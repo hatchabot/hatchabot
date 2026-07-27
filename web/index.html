@@ -265,7 +265,21 @@ function renderAgents() {
     el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
     return;
   }
+  // The poll re-renders this whole list; without care that wipes anything the
+  // user is typing (e.g. a bot token). Save input values + focus, re-render,
+  // restore.
+  const saved = {};
+  el.querySelectorAll('input').forEach((i) => { if (i.value) saved[i.id] = i.value; });
+  const focusedId = document.activeElement?.closest('#agents') ? document.activeElement.id : null;
+  const caret = focusedId ? document.activeElement.selectionStart : null;
+
   el.innerHTML = agents.map(agentCard).join('');
+
+  for (const [id, v] of Object.entries(saved)) { const i = $(id); if (i) i.value = v; }
+  if (focusedId) {
+    const i = $(focusedId);
+    if (i) { i.focus(); if (caret != null) try { i.setSelectionRange(caret, caret); } catch {} }
+  }
 }
 
 // ---- polling ------------------------------------------------------------------
