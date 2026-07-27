@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { SecretNotFoundError, type SecretStore } from './secretStore.js';
 
@@ -32,15 +32,23 @@ export class LocalSecretStore implements SecretStore {
     `);
   }
 
+  /**
+   * AGENTCLAW_SECRET_KEY can be either 64 hex chars (used as the raw key) or
+   * any passphrase (stretched to 32 bytes with scrypt). Either way, the same
+   * value must be used every run — it decrypts everything in the store.
+   */
   static keyFromEnv(env = process.env): Buffer {
-    const hex = env.AGENTCLAW_SECRET_KEY;
-    if (!hex) {
+    const value = env.AGENTCLAW_SECRET_KEY;
+    if (!value) {
       throw new Error(
-        'AGENTCLAW_SECRET_KEY is not set. Generate one with:\n' +
+        'AGENTCLAW_SECRET_KEY is not set. Use any passphrase, or generate a key with:\n' +
           "  node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
       );
     }
-    return Buffer.from(hex, 'hex');
+    if (/^[0-9a-fA-F]{64}$/.test(value)) return Buffer.from(value, 'hex');
+    // Static salt is acceptable here: this guards a local file against
+    // casual reads, not against an attacker who already owns the box.
+    return scryptSync(value, 'agentclaw-secret-store-v1', 32);
   }
 
   async put(ref: string, value: string): Promise<void> {
