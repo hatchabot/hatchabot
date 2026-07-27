@@ -74,13 +74,14 @@ Later senders wait for explicit approval via `/v1/agents/:id/pairing`.
 the container and start/stop survive control-plane restarts. All durable state
 lives on the volume — containers are cattle.
 
+## Status
+
+**The full loop is verified live (2026-07-27):** real OpenClaw container,
+Telegram pairing auto-claimed by the control plane, real Claude reply on a Max
+subscription. `TELEGRAM_BOT_TOKEN=… npm run e2e:docker` reproduces it.
+
 ## Known gaps
 
-- **Unverified: first real model reply through claude-cli in-container.** The
-  gateway boots healthy and the credential mounts, but Claude Code keeps some
-  state in `~/.claude.json` (outside the mounted dir); the first live-token run
-  (`TELEGRAM_BOT_TOKEN=… npm run e2e:docker`) will tell us whether the CLI
-  runtime needs it seeded.
 - Auth is a placeholder header (`x-agentclaw-owner`).
 - Persistence is SQLite; production target is Postgres.
 - Claim window auto-approves the *first* contact — fine for a link shown only
