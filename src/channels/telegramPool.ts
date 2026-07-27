@@ -1,0 +1,119 @@
+import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
+import type { SecretStore } from '../secrets/secretStore.js';
+import type {
+  ChannelProvisioner,
+  ChannelProvisionRequest,
+  ProvisionedChannel,
+} from './channel.js';
+
+/**
+ * Telegram has no API for creating bots — BotFather is a bot you talk to as a
+ * human, and the Bot API cannot mint new bots. So "the user never sees
+ * BotFather" (§9.6 / §11.1.3) has to be bought some other way.
+ *
+ * This provisioner buys it with a **pre-minted pool**: bots are created by hand
+ * in advance and leased to agents on demand. Fully within Telegram's ToS, and
+ * from the user's side it is instant — tap +, and a real bot is already waiting.
+ * The ceiling is however many bots we have minted, which is why
+ * TelegramManualProvisioner exists as the unbounded fallback.
+ */
+export class TelegramPoolProvisioner implements ChannelProvisioner {
+  readonly kind = 'telegram' as const;
+  readonly key = 'telegram-pool';
+
+  constructor(
+    private readonly db: Database.Database,
+    private readonly secrets: SecretStore,
+  ) {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS telegram_pool (
+        username TEXT PRIMARY KEY,
+        secret_ref TEXT NOT NULL,
+        leased_to TEXT,
+        leased_at TEXT
+      )
+    `);
+  }
+
+  /** Adds a hand-minted bot to the pool. Called by an admin script, not the app. */
+  async addToPool(username: string, botToken: string): Promise<void> {
+    const secretRef = `telegram/bot/${username}`;
+    await this.secrets.put(secretRef, botToken);
+    this.db
+      .prepare(
+        `INSERT INTO telegram_pool (username, secret_ref) VALUES (?, ?)
+         ON CONFLICT(username) DO UPDATE SET secret_ref = excluded.secret_ref`,
+      )
+      .run(username, secretRef);
+  }
+
+  availableCount(): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL`)
+      .get() as { n: number };
+    return row.n;
+  }
+
+  async provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel> {
+    // Idempotent: a retry after a partial failure finds the existing lease.
+    const existing = this.db
+      .prepare(`SELECT username, secret_ref FROM telegram_pool WHERE leased_to = ?`)
+      .get(req.agentId) as { username: string; secret_ref: string } | undefined;
+    if (existing) return this.#toChannel(existing.username, existing.secret_ref);
+
+    const free = this.db
+      .prepare(`SELECT username, secret_ref FROM telegram_pool WHERE leased_to IS NULL LIMIT 1`)
+      .get() as { username: string; secret_ref: string } | undefined;
+    if (!free) {
+      throw new PoolExhaustedError();
+    }
+
+    const claimed = this.db
+      .prepare(
+        `UPDATE telegram_pool SET leased_to = ?, leased_at = ?
+         WHERE username = ? AND leased_to IS NULL`,
+      )
+      .run(req.agentId, new Date().toISOString(), free.username);
+    if (claimed.changes === 0) {
+      // Lost a race with a concurrent provision — retry once.
+      return this.provision(req);
+    }
+
+    return this.#toChannel(free.username, free.secret_ref);
+  }
+
+  async release(accountId: string): Promise<void> {
+    // The bot goes back in the pool. We do NOT delete the token — the bot still
+    // exists on Telegram's side and can serve the next agent.
+    this.db
+      .prepare(`UPDATE telegram_pool SET leased_to = NULL, leased_at = NULL WHERE username = ?`)
+      .run(accountId);
+  }
+
+  #toChannel(username: string, secretRef: string): ProvisionedChannel {
+    return {
+      accountId: username,
+      secretRef,
+      deepLink: `https://t.me/${username}`,
+    };
+  }
+}
+
+export class PoolExhaustedError extends Error {
+  readonly userMessage =
+    'We are out of ready-made bots right now. You can connect your own in about a minute instead.';
+  constructor() {
+    super('Telegram bot pool exhausted');
+    this.name = 'PoolExhaustedError';
+  }
+}
+
+/** Deterministic-ish handle suggestion, used when minting pool bots by hand. */
+export function suggestBotUsername(agentName: string): string {
+  const base = agentName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+    .slice(0, 24);
+  return `${base || 'agent'}${randomUUID().slice(0, 4)}bot`;
+}
