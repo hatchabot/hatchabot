@@ -48,6 +48,13 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .run(username, secretRef);
   }
 
+  /** True when this username came from the pool (vs a user-supplied bot). */
+  owns(username: string): boolean {
+    return !!this.db
+      .prepare(`SELECT 1 FROM telegram_pool WHERE username = ?`)
+      .get(username);
+  }
+
   availableCount(): number {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL`)

@@ -1,5 +1,5 @@
 import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { hostname } from 'node:os';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
@@ -8,6 +8,8 @@ import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
 import { LocalDockerProvider } from './providers/localDockerProvider.js';
 import { TelegramPoolProvisioner } from './channels/telegramPool.js';
+import { TelegramManualProvisioner } from './channels/telegramManual.js';
+import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
@@ -19,7 +21,9 @@ const db = new Database(DB_PATH);
 
 const store = new Store(db);
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());
-const channel = new TelegramPoolProvisioner(db, secrets);
+const pool = new TelegramPoolProvisioner(db, secrets);
+const manual = new TelegramManualProvisioner(secrets);
+const channel = new CompositeTelegramProvisioner(pool, manual);
 
 const providers = new Map<string, RuntimeProvider>();
 providers.set('mock', new MockProvider());
@@ -41,10 +45,16 @@ if (!store.getHost(LOCAL_HOST_ID)) {
 }
 
 const app = Fastify({ logger: true });
-await registerRoutes(app, { store, secrets, providers, channel });
+await registerRoutes(app, {
+  store,
+  secrets,
+  providers,
+  channel,
+  webIndexPath: resolve(import.meta.dirname, '../web/index.html'),
+});
 
 await app.listen({ port: PORT, host: '0.0.0.0' });
 app.log.info(
-  { availableBots: channel.availableCount(), localHostId: LOCAL_HOST_ID },
+  { availableBots: pool.availableCount(), localHostId: LOCAL_HOST_ID, url: `http://localhost:${PORT}` },
   'AgentClaw control plane up',
 );

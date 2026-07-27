@@ -1,12 +1,17 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
-import type { ChannelProvisioner } from '../channels/channel.js';
-import { provisionAgent, claudeAuthDir } from '../orchestrator/provision.js';
+import type { CompositeTelegramProvisioner } from '../channels/composite.js';
+import { InvalidBotTokenError } from '../channels/telegramManual.js';
+import {
+  claudeAuthDir,
+  createAgentRecord,
+  runProvisionSteps,
+} from '../orchestrator/provision.js';
 import {
   approvePairing,
   claimFirstContact,
@@ -18,7 +23,9 @@ export interface ApiDeps {
   secrets: SecretStore;
   /** Keyed by Host.provider — 'mock', 'local-docker', later 'gce'. */
   providers: Map<string, RuntimeProvider>;
-  channel: ChannelProvisioner;
+  channel: CompositeTelegramProvisioner;
+  /** Absolute path to the single-page app. */
+  webIndexPath?: string;
 }
 
 const CreateAIProfile = z.discriminatedUnion('kind', [
@@ -66,13 +73,71 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return provider;
   };
 
-  const providerForAgent = (agentId: string): RuntimeProvider => {
-    const agent = store.getAgent(agentId);
-    if (!agent) throw new Error(`No such agent: ${agentId}`);
-    return providerFor(agent.hostId);
+  // ---- background provisioning ------------------------------------------
+  // POST /v1/agents returns in milliseconds; the slow steps (docker, health
+  // check) run here. One in-flight run per agent; the app polls GET /v1/agents.
+  const inflight = new Map<string, Promise<void>>();
+  const kickProvision = (agentId: string): void => {
+    if (inflight.has(agentId)) return;
+    const task = (async () => {
+      const agent = store.getAgent(agentId);
+      if (!agent) return;
+      const provider = providerFor(agent.hostId);
+      const log = (e: string, d: Record<string, unknown>) => app.log.info(d, e);
+      const result = await runProvisionSteps(
+        { store, secrets, provider, channel: deps.channel, log },
+        agentId,
+      );
+      // Fresh agent went live in pairing mode → watch for the owner's first
+      // message and bind it (the §12.4 claim).
+      const channelRow = store.getChannelForAgent(agentId);
+      if (result.agent.state === 'RUNNING' && result.agent.runtimeRef && channelRow) {
+        await claimFirstContact(
+          { store, provider, log },
+          {
+            agentId,
+            runtimeRef: result.agent.runtimeRef,
+            accountId: channelRow.accountId,
+            ownerId: result.agent.ownerId,
+          },
+        );
+      }
+    })();
+    inflight.set(
+      agentId,
+      task
+        .catch((err) => app.log.error({ err, agentId }, 'provision task failed'))
+        .finally(() => inflight.delete(agentId)),
+    );
   };
 
+  // ---- app ----------------------------------------------------------------
+
+  if (deps.webIndexPath) {
+    app.get('/', async (_req, reply) => {
+      // Re-read per request: dev-friendly, and this page is tiny.
+      const html = readFileSync(deps.webIndexPath!, 'utf8');
+      return reply.type('text/html; charset=utf-8').send(html);
+    });
+  }
+
   app.get('/healthz', async () => ({ ok: true }));
+
+  // ---- profiles & hosts ----------------------------------------------------
+
+  app.get('/v1/ai-profiles', async (req) => {
+    return store
+      .listAIProfiles(ownerIdOf(req.headers as Record<string, unknown>))
+      .map(({ secretRef: _s, ...safe }) => safe);
+  });
+
+  app.get('/v1/hosts', async (req) => {
+    return store.listHosts(ownerIdOf(req.headers as Record<string, unknown>));
+  });
+
+  app.get('/v1/pool', async () => {
+    return { availableBots: deps.channel.pool.availableCount() };
+  });
 
   app.post('/v1/ai-profiles', async (req, reply) => {
     const parsed = CreateAIProfile.safeParse(req.body);
@@ -114,6 +179,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return reply.code(201).send(safe);
   });
 
+  // ---- agents ---------------------------------------------------------------
+
   app.post('/v1/agents', async (req, reply) => {
     const parsed = CreateAgent.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
@@ -131,32 +198,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       });
     }
 
-    const provider = providerFor(parsed.data.hostId);
-    const result = await provisionAgent(
-      { ...deps, provider, log: (e, d) => app.log.info(d, e) },
-      { ownerId, ...parsed.data },
-    );
-
-    // Kick off the first-contact claim in the background: the deep link is
-    // about to be shown to the owner, and their first message binds them.
-    const channelRow = store.getChannelForAgent(result.agent.id);
-    if (result.agent.state === 'RUNNING' && result.agent.runtimeRef && channelRow) {
-      void claimFirstContact(
-        { store, provider, log: (e, d) => app.log.info(d, e) },
-        {
-          agentId: result.agent.id,
-          runtimeRef: result.agent.runtimeRef,
-          accountId: channelRow.accountId,
-          ownerId,
-        },
-      ).catch((err) => app.log.error({ err }, 'claim failed'));
-    }
-
-    return reply.code(202).send(result);
+    const agent = createAgentRecord(store, { ownerId, ...parsed.data });
+    kickProvision(agent.id);
+    return reply.code(202).send(agent);
   });
 
   app.get('/v1/agents', async (req) => {
-    return store.listAgents(ownerIdOf(req.headers as Record<string, unknown>));
+    const agents = store.listAgents(ownerIdOf(req.headers as Record<string, unknown>));
+    return agents.map((a) => ({
+      ...a,
+      deepLink: store.getChannelForAgent(a.id)?.deepLink,
+    }));
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
@@ -166,14 +218,43 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { ...agent, deepLink: channel?.deepLink };
   });
 
+  // The parked-provisioning resume: user pasted their BotFather token.
+  app.post<{ Params: { id: string }; Body: { token?: string } }>(
+    '/v1/agents/:id/channel-token',
+    async (req, reply) => {
+      const agent = store.getAgent(req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const token = (req.body as { token?: string } | null)?.token?.trim();
+      if (!token) return reply.code(400).send({ error: 'token required' });
+      try {
+        const { username } = await deps.channel.submitToken(agent.id, token);
+        kickProvision(agent.id);
+        return reply.code(202).send({ username });
+      } catch (err) {
+        if (err instanceof InvalidBotTokenError) {
+          return reply.code(400).send({ error: err.userMessage });
+        }
+        throw err;
+      }
+    },
+  );
+
+  // Retry after FAILED (or nudge a stuck PROVISIONING after a restart).
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/provision', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    kickProvision(agent.id);
+    return reply.code(202).send(store.getAgent(agent.id));
+  });
+
   // Pending pairing requests on a live agent — the app renders these as
   // "someone wants to talk to <agent>" cards for the owner to approve.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/pairing', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
     if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
-    const provider = providerForAgent(agent.id);
-    return listPairingRequests(provider, agent.runtimeRef, channel.accountId);
+    if (agent.state !== 'RUNNING') return [];
+    return listPairingRequests(providerFor(agent.hostId), agent.runtimeRef, channel.accountId);
   });
 
   app.post<{ Params: { id: string }; Body: { code?: string } }>(
@@ -184,8 +265,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const code = (req.body as { code?: string } | null)?.code;
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
       if (!code) return reply.code(400).send({ error: 'code required' });
-      const provider = providerForAgent(agent.id);
-      const ok = await approvePairing(provider, agent.runtimeRef, channel.accountId, code);
+      const ok = await approvePairing(
+        providerFor(agent.hostId),
+        agent.runtimeRef,
+        channel.accountId,
+        code,
+      );
       return ok ? { approved: true } : reply.code(400).send({ error: 'Approval failed' });
     },
   );
@@ -193,14 +278,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/stop', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-    await providerForAgent(agent.id).stop(agent.runtimeRef);
+    await providerFor(agent.hostId).stop(agent.runtimeRef);
     return store.setAgentState(agent.id, 'STOPPED');
   });
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-    await providerForAgent(agent.id).start(agent.runtimeRef);
+    await providerFor(agent.hostId).start(agent.runtimeRef);
     return store.setAgentState(agent.id, 'RUNNING');
   });
 
@@ -209,7 +294,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     store.setAgentState(agent.id, 'DELETING');
     if (agent.runtimeRef) {
-      await providerForAgent(agent.id).destroy(agent.runtimeRef, { purge: true });
+      await providerFor(agent.hostId).destroy(agent.runtimeRef, { purge: true });
     }
     const channel = store.getChannelForAgent(agent.id);
     if (channel) {

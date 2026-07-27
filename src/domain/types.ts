@@ -62,8 +62,21 @@ export interface Agent {
   runtimeRef?: string;
   /** Persona seed used at provision time. */
   persona: string;
+  /** One-to-many agents share MEMORY.md across members (§12.5). */
+  sharedMemory: boolean;
+  /**
+   * Set while provisioning is parked on a human step (e.g. the user must
+   * paste a bot token). The app renders this as an actionable card; resuming
+   * provisioning clears it.
+   */
+  pendingAction?: PendingAction;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PendingAction {
+  type: 'bot_token';
+  instructions: string;
 }
 
 export interface Host {

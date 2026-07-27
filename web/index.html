@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentClaw</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
+    --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
+    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 24px 16px 80px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; }
+  h1 b { color: var(--accent); font-weight: 700; }
+  .sub { color: var(--dim); font-size: 13px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+  }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .name { font-weight: 650; font-size: 16px; }
+  .chip {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 9px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
+  }
+  .chip.RUNNING { color: var(--ok); border-color: var(--ok); }
+  .chip.PROVISIONING { color: var(--warn); border-color: var(--warn); }
+  .chip.PROVISIONING::after { content: "…"; animation: pulse 1.2s infinite; }
+  .chip.FAILED { color: var(--bad); border-color: var(--bad); }
+  .chip.STOPPED, .chip.DELETING { color: var(--off); border-color: var(--off); }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  .reason { color: var(--bad); font-size: 13px; margin-top: 8px; }
+  .persona { color: var(--dim); font-size: 13px; margin-top: 4px; overflow: hidden;
+             text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+  button, .btn {
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    padding: 7px 14px; border-radius: 8px; text-decoration: none; display: inline-block;
+  }
+  button:hover, .btn:hover { border-color: var(--dim); }
+  .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .primary:hover { filter: brightness(1.08); }
+  .danger { color: var(--bad); }
+  .fab {
+    position: fixed; right: 20px; bottom: 20px; width: 58px; height: 58px;
+    border-radius: 50%; font-size: 30px; line-height: 1;
+    background: var(--accent); color: var(--accent-ink); border: none;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.45);
+  }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px; width: min(440px, 92vw);
+  }
+  dialog::backdrop { background: rgba(0,0,0,0.6); }
+  label { display: block; font-size: 13px; color: var(--dim); margin: 12px 0 4px; }
+  input[type=text], textarea, select {
+    width: 100%; font: inherit; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+  }
+  textarea { resize: vertical; min-height: 72px; }
+  .token-form { margin-top: 12px; background: var(--panel-2); border-radius: 8px; padding: 12px; }
+  .token-form pre {
+    white-space: pre-wrap; font-size: 12.5px; color: var(--dim); margin: 0 0 10px;
+    font-family: ui-monospace, monospace;
+  }
+  .pair { margin-top: 10px; padding: 10px 12px; background: var(--panel-2); border-radius: 8px;
+          display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+  .empty { text-align: center; color: var(--dim); padding: 48px 12px; }
+  .err { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
+  .toast {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 92px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 18px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Agent<b>Claw</b></h1>
+    <span class="sub" id="poolInfo"></span>
+  </header>
+  <div id="setup"></div>
+  <div id="agents"></div>
+</div>
+
+<button class="fab" id="fabBtn" title="New agent" hidden>+</button>
+
+<dialog id="createDlg">
+  <h3 style="margin:0 0 4px">New agent</h3>
+  <div class="sub">It boots on this machine and lives on Telegram.</div>
+  <label>Name</label>
+  <input type="text" id="agentName" placeholder="Kitchen Helper" maxlength="64">
+  <label>What is it for? <span style="color:var(--dim)">(optional — becomes its persona)</span></label>
+  <textarea id="agentPersona" placeholder="You help plan meals and keep the pantry list current."></textarea>
+  <div class="err" id="createErr"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="createDlg.close()">Cancel</button>
+    <button class="primary" id="createBtn" onclick="createAgent()">Create</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let profiles = [], hosts = [], agents = [], pairings = {};
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, {
+    headers: { 'content-type': 'application/json' },
+    ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
+  return data;
+};
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+// ---- setup: first-run subscription profile --------------------------------
+
+function renderSetup() {
+  const el = $('setup');
+  if (profiles.length > 0) { el.innerHTML = ''; $('fabBtn').hidden = false; return; }
+  $('fabBtn').hidden = true;
+  el.innerHTML = `
+    <div class="card">
+      <div class="name">Welcome 👋</div>
+      <p class="sub" style="margin:8px 0 4px">
+        One thing before your first agent: connect the AI. If you're logged into
+        Claude on this machine (Pro or Max plan), that's one tap.
+      </p>
+      <label>Model</label>
+      <select id="setupModel">
+        <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
+        <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (faster)</option>
+      </select>
+      <div class="err" id="setupErr"></div>
+      <div class="actions">
+        <button class="primary" onclick="createSubscriptionProfile()">Use my Claude subscription</button>
+      </div>
+    </div>`;
+}
+
+async function createSubscriptionProfile() {
+  try {
+    await api('/v1/ai-profiles', { method: 'POST', body: {
+      kind: 'subscription', vendor: 'anthropic',
+      name: 'My Claude', model: $('setupModel').value,
+    }});
+    await refresh(true);
+    toast('Claude connected');
+  } catch (e) { $('setupErr').textContent = e.message; }
+}
+
+// ---- agent creation ---------------------------------------------------------
+
+$('fabBtn').onclick = () => { $('createErr').textContent = ''; createDlg.showModal(); $('agentName').focus(); };
+
+async function createAgent() {
+  const name = $('agentName').value.trim();
+  if (!name) { $('createErr').textContent = 'Give it a name.'; return; }
+  const localHost = hosts.find(h => h.kind === 'local') ?? hosts[0];
+  if (!localHost || !profiles[0]) { $('createErr').textContent = 'Setup incomplete.'; return; }
+  $('createBtn').disabled = true;
+  try {
+    await api('/v1/agents', { method: 'POST', body: {
+      name, persona: $('agentPersona').value.trim() || undefined,
+      aiProfileId: profiles[0].id, hostId: localHost.id,
+    }});
+    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = '';
+    await refresh(false);
+  } catch (e) { $('createErr').textContent = e.message; }
+  finally { $('createBtn').disabled = false; }
+}
+
+// ---- agent cards ------------------------------------------------------------
+
+function agentCard(a) {
+  const pending = a.pendingAction?.type === 'bot_token';
+  const pairs = pairings[a.id] ?? [];
+  return `
+  <div class="card" id="card-${a.id}">
+    <div class="row">
+      <div class="grow">
+        <span class="name">${esc(a.name)}</span>
+        ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
+      </div>
+      <span class="chip ${a.state}">${a.state}</span>
+    </div>
+    ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+    ${pending ? tokenForm(a) : ''}
+    ${pairs.map(p => `
+      <div class="pair">
+        <span class="grow">🔑 <b>${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
+        <button class="primary" onclick="approve('${a.id}','${esc(p.code)}')">Let them in</button>
+      </div>`).join('')}
+    <div class="actions">
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank">Open in Telegram</a>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
+      ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
+      ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
+      ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${esc(a.name)}')">Delete</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function tokenForm(a) {
+  return `
+  <div class="token-form">
+    <pre>${esc(a.pendingAction.instructions)}</pre>
+    <div class="row">
+      <input type="text" class="grow" id="tok-${a.id}" placeholder="123456789:AA...">
+      <button class="primary" onclick="submitToken('${a.id}')">Connect</button>
+    </div>
+    <div class="err" id="tokerr-${a.id}"></div>
+  </div>`;
+}
+
+async function submitToken(id) {
+  try {
+    const token = $(`tok-${id}`).value.trim();
+    const { username } = await api(`/v1/agents/${id}/channel-token`, { method: 'POST', body: { token } });
+    toast(`@${username} connected — booting…`);
+    await refresh(false);
+  } catch (e) { $(`tokerr-${id}`).textContent = e.message; }
+}
+
+async function act(id, action) {
+  try { await api(`/v1/agents/${id}/${action}`, { method: 'POST', body: {} }); await refresh(false); }
+  catch (e) { toast(e.message); }
+}
+
+async function del(id, name) {
+  if (!confirm(`Delete "${name}"? Its memory is erased too.`)) return;
+  try { await api(`/v1/agents/${id}`, { method: 'DELETE' }); await refresh(false); }
+  catch (e) { toast(e.message); }
+}
+
+async function approve(id, code) {
+  try { await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code } }); toast('Approved'); await refresh(false); }
+  catch (e) { toast(e.message); }
+}
+
+function renderAgents() {
+  const el = $('agents');
+  if (profiles.length && agents.length === 0) {
+    el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
+    return;
+  }
+  el.innerHTML = agents.map(agentCard).join('');
+}
+
+// ---- polling ------------------------------------------------------------------
+
+let pollTimer, pairTick = 0;
+async function refresh(withMeta) {
+  try {
+    if (withMeta || !profiles.length || !hosts.length) {
+      [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
+      api('/v1/pool').then(p => {
+        $('poolInfo').textContent = p.availableBots > 0 ? `${p.availableBots} instant bot${p.availableBots === 1 ? '' : 's'} ready` : '';
+      }).catch(() => {});
+    }
+    agents = await api('/v1/agents');
+    // Pairing checks hit docker exec — do them on a slower cadence.
+    if (pairTick++ % 3 === 0) {
+      const running = agents.filter(a => a.state === 'RUNNING');
+      const results = await Promise.allSettled(running.map(a => api(`/v1/agents/${a.id}/pairing`)));
+      pairings = {};
+      results.forEach((r, i) => { if (r.status === 'fulfilled') pairings[running[i].id] = r.value; });
+    }
+    renderSetup(); renderAgents();
+  } catch (e) { console.error(e); }
+  const busy = agents.some(a => a.state === 'PROVISIONING' || a.state === 'DELETING');
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+refresh(true);
+</script>
+</body>
+</html>

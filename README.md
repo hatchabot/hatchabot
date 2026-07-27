@@ -12,13 +12,15 @@ running end to end against a mock runtime provider — no cloud account, no cost
 npm install
 export AGENTCLAW_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
 
+# The product:
+./scripts/build-runtime-image.sh   # once per OpenClaw version
+npm run dev                        # control plane + web app on http://localhost:8080
+npx tsx scripts/pool-add.ts <bot-token>…   # optional: stock the instant-bot pool
+
+# Dev loops:
 npm run e2e             # whole tap-+ → first-reply loop in-process (mock provider)
 npm test                # unit tests (claim flow, state machine)
-npm run dev             # HTTP control plane on :8080
-
-# Real runtime on this machine:
-./scripts/build-runtime-image.sh   # once per OpenClaw version
-npm run e2e:docker                 # boots a real OpenClaw container, checks health, tears down
+npm run e2e:docker      # boots a real OpenClaw container, checks health, tears down
 TELEGRAM_BOT_TOKEN=123:abc npm run e2e:docker   # full flow: live bot, pairing claim
 ```
 
@@ -29,11 +31,15 @@ src/
   domain/       Agent, AIProfile, Membership + the §11.4 state machine
   store/        SQLite persistence (one file to swap for Postgres)
   secrets/      SecretStore interface; local AES-256-GCM impl
-  providers/    RuntimeProvider interface + MockProvider
-  channels/     ChannelProvisioner interface + two Telegram strategies
+  providers/    RuntimeProvider interface + Mock and LocalDocker providers
+  channels/     ChannelProvisioner: pool → paste-token composite
   openclaw/     Surgical openclaw.json patching + workspace seeding
-  orchestrator/ The §11.1 provisioning flow: idempotent steps + rollback
-  api/          Fastify routes
+  orchestrator/ §11.1 provisioning (create + resumable steps + rollback), claim
+  api/          Fastify routes; provisioning runs in the background,
+                the app polls agent state
+web/index.html  The app: single file, no build step. Onboarding (connect
+                subscription), + button, live progress, paste-token fallback,
+                pairing approvals, lifecycle buttons.
 ```
 
 Three interfaces are load-bearing and were built before anything used them,

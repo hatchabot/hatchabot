@@ -40,7 +40,9 @@ export class Store {
         id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
         slug TEXT NOT NULL, state TEXT NOT NULL, state_reason TEXT,
         ai_profile_id TEXT NOT NULL, host_id TEXT NOT NULL, runtime_ref TEXT,
-        persona TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        persona TEXT NOT NULL, shared_memory INTEGER NOT NULL DEFAULT 0,
+        pending_action TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS agents_owner_slug ON agents (owner_id, slug);
 
@@ -59,6 +61,18 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS memberships_agent_user
         ON memberships (agent_id, user_id);
     `);
+    // Additive dev migrations for databases created before these columns
+    // existed. Harmless when the column is already there.
+    for (const alter of [
+      `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
+    ]) {
+      try {
+        this.db.exec(alter);
+      } catch {
+        /* column exists */
+      }
+    }
   }
 
   // ---- AI profiles -------------------------------------------------------
@@ -77,6 +91,13 @@ export class Store {
     return r ? rowToAIProfile(r) : undefined;
   }
 
+  listAIProfiles(ownerId: string): AIProfile[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM ai_profiles WHERE owner_id = ? ORDER BY created_at`)
+      .all(ownerId) as any[];
+    return rows.map(rowToAIProfile);
+  }
+
   // ---- Hosts -------------------------------------------------------------
 
   insertHost(h: Host): void {
@@ -86,6 +107,13 @@ export class Store {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(h.id, h.ownerId, h.kind, h.provider, h.name, JSON.stringify(h.settings), h.createdAt);
+  }
+
+  listHosts(ownerId: string): Host[] {
+    const rows = this.db
+      .prepare(`SELECT id FROM hosts WHERE owner_id = ? ORDER BY created_at`)
+      .all(ownerId) as { id: string }[];
+    return rows.map((r) => this.getHost(r.id)!).filter(Boolean);
   }
 
   getHost(id: string): Host | undefined {
@@ -108,11 +136,25 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
-                             host_id, runtime_ref, persona, created_at, updated_at)
+                             host_id, runtime_ref, persona, shared_memory, pending_action,
+                             created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
-                 @hostId, @runtimeRef, @persona, @createdAt, @updatedAt)`,
+                 @hostId, @runtimeRef, @persona, @sharedMemory, @pendingAction,
+                 @createdAt, @updatedAt)`,
       )
-      .run({ stateReason: null, runtimeRef: null, ...a });
+      .run({
+        stateReason: null,
+        runtimeRef: null,
+        ...a,
+        sharedMemory: a.sharedMemory ? 1 : 0,
+        pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
+      });
+  }
+
+  setAgentPendingAction(id: string, action: Agent['pendingAction'] | null): void {
+    this.db
+      .prepare(`UPDATE agents SET pending_action = ?, updated_at = ? WHERE id = ?`)
+      .run(action ? JSON.stringify(action) : null, new Date().toISOString(), id);
   }
 
   getAgent(id: string): Agent | undefined {
@@ -219,6 +261,8 @@ function rowToAgent(r: any): Agent {
     hostId: r.host_id,
     runtimeRef: r.runtime_ref ?? undefined,
     persona: r.persona,
+    sharedMemory: !!r.shared_memory,
+    pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

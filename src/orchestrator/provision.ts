@@ -37,59 +37,69 @@ export interface ProvisionResult {
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
- * §11.1 — the create flow, minus the parts the user sees.
- *
- * Two properties matter more than anything else here:
- *
- *  1. Every step is idempotent. Re-running provisionAgent() after a crash
- *     partway through reuses the channel lease and the runtime rather than
- *     leasing a second bot or booting a second container.
- *  2. On hard failure we roll back what we created, so a half-provisioned
- *     agent never leaves a bot leased or a VM billing (§11.3).
+ * Step 2 of §11.1: create the agent record and return fast, so the app can
+ * render a live progress card while runProvisionSteps() does the slow work.
  */
-export async function provisionAgent(
-  deps: ProvisionDeps,
-  input: CreateAgentInput,
-): Promise<ProvisionResult> {
-  const { store, secrets, provider, channel } = deps;
-  const log = deps.log ?? (() => {});
-  const sleep = deps.sleep ?? defaultSleep;
-
+export function createAgentRecord(store: Store, input: CreateAgentInput): Agent {
   const profile = store.getAIProfile(input.aiProfileId);
   if (!profile) throw new Error(`No such AI profile: ${input.aiProfileId}`);
   const host = store.getHost(input.hostId);
   if (!host) throw new Error(`No such host: ${input.hostId}`);
 
-  // Step 2: create the agent record and return fast so the app can render a
-  // live progress card while the rest of this runs.
   const now = new Date().toISOString();
-  const agentId = randomUUID();
-  const slug = slugify(input.name);
   const agent: Agent = {
-    id: agentId,
+    id: randomUUID(),
     ownerId: input.ownerId,
     name: input.name,
-    slug,
+    slug: slugify(input.name),
     state: 'PROVISIONING',
     aiProfileId: profile.id,
     hostId: host.id,
     persona: input.persona ?? '',
+    sharedMemory: input.sharedMemory ?? false,
     createdAt: now,
     updatedAt: now,
   };
   store.insertAgent(agent);
-  log('agent.created', { agentId, slug });
 
   // Owner is a member from the start — the allowlist has to contain somebody.
   store.insertMembership({
     id: randomUUID(),
-    agentId,
+    agentId: agent.id,
     userId: input.ownerId,
     role: 'owner',
     status: 'active',
     joinedAt: now,
   });
 
+  return agent;
+}
+
+/**
+ * Steps 3–8 of §11.1, resumable. Safe to call again after a crash, a FAILED
+ * state (retry), or a parked human step (bot token arrived): every step is
+ * idempotent, and on hard failure everything created in this run is rolled
+ * back so nothing keeps billing or stays leased (§11.3).
+ */
+export async function runProvisionSteps(
+  deps: ProvisionDeps,
+  agentId: string,
+): Promise<ProvisionResult> {
+  const { store, secrets, provider, channel } = deps;
+  const log = deps.log ?? (() => {});
+  const sleep = deps.sleep ?? defaultSleep;
+
+  let agent = store.getAgent(agentId);
+  if (!agent) throw new Error(`No such agent: ${agentId}`);
+  if (agent.state === 'FAILED') {
+    agent = store.setAgentState(agentId, 'PROVISIONING'); // retry path
+  }
+  if (agent.state !== 'PROVISIONING') {
+    return { agent }; // already live (or being deleted) — nothing to do
+  }
+
+  const profile = store.getAIProfile(agent.aiProfileId)!;
+  const host = store.getHost(agent.hostId)!;
   const rollback: Array<() => Promise<void>> = [];
 
   try {
@@ -98,8 +108,8 @@ export async function provisionAgent(
     if (!provisioned) {
       const result = await channel.provision({
         agentId,
-        agentName: input.name,
-        slug,
+        agentName: agent.name,
+        slug: agent.slug,
       });
       rollback.push(async () => {
         await channel.release(result.accountId);
@@ -115,6 +125,7 @@ export async function provisionAgent(
         createdAt: new Date().toISOString(),
       };
       store.insertChannel(provisioned);
+      store.setAgentPendingAction(agentId, null); // any parked human step is done
       log('channel.provisioned', { agentId, accountId: provisioned.accountId });
     }
 
@@ -135,16 +146,16 @@ export async function provisionAgent(
     const allowFrom = store.listAllowedChannelUserIds(agentId);
     const spec: RuntimeSpec = {
       agentId,
-      slug,
+      slug: agent.slug,
       workspace: {
         files: buildWorkspaceSeed({
-          agentName: input.name,
-          slug,
-          persona: input.persona ?? '',
-          sharedMemory: input.sharedMemory ?? false,
+          agentName: agent.name,
+          slug: agent.slug,
+          persona: agent.persona,
+          sharedMemory: agent.sharedMemory,
         }),
         configPatch: {
-          agentId: slug,
+          agentId: agent.slug,
           model: profile.model,
           authMode: subscription ? 'oauth-claude-cli' : 'api-key',
           telegram: {
@@ -179,9 +190,14 @@ export async function provisionAgent(
     const live = store.setAgentState(agentId, 'RUNNING');
     return { agent: live, deepLink: provisioned.deepLink };
   } catch (err) {
-    // A channel that needs a human step is not a failure — the agent stays in
-    // PROVISIONING and the app prompts, then calls provisionAgent() again.
+    // A channel that needs a human step is not a failure — the agent parks in
+    // PROVISIONING with a pendingAction the app renders; once the user acts,
+    // provisioning resumes right here.
     if (err instanceof ChannelSetupRequired) {
+      store.setAgentPendingAction(agentId, {
+        type: 'bot_token',
+        instructions: err.instructions,
+      });
       log('channel.setup_required', { agentId });
       return {
         agent: store.getAgent(agentId)!,
@@ -204,6 +220,15 @@ export async function provisionAgent(
     store.setAgentState(agentId, 'FAILED', reason);
     return { agent: store.getAgent(agentId)! };
   }
+}
+
+/** Create + provision in one call — the shape scripts and tests want. */
+export async function provisionAgent(
+  deps: ProvisionDeps,
+  input: CreateAgentInput,
+): Promise<ProvisionResult> {
+  const agent = createAgentRecord(deps.store, input);
+  return runProvisionSteps(deps, agent.id);
 }
 
 async function waitForHealthy(

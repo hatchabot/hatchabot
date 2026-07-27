@@ -41,7 +41,7 @@ describe('claimFirstContact', () => {
 
     store.insertAgent({
       id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'PROVISIONING',
-      aiProfileId: 'p', hostId: 'h', persona: '',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
       createdAt: 'now', updatedAt: 'now',
     });
     store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
