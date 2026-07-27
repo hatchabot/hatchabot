@@ -38,8 +38,12 @@ export interface AIProfile {
   kind: AIProfileKind;
   /** Model id to hand OpenClaw, e.g. "claude-opus-5". */
   model: string;
-  /** Reference into the SecretStore — never the secret itself. */
-  secretRef: string;
+  /**
+   * Reference into the SecretStore — never the secret itself. Absent for
+   * subscription profiles: the OAuth credential stays on the host machine
+   * (~/.claude) and is mounted, never copied into AgentClaw's store.
+   */
+  secretRef?: string;
   createdAt: string;
 }
 

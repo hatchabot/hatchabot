@@ -121,7 +121,18 @@ export async function provisionAgent(
     // Step 5: render config + workspace. Secrets are resolved as late as
     // possible and only ever live in the spec we hand the provider.
     const botToken = await secrets.get(provisioned.secretRef);
-    const modelKey = await secrets.get(profile.secretRef);
+    const subscription = profile.kind === 'subscription';
+    if (subscription && host.kind !== 'local') {
+      // Enforced at the API too; belt and suspenders here because this is the
+      // last gate before a credential decision. See docs/ai-profiles.md.
+      throw new Error('Subscription AI profiles can only run on local hosts');
+    }
+    const modelKey = subscription ? undefined : await secrets.get(requireRef(profile.secretRef));
+
+    // Fresh agents open in pairing mode: we don't know anyone's telegram id
+    // yet, so the first-contact claim (orchestrator/claim.ts) binds the owner.
+    // Agents with known members provision straight to an allowlist.
+    const allowFrom = store.listAllowedChannelUserIds(agentId);
     const spec: RuntimeSpec = {
       agentId,
       slug,
@@ -135,14 +146,19 @@ export async function provisionAgent(
         configPatch: {
           agentId: slug,
           model: profile.model,
+          authMode: subscription ? 'oauth-claude-cli' : 'api-key',
           telegram: {
             accountId: provisioned.accountId,
             botToken,
-            allowFrom: store.listAllowedChannelUserIds(agentId),
+            dmPolicy: allowFrom.length > 0 ? 'allowlist' : 'pairing',
+            allowFrom,
           },
         },
       },
-      env: envForProfile(profile.vendor, modelKey),
+      env: modelKey ? envForProfile(profile.vendor, modelKey) : {},
+      hostMounts: subscription
+        ? [{ source: claudeAuthDir(), target: '/root/.claude' }]
+        : [],
     };
 
     // Step 4: runtime + persistent volume.
@@ -209,6 +225,20 @@ async function waitForHealthy(
     `runtime ${runtimeRef} never became healthy`,
     'Your agent started but never came online. We stopped it so it will not keep billing.',
   );
+}
+
+function requireRef(ref: string | undefined): string {
+  if (!ref) throw new Error('AI profile has no stored credential');
+  return ref;
+}
+
+/**
+ * Where the Claude Code OAuth credential lives on the host. The whole
+ * directory is mounted (not the single file) because the CLI refreshes tokens
+ * by rewriting the file, and a single-file bind mount would detach on rename.
+ */
+export function claudeAuthDir(): string {
+  return `${process.env.HOME ?? '/root'}/.claude`;
 }
 
 function envForProfile(vendor: string, key: string): Record<string, string> {

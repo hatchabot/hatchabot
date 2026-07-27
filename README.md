@@ -12,9 +12,14 @@ running end to end against a mock runtime provider — no cloud account, no cost
 npm install
 export AGENTCLAW_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
 
-npm run e2e      # drives the whole tap-+ → first-reply loop in-process
-npm run dev      # HTTP control plane on :8080
-npm run typecheck
+npm run e2e             # whole tap-+ → first-reply loop in-process (mock provider)
+npm test                # unit tests (claim flow, state machine)
+npm run dev             # HTTP control plane on :8080
+
+# Real runtime on this machine:
+./scripts/build-runtime-image.sh   # once per OpenClaw version
+npm run e2e:docker                 # boots a real OpenClaw container, checks health, tears down
+TELEGRAM_BOT_TOKEN=123:abc npm run e2e:docker   # full flow: live bot, pairing claim
 ```
 
 ## Shape
@@ -53,16 +58,30 @@ AgentClaw owns (`agents.list`, `channels.telegram.accounts.*`, `bindings`,
 user's edits left it. See `src/openclaw/configWriter.ts`.
 
 **Subscription credentials are owner-hosted only.** See `docs/ai-profiles.md`.
+For local hosts, the whole `~/.claude` directory is bind-mounted into each
+agent container: every agent shares the one OAuth credential *in place* (same
+file, same host), so token refresh stays coherent. The credential is never
+copied into AgentClaw's store.
+
+**First-contact claim rides OpenClaw's native pairing.** Fresh agents boot with
+`dmPolicy: "pairing"`; the owner taps the deep link, messages the bot, and the
+control plane auto-approves the first pairing request inside the claim window,
+binding that Telegram id to the owner membership (`src/orchestrator/claim.ts`).
+Later senders wait for explicit approval via `/v1/agents/:id/pairing`.
+
+**One container per agent, one volume per agent** (`LocalDockerProvider`).
+`provision()` goes all the way to `docker create` so env/mounts are baked into
+the container and start/stop survive control-plane restarts. All durable state
+lives on the volume — containers are cattle.
 
 ## Known gaps
 
-- **Owner lockout on first provision.** The Telegram allowlist (§12.4) is keyed
-  on Telegram user ids, which we don't know until someone DMs the bot. A fresh
-  agent therefore boots with an empty allowlist and refuses its own owner. Needs
-  a first-contact claim: the deep link carries a one-time code
-  (`https://t.me/<bot>?start=<code>`), the agent binds the first sender who
-  presents it to the owner membership, then enforces the allowlist normally.
-- No real runtime provider yet — `MockProvider` only. Next up is a Docker
-  provider that runs against the local machine.
+- **Unverified: first real model reply through claude-cli in-container.** The
+  gateway boots healthy and the credential mounts, but Claude Code keeps some
+  state in `~/.claude.json` (outside the mounted dir); the first live-token run
+  (`TELEGRAM_BOT_TOKEN=… npm run e2e:docker`) will tell us whether the CLI
+  runtime needs it seeded.
 - Auth is a placeholder header (`x-agentclaw-owner`).
 - Persistence is SQLite; production target is Postgres.
+- Claim window auto-approves the *first* contact — fine for a link shown only
+  to the owner; revisit if deep links ever get shared before claim.

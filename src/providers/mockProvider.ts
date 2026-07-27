@@ -1,4 +1,5 @@
 import type {
+  ExecResult,
   RuntimeProvider,
   RuntimeSpec,
   RuntimeStatus,
@@ -19,6 +20,9 @@ interface MockRuntime {
 export class MockProvider implements RuntimeProvider {
   readonly key = 'mock';
   readonly runtimes = new Map<string, MockRuntime>();
+  /** Programmable responses for exec(), keyed by the joined argv prefix. */
+  readonly execResponses = new Map<string, ExecResult>();
+  readonly execLog: string[][] = [];
 
   constructor(
     private readonly opts: {
@@ -75,6 +79,19 @@ export class MockProvider implements RuntimeProvider {
     const threshold = this.opts.healthyAfter ?? 0;
     const healthy = this.#healthChecks++ >= threshold;
     return { phase: 'running', healthy };
+  }
+
+  async exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult> {
+    this.#require(runtimeRef);
+    this.execLog.push(openclawArgv);
+    // Longest-prefix match lets tests program `pairing list` and
+    // `pairing approve` independently.
+    for (let n = openclawArgv.length; n > 0; n--) {
+      const key = openclawArgv.slice(0, n).join(' ');
+      const canned = this.execResponses.get(key);
+      if (canned) return canned;
+    }
+    return { code: 0, stdout: '', stderr: '' };
   }
 
   #require(runtimeRef: string): MockRuntime {

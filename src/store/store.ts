@@ -27,7 +27,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS ai_profiles (
         id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
         vendor TEXT NOT NULL, kind TEXT NOT NULL, model TEXT NOT NULL,
-        secret_ref TEXT NOT NULL, created_at TEXT NOT NULL
+        secret_ref TEXT, created_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS hosts (
@@ -69,7 +69,7 @@ export class Store {
         `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, secret_ref, created_at)
          VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @secretRef, @createdAt)`,
       )
-      .run(p);
+      .run({ secretRef: null, ...p });
   }
 
   getAIProfile(id: string): AIProfile | undefined {
@@ -185,6 +185,16 @@ export class Store {
       .run({ channelUserId: null, invitedBy: null, joinedAt: null, ...m });
   }
 
+  /** Records which telegram identity the first-contact claim bound (§12.4). */
+  bindMembershipChannelUser(agentId: string, userId: string, channelUserId: string): void {
+    this.db
+      .prepare(
+        `UPDATE memberships SET channel_user_id = ?, joined_at = COALESCE(joined_at, ?)
+         WHERE agent_id = ? AND user_id = ?`,
+      )
+      .run(channelUserId, new Date().toISOString(), agentId, userId);
+  }
+
   /** Active members' channel ids — this is what becomes the bot allowlist. */
   listAllowedChannelUserIds(agentId: string): string[] {
     const rows = this.db
@@ -222,7 +232,7 @@ function rowToAIProfile(r: any): AIProfile {
     vendor: r.vendor,
     kind: r.kind,
     model: r.model,
-    secretRef: r.secret_ref,
+    secretRef: r.secret_ref ?? undefined,
     createdAt: r.created_at,
   };
 }

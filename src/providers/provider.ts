@@ -16,6 +16,19 @@ export interface RuntimeSpec {
   workspace: WorkspaceSeed;
   /** Environment injected at boot — resolved secrets live here, briefly. */
   env: Record<string, string>;
+  /**
+   * Host directories to expose inside the runtime. Used for subscription auth:
+   * the owner's ~/.claude is mounted so every agent on the box shares the one
+   * OAuth credential in place (same file, same host — refresh stays coherent).
+   * Providers that cannot mount (mock, future remote clouds) ignore these.
+   */
+  hostMounts?: HostMount[];
+}
+
+export interface HostMount {
+  source: string;
+  target: string;
+  readonly?: boolean;
 }
 
 export interface WorkspaceSeed {
@@ -30,12 +43,25 @@ export interface WorkspaceSeed {
 
 export interface OpenClawConfigPatch {
   agentId: string;
+  /** Bare model id, e.g. "claude-opus-4-8". Prefixing is the writer's job. */
   model?: string;
+  /**
+   * How the runtime authenticates to the model vendor.
+   * `oauth-claude-cli` — OpenClaw drives the Claude Code CLI, which reads the
+   *   subscription credential from the mounted ~/.claude.
+   * `api-key` — key arrives via env (ANTHROPIC_API_KEY / GEMINI_API_KEY).
+   */
+  authMode: 'oauth-claude-cli' | 'api-key';
   telegram?: {
     accountId: string;
     botToken: string;
-    /** Telegram user ids permitted to DM this bot (§12.4). */
-    allowFrom: string[];
+    /**
+     * 'pairing'  — fresh agent: first contact triggers a pairing request the
+     *              control plane approves (the §12.4 claim flow).
+     * 'allowlist' — members already known; enforce allowFrom.
+     */
+    dmPolicy: 'pairing' | 'allowlist';
+    allowFrom?: string[];
   };
 }
 
@@ -45,6 +71,12 @@ export type RuntimeStatus =
   | { phase: 'running'; healthy: boolean }
   | { phase: 'stopped' }
   | { phase: 'error'; message: string };
+
+export interface ExecResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
 
 export interface RuntimeProvider {
   readonly key: string;
@@ -63,6 +95,13 @@ export interface RuntimeProvider {
   destroy(runtimeRef: string, opts?: { purge?: boolean }): Promise<void>;
 
   status(runtimeRef: string): Promise<RuntimeStatus>;
+
+  /**
+   * Run an `openclaw` subcommand inside the runtime. This is how the control
+   * plane talks to a live agent (pairing list/approve, config nudges) without
+   * caring where the runtime physically lives.
+   */
+  exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult>;
 }
 
 export class ProviderError extends Error {

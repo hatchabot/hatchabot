@@ -1,0 +1,218 @@
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { promisify } from 'node:util';
+import type {
+  ExecResult,
+  RuntimeProvider,
+  RuntimeSpec,
+  RuntimeStatus,
+} from './provider.js';
+import { ProviderError } from './provider.js';
+import { buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+
+const execFileP = promisify(execFile);
+
+export interface LocalDockerOptions {
+  /** Image built by scripts/build-runtime-image.sh. */
+  image?: string;
+  /** Container name prefix. */
+  prefix?: string;
+  docker?: string;
+}
+
+/**
+ * §5.2 made concrete on a single always-on box: one container per agent, one
+ * named volume per agent. The volume holds the entire OpenClaw state dir
+ * (config + workspace + memory + sessions), so the container is cattle — kill
+ * and recreate it and the agent comes back intact. Re-hosting later is "move
+ * the volume, keep the ref format".
+ *
+ * provision() goes all the way to `docker create`, baking env and mounts into
+ * the container, so start/stop survive control-plane restarts with no state
+ * held in this process. Changing env/mounts = re-provision (cattle).
+ *
+ * Shells out to the docker CLI rather than a client library: fewer deps, and
+ * every operation here is coarse enough that process spawn cost is noise.
+ */
+export class LocalDockerProvider implements RuntimeProvider {
+  readonly key = 'local-docker';
+  readonly image: string;
+  readonly prefix: string;
+  readonly docker: string;
+
+  constructor(opts: LocalDockerOptions = {}) {
+    this.image = opts.image ?? 'agentclaw-runtime:latest';
+    this.prefix = opts.prefix ?? 'agentclaw';
+    this.docker = opts.docker ?? 'docker';
+  }
+
+  #names(agentIdOrRef: string) {
+    const short = agentIdOrRef.replace(/^docker:\/\//, '').slice(0, 12);
+    return {
+      volume: `${this.prefix}-vol-${short}`,
+      container: `${this.prefix}-${short}`,
+      runtimeRef: `docker://${short}`,
+    };
+  }
+
+  async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
+    const { volume, container, runtimeRef } = this.#names(spec.agentId);
+
+    // `docker volume create` is idempotent by name — a retry reuses the volume.
+    await this.#must(['volume', 'create', volume], 'Could not create the agent volume.');
+
+    await this.#seed(volume, spec);
+
+    // Replace any existing container so a re-provision picks up new env/mounts.
+    // Safe because all durable state lives on the volume.
+    await this.#docker(['rm', '-f', container]);
+
+    const args = [
+      'create',
+      '--name',
+      container,
+      '--restart',
+      'unless-stopped',
+      '-v',
+      `${volume}:/root/.openclaw`,
+    ];
+    for (const m of spec.hostMounts ?? []) {
+      args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
+    }
+    for (const [k, v] of Object.entries(spec.env)) {
+      args.push('-e', `${k}=${v}`);
+    }
+    args.push(this.image, 'openclaw', 'gateway');
+    await this.#must(args, 'The agent runtime could not be created.');
+
+    return { runtimeRef };
+  }
+
+  async #seed(volume: string, spec: RuntimeSpec): Promise<void> {
+    // Stage the seed: config commands as a shell script, workspace files as a
+    // directory, both mounted read-only into a one-shot container. The bot
+    // token rides inside seed.sh in a tmpdir (0700) for the duration of one
+    // container run, then the whole directory is deleted.
+    const seedDir = await mkdtemp(join(tmpdir(), 'agentclaw-seed-'));
+    try {
+      const workspaceDir = WORKSPACE_DIR_TEMPLATE.replace(
+        '{slug}',
+        spec.workspace.configPatch.agentId,
+      );
+      const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
+      for (const cmd of buildConfigCommands(spec.workspace.configPatch)) {
+        script.push(`openclaw ${cmd.argv.map(shq).join(' ')}`);
+      }
+      // Workspace seed files land after `agents add` created the directory.
+      script.push(`mkdir -p ${shq(workspaceDir)}`);
+      for (const name of Object.keys(spec.workspace.files)) {
+        script.push(`cp ${shq(`/seed/workspace/${name}`)} ${shq(`${workspaceDir}/${name}`)}`);
+      }
+
+      await writeFile(join(seedDir, 'seed.sh'), script.join('\n') + '\n', { mode: 0o700 });
+      for (const [name, contents] of Object.entries(spec.workspace.files)) {
+        const path = join(seedDir, 'workspace', name);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, contents);
+      }
+
+      const res = await this.#docker([
+        'run',
+        '--rm',
+        '-v',
+        `${volume}:/root/.openclaw`,
+        '-v',
+        `${seedDir}:/seed:ro`,
+        this.image,
+        'bash',
+        '/seed/seed.sh',
+      ]);
+      if (res.code !== 0) {
+        throw new ProviderError(
+          `seed failed: ${res.stderr.slice(-2000) || res.stdout.slice(-2000)}`,
+          'Setting up the agent workspace failed.',
+        );
+      }
+    } finally {
+      await rm(seedDir, { recursive: true, force: true });
+    }
+  }
+
+  async start(runtimeRef: string): Promise<void> {
+    const { container } = this.#names(runtimeRef);
+    await this.#must(['start', container], 'The agent could not start. Try again?');
+  }
+
+  async stop(runtimeRef: string): Promise<void> {
+    const { container } = this.#names(runtimeRef);
+    await this.#must(['stop', '-t', '10', container], 'The agent could not be stopped.');
+  }
+
+  async destroy(runtimeRef: string, opts?: { purge?: boolean }): Promise<void> {
+    const { container, volume } = this.#names(runtimeRef);
+    await this.#docker(['rm', '-f', container]);
+    if (opts?.purge) await this.#docker(['volume', 'rm', '-f', volume]);
+  }
+
+  async status(runtimeRef: string): Promise<RuntimeStatus> {
+    const { container } = this.#names(runtimeRef);
+    const res = await this.#docker(['inspect', '-f', '{{.State.Status}}', container]);
+    if (res.code !== 0) return { phase: 'absent' };
+    const state = res.stdout.trim();
+    if (state === 'exited' || state === 'created' || state === 'paused') {
+      return { phase: 'stopped' };
+    }
+    if (state === 'running') {
+      // OpenClaw's own health command is the readiness signal — it queries the
+      // gateway over its local socket and exits non-zero until it's serving.
+      const health = await this.exec(runtimeRef, ['health']);
+      return { phase: 'running', healthy: health.code === 0 };
+    }
+    if (state === 'restarting') return { phase: 'starting' };
+    return { phase: 'error', message: `container state: ${state}` };
+  }
+
+  async exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult> {
+    const { container } = this.#names(runtimeRef);
+    return this.#docker(['exec', container, 'openclaw', ...openclawArgv]);
+  }
+
+  async #must(args: string[], userMessage: string): Promise<ExecResult> {
+    const res = await this.#docker(args);
+    if (res.code !== 0) {
+      throw new ProviderError(
+        `docker ${args[0]} failed: ${res.stderr.slice(-2000)}`,
+        userMessage,
+      );
+    }
+    return res;
+  }
+
+  async #docker(args: string[]): Promise<ExecResult> {
+    try {
+      const { stdout, stderr } = await execFileP(this.docker, args, {
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      return { code: 0, stdout, stderr };
+    } catch (err: any) {
+      if (typeof err?.code === 'number' || err?.stdout !== undefined) {
+        return {
+          code: typeof err.code === 'number' ? err.code : 1,
+          stdout: String(err.stdout ?? ''),
+          stderr: String(err.stderr ?? err.message ?? ''),
+        };
+      }
+      throw new ProviderError(
+        `docker unavailable: ${String(err)}`,
+        'Docker is not available on this host.',
+      );
+    }
+  }
+}
+
+/** Minimal single-quote shell escaping for the generated seed script. */
+function shq(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}

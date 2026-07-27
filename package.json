@@ -4,13 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "e2e": "tsx scripts/e2e.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e:docker": "tsx scripts/e2e-docker.ts"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.1",
