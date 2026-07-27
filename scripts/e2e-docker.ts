@@ -44,7 +44,7 @@ if (!botToken) {
       configPatch: { agentId: 'smoke-agent', model: 'claude-opus-4-8', authMode: 'oauth-claude-cli' },
     },
     env: {},
-    hostMounts: [{ source: claudeAuthDir(), target: '/root/.claude' }],
+    hostMounts: [{ source: claudeAuthDir(), target: '/home/node/.claude' }],
   });
   console.log(`  provisioned ${runtimeRef}`);
 

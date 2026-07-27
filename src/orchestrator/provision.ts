@@ -157,7 +157,7 @@ export async function provisionAgent(
       },
       env: modelKey ? envForProfile(profile.vendor, modelKey) : {},
       hostMounts: subscription
-        ? [{ source: claudeAuthDir(), target: '/root/.claude' }]
+        ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
         : [],
     };
 

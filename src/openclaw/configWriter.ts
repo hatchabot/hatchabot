@@ -34,7 +34,7 @@ export interface ConfigCommand {
   sensitive?: boolean;
 }
 
-export const WORKSPACE_DIR_TEMPLATE = '/root/.openclaw/agents/{slug}/agent';
+export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent';
 
 export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[] {
   const cmds: ConfigCommand[] = [];

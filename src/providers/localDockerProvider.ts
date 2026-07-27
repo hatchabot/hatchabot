@@ -76,7 +76,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--restart',
       'unless-stopped',
       '-v',
-      `${volume}:/root/.openclaw`,
+      `${volume}:/home/node/.openclaw`,
     ];
     for (const m of spec.hostMounts ?? []) {
       args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
@@ -122,7 +122,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         'run',
         '--rm',
         '-v',
-        `${volume}:/root/.openclaw`,
+        `${volume}:/home/node/.openclaw`,
         '-v',
         `${seedDir}:/seed:ro`,
         this.image,
