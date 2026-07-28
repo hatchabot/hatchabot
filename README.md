@@ -86,6 +86,20 @@ lives on the volume — containers are cattle.
 Telegram pairing auto-claimed by the control plane, real Claude reply on a Max
 subscription. `TELEGRAM_BOT_TOKEN=… npm run e2e:docker` reproduces it.
 
+## Operations
+
+- **Service**: `systemctl --user {status|restart} agentclaw`, logs via
+  `journalctl --user -u agentclaw -f`. Installed by `scripts/install-service.sh`.
+- **Rebuild ≠ delete**: Rebuild (button in the app, `POST /v1/agents/:id/rebuild`)
+  recreates the container from the current image and KEEPS the volume — memory,
+  pairing, identity survive. It's the upgrade + unstick mechanism. Delete purges
+  everything and requires typing the agent's name.
+- **Backups**: nightly at 03:30 (`agentclaw-backup.timer`), one tarball per
+  volume under `~/agentclaw-backups/<date>/`, 14-day retention. Manual run:
+  `./scripts/backup-volumes.sh`. Restore (agent stopped):
+  `docker run --rm -v <vol>:/data -v <dir>:/in:ro agentclaw-runtime:latest
+  bash -c 'cd /data && tar xzf /in/<vol>.tgz'`.
+
 ## Known gaps
 
 - Auth is a placeholder header (`x-agentclaw-owner`).

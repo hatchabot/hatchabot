@@ -10,7 +10,7 @@ import type { AgentState } from './types.js';
 const TRANSITIONS: Record<AgentState, readonly AgentState[]> = {
   PROVISIONING: ['RUNNING', 'FAILED', 'DELETING'],
   RUNNING: ['STOPPED', 'DELETING', 'FAILED'],
-  STOPPED: ['RUNNING', 'DELETING'],
+  STOPPED: ['RUNNING', 'DELETING', 'FAILED'], // FAILED: a rebuild can fail from stopped
   DELETING: ['DELETED', 'FAILED'],
   DELETED: [],
   FAILED: ['PROVISIONING', 'DELETING'],

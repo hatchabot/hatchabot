@@ -10,6 +10,7 @@ import { InvalidBotTokenError } from '../channels/telegramManual.js';
 import {
   claudeAuthDir,
   createAgentRecord,
+  rebuildAgent,
   runProvisionSteps,
 } from '../orchestrator/provision.js';
 import {
@@ -244,6 +245,30 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     },
   );
+
+  // Rebuild: new container from the current image, volume (memory) kept.
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/rebuild', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+      return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
+    }
+    if (!inflight.has(agent.id)) {
+      const task = rebuildAgent(
+        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+          log: (e, d) => app.log.info(d, e) },
+        agent.id,
+      );
+      inflight.set(
+        agent.id,
+        task
+          .then(() => undefined)
+          .catch((err) => app.log.error({ err, agentId: agent.id }, 'rebuild task failed'))
+          .finally(() => inflight.delete(agent.id)),
+      );
+    }
+    return reply.code(202).send({ rebuilding: true });
+  });
 
   // Retry after FAILED (or nudge a stuck PROVISIONING after a restart).
   app.post<{ Params: { id: string } }>('/v1/agents/:id/provision', async (req, reply) => {

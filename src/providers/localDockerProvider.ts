@@ -74,7 +74,12 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
-    const { volume, container, runtimeRef } = this.#namesFor(spec);
+    // Rebuild/retry path: reuse the existing names wholesale (container AND
+    // volume) so the agent's memory survives and the stored ref stays valid —
+    // including for legacy agents named under the old scheme.
+    const { volume, container, runtimeRef } = spec.previousRef
+      ? { ...this.#names(spec.previousRef), runtimeRef: spec.previousRef }
+      : this.#namesFor(spec);
 
     // `docker volume create` is idempotent by name — a retry reuses the volume.
     await this.#must(['volume', 'create', volume], 'Could not create the agent volume.');
@@ -117,14 +122,24 @@ export class LocalDockerProvider implements RuntimeProvider {
         '{slug}',
         spec.workspace.configPatch.agentId,
       );
+      // The seed must be idempotent: rebuilds re-run it against a volume that
+      // already holds a live workspace. Config sets are naturally re-runnable
+      // (and SHOULD re-run — they re-apply current tokens/allowlists), but
+      // `agents add` and the workspace file copies must not touch an existing
+      // agent — overwriting MEMORY.md on rebuild would lobotomize it.
       const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
       for (const cmd of buildConfigCommands(spec.workspace.configPatch)) {
-        script.push(`openclaw ${cmd.argv.map(shq).join(' ')}`);
+        const line = `openclaw ${cmd.argv.map(shq).join(' ')}`;
+        script.push(
+          cmd.argv[0] === 'agents' && cmd.argv[1] === 'add'
+            ? `if [ ! -d ${shq(workspaceDir)} ]; then ${line}; fi`
+            : line,
+        );
       }
-      // Workspace seed files land after `agents add` created the directory.
       script.push(`mkdir -p ${shq(workspaceDir)}`);
       for (const name of Object.keys(spec.workspace.files)) {
-        script.push(`cp ${shq(`/seed/workspace/${name}`)} ${shq(`${workspaceDir}/${name}`)}`);
+        const dest = `${workspaceDir}/${name}`;
+        script.push(`[ -f ${shq(dest)} ] || cp ${shq(`/seed/workspace/${name}`)} ${shq(dest)}`);
       }
 
       await writeFile(join(seedDir, 'seed.sh'), script.join('\n') + '\n', { mode: 0o700 });

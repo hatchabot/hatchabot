@@ -13,6 +13,8 @@ EnvironmentFile=%h/agentclaw/.env
 ExecStart=%h/agentclaw/node_modules/.bin/tsx src/index.ts
 Restart=always
 RestartSec=3
+# tsx exits 143 on SIGTERM; that's a clean shutdown, not a failure.
+SuccessExitStatus=143
 
 [Install]
 WantedBy=default.target

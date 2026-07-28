@@ -1,0 +1,7 @@
+[Unit]
+Description=AgentClaw nightly volume backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/agentclaw
+ExecStart=%h/agentclaw/scripts/backup-volumes.sh

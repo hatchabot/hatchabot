@@ -255,6 +255,8 @@ function agentCard(a) {
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank">Open in Telegram</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
+      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
+        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${esc(a.name)}')">Delete</button>` : ''}
     </div>
@@ -287,8 +289,20 @@ async function act(id, action) {
   catch (e) { toast(e.message); }
 }
 
+async function rebuild(id) {
+  try {
+    await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+    toast('Rebuilding — memory is kept');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
 async function del(id, name) {
-  if (!confirm(`Delete "${name}"? Its memory is erased too.`)) return;
+  // Deliberately annoying: deletion erases the agent's memory forever, so it
+  // costs a typed confirmation, not a reflex click.
+  const typed = prompt(`This permanently erases "${name}" and everything it remembers.\n\nType the agent's name to confirm:`);
+  if (typed === null) return;
+  if (typed.trim() !== name) { toast('Name did not match — nothing deleted.'); return; }
   try { await api(`/v1/agents/${id}`, { method: 'DELETE' }); await refresh(false); }
   catch (e) { toast(e.message); }
 }

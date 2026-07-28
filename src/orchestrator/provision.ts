@@ -129,48 +129,8 @@ export async function runProvisionSteps(
       log('channel.provisioned', { agentId, accountId: provisioned.accountId });
     }
 
-    // Step 5: render config + workspace. Secrets are resolved as late as
-    // possible and only ever live in the spec we hand the provider.
-    const botToken = await secrets.get(provisioned.secretRef);
-    const subscription = profile.kind === 'subscription';
-    if (subscription && host.kind !== 'local') {
-      // Enforced at the API too; belt and suspenders here because this is the
-      // last gate before a credential decision. See docs/ai-profiles.md.
-      throw new Error('Subscription AI profiles can only run on local hosts');
-    }
-    const modelKey = subscription ? undefined : await secrets.get(requireRef(profile.secretRef));
-
-    // Fresh agents open in pairing mode: we don't know anyone's telegram id
-    // yet, so the first-contact claim (orchestrator/claim.ts) binds the owner.
-    // Agents with known members provision straight to an allowlist.
-    const allowFrom = store.listAllowedChannelUserIds(agentId);
-    const spec: RuntimeSpec = {
-      agentId,
-      slug: agent.slug,
-      workspace: {
-        files: buildWorkspaceSeed({
-          agentName: agent.name,
-          slug: agent.slug,
-          persona: agent.persona,
-          sharedMemory: agent.sharedMemory,
-        }),
-        configPatch: {
-          agentId: agent.slug,
-          model: profile.model,
-          authMode: subscription ? 'oauth-claude-cli' : 'api-key',
-          telegram: {
-            accountId: provisioned.accountId,
-            botToken,
-            dmPolicy: allowFrom.length > 0 ? 'allowlist' : 'pairing',
-            allowFrom,
-          },
-        },
-      },
-      env: modelKey ? envForProfile(profile.vendor, modelKey) : {},
-      hostMounts: subscription
-        ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
-        : [],
-    };
+    // Step 5: render config + workspace.
+    const spec = await buildRuntimeSpec(deps, agentId);
 
     // Step 4: runtime + persistent volume.
     const { runtimeRef } = await provider.provision(spec);
@@ -219,6 +179,96 @@ export async function runProvisionSteps(
 
     store.setAgentState(agentId, 'FAILED', reason);
     return { agent: store.getAgent(agentId)! };
+  }
+}
+
+/**
+ * Renders the full RuntimeSpec for an agent from its current registry state.
+ * Used by fresh provisioning, retry, and rebuild — secrets are resolved as
+ * late as possible and only ever live in the spec handed to the provider.
+ */
+export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Promise<RuntimeSpec> {
+  const { store, secrets } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) throw new Error(`No such agent: ${agentId}`);
+  const profile = store.getAIProfile(agent.aiProfileId)!;
+  const host = store.getHost(agent.hostId)!;
+  const channelRow = store.getChannelForAgent(agentId);
+  if (!channelRow) throw new Error(`Agent ${agentId} has no channel yet`);
+
+  const botToken = await secrets.get(channelRow.secretRef);
+  const subscription = profile.kind === 'subscription';
+  if (subscription && host.kind !== 'local') {
+    // Enforced at the API too; belt and suspenders here because this is the
+    // last gate before a credential decision. See docs/ai-profiles.md.
+    throw new Error('Subscription AI profiles can only run on local hosts');
+  }
+  const modelKey = subscription ? undefined : await secrets.get(requireRef(profile.secretRef));
+
+  // Fresh agents open in pairing mode: we don't know anyone's telegram id
+  // yet, so the first-contact claim (orchestrator/claim.ts) binds the owner.
+  // Agents with known members provision straight to an allowlist.
+  const allowFrom = store.listAllowedChannelUserIds(agentId);
+  return {
+    agentId,
+    slug: agent.slug,
+    previousRef: agent.runtimeRef,
+    workspace: {
+      files: buildWorkspaceSeed({
+        agentName: agent.name,
+        slug: agent.slug,
+        persona: agent.persona,
+        sharedMemory: agent.sharedMemory,
+      }),
+      configPatch: {
+        agentId: agent.slug,
+        model: profile.model,
+        authMode: subscription ? 'oauth-claude-cli' : 'api-key',
+        telegram: {
+          accountId: channelRow.accountId,
+          botToken,
+          dmPolicy: allowFrom.length > 0 ? 'allowlist' : 'pairing',
+          allowFrom,
+        },
+      },
+    },
+    env: modelKey ? envForProfile(profile.vendor, modelKey) : {},
+    hostMounts: subscription
+      ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
+      : [],
+  };
+}
+
+/**
+ * Recreate the runtime from the current image and config while KEEPING the
+ * agent's volume — memory, pairing, and identity survive. This is the upgrade
+ * mechanism (new OpenClaw image) and the unstick mechanism, distinct from
+ * delete (which purges) by construction: previousRef makes the provider reuse
+ * the existing storage, and the seed script never overwrites existing files.
+ */
+export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const sleep = deps.sleep ?? defaultSleep;
+  const agent = store.getAgent(agentId);
+  if (!agent?.runtimeRef) throw new Error(`Agent ${agentId} has no runtime to rebuild`);
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+    throw new Error(`Cannot rebuild from state ${agent.state}`);
+  }
+
+  try {
+    await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
+    const spec = await buildRuntimeSpec(deps, agentId);
+    const { runtimeRef } = await provider.provision(spec);
+    await provider.start(runtimeRef);
+    await waitForHealthy(provider, runtimeRef, sleep);
+    log('runtime.rebuilt', { agentId, runtimeRef });
+    return store.setAgentState(agentId, 'RUNNING');
+  } catch (err) {
+    const reason = userMessageFor(err);
+    log('rebuild.failed', { agentId, reason, error: String(err) });
+    store.setAgentState(agentId, 'FAILED', reason);
+    return store.getAgent(agentId)!;
   }
 }
 

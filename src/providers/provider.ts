@@ -17,6 +17,12 @@ export interface RuntimeSpec {
   /** Environment injected at boot — resolved secrets live here, briefly. */
   env: Record<string, string>;
   /**
+   * Set when this spec re-provisions an existing runtime (rebuild, retry).
+   * The provider MUST keep using the same underlying storage so the agent's
+   * memory survives; the returned ref stays equal to this one.
+   */
+  previousRef?: string;
+  /**
    * Host directories to expose inside the runtime. Used for subscription auth:
    * the owner's ~/.claude is mounted so every agent on the box shares the one
    * OAuth credential in place (same file, same host — refresh stays coherent).

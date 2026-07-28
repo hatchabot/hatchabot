@@ -18,8 +18,11 @@ fi
 
 mkdir -p ~/.config/systemd/user
 cp deploy/agentclaw.service ~/.config/systemd/user/agentclaw.service
+cp deploy/agentclaw-backup.service ~/.config/systemd/user/agentclaw-backup.service
+cp deploy/agentclaw-backup.timer ~/.config/systemd/user/agentclaw-backup.timer
 systemctl --user daemon-reload
 systemctl --user enable --now agentclaw
+systemctl --user enable --now agentclaw-backup.timer
 
 # Lingering lets user services start at boot instead of at first login.
 if loginctl show-user "$USER" 2>/dev/null | grep -q '^Linger=yes'; then
