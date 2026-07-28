@@ -1,0 +1,18 @@
+# AgentClaw control plane — user-level systemd unit.
+# Installed by scripts/install-service.sh into ~/.config/systemd/user/.
+#
+# Runs as your user (so it can reach docker and ~/.claude), restarts on crash,
+# and starts at boot once lingering is enabled for the account.
+[Unit]
+Description=AgentClaw control plane
+
+[Service]
+WorkingDirectory=%h/agentclaw
+# Holds AGENTCLAW_SECRET_KEY (and PORT). Never committed — see .gitignore.
+EnvironmentFile=%h/agentclaw/.env
+ExecStart=%h/agentclaw/node_modules/.bin/tsx src/index.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
