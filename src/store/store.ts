@@ -211,6 +211,21 @@ export class Store {
     };
   }
 
+  /**
+   * The live agent (if any) already bound to this messaging identity. Guards
+   * against wiring one bot token into two agents — Telegram delivers each
+   * message to exactly one poller, so a double-use flip-flops between them.
+   */
+  findAgentUsingAccount(accountId: string): Agent | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT a.id FROM channels c JOIN agents a ON a.id = c.agent_id
+         WHERE c.account_id = ? AND a.state != 'DELETED' LIMIT 1`,
+      )
+      .get(accountId) as { id: string } | undefined;
+    return row ? this.getAgent(row.id) : undefined;
+  }
+
   deleteChannelForAgent(agentId: string): void {
     this.db.prepare(`DELETE FROM channels WHERE agent_id = ?`).run(agentId);
   }

@@ -97,6 +97,17 @@
 
 <button class="fab" id="fabBtn" title="New agent" hidden>+</button>
 
+<dialog id="loginDlg">
+  <h3 style="margin:0 0 4px">Welcome back</h3>
+  <div class="sub">Enter the AgentClaw password for this machine.</div>
+  <label>Password</label>
+  <input type="password" id="loginPw" autocomplete="current-password">
+  <div class="err" id="loginErr"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button class="primary" id="loginBtn" onclick="doLogin()">Unlock</button>
+  </div>
+</dialog>
+
 <dialog id="createDlg">
   <h3 style="margin:0 0 4px">New agent</h3>
   <div class="sub">It boots on this machine and lives on Telegram.</div>
@@ -123,10 +134,34 @@ const api = async (path, opts = {}) => {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
+  if (res.status === 401 && path !== '/v1/login') {
+    showLogin();
+    throw new Error('auth required');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
   return data;
 };
+
+// ---- auth ------------------------------------------------------------------
+
+function showLogin() {
+  if (!loginDlg.open) { $('loginErr').textContent = ''; loginDlg.showModal(); $('loginPw').focus(); }
+}
+async function doLogin() {
+  $('loginBtn').disabled = true;
+  try {
+    await api('/v1/login', { method: 'POST', body: { password: $('loginPw').value } });
+    loginDlg.close(); $('loginPw').value = '';
+    await refresh(true);
+  } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong password' : e.message; }
+  finally { $('loginBtn').disabled = false; }
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && loginDlg.open) doLogin();
+});
+// dialogs shouldn't be escapable into a broken page when auth is required
+loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
 
 function toast(msg) {
   const t = $('toast');

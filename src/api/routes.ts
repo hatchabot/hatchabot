@@ -228,6 +228,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!token) return reply.code(400).send({ error: 'token required' });
       try {
         const { username } = await deps.channel.submitToken(agent.id, token);
+        const inUseBy = store.findAgentUsingAccount(username);
+        if (inUseBy && inUseBy.id !== agent.id) {
+          return reply.code(400).send({
+            error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.`,
+          });
+        }
         kickProvision(agent.id);
         return reply.code(202).send({ username });
       } catch (err) {

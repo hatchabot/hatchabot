@@ -11,6 +11,7 @@ import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
+import { registerAuth } from './api/auth.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
 const DB_PATH = process.env.AGENTCLAW_DB ?? 'data/agentclaw.sqlite';
@@ -45,6 +46,10 @@ if (!store.getHost(LOCAL_HOST_ID)) {
 }
 
 const app = Fastify({ logger: true });
+await registerAuth(app, {
+  password: process.env.AGENTCLAW_PASSWORD,
+  secret: LocalSecretStore.keyFromEnv(),
+});
 await registerRoutes(app, {
   store,
   secrets,
