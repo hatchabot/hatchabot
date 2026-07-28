@@ -85,7 +85,7 @@ async function join() {
       </ol>
       ${data.botUsername ? `
         <a class="btn" href="https://t.me/${esc(data.botUsername)}">Open in Telegram app</a>
-        <a class="btn alt" href="https://web.telegram.org/k/#@${esc(data.botUsername)}" target="_blank">Open Telegram Web instead</a>
+        <a class="btn alt" href="https://web.telegram.org/k/#?tgaddr=${encodeURIComponent('tg://resolve?domain=' + data.botUsername)}" target="_blank">Open Telegram Web instead</a>
       ` : `<div class="notice">The agent isn't running right now — ask the owner to start it, then message the bot.</div>`}`;
   } catch (e) {
     document.getElementById('err').textContent = e.message;

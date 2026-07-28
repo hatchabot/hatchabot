@@ -278,7 +278,7 @@ function agentCard(a) {
         `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}${m.role === 'owner' ? ' ★' : ''}</span>`).join('')}
       </div>` : ''}
     <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="https://web.telegram.org/k/#@${esc(botOf(a))}" target="_blank">Open in Telegram</a>
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Open in Telegram</a>
         <a class="btn" href="${esc(a.deepLink)}" title="Open in the Telegram app">In app</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
@@ -318,6 +318,11 @@ async function act(id, action) {
 }
 
 const botOf = (a) => (a.deepLink ?? '').replace('https://t.me/', '');
+// Telegram Web's documented deep-link: the #@username hash form only resolves
+// in some client states, but tgaddr survives reliably (needs a logged-in
+// Telegram Web session either way).
+const tgWebLink = (username) =>
+  `https://web.telegram.org/k/#?tgaddr=${encodeURIComponent(`tg://resolve?domain=${username}`)}`;
 
 async function invite(id, name) {
   try {
