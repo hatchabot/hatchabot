@@ -115,6 +115,24 @@ export interface RuntimeProvider {
    * from the pairing allowlist file). Prefer exec() whenever a CLI verb exists.
    */
   execShell(runtimeRef: string, script: string): Promise<ExecResult>;
+
+  /** What this runtime is actually running (image identity, OpenClaw version). */
+  info(runtimeRef: string): Promise<RuntimeInfo>;
+
+  /**
+   * What a runtime provisioned right now would run. Comparing this against
+   * info() is how "update available" is detected — by image id, never by tag
+   * (tags like :latest are reassigned in place).
+   */
+  currentImageInfo(): Promise<RuntimeInfo>;
+
+  /** Recent runtime output for the observability card. */
+  logs(runtimeRef: string, lines: number): Promise<string>;
+}
+
+export interface RuntimeInfo {
+  imageId?: string;
+  openclawVersion?: string;
 }
 
 export class ProviderError extends Error {

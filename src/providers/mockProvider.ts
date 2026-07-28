@@ -1,5 +1,6 @@
 import type {
   ExecResult,
+  RuntimeInfo,
   RuntimeProvider,
   RuntimeSpec,
   RuntimeStatus,
@@ -98,6 +99,18 @@ export class MockProvider implements RuntimeProvider {
     this.#require(runtimeRef);
     this.execLog.push(['sh', script]);
     return this.execResponses.get('sh') ?? { code: 0, stdout: '', stderr: '' };
+  }
+
+  async info(): Promise<RuntimeInfo> {
+    return { imageId: 'mock-image', openclawVersion: 'mock' };
+  }
+
+  async currentImageInfo(): Promise<RuntimeInfo> {
+    return { imageId: 'mock-image', openclawVersion: 'mock' };
+  }
+
+  async logs(): Promise<string> {
+    return '';
   }
 
   #require(runtimeRef: string): MockRuntime {

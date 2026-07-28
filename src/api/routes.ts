@@ -217,11 +217,93 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.get('/v1/agents', async (req) => {
     const agents = store.listAgents(ownerIdOf(req.headers as Record<string, unknown>));
-    return agents.map((a) => ({
-      ...a,
-      deepLink: store.getChannelForAgent(a.id)?.deepLink,
-    }));
+    return Promise.all(
+      agents.map(async (a) => {
+        let openclawVersion: string | undefined;
+        let updateAvailable = false;
+        if (a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
+          try {
+            const provider = providerFor(a.hostId);
+            const [running, current] = await Promise.all([
+              provider.info(a.runtimeRef),
+              provider.currentImageInfo(),
+            ]);
+            openclawVersion = running.openclawVersion;
+            // Compare image ids, never tags — :latest gets reassigned in place.
+            updateAvailable = !!(
+              running.imageId && current.imageId && running.imageId !== current.imageId
+            );
+          } catch {
+            /* provider hiccup — omit version info rather than fail the list */
+          }
+        }
+        return {
+          ...a,
+          deepLink: store.getChannelForAgent(a.id)?.deepLink,
+          openclawVersion,
+          updateAvailable,
+        };
+      }),
+    );
   });
+
+  // Recent runtime output — the "is it alive and what is it doing" view.
+  app.get<{ Params: { id: string }; Querystring: { lines?: string } }>(
+    '/v1/agents/:id/logs',
+    async (req, reply) => {
+      const agent = store.getAgent(req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      const lines = Math.min(Number(req.query.lines ?? 80) || 80, 500);
+      const text = await providerFor(agent.hostId).logs(agent.runtimeRef, lines);
+      return { text };
+    },
+  );
+
+  // Workspace file editing — the "full OpenClaw interface" promise (§9.3):
+  // the persona and memory are the user's files, editable from the app.
+  const EDITABLE_FILES = new Set(['SOUL.md', 'AGENTS.md', 'MEMORY.md']);
+  const workspacePath = (slug: string, name: string) =>
+    `/home/node/.openclaw/agents/${slug}/agent/${name}`;
+
+  app.get<{ Params: { id: string; name: string } }>(
+    '/v1/agents/:id/files/:name',
+    async (req, reply) => {
+      const agent = store.getAgent(req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      if (!EDITABLE_FILES.has(req.params.name)) return reply.code(400).send({ error: 'Not editable' });
+      if (agent.state !== 'RUNNING') {
+        return reply.code(409).send({ error: 'Start the agent to edit its files.' });
+      }
+      const res = await providerFor(agent.hostId).execShell(
+        agent.runtimeRef,
+        `cat ${JSON.stringify(workspacePath(agent.slug, req.params.name))} 2>/dev/null || true`,
+      );
+      return { name: req.params.name, content: res.stdout };
+    },
+  );
+
+  app.put<{ Params: { id: string; name: string }; Body: { content?: string } }>(
+    '/v1/agents/:id/files/:name',
+    async (req, reply) => {
+      const agent = store.getAgent(req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      if (!EDITABLE_FILES.has(req.params.name)) return reply.code(400).send({ error: 'Not editable' });
+      const content = (req.body as { content?: string } | null)?.content;
+      if (typeof content !== 'string') return reply.code(400).send({ error: 'content required' });
+      if (agent.state !== 'RUNNING') {
+        return reply.code(409).send({ error: 'Start the agent to edit its files.' });
+      }
+      // base64 through the shell so arbitrary content can't break quoting.
+      const b64 = Buffer.from(content, 'utf8').toString('base64');
+      const path = workspacePath(agent.slug, req.params.name);
+      const res = await providerFor(agent.hostId).execShell(
+        agent.runtimeRef,
+        `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
+      );
+      if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
+      return { saved: true };
+    },
+  );
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
     const agent = store.getAgent(req.params.id);

@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
-# Builds the per-agent runtime image. Run once per OpenClaw version bump.
+# Builds the per-agent runtime image, tagged with its OpenClaw version AND
+# (unless NO_LATEST=1) retagged as :latest — which is what new provisions and
+# Rebuild use. The upgrade flow is:
+#
+#   OPENCLAW_VERSION=X NO_LATEST=1 ./scripts/build-runtime-image.sh  # candidate
+#   AGENTCLAW_IMAGE=agentclaw-runtime:X npm run e2e:docker           # smoke it
+#   docker tag agentclaw-runtime:X agentclaw-runtime:latest          # promote
+#   → app shows "update available" per agent; Rebuild upgrades it, memory kept.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-IMAGE="${AGENTCLAW_IMAGE:-agentclaw-runtime:latest}"
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.6.11}"
+REPO="${AGENTCLAW_IMAGE_REPO:-agentclaw-runtime}"
 
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
-  -t "${IMAGE}" \
+  -t "${REPO}:${OPENCLAW_VERSION}" \
   -f docker/Dockerfile.runtime \
   docker/
 
-echo "Built ${IMAGE} (openclaw@${OPENCLAW_VERSION})"
+if [ "${NO_LATEST:-0}" != "1" ]; then
+  docker tag "${REPO}:${OPENCLAW_VERSION}" "${REPO}:latest"
+  echo "Built ${REPO}:${OPENCLAW_VERSION} (promoted to :latest)"
+else
+  echo "Built ${REPO}:${OPENCLAW_VERSION} (candidate — :latest untouched)"
+fi

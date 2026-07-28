@@ -25,6 +25,9 @@ RUN apt-get update \
 RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm cache clean --force
 
+# Read back at runtime by the control plane (update-available detection).
+LABEL org.agentclaw.openclaw-version="${OPENCLAW_VERSION}"
+
 COPY entrypoint.sh /usr/local/bin/agentclaw-entrypoint
 RUN chmod +x /usr/local/bin/agentclaw-entrypoint \
  && mkdir -p /home/node/.openclaw \

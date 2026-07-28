@@ -128,10 +128,43 @@
   <input type="text" id="agentName" placeholder="Kitchen Helper" maxlength="64">
   <label>What is it for? <span style="color:var(--dim)">(optional — becomes its persona)</span></label>
   <textarea id="agentPersona" placeholder="You help plan meals and keep the pantry list current."></textarea>
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
+    <input type="checkbox" id="agentShared" style="width:auto">
+    Shared memory — for a family/group agent: everyone you invite reads and
+    writes one common memory
+  </label>
   <div class="err" id="createErr"></div>
   <div class="actions" style="justify-content:flex-end">
     <button onclick="createDlg.close()">Cancel</button>
     <button class="primary" id="createBtn" onclick="createAgent()">Create</button>
+  </div>
+</dialog>
+
+<dialog id="editDlg" style="width:min(640px,94vw)">
+  <h3 style="margin:0 0 4px">Edit <span id="editAgent"></span></h3>
+  <div class="sub">
+    These are the agent's own files. <b>SOUL.md</b> is its persona,
+    <b>MEMORY.md</b> what it remembers. Changes apply to new conversations
+    (send <code>/new</code> in Telegram to start one).
+  </div>
+  <label>File</label>
+  <select id="editFile" onchange="loadEditFile()">
+    <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
+  </select>
+  <textarea id="editContent" style="min-height:280px;font-family:ui-monospace,monospace;font-size:13px;margin-top:10px"></textarea>
+  <div class="err" id="editErr"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="editDlg.close()">Cancel</button>
+    <button class="primary" id="editSaveBtn" onclick="saveEditFile()">Save</button>
+  </div>
+</dialog>
+
+<dialog id="logsDlg" style="width:min(720px,94vw)">
+  <h3 style="margin:0 0 10px">Activity — <span id="logsAgent"></span></h3>
+  <pre id="logsText" style="max-height:50vh;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:12px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="loadLogs()">Refresh</button>
+    <button class="primary" onclick="logsDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -246,8 +279,9 @@ async function createAgent() {
     await api('/v1/agents', { method: 'POST', body: {
       name, persona: $('agentPersona').value.trim() || undefined,
       aiProfileId: profiles[0].id, hostId: localHost.id,
+      sharedMemory: $('agentShared').checked || undefined,
     }});
-    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = '';
+    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentShared').checked = false;
     await refresh(false);
   } catch (e) { $('createErr').textContent = e.message; }
   finally { $('createBtn').disabled = false; }
@@ -267,7 +301,9 @@ function agentCard(a) {
       </div>
       <span class="chip ${a.state}">${a.state}</span>
     </div>
-    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}</div>` : ''}
+    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}</div>` : ''}
+    ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">An OpenClaw update is ready. Rebuild applies it — memory is kept.</span>
+      <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
     ${pending ? tokenForm(a) : ''}
     ${pairs.map(p => `
@@ -286,7 +322,9 @@ function agentCard(a) {
     <div class="actions">
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Open in Telegram</a>
         <a class="btn" href="${esc(a.deepLink)}" title="Open in the Telegram app">In app</a>` : ''}
-      ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>
+        <button onclick="openEdit('${a.id}', '${esc(a.name)}')">Edit…</button>
+        <button onclick="openLogs('${a.id}', '${esc(a.name)}')">Logs</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
@@ -324,6 +362,56 @@ async function act(id, action) {
 }
 
 const botOf = (a) => (a.deepLink ?? '').replace('https://t.me/', '');
+
+// ---- workspace file editing + logs ----------------------------------------
+
+let editAgentId = null, logsAgentId = null;
+
+async function openEdit(id, name) {
+  editAgentId = id;
+  $('editAgent').textContent = name;
+  $('editErr').textContent = '';
+  editDlg.showModal();
+  await loadEditFile();
+}
+
+async function loadEditFile() {
+  if (!editAgentId) return;
+  $('editContent').value = 'Loading…';
+  try {
+    const f = await api(`/v1/agents/${editAgentId}/files/${$('editFile').value}`);
+    $('editContent').value = f.content;
+  } catch (e) { $('editContent').value = ''; $('editErr').textContent = e.message; }
+}
+
+async function saveEditFile() {
+  $('editSaveBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}/files/${$('editFile').value}`, {
+      method: 'PUT', body: { content: $('editContent').value },
+    });
+    toast(`${$('editFile').value} saved`);
+    editDlg.close();
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('editSaveBtn').disabled = false; }
+}
+
+async function openLogs(id, name) {
+  logsAgentId = id;
+  $('logsAgent').textContent = name;
+  logsDlg.showModal();
+  await loadLogs();
+}
+
+async function loadLogs() {
+  if (!logsAgentId) return;
+  $('logsText').textContent = 'Loading…';
+  try {
+    const l = await api(`/v1/agents/${logsAgentId}/logs?lines=120`);
+    $('logsText').textContent = l.text || '(no recent output)';
+    $('logsText').scrollTop = $('logsText').scrollHeight;
+  } catch (e) { $('logsText').textContent = e.message; }
+}
 // Telegram Web's documented deep-link: the #@username hash form only resolves
 // in some client states, but tgaddr survives reliably (needs a logged-in
 // Telegram Web session either way).

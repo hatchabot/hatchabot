@@ -5,6 +5,7 @@ import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type {
   ExecResult,
+  RuntimeInfo,
   RuntimeProvider,
   RuntimeSpec,
   RuntimeStatus,
@@ -213,6 +214,40 @@ export class LocalDockerProvider implements RuntimeProvider {
   async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
     const { container } = this.#names(runtimeRef);
     return this.#docker(['exec', container, 'bash', '-c', script]);
+  }
+
+  async info(runtimeRef: string): Promise<RuntimeInfo> {
+    const { container } = this.#names(runtimeRef);
+    const res = await this.#docker([
+      'inspect',
+      '-f',
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}`,
+      container,
+    ]);
+    if (res.code !== 0) return {};
+    const [imageId, openclawVersion] = res.stdout.trim().split('|');
+    return { imageId, openclawVersion: openclawVersion || undefined };
+  }
+
+  async currentImageInfo(): Promise<RuntimeInfo> {
+    const res = await this.#docker([
+      'image',
+      'inspect',
+      '-f',
+      `{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}`,
+      this.image,
+    ]);
+    if (res.code !== 0) return {};
+    const [imageId, openclawVersion] = res.stdout.trim().split('|');
+    return { imageId, openclawVersion: openclawVersion || undefined };
+  }
+
+  async logs(runtimeRef: string, lines: number): Promise<string> {
+    const { container } = this.#names(runtimeRef);
+    const res = await this.#docker(['logs', '--tail', String(lines), container]);
+    // docker logs writes container stdout to stdout and stderr to stderr —
+    // interleave both, the reader wants the story not the streams.
+    return (res.stdout + res.stderr).trim();
   }
 
   async #must(args: string[], userMessage: string): Promise<ExecResult> {
