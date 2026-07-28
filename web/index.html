@@ -275,7 +275,7 @@ function agentCard(a) {
       </div>`).join('')}
     ${(members[a.id] ?? []).length > 1 ? `
       <div class="members">👥 ${(members[a.id] ?? []).map(m =>
-        `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Hasn\\'t messaged the bot yet'}">${esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}${m.role === 'owner' ? ' ★' : ''}</span>`).join('')}
+        `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}${m.role === 'owner' ? ' ★' : ''}</span>`).join('')}
       </div>` : ''}
     <div class="actions">
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="https://web.telegram.org/k/#@${esc(botOf(a))}" target="_blank">Open in Telegram</a>
