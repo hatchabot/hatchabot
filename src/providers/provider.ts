@@ -108,6 +108,13 @@ export interface RuntimeProvider {
    * caring where the runtime physically lives.
    */
   exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult>;
+
+  /**
+   * Run a shell script inside the runtime. Escape hatch for the few state
+   * surgeries OpenClaw's CLI has no verb for (e.g. removing a revoked member
+   * from the pairing allowlist file). Prefer exec() whenever a CLI verb exists.
+   */
+  execShell(runtimeRef: string, script: string): Promise<ExecResult>;
 }
 
 export class ProviderError extends Error {

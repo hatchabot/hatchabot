@@ -12,6 +12,7 @@ import { TelegramManualProvisioner } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
 import { registerAuth } from './api/auth.js';
+import { reconcileAgents } from './orchestrator/reconcile.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
 const DB_PATH = process.env.AGENTCLAW_DB ?? 'data/agentclaw.sqlite';
@@ -46,6 +47,10 @@ if (!store.getHost(LOCAL_HOST_ID)) {
 }
 
 const app = Fastify({ logger: true });
+
+// Mend any state drift from reboots/crashes before serving a single request —
+// containers auto-restart with the box, the DB doesn't know that.
+await reconcileAgents(store, providers, (e, d) => app.log.info(d, e));
 await registerAuth(app, {
   password: process.env.AGENTCLAW_PASSWORD,
   secret: LocalSecretStore.keyFromEnv(),

@@ -12,7 +12,8 @@
     "start": "tsx src/index.ts",
     "e2e": "tsx scripts/e2e.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "check:web": "node scripts/check-web.mjs",
+    "test": "npm run check:web && vitest run",
     "e2e:docker": "tsx scripts/e2e-docker.ts"
   },
   "dependencies": {

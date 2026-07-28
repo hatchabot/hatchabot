@@ -94,6 +94,12 @@ export class MockProvider implements RuntimeProvider {
     return { code: 0, stdout: '', stderr: '' };
   }
 
+  async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
+    this.#require(runtimeRef);
+    this.execLog.push(['sh', script]);
+    return this.execResponses.get('sh') ?? { code: 0, stdout: '', stderr: '' };
+  }
+
   #require(runtimeRef: string): MockRuntime {
     const rt = this.runtimes.get(runtimeRef);
     if (!rt || rt.purged) {

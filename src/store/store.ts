@@ -169,6 +169,14 @@ export class Store {
     return r ? rowToAgent(r) : undefined;
   }
 
+  /** Every non-deleted agent regardless of owner — reconcile and ops sweeps. */
+  listAllActiveAgents(): Agent[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM agents WHERE state != 'DELETED' ORDER BY created_at`)
+      .all() as any[];
+    return rows.map(rowToAgent);
+  }
+
   listAgents(ownerId: string): Agent[] {
     const rows = this.db
       .prepare(`SELECT * FROM agents WHERE owner_id = ? AND state != 'DELETED' ORDER BY created_at`)
@@ -322,6 +330,30 @@ export class Store {
       channelUserId: r.channel_user_id ?? undefined,
       status: r.status,
     }));
+  }
+
+  getMembership(agentId: string, userId: string):
+    | { userId: string; role: string; channelUserId?: string; status: string }
+    | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT user_id, role, channel_user_id, status FROM memberships
+         WHERE agent_id = ? AND user_id = ?`,
+      )
+      .get(agentId, userId) as any;
+    if (!r) return undefined;
+    return {
+      userId: r.user_id,
+      role: r.role,
+      channelUserId: r.channel_user_id ?? undefined,
+      status: r.status,
+    };
+  }
+
+  revokeMembership(agentId: string, userId: string): void {
+    this.db
+      .prepare(`UPDATE memberships SET status = 'revoked' WHERE agent_id = ? AND user_id = ?`)
+      .run(agentId, userId);
   }
 
   setMembershipDisplayName(agentId: string, userId: string, name: string): void {

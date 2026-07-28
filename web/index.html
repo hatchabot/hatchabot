@@ -83,6 +83,8 @@
   .member { background: var(--panel-2); border: 1px solid var(--line);
             border-radius: 99px; padding: 2px 10px; }
   .member.linked { border-color: var(--ok); }
+  .kick { margin-left: 6px; cursor: pointer; color: var(--off); font-weight: 700; }
+  .kick:hover { color: var(--bad); }
   .invite-link { font-family: ui-monospace, monospace; font-size: 13px;
                  background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
                  padding: 10px 12px; word-break: break-all; margin: 12px 0; user-select: all; }
@@ -274,8 +276,12 @@ function agentCard(a) {
         <button class="primary" onclick="approve('${a.id}','${esc(p.code)}')">Let them in</button>
       </div>`).join('')}
     ${(members[a.id] ?? []).length > 1 ? `
-      <div class="members">👥 ${(members[a.id] ?? []).map(m =>
-        `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}${m.role === 'owner' ? ' ★' : ''}</span>`).join('')}
+      <div class="members">👥 ${(members[a.id] ?? []).map(m => {
+        const label = esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)));
+        const x = m.role === 'owner' ? '' :
+          `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${esc(m.userId)}','${label}')">×</span>`;
+        return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
+      }).join('')}
       </div>` : ''}
     <div class="actions">
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Open in Telegram</a>
@@ -354,6 +360,16 @@ async function del(id, name) {
   if (typed.trim() !== name) { toast('Name did not match — nothing deleted.'); return; }
   try { await api(`/v1/agents/${id}`, { method: 'DELETE' }); await refresh(false); }
   catch (e) { toast(e.message); }
+}
+
+async function kick(agentId, userId, label) {
+  if (!confirm(`Remove ${label}? They lose access to this agent immediately.`)) return;
+  try {
+    await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+    toast(`${label} removed`);
+    pairTick = 0; // refetch members on next poll
+    await refresh(false);
+  } catch (e) { toast(e.message); }
 }
 
 async function approve(id, code) {

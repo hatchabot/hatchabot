@@ -1,0 +1,63 @@
+import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { Store } from '../src/store/store.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
+import { reconcileAgents } from '../src/orchestrator/reconcile.js';
+import type { RuntimeProvider } from '../src/providers/provider.js';
+import type { AgentState } from '../src/domain/types.js';
+
+async function setup(dbState: AgentState, runtimePhase: 'running' | 'stopped' | 'absent') {
+  const store = new Store(new Database(':memory:'));
+  store.insertHost({
+    id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box',
+    settings: {}, createdAt: 'now',
+  });
+  const provider = new MockProvider();
+  const { runtimeRef } = await provider.provision({
+    agentId: 'a1', slug: 'a1',
+    workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } },
+    env: {},
+  });
+  if (runtimePhase === 'running') await provider.start(runtimeRef);
+  if (runtimePhase === 'absent') await provider.destroy(runtimeRef, { purge: true });
+
+  store.insertAgent({
+    id: 'a1', ownerId: 'o', name: 'A', slug: 'a1', state: 'PROVISIONING',
+    aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false,
+    createdAt: 'now', updatedAt: 'now',
+  });
+  store.setAgentRuntimeRef('a1', runtimeRef);
+  // walk to the desired DB state through legal transitions
+  if (dbState === 'RUNNING' || dbState === 'STOPPED') store.setAgentState('a1', 'RUNNING');
+  if (dbState === 'STOPPED') store.setAgentState('a1', 'STOPPED');
+
+  const providers = new Map<string, RuntimeProvider>([['mock', provider]]);
+  await reconcileAgents(store, providers, () => {});
+  return store.getAgent('a1')!;
+}
+
+describe('boot reconcile', () => {
+  it('marks a running-in-docker agent RUNNING when DB says STOPPED', async () => {
+    expect((await setup('STOPPED', 'running')).state).toBe('RUNNING');
+  });
+
+  it('marks a stopped container STOPPED when DB says RUNNING', async () => {
+    expect((await setup('RUNNING', 'stopped')).state).toBe('STOPPED');
+  });
+
+  it('fails an agent whose runtime vanished', async () => {
+    const agent = await setup('RUNNING', 'absent');
+    expect(agent.state).toBe('FAILED');
+    expect(agent.stateReason).toMatch(/missing/);
+  });
+
+  it('completes a PROVISIONING agent whose runtime is actually up', async () => {
+    expect((await setup('PROVISIONING', 'running')).state).toBe('RUNNING');
+  });
+
+  it('fails interrupted provisioning with a retry hint', async () => {
+    const agent = await setup('PROVISIONING', 'stopped');
+    expect(agent.state).toBe('FAILED');
+    expect(agent.stateReason).toMatch(/Retry/);
+  });
+});

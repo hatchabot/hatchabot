@@ -19,6 +19,7 @@ import {
   listPairingRequests,
 } from '../orchestrator/claim.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
+import { revokeMember, RevokeError } from '../orchestrator/members.js';
 
 export interface ApiDeps {
   store: Store;
@@ -294,8 +295,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Params: { id: string } }>('/v1/agents/:id/members', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    return store.listMemberships(agent.id);
+    return store.listMemberships(agent.id).filter((m) => m.status === 'active');
   });
+
+  app.delete<{ Params: { id: string; userId: string } }>(
+    '/v1/agents/:id/members/:userId',
+    async (req, reply) => {
+      const agent = store.getAgent(req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      try {
+        await revokeMember(
+          { store, provider: providerFor(agent.hostId), log: (e, d) => app.log.info(d, e) },
+          agent.id,
+          req.params.userId,
+        );
+        return { revoked: true };
+      } catch (err) {
+        if (err instanceof RevokeError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
 
   // Unauthenticated (code-gated): what the join page needs to render.
   app.get<{ Params: { code: string } }>('/v1/invites/:code', async (req) => {
