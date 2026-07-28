@@ -334,7 +334,7 @@ async function invite(id, name) {
   try {
     const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: {} });
     $('invAgent').textContent = name;
-    $('invLink').textContent = location.origin + inv.path;
+    $('invLink').textContent = inv.url ?? (location.origin + inv.path);
     inviteDlg.showModal();
   } catch (e) { toast(e.message); }
 }

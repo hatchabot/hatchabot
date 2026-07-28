@@ -31,6 +31,13 @@ export interface ApiDeps {
   webIndexPath?: string;
   /** Absolute path to the invitee join page. */
   webJoinPath?: string;
+  /**
+   * Canonical origin others should use to reach this control plane, e.g.
+   * http://my-host.example.ts.net:8080. Invite links are built from it,
+   * so a link minted while the owner browses localhost still works from the
+   * invitee's phone.
+   */
+  publicUrl?: string;
 }
 
 const CreateAIProfile = z.discriminatedUnion('kind', [
@@ -289,7 +296,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const ownerId = ownerIdOf(req.headers as Record<string, unknown>);
     const { code, expiresAt } = createInvite(store, agent.id, ownerId);
-    return reply.code(201).send({ code, expiresAt, path: `/join/${code}` });
+    const path = `/join/${code}`;
+    return reply.code(201).send({
+      code,
+      expiresAt,
+      path,
+      url: deps.publicUrl ? `${deps.publicUrl.replace(/\/$/, '')}${path}` : undefined,
+    });
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/members', async (req, reply) => {
