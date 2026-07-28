@@ -78,6 +78,14 @@
   }
   .pair { margin-top: 10px; padding: 10px 12px; background: var(--panel-2); border-radius: 8px;
           display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+  .members { margin-top: 10px; font-size: 13px; color: var(--dim);
+             display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .member { background: var(--panel-2); border: 1px solid var(--line);
+            border-radius: 99px; padding: 2px 10px; }
+  .member.linked { border-color: var(--ok); }
+  .invite-link { font-family: ui-monospace, monospace; font-size: 13px;
+                 background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+                 padding: 10px 12px; word-break: break-all; margin: 12px 0; user-select: all; }
   .empty { text-align: center; color: var(--dim); padding: 48px 12px; }
   .err { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
   .toast {
@@ -125,11 +133,25 @@
   </div>
 </dialog>
 
+<dialog id="inviteDlg">
+  <h3 style="margin:0 0 4px">Invite someone to <span id="invAgent"></span></h3>
+  <div class="sub">
+    Send them this link. It works once, expires in 48 hours, and they join as a
+    member — they can chat, not change settings.
+  </div>
+  <div class="invite-link" id="invLink"></div>
+  <div class="sub">They'll see a note that this agent's memory is shared.</div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="inviteDlg.close()">Done</button>
+    <button class="primary" onclick="copyInvite()">Copy link</button>
+  </div>
+</dialog>
+
 <div class="toast" id="toast"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let profiles = [], hosts = [], agents = [], pairings = {};
+let profiles = [], hosts = [], agents = [], pairings = {}, members = {};
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
@@ -251,8 +273,14 @@ function agentCard(a) {
         <span class="grow">🔑 <b>${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
         <button class="primary" onclick="approve('${a.id}','${esc(p.code)}')">Let them in</button>
       </div>`).join('')}
+    ${(members[a.id] ?? []).length > 1 ? `
+      <div class="members">👥 ${(members[a.id] ?? []).map(m =>
+        `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Hasn\\'t messaged the bot yet'}">${esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}${m.role === 'owner' ? ' ★' : ''}</span>`).join('')}
+      </div>` : ''}
     <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank">Open in Telegram</a>` : ''}
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="https://web.telegram.org/k/#@${esc(botOf(a))}" target="_blank">Open in Telegram</a>
+        <a class="btn" href="${esc(a.deepLink)}" title="Open in the Telegram app">In app</a>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
@@ -287,6 +315,22 @@ async function submitToken(id) {
 async function act(id, action) {
   try { await api(`/v1/agents/${id}/${action}`, { method: 'POST', body: {} }); await refresh(false); }
   catch (e) { toast(e.message); }
+}
+
+const botOf = (a) => (a.deepLink ?? '').replace('https://t.me/', '');
+
+async function invite(id, name) {
+  try {
+    const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: {} });
+    $('invAgent').textContent = name;
+    $('invLink').textContent = location.origin + inv.path;
+    inviteDlg.showModal();
+  } catch (e) { toast(e.message); }
+}
+
+async function copyInvite() {
+  try { await navigator.clipboard.writeText($('invLink').textContent); toast('Link copied'); }
+  catch { toast('Select and copy the link manually'); }
 }
 
 async function rebuild(id) {
@@ -353,6 +397,9 @@ async function refresh(withMeta) {
       const results = await Promise.allSettled(running.map(a => api(`/v1/agents/${a.id}/pairing`)));
       pairings = {};
       results.forEach((r, i) => { if (r.status === 'fulfilled') pairings[running[i].id] = r.value; });
+      const mres = await Promise.allSettled(agents.map(a => api(`/v1/agents/${a.id}/members`)));
+      members = {};
+      mres.forEach((r, i) => { if (r.status === 'fulfilled') members[agents[i].id] = r.value; });
     }
     renderSetup(); renderAgents();
   } catch (e) { console.error(e); }

@@ -36,7 +36,9 @@ export interface ClaimOptions {
   agentId: string;
   runtimeRef: string;
   accountId: string;
-  ownerId: string;
+  /** Membership (agentclaw user id) the next pairing request binds to —
+   *  the owner on first provision, an invitee after a join (§12.3). */
+  forUserId: string;
   /** How long to keep watching for the owner's first message. */
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -97,7 +99,7 @@ export async function claimFirstContact(
     if (first) {
       const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code);
       if (ok) {
-        deps.store.bindMembershipChannelUser(opts.agentId, opts.ownerId, first.id);
+        deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id);
         log('claim.bound', {
           agentId: opts.agentId,
           channelUserId: first.id,

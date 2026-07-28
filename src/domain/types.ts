@@ -113,6 +113,8 @@ export interface Membership {
   agentId: string;
   userId: string;
   role: MemberRole;
+  /** Human-readable name, shown in the app's member list. */
+  displayName?: string;
   /** Telegram user id, once linked. Drives the bot allowlist (§12.4). */
   channelUserId?: string;
   status: 'active' | 'revoked';

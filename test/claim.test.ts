@@ -55,7 +55,7 @@ describe('claimFirstContact', () => {
 
     const claimed = await claimFirstContact(
       { store, provider, sleep: async () => {} },
-      { agentId: 'a1', runtimeRef, accountId: 'bot', ownerId: 'u1', timeoutMs: 1000 },
+      { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1000 },
     );
 
     expect(claimed).toBe('999');
@@ -82,7 +82,7 @@ describe('claimFirstContact', () => {
           now += 5000;
         },
       },
-      { agentId: 'a2', runtimeRef, accountId: 'bot', ownerId: 'u1', timeoutMs: 1, pollIntervalMs: 1 },
+      { agentId: 'a2', runtimeRef, accountId: 'bot', forUserId: 'u1', timeoutMs: 1, pollIntervalMs: 1 },
     );
     expect(claimed).toBeNull();
   });

@@ -71,6 +71,9 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     if (!opts.password) return;
     const path = req.url.split('?')[0] ?? '';
     if (path === '/' || path === '/healthz' || path === '/v1/login') return;
+    // Invitees don't have the LAN password — their invite code is their
+    // credential. The join surface validates codes itself.
+    if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     if (validSession(req.cookies[COOKIE])) return;
     return reply.code(401).send({ error: 'auth required' });
   });

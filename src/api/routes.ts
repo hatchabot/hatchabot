@@ -18,6 +18,7 @@ import {
   claimFirstContact,
   listPairingRequests,
 } from '../orchestrator/claim.js';
+import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 
 export interface ApiDeps {
   store: Store;
@@ -27,6 +28,8 @@ export interface ApiDeps {
   channel: CompositeTelegramProvisioner;
   /** Absolute path to the single-page app. */
   webIndexPath?: string;
+  /** Absolute path to the invitee join page. */
+  webJoinPath?: string;
 }
 
 const CreateAIProfile = z.discriminatedUnion('kind', [
@@ -99,7 +102,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             agentId,
             runtimeRef: result.agent.runtimeRef,
             accountId: channelRow.accountId,
-            ownerId: result.agent.ownerId,
+            forUserId: result.agent.ownerId,
           },
         );
       }
@@ -277,6 +280,71 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     kickProvision(agent.id);
     return reply.code(202).send(store.getAgent(agent.id));
   });
+
+  // ---- invites & join (§12.3) --------------------------------------------
+
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/invites', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const ownerId = ownerIdOf(req.headers as Record<string, unknown>);
+    const { code, expiresAt } = createInvite(store, agent.id, ownerId);
+    return reply.code(201).send({ code, expiresAt, path: `/join/${code}` });
+  });
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/members', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    return store.listMemberships(agent.id);
+  });
+
+  // Unauthenticated (code-gated): what the join page needs to render.
+  app.get<{ Params: { code: string } }>('/v1/invites/:code', async (req) => {
+    const check = checkInvite(store, req.params.code);
+    if (!check.valid) return { valid: false, reason: check.reason };
+    const agent = store.getAgent(check.agentId)!;
+    return { valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory };
+  });
+
+  // Unauthenticated (code-gated): redeem + start watching for the invitee's
+  // first Telegram contact, exactly like the owner's claim.
+  app.post<{ Body: { code?: string; name?: string } }>('/v1/join', async (req, reply) => {
+    const body = (req.body ?? {}) as { code?: string; name?: string };
+    if (!body.code) return reply.code(400).send({ error: 'code required' });
+    try {
+      const joined = redeemInvite(store, body.code, body.name ?? '');
+      const agent = store.getAgent(joined.agentId)!;
+      const channelRow = store.getChannelForAgent(agent.id);
+      if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
+        void claimFirstContact(
+          { store, provider: providerFor(agent.hostId), log: (e, d) => app.log.info(d, e) },
+          {
+            agentId: agent.id,
+            runtimeRef: agent.runtimeRef,
+            accountId: channelRow.accountId,
+            forUserId: joined.membershipUserId,
+            timeoutMs: 30 * 60_000,
+          },
+        ).catch((err) => app.log.error({ err }, 'invitee claim failed'));
+      }
+      return reply.code(201).send({
+        agentName: agent.name,
+        botUsername: channelRow?.accountId,
+        deepLink: channelRow?.deepLink,
+      });
+    } catch (err) {
+      if (err instanceof InviteInvalidError) {
+        return reply.code(400).send({ error: err.userMessage });
+      }
+      throw err;
+    }
+  });
+
+  if (deps.webJoinPath) {
+    app.get('/join/:code', async (_req, reply) => {
+      const html = readFileSync(deps.webJoinPath!, 'utf8');
+      return reply.type('text/html; charset=utf-8').send(html);
+    });
+  }
 
   // Pending pairing requests on a live agent — the app renders these as
   // "someone wants to talk to <agent>" cards for the owner to approve.

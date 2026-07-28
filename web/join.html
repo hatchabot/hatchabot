@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Join an agent — AgentClaw</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
+    --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
+    --bad: #e06c5f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 440px; margin: 0 auto; padding: 48px 20px; }
+  h1 { font-size: 20px; margin: 0 0 6px; } h1 b { color: var(--accent); }
+  .card { background: var(--panel); border: 1px solid var(--line);
+          border-radius: 14px; padding: 20px; margin-top: 18px; }
+  .agent { font-size: 22px; font-weight: 700; margin: 4px 0 12px; }
+  .notice { background: var(--panel-2); border-radius: 10px; padding: 12px 14px;
+            font-size: 14px; color: var(--dim); margin: 14px 0; }
+  .notice b { color: var(--text); }
+  label { display: block; font-size: 13px; color: var(--dim); margin: 14px 0 5px; }
+  input { width: 100%; font: inherit; background: var(--bg); color: var(--text);
+          border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px; }
+  button, .btn { font: inherit; font-weight: 650; cursor: pointer; width: 100%;
+    background: var(--accent); color: var(--accent-ink); border: none;
+    padding: 13px; border-radius: 10px; margin-top: 16px; text-align: center;
+    text-decoration: none; display: block; }
+  .btn.alt { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+  .err { color: var(--bad); font-size: 14px; margin-top: 10px; min-height: 1em; }
+  .steps { font-size: 14.5px; color: var(--dim); padding-left: 18px; }
+  .steps li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Agent<b>Claw</b></h1>
+  <div class="card" id="card"><div style="color:var(--dim)">Checking your invite…</div></div>
+</div>
+<script>
+const code = location.pathname.split('/').pop();
+const card = document.getElementById('card');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+async function init() {
+  const info = await fetch(`/v1/invites/${encodeURIComponent(code)}`).then(r => r.json()).catch(() => null);
+  if (!info || !info.valid) {
+    const why = { expired: 'This invite has expired.', used: 'This invite was already used.' }[info?.reason]
+      ?? "This invite link isn't valid.";
+    card.innerHTML = `<div class="agent">Hmm.</div><div class="notice">${why} Ask the person who sent it for a new one.</div>`;
+    return;
+  }
+  card.innerHTML = `
+    <div style="color:var(--dim);font-size:14px">You've been invited to</div>
+    <div class="agent">${esc(info.agentName)}</div>
+    <div class="notice">
+      <b>Heads up:</b> this is a shared agent. Things you tell it may be
+      remembered and shared with the other people who use it.
+    </div>
+    <label>Your name (so others know who's here)</label>
+    <input id="name" maxlength="64" placeholder="e.g. Sam">
+    <button id="joinBtn">Join</button>
+    <div class="err" id="err"></div>`;
+  document.getElementById('joinBtn').onclick = join;
+}
+
+async function join() {
+  const btn = document.getElementById('joinBtn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/v1/join', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ code, name: document.getElementById('name').value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
+    card.innerHTML = `
+      <div class="agent">You're in 🎉</div>
+      <ol class="steps">
+        <li>Open <b>${esc(data.agentName)}</b> in Telegram below.</li>
+        <li>Send it any message — that links your Telegram to the agent.</li>
+        <li>Give it a few seconds, then just chat.</li>
+      </ol>
+      ${data.botUsername ? `
+        <a class="btn" href="https://t.me/${esc(data.botUsername)}">Open in Telegram app</a>
+        <a class="btn alt" href="https://web.telegram.org/k/#@${esc(data.botUsername)}" target="_blank">Open Telegram Web instead</a>
+      ` : `<div class="notice">The agent isn't running right now — ask the owner to start it, then message the bot.</div>`}`;
+  } catch (e) {
+    document.getElementById('err').textContent = e.message;
+    btn.disabled = false;
+  }
+}
+init();
+</script>
+</body>
+</html>

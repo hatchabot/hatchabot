@@ -205,9 +205,11 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   }
   const modelKey = subscription ? undefined : await secrets.get(requireRef(profile.secretRef));
 
-  // Fresh agents open in pairing mode: we don't know anyone's telegram id
-  // yet, so the first-contact claim (orchestrator/claim.ts) binds the owner.
-  // Agents with known members provision straight to an allowlist.
+  // Always pairing mode, never a hard allowlist: pairing already enforces
+  // §12.4 (only approved senders chat; strangers get a pending request), AND
+  // it keeps the door open for invitees who join after a rebuild — a hard
+  // allowlist would silently reject their first contact. allowFrom seeds the
+  // known members on fresh volumes.
   const allowFrom = store.listAllowedChannelUserIds(agentId);
   return {
     agentId,
@@ -227,7 +229,7 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         telegram: {
           accountId: channelRow.accountId,
           botToken,
-          dmPolicy: allowFrom.length > 0 ? 'allowlist' : 'pairing',
+          dmPolicy: 'pairing',
           allowFrom,
         },
       },

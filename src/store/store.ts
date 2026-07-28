@@ -60,12 +60,19 @@ export class Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS memberships_agent_user
         ON memberships (agent_id, user_id);
+
+      CREATE TABLE IF NOT EXISTS invites (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL, redeemed_at TEXT, redeemed_by TEXT
+      );
     `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
     for (const alter of [
       `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
+      `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -235,11 +242,92 @@ export class Store {
   insertMembership(m: Membership): void {
     this.db
       .prepare(
-        `INSERT INTO memberships (id, agent_id, user_id, role, channel_user_id, status,
-                                  invited_by, joined_at)
-         VALUES (@id, @agentId, @userId, @role, @channelUserId, @status, @invitedBy, @joinedAt)`,
+        `INSERT INTO memberships (id, agent_id, user_id, role, display_name, channel_user_id,
+                                  status, invited_by, joined_at)
+         VALUES (@id, @agentId, @userId, @role, @displayName, @channelUserId, @status,
+                 @invitedBy, @joinedAt)`,
       )
-      .run({ channelUserId: null, invitedBy: null, joinedAt: null, ...m });
+      .run({ channelUserId: null, invitedBy: null, joinedAt: null, displayName: null, ...m });
+  }
+
+  // ---- Invites -----------------------------------------------------------
+
+  insertInvite(i: {
+    id: string;
+    agentId: string;
+    code: string;
+    role: string;
+    createdBy: string;
+    createdAt: string;
+    expiresAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO invites (id, agent_id, code, role, created_by, created_at, expires_at)
+         VALUES (@id, @agentId, @code, @role, @createdBy, @createdAt, @expiresAt)`,
+      )
+      .run(i);
+  }
+
+  getInviteByCode(code: string):
+    | {
+        id: string;
+        agentId: string;
+        code: string;
+        role: string;
+        expiresAt: string;
+        redeemedAt?: string;
+      }
+    | undefined {
+    const r = this.db.prepare(`SELECT * FROM invites WHERE code = ?`).get(code) as any;
+    if (!r) return undefined;
+    return {
+      id: r.id,
+      agentId: r.agent_id,
+      code: r.code,
+      role: r.role,
+      expiresAt: r.expires_at,
+      redeemedAt: r.redeemed_at ?? undefined,
+    };
+  }
+
+  /** Atomically claims a single-use invite. Returns false if already used. */
+  markInviteRedeemed(code: string, redeemedBy: string): boolean {
+    const res = this.db
+      .prepare(
+        `UPDATE invites SET redeemed_at = ?, redeemed_by = ?
+         WHERE code = ? AND redeemed_at IS NULL`,
+      )
+      .run(new Date().toISOString(), redeemedBy, code);
+    return res.changes === 1;
+  }
+
+  listMemberships(agentId: string): Array<{
+    userId: string;
+    role: string;
+    displayName?: string;
+    channelUserId?: string;
+    status: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT user_id, role, display_name, channel_user_id, status
+         FROM memberships WHERE agent_id = ? ORDER BY joined_at`,
+      )
+      .all(agentId) as any[];
+    return rows.map((r) => ({
+      userId: r.user_id,
+      role: r.role,
+      displayName: r.display_name ?? undefined,
+      channelUserId: r.channel_user_id ?? undefined,
+      status: r.status,
+    }));
+  }
+
+  setMembershipDisplayName(agentId: string, userId: string, name: string): void {
+    this.db
+      .prepare(`UPDATE memberships SET display_name = ? WHERE agent_id = ? AND user_id = ?`)
+      .run(name, agentId, userId);
   }
 
   /** Records which telegram identity the first-contact claim bound (§12.4). */

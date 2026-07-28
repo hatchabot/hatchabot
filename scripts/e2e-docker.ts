@@ -136,7 +136,7 @@ const claimed = await claimFirstContact(
     agentId: result.agent.id,
     runtimeRef: result.agent.runtimeRef!,
     accountId: username,
-    ownerId: 'chris',
+    forUserId: 'chris',
     timeoutMs: 5 * 60_000,
   },
 );
