@@ -48,17 +48,33 @@ export class LocalDockerProvider implements RuntimeProvider {
     this.docker = opts.docker ?? 'docker';
   }
 
-  #names(agentIdOrRef: string) {
-    const short = agentIdOrRef.replace(/^docker:\/\//, '').slice(0, 12);
-    return {
-      volume: `${this.prefix}-vol-${short}`,
-      container: `${this.prefix}-${short}`,
-      runtimeRef: `docker://${short}`,
-    };
+  /**
+   * Container names carry the agent slug so `docker ps` reads like an agent
+   * list: agentclaw-kitchen-helper-9221b8b8. The runtimeRef embeds the full
+   * container name, so nothing needs to be re-derived later.
+   */
+  #namesFor(spec: { agentId: string; slug: string }) {
+    const slug = spec.slug.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 24);
+    const container = `${this.prefix}-${slug}-${spec.agentId.slice(0, 8)}`;
+    return { container, volume: `${container}-vol`, runtimeRef: `docker://${container}` };
+  }
+
+  /**
+   * Resolve a stored ref to docker object names. Legacy refs (pre-slug, a bare
+   * uuid fragment) map to the old naming scheme so existing agents keep
+   * working without a migration.
+   */
+  #names(runtimeRef: string) {
+    const name = runtimeRef.replace(/^docker:\/\//, '');
+    if (name.startsWith(`${this.prefix}-`)) {
+      return { container: name, volume: `${name}-vol` };
+    }
+    const short = name.slice(0, 12); // legacy: docker://<uuid-fragment>
+    return { container: `${this.prefix}-${short}`, volume: `${this.prefix}-vol-${short}` };
   }
 
   async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
-    const { volume, container, runtimeRef } = this.#names(spec.agentId);
+    const { volume, container, runtimeRef } = this.#namesFor(spec);
 
     // `docker volume create` is idempotent by name — a retry reuses the volume.
     await this.#must(['volume', 'create', volume], 'Could not create the agent volume.');
