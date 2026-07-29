@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
+import { approvePairing, listPairingRequests } from './claim.js';
 
 /**
  * Revoke = flip status + drop the member from the bot's allowlist immediately
@@ -20,6 +22,105 @@ export class RevokeError extends Error {
     super(userMessage);
     this.name = 'RevokeError';
   }
+}
+
+export class AdmitError extends Error {
+  constructor(readonly userMessage: string) {
+    super(userMessage);
+    this.name = 'AdmitError';
+  }
+}
+
+export interface AdmitOptions {
+  agentId: string;
+  runtimeRef: string;
+  accountId: string;
+  /** OpenClaw pairing code of the pending request being admitted. */
+  code: string;
+  agentName: string;
+  sharedMemory: boolean;
+}
+
+export interface AdmitResult {
+  userId: string;
+  displayName: string;
+  channelUserId: string;
+  alreadyMember: boolean;
+}
+
+/**
+ * The Telegram-native invite path (§12.3 without the web page): the invitee
+ * simply messages the bot from anywhere — no tailnet needed — and the owner's
+ * "Let them in" tap turns the pending pairing request into a real membership.
+ * The §12.6 shared-memory disclosure, which the web join page would have
+ * shown before joining, is delivered as the bot's first message instead.
+ */
+export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise<AdmitResult> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+
+  const requests = await listPairingRequests(provider, opts.runtimeRef, opts.accountId);
+  const req = requests.find((r) => r.code === opts.code);
+  if (!req) throw new AdmitError('That request is no longer pending. Ask them to message again.');
+
+  if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code))) {
+    throw new AdmitError("Couldn't approve the request — try again.");
+  }
+
+  // Re-approval for someone already admitted (e.g. after a rebuild reset the
+  // runtime's pairing state) must not mint a second membership.
+  const existing = store.getActiveMembershipByChannelUser(opts.agentId, req.id);
+  if (existing) {
+    return {
+      userId: existing.userId,
+      displayName: existing.displayName ?? existing.userId,
+      channelUserId: req.id,
+      alreadyMember: true,
+    };
+  }
+
+  const displayName =
+    ([req.meta?.firstName, req.meta?.lastName].filter(Boolean).join(' ') ||
+      req.meta?.username ||
+      `Member ${req.id}`).slice(0, 64);
+  const userId = `member-${randomUUID()}`;
+  store.insertMembership({
+    id: randomUUID(),
+    agentId: opts.agentId,
+    userId,
+    role: 'user',
+    displayName,
+    channelUserId: req.id,
+    status: 'active',
+    joinedAt: new Date().toISOString(),
+  });
+  log('member.admitted', { agentId: opts.agentId, userId, channelUserId: req.id, displayName });
+
+  // Welcome + disclosure. Best-effort: the membership is already real, and
+  // they'll see the agent respond to their held message either way.
+  const disclosure = opts.sharedMemory
+    ? ' Heads up: this is a shared agent — things you tell it may be remembered and shared with the other people who use it.'
+    : '';
+  const welcome = `You're in! You're now a member of ${opts.agentName}.${disclosure} Say hi whenever you're ready.`;
+  const sent = await provider
+    .exec(opts.runtimeRef, [
+      'message',
+      'send',
+      '--channel',
+      'telegram',
+      '--account',
+      opts.accountId,
+      '--target',
+      req.id,
+      '-m',
+      welcome,
+    ])
+    .catch(() => ({ code: 1, stdout: '', stderr: 'exec failed' }));
+  if (sent.code !== 0) {
+    log('member.welcome_failed', { agentId: opts.agentId, userId, stderr: sent.stderr });
+  }
+
+  return { userId, displayName, channelUserId: req.id, alreadyMember: false };
 }
 
 export async function revokeMember(

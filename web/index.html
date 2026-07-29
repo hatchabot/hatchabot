@@ -176,8 +176,15 @@
   </div>
   <div class="invite-link" id="invLink"></div>
   <div class="sub">They'll see a note that this agent's memory is shared.</div>
+  <div class="sub" style="margin-top:10px">
+    <b>Not on your Tailscale network?</b> Send them the agent's Telegram link
+    instead — when they message it, a "wants to talk" card appears here and
+    <b>Let them in</b> makes them a member.
+  </div>
+  <div class="invite-link" id="invTgLink"></div>
   <div class="actions" style="justify-content:flex-end">
     <button onclick="inviteDlg.close()">Done</button>
+    <button onclick="copyInviteTg()">Copy Telegram link</button>
     <button class="primary" onclick="copyInvite()">Copy link</button>
   </div>
 </dialog>
@@ -423,12 +430,19 @@ async function invite(id, name) {
     const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: {} });
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
+    const a = agents.find(x => x.id === id);
+    $('invTgLink').textContent = a?.deepLink ?? '';
     inviteDlg.showModal();
   } catch (e) { toast(e.message); }
 }
 
 async function copyInvite() {
   try { await navigator.clipboard.writeText($('invLink').textContent); toast('Link copied'); }
+  catch { toast('Select and copy the link manually'); }
+}
+
+async function copyInviteTg() {
+  try { await navigator.clipboard.writeText($('invTgLink').textContent); toast('Telegram link copied'); }
   catch { toast('Select and copy the link manually'); }
 }
 
@@ -461,8 +475,14 @@ async function kick(agentId, userId, label) {
 }
 
 async function approve(id, code) {
-  try { await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code } }); toast('Approved'); await refresh(false); }
-  catch (e) { toast(e.message); }
+  try {
+    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code } });
+    toast(res.member?.alreadyMember
+      ? `${res.member.displayName} is already a member — access restored`
+      : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
+    pairTick = 0; // refetch members on next poll
+    await refresh(false);
+  } catch (e) { toast(e.message); }
 }
 
 function renderAgents() {

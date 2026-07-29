@@ -13,13 +13,9 @@ import {
   rebuildAgent,
   runProvisionSteps,
 } from '../orchestrator/provision.js';
-import {
-  approvePairing,
-  claimFirstContact,
-  listPairingRequests,
-} from '../orchestrator/claim.js';
+import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { revokeMember, RevokeError } from '../orchestrator/members.js';
+import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 
 export interface ApiDeps {
   store: Store;
@@ -479,13 +475,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const code = (req.body as { code?: string } | null)?.code;
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
       if (!code) return reply.code(400).send({ error: 'code required' });
-      const ok = await approvePairing(
-        providerFor(agent.hostId),
-        agent.runtimeRef,
-        channel.accountId,
-        code,
-      );
-      return ok ? { approved: true } : reply.code(400).send({ error: 'Approval failed' });
+      try {
+        const admitted = await admitMember(
+          { store, provider: providerFor(agent.hostId), log: (e, d) => app.log.info(d, e) },
+          {
+            agentId: agent.id,
+            runtimeRef: agent.runtimeRef,
+            accountId: channel.accountId,
+            code,
+            agentName: agent.name,
+            sharedMemory: agent.sharedMemory,
+          },
+        );
+        return { approved: true, member: admitted };
+      } catch (err) {
+        if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
     },
   );
 

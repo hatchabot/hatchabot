@@ -1,5 +1,12 @@
 # Off-LAN access via Tailscale
 
+> **Inviting someone who isn't on the tailnet?** They don't need Tailscale at
+> all: send them the agent's Telegram link (shown in the Invite dialog). When
+> they message the bot, a "wants to talk" card appears in the app; **Let them
+> in** makes them a member and the bot sends the shared-memory disclosure as
+> its first message. Tailscale is only needed for someone to open AgentClaw's
+> web pages, including the classic invite-link join flow below.
+
 AgentClaw's control plane binds `0.0.0.0:8080` on the host. Tailscale turns
 that into "reachable from anywhere, by exactly the people you choose" without
 opening a single port to the internet. This is the family-scale access story:

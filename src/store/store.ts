@@ -350,6 +350,21 @@ export class Store {
     };
   }
 
+  /** Active membership already bound to this channel identity, if any. */
+  getActiveMembershipByChannelUser(
+    agentId: string,
+    channelUserId: string,
+  ): { userId: string; role: string; displayName?: string } | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT user_id, role, display_name FROM memberships
+         WHERE agent_id = ? AND channel_user_id = ? AND status = 'active'`,
+      )
+      .get(agentId, channelUserId) as any;
+    if (!r) return undefined;
+    return { userId: r.user_id, role: r.role, displayName: r.display_name ?? undefined };
+  }
+
   revokeMembership(agentId: string, userId: string): void {
     this.db
       .prepare(`UPDATE memberships SET status = 'revoked' WHERE agent_id = ? AND user_id = ?`)
