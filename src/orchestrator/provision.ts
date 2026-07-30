@@ -56,7 +56,10 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
     aiProfileId: profile.id,
     hostId: host.id,
     persona: input.persona ?? '',
-    sharedMemory: input.sharedMemory ?? false,
+    // Shared by default: a multi-member agent with a single MEMORY.md is only
+    // honest when everyone knows memory is common. Private is the opt-out for
+    // a strictly personal agent.
+    sharedMemory: input.sharedMemory ?? true,
     createdAt: now,
     updatedAt: now,
   };

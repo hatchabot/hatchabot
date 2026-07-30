@@ -129,9 +129,9 @@
   <label>What is it for? <span style="color:var(--dim)">(optional — becomes its persona)</span></label>
   <textarea id="agentPersona" placeholder="You help plan meals and keep the pantry list current."></textarea>
   <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
-    <input type="checkbox" id="agentShared" style="width:auto">
-    Shared memory — for a family/group agent: everyone you invite reads and
-    writes one common memory
+    <input type="checkbox" id="agentPrivate" style="width:auto">
+    Keep memory private — just for you. Leave off for a family/group agent:
+    everyone you invite reads and writes one common memory
   </label>
   <div class="err" id="createErr"></div>
   <div class="actions" style="justify-content:flex-end">
@@ -178,10 +178,14 @@
   <div class="sub">They'll see a note that this agent's memory is shared.</div>
   <div class="sub" style="margin-top:10px">
     <b>Not on your Tailscale network?</b> Send them the agent's Telegram link
-    instead — when they message it, a "wants to talk" card appears here and
-    <b>Let them in</b> makes them a member.
+    instead — or let them scan the code. When they message it, a "wants to
+    talk" card appears here and <b>Let them in</b> makes them a member.
   </div>
-  <div class="invite-link" id="invTgLink"></div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="invite-link" id="invTgLink" style="flex:1;min-width:0"></div>
+    <img id="invTgQr" alt="Telegram link QR code" width="112" height="112"
+         style="display:none;border-radius:8px;background:#fff;padding:4px">
+  </div>
   <div class="actions" style="justify-content:flex-end">
     <button onclick="inviteDlg.close()">Done</button>
     <button onclick="copyInviteTg()">Copy Telegram link</button>
@@ -286,9 +290,9 @@ async function createAgent() {
     await api('/v1/agents', { method: 'POST', body: {
       name, persona: $('agentPersona').value.trim() || undefined,
       aiProfileId: profiles[0].id, hostId: localHost.id,
-      sharedMemory: $('agentShared').checked || undefined,
+      sharedMemory: !$('agentPrivate').checked,
     }});
-    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentShared').checked = false;
+    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentPrivate').checked = false;
     await refresh(false);
   } catch (e) { $('createErr').textContent = e.message; }
   finally { $('createBtn').disabled = false; }
@@ -432,6 +436,9 @@ async function invite(id, name) {
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
     const a = agents.find(x => x.id === id);
     $('invTgLink').textContent = a?.deepLink ?? '';
+    const qr = $('invTgQr');
+    qr.style.display = a?.deepLink ? '' : 'none';
+    if (a?.deepLink) qr.src = `/v1/agents/${id}/qr.svg`;
     inviteDlg.showModal();
   } catch (e) { toast(e.message); }
 }

@@ -13,6 +13,7 @@ import {
   rebuildAgent,
   runProvisionSteps,
 } from '../orchestrator/provision.js';
+import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
@@ -456,6 +457,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       return reply.type('text/html; charset=utf-8').send(html);
     });
   }
+
+  // The agent's Telegram deep link as a scannable QR — the invite dialog shows
+  // it so an off-tailnet invitee can join by pointing their camera at the
+  // owner's screen instead of retyping a link.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/qr.svg', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    const channel = agent && store.getChannelForAgent(agent.id);
+    if (!channel?.deepLink) return reply.code(404).send({ error: 'Not found' });
+    const svg = await QRCode.toString(channel.deepLink, {
+      type: 'svg',
+      margin: 1,
+      errorCorrectionLevel: 'M',
+    });
+    return reply.type('image/svg+xml').send(svg);
+  });
 
   // Pending pairing requests on a live agent — the app renders these as
   // "someone wants to talk to <agent>" cards for the owner to approve.
