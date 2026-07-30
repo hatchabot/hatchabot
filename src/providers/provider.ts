@@ -52,6 +52,11 @@ export interface OpenClawConfigPatch {
   /** Bare model id, e.g. "claude-opus-4-8". Prefixing is the writer's job. */
   model?: string;
   /**
+   * Every model the agent may use, primary first, bare ids. Drives the
+   * runtime's model allowlist and the /model picker in chat.
+   */
+  models?: string[];
+  /**
    * How the runtime authenticates to the model vendor.
    * `oauth-claude-cli` — OpenClaw drives the Claude Code CLI, which reads the
    *   subscription credential from the mounted ~/.claude.

@@ -8,7 +8,8 @@ import type { OpenClawConfigPatch } from '../providers/provider.js';
  *
  *   openclaw agents add …                 — agent + workspace + model + binding
  *   channels.telegram.accounts.<id>       — bot token + DM policy
- *   agents.defaults.models.<model>        — claude-cli runtime for subscription auth
+ *   agents.defaults.models.<model>        — switchable models (/model picker);
+ *                                           claude-cli runtime for subscription auth
  *   auth.profiles                         — oauth profile for subscription auth
  *   gateway.mode / gateway.auth           — headless gateway inside the runtime
  *
@@ -49,10 +50,14 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   cmds.push({ argv: ['config', 'set', 'gateway.bind', 'loopback'] });
 
   const prefixedModel = patch.model ? `anthropic/${patch.model}` : undefined;
+  // Primary first, deduped: patch.models may or may not repeat patch.model.
+  const allModels = [
+    ...new Set([patch.model, ...(patch.models ?? [])].filter((m): m is string => !!m)),
+  ].map((m) => `anthropic/${m}`);
 
   if (patch.authMode === 'oauth-claude-cli') {
     // Subscription path: OpenClaw drives the Claude Code CLI, which reads the
-    // OAuth credential from the mounted ~/.claude. Two pieces of config:
+    // OAuth credential from the mounted ~/.claude.
     cmds.push({
       argv: [
         'config',
@@ -61,16 +66,23 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
         JSON.stringify({ 'anthropic:claude-cli': { provider: 'claude-cli', mode: 'oauth' } }),
       ],
     });
-    if (prefixedModel) {
-      cmds.push({
-        argv: [
-          'config',
-          'set',
-          'agents.defaults.models',
-          JSON.stringify({ [prefixedModel]: { agentRuntime: { id: 'claude-cli' } } }),
-        ],
-      });
-    }
+  }
+
+  if (allModels.length) {
+    // The /model picker in chat lists configured models, so every switchable
+    // model needs its entry here. Under subscription auth each one also rides
+    // the claude-cli runtime — without that a model is listed but unusable.
+    // (agents.defaults.modelPolicy would be the precise allowlist, but
+    // 2026.6.11 rejects the key: "Unrecognized key: modelPolicy".)
+    const entry = patch.authMode === 'oauth-claude-cli' ? { agentRuntime: { id: 'claude-cli' } } : {};
+    cmds.push({
+      argv: [
+        'config',
+        'set',
+        'agents.defaults.models',
+        JSON.stringify(Object.fromEntries(allModels.map((m) => [m, entry]))),
+      ],
+    });
   }
 
   if (patch.telegram) {

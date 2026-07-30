@@ -43,6 +43,7 @@ const CreateAIProfile = z.discriminatedUnion('kind', [
     name: z.string().min(1),
     vendor: z.enum(['anthropic', 'google']),
     model: z.string().min(1),
+    models: z.array(z.string().min(1)).max(16).optional(),
     apiKey: z.string().min(1),
   }),
   z.object({
@@ -50,6 +51,7 @@ const CreateAIProfile = z.discriminatedUnion('kind', [
     name: z.string().min(1),
     vendor: z.literal('anthropic'),
     model: z.string().min(1),
+    models: z.array(z.string().min(1)).max(16).optional(),
   }),
 ]);
 
@@ -179,6 +181,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       vendor: body.vendor,
       kind: body.kind,
       model: body.model,
+      models: body.models,
       secretRef,
       createdAt: new Date().toISOString(),
     };
@@ -187,6 +190,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const { secretRef: _omit, ...safe } = profile;
     return reply.code(201).send(safe);
   });
+
+  // Update the switchable-model list on a profile. Running agents pick the
+  // change up on their next rebuild (config is written at provision time).
+  app.patch<{ Params: { id: string }; Body: { models?: string[] } }>(
+    '/v1/ai-profiles/:id',
+    async (req, reply) => {
+      const profile = store.getAIProfile(req.params.id);
+      if (!profile) return reply.code(404).send({ error: 'Not found' });
+      const parsed = z
+        .object({ models: z.array(z.string().min(1)).max(16).optional() })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
+      store.setAIProfileModels(profile.id, parsed.data.models);
+      const updated = store.getAIProfile(profile.id)!;
+      const { secretRef: _s, ...safe } = updated;
+      return safe;
+    },
+  );
 
   // ---- agents ---------------------------------------------------------------
 

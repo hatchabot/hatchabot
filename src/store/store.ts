@@ -73,6 +73,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN shared_memory INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
       `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
+      `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -87,10 +88,16 @@ export class Store {
   insertAIProfile(p: AIProfile): void {
     this.db
       .prepare(
-        `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, secret_ref, created_at)
-         VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @secretRef, @createdAt)`,
+        `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, models, secret_ref, created_at)
+         VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @models, @secretRef, @createdAt)`,
       )
-      .run({ secretRef: null, ...p });
+      .run({ secretRef: null, ...p, models: p.models ? JSON.stringify(p.models) : null });
+  }
+
+  setAIProfileModels(id: string, models: string[] | undefined): void {
+    this.db
+      .prepare(`UPDATE ai_profiles SET models = ? WHERE id = ?`)
+      .run(models ? JSON.stringify(models) : null, id);
   }
 
   getAIProfile(id: string): AIProfile | undefined {
@@ -426,6 +433,7 @@ function rowToAIProfile(r: any): AIProfile {
     vendor: r.vendor,
     kind: r.kind,
     model: r.model,
+    models: r.models ? JSON.parse(r.models) : undefined,
     secretRef: r.secret_ref ?? undefined,
     createdAt: r.created_at,
   };

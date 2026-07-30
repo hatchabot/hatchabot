@@ -39,6 +39,12 @@ export interface AIProfile {
   /** Model id to hand OpenClaw, e.g. "claude-opus-5". */
   model: string;
   /**
+   * Further models of the same vendor the agent may switch to in chat
+   * (OpenClaw's /model picker). `model` stays the default; order is the
+   * picker's order.
+   */
+  models?: string[];
+  /**
    * Reference into the SecretStore — never the secret itself. Absent for
    * subscription profiles: the OAuth credential stays on the host machine
    * (~/.claude) and is mounted, never copied into AgentClaw's store.
