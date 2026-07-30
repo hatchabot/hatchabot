@@ -34,12 +34,19 @@ export async function reconcileAgents(
       const status = await provider.status(agent.runtimeRef);
       const s = agent.state;
 
-      if (status.phase === 'absent' && (s === 'RUNNING' || s === 'STOPPED' || s === 'PROVISIONING')) {
+      if (
+        status.phase === 'absent' &&
+        (s === 'RUNNING' || s === 'STOPPED' || s === 'PROVISIONING' || s === 'REBUILDING')
+      ) {
         store.setAgentState(agent.id, 'FAILED', 'The agent runtime is missing — tap Retry to rebuild it.');
         log('reconcile.runtime_missing', { agentId: agent.id, was: s });
       } else if (status.phase === 'running' && s === 'STOPPED') {
         store.setAgentState(agent.id, 'RUNNING');
         log('reconcile.marked_running', { agentId: agent.id });
+      } else if (status.phase === 'running' && s === 'REBUILDING') {
+        // Rebuild finished but the control plane died before recording it.
+        store.setAgentState(agent.id, 'RUNNING');
+        log('reconcile.marked_running', { agentId: agent.id, was: s });
       } else if (status.phase === 'running' && s === 'PROVISIONING' && !agent.pendingAction) {
         // Provisioning finished but the control plane died before recording it.
         store.setAgentState(agent.id, 'RUNNING');
@@ -47,6 +54,9 @@ export async function reconcileAgents(
       } else if (status.phase === 'stopped' && s === 'RUNNING') {
         store.setAgentState(agent.id, 'STOPPED');
         log('reconcile.marked_stopped', { agentId: agent.id });
+      } else if (status.phase === 'stopped' && s === 'REBUILDING') {
+        store.setAgentState(agent.id, 'FAILED', 'The rebuild was interrupted — tap Retry.');
+        log('reconcile.interrupted', { agentId: agent.id, was: s });
       } else if (status.phase === 'stopped' && s === 'PROVISIONING' && !agent.pendingAction) {
         store.setAgentState(agent.id, 'FAILED', 'Setup was interrupted — tap Retry.');
         log('reconcile.interrupted', { agentId: agent.id });

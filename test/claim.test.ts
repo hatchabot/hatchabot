@@ -96,5 +96,11 @@ describe('state machine', () => {
     expect(canTransition('DELETED', 'RUNNING')).toBe(false);
     expect(canTransition('PROVISIONING', 'STOPPED')).toBe(false);
     expect(canTransition('FAILED', 'PROVISIONING')).toBe(true);
+    expect(canTransition('RUNNING', 'REBUILDING')).toBe(true);
+    expect(canTransition('STOPPED', 'REBUILDING')).toBe(true);
+    expect(canTransition('REBUILDING', 'RUNNING')).toBe(true);
+    expect(canTransition('REBUILDING', 'FAILED')).toBe(true);
+    expect(canTransition('REBUILDING', 'DELETING')).toBe(true);
+    expect(canTransition('PROVISIONING', 'REBUILDING')).toBe(false);
   });
 });

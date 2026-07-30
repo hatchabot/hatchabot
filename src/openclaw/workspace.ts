@@ -9,6 +9,36 @@ export interface WorkspaceInput {
 }
 
 /**
+ * The AGENTS.md section owned by the sharedMemory flag. Exported so the
+ * make-private/make-shared toggle can rewrite exactly this section on a live
+ * agent without touching the rest of the user's file.
+ */
+export function memoryPolicySection(sharedMemory: boolean): string {
+  return `## Memory policy
+${
+  sharedMemory
+    ? `- This is a **shared** agent. MEMORY.md is common to every member.
+- Tag each entry with who told you and when: \`source: <telegram_user_id>, ts: <iso8601>\`.
+- Anything written here may surface to other members. Do not record something a
+  member asked you to keep private.`
+    : `- MEMORY.md is private to this agent's owner.`
+}`;
+}
+
+/**
+ * Swaps the "## Memory policy" section of an AGENTS.md for `section`, leaving
+ * everything else (including any sections the user added after it) untouched.
+ * Appends the section when the heading is missing.
+ */
+export function replaceMemoryPolicy(content: string, section: string): string {
+  const start = content.indexOf('## Memory policy');
+  if (start === -1) return `${content.trimEnd()}\n\n${section}\n`;
+  const rest = content.indexOf('\n## ', start + 1);
+  const tail = rest === -1 ? '\n' : content.slice(rest);
+  return `${content.slice(0, start)}${section}${tail}`;
+}
+
+/**
  * Seeds the durable half of an agent (§4 "Workspace"). These files are the
  * user's to edit afterwards — AgentClaw writes them once at provision time and
  * then stays out of the way, per the "full OpenClaw interface" decision (§9.3).
@@ -27,15 +57,7 @@ ${persona.trim() || 'A helpful personal assistant.'}
 - You are reachable over Telegram. Keep replies short enough to read on a phone.
 - When you learn something durable about the people you serve, write it to MEMORY.md.
 
-## Memory policy
-${
-  sharedMemory
-    ? `- This is a **shared** agent. MEMORY.md is common to every member.
-- Tag each entry with who told you and when: \`source: <telegram_user_id>, ts: <iso8601>\`.
-- Anything written here may surface to other members. Do not record something a
-  member asked you to keep private.`
-    : `- MEMORY.md is private to this agent's owner.`
-}
+${memoryPolicySection(sharedMemory)}
 `;
 
   const memory = sharedMemory

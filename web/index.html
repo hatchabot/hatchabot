@@ -33,8 +33,8 @@
     padding: 3px 9px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
   }
   .chip.RUNNING { color: var(--ok); border-color: var(--ok); }
-  .chip.PROVISIONING { color: var(--warn); border-color: var(--warn); }
-  .chip.PROVISIONING::after { content: "…"; animation: pulse 1.2s infinite; }
+  .chip.PROVISIONING, .chip.REBUILDING { color: var(--warn); border-color: var(--warn); }
+  .chip.PROVISIONING::after, .chip.REBUILDING::after { content: "…"; animation: pulse 1.2s infinite; }
   .chip.FAILED { color: var(--bad); border-color: var(--bad); }
   .chip.STOPPED, .chip.DELETING { color: var(--off); border-color: var(--off); }
   @keyframes pulse { 50% { opacity: 0.3; } }
@@ -342,11 +342,13 @@ function agentCard(a) {
       }).join('')}
       </div>` : ''}
     <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Open in Telegram</a>
-        <a class="btn" href="${esc(a.deepLink)}" title="Open in the Telegram app">In app</a>` : ''}
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
+        <a class="btn" href="${esc(a.deepLink)}" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${esc(a.name)}')">Edit…</button>
         <button onclick="openLogs('${a.id}', '${esc(a.name)}')">Logs</button>` : ''}
+      ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
+        ? `<button onclick="toggleMemory('${a.id}', ${a.sharedMemory})" title="Changes what invitees are told and how the agent treats MEMORY.md">${a.sharedMemory ? 'Make private' : 'Make shared'}</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
@@ -492,6 +494,20 @@ async function kick(agentId, userId, label) {
   } catch (e) { toast(e.message); }
 }
 
+async function toggleMemory(id, currentlyShared) {
+  const msg = currentlyShared
+    ? 'Make memory private? The agent treats MEMORY.md as yours alone, and future invites lose the shared-memory setup. What it already remembers stays.'
+    : 'Make memory shared? People you invite will be told the agent\'s memory is common to every member.';
+  if (!confirm(msg)) return;
+  try {
+    const res = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { sharedMemory: !currentlyShared } });
+    toast(res.policyUpdated
+      ? (res.sharedMemory ? 'Memory is now shared' : 'Memory is now private')
+      : 'Setting saved, but updating AGENTS.md failed — edit it by hand');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
 async function approve(id, code) {
   try {
     const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code } });
@@ -550,7 +566,7 @@ async function refresh(withMeta) {
     }
     renderSetup(); renderAgents();
   } catch (e) { console.error(e); }
-  const busy = agents.some(a => a.state === 'PROVISIONING' || a.state === 'DELETING');
+  const busy = agents.some(a => a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
   pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
 }

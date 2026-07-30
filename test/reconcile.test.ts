@@ -28,8 +28,9 @@ async function setup(dbState: AgentState, runtimePhase: 'running' | 'stopped' | 
   });
   store.setAgentRuntimeRef('a1', runtimeRef);
   // walk to the desired DB state through legal transitions
-  if (dbState === 'RUNNING' || dbState === 'STOPPED') store.setAgentState('a1', 'RUNNING');
+  if (dbState !== 'PROVISIONING') store.setAgentState('a1', 'RUNNING');
   if (dbState === 'STOPPED') store.setAgentState('a1', 'STOPPED');
+  if (dbState === 'REBUILDING') store.setAgentState('a1', 'REBUILDING');
 
   const providers = new Map<string, RuntimeProvider>([['mock', provider]]);
   await reconcileAgents(store, providers, () => {});
@@ -59,5 +60,15 @@ describe('boot reconcile', () => {
     const agent = await setup('PROVISIONING', 'stopped');
     expect(agent.state).toBe('FAILED');
     expect(agent.stateReason).toMatch(/Retry/);
+  });
+
+  it('completes a REBUILDING agent whose runtime is actually up', async () => {
+    expect((await setup('REBUILDING', 'running')).state).toBe('RUNNING');
+  });
+
+  it('fails an interrupted rebuild with a retry hint', async () => {
+    const agent = await setup('REBUILDING', 'stopped');
+    expect(agent.state).toBe('FAILED');
+    expect(agent.stateReason).toMatch(/rebuild was interrupted/i);
   });
 });

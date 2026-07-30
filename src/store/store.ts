@@ -357,6 +357,12 @@ export class Store {
     };
   }
 
+  setAgentSharedMemory(id: string, shared: boolean): void {
+    this.db
+      .prepare(`UPDATE agents SET shared_memory = ?, updated_at = ? WHERE id = ?`)
+      .run(shared ? 1 : 0, new Date().toISOString(), id);
+  }
+
   /** Active membership already bound to this channel identity, if any. */
   getActiveMembershipByChannelUser(
     agentId: string,

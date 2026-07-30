@@ -261,6 +261,9 @@ export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promis
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
     throw new Error(`Cannot rebuild from state ${agent.state}`);
   }
+  // Visible immediately: the chip must not read RUNNING while the container
+  // is being replaced.
+  store.setAgentState(agentId, 'REBUILDING');
 
   try {
     await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
