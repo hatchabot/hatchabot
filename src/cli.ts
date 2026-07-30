@@ -11,6 +11,26 @@
  * AGENTCLAW_PASSWORD, or --url/--password flags.
  */
 import { readFile, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+// Flags > environment > ~/.config/agentclaw/env (KEY=VALUE lines, chmod 600 —
+// keeps the password out of shell history and .bashrc).
+function configDefaults(): Record<string, string> {
+  try {
+    const text = readFileSync(join(homedir(), '.config', 'agentclaw', 'env'), 'utf8');
+    return Object.fromEntries(
+      text
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#') && l.includes('='))
+        .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+    );
+  } catch {
+    return {};
+  }
+}
 
 const USAGE = `agentclaw <command> [options]
 
@@ -113,8 +133,12 @@ async function main() {
     return;
   }
 
-  const url = (flags.get('url') ?? process.env.AGENTCLAW_URL ?? 'http://localhost:8080').replace(/\/$/, '');
-  const password = flags.get('password') ?? process.env.AGENTCLAW_PASSWORD ?? '';
+  const defaults = configDefaults();
+  const url = (
+    flags.get('url') ?? process.env.AGENTCLAW_URL ?? defaults.AGENTCLAW_URL ?? 'http://localhost:8080'
+  ).replace(/\/$/, '');
+  const password =
+    flags.get('password') ?? process.env.AGENTCLAW_PASSWORD ?? defaults.AGENTCLAW_PASSWORD ?? '';
   const ctx = await login(url, password);
 
   switch (cmd) {
