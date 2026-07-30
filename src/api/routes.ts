@@ -279,6 +279,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         return {
           ...a,
           deepLink: store.getChannelForAgent(a.id)?.deepLink,
+          // Default model from the agent's AI profile. Applied config can lag
+          // one rebuild behind, and /model can switch a single chat session —
+          // this is "what it runs by default", which is what the card answers.
+          model: store.getAIProfile(a.aiProfileId)?.model,
           openclawVersion,
           updateAvailable,
         };

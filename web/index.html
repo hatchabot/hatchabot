@@ -435,7 +435,7 @@ function agentCard(a) {
       </div>
       <span class="chip ${a.state}">${a.state}</span>
     </div>
-    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}</div>` : ''}
+    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}</div>` : ''}
     ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">An OpenClaw update is ready. Rebuild applies it — memory is kept.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
