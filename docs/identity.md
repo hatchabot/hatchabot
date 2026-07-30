@@ -1,0 +1,84 @@
+# Real per-user identity — scope
+
+Step 1 of the GCP plan. Replaces the single shared password with accounts, on
+a path that keeps local-only installs working exactly as they do today.
+
+## Why now
+
+Everything downstream assumes it: Cloud Run exposure (a shared password on
+the public internet is a non-starter), the "full invite" tier (an invitee who
+can log in), per-user AI profiles and billing, and the phone app (which wants
+token auth, not a cookie minted from a shared secret).
+
+## Provider choice
+
+**GCP Identity Platform** (Firebase Auth's GCP face). Email/password +
+Google sign-in out of the box, ~50k MAU free, and verification is just
+"validate a JWT against Google's public JWKS" — no vendor SDK required
+server-side, and the web app can log in through Identity Platform's REST API
+(`accounts:signInWithPassword`), keeping our single-file no-build page.
+
+## Design
+
+### Auth modes, not a rewrite
+
+`auth.ts` gains a mode switch (env: `AGENTCLAW_AUTH=password|identity`):
+
+- `password` — today's behavior, unchanged. The default. A home install
+  never needs a Google project.
+- `identity` — `Authorization: Bearer <ID token>` verified against the
+  project's JWKS (issuer + audience + expiry + signature). The session
+  cookie mechanism stays for the browser; it just gets minted from a
+  verified token instead of the shared password.
+
+### Principal plumbing
+
+`ownerIdOf()` currently returns the constant `dev-owner`. It becomes the
+verified principal's uid. Every store query already filters by `ownerId` —
+the schema needs no change, which is the payoff of having threaded ownerId
+from day one.
+
+### Migrating a dev-owner install
+
+One-time, on first login after switching modes: if rows owned by
+`dev-owner` exist and no other real owner does, re-key them to the
+authenticated uid (`UPDATE ... SET owner_id = ?`  across agents, profiles,
+hosts, invites, memberships). Logged loudly. This turns Chris's Spark into
+account #1 without export/import.
+
+### Members become accounts (full invites)
+
+Per the invite-tiers decision: membership (agent-scoped chat access) stays
+distinct from accounts (system login). The lightweight Telegram invite is
+untouched. The full invite becomes: invite link → invitee signs in/up via
+Identity Platform → membership binds their uid → role-scoped API access
+(`user` members: see their agents, chat links, leave; no lifecycle controls).
+Requires per-route role checks — today every authenticated caller is
+effectively the owner.
+
+### CLI and phone app
+
+Both are token clients. CLI: `agentclaw login` does the REST sign-in, stores
+the refresh token in `~/.config/agentclaw/env`, refreshes ID tokens as
+needed; `--password` keeps working against `password`-mode installs. The
+phone app follows the identical flow — that's the point.
+
+## Phases
+
+1. **Seam** — introduce the mode switch and principal plumbing with the
+   password mode as default. Pure refactor, no behavior change. Shippable.
+2. **Identity mode** — JWKS verification + web login via REST + CLI login.
+   Test on the Spark against a real Identity Platform project.
+3. **Migration** — dev-owner adoption flow.
+4. **Roles** — role-scoped routes; full-invite flow for invitees.
+
+Each phase lands green on the Spark before the next; nothing requires Cloud
+Run to exist yet.
+
+## Non-goals (for now)
+
+- Multi-owner *hosting* (several families on one control plane) — the data
+  model supports it once ownerId is real, but pricing/isolation questions
+  come with the cloud step, not this one.
+- SSO providers beyond Google/email.
+- Token-gated agent-to-agent APIs.

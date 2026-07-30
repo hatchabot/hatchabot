@@ -46,7 +46,12 @@ under them.
 ## Current state in code
 
 - `AIProfile.kind` carries the distinction (`src/domain/types.ts`).
-- `POST /v1/ai-profiles` rejects `kind: 'subscription'` with a pointer here.
-- **Not yet built:** the local-host path that reuses an existing on-box
-  credential instead of injecting one. Needs the Host Agent (§5.4) first, since
-  that is the component that runs on a machine where the login already lives.
+- The local-host subscription path is built: the owner's `~/.claude` is
+  mounted into each runtime (`hostMounts` in `buildRuntimeSpec`), and the
+  OpenClaw config routes the model through the Claude Code CLI
+  (`authMode: 'oauth-claude-cli'` in `src/openclaw/configWriter.ts`).
+  Profile creation checks the login exists on this host and rejects
+  subscription profiles for non-local hosts — belt and suspenders in
+  `POST /v1/ai-profiles` and `buildRuntimeSpec`.
+- Profiles are managed from the app (⚙ AI): default model, the switchable
+  `/model` list, additional API-key profiles.
