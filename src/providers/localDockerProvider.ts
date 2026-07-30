@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -248,6 +248,47 @@ export class LocalDockerProvider implements RuntimeProvider {
     // docker logs writes container stdout to stdout and stderr to stderr —
     // interleave both, the reader wants the story not the streams.
     return (res.stdout + res.stderr).trim();
+  }
+
+  async exportState(runtimeRef: string): Promise<Buffer> {
+    const { volume } = this.#names(runtimeRef);
+    try {
+      const { stdout } = await execFileP(
+        this.docker,
+        ['run', '--rm', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.'],
+        { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 },
+      );
+      return stdout as Buffer;
+    } catch (err) {
+      throw new ProviderError(
+        `volume export failed: ${String(err).slice(0, 500)}`,
+        "Couldn't snapshot the agent's state.",
+        { cause: err },
+      );
+    }
+  }
+
+  async importState(runtimeRef: string, data: Buffer): Promise<void> {
+    const { volume } = this.#names(runtimeRef);
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(this.docker, [
+        'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine', 'tar', 'xz', '-C', '/vol',
+      ]);
+      let stderr = '';
+      child.stderr.on('data', (c) => (stderr += c));
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) resolve();
+        else
+          reject(
+            new ProviderError(
+              `volume import failed (${code}): ${stderr.slice(-500)}`,
+              "Couldn't restore the agent's state.",
+            ),
+          );
+      });
+      child.stdin.end(data);
+    });
   }
 
   async #must(args: string[], userMessage: string): Promise<ExecResult> {

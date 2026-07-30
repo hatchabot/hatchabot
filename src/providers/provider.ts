@@ -133,6 +133,20 @@ export interface RuntimeProvider {
 
   /** Recent runtime output for the observability card. */
   logs(runtimeRef: string, lines: number): Promise<string>;
+
+  /**
+   * Snapshot the runtime's persistent state (the OpenClaw state dir) as a
+   * gzipped tarball. The runtime should be stopped first for a consistent
+   * snapshot — the orchestrator owns that dance, not the provider.
+   */
+  exportState(runtimeRef: string): Promise<Buffer>;
+
+  /**
+   * Restore a snapshot produced by exportState into the runtime's volume,
+   * overwriting same-named files. Called between provision() and start() on
+   * the import path, so the seeded skeleton is replaced by the real state.
+   */
+  importState(runtimeRef: string, data: Buffer): Promise<void>;
 }
 
 export interface RuntimeInfo {

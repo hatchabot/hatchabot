@@ -113,6 +113,19 @@ export class MockProvider implements RuntimeProvider {
     return '';
   }
 
+  /** In-memory "volumes" so transfer round-trips are testable. */
+  readonly stateStore = new Map<string, Buffer>();
+
+  async exportState(runtimeRef: string): Promise<Buffer> {
+    this.#require(runtimeRef);
+    return this.stateStore.get(runtimeRef) ?? Buffer.from('mock-state');
+  }
+
+  async importState(runtimeRef: string, data: Buffer): Promise<void> {
+    this.#require(runtimeRef);
+    this.stateStore.set(runtimeRef, data);
+  }
+
   #require(runtimeRef: string): MockRuntime {
     const rt = this.runtimes.get(runtimeRef);
     if (!rt || rt.purged) {

@@ -290,7 +290,7 @@ export async function provisionAgent(
   return runProvisionSteps(deps, agent.id);
 }
 
-async function waitForHealthy(
+export async function waitForHealthy(
   provider: RuntimeProvider,
   runtimeRef: string,
   sleep: (ms: number) => Promise<void>,

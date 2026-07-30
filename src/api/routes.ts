@@ -18,6 +18,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
+import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
 import type { Agent } from '../domain/types.js';
 
 export interface ApiDeps {
@@ -77,6 +78,14 @@ function ownerIdOf(headers: Record<string, unknown>): string {
 
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
+
+  // Agent archives arrive as raw bytes (import). 512 MB ceiling — a family
+  // agent's volume snapshot is MBs, but sessions grow.
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer', bodyLimit: 512 * 1024 * 1024 },
+    (_req, body, done) => done(null, body),
+  );
 
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
@@ -466,6 +475,59 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (err instanceof InvalidBotTokenError) {
           return reply.code(400).send({ error: err.userMessage });
         }
+        throw err;
+      }
+    },
+  );
+
+  // ---- export & import (agent portability) ---------------------------------
+
+  // The archive contains the bot token — it IS the agent's identity — so the
+  // download is a credential. The export leaves the agent STOPPED here: once
+  // it's imported elsewhere, two pollers on one bot would flip-flop.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    try {
+      const { filename, data } = await exportAgent(
+        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+          log: (e, d) => app.log.info(d, e) },
+        agent.id,
+      );
+      return reply
+        .type('application/octet-stream')
+        .header('content-disposition', `attachment; filename="${filename}"`)
+        .send(data);
+    } catch (err) {
+      if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+  });
+
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string } }>(
+    '/v1/agents/import',
+    async (req, reply) => {
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        return reply.code(400).send({ error: 'Send the .agentclaw file as the request body.' });
+      }
+      const ownerId = ownerIdOf(req.headers as Record<string, unknown>);
+      // Resolve the host up front so the right provider handles the restore.
+      const hosts = store.listHosts(ownerId);
+      const host = req.query.hostId
+        ? store.getHost(req.query.hostId)
+        : (hosts.find((h) => h.kind === 'local') ?? hosts[0]);
+      if (!host) return reply.code(400).send({ error: 'No host available to import onto.' });
+      try {
+        const agent = await importAgent(
+          { store, secrets, provider: providerFor(host.id), channel: deps.channel,
+            log: (e, d) => app.log.info(d, e) },
+          body,
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
+        );
+        return reply.code(201).send(agent);
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
     },

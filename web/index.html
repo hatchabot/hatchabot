@@ -103,8 +103,11 @@
   <header>
     <h1>Agent<b>Claw</b></h1>
     <span class="sub" id="poolInfo"></span>
+    <button id="importBtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()"
+            style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
     <button id="aiBtn" title="AI sources" onclick="openAiDlg()"
-            style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ AI</button>
+            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ AI</button>
+    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
   <div id="agents"></div>
@@ -464,7 +467,8 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
+        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
+           <button onclick="exportAgent('${a.id}', '${esc(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${esc(a.name)}')">Delete</button>` : ''}
     </div>
@@ -628,6 +632,29 @@ async function kick(agentId, userId, label) {
     pairTick = 0; // refetch members on next poll
     await refresh(false);
   } catch (e) { toast(e.message); }
+}
+
+async function exportAgent(id, name) {
+  if (!confirm(`Export "${name}"? The download includes the agent's bot token — treat the file like a password. The agent is STOPPED here afterwards, so the copy you import elsewhere is the only one talking to Telegram.`)) return;
+  // Same-origin navigation carries the session cookie; the browser downloads.
+  window.location.href = `/v1/agents/${id}/export`;
+  setTimeout(() => refresh(false), 2500);
+}
+
+async function importAgentFile(file) {
+  if (!file) return;
+  try {
+    const res = await fetch('/v1/agents/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
+    toast(`${data.name} imported — booting`);
+    await refresh(true);
+  } catch (e) { toast(e.message); }
+  finally { $('importFile').value = ''; }
 }
 
 async function toggleMemory(id, currentlyShared) {
