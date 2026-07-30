@@ -284,51 +284,63 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const workspacePath = (slug: string, name: string) =>
     `/home/node/.openclaw/agents/${slug}/agent/${name}`;
 
-  // Flip memory between shared and private. Only while the agent has no other
-  // members — the disclosure people joined under must not change shape beneath
-  // them — and only while RUNNING, because the AGENTS.md policy section is
-  // rewritten in place on the runtime.
-  app.patch<{ Params: { id: string }; Body: { sharedMemory?: boolean } }>(
+  // Owner-editable agent settings. `name` is display-only (the slug, workspace
+  // and bot identity never change). `sharedMemory` flips memory between shared
+  // and private — only while the agent has no other members (the disclosure
+  // people joined under must not change shape beneath them) and only while
+  // RUNNING, because the AGENTS.md policy section is rewritten in place.
+  app.patch<{ Params: { id: string }; Body: { name?: string; sharedMemory?: boolean } }>(
     '/v1/agents/:id',
     async (req, reply) => {
       const agent = store.getAgent(req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      const parsed = z.object({ sharedMemory: z.boolean() }).safeParse(req.body ?? {});
+      const parsed = z
+        .object({
+          name: z.string().trim().min(1).max(64).optional(),
+          sharedMemory: z.boolean().optional(),
+        })
+        .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
-      const shared = parsed.data.sharedMemory;
-      if (shared === agent.sharedMemory) return { ...agent, policyUpdated: true };
-
-      const others = store
-        .listMemberships(agent.id)
-        .filter((m) => m.status === 'active' && m.role !== 'owner');
-      if (others.length > 0) {
-        return reply.code(400).send({
-          error: 'This agent has members. Remove them first — what they were told about memory must stay true.',
-        });
-      }
-      if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
-        return reply.code(409).send({ error: 'Start the agent to change its memory policy.' });
+      const { name, sharedMemory: shared } = parsed.data;
+      if (name === undefined && shared === undefined) {
+        return reply.code(400).send({ error: 'Nothing to update' });
       }
 
-      store.setAgentSharedMemory(agent.id, shared);
+      if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
 
-      // Rewrite only the policy section; the rest of AGENTS.md is the user's.
-      let policyUpdated = false;
-      const provider = providerFor(agent.hostId);
-      const path = workspacePath(agent.slug, 'AGENTS.md');
-      const read = await provider.execShell(
-        agent.runtimeRef,
-        `cat ${JSON.stringify(path)} 2>/dev/null || true`,
-      );
-      const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared));
-      const b64 = Buffer.from(next, 'utf8').toString('base64');
-      const write = await provider.execShell(
-        agent.runtimeRef,
-        `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-      );
-      policyUpdated = write.code === 0;
-      if (!policyUpdated) {
-        app.log.warn({ agentId: agent.id, stderr: write.stderr }, 'memory policy rewrite failed');
+      let policyUpdated = true;
+      if (shared !== undefined && shared !== agent.sharedMemory) {
+        const others = store
+          .listMemberships(agent.id)
+          .filter((m) => m.status === 'active' && m.role !== 'owner');
+        if (others.length > 0) {
+          return reply.code(400).send({
+            error: 'This agent has members. Remove them first — what they were told about memory must stay true.',
+          });
+        }
+        if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
+          return reply.code(409).send({ error: 'Start the agent to change its memory policy.' });
+        }
+
+        store.setAgentSharedMemory(agent.id, shared);
+
+        // Rewrite only the policy section; the rest of AGENTS.md is the user's.
+        const provider = providerFor(agent.hostId);
+        const path = workspacePath(agent.slug, 'AGENTS.md');
+        const read = await provider.execShell(
+          agent.runtimeRef,
+          `cat ${JSON.stringify(path)} 2>/dev/null || true`,
+        );
+        const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared));
+        const b64 = Buffer.from(next, 'utf8').toString('base64');
+        const write = await provider.execShell(
+          agent.runtimeRef,
+          `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
+        );
+        policyUpdated = write.code === 0;
+        if (!policyUpdated) {
+          app.log.warn({ agentId: agent.id, stderr: write.stderr }, 'memory policy rewrite failed');
+        }
       }
       return { ...store.getAgent(agent.id)!, policyUpdated };
     },

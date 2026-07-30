@@ -147,6 +147,11 @@
     <b>MEMORY.md</b> what it remembers. Changes apply to new conversations
     (send <code>/new</code> in Telegram to start one).
   </div>
+  <label>Name</label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
+    <button id="renameBtn" onclick="renameAgent()">Rename</button>
+  </div>
   <label>File</label>
   <select id="editFile" onchange="loadEditFile()">
     <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
@@ -394,9 +399,23 @@ let editAgentId = null, logsAgentId = null;
 async function openEdit(id, name) {
   editAgentId = id;
   $('editAgent').textContent = name;
+  $('editName').value = name;
   $('editErr').textContent = '';
   editDlg.showModal();
   await loadEditFile();
+}
+
+async function renameAgent() {
+  const name = $('editName').value.trim();
+  if (!name) { $('editErr').textContent = 'Give it a name.'; return; }
+  $('renameBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { name } });
+    $('editAgent').textContent = name;
+    toast('Renamed');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('renameBtn').disabled = false; }
 }
 
 async function loadEditFile() {

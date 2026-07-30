@@ -357,6 +357,12 @@ export class Store {
     };
   }
 
+  setAgentName(id: string, name: string): void {
+    this.db
+      .prepare(`UPDATE agents SET name = ?, updated_at = ? WHERE id = ?`)
+      .run(name, new Date().toISOString(), id);
+  }
+
   setAgentSharedMemory(id: string, shared: boolean): void {
     this.db
       .prepare(`UPDATE agents SET shared_memory = ?, updated_at = ? WHERE id = ?`)
