@@ -103,6 +103,8 @@
   <header>
     <h1>Agent<b>Claw</b></h1>
     <span class="sub" id="poolInfo"></span>
+    <button id="aiBtn" title="AI sources" onclick="openAiDlg()"
+            style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ AI</button>
   </header>
   <div id="setup"></div>
   <div id="agents"></div>
@@ -128,6 +130,10 @@
   <input type="text" id="agentName" placeholder="Kitchen Helper" maxlength="64">
   <label>What is it for? <span style="color:var(--dim)">(optional — becomes its persona)</span></label>
   <textarea id="agentPersona" placeholder="You help plan meals and keep the pantry list current."></textarea>
+  <div id="agentProfileRow" style="display:none">
+    <label>AI source</label>
+    <select id="agentProfile"></select>
+  </div>
   <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
     <input type="checkbox" id="agentPrivate" style="width:auto">
     Keep memory private — just for you. Leave off for a family/group agent:
@@ -161,6 +167,33 @@
   <div class="actions" style="justify-content:flex-end">
     <button onclick="editDlg.close()">Cancel</button>
     <button class="primary" id="editSaveBtn" onclick="saveEditFile()">Save</button>
+  </div>
+</dialog>
+
+<dialog id="aiDlg" style="width:min(600px,94vw)">
+  <h3 style="margin:0 0 4px">AI sources</h3>
+  <div class="sub">
+    Agents inherit the AI source you pick when creating them. The model list
+    is what <code>/model</code> offers in chat — existing agents pick up
+    changes on their next Rebuild.
+  </div>
+  <div id="aiList"></div>
+  <h4 style="margin:16px 0 4px">Add another</h4>
+  <select id="aiKind" onchange="$('aiKeyRow').style.display = this.value === 'api_key' ? '' : 'none'">
+    <option value="subscription">Claude subscription (login on this machine)</option>
+    <option value="api_key">API key</option>
+  </select>
+  <input type="text" id="aiName" placeholder="Name (e.g. Work Claude)" maxlength="64">
+  <div id="aiKeyRow" style="display:none">
+    <select id="aiVendor"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
+    <input type="password" id="aiKey" placeholder="API key" autocomplete="off">
+  </div>
+  <input type="text" id="aiModel" placeholder="Default model (e.g. claude-opus-4-8)">
+  <input type="text" id="aiModelsAdd" placeholder="More switchable models, comma-separated (optional)">
+  <div class="err" id="aiErr"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="aiDlg.close()">Close</button>
+    <button class="primary" id="aiAddBtn" onclick="addAiProfile()">Add</button>
   </div>
 </dialog>
 
@@ -292,9 +325,82 @@ async function createSubscriptionProfile() {
   } catch (e) { $('setupErr').textContent = e.message; }
 }
 
+// ---- AI sources -------------------------------------------------------------
+
+function openAiDlg() {
+  renderAiList();
+  $('aiErr').textContent = '';
+  aiDlg.showModal();
+}
+
+function renderAiList() {
+  $('aiList').innerHTML = profiles.map(p => `
+    <div class="pair" style="flex-wrap:wrap;gap:6px">
+      <b>${esc(p.name)}</b>
+      <span class="chip">${p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
+      <div style="display:flex;gap:6px;width:100%">
+        <input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" title="Default model" style="flex:1;min-width:0">
+        <input type="text" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(', '))}"
+               placeholder="More switchable models, comma-separated" title="Switchable in chat via /model" style="flex:2;min-width:0">
+        <button onclick="saveAiProfile('${p.id}')">Save</button>
+        <button class="danger" onclick="delAiProfile('${p.id}', '${esc(p.name)}')">×</button>
+      </div>
+    </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
+}
+
+async function saveAiProfile(id) {
+  const model = $(`aiModel-${id}`).value.trim();
+  if (!model) { $('aiErr').textContent = 'Default model is required.'; return; }
+  const extra = $(`aiModels-${id}`).value.split(',').map(s => s.trim()).filter(Boolean);
+  try {
+    await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { model, models: [model, ...extra] } });
+    toast('Saved — agents apply it on their next Rebuild');
+    await refresh(true); renderAiList();
+  } catch (e) { $('aiErr').textContent = e.message; }
+}
+
+async function delAiProfile(id, name) {
+  if (!confirm(`Remove AI source "${name}"?`)) return;
+  try {
+    await api(`/v1/ai-profiles/${id}`, { method: 'DELETE' });
+    toast('Removed');
+    await refresh(true); renderAiList();
+  } catch (e) { $('aiErr').textContent = e.message; }
+}
+
+async function addAiProfile() {
+  const kind = $('aiKind').value;
+  const name = $('aiName').value.trim();
+  const model = $('aiModel').value.trim();
+  if (!name || !model) { $('aiErr').textContent = 'Name and default model are required.'; return; }
+  const extra = $('aiModelsAdd').value.split(',').map(s => s.trim()).filter(Boolean);
+  const body = { kind, name, model, models: extra.length ? [model, ...extra] : undefined };
+  if (kind === 'subscription') body.vendor = 'anthropic';
+  else {
+    body.vendor = $('aiVendor').value;
+    body.apiKey = $('aiKey').value.trim();
+    if (!body.apiKey) { $('aiErr').textContent = 'API key is required.'; return; }
+  }
+  $('aiAddBtn').disabled = true;
+  try {
+    await api('/v1/ai-profiles', { method: 'POST', body });
+    $('aiName').value = ''; $('aiModel').value = ''; $('aiModelsAdd').value = ''; $('aiKey').value = '';
+    toast('AI source added');
+    await refresh(true); renderAiList();
+  } catch (e) { $('aiErr').textContent = e.message; }
+  finally { $('aiAddBtn').disabled = false; }
+}
+
 // ---- agent creation ---------------------------------------------------------
 
-$('fabBtn').onclick = () => { $('createErr').textContent = ''; createDlg.showModal(); $('agentName').focus(); };
+$('fabBtn').onclick = () => {
+  $('createErr').textContent = '';
+  $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
+  $('agentProfile').innerHTML = profiles.map(p =>
+    `<option value="${p.id}">${esc(p.name)} — ${esc(p.model)}</option>`).join('');
+  createDlg.showModal();
+  $('agentName').focus();
+};
 
 async function createAgent() {
   const name = $('agentName').value.trim();
@@ -305,7 +411,8 @@ async function createAgent() {
   try {
     await api('/v1/agents', { method: 'POST', body: {
       name, persona: $('agentPersona').value.trim() || undefined,
-      aiProfileId: profiles[0].id, hostId: localHost.id,
+      aiProfileId: (profiles.length > 1 && $('agentProfile').value) || profiles[0].id,
+      hostId: localHost.id,
       sharedMemory: !$('agentPrivate').checked,
     }});
     createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentPrivate').checked = false;

@@ -200,15 +200,35 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const profile = store.getAIProfile(req.params.id);
       if (!profile) return reply.code(404).send({ error: 'Not found' });
       const parsed = z
-        .object({ models: z.array(z.string().min(1)).max(16).optional() })
+        .object({
+          model: z.string().trim().min(1).optional(),
+          models: z.array(z.string().min(1)).max(16).optional(),
+        })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
-      store.setAIProfileModels(profile.id, parsed.data.models);
+      if (parsed.data.model !== undefined) store.setAIProfileModel(profile.id, parsed.data.model);
+      if ('models' in ((req.body ?? {}) as object)) {
+        store.setAIProfileModels(profile.id, parsed.data.models);
+      }
       const updated = store.getAIProfile(profile.id)!;
       const { secretRef: _s, ...safe } = updated;
       return safe;
     },
   );
+
+  app.delete<{ Params: { id: string } }>('/v1/ai-profiles/:id', async (req, reply) => {
+    const profile = store.getAIProfile(req.params.id);
+    if (!profile) return reply.code(404).send({ error: 'Not found' });
+    const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id);
+    if (using.length > 0) {
+      return reply.code(400).send({
+        error: `${using.length} agent${using.length === 1 ? ' is' : 's are'} using this AI source — delete them first.`,
+      });
+    }
+    if (profile.secretRef) await secrets.delete(profile.secretRef).catch(() => {});
+    store.deleteAIProfile(profile.id);
+    return { deleted: true };
+  });
 
   // ---- agents ---------------------------------------------------------------
 

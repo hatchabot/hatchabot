@@ -94,6 +94,14 @@ export class Store {
       .run({ secretRef: null, ...p, models: p.models ? JSON.stringify(p.models) : null });
   }
 
+  setAIProfileModel(id: string, model: string): void {
+    this.db.prepare(`UPDATE ai_profiles SET model = ? WHERE id = ?`).run(model, id);
+  }
+
+  deleteAIProfile(id: string): void {
+    this.db.prepare(`DELETE FROM ai_profiles WHERE id = ?`).run(id);
+  }
+
   setAIProfileModels(id: string, models: string[] | undefined): void {
     this.db
       .prepare(`UPDATE ai_profiles SET models = ? WHERE id = ?`)
