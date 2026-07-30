@@ -18,6 +18,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
+import type { Agent } from '../domain/types.js';
 
 export interface ApiDeps {
   store: Store;
@@ -254,6 +255,31 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return reply.code(202).send(agent);
   });
 
+  // "Last active" = newest OpenClaw session update inside the runtime. The
+  // CLI costs ~1s to start in-container, and the app polls the agent list
+  // every few seconds — so cache per agent and refresh at most once a minute.
+  const lastActiveCache = new Map<string, { fetchedAt: number; value?: string }>();
+  const lastActiveFor = async (a: Agent): Promise<string | undefined> => {
+    if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
+    const hit = lastActiveCache.get(a.id);
+    if (hit && Date.now() - hit.fetchedAt < 60_000) return hit.value;
+    let value: string | undefined;
+    try {
+      const res = await providerFor(a.hostId).exec(a.runtimeRef, [
+        'sessions', 'list', '--agent', a.slug, '--json',
+      ]);
+      if (res.code === 0) {
+        const sessions: Array<{ updatedAt?: number }> = JSON.parse(res.stdout).sessions ?? [];
+        const newest = Math.max(0, ...sessions.map((s) => s.updatedAt ?? 0));
+        if (newest > 0) value = new Date(newest).toISOString();
+      }
+    } catch {
+      /* diagnostic only — omit rather than fail the list */
+    }
+    lastActiveCache.set(a.id, { fetchedAt: Date.now(), value });
+    return value;
+  };
+
   app.get('/v1/agents', async (req) => {
     const agents = store.listAgents(ownerIdOf(req.headers as Record<string, unknown>));
     return Promise.all(
@@ -283,6 +309,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.
           model: store.getAIProfile(a.aiProfileId)?.model,
+          lastActiveAt: await lastActiveFor(a),
           openclawVersion,
           updateAvailable,
         };
