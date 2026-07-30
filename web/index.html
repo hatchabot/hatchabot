@@ -201,8 +201,10 @@ let profiles = [], hosts = [], agents = [], pairings = {}, members = {};
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
-    headers: { 'content-type': 'application/json' },
     ...opts,
+    // Only claim a JSON body when there is one: Fastify 400s a body-less
+    // request (e.g. DELETE) that still carries the content-type header.
+    headers: opts.body ? { 'content-type': 'application/json' } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
   if (res.status === 401 && path !== '/v1/login') {
@@ -210,7 +212,16 @@ const api = async (path, opts = {}) => {
     throw new Error('auth required');
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : 'Request failed');
+  if (!res.ok) {
+    // App errors send {error: "friendly text"}; framework errors send a
+    // generic error ("Bad Request") plus a specific message — prefer the
+    // specific one.
+    const msg =
+      (typeof data.message === 'string' && data.message) ||
+      (typeof data.error === 'string' && data.error) ||
+      'Request failed';
+    throw new Error(msg);
+  }
   return data;
 };
 
