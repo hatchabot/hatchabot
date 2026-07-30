@@ -128,6 +128,8 @@ export async function importAgent(
   if (store.listAllActiveAgents().some((a) => a.slug === manifest.agent.slug)) {
     throw new TransferError(`An agent with slug "${manifest.agent.slug}" already lives here.`);
   }
+  // A previously deleted agent's tombstone may still hold the slug.
+  store.releaseDeletedSlug(opts.ownerId, manifest.agent.slug);
   if (store.findAgentUsingAccount(manifest.channel.accountId)) {
     throw new TransferError(
       `Bot @${manifest.channel.accountId} is already wired to an agent here.`,

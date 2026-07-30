@@ -102,6 +102,21 @@ describe('agent export/import', () => {
     await expect(importAgent(dst.deps, data, { ownerId: 'o' })).rejects.toBeInstanceOf(TransferError);
   });
 
+  it('imports again after the previous copy was deleted (tombstone slug freed)', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+
+    const dst = await installation();
+    const first = await importAgent(dst.deps, data, { ownerId: 'o' });
+    dst.store.setAgentState(first.id, 'DELETING');
+    dst.store.setAgentState(first.id, 'DELETED');
+
+    const second = await importAgent(dst.deps, data, { ownerId: 'o' });
+    expect(second.state).toBe('RUNNING');
+    expect(second.slug).toBe('kitchen');
+  });
+
   it('rejects garbage files', async () => {
     const dst = await installation();
     await expect(

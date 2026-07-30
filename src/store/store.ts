@@ -365,6 +365,20 @@ export class Store {
     };
   }
 
+  /**
+   * DELETED rows are kept as history but still hold UNIQUE(owner_id, slug).
+   * Rename theirs out of the way so a new agent (e.g. an import of the same
+   * agent after a delete) can take the slug back.
+   */
+  releaseDeletedSlug(ownerId: string, slug: string): void {
+    this.db
+      .prepare(
+        `UPDATE agents SET slug = slug || '-deleted-' || substr(id, 1, 8)
+         WHERE owner_id = ? AND slug = ? AND state = 'DELETED'`,
+      )
+      .run(ownerId, slug);
+  }
+
   setAgentName(id: string, name: string): void {
     this.db
       .prepare(`UPDATE agents SET name = ?, updated_at = ? WHERE id = ?`)
