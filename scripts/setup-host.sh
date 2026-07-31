@@ -39,8 +39,14 @@ else
   say ".env already exists — keeping it."
 fi
 
-say "Building the agent runtime image (a few minutes on first run)…"
-./scripts/build-runtime-image.sh
+if docker image inspect agentclaw-runtime:latest >/dev/null 2>&1; then
+  # An existing install may have promoted a NEWER image to :latest — a default
+  # build here would silently demote it (learned the hard way).
+  say "Runtime image already present — keeping the existing :latest."
+else
+  say "Building the agent runtime image (a few minutes on first run)…"
+  ./scripts/build-runtime-image.sh
+fi
 
 say "Installing the systemd user service…"
 ./scripts/install-service.sh
