@@ -10,7 +10,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.6.11}"
+# Default = the version the fleet is proven on (candidate/promote flow above
+# is how this moves forward).
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.7.1-2}"
 REPO="${AGENTCLAW_IMAGE_REPO:-agentclaw-runtime}"
 
 docker build \

@@ -48,8 +48,34 @@ else
   ./scripts/build-runtime-image.sh
 fi
 
-say "Installing the systemd user service…"
-./scripts/install-service.sh
+if [ "$(uname -s)" = "Darwin" ]; then
+  say "Installing the launchd service (macOS)…"
+  REPO="$(pwd)"
+  PLIST="$HOME/Library/LaunchAgents/com.agentclaw.control-plane.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" data
+  cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentclaw.control-plane</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd "$REPO" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec ./node_modules/.bin/tsx src/index.ts</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$REPO/data/server.log</string>
+  <key>StandardErrorPath</key><string>$REPO/data/server.log</string>
+</dict></plist>
+PLIST
+  launchctl unload -w "$PLIST" 2>/dev/null || true
+  launchctl load -w "$PLIST"
+  echo "Manage with: launchctl {load|unload} -w $PLIST"
+  echo "Logs: tail -f $REPO/data/server.log"
+else
+  say "Installing the systemd user service…"
+  ./scripts/install-service.sh
+fi
 
 say "Linking the agentclaw CLI…"
 npm link >/dev/null
