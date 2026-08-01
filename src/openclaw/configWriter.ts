@@ -55,6 +55,14 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       sensitive: true,
     });
     cmds.push({ argv: ['config', 'set', 'gateway.bind', 'auto'] });
+    // The Control UI additionally allowlists browser origins, but the page's
+    // origin depends on how the owner reaches the box (localhost, tailnet
+    // name, LAN IP) — unknowable at seed time. "*" disables that check; the
+    // per-agent token remains the actual gate, and a drive-by page without
+    // it still can't connect. (OpenClaw's security audit flags this — known.)
+    cmds.push({
+      argv: ['config', 'set', 'gateway.controlUi.allowedOrigins', '["*"]'],
+    });
   } else {
     cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'none'] });
     cmds.push({ argv: ['config', 'set', 'gateway.bind', 'loopback'] });

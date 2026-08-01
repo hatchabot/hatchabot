@@ -77,6 +77,8 @@ describe('buildConfigCommands multi-model', () => {
     expect(argFor(cmds, 'gateway.auth.mode')).toBe('token');
     expect(argFor(cmds, 'gateway.auth.token')).toBe('gw-secret-token');
     expect(argFor(cmds, 'gateway.bind')).toBe('auto');
+    // page origin varies (localhost/tailnet/LAN) — token is the real gate
+    expect(argFor(cmds, 'gateway.controlUi.allowedOrigins')).toBe('["*"]');
     expect(describeConfigCommands(cmds).join('\n')).not.toContain('gw-secret-token');
   });
 
