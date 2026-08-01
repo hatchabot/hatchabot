@@ -203,7 +203,14 @@ export async function importAgent(
     const respec = await buildRuntimeSpec(deps, agent.id);
     await provider.provision(respec);
     await provider.start(runtimeRef);
-    await waitForHealthy(provider, runtimeRef, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))));
+    // First boot on an import can be slow (cold image on Docker Desktop's VM,
+    // imported sessions to load) — give it 2 minutes, not the default 30s.
+    await waitForHealthy(
+      provider,
+      runtimeRef,
+      deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+      120,
+    );
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
     return store.setAgentState(agent.id, 'RUNNING');
   } catch (err) {
