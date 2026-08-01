@@ -47,13 +47,16 @@ describe('buildConfigCommands multi-model', () => {
       authMode: 'oauth-claude-cli',
       setupToken: 'sk-ant-oat01-secret',
     });
-    const paste = cmds.find((c) => c.argv.includes('paste-token'))!;
-    expect(paste.stdin).toBe('sk-ant-oat01-secret');
-    expect(paste.sensitive).toBe(true);
-    // per-agent auth store: without --agent the token lands in agent "main"
-    expect(paste.argv[paste.argv.indexOf('--agent') + 1]).toBe('a1');
-    // and it must run after `agents add`, which creates that agent
-    expect(cmds.indexOf(paste)).toBeGreaterThan(cmds.findIndex((c) => c.argv[1] === 'add'));
+    // per-agent auth stores: once for the bound agent, once for "main"
+    // (which the Control UI lands on)
+    const pastes = cmds.filter((c) => c.argv.includes('paste-token'));
+    expect(pastes).toHaveLength(2);
+    expect(pastes.every((p) => p.stdin === 'sk-ant-oat01-secret' && p.sensitive)).toBe(true);
+    expect(pastes.some((p) => p.argv[p.argv.indexOf('--agent') + 1] === 'a1')).toBe(true);
+    expect(pastes.some((p) => !p.argv.includes('--agent'))).toBe(true);
+    // and they must run after `agents add`, which creates the bound agent
+    const addIdx = cmds.findIndex((c) => c.argv[1] === 'add');
+    for (const p of pastes) expect(cmds.indexOf(p)).toBeGreaterThan(addIdx);
 
     const auth = JSON.parse(cmds.find((c) => c.argv[2] === 'auth.profiles')!.argv[3]!);
     expect(auth).toEqual({ 'anthropic:manual': { provider: 'anthropic', mode: 'token' } });

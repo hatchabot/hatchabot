@@ -69,6 +69,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   }
 
   const prefixedModel = patch.model ? `anthropic/${patch.model}` : undefined;
+
+  // Runtime-wide default model. Without it, OpenClaw's OWN default agent
+  // "main" (which the Control UI lands on) falls back to the factory default
+  // (openai/gpt-*) and fails with missing-provider-auth.
+  if (prefixedModel) {
+    cmds.push({ argv: ['config', 'set', 'agents.defaults.model.primary', prefixedModel] });
+  }
   // Primary first, deduped: patch.models may or may not repeat patch.model.
   const allModels = [
     ...new Set([patch.model, ...(patch.models ?? [])].filter((m): m is string => !!m)),
@@ -173,6 +180,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
         'models', 'auth', '--agent', patch.agentId,
         'paste-token', '--provider', 'anthropic', '--expires-in', '365d',
       ],
+      stdin: patch.setupToken,
+      sensitive: true,
+    });
+    // Also into the default agent "main"'s store — the Control UI lands
+    // there, and auth stores are per-agent.
+    cmds.push({
+      argv: ['models', 'auth', 'paste-token', '--provider', 'anthropic', '--expires-in', '365d'],
       stdin: patch.setupToken,
       sensitive: true,
     });

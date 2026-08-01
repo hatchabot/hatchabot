@@ -480,7 +480,7 @@ function agentCard(a) {
         <button onclick="openLogs('${a.id}', '${esc(a.name)}')">Logs</button>` : ''}
       ${a.state === 'RUNNING' && a.gatewayPort && a.gatewayToken
         ? `<a class="btn" target="_blank" title="This agent's own OpenClaw Control UI (debug)"
-             href="http://${location.hostname}:${a.gatewayPort}/#token=${esc(a.gatewayToken)}">OpenClaw</a>` : ''}
+             href="http://${location.hostname}:${a.gatewayPort}/chat/${esc(a.slug)}#token=${esc(a.gatewayToken)}">OpenClaw</a>` : ''}
       ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
         ? `<button onclick="toggleMemory('${a.id}', ${a.sharedMemory})" title="Changes what invitees are told and how the agent treats MEMORY.md">${a.sharedMemory ? 'Make private' : 'Make shared'}</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
