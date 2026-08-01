@@ -73,6 +73,16 @@ await registerAuth(app, {
   password: process.env.AGENTCLAW_PASSWORD,
   secret: LocalSecretStore.keyFromEnv(),
   mode: authModeFromEnv(),
+  onAuthenticated: (principal) => {
+    // Phase 3: the first real account adopts what password mode owned.
+    const rows = store.adoptLocalOwnerData(principal.ownerId);
+    if (rows > 0) {
+      app.log.warn(
+        { ownerId: principal.ownerId, email: principal.email, rows },
+        'adopted this installation\'s data into the first signed-in account',
+      );
+    }
+  },
 });
 await registerRoutes(app, {
   store,

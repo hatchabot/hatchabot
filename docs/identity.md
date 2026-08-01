@@ -75,9 +75,19 @@ phone app follows the identical flow — that's the point.
    finding 8). Sessions are now bound to a hash of the current password, so
    rotating `AGENTCLAW_PASSWORD` invalidates outstanding 30-day cookies.
    Covered by test/auth.test.ts.
-2. **Identity mode** — JWKS verification + web login via REST + CLI login.
-   Test on the Spark against a real Identity Platform project.
-3. **Migration** — dev-owner adoption flow.
+2. **Identity mode** — ✅ shipped 2026-08-01. `src/api/identity.ts` verifies
+   ID tokens against Google's securetoken certs (no Admin SDK, no service
+   account); `auth.ts` accepts Bearer tokens per call and mints a 12h cookie
+   from `POST /v1/session`. Web login does Google (GIS credential →
+   `signInWithIdp`) and email/password via the Identity Toolkit REST API;
+   `agentclaw login` stores a refresh token 0600. `/v1/config` (open in both
+   modes) tells the login screen which mode to render.
+   Project `agentclaw-504222`; env: `AGENTCLAW_GCP_PROJECT`,
+   `AGENTCLAW_IDENTITY_API_KEY`, `AGENTCLAW_GOOGLE_CLIENT_ID`.
+3. **Migration** — ✅ shipped 2026-08-01. `Store.adoptLocalOwnerData` re-keys
+   agents/profiles/hosts/memberships/invites from `dev-owner` to the first
+   real account that signs in, in one transaction, and refuses if any real
+   account already owns data here (so it can only happen once).
 4. **Roles** — role-scoped routes; full-invite flow for invitees.
 
 Each phase lands green on the Spark before the next; nothing requires Cloud

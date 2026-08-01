@@ -157,6 +157,42 @@ describe('identity auth mode', () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it('adopts the local owner’s data on first identity sign-in, once', async () => {
+    const store = new (await import('../src/store/store.js')).Store(
+      new (await import('better-sqlite3')).default(':memory:'),
+    );
+    store.insertHost({
+      id: 'h1', ownerId: 'dev-owner', kind: 'local', provider: 'mock', name: 'box',
+      settings: {}, createdAt: 'now',
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'dev-owner', name: 'Mine', slug: 'mine', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({
+      id: 'm1', agentId: 'a1', userId: 'dev-owner', role: 'owner', status: 'active',
+    });
+
+    const f = Fastify();
+    await registerAuth(f, {
+      secret: Buffer.alloc(32, 3),
+      mode: 'identity',
+      verifier: verifier(),
+      onAuthenticated: (p) => { store.adoptLocalOwnerData(p.ownerId); },
+    });
+    await f.inject({ method: 'POST', url: '/v1/session', payload: { idToken: makeToken() } });
+
+    expect(store.listAgents('user-uid-abc')).toHaveLength(1);
+    expect(store.listAgents('dev-owner')).toHaveLength(0);
+    expect(store.getAgent('a1')!.ownerId).toBe('user-uid-abc');
+    expect(store.listMemberships('a1')[0]!.userId).toBe('user-uid-abc');
+
+    // a second, different account must NOT inherit anything
+    expect(store.adoptLocalOwnerData('user-someone-else')).toBe(0);
+    expect(store.getAgent('a1')!.ownerId).toBe('user-uid-abc');
+  });
+
   it('rejects a forged session cookie', async () => {
     const f = await app();
     const forged = `${Buffer.from('uid-abc:9999999999999').toString('base64url')}.deadbeef`;

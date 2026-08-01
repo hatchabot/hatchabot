@@ -313,6 +313,39 @@ export class Store {
       .run({ channelUserId: null, invitedBy: null, joinedAt: null, displayName: null, ...m });
   }
 
+  /**
+   * docs/identity.md phase 3. A password-mode installation owns everything as
+   * the single LOCAL_OWNER; the first person to sign in with a real account
+   * adopts it. Guarded so it can only ever happen once: if any real account
+   * already owns data here, this is a no-op and the caller gets nothing.
+   *
+   * Returns the number of rows re-keyed (0 = nothing to adopt).
+   */
+  adoptLocalOwnerData(newOwnerId: string, localOwner = 'dev-owner'): number {
+    if (newOwnerId === localOwner) return 0;
+    const adopt = this.db.transaction((owner: string) => {
+      const claimed = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM agents WHERE owner_id != ?`)
+        .get(localOwner) as { n: number };
+      const claimedProfiles = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM ai_profiles WHERE owner_id != ?`)
+        .get(localOwner) as { n: number };
+      if (claimed.n > 0 || claimedProfiles.n > 0) return 0; // already adopted
+      let rows = 0;
+      for (const sql of [
+        `UPDATE agents SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE ai_profiles SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE hosts SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE memberships SET user_id = ? WHERE user_id = ?`,
+        `UPDATE invites SET created_by = ? WHERE created_by = ?`,
+      ]) {
+        rows += this.db.prepare(sql).run(owner, localOwner).changes;
+      }
+      return rows;
+    });
+    return adopt(newOwnerId);
+  }
+
   // ---- Snapshots ---------------------------------------------------------
 
   insertSnapshot(s: {

@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
-import { LOCAL_OWNER } from './principal.js';
+import { LOCAL_OWNER, type Principal } from './principal.js';
 import {
   identityConfigFromEnv,
   IdentityError,
@@ -28,6 +28,11 @@ export interface AuthOptions {
   mode?: AuthMode;
   /** Test seam / DI for identity mode. */
   verifier?: IdentityVerifier;
+  /**
+   * Called on each successful identity authentication. Phase 3 uses it to
+   * hand a password-mode installation's data to its first real account.
+   */
+  onAuthenticated?: (principal: Principal) => void;
 }
 
 export type AuthMode = 'password' | 'identity';
@@ -181,6 +186,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
         maxAge: Math.floor((exp - Date.now()) / 1000),
       });
       const principal = principalFor(token);
+      opts.onAuthenticated?.(principal);
       return { ok: true, ownerId: principal.ownerId, email: principal.email };
     } catch (err) {
       if (err instanceof IdentityError) return reply.code(401).send({ error: err.userMessage });
@@ -204,6 +210,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
       try {
         req.principal = principalFor(await verifier.verify(authz.slice(7)));
+        opts.onAuthenticated?.(req.principal);
         return;
       } catch (err) {
         const msg = err instanceof IdentityError ? err.userMessage : 'auth required';
