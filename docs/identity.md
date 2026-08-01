@@ -88,7 +88,16 @@ phone app follows the identical flow — that's the point.
    agents/profiles/hosts/memberships/invites from `dev-owner` to the first
    real account that signs in, in one transaction, and refuses if any real
    account already owns data here (so it can only happen once).
-4. **Roles** — role-scoped routes; full-invite flow for invitees.
+4. **Roles** — ✅ shipped 2026-08-01. `Store.listVisibleAgents` /
+   `Store.accessRole` grade every caller as owner / member / no-access;
+   `visibleAgent()` gates read-only surfaces while everything that changes an
+   agent (lifecycle, files, snapshots, members, export, bot token, gateway,
+   delete) stays on `ownedAgent()`. The agent list reports the viewer's
+   `role`, and the app renders members a chat-only card. Full invites:
+   `POST /v1/join` accepts an optional `idToken`, and the join page offers
+   Google sign-in — signing in keys the membership to the account so the
+   invitee can log in and see the agent; skipping it keeps the old
+   Telegram-only membership. Covered by test/roles.test.ts.
 
 Each phase lands green on the Spark before the next; nothing requires Cloud
 Run to exist yet.

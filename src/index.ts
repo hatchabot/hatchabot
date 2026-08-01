@@ -12,6 +12,7 @@ import { TelegramManualProvisioner } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
 import { authModeFromEnv, registerAuth } from './api/auth.js';
+import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
 import { reconcileAgents } from './orchestrator/reconcile.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
@@ -93,6 +94,10 @@ await registerRoutes(app, {
   webJoinPath: resolve(import.meta.dirname, '../web/join.html'),
   publicUrl: process.env.AGENTCLAW_PUBLIC_URL,
   authMode: authModeFromEnv(),
+  verifier:
+    authModeFromEnv() === 'identity'
+      ? new IdentityVerifier(identityConfigFromEnv())
+      : undefined,
 });
 
 await app.listen({ port: PORT, host: '0.0.0.0' });

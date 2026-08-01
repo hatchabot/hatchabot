@@ -62,11 +62,26 @@ export interface JoinResult {
  * Redeems the invite and creates the membership. Atomic on the invite row, so
  * two people racing the same link produce exactly one member.
  */
-export function redeemInvite(store: Store, code: string, displayName: string): JoinResult {
+export function redeemInvite(
+  store: Store,
+  code: string,
+  displayName: string,
+  /**
+   * The invitee's verified account id, when they signed in while joining
+   * (the "full invite" of docs/identity.md phase 4). Absent = lightweight
+   * membership: chat access only, no login.
+   */
+  accountId?: string,
+): JoinResult {
   const check = checkInvite(store, code);
   if (!check.valid) throw new InviteInvalidError(check.reason);
 
-  const userId = `member-${randomUUID()}`;
+  // Keying the membership on the account id is what lets them log in later
+  // and see this agent; otherwise it's an opaque per-invite id.
+  const userId = accountId ?? `member-${randomUUID()}`;
+  if (accountId && store.getMembership(check.agentId, accountId)) {
+    throw new InviteInvalidError('used'); // already a member of this agent
+  }
   if (!store.markInviteRedeemed(code.trim().toUpperCase(), userId)) {
     throw new InviteInvalidError('used'); // lost the race
   }

@@ -561,7 +561,31 @@ async function createAgent() {
 
 // ---- agent cards ------------------------------------------------------------
 
+function memberCard(a) {
+  return `
+  <div class="card" id="card-${a.id}">
+    <div class="row">
+      <div class="grow">
+        <span class="name">${esc(a.name)}</span>
+        ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
+      </div>
+      <span class="chip ${a.state}">${a.state}</span>
+    </div>
+    <div class="sub" style="margin-top:8px">
+      You're a member of this agent${a.sharedMemory ? ' — its memory is shared with everyone who uses it' : ''}.
+    </div>
+    <div class="actions">
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
+        <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Telegram App</a>` : ''}
+    </div>
+  </div>`;
+}
+
 function agentCard(a) {
+  // Members (role 'user') get a chat-only card: no lifecycle, no files, no
+  // members list. The server enforces this too — this just hides what would
+  // 404 anyway. (role is absent on older servers → treat as owner.)
+  if (a.role === 'user') return memberCard(a);
   const pending = a.pendingAction?.type === 'bot_token';
   const pairs = pairings[a.id] ?? [];
   return `

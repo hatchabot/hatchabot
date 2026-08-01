@@ -7,6 +7,7 @@ import type {
   Channel,
   Host,
   Membership,
+  MemberRole,
 } from '../domain/types.js';
 import { assertTransition } from '../domain/stateMachine.js';
 
@@ -208,6 +209,36 @@ export class Store {
       .prepare(`SELECT * FROM agents WHERE owner_id = ? AND state != 'DELETED' ORDER BY created_at`)
       .all(ownerId) as any[];
     return rows.map(rowToAgent);
+  }
+
+  /**
+   * Agents this account can see: the ones it owns, plus the ones it is an
+   * active member of (docs/identity.md phase 4 — a family member logs in and
+   * sees the shared agent, not an empty page).
+   */
+  listVisibleAgents(userId: string): Agent[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT a.* FROM agents a
+         LEFT JOIN memberships m ON m.agent_id = a.id AND m.user_id = ? AND m.status = 'active'
+         WHERE a.state != 'DELETED' AND (a.owner_id = ? OR m.user_id IS NOT NULL)
+         ORDER BY a.created_at`,
+      )
+      .all(userId, userId) as any[];
+    return rows.map(rowToAgent);
+  }
+
+  /**
+   * What this account may do with an agent: 'owner' (everything), 'admin',
+   * 'user' (chat-level), or undefined (no access at all).
+   */
+  accessRole(agentId: string, userId: string): MemberRole | undefined {
+    const agent = this.getAgent(agentId);
+    if (!agent || agent.state === 'DELETED') return undefined;
+    if (agent.ownerId === userId) return 'owner';
+    const m = this.getMembership(agentId, userId);
+    if (!m || m.status !== 'active') return undefined;
+    return m.role as MemberRole;
   }
 
   /** The only path that changes agent state. Enforces the §11.4 transitions. */

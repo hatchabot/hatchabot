@@ -21,6 +21,7 @@ import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.
 import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
 import type { Agent } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
+import type { IdentityVerifier } from './identity.js';
 import {
   autoSnapshot,
   captureSnapshot,
@@ -47,6 +48,8 @@ export interface ApiDeps {
   publicUrl?: string;
   /** Drives the login screen the unauthenticated page renders. */
   authMode?: 'password' | 'identity';
+  /** Set in identity mode: lets the join flow bind a membership to an account. */
+  verifier?: IdentityVerifier;
 }
 
 const CreateAIProfile = z.discriminatedUnion('kind', [
@@ -100,6 +103,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = store.getAgent(id);
     if (!agent || agent.ownerId !== ownerIdOf(req)) return undefined;
     return agent;
+  };
+
+  /**
+   * Phase 4 (docs/identity.md): an agent a member may *see* — theirs by
+   * ownership or by active membership. Read-only surfaces use this; anything
+   * that changes the agent's life (lifecycle, files, members, export, delete)
+   * stays on ownedAgent so a `user` member can't touch it.
+   */
+  const visibleAgent = (req: FastifyRequest, id: string): Agent | undefined => {
+    const agent = store.getAgent(id);
+    if (!agent) return undefined;
+    return store.accessRole(agent.id, ownerIdOf(req)) ? agent : undefined;
   };
 
   const snapshotDeps = (agent: Agent) => ({
@@ -334,7 +349,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   };
 
   app.get('/v1/agents', async (req) => {
-    const agents = store.listAgents(ownerIdOf(req));
+    const agents = store.listVisibleAgents(ownerIdOf(req));
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -355,8 +370,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             /* provider hiccup — omit version info rather than fail the list */
           }
         }
+        const role = store.accessRole(a.id, ownerIdOf(req));
         return {
           ...a,
+          /** What the viewer may do — drives which controls the app renders. */
+          role,
           // Never ship the gateway token in a poll response — it is a
           // credential for full agent control. /gateway serves it on demand.
           gatewayToken: undefined,
@@ -559,7 +577,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   );
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
-    const agent = ownedAgent(req, req.params.id);
+    const agent = visibleAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const channel = store.getChannelForAgent(agent.id);
     return {
@@ -762,11 +780,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Unauthenticated (code-gated): redeem + start watching for the invitee's
   // first Telegram contact, exactly like the owner's claim.
-  app.post<{ Body: { code?: string; name?: string } }>('/v1/join', async (req, reply) => {
-    const body = (req.body ?? {}) as { code?: string; name?: string };
+  app.post<{ Body: { code?: string; name?: string; idToken?: string } }>('/v1/join', async (req, reply) => {
+    const body = (req.body ?? {}) as { code?: string; name?: string; idToken?: string };
     if (!body.code) return reply.code(400).send({ error: 'code required' });
     try {
-      const joined = redeemInvite(store, body.code, body.name ?? '');
+      // Full invite (phase 4): when the invitee signs in, the membership is
+      // keyed to their real account, so they can log in and see this agent.
+      // Without a token it stays a lightweight, Telegram-only membership.
+      let accountId: string | undefined;
+      if (body.idToken && deps.verifier) {
+        try {
+          const token = await deps.verifier.verify(body.idToken);
+          accountId = `user-${token.sub}`;
+        } catch {
+          return reply.code(401).send({ error: "That sign-in didn't verify — try again." });
+        }
+      }
+      const joined = redeemInvite(store, body.code, body.name ?? '', accountId);
       const agent = store.getAgent(joined.agentId)!;
       const channelRow = store.getChannelForAgent(agent.id);
       if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {

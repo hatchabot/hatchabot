@@ -61,18 +61,56 @@ async function init() {
     </div>
     <label>Your name (so others know who's here)</label>
     <input id="name" maxlength="64" placeholder="e.g. Sam">
-    <button id="joinBtn">Join</button>
+    <div id="gsi" style="display:flex;justify-content:center;margin:12px 0"></div>
+    <button id="joinBtn">Join with Telegram only</button>
     <div class="err" id="err"></div>`;
-  document.getElementById('joinBtn').onclick = join;
+  document.getElementById('joinBtn').onclick = () => join();
+  setupSignIn();
 }
 
-async function join() {
+/**
+ * Optional sign-in: joining while signed in binds the membership to a real
+ * account, so the invitee can also open this page's app and see the agent.
+ * Without it the membership is Telegram-only, exactly as before.
+ */
+async function setupSignIn() {
+  let cfg;
+  try { cfg = await fetch('/v1/config').then(r => r.json()); } catch { return; }
+  const cid = cfg?.identity?.googleClientId, apiKey = cfg?.identity?.apiKey;
+  if (cfg?.authMode !== 'identity' || !cid || !apiKey) return;
+  const s = document.createElement('script');
+  s.src = 'https://accounts.google.com/gsi/client';
+  s.async = true;
+  s.onload = () => {
+    google.accounts.id.initialize({
+      client_id: cid,
+      callback: async (resp) => {
+        try {
+          const out = await fetch(
+            `https://identitytoolkit.googleapis.com/v1/accounts:signInWithIdp?key=${apiKey}`,
+            { method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                postBody: `id_token=${encodeURIComponent(resp.credential)}&providerId=google.com`,
+                requestUri: location.origin, returnSecureToken: true }) },
+          ).then(r => r.json());
+          if (!out.idToken) throw new Error('Sign-in failed');
+          await join(out.idToken);
+        } catch (e) { document.getElementById('err').textContent = e.message; }
+      },
+    });
+    google.accounts.id.renderButton(document.getElementById('gsi'),
+      { theme: 'filled_black', size: 'large', text: 'signin_with' });
+  };
+  document.head.appendChild(s);
+}
+
+async function join(idToken) {
   const btn = document.getElementById('joinBtn');
   btn.disabled = true;
   try {
     const res = await fetch('/v1/join', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code, name: document.getElementById('name').value }),
+      body: JSON.stringify({ code, name: document.getElementById('name').value, idToken }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
