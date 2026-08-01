@@ -19,6 +19,9 @@ export const CORE_FILES = ['SOUL.md', 'AGENTS.md', 'MEMORY.md'] as const;
 /** How many automatic snapshots to keep per agent. Manual ones are forever. */
 export const AUTO_KEEP = 20;
 
+/** Per-file ceiling for both snapshot capture and edits (256 KB). */
+export const MAX_FILE_BYTES = 256 * 1024;
+
 export type SnapshotReason = 'manual' | 'pre-edit' | 'pre-restore' | 'pre-rebuild' | 'scheduled';
 
 export interface SnapshotDeps {
@@ -45,9 +48,11 @@ export async function readCoreFiles(
 ): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const name of CORE_FILES) {
+    // Cap the read: these live in SQLite and are captured automatically, so
+    // an oversized MEMORY.md must not bloat the control plane.
     const res = await provider.execShell(
       runtimeRef,
-      `cat ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`,
+      `head -c ${MAX_FILE_BYTES} ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`,
     );
     if (res.stdout) files[name] = res.stdout;
   }

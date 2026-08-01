@@ -73,6 +73,14 @@ const CreateAIProfile = z.discriminatedUnion('kind', [
   }),
 ]);
 
+/** Zod issues render as "Request failed" in the app; send a sentence. */
+function zodMessage(err: z.ZodError): string {
+  const i = err.issues[0];
+  if (!i) return 'Invalid input';
+  const where = i.path.length ? `${i.path.join('.')}: ` : '';
+  return `${where}${i.message}`;
+}
+
 const CreateAgent = z.object({
   name: z.string().min(1).max(64),
   persona: z.string().max(4000).optional(),
@@ -116,6 +124,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent) return undefined;
     return store.accessRole(agent.id, ownerIdOf(req)) ? agent : undefined;
   };
+
+  /**
+   * The only shape an Agent leaves this process in. gatewayToken is a
+   * credential for full agent control (served on demand by /gateway), so
+   * stripping it belongs here rather than in each route's spread — four
+   * mutation routes previously leaked it by returning the raw row.
+   */
+  const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => ({
+    ...agent,
+    gatewayToken: undefined,
+    hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
+    ...extra,
+  });
 
   const snapshotDeps = (agent: Agent) => ({
     store,
@@ -215,7 +236,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.post('/v1/ai-profiles', async (req, reply) => {
     const parsed = CreateAIProfile.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const body = parsed.data;
 
     const id = randomUUID();
@@ -267,14 +288,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     '/v1/ai-profiles/:id',
     async (req, reply) => {
       const profile = store.getAIProfile(req.params.id);
-      if (!profile) return reply.code(404).send({ error: 'Not found' });
+      if (!profile || profile.ownerId !== ownerIdOf(req)) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
       const parsed = z
         .object({
           model: z.string().trim().min(1).optional(),
           models: z.array(z.string().min(1)).max(16).optional(),
         })
         .safeParse(req.body ?? {});
-      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       if (parsed.data.model !== undefined) store.setAIProfileModel(profile.id, parsed.data.model);
       if ('models' in ((req.body ?? {}) as object)) {
         store.setAIProfileModels(profile.id, parsed.data.models);
@@ -287,7 +310,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.delete<{ Params: { id: string } }>('/v1/ai-profiles/:id', async (req, reply) => {
     const profile = store.getAIProfile(req.params.id);
-    if (!profile) return reply.code(404).send({ error: 'Not found' });
+    if (!profile || profile.ownerId !== ownerIdOf(req)) {
+      return reply.code(404).send({ error: 'Not found' });
+    }
     const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id);
     if (using.length > 0) {
       return reply.code(400).send({
@@ -303,13 +328,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.post('/v1/agents', async (req, reply) => {
     const parsed = CreateAgent.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const ownerId = ownerIdOf(req);
 
+    // Ownership, not mere existence: without this any authenticated caller
+    // could run a container on the owner's host using the owner's AI
+    // credentials. Unknown-vs-not-yours are the same answer on purpose.
     const profile = store.getAIProfile(parsed.data.aiProfileId);
     const host = store.getHost(parsed.data.hostId);
-    if (!profile) return reply.code(400).send({ error: 'Unknown AI profile' });
-    if (!host) return reply.code(400).send({ error: 'Unknown host' });
+    if (!profile || profile.ownerId !== ownerId) {
+      return reply.code(400).send({ error: 'Unknown AI profile' });
+    }
+    if (!host || host.ownerId !== ownerId) {
+      return reply.code(400).send({ error: 'Unknown host' });
+    }
     if (profile.kind === 'subscription' && host.kind !== 'local') {
       return reply.code(400).send({
         error:
@@ -370,15 +402,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             /* provider hiccup — omit version info rather than fail the list */
           }
         }
-        const role = store.accessRole(a.id, ownerIdOf(req));
-        return {
-          ...a,
+        return publicAgent(a, {
           /** What the viewer may do — drives which controls the app renders. */
-          role,
-          // Never ship the gateway token in a poll response — it is a
-          // credential for full agent control. /gateway serves it on demand.
-          gatewayToken: undefined,
-          hasGateway: !!(a.gatewayPort && a.gatewayToken),
+          role: store.accessRole(a.id, ownerIdOf(req)),
           deepLink: store.getChannelForAgent(a.id)?.deepLink,
           // Default model from the agent's AI profile. Applied config can lag
           // one rebuild behind, and /model can switch a single chat session —
@@ -387,7 +413,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           lastActiveAt: await lastActiveFor(a),
           openclawVersion,
           updateAvailable,
-        };
+        });
       }),
     );
   });
@@ -426,7 +452,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           sharedMemory: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
-      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const { name, sharedMemory: shared } = parsed.data;
       if (name === undefined && shared === undefined) {
         return reply.code(400).send({ error: 'Nothing to update' });
@@ -468,7 +494,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           app.log.warn({ agentId: agent.id, stderr: write.stderr }, 'memory policy rewrite failed');
         }
       }
-      return { ...store.getAgent(agent.id)!, policyUpdated };
+      return publicAgent(store.getAgent(agent.id)!, { policyUpdated });
     },
   );
 
@@ -580,12 +606,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = visibleAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const channel = store.getChannelForAgent(agent.id);
-    return {
-      ...agent,
-      gatewayToken: undefined,
-      hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
-      deepLink: channel?.deepLink,
-    };
+    return publicAgent(agent, { deepLink: channel?.deepLink });
   });
 
   // On-demand Control UI credential — same shape as the bot-token reveal, so
@@ -675,9 +696,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Resolve the host up front so the right provider handles the restore.
       const hosts = store.listHosts(ownerId);
       const host = req.query.hostId
-        ? store.getHost(req.query.hostId)
+        ? hosts.find((h) => h.id === req.query.hostId)
         : (hosts.find((h) => h.kind === 'local') ?? hosts[0]);
       if (!host) return reply.code(400).send({ error: 'No host available to import onto.' });
+      if (req.query.aiProfileId) {
+        const p = store.getAIProfile(req.query.aiProfileId);
+        if (!p || p.ownerId !== ownerId) {
+          return reply.code(400).send({ error: 'Unknown AI profile' });
+        }
+      }
       try {
         const agent = await importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel,
@@ -726,7 +753,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     kickProvision(agent.id);
-    return reply.code(202).send(store.getAgent(agent.id));
+    return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });
 
   // ---- invites & join (§12.3) --------------------------------------------
@@ -892,7 +919,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       return reply.code(409).send({ error: `Cannot stop while ${agent.state}` });
     }
     await providerFor(agent.hostId).stop(agent.runtimeRef);
-    return store.setAgentState(agent.id, 'STOPPED');
+    return publicAgent(store.setAgentState(agent.id, 'STOPPED'));
   });
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
@@ -902,7 +929,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
     }
     await providerFor(agent.hostId).start(agent.runtimeRef);
-    return store.setAgentState(agent.id, 'RUNNING');
+    return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
   });
 
   app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {

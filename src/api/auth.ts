@@ -10,6 +10,13 @@ import {
 } from './identity.js';
 
 const COOKIE = 'agentclaw_session';
+/**
+ * Identity mode targets the public internet, where a cookie must not ride
+ * plain HTTP. Home installs are http://localhost / tailnet, so the flag is
+ * opt-out via AGENTCLAW_INSECURE_COOKIES=1.
+ */
+const secureCookies = (mode: string) =>
+  mode === 'identity' && process.env.AGENTCLAW_INSECURE_COOKIES !== '1';
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 /** Identity-mode browser sessions are shorter: the token behind them is too. */
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -182,6 +189,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       reply.setCookie(COOKIE, mintSession(token.sub, exp), {
         httpOnly: true,
         sameSite: 'strict',
+        secure: secureCookies('identity'),
         path: '/',
         maxAge: Math.floor((exp - Date.now()) / 1000),
       });

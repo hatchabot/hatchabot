@@ -27,14 +27,21 @@ declare module 'fastify' {
 }
 
 /**
- * The caller for this request. Auth sets `request.principal`; until identity
- * mode exists, a password-mode session IS the local owner. The legacy
- * `x-agentclaw-owner` header still works for scripts and tests.
+ * The caller for this request. Auth always sets `request.principal` on an
+ * authenticated route — in password mode that is the single local owner, in
+ * identity mode the verified token subject.
  */
 export function principalOf(req: FastifyRequest): Principal {
   if (req.principal) return req.principal;
+  // No verified principal: this is either a test harness or an auth-exempt
+  // route that has no business asking who the caller is. The header branch is
+  // opt-in so that adding a route under /join/* or /v1/invites/* can never
+  // silently become an owner-spoof. Set AGENTCLAW_ALLOW_OWNER_HEADER=1 in
+  // tests and scripts that need it.
   const raw = (req.headers as Record<string, unknown>)['x-agentclaw-owner'];
-  if (typeof raw === 'string' && raw) return { ownerId: raw, via: 'header' };
+  if (process.env.AGENTCLAW_ALLOW_OWNER_HEADER === '1' && typeof raw === 'string' && raw) {
+    return { ownerId: raw, via: 'header' };
+  }
   return { ownerId: LOCAL_OWNER, via: 'password' };
 }
 

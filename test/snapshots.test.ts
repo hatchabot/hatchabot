@@ -14,12 +14,12 @@ function fileWorld(initial: Record<string, string>) {
   const store = new Store(new Database(':memory:'));
   const provider = new MockProvider();
   const files = { ...initial };
-  // cat → contents of whichever core file the script names; write → capture it.
+  // read → contents of whichever core file the script names; write → capture it.
   (provider as any).execShell = async (_ref: string, script: string) => {
     provider.execLog.push(['sh', script]);
     const m = script.match(/agents\/[^/]+\/agent\/([A-Za-z.]+)/);
     const name = m?.[1] ?? '';
-    if (script.startsWith('cat ')) return { code: 0, stdout: files[name] ?? '', stderr: '' };
+    if (script.startsWith('head -c')) return { code: 0, stdout: files[name] ?? '', stderr: '' };
     const b64 = script.match(/echo "([^"]+)"/)?.[1] ?? '';
     files[name] = Buffer.from(b64, 'base64').toString('utf8');
     return { code: 0, stdout: '', stderr: '' };

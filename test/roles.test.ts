@@ -115,6 +115,51 @@ describe('route enforcement', () => {
   });
 });
 
+describe('cross-owner isolation (audit regressions)', () => {
+  function twoOwners() {
+    const store = world();
+    store.insertAIProfile({
+      id: 'p-owner', ownerId: OWNER, name: 'Owner AI', vendor: 'anthropic',
+      kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p', createdAt: 'now',
+    });
+    return store;
+  }
+
+  it("refuses to create an agent on another owner's host or AI profile", async () => {
+    const f = await app(twoOwners());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as(MEMBER),
+      payload: { name: 'Sneaky', aiProfileId: 'p-owner', hostId: 'h1' },
+    });
+    expect(res.statusCode).toBe(400); // not 202 — no container on the owner's box
+  });
+
+  it("refuses to edit or delete another owner's AI profile", async () => {
+    const f = await app(twoOwners());
+    const patch = await f.inject({
+      method: 'PATCH', url: '/v1/ai-profiles/p-owner', headers: as(STRANGER),
+      payload: { model: 'hijacked' },
+    });
+    expect(patch.statusCode).toBe(404);
+    const del = await f.inject({
+      method: 'DELETE', url: '/v1/ai-profiles/p-owner', headers: as(STRANGER),
+    });
+    expect(del.statusCode).toBe(404);
+  });
+
+  it('never returns the gateway token from mutation responses', async () => {
+    const store = twoOwners();
+    store.ensureGatewayAccess('a1');
+    const f = await app(store);
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: as(OWNER), payload: { name: 'Renamed' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().gatewayToken).toBeUndefined();
+    expect(res.json().hasGateway).toBe(true);
+  });
+});
+
 describe('full invite binding', () => {
   it('keys the membership to the account when one is supplied', () => {
     const store = world();

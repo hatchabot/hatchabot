@@ -37,6 +37,7 @@ const pool = new TelegramPoolProvisioner(db, secrets);
 const manual = new TelegramManualProvisioner(secrets);
 const channel = new CompositeTelegramProvisioner(pool, manual);
 
+let adoptionChecked = false;
 const providers = new Map<string, RuntimeProvider>();
 providers.set('mock', new MockProvider());
 // AGENTCLAW_PREFIX namespaces docker container/volume names so a second
@@ -75,7 +76,10 @@ await registerAuth(app, {
   secret: LocalSecretStore.keyFromEnv(),
   mode: authModeFromEnv(),
   onAuthenticated: (principal) => {
-    // Phase 3: the first real account adopts what password mode owned.
+    // Phase 3: the first real account adopts what password mode owned. Runs
+    // at most once per process — it fires on every authenticated request.
+    if (adoptionChecked) return;
+    adoptionChecked = true;
     const rows = store.adoptLocalOwnerData(principal.ownerId);
     if (rows > 0) {
       app.log.warn(

@@ -59,18 +59,33 @@ export class IdentityVerifier {
   }
 
   /** Google rotates these daily; an hour of caching is well inside that. */
+  #lastAttempt = 0;
+
   async #certFor(kid: string): Promise<string> {
-    const stale = (this.#config.now?.() ?? Date.now()) - this.#fetchedAt > 60 * 60_000;
-    if (!this.#certs[kid] || stale) {
+    const now = this.#config.now?.() ?? Date.now();
+    const stale = now - this.#fetchedAt > 60 * 60_000;
+    // Refetch when the key is unknown (rotation) or the cache aged out — but
+    // never more than once a minute, so unauthenticated callers can't drive
+    // outbound requests by spamming made-up kids.
+    if ((!this.#certs[kid] || stale) && now - this.#lastAttempt > 60_000) {
+      this.#lastAttempt = now;
       const fetcher =
         this.#config.fetchCerts ??
         (async () => {
           const res = await fetch(CERT_URL);
-          if (!res.ok) throw new IdentityError('Could not reach Google to verify your login.');
+          if (!res.ok) throw new Error(`cert fetch failed: ${res.status}`);
           return (await res.json()) as Record<string, string>;
         });
-      this.#certs = await fetcher();
-      this.#fetchedAt = this.#config.now?.() ?? Date.now();
+      try {
+        this.#certs = await fetcher();
+        this.#fetchedAt = now;
+      } catch (err) {
+        // A Google outage must not log everyone out: keep serving the cached
+        // keys and only fail if this particular kid was never seen.
+        if (!this.#certs[kid]) {
+          throw new IdentityError('Could not reach Google to verify your login.');
+        }
+      }
     }
     const cert = this.#certs[kid];
     if (!cert) throw new IdentityError('Your login could not be verified — try signing in again.');
@@ -133,6 +148,12 @@ export class IdentityVerifier {
  * unlike email, which a user can update — so it is what owns data.
  */
 export function principalFor(token: VerifiedToken): Principal {
+  // Google-federated sign-ins arrive verified; a fresh email/password signup
+  // does not. Refusing unverified emails stops "sign up as anyone" from
+  // minting a usable principal.
+  if (token.email && !token.emailVerified) {
+    throw new IdentityError('Verify your email address, then sign in again.');
+  }
   return {
     ownerId: `user-${token.sub}`,
     via: 'identity',

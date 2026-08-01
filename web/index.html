@@ -478,7 +478,7 @@ function renderAiList() {
         <input type="text" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(', '))}"
                placeholder="More switchable models, comma-separated" title="Switchable in chat via /model" style="flex:2;min-width:0">
         <button onclick="saveAiProfile('${p.id}')">Save</button>
-        <button class="danger" onclick="delAiProfile('${p.id}', '${esc(p.name)}')">×</button>
+        <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">×</button>
       </div>
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
 }
@@ -605,33 +605,33 @@ function agentCard(a) {
     ${pairs.map(p => `
       <div class="pair">
         <span class="grow">🔑 <b>${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
-        <button class="primary" onclick="approve('${a.id}','${esc(p.code)}')">Let them in</button>
+        <button class="primary" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
       </div>`).join('')}
     ${(members[a.id] ?? []).length > 1 ? `
       <div class="members">👥 ${(members[a.id] ?? []).map(m => {
         const label = esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)));
         const x = m.role === 'owner' ? '' :
-          `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${esc(m.userId)}','${label}')">×</span>`;
+          `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
         return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
       }).join('')}
       </div>` : ''}
     <div class="actions">
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
         <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
-      ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>
-        <button onclick="openEdit('${a.id}', '${esc(a.name)}')">Edit…</button>
-        <button onclick="openLogs('${a.id}', '${esc(a.name)}')">Logs</button>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
+        <button onclick="openEdit('${a.id}', '${jsq(a.name)}')">Edit…</button>
+        <button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>` : ''}
       ${a.state === 'RUNNING' && a.hasGateway
-        ? `<button onclick="openGateway('${a.id}', '${esc(a.slug)}')" title="This agent's own OpenClaw Control UI (debug)">OpenClaw</button>` : ''}
+        ? `<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')" title="This agent's own OpenClaw Control UI (debug)">OpenClaw</button>` : ''}
       ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
         ? `<button onclick="toggleMemory('${a.id}', ${a.sharedMemory})" title="Changes what invitees are told and how the agent treats MEMORY.md">${a.sharedMemory ? 'Make private' : 'Make shared'}</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
-           <button onclick="exportAgent('${a.id}', '${esc(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>` : ''}
+           <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
-      ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${esc(a.name)}')">Delete</button>` : ''}
+      ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
     </div>
   </div>`;
 }
@@ -701,7 +701,7 @@ async function loadSnapshots() {
           <span class="grow">🕘 <b>${esc(s.label)}</b>
             <span style="color:var(--dim)">${ago(s.createdAt)} · ${s.files.length} files${s.reason === 'manual' ? ' · kept' : ''}</span>
           </span>
-          <button onclick="restoreSnapshot('${s.id}', '${esc(s.label)}')">Restore</button>
+          <button onclick="restoreSnapshot('${s.id}', '${jsq(s.label)}')">Restore</button>
         </div>`).join('')
       : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -959,6 +959,16 @@ async function refresh(withMeta) {
   const busy = agents.some(a => a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
   pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
+}
+
+/**
+ * Escape for a JS string literal that lives inside an HTML attribute
+ * (onclick="f('HERE')"). Backslash-escape first so that after the browser
+ * HTML-decodes &#39; the JS parser sees \' — an escaped quote, not a
+ * terminator. Using esc() alone here is a script-injection sink.
+ */
+function jsq(v) {
+  return esc(String(v ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }
 
 function esc(s) {
