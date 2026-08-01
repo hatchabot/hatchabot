@@ -71,6 +71,10 @@ export interface Agent {
   persona: string;
   /** One-to-many agents share MEMORY.md across members (§12.5). */
   sharedMemory: boolean;
+  /** Host port publishing the agent's own OpenClaw Control UI (debug). */
+  gatewayPort?: number;
+  /** Gateway auth token for that Control UI. */
+  gatewayToken?: string;
   /**
    * Set while provisioning is parked on a human step (e.g. the user must
    * paste a bot token). The app renders this as an actionable card; resuming

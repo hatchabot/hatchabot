@@ -23,6 +23,11 @@ export interface RuntimeSpec {
    */
   previousRef?: string;
   /**
+   * Ports to publish host→container (e.g. the agent's Control UI). Providers
+   * that cannot publish (mock) ignore these.
+   */
+  ports?: Array<{ host: number; container: number }>;
+  /**
    * Host directories to expose inside the runtime. Used for subscription auth:
    * the owner's ~/.claude is mounted so every agent on the box shares the one
    * OAuth credential in place (same file, same host — refresh stays coherent).
@@ -69,6 +74,11 @@ export interface OpenClawConfigPatch {
    * time; models then ride the native anthropic provider.
    */
   setupToken?: string;
+  /**
+   * When set, the container gateway binds 0.0.0.0 behind token auth so the
+   * provider can publish its port — the per-agent Control UI debug door.
+   */
+  gatewayToken?: string;
   telegram?: {
     accountId: string;
     botToken: string;

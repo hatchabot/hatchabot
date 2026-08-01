@@ -47,11 +47,15 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
   if (!host) throw new Error(`No such host: ${input.hostId}`);
 
   const now = new Date().toISOString();
+  const slug = slugify(input.name);
+  // A deleted agent's tombstone row still holds UNIQUE(owner_id, slug) —
+  // free it so names are reusable after deletion.
+  store.releaseDeletedSlug(input.ownerId, slug);
   const agent: Agent = {
     id: randomUUID(),
     ownerId: input.ownerId,
     name: input.name,
-    slug: slugify(input.name),
+    slug,
     state: 'PROVISIONING',
     aiProfileId: profile.id,
     hostId: host.id,
@@ -219,10 +223,14 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   // allowlist would silently reject their first contact. allowFrom seeds the
   // known members on fresh volumes.
   const allowFrom = store.listAllowedChannelUserIds(agentId);
+  // Debug door: each agent's Control UI published on a stable host port
+  // behind a per-agent gateway token.
+  const gateway = store.ensureGatewayAccess(agentId);
   return {
     agentId,
     slug: agent.slug,
     previousRef: agent.runtimeRef,
+    ports: [{ host: gateway.port, container: 18789 }],
     workspace: {
       files: buildWorkspaceSeed({
         agentName: agent.name,
@@ -236,6 +244,7 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         setupToken: oauthToken,
+        gatewayToken: gateway.token,
         telegram: {
           accountId: channelRow.accountId,
           botToken,

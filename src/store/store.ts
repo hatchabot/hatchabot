@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
   Agent,
@@ -74,6 +75,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
       `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
+      `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
+      `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -208,6 +211,28 @@ export class Store {
       .prepare(`UPDATE agents SET state = ?, state_reason = ?, updated_at = ? WHERE id = ?`)
       .run(next, reason ?? null, new Date().toISOString(), id);
     return this.getAgent(id)!;
+  }
+
+  /**
+   * Debug access to the agent's own OpenClaw Control UI: a host port and a
+   * gateway auth token, allocated once and stable across rebuilds. Ports
+   * start at 19100 and count up per installation.
+   */
+  ensureGatewayAccess(id: string): { port: number; token: string } {
+    const agent = this.getAgent(id);
+    if (!agent) throw new Error(`No such agent: ${id}`);
+    if (agent.gatewayPort && agent.gatewayToken) {
+      return { port: agent.gatewayPort, token: agent.gatewayToken };
+    }
+    const row = this.db
+      .prepare(`SELECT MAX(gateway_port) AS p FROM agents`)
+      .get() as { p: number | null };
+    const port = Math.max(19099, row.p ?? 0) + 1;
+    const token = randomBytes(16).toString('hex');
+    this.db
+      .prepare(`UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?`)
+      .run(port, token, id);
+    return { port, token };
   }
 
   setAgentRuntimeRef(id: string, runtimeRef: string): void {
@@ -454,6 +479,8 @@ function rowToAgent(r: any): Agent {
     persona: r.persona,
     sharedMemory: !!r.shared_memory,
     pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
+    gatewayPort: r.gateway_port ?? undefined,
+    gatewayToken: r.gateway_token ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

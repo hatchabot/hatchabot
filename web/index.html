@@ -474,10 +474,13 @@ function agentCard(a) {
       </div>` : ''}
     <div class="actions">
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
-        <a class="btn" href="${esc(a.deepLink)}" title="Open in the Telegram app">Telegram App</a>` : ''}
+        <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${esc(a.name)}')">Edit…</button>
         <button onclick="openLogs('${a.id}', '${esc(a.name)}')">Logs</button>` : ''}
+      ${a.state === 'RUNNING' && a.gatewayPort && a.gatewayToken
+        ? `<a class="btn" target="_blank" title="This agent's own OpenClaw Control UI (debug)"
+             href="http://${location.hostname}:${a.gatewayPort}/#token=${esc(a.gatewayToken)}">OpenClaw</a>` : ''}
       ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
         ? `<button onclick="toggleMemory('${a.id}', ${a.sharedMemory})" title="Changes what invitees are told and how the agent treats MEMORY.md">${a.sharedMemory ? 'Make private' : 'Make shared'}</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}

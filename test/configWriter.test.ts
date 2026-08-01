@@ -67,6 +67,25 @@ describe('buildConfigCommands multi-model', () => {
     expect(described).toContain('<redacted> | openclaw models auth --agent a1 paste-token');
   });
 
+  it('gateway token: binds auto behind token auth, redacted in logs', () => {
+    const cmds = buildConfigCommands({
+      agentId: 'a1',
+      model: 'claude-opus-4-8',
+      authMode: 'api-key',
+      gatewayToken: 'gw-secret-token',
+    });
+    expect(argFor(cmds, 'gateway.auth.mode')).toBe('token');
+    expect(argFor(cmds, 'gateway.auth.token')).toBe('gw-secret-token');
+    expect(argFor(cmds, 'gateway.bind')).toBe('auto');
+    expect(describeConfigCommands(cmds).join('\n')).not.toContain('gw-secret-token');
+  });
+
+  it('gateway stays loopback + no auth without a token', () => {
+    const cmds = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
+    expect(argFor(cmds, 'gateway.auth.mode')).toBe('none');
+    expect(argFor(cmds, 'gateway.bind')).toBe('loopback');
+  });
+
   it('keeps the single-model shape when models is absent', () => {
     const cmds = buildConfigCommands({
       agentId: 'a1',

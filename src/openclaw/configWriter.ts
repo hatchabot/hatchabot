@@ -43,13 +43,22 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   const cmds: ConfigCommand[] = [];
   const workspaceDir = WORKSPACE_DIR_TEMPLATE.replace('{slug}', patch.agentId);
 
-  // Gateway must run headless inside the runtime. Loopback-only + no auth is
-  // fine because nothing else lives in the container's network namespace.
-  // bind must be pinned: in a container OpenClaw defaults to bind=auto
-  // (0.0.0.0) and then refuses to start unauthenticated.
+  // Gateway must run headless inside the runtime. With a gatewayToken the
+  // gateway binds 0.0.0.0 behind token auth so the host can publish its port
+  // (the per-agent Control UI debug button). Without one: loopback-only + no
+  // auth, which is fine because nothing else lives in the container's netns.
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
-  cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'none'] });
-  cmds.push({ argv: ['config', 'set', 'gateway.bind', 'loopback'] });
+  if (patch.gatewayToken) {
+    cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'token'] });
+    cmds.push({
+      argv: ['config', 'set', 'gateway.auth.token', patch.gatewayToken],
+      sensitive: true,
+    });
+    cmds.push({ argv: ['config', 'set', 'gateway.bind', 'auto'] });
+  } else {
+    cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'none'] });
+    cmds.push({ argv: ['config', 'set', 'gateway.bind', 'loopback'] });
+  }
 
   const prefixedModel = patch.model ? `anthropic/${patch.model}` : undefined;
   // Primary first, deduped: patch.models may or may not repeat patch.model.

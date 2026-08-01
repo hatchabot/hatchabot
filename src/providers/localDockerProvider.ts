@@ -103,6 +103,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     for (const m of spec.hostMounts ?? []) {
       args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
     }
+    for (const p of spec.ports ?? []) {
+      args.push('-p', `${p.host}:${p.container}`);
+    }
     for (const [k, v] of Object.entries(spec.env)) {
       args.push('-e', `${k}=${v}`);
     }
