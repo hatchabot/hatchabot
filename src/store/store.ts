@@ -216,23 +216,27 @@ export class Store {
   /**
    * Debug access to the agent's own OpenClaw Control UI: a host port and a
    * gateway auth token, allocated once and stable across rebuilds. Ports
-   * start at 19100 and count up per installation.
+   * start at 19100 and count up per installation. Allocation runs in a
+   * transaction — two concurrent provisions must not get the same port.
    */
   ensureGatewayAccess(id: string): { port: number; token: string } {
-    const agent = this.getAgent(id);
-    if (!agent) throw new Error(`No such agent: ${id}`);
-    if (agent.gatewayPort && agent.gatewayToken) {
-      return { port: agent.gatewayPort, token: agent.gatewayToken };
-    }
-    const row = this.db
-      .prepare(`SELECT MAX(gateway_port) AS p FROM agents`)
-      .get() as { p: number | null };
-    const port = Math.max(19099, row.p ?? 0) + 1;
-    const token = randomBytes(16).toString('hex');
-    this.db
-      .prepare(`UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?`)
-      .run(port, token, id);
-    return { port, token };
+    const alloc = this.db.transaction((agentId: string) => {
+      const agent = this.getAgent(agentId);
+      if (!agent) throw new Error(`No such agent: ${agentId}`);
+      if (agent.gatewayPort && agent.gatewayToken) {
+        return { port: agent.gatewayPort, token: agent.gatewayToken };
+      }
+      const row = this.db
+        .prepare(`SELECT MAX(gateway_port) AS p FROM agents`)
+        .get() as { p: number | null };
+      const port = Math.max(19099, row.p ?? 0) + 1;
+      const token = randomBytes(16).toString('hex');
+      this.db
+        .prepare(`UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?`)
+        .run(port, token, agentId);
+      return { port, token };
+    });
+    return alloc(id);
   }
 
   setAgentRuntimeRef(id: string, runtimeRef: string): void {
@@ -429,6 +433,11 @@ export class Store {
       .get(agentId, channelUserId) as any;
     if (!r) return undefined;
     return { userId: r.user_id, role: r.role, displayName: r.display_name ?? undefined };
+  }
+
+  /** Hard delete — used by import rollback, not by revoke (which tombstones). */
+  deleteMemberships(agentId: string): void {
+    this.db.prepare(`DELETE FROM memberships WHERE agent_id = ?`).run(agentId);
   }
 
   revokeMembership(agentId: string, userId: string): void {

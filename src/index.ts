@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { hostname } from 'node:os';
 import Database from 'better-sqlite3';
@@ -20,6 +20,15 @@ const PORT = Number(process.env.PORT ?? 8080);
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
+// The DB holds encrypted secrets AND cleartext gateway tokens — no other
+// local user has any business reading it. (WAL siblings too.)
+for (const f of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
+  try {
+    chmodSync(f, 0o600);
+  } catch {
+    /* not created yet — sqlite makes them on first write */
+  }
+}
 
 const store = new Store(db);
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());

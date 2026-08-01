@@ -483,9 +483,8 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${esc(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${esc(a.name)}')">Edit…</button>
         <button onclick="openLogs('${a.id}', '${esc(a.name)}')">Logs</button>` : ''}
-      ${a.state === 'RUNNING' && a.gatewayPort && a.gatewayToken
-        ? `<a class="btn" target="_blank" title="This agent's own OpenClaw Control UI (debug)"
-             href="http://${location.hostname}:${a.gatewayPort}/chat/${esc(a.slug)}#token=${esc(a.gatewayToken)}">OpenClaw</a>` : ''}
+      ${a.state === 'RUNNING' && a.hasGateway
+        ? `<button onclick="openGateway('${a.id}', '${esc(a.slug)}')" title="This agent's own OpenClaw Control UI (debug)">OpenClaw</button>` : ''}
       ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
         ? `<button onclick="toggleMemory('${a.id}', ${a.sharedMemory})" title="Changes what invitees are told and how the agent treats MEMORY.md">${a.sharedMemory ? 'Make private' : 'Make shared'}</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
@@ -672,6 +671,15 @@ async function kick(agentId, userId, label) {
     toast(`${label} removed`);
     pairTick = 0; // refetch members on next poll
     await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function openGateway(id, slug) {
+  try {
+    const g = await api(`/v1/agents/${id}/gateway`);
+    // Fetched on click, never in the poll: the token grants full control of
+    // this agent's gateway. Loopback-published, so localhost is the host.
+    window.open(`http://localhost:${g.port}/chat/${slug}#token=${g.token}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }
 

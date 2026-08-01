@@ -323,6 +323,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         }
         return {
           ...a,
+          // Never ship the gateway token in a poll response — it is a
+          // credential for full agent control. /gateway serves it on demand.
+          gatewayToken: undefined,
+          hasGateway: !!(a.gatewayPort && a.gatewayToken),
           deepLink: store.getChannelForAgent(a.id)?.deepLink,
           // Default model from the agent's AI profile. Applied config can lag
           // one rebuild behind, and /model can switch a single chat session —
@@ -460,7 +464,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = store.getAgent(req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const channel = store.getChannelForAgent(agent.id);
-    return { ...agent, deepLink: channel?.deepLink };
+    return {
+      ...agent,
+      gatewayToken: undefined,
+      hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
+      deepLink: channel?.deepLink,
+    };
+  });
+
+  // On-demand Control UI credential — same shape as the bot-token reveal, so
+  // the token is fetched by an explicit click, not broadcast in every poll.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/gateway', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    if (!agent?.gatewayPort || !agent.gatewayToken) {
+      return reply.code(404).send({ error: 'This agent has no debug gateway yet — rebuild it.' });
+    }
+    return { port: agent.gatewayPort, token: agent.gatewayToken };
   });
 
   // The parked-provisioning resume: user pasted their BotFather token.
@@ -736,6 +755,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/stop', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    // Guard the transition here so a mid-rebuild stop is a 409, not a 500.
+    if (agent.state !== 'RUNNING') {
+      return reply.code(409).send({ error: `Cannot stop while ${agent.state}` });
+    }
     await providerFor(agent.hostId).stop(agent.runtimeRef);
     return store.setAgentState(agent.id, 'STOPPED');
   });
@@ -743,6 +766,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (agent.state !== 'STOPPED') {
+      return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
+    }
     await providerFor(agent.hostId).start(agent.runtimeRef);
     return store.setAgentState(agent.id, 'RUNNING');
   });
@@ -750,6 +776,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
     const agent = store.getAgent(req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    // Wait for any in-flight provision/rebuild: deleting underneath one would
+    // let it re-create the container AFTER the purge, leaving an orphan that
+    // still holds the bot token and keeps polling Telegram.
+    const running = inflight.get(agent.id);
+    if (running) await running.catch(() => {});
     store.setAgentState(agent.id, 'DELETING');
     if (agent.runtimeRef) {
       await providerFor(agent.hostId).destroy(agent.runtimeRef, { purge: true });
@@ -757,6 +788,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const channel = store.getChannelForAgent(agent.id);
     if (channel) {
       await deps.channel.release(channel.accountId);
+      // An imported agent's token lives under channel/<agentId>/bot-token,
+      // which release() (keyed by username) never touches — scrub it here so
+      // deletion doesn't leave a live credential in the store.
+      if (channel.secretRef.startsWith('channel/')) {
+        await secrets.delete(channel.secretRef).catch(() => {});
+      }
       store.deleteChannelForAgent(agent.id);
     }
     return store.setAgentState(agent.id, 'DELETED');

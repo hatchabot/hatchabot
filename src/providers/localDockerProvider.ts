@@ -104,7 +104,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
     }
     for (const p of spec.ports ?? []) {
-      args.push('-p', `${p.host}:${p.container}`);
+      // Loopback only: the agent's Control UI is a debug door for whoever is
+      // on this box (or tunnelling to it), never for the whole LAN/tailnet.
+      args.push('-p', `127.0.0.1:${p.host}:${p.container}`);
     }
     for (const [k, v] of Object.entries(spec.env)) {
       args.push('-e', `${k}=${v}`);
@@ -276,7 +278,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { volume } = this.#names(runtimeRef);
     await new Promise<void>((resolve, reject) => {
       const child = spawn(this.docker, [
-        'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine', 'tar', 'xz', '-C', '/vol',
+        // An archive is untrusted input: never let it set ownership or modes.
+        'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
+        'tar', 'xz', '--no-same-owner', '--no-same-permissions', '-C', '/vol',
       ]);
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));

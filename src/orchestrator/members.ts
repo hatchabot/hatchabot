@@ -146,6 +146,10 @@ export async function revokeMember(
   const channel = store.getChannelForAgent(agentId);
   if (!agent?.runtimeRef || !channel) return;
 
+  // Telegram user ids are numeric; anything else never reaches a shell string.
+  if (!/^\d{1,32}$/.test(member.channelUserId)) {
+    throw new RevokeError('Removed from the member list, but their chat id looks wrong — rebuild the agent to enforce it.');
+  }
   // Filename uses the lowercased account id (observed on 2026.6.11).
   const file = `/home/node/.openclaw/credentials/telegram-${channel.accountId.toLowerCase()}-allowFrom.json`;
   const script = `node -e '

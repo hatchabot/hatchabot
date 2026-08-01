@@ -288,6 +288,13 @@ export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promis
   try {
     await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
     const spec = await buildRuntimeSpec(deps, agentId);
+    // Deletion may have started while we were stopping. Re-creating the
+    // container now would resurrect a purged agent as an orphan.
+    const current = store.getAgent(agentId);
+    if (!current || current.state === 'DELETING' || current.state === 'DELETED') {
+      log('rebuild.abandoned', { agentId, reason: 'agent is being deleted' });
+      return current ?? agent;
+    }
     const { runtimeRef } = await provider.provision(spec);
     await provider.start(runtimeRef);
     await waitForHealthy(provider, runtimeRef, sleep);

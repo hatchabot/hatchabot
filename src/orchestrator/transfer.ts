@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import type { Agent } from '../domain/types.js';
-import { buildRuntimeSpec, waitForHealthy, type ProvisionDeps } from './provision.js';
+import { z } from 'zod';
+import type { Agent, MemberRole } from '../domain/types.js';
+import { buildRuntimeSpec, slugify, waitForHealthy, type ProvisionDeps } from './provision.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -26,13 +27,13 @@ export interface ExportManifest {
   exportedAt: string;
   agent: { name: string; slug: string; persona: string; sharedMemory: boolean };
   ai: { vendor: string; model: string; models?: string[] };
-  channel: { kind: string; accountId: string; deepLink: string; botToken: string };
+  channel: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
   memberships: Array<{
     userId: string;
-    role: string;
+    role: MemberRole;
     displayName?: string;
     channelUserId?: string;
-    status: string;
+    status: 'active' | 'revoked';
   }>;
   /** base64 gzipped tarball of the OpenClaw state dir. */
   state: string;
@@ -44,6 +45,52 @@ export class TransferError extends Error {
     this.name = 'TransferError';
   }
 }
+
+/**
+ * An archive is untrusted input — it crosses machines and may arrive from
+ * someone else. Everything below is validated before a single value reaches
+ * the store, a shell string, or a docker name. The slug matters most: it is
+ * interpolated into container/volume names and workspace paths.
+ */
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+const ManifestSchema = z.object({
+  format: z.literal(EXPORT_FORMAT),
+  version: z.literal(EXPORT_VERSION),
+  exportedAt: z.string().max(64),
+  agent: z.object({
+    name: z.string().min(1).max(64),
+    slug: z.string().regex(SLUG_RE),
+    persona: z.string().max(8000),
+    sharedMemory: z.boolean(),
+  }),
+  ai: z.object({
+    vendor: z.string().max(32),
+    model: z.string().max(64),
+    models: z.array(z.string().max(64)).max(16).optional(),
+  }),
+  channel: z.object({
+    kind: z.literal('telegram'),
+    accountId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_]+$/),
+    deepLink: z.string().max(256),
+    botToken: z.string().min(1).max(256),
+  }),
+  memberships: z
+    .array(
+      z.object({
+        userId: z.string().min(1).max(128),
+        role: z.enum(['owner', 'admin', 'user']),
+        displayName: z.string().max(64).optional(),
+        channelUserId: z.string().regex(/^\d{1,32}$/).optional(),
+        status: z.enum(['active', 'revoked']),
+      }),
+    )
+    .max(256),
+  state: z.string(),
+});
+
+/** Uncompressed ceiling — a gzip bomb must not OOM the control plane. */
+const MAX_STATE_BYTES = 256 * 1024 * 1024;
 
 export async function exportAgent(
   deps: ProvisionDeps,
@@ -90,7 +137,11 @@ export async function exportAgent(
       deepLink: channel.deepLink,
       botToken: await secrets.get(channel.secretRef),
     },
-    memberships: store.listMemberships(agentId),
+    memberships: store.listMemberships(agentId).map((m) => ({
+      ...m,
+      role: m.role as MemberRole,
+      status: m.status as 'active' | 'revoked',
+    })),
     state: state.toString('base64'),
   };
   log('agent.exported', { agentId, bytes: state.length });
@@ -115,14 +166,28 @@ export async function importAgent(
   const { store, secrets, provider } = deps;
   const log = deps.log ?? (() => {});
 
-  let manifest: ExportManifest;
+  let raw: unknown;
   try {
-    manifest = JSON.parse(gunzipSync(data).toString('utf8'));
+    raw = JSON.parse(
+      gunzipSync(data, { maxOutputLength: MAX_STATE_BYTES }).toString('utf8'),
+    );
   } catch {
-    throw new TransferError("That file isn't an AgentClaw export.");
+    throw new TransferError("That file isn't an AgentClaw export (or is too large).");
   }
-  if (manifest.format !== EXPORT_FORMAT || manifest.version !== EXPORT_VERSION) {
-    throw new TransferError('This export was made by an incompatible AgentClaw version.');
+  const parsed = ManifestSchema.safeParse(raw);
+  if (!parsed.success) {
+    const bad = parsed.error.issues[0];
+    throw new TransferError(
+      raw && typeof raw === 'object' && (raw as any).format === EXPORT_FORMAT
+        ? `That export is malformed or from an incompatible version (${bad?.path.join('.') || 'manifest'}).`
+        : "That file isn't an AgentClaw export.",
+    );
+  }
+  const manifest: ExportManifest = parsed.data as ExportManifest;
+  // Belt and suspenders: the slug also has to survive our own slugifier
+  // unchanged before it becomes a container name or workspace path.
+  if (slugify(manifest.agent.slug) !== manifest.agent.slug) {
+    throw new TransferError('That export has an unusable agent id.');
   }
 
   if (store.listAllActiveAgents().some((a) => a.slug === manifest.agent.slug)) {
@@ -163,35 +228,36 @@ export async function importAgent(
   };
   store.insertAgent(agent);
 
-  // Memberships travel verbatim, except the owner seat belongs to whoever
-  // imports — it's their installation now.
-  for (const m of manifest.memberships) {
-    store.insertMembership({
-      id: randomUUID(),
-      agentId: agent.id,
-      userId: m.role === 'owner' ? opts.ownerId : m.userId,
-      role: m.role as 'owner' | 'admin' | 'user',
-      displayName: m.displayName,
-      channelUserId: m.channelUserId,
-      status: m.status as 'active' | 'revoked',
-      joinedAt: now,
-    });
-  }
-
   const secretRef = `channel/${agent.id}/bot-token`;
-  await secrets.put(secretRef, manifest.channel.botToken);
-  store.insertChannel({
-    id: randomUUID(),
-    agentId: agent.id,
-    kind: manifest.channel.kind as 'telegram',
-    accountId: manifest.channel.accountId,
-    secretRef,
-    deepLink: manifest.channel.deepLink,
-    createdAt: now,
-  });
-
   let runtimeRef: string | undefined;
   try {
+    // Memberships travel verbatim, except the owner seat belongs to whoever
+    // imports — it's their installation now. Inside the try: a malformed row
+    // must roll back with everything else, not strand a half-made agent.
+    for (const m of manifest.memberships) {
+      store.insertMembership({
+        id: randomUUID(),
+        agentId: agent.id,
+        userId: m.role === 'owner' ? opts.ownerId : m.userId,
+        role: m.role,
+        displayName: m.displayName,
+        channelUserId: m.channelUserId,
+        status: m.status,
+        joinedAt: now,
+      });
+    }
+
+    await secrets.put(secretRef, manifest.channel.botToken);
+    store.insertChannel({
+      id: randomUUID(),
+      agentId: agent.id,
+      kind: manifest.channel.kind,
+      accountId: manifest.channel.accountId,
+      secretRef,
+      deepLink: manifest.channel.deepLink,
+      createdAt: now,
+    });
+
     // Provision creates + seeds the volume; the snapshot then overwrites it
     // with the real state; a second provision re-applies THIS installation's
     // config (model, auth mode) over the imported openclaw.json — the seed
@@ -220,6 +286,7 @@ export async function importAgent(
     if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
     await secrets.delete(secretRef).catch(() => {});
     store.deleteChannelForAgent(agent.id);
+    store.deleteMemberships(agent.id);
     store.setAgentState(agent.id, 'DELETING');
     store.setAgentState(agent.id, 'DELETED');
     log('import.rolled_back', { agentId: agent.id, error: String(err) });

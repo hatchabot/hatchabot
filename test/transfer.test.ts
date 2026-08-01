@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { exportAgent, importAgent, TransferError } from '../src/orchestrator/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
@@ -134,6 +135,44 @@ describe('agent export/import', () => {
     // fix the cause (healthy provider) → the one true retry path works
     const again = await importAgent(dst.deps, data, { ownerId: 'o' });
     expect(again.state).toBe('RUNNING');
+  });
+
+  describe('untrusted archive validation', () => {
+    async function archiveWith(mutate: (m: any) => void): Promise<Buffer> {
+      const src = await installation();
+      await seedSourceAgent(src);
+      const { data } = await exportAgent(src.deps, 'a1');
+      const m = JSON.parse(gunzipSync(data).toString('utf8'));
+      mutate(m);
+      return gzipSync(Buffer.from(JSON.stringify(m), 'utf8'));
+    }
+
+    it('rejects a slug carrying shell metacharacters', async () => {
+      const data = await archiveWith((m) => { m.agent.slug = 'kitchen$(touch /tmp/pwned)'; });
+      const dst = await installation();
+      await expect(importAgent(dst.deps, data, { ownerId: 'o' })).rejects.toBeInstanceOf(TransferError);
+      expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+    });
+
+    it('rejects a slug with path traversal', async () => {
+      const data = await archiveWith((m) => { m.agent.slug = '../../etc/evil'; });
+      const dst = await installation();
+      await expect(importAgent(dst.deps, data, { ownerId: 'o' })).rejects.toBeInstanceOf(TransferError);
+    });
+
+    it('rejects a non-numeric channelUserId (it reaches a shell on revoke)', async () => {
+      const data = await archiveWith((m) => { m.memberships[0].channelUserId = "1'; rm -rf /"; });
+      const dst = await installation();
+      await expect(importAgent(dst.deps, data, { ownerId: 'o' })).rejects.toBeInstanceOf(TransferError);
+    });
+
+    it('rejects a malformed manifest without stranding a half-made agent', async () => {
+      const data = await archiveWith((m) => { m.memberships = 'not-an-array'; });
+      const dst = await installation();
+      await expect(importAgent(dst.deps, data, { ownerId: 'o' })).rejects.toBeInstanceOf(TransferError);
+      expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+      expect(dst.store.findAgentUsingAccount('kitchenbot')).toBeUndefined();
+    });
   });
 
   it('rejects garbage files', async () => {

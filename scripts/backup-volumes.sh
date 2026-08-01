@@ -17,7 +17,10 @@ DEST="$BASE/$(date +%F)"
 IMAGE="${AGENTCLAW_IMAGE:-agentclaw-runtime:latest}"
 KEEP_DAYS="${AGENTCLAW_BACKUP_KEEP_DAYS:-14}"
 
-mkdir -p "$DEST"
+# Tarballs contain openclaw.json — bot tokens and gateway tokens in the clear.
+mkdir -p "$BASE" && chmod 700 "$BASE"
+mkdir -m 700 -p "$DEST"
+umask 077
 
 count=0
 for vol in $(docker volume ls -q | grep -E '^agentclaw-' || true); do
