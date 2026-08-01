@@ -75,12 +75,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // (agents.defaults.modelPolicy would be the precise allowlist, but
     // 2026.6.11 rejects the key: "Unrecognized key: modelPolicy".)
     const entry = patch.authMode === 'oauth-claude-cli' ? { agentRuntime: { id: 'claude-cli' } } : {};
+    // --replace: this path is AgentClaw-owned (the profile is the source of
+    // truth), and without it OpenClaw refuses a set that would drop entries —
+    // e.g. re-seeding an imported volume whose old install had more models.
     cmds.push({
       argv: [
         'config',
         'set',
         'agents.defaults.models',
         JSON.stringify(Object.fromEntries(allModels.map((m) => [m, entry]))),
+        '--replace',
       ],
     });
   }

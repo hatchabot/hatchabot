@@ -16,6 +16,10 @@ describe('buildConfigCommands multi-model', () => {
     const models = JSON.parse(argFor(cmds, 'agents.defaults.models')!);
     expect(Object.keys(models)).toEqual(['anthropic/claude-opus-4-8', 'anthropic/claude-sonnet-5']);
     expect(models['anthropic/claude-sonnet-5']).toEqual({ agentRuntime: { id: 'claude-cli' } });
+    // --replace: without it OpenClaw refuses a set that would drop entries
+    // (hit when re-seeding an imported volume that had more models).
+    const modelsCmd = cmds.find((c) => c.argv[2] === 'agents.defaults.models')!;
+    expect(modelsCmd.argv).toContain('--replace');
 
     // 2026.6.11 rejects agents.defaults.modelPolicy — must not be emitted.
     expect(argFor(cmds, 'agents.defaults.modelPolicy')).toBeUndefined();
