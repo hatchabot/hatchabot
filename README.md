@@ -1,6 +1,6 @@
 # AgentClaw
 
-**Run private AI agents for your family or team, on your own hardware.**
+**Run private AI agents for your family on your own hardware, reachable over Telegram.**
 
 AgentClaw turns a machine you already own into a home for persistent AI agents.
 Each agent lives in its own container, remembers things across conversations,
