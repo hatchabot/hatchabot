@@ -64,7 +64,7 @@ describe('buildConfigCommands multi-model', () => {
     // the token must never appear in log rendering
     const described = describeConfigCommands(cmds).join('\n');
     expect(described).not.toContain('sk-ant-oat01-secret');
-    expect(described).toContain('<redacted> | openclaw models auth paste-token');
+    expect(described).toContain('<redacted> | openclaw models auth --agent a1 paste-token');
   });
 
   it('keeps the single-model shape when models is absent', () => {
