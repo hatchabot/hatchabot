@@ -97,6 +97,10 @@ describe('buildConfigCommands multi-model', () => {
       model: 'claude-opus-4-8',
       authMode: 'oauth-claude-cli',
     });
+    // both auth branches must --replace: an imported volume can carry the
+    // other mode's profile (laptop→Spark hit this)
+    const auth = cmds.find((c) => c.argv[2] === 'auth.profiles')!;
+    expect(auth.argv).toContain('--replace');
     expect(Object.keys(JSON.parse(argFor(cmds, 'agents.defaults.models')!))).toEqual([
       'anthropic/claude-opus-4-8',
     ]);

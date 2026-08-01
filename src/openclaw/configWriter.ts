@@ -101,13 +101,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     });
   } else if (patch.authMode === 'oauth-claude-cli') {
     // Subscription path: OpenClaw drives the Claude Code CLI, which reads the
-    // OAuth credential from the mounted ~/.claude.
+    // OAuth credential from the mounted ~/.claude. --replace for the same
+    // reason as the token branch: an imported volume may carry the OTHER auth
+    // mode's profile, and this installation's mode wins.
     cmds.push({
       argv: [
         'config',
         'set',
         'auth.profiles',
         JSON.stringify({ 'anthropic:claude-cli': { provider: 'claude-cli', mode: 'oauth' } }),
+        '--replace',
       ],
     });
   }
