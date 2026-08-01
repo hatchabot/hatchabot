@@ -51,9 +51,11 @@ fi
 if [ "$(uname -s)" = "Darwin" ]; then
   say "Installing the launchd service (macOS)…"
   REPO="$(pwd)"
-  # launchd's default PATH is /usr/bin:/bin — node (Homebrew/nvm) lives
-  # elsewhere, so bake its real location into the service environment.
+  # launchd's default PATH is /usr/bin:/bin — node (Homebrew/nvm) and docker
+  # (Docker Desktop: /usr/local/bin) live elsewhere, so bake their real
+  # locations into the service environment.
   NODE_DIR="$(dirname "$(command -v node)")"
+  DOCKER_DIR="$(dirname "$(command -v docker)")"
   PLIST="$HOME/Library/LaunchAgents/com.agentclaw.control-plane.plist"
   mkdir -p "$HOME/Library/LaunchAgents" data
   cat > "$PLIST" <<PLIST
@@ -66,7 +68,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     <string>cd "$REPO" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec ./node_modules/.bin/tsx src/index.ts</string>
   </array>
   <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>$NODE_DIR:/usr/bin:/bin</string>
+    <key>PATH</key><string>$NODE_DIR:$DOCKER_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

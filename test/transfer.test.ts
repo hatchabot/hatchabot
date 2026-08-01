@@ -117,6 +117,25 @@ describe('agent export/import', () => {
     expect(second.slug).toBe('kitchen');
   });
 
+  it('rolls back a failed import completely, and a re-import succeeds', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+
+    const dst = await installation();
+    const broken = new MockProvider({ failOn: 'start' });
+    await expect(
+      importAgent({ ...dst.deps, provider: broken }, data, { ownerId: 'o' }),
+    ).rejects.toBeInstanceOf(TransferError);
+    // nothing half-imported left behind
+    expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+    expect(dst.store.findAgentUsingAccount('kitchenbot')).toBeUndefined();
+
+    // fix the cause (healthy provider) → the one true retry path works
+    const again = await importAgent(dst.deps, data, { ownerId: 'o' });
+    expect(again.state).toBe('RUNNING');
+  });
+
   it('rejects garbage files', async () => {
     const dst = await installation();
     await expect(

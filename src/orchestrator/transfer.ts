@@ -190,13 +190,14 @@ export async function importAgent(
     createdAt: now,
   });
 
+  let runtimeRef: string | undefined;
   try {
     // Provision creates + seeds the volume; the snapshot then overwrites it
     // with the real state; a second provision re-applies THIS installation's
     // config (model, auth mode) over the imported openclaw.json — the seed
     // never touches existing workspace files, so memory survives.
     const spec = await buildRuntimeSpec(deps, agent.id);
-    const { runtimeRef } = await provider.provision(spec);
+    ({ runtimeRef } = await provider.provision(spec));
     store.setAgentRuntimeRef(agent.id, runtimeRef);
     await provider.importState(runtimeRef, Buffer.from(manifest.state, 'base64'));
     const respec = await buildRuntimeSpec(deps, agent.id);
@@ -206,8 +207,19 @@ export async function importAgent(
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
     return store.setAgentState(agent.id, 'RUNNING');
   } catch (err) {
-    store.setAgentState(agent.id, 'FAILED', 'Import could not start the agent — tap Retry.');
-    log('import.failed', { agentId: agent.id, error: String(err) });
-    return store.getAgent(agent.id)!;
+    // Roll back completely: a "Retry" on a half-imported agent would boot it
+    // with a fresh seeded volume — an empty-headed impostor of the archive.
+    // Leaving nothing behind keeps "import again" the one true retry path.
+    if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
+    await secrets.delete(secretRef).catch(() => {});
+    store.deleteChannelForAgent(agent.id);
+    store.setAgentState(agent.id, 'DELETING');
+    store.setAgentState(agent.id, 'DELETED');
+    log('import.rolled_back', { agentId: agent.id, error: String(err) });
+    throw new TransferError(
+      `Import failed and was rolled back — fix the cause and import again. (${String(
+        err instanceof Error ? err.message : err,
+      ).slice(0, 300)})`,
+    );
   }
 }
