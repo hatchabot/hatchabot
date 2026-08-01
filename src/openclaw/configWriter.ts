@@ -60,15 +60,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
     // Subscription via a `claude setup-token` token (macOS hosts — the login
     // lives in the Keychain, so there is no ~/.claude to mount). The gateway
-    // ignores ambient env for auth; the token must live in ITS auth store:
-    // paste-token writes auth-profiles.json + the anthropic:manual profile.
-    // The explicit auth.profiles set then drops any imported claude-cli
-    // profile, which the gateway would otherwise prefer and fail on.
-    cmds.push({
-      argv: ['models', 'auth', 'paste-token', '--provider', 'anthropic', '--expires-in', '365d'],
-      stdin: patch.setupToken,
-      sensitive: true,
-    });
+    // ignores ambient env for auth; the token must live in ITS auth store.
+    // The explicit auth.profiles set drops any imported claude-cli profile,
+    // which the gateway would otherwise prefer and fail on. The paste-token
+    // command itself is appended AFTER `agents add` below: auth stores are
+    // per-agent, and without --agent the token lands in agent "main" while
+    // turns run as the bound agent (verified on 2026.7.1-2).
     cmds.push({
       argv: [
         'config',
@@ -152,6 +149,17 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (prefixedModel) add.push('--model', prefixedModel);
   if (patch.telegram) add.push('--bind', `telegram:${patch.telegram.accountId}`);
   cmds.push({ argv: add });
+
+  if (patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
+    cmds.push({
+      argv: [
+        'models', 'auth', '--agent', patch.agentId,
+        'paste-token', '--provider', 'anthropic', '--expires-in', '365d',
+      ],
+      stdin: patch.setupToken,
+      sensitive: true,
+    });
+  }
 
   return cmds;
 }
