@@ -163,6 +163,11 @@
     <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
     <button id="renameBtn" onclick="renameAgent()">Rename</button>
   </div>
+  <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
+    <button id="botTokenBtn" onclick="showBotToken()">Show</button>
+  </div>
   <label>File</label>
   <select id="editFile" onchange="loadEditFile()">
     <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
@@ -540,9 +545,26 @@ async function openEdit(id, name) {
   editAgentId = id;
   $('editAgent').textContent = name;
   $('editName').value = name;
+  $('editBotToken').value = '';
+  $('botTokenBtn').textContent = 'Show';
   $('editErr').textContent = '';
   editDlg.showModal();
   await loadEditFile();
+}
+
+async function showBotToken() {
+  const btn = $('botTokenBtn'), input = $('editBotToken');
+  if (input.value) {
+    try { await navigator.clipboard.writeText(input.value); toast('Token copied'); }
+    catch { toast('Select and copy manually'); }
+    return;
+  }
+  try {
+    const t = await api(`/v1/agents/${editAgentId}/bot-token`);
+    input.value = t.botToken;
+    btn.textContent = 'Copy';
+    if (t.pooled) toast('Pool bot — recycles automatically when the agent is deleted');
+  } catch (e) { toast(e.message); }
 }
 
 async function renameAgent() {

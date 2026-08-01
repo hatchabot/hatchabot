@@ -42,6 +42,7 @@ Commands:
   import <file> [--profile <aiProfileId>]
                                Import an exported agent and boot it
   start|stop|rebuild <agent>   Lifecycle controls
+  token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
 
 Global options:
@@ -186,6 +187,13 @@ async function main() {
         body: '{}',
       });
       console.log(`${cmd} requested for "${a.name}"`);
+      return;
+    }
+    case 'token': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw token <agent>'));
+      const t = (await (await api(ctx, `/v1/agents/${a.id}/bot-token`)).json()) as any;
+      console.log(`bot: @${t.accountId}${t.pooled ? ' (pool — recycles automatically)' : ''}`);
+      console.log(t.botToken);
       return;
     }
     case 'logs': {

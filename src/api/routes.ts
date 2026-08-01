@@ -490,6 +490,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     },
   );
 
+  // Owner-facing reveal of the agent's bot token — for recycling a hand-made
+  // bot into a new agent after deleting this one. Owner-authed like all /v1.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/bot-token', async (req, reply) => {
+    const agent = store.getAgent(req.params.id);
+    const channel = agent && store.getChannelForAgent(agent.id);
+    if (!agent || !channel) return reply.code(404).send({ error: 'Not found' });
+    return {
+      accountId: channel.accountId,
+      botToken: await secrets.get(channel.secretRef),
+      // Pool bots recycle automatically on delete; manual bots don't — the
+      // app uses this to tell the owner which kind they're looking at.
+      pooled: deps.channel.pool.owns(channel.accountId),
+    };
+  });
+
   // ---- export & import (agent portability) ---------------------------------
 
   // The archive contains the bot token — it IS the agent's identity — so the
