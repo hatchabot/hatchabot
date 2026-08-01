@@ -1,108 +1,195 @@
 # AgentClaw
 
-Deployment & management layer for OpenClaw agents. Spec:
-`~/.openclaw/workspace-tech-advisor/projects/agentclaw-spec.md`.
+**Run private AI agents for your family or team, on your own hardware.**
 
-This repo currently contains the **control plane skeleton** (§11.5 steps 1–6)
-running end to end against a mock runtime provider — no cloud account, no cost.
+AgentClaw turns a machine you already own into a home for persistent AI agents.
+Each agent lives in its own container, remembers things across conversations,
+and is reachable from anywhere over Telegram — so the people using it never
+install anything or see a terminal. You keep the hardware, the memory, and the
+credentials.
 
-## Run it
+It's a control plane for [OpenClaw](https://docs.openclaw.ai) agent runtimes:
+AgentClaw handles provisioning, messaging identity, memory safety, membership,
+and lifecycle; OpenClaw runs the agent.
 
-```sh
-npm install
-export AGENTCLAW_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
-
-# The product:
-./scripts/build-runtime-image.sh   # once per OpenClaw version
-npm run dev                        # control plane + web app on http://localhost:8080
-npx tsx scripts/pool-add.ts <bot-token>…   # optional: stock the instant-bot pool
-
-# Dev loops:
-npm run e2e             # whole tap-+ → first-reply loop in-process (mock provider)
-npm test                # unit tests (claim flow, state machine)
-npm run e2e:docker      # boots a real OpenClaw container, checks health, tears down
-TELEGRAM_BOT_TOKEN=123:abc npm run e2e:docker   # full flow: live bot, pairing claim
+```
+   You (web app / CLI)          Family (Telegram)
+            │                          │
+      ┌─────▼──────────────────────────▼─────┐
+      │        AgentClaw control plane       │
+      └─────┬──────────────────────────┬─────┘
+       ┌────▼────┐                ┌────▼────┐
+       │ agent A │  containers    │ agent B │   ← one volume each:
+       │ OpenClaw│  on your box   │ OpenClaw│      memory, config, sessions
+       └─────────┘                └─────────┘
 ```
 
-## Shape
+## What you get
+
+- **Agents that remember.** Each has its own `SOUL.md` (who it is), `AGENTS.md`
+  (how it works), and `MEMORY.md` (what it knows) — editable from the app, with
+  automatic snapshots before every change so a bad edit is always undoable.
+- **Telegram as the front door.** Family members chat with an agent like any
+  other contact. No accounts, no apps, no setup on their side.
+- **Invites with two tiers.** Send a link (or a QR code) for chat-only access,
+  or have the invitee sign in so they can also log into AgentClaw and see the
+  agents they belong to.
+- **Shared or private memory.** A family agent's memory is common to everyone
+  in it — and everyone is told so. A personal agent's isn't.
+- **Portability.** Export an agent to a single file and import it on another
+  machine; memory, members, and its Telegram identity come along.
+- **Bring your own AI.** Anthropic API key, or a Claude Pro/Max subscription on
+  a machine where you're already logged in.
+
+## Requirements
+
+- **Linux or macOS** with **Docker** (Docker Desktop is fine) and **Node.js 22+**
+- **A Telegram account** (to create bots via [@BotFather](https://t.me/botfather) —
+  about 60 seconds per agent, or pre-stock a pool so it's zero)
+- **An AI credential**: an Anthropic API key, or the `claude` CLI logged in
+- A machine that stays on, if you want the agents to stay reachable
+
+## Quick start
+
+```sh
+git clone https://github.com/cksci/agentclaw-ai.git agentclaw
+cd agentclaw
+./scripts/setup-host.sh
+```
+
+The script checks prerequisites, installs dependencies, generates a `.env`
+(asking you to choose an app password), builds the agent runtime image,
+installs a background service, and links the `agentclaw` CLI. It's safe to
+re-run.
+
+Then open **http://localhost:8080**, unlock with your password, and:
+
+1. **Connect an AI source** (⚙ AI). If the `claude` CLI is logged in on this
+   machine, it's one tap. On macOS, run `claude setup-token` and paste the
+   token (see [docs/ai-profiles.md](docs/ai-profiles.md)). Otherwise paste an
+   API key.
+2. **Tap +** to create an agent. If the bot pool is empty you'll be asked for a
+   BotFather token — the app walks you through it.
+3. **Tap the Telegram link and say hi.** That first message claims the agent as
+   yours. Then just chat.
+
+To let others in, use **Invite…** on the agent card — send the link, or have
+them scan the QR, or (if they're not on your network) send the agent's Telegram
+link and approve them when they message it.
+
+## The CLI
+
+`agentclaw` speaks the same API as the web app, for scripting and remote
+management. It's linked by `setup-host.sh`; configure it with
+`~/.config/agentclaw/env` (`AGENTCLAW_URL`, `AGENTCLAW_PASSWORD`) or flags.
+
+```sh
+agentclaw list                          # state, model, last activity
+agentclaw create "Kitchen Helper"       # incl. the BotFather step if needed
+agentclaw logs "Kitchen Helper" -n 100
+agentclaw snapshot "Kitchen Helper" --label "before the big edit"
+agentclaw restore "Kitchen Helper" <snapshot-id>
+
+# move an agent to another machine
+agentclaw export "Kitchen Helper" -o kitchen.agentclaw
+agentclaw --url http://desktop:8080 import kitchen.agentclaw
+```
+
+`agentclaw help` lists all 20 commands. See
+[docs/moving-agents.md](docs/moving-agents.md) for the migration rules.
+
+## Configuration
+
+All via `.env` in the repo root (generated by `setup-host.sh`, never committed):
+
+| Variable | Purpose |
+|---|---|
+| `AGENTCLAW_SECRET_KEY` | **Required.** Encrypts stored credentials. Losing it means re-entering every token. |
+| `AGENTCLAW_PASSWORD` | App password (password auth mode). |
+| `PORT` | HTTP port, default `8080`. |
+| `AGENTCLAW_PUBLIC_URL` | Canonical URL used in invite links, e.g. a Tailscale hostname. |
+| `AGENTCLAW_AUTH` | `password` (default) or `identity` — see below. |
+| `AGENTCLAW_DB` | SQLite path, default `data/agentclaw.sqlite`. |
+| `AGENTCLAW_IMAGE` | Runtime image tag, default `agentclaw-runtime:latest`. |
+| `AGENTCLAW_PREFIX` | Docker name prefix. Change it to run **two installations on one host**. |
+| `AGENTCLAW_GATEWAY_PORT_BASE` | First debug-UI port, default `19100`. Also for multi-install. |
+| `AGENTCLAW_BACKUP_DIR` | Nightly volume backups, default `~/agentclaw-backups`. |
+
+**Authentication.** By default AgentClaw uses one shared password — right for a
+home install on a private network. Set `AGENTCLAW_AUTH=identity` to use real
+per-user accounts via GCP Identity Platform (Google sign-in and/or
+email/password) instead; that path needs `AGENTCLAW_GCP_PROJECT`,
+`AGENTCLAW_IDENTITY_API_KEY`, and `AGENTCLAW_GOOGLE_CLIENT_ID`. Setup and
+rationale in [docs/identity.md](docs/identity.md).
+
+**Off-network access.** Agents reach Telegram outbound from wherever they run,
+so chatting works anywhere with no port forwarding. Only AgentClaw's own web
+pages need reaching, for which [docs/tailscale.md](docs/tailscale.md) describes
+a Tailscale setup that opens nothing to the internet.
+
+## How it works
 
 ```
 src/
-  domain/       Agent, AIProfile, Membership + the §11.4 state machine
+  domain/       Agent, AIProfile, Membership + the state machine
   store/        SQLite persistence (one file to swap for Postgres)
-  secrets/      SecretStore interface; local AES-256-GCM impl
+  secrets/      SecretStore interface; local AES-256-GCM implementation
   providers/    RuntimeProvider interface + Mock and LocalDocker providers
-  channels/     ChannelProvisioner: pool → paste-token composite
+  channels/     ChannelProvisioner: bot pool → paste-token composite
   openclaw/     Surgical openclaw.json patching + workspace seeding
-  orchestrator/ §11.1 provisioning (create + resumable steps + rollback), claim
-  api/          Fastify routes; provisioning runs in the background,
-                the app polls agent state
-web/index.html  The app: single file, no build step. Onboarding (connect
-                subscription), + button, live progress, paste-token fallback,
-                pairing approvals, lifecycle buttons.
+  orchestrator/ Provisioning, claim, invites, members, snapshots, transfer
+  api/          Fastify routes, auth modes, identity verification
+  cli.ts        The agentclaw command
+web/            The app and the invitee join page: single files, no build step
 ```
 
-Three interfaces are load-bearing and were built before anything used them,
-per §7: `RuntimeProvider` (so GCE/AWS slot in without touching the control
-plane), `ChannelProvisioner` (so WhatsApp/Signal slot in without touching the
-provisioning flow), and `SecretStore` (so GCP Secret Manager replaces the local
-impl in one line).
+Four interfaces are load-bearing and were written before anything needed them:
+`RuntimeProvider` (so other hosts slot in without touching the control plane),
+`ChannelProvisioner` (so other messengers do too), `SecretStore` (so a cloud
+secret manager replaces the local one), and the auth-mode seam (so identity
+providers swap without rewriting routes).
 
-## Decisions worth knowing
+Design decisions worth knowing before you read the code:
 
-**Telegram bots are leased, not minted.** Telegram has no API for creating
-bots — BotFather is a bot you talk to as a human. `TelegramPoolProvisioner`
-leases from a pool of hand-minted bots so the user never sees BotFather;
-`TelegramManualProvisioner` is the unbounded fallback where the user pastes
-their own token. Both sit behind `ChannelProvisioner`, so switching strategy
-is config.
-
-**We do not template `openclaw.json`.** Its schema is volatile. The provisioner
-emits a handful of `openclaw config set` commands touching only the four paths
-AgentClaw owns (`agents.list`, `channels.telegram.accounts.*`, `bindings`,
-`agents.defaults.model`). Everything else stays as OpenClaw's defaults and the
-user's edits left it. See `src/openclaw/configWriter.ts`.
-
-**Subscription credentials are owner-hosted only.** See `docs/ai-profiles.md`.
-For local hosts, the whole `~/.claude` directory is bind-mounted into each
-agent container: every agent shares the one OAuth credential *in place* (same
-file, same host), so token refresh stays coherent. The credential is never
-copied into AgentClaw's store.
-
-**First-contact claim rides OpenClaw's native pairing.** Fresh agents boot with
-`dmPolicy: "pairing"`; the owner taps the deep link, messages the bot, and the
-control plane auto-approves the first pairing request inside the claim window,
-binding that Telegram id to the owner membership (`src/orchestrator/claim.ts`).
-Later senders wait for explicit approval via `/v1/agents/:id/pairing`.
-
-**One container per agent, one volume per agent** (`LocalDockerProvider`).
-`provision()` goes all the way to `docker create` so env/mounts are baked into
-the container and start/stop survive control-plane restarts. All durable state
-lives on the volume — containers are cattle.
-
-## Status
-
-**The full loop is verified live (2026-07-27):** real OpenClaw container,
-Telegram pairing auto-claimed by the control plane, real Claude reply on a Max
-subscription. `TELEGRAM_BOT_TOKEN=… npm run e2e:docker` reproduces it.
+- **Telegram bots are leased, not minted.** Telegram has no API to create bots,
+  so a pool of pre-made bots is leased to agents (`scripts/pool-add.ts` stocks
+  it) with a paste-your-own-token fallback.
+- **`openclaw.json` is patched, never templated.** Its schema moves between
+  releases; AgentClaw emits a handful of `openclaw config set` commands for
+  only the paths it owns. See `src/openclaw/configWriter.ts`.
+- **Containers are cattle, volumes are not.** All durable state lives on the
+  agent's volume. Rebuild replaces the container and keeps memory; only Delete
+  purges, and it makes you type the agent's name.
+- **Credentials stay put.** A Claude subscription is bind-mounted in place
+  rather than copied; API keys are encrypted at rest and resolved only at boot.
 
 ## Operations
 
-- **Service**: `systemctl --user {status|restart} agentclaw`, logs via
-  `journalctl --user -u agentclaw -f`. Installed by `scripts/install-service.sh`.
-- **Rebuild ≠ delete**: Rebuild (button in the app, `POST /v1/agents/:id/rebuild`)
-  recreates the container from the current image and KEEPS the volume — memory,
-  pairing, identity survive. It's the upgrade + unstick mechanism. Delete purges
-  everything and requires typing the agent's name.
-- **Backups**: nightly at 03:30 (`agentclaw-backup.timer`), one tarball per
-  volume under `~/agentclaw-backups/<date>/`, 14-day retention. Manual run:
-  `./scripts/backup-volumes.sh`. Restore (agent stopped):
-  `docker run --rm -v <vol>:/data -v <dir>:/in:ro agentclaw-runtime:latest
-  bash -c 'cd /data && tar xzf /in/<vol>.tgz'`.
+```sh
+./scripts/restart.sh                  # restart (systemd or launchd)
+./scripts/backup-volumes.sh           # manual volume backup; nightly by timer
+./scripts/build-runtime-image.sh      # rebuild the agent image
+npm test                              # 103 tests
+```
 
-## Known gaps
+Logs: `journalctl --user -u agentclaw -f` (Linux) or `tail -f data/server.log`
+(macOS).
 
-- Auth is a placeholder header (`x-agentclaw-owner`).
-- Persistence is SQLite; production target is Postgres.
-- Claim window auto-approves the *first* contact — fine for a link shown only
-  to the owner; revisit if deep links ever get shared before claim.
+## Status and limitations
+
+Working and used daily by its author, but young — expect rough edges.
+
+- **SQLite, single node.** Fine for a household; Postgres is the intended path
+  for anything larger.
+- **Telegram only.** The channel abstraction exists for others; nothing else is
+  implemented.
+- **Cloud hosting isn't built.** AgentClaw runs on machines you own.
+  [docs/identity.md](docs/identity.md) and the architecture are shaped for it,
+  but the hosted path is deliberately deferred.
+- **Not audited by a third party.** It has been reviewed for the obvious
+  classes (authorization, injection, secret handling) and has tests for them,
+  but it holds real credentials — run it on a network you trust.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

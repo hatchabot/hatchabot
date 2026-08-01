@@ -15,8 +15,8 @@ only credential type `POST /v1/ai-profiles` currently accepts for cloud hosting.
 
 A Pro/Max subscription is not a key. It is an interactive OAuth login that
 mints a short-lived token plus a refresh token, stored as a credential profile
-on the machine where you logged in (`~/.config/anthropic/` for the `ant` CLI,
-`~/.openclaw/credentials/` for OpenClaw). Two consequences:
+on the machine where you logged in (`~/.claude/.credentials.json` on Linux;
+the Keychain on macOS). Two consequences:
 
 1. **There is no documented server-side credential for it.** Anthropic's own
    guidance is explicit that interactive login is for development on your own
@@ -61,8 +61,8 @@ under them.
   mounted into each runtime (`hostMounts` in `buildRuntimeSpec`), and the
   OpenClaw config routes the model through the Claude Code CLI
   (`authMode: 'oauth-claude-cli'` in `src/openclaw/configWriter.ts`).
-  Profile creation checks the login exists on this host and rejects
-  subscription profiles for non-local hosts — belt and suspenders in
-  `POST /v1/ai-profiles` and `buildRuntimeSpec`.
+  Profile creation checks the login exists on this host; the local-host-only
+  rule is enforced where an agent binds a profile to a host — belt and
+  suspenders in `POST /v1/agents` and `buildRuntimeSpec`.
 - Profiles are managed from the app (⚙ AI): default model, the switchable
   `/model` list, additional API-key profiles.
