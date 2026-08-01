@@ -63,6 +63,12 @@ export interface OpenClawConfigPatch {
    * `api-key` — key arrives via env (ANTHROPIC_API_KEY / GEMINI_API_KEY).
    */
   authMode: 'oauth-claude-cli' | 'api-key';
+  /**
+   * `claude setup-token` value for subscription auth without a mountable
+   * ~/.claude (macOS hosts). Registered into OpenClaw's auth store at seed
+   * time; models then ride the native anthropic provider.
+   */
+  setupToken?: string;
   telegram?: {
     accountId: string;
     botToken: string;

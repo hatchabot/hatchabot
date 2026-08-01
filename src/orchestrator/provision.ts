@@ -235,6 +235,7 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         model: profile.model,
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
+        setupToken: oauthToken,
         telegram: {
           accountId: channelRow.accountId,
           botToken,

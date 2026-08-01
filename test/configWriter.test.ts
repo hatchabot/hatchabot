@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildConfigCommands } from '../src/openclaw/configWriter.js';
+import { buildConfigCommands, describeConfigCommands } from '../src/openclaw/configWriter.js';
 
 const argFor = (cmds: ReturnType<typeof buildConfigCommands>, path: string): string | undefined =>
   cmds.find((c) => c.argv[0] === 'config' && c.argv[2] === path)?.argv[3];
@@ -38,6 +38,29 @@ describe('buildConfigCommands multi-model', () => {
     const models = JSON.parse(argFor(cmds, 'agents.defaults.models')!);
     expect(Object.keys(models)).toEqual(['anthropic/claude-sonnet-5', 'anthropic/claude-haiku-4-5']);
     expect(models['anthropic/claude-haiku-4-5']).toEqual({});
+  });
+
+  it('setup-token auth: paste-token via stdin, native provider, no claude-cli', () => {
+    const cmds = buildConfigCommands({
+      agentId: 'a1',
+      model: 'claude-opus-4-8',
+      authMode: 'oauth-claude-cli',
+      setupToken: 'sk-ant-oat01-secret',
+    });
+    const paste = cmds.find((c) => c.argv[2] === 'paste-token')!;
+    expect(paste.stdin).toBe('sk-ant-oat01-secret');
+    expect(paste.sensitive).toBe(true);
+
+    const auth = JSON.parse(cmds.find((c) => c.argv[2] === 'auth.profiles')!.argv[3]!);
+    expect(auth).toEqual({ 'anthropic:manual': { provider: 'anthropic', mode: 'token' } });
+
+    const models = JSON.parse(argFor(cmds, 'agents.defaults.models')!);
+    expect(models['anthropic/claude-opus-4-8']).toEqual({}); // native provider, no claude-cli
+
+    // the token must never appear in log rendering
+    const described = describeConfigCommands(cmds).join('\n');
+    expect(described).not.toContain('sk-ant-oat01-secret');
+    expect(described).toContain('<redacted> | openclaw models auth paste-token');
   });
 
   it('keeps the single-model shape when models is absent', () => {

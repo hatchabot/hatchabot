@@ -31,6 +31,8 @@ import type { OpenClawConfigPatch } from '../providers/provider.js';
 export interface ConfigCommand {
   /** Argv for the `openclaw` CLI, minus the leading binary name. */
   argv: string[];
+  /** Piped to the command's stdin (e.g. `models auth paste-token`). */
+  stdin?: string;
   /** True when the value is a secret and must be redacted in logs. */
   sensitive?: boolean;
 }
@@ -55,7 +57,28 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     ...new Set([patch.model, ...(patch.models ?? [])].filter((m): m is string => !!m)),
   ].map((m) => `anthropic/${m}`);
 
-  if (patch.authMode === 'oauth-claude-cli') {
+  if (patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
+    // Subscription via a `claude setup-token` token (macOS hosts — the login
+    // lives in the Keychain, so there is no ~/.claude to mount). The gateway
+    // ignores ambient env for auth; the token must live in ITS auth store:
+    // paste-token writes auth-profiles.json + the anthropic:manual profile.
+    // The explicit auth.profiles set then drops any imported claude-cli
+    // profile, which the gateway would otherwise prefer and fail on.
+    cmds.push({
+      argv: ['models', 'auth', 'paste-token', '--provider', 'anthropic', '--expires-in', '365d'],
+      stdin: patch.setupToken,
+      sensitive: true,
+    });
+    cmds.push({
+      argv: [
+        'config',
+        'set',
+        'auth.profiles',
+        JSON.stringify({ 'anthropic:manual': { provider: 'anthropic', mode: 'token' } }),
+        '--replace',
+      ],
+    });
+  } else if (patch.authMode === 'oauth-claude-cli') {
     // Subscription path: OpenClaw drives the Claude Code CLI, which reads the
     // OAuth credential from the mounted ~/.claude.
     cmds.push({
@@ -74,7 +97,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // the claude-cli runtime — without that a model is listed but unusable.
     // (agents.defaults.modelPolicy would be the precise allowlist, but
     // 2026.6.11 rejects the key: "Unrecognized key: modelPolicy".)
-    const entry = patch.authMode === 'oauth-claude-cli' ? { agentRuntime: { id: 'claude-cli' } } : {};
+    // Token-auth models run through OpenClaw's native anthropic provider, not
+    // the claude-cli runtime (which would demand its own login).
+    const entry =
+      patch.authMode === 'oauth-claude-cli' && !patch.setupToken
+        ? { agentRuntime: { id: 'claude-cli' } }
+        : {};
     // --replace: this path is AgentClaw-owned (the profile is the source of
     // truth), and without it OpenClaw refuses a set that would drop entries —
     // e.g. re-seeding an imported volume whose old install had more models.
@@ -131,6 +159,8 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
 /** Renders the commands for logging, with secrets masked. */
 export function describeConfigCommands(cmds: ConfigCommand[]): string[] {
   return cmds.map((c) => {
+    // stdin-fed secrets never appear in argv — mask the pipe, not the args.
+    if (c.stdin) return `<redacted> | openclaw ${c.argv.join(' ')}`;
     const argv = c.sensitive ? [...c.argv.slice(0, -1), '<redacted>'] : c.argv;
     return `openclaw ${argv.join(' ')}`;
   });

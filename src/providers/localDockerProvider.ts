@@ -130,7 +130,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       // agent — overwriting MEMORY.md on rebuild would lobotomize it.
       const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
       for (const cmd of buildConfigCommands(spec.workspace.configPatch)) {
-        const line = `openclaw ${cmd.argv.map(shq).join(' ')}`;
+        const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
+        const line = cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke;
         script.push(
           cmd.argv[0] === 'agents' && cmd.argv[1] === 'add'
             ? `if [ ! -d ${shq(workspaceDir)} ]; then ${line}; fi`
