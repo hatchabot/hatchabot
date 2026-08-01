@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { admitMember, AdmitError } from '../src/orchestrator/members.js';
+import { admitMember, AdmitError, revokeMember, RevokeError } from '../src/orchestrator/members.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 
@@ -85,5 +85,56 @@ describe('admitMember', () => {
     const res = await admitMember({ store, provider }, opts);
     expect(res.alreadyMember).toBe(false);
     expect(store.getMembership('a1', res.userId)?.status).toBe('active');
+  });
+});
+
+describe('revokeMember', () => {
+  async function withMember() {
+    const s = await setup();
+    s.store.insertChannel({
+      id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'MixedCaseBot',
+      secretRef: 'chan/a1', deepLink: 'https://t.me/MixedCaseBot', createdAt: 'now',
+    });
+    s.store.setAgentRuntimeRef('a1', s.opts.runtimeRef);
+    s.store.setAgentState('a1', 'RUNNING');
+    s.store.insertMembership({
+      id: 'm2', agentId: 'a1', userId: 'u2', role: 'user',
+      displayName: 'Gran', channelUserId: '555', status: 'active',
+    });
+    return s;
+  }
+
+  it('revokes, scrubs the lowercased allowlist file, and bounces the runtime', async () => {
+    const { store, provider } = await withMember();
+    await revokeMember({ store, provider }, 'a1', 'u2');
+    expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
+    expect(store.listAllowedChannelUserIds('a1')).toEqual([]);
+    const sh = provider.execLog.find((a) => a[0] === 'sh')!;
+    expect(sh[1]).toContain('telegram-mixedcasebot-allowFrom.json');
+    expect(sh[1]).toContain('555');
+    expect(provider.runtimes.get('mock://a1')!.phase).toBe('running'); // restarted
+  });
+
+  it("refuses to remove the owner and is idempotent on re-revoke", async () => {
+    const { store, provider } = await withMember();
+    await expect(revokeMember({ store, provider }, 'a1', 'o')).rejects.toBeInstanceOf(RevokeError);
+    await revokeMember({ store, provider }, 'a1', 'u2');
+    const callsAfterFirst = provider.execLog.length;
+    await revokeMember({ store, provider }, 'a1', 'u2'); // no second surgery
+    expect(provider.execLog.length).toBe(callsAfterFirst);
+  });
+
+  it('keeps the DB revocation but reports failure when the scrub fails', async () => {
+    const { store, provider } = await withMember();
+    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'boom' });
+    await expect(revokeMember({ store, provider }, 'a1', 'u2')).rejects.toBeInstanceOf(RevokeError);
+    expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
+  });
+
+  it('skips runtime surgery for a member with no telegram identity', async () => {
+    const { store, provider } = await withMember();
+    store.insertMembership({ id: 'm3', agentId: 'a1', userId: 'u3', role: 'user', status: 'active' });
+    await revokeMember({ store, provider }, 'a1', 'u3');
+    expect(provider.execLog.some((a) => a[0] === 'sh')).toBe(false);
   });
 });

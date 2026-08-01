@@ -157,7 +157,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       botToken,
       dmPolicy,
     };
-    if (dmPolicy === 'allowlist') account.allowFrom = allowFrom ?? [];
+    // Seed allowFrom in pairing mode too: on a rebuilt/imported volume the
+    // known members must not land back in pairing-pending. (Was previously
+    // allowlist-only — members silently dropped on rebuild.)
+    if (allowFrom?.length || dmPolicy === 'allowlist') account.allowFrom = allowFrom ?? [];
     cmds.push({
       argv: [
         'config',

@@ -72,3 +72,49 @@ describe('boot reconcile', () => {
     expect(agent.stateReason).toMatch(/rebuild was interrupted/i);
   });
 });
+
+describe('boot reconcile: parked agents', () => {
+  function parkedWorld(withRuntime: boolean, pendingAction: boolean) {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({
+      id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box',
+      settings: {}, createdAt: 'now',
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'o', name: 'A', slug: 'a1', state: 'PROVISIONING',
+      aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    if (pendingAction) {
+      store.setAgentPendingAction('a1', { type: 'bot_token', instructions: 'paste it' });
+    }
+    const provider = new MockProvider();
+    return { store, provider, withRuntime };
+  }
+
+  it('leaves a parked agent (pendingAction, no runtime) in PROVISIONING', async () => {
+    const { store, provider } = parkedWorld(false, true);
+    await reconcileAgents(store, new Map([['mock', provider as RuntimeProvider]]), () => {});
+    expect(store.getAgent('a1')!.state).toBe('PROVISIONING');
+  });
+
+  it('leaves a parked agent alone even with a stopped half-made runtime', async () => {
+    const { store, provider } = parkedWorld(false, true);
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1',
+      workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } },
+      env: {},
+    });
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await reconcileAgents(store, new Map([['mock', provider as RuntimeProvider]]), () => {});
+    expect(store.getAgent('a1')!.state).toBe('PROVISIONING');
+  });
+
+  it('fails an unparked PROVISIONING agent with no runtime', async () => {
+    const { store, provider } = parkedWorld(false, false);
+    await reconcileAgents(store, new Map([['mock', provider as RuntimeProvider]]), () => {});
+    const a = store.getAgent('a1')!;
+    expect(a.state).toBe('FAILED');
+    expect(a.stateReason).toMatch(/interrupted/i);
+  });
+});
