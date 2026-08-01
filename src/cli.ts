@@ -56,6 +56,10 @@ Commands:
   approve <agent> <code>       Let a pending requester in (creates a member)
   members <agent>              List members
   kick <agent> <userId>        Revoke a member
+  snapshot <agent> [--label <text>]
+                               Save a restore point of SOUL/AGENTS/MEMORY
+  snapshots <agent>            List restore points
+  restore <agent> <snapshotId> Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
 
@@ -340,6 +344,31 @@ async function main() {
         body: '{}',
       });
       console.log(`${cmd} requested for "${a.name}"`);
+      return;
+    }
+    case 'snapshot': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw snapshot <agent> [--label text]'));
+      const s: any = await (await jsonPost(`/v1/agents/${a.id}/snapshots`, { label: flags.get('label') })).json();
+      console.log(`saved "${s.label}" (${s.files.join(', ')})`);
+      console.log(s.id);
+      return;
+    }
+    case 'snapshots': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw snapshots <agent>'));
+      const list: any[] = await (await api(ctx, `/v1/agents/${a.id}/snapshots`)).json() as any[];
+      if (!list.length) return console.log('no snapshots yet');
+      for (const s of list) {
+        console.log(`${s.id}  ${ago(s.createdAt).padEnd(10)} ${s.reason.padEnd(12)} ${s.label}`);
+      }
+      return;
+    }
+    case 'restore': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw restore <agent> <snapshotId>'));
+      const snapId = rest[1] ?? fail('give the snapshot id (see: agentclaw snapshots)');
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/snapshots/${snapId}/restore`, {})).json();
+      console.log(`restored ${res.restored.join(', ')}`);
+      if (res.safetySnapshotId) console.log(`undo with: agentclaw restore "${a.name}" ${res.safetySnapshotId}`);
+      console.log('applies to new conversations — send /new in Telegram');
       return;
     }
     case 'token': {

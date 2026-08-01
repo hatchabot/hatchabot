@@ -173,6 +173,11 @@
     <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
   </select>
   <textarea id="editContent" style="min-height:280px;font-family:ui-monospace,monospace;font-size:13px;margin-top:10px"></textarea>
+  <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+    <label style="margin:0;flex:1">History <span style="color:var(--dim)">— snapshots of SOUL/AGENTS/MEMORY, taken automatically before edits and rebuilds</span></label>
+    <button id="snapBtn" onclick="takeSnapshot()">Snapshot now</button>
+  </div>
+  <div id="snapList" style="max-height:150px;overflow:auto"></div>
   <div class="err" id="editErr"></div>
   <div class="actions" style="justify-content:flex-end">
     <button onclick="editDlg.close()">Cancel</button>
@@ -547,8 +552,48 @@ async function openEdit(id, name) {
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   $('editErr').textContent = '';
+  $('snapList').innerHTML = '';
   editDlg.showModal();
   await loadEditFile();
+  await loadSnapshots();
+}
+
+async function loadSnapshots() {
+  const el = $('snapList');
+  try {
+    const snaps = await api(`/v1/agents/${editAgentId}/snapshots`);
+    el.innerHTML = snaps.length
+      ? snaps.map(s => `
+        <div class="pair">
+          <span class="grow">🕘 <b>${esc(s.label)}</b>
+            <span style="color:var(--dim)">${ago(s.createdAt)} · ${s.files.length} files${s.reason === 'manual' ? ' · kept' : ''}</span>
+          </span>
+          <button onclick="restoreSnapshot('${s.id}', '${esc(s.label)}')">Restore</button>
+        </div>`).join('')
+      : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+async function takeSnapshot() {
+  const label = prompt('Name this snapshot (optional):', '');
+  if (label === null) return;
+  $('snapBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}/snapshots`, { method: 'POST', body: { label } });
+    toast('Snapshot saved');
+    await loadSnapshots();
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('snapBtn').disabled = false; }
+}
+
+async function restoreSnapshot(snapId, label) {
+  if (!confirm(`Restore "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in Telegram).`)) return;
+  try {
+    const res = await api(`/v1/agents/${editAgentId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
+    toast(`Restored ${res.restored.join(', ')}`);
+    await loadEditFile();
+    await loadSnapshots();
+  } catch (e) { $('editErr').textContent = e.message; }
 }
 
 async function showBotToken() {

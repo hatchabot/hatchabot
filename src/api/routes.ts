@@ -21,6 +21,12 @@ import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.
 import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
 import type { Agent } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
+import {
+  autoSnapshot,
+  captureSnapshot,
+  restoreSnapshot,
+  SnapshotError,
+} from '../orchestrator/snapshots.js';
 
 export interface ApiDeps {
   store: Store;
@@ -93,6 +99,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent || agent.ownerId !== ownerIdOf(req)) return undefined;
     return agent;
   };
+
+  const snapshotDeps = (agent: Agent) => ({
+    store,
+    provider: providerFor(agent.hostId),
+    log: (e: string, d: Record<string, unknown>) => app.log.info(d, e),
+  });
 
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
@@ -452,6 +464,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to edit its files.' });
       }
+      // Version the files BEFORE overwriting them — the whole point of the
+      // history is that a bad save is recoverable.
+      await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-edit');
       // base64 through the shell so arbitrary content can't break quoting.
       const b64 = Buffer.from(content, 'utf8').toString('base64');
       const path = workspacePath(agent.slug, req.params.name);
@@ -461,6 +476,67 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       );
       if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
       return { saved: true };
+    },
+  );
+
+  // ---- snapshots (core-file history) ---------------------------------------
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/snapshots', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    return store.listSnapshots(agent.id);
+  });
+
+  app.post<{ Params: { id: string }; Body: { label?: string } }>(
+    '/v1/agents/:id/snapshots',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      try {
+        const snap = await captureSnapshot(snapshotDeps(agent), agent.id, {
+          label: (req.body as { label?: string } | null)?.label,
+        });
+        return reply.code(201).send(snap);
+      } catch (err) {
+        if (err instanceof SnapshotError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  app.get<{ Params: { id: string; snapId: string } }>(
+    '/v1/agents/:id/snapshots/:snapId',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      const snap = agent && store.getSnapshot(agent.id, req.params.snapId);
+      if (!snap) return reply.code(404).send({ error: 'Not found' });
+      return snap;
+    },
+  );
+
+  app.post<{ Params: { id: string; snapId: string } }>(
+    '/v1/agents/:id/snapshots/:snapId/restore',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      try {
+        return await restoreSnapshot(snapshotDeps(agent), agent.id, req.params.snapId);
+      } catch (err) {
+        if (err instanceof SnapshotError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  app.delete<{ Params: { id: string; snapId: string } }>(
+    '/v1/agents/:id/snapshots/:snapId',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (!store.deleteSnapshot(agent.id, req.params.snapId)) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      return { deleted: true };
     },
   );
 
@@ -587,6 +663,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
+    }
+    // Cheap insurance before replacing the container (no-op unless RUNNING).
+    if (agent.state === 'RUNNING') {
+      await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-rebuild');
     }
     if (!inflight.has(agent.id)) {
       const task = rebuildAgent(
@@ -800,6 +880,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
       store.deleteChannelForAgent(agent.id);
     }
+    store.deleteSnapshotsFor(agent.id);
     return store.setAgentState(agent.id, 'DELETED');
   });
 }

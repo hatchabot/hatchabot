@@ -62,6 +62,14 @@ export class Store {
       CREATE UNIQUE INDEX IF NOT EXISTS memberships_agent_user
         ON memberships (agent_id, user_id);
 
+      -- Point-in-time copies of an agent's core files. Small (KBs) and cheap,
+      -- so they can be taken automatically before anything risky.
+      CREATE TABLE IF NOT EXISTS snapshots (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, label TEXT NOT NULL,
+        reason TEXT NOT NULL, files TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS snapshots_agent ON snapshots (agent_id, created_at);
+
       CREATE TABLE IF NOT EXISTS invites (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -229,7 +237,10 @@ export class Store {
       const row = this.db
         .prepare(`SELECT MAX(gateway_port) AS p FROM agents`)
         .get() as { p: number | null };
-      const port = Math.max(19099, row.p ?? 0) + 1;
+      // Base is configurable so a second installation on the same host uses a
+      // different range (docker publishes these on the shared loopback).
+      const base = Number(process.env.AGENTCLAW_GATEWAY_PORT_BASE ?? 19100);
+      const port = Math.max(base - 1, row.p ?? 0) + 1;
       const token = randomBytes(16).toString('hex');
       this.db
         .prepare(`UPDATE agents SET gateway_port = ?, gateway_token = ? WHERE id = ?`)
@@ -300,6 +311,90 @@ export class Store {
                  @invitedBy, @joinedAt)`,
       )
       .run({ channelUserId: null, invitedBy: null, joinedAt: null, displayName: null, ...m });
+  }
+
+  // ---- Snapshots ---------------------------------------------------------
+
+  insertSnapshot(s: {
+    id: string;
+    agentId: string;
+    label: string;
+    reason: string;
+    files: Record<string, string>;
+    createdAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO snapshots (id, agent_id, label, reason, files, created_at)
+         VALUES (@id, @agentId, @label, @reason, @files, @createdAt)`,
+      )
+      .run({ ...s, files: JSON.stringify(s.files) });
+  }
+
+  listSnapshots(agentId: string): Array<{
+    id: string;
+    label: string;
+    reason: string;
+    createdAt: string;
+    bytes: number;
+    files: string[];
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, label, reason, files, created_at FROM snapshots
+         WHERE agent_id = ? ORDER BY created_at DESC`,
+      )
+      .all(agentId) as any[];
+    return rows.map((r) => {
+      const files = JSON.parse(r.files) as Record<string, string>;
+      return {
+        id: r.id,
+        label: r.label,
+        reason: r.reason,
+        createdAt: r.created_at,
+        bytes: Object.values(files).reduce((n, v) => n + v.length, 0),
+        files: Object.keys(files),
+      };
+    });
+  }
+
+  getSnapshot(agentId: string, id: string):
+    | { id: string; label: string; reason: string; createdAt: string; files: Record<string, string> }
+    | undefined {
+    const r = this.db
+      .prepare(`SELECT * FROM snapshots WHERE id = ? AND agent_id = ?`)
+      .get(id, agentId) as any;
+    if (!r) return undefined;
+    return {
+      id: r.id,
+      label: r.label,
+      reason: r.reason,
+      createdAt: r.created_at,
+      files: JSON.parse(r.files),
+    };
+  }
+
+  deleteSnapshot(agentId: string, id: string): boolean {
+    return (
+      this.db.prepare(`DELETE FROM snapshots WHERE id = ? AND agent_id = ?`).run(id, agentId)
+        .changes === 1
+    );
+  }
+
+  /** Keep the newest `keep` automatic snapshots; named ones are never pruned. */
+  pruneAutoSnapshots(agentId: string, keep: number): number {
+    return this.db
+      .prepare(
+        `DELETE FROM snapshots WHERE agent_id = ? AND reason != 'manual' AND id NOT IN (
+           SELECT id FROM snapshots WHERE agent_id = ? AND reason != 'manual'
+           ORDER BY created_at DESC LIMIT ?
+         )`,
+      )
+      .run(agentId, agentId, keep).changes;
+  }
+
+  deleteSnapshotsFor(agentId: string): void {
+    this.db.prepare(`DELETE FROM snapshots WHERE agent_id = ?`).run(agentId);
   }
 
   // ---- Invites -----------------------------------------------------------

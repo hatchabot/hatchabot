@@ -38,7 +38,16 @@ const channel = new CompositeTelegramProvisioner(pool, manual);
 
 const providers = new Map<string, RuntimeProvider>();
 providers.set('mock', new MockProvider());
-providers.set('local-docker', new LocalDockerProvider({ image: process.env.AGENTCLAW_IMAGE }));
+// AGENTCLAW_PREFIX namespaces docker container/volume names so a second
+// installation on the same box (another unix user) never collides. Docker is
+// host-wide even though systemd --user, HOME, and the DB are per-user.
+providers.set(
+  'local-docker',
+  new LocalDockerProvider({
+    image: process.env.AGENTCLAW_IMAGE,
+    prefix: process.env.AGENTCLAW_PREFIX,
+  }),
+);
 
 // This box is a host from day one — the MVP is local-first (see memory:
 // agentclaw-retail-pivot). A stable id keeps re-runs from duplicating it.
