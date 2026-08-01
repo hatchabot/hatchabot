@@ -207,6 +207,11 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
     throw new Error('Subscription AI profiles can only run on local hosts');
   }
   const modelKey = subscription ? undefined : await secrets.get(requireRef(profile.secretRef));
+  // Subscription with a stored secret = a `claude setup-token` token (macOS
+  // hosts, where the login lives in the Keychain and can't be file-mounted).
+  // Claude Code reads it from CLAUDE_CODE_OAUTH_TOKEN; no ~/.claude mount.
+  const oauthToken =
+    subscription && profile.secretRef ? await secrets.get(profile.secretRef) : undefined;
 
   // Always pairing mode, never a hard allowlist: pairing already enforces
   // §12.4 (only approved senders chat; strangers get a pending request), AND
@@ -238,10 +243,15 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         },
       },
     },
-    env: modelKey ? envForProfile(profile.vendor, modelKey) : {},
-    hostMounts: subscription
-      ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
-      : [],
+    env: modelKey
+      ? envForProfile(profile.vendor, modelKey)
+      : oauthToken
+        ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken }
+        : {},
+    hostMounts:
+      subscription && !oauthToken
+        ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
+        : [],
   };
 }
 

@@ -182,7 +182,7 @@
   </div>
   <div id="aiList"></div>
   <h4 style="margin:16px 0 4px">Add another</h4>
-  <select id="aiKind" onchange="$('aiKeyRow').style.display = this.value === 'api_key' ? '' : 'none'">
+  <select id="aiKind" onchange="const k = this.value === 'api_key'; $('aiKeyRow').style.display = k ? '' : 'none'; $('aiTokenRow').style.display = k ? 'none' : ''">
     <option value="subscription">Claude subscription (login on this machine)</option>
     <option value="api_key">API key</option>
   </select>
@@ -190,6 +190,10 @@
   <div id="aiKeyRow" style="display:none">
     <select id="aiVendor"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
     <input type="password" id="aiKey" placeholder="API key" autocomplete="off">
+  </div>
+  <div id="aiTokenRow">
+    <input type="password" id="aiToken" autocomplete="off"
+           placeholder="Mac only: paste the token from `claude setup-token` (optional on Linux)">
   </div>
   <input type="text" id="aiModel" placeholder="Default model (e.g. claude-opus-4-8)">
   <input type="text" id="aiModelsAdd" placeholder="More switchable models, comma-separated (optional)">
@@ -308,8 +312,10 @@ function renderSetup() {
       <label>Model</label>
       <select id="setupModel">
         <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
-        <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (faster)</option>
+        <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
       </select>
+      <label>On a Mac? <span style="color:var(--dim)">Run <code>claude setup-token</code> in a terminal and paste the token</span></label>
+      <input type="password" id="setupToken" placeholder="Optional — needed when the Claude login lives in the Keychain" autocomplete="off">
       <div class="err" id="setupErr"></div>
       <div class="actions">
         <button class="primary" onclick="createSubscriptionProfile()">Use my Claude subscription</button>
@@ -322,6 +328,7 @@ async function createSubscriptionProfile() {
     await api('/v1/ai-profiles', { method: 'POST', body: {
       kind: 'subscription', vendor: 'anthropic',
       name: 'My Claude', model: $('setupModel').value,
+      oauthToken: $('setupToken').value.trim() || undefined,
     }});
     await refresh(true);
     toast('Claude connected');
@@ -378,7 +385,10 @@ async function addAiProfile() {
   if (!name || !model) { $('aiErr').textContent = 'Name and default model are required.'; return; }
   const extra = $('aiModelsAdd').value.split(',').map(s => s.trim()).filter(Boolean);
   const body = { kind, name, model, models: extra.length ? [model, ...extra] : undefined };
-  if (kind === 'subscription') body.vendor = 'anthropic';
+  if (kind === 'subscription') {
+    body.vendor = 'anthropic';
+    body.oauthToken = $('aiToken').value.trim() || undefined;
+  }
   else {
     body.vendor = $('aiVendor').value;
     body.apiKey = $('aiKey').value.trim();

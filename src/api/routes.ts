@@ -55,6 +55,9 @@ const CreateAIProfile = z.discriminatedUnion('kind', [
     vendor: z.literal('anthropic'),
     model: z.string().min(1),
     models: z.array(z.string().min(1)).max(16).optional(),
+    /** From `claude setup-token` — the subscription path for hosts where the
+     *  login lives in the macOS Keychain instead of ~/.claude. */
+    oauthToken: z.string().min(1).optional(),
   }),
 ]);
 
@@ -172,15 +175,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (body.kind === 'api_key') {
       secretRef = `ai-profile/${id}`;
       await secrets.put(secretRef, body.apiKey);
+    } else if (body.oauthToken) {
+      // Subscription via a `claude setup-token` token — for hosts (macOS)
+      // where the login lives in the Keychain and can't be file-mounted.
+      secretRef = `ai-profile/${id}`;
+      await secrets.put(secretRef, body.oauthToken);
     } else {
-      // Subscription: nothing to store — the OAuth credential stays on the
-      // host machine and is mounted at boot. Just check it exists so the
-      // failure happens here, with a fixable message, not inside a container.
+      // Subscription via the on-disk login: nothing to store — the OAuth
+      // credential stays on the host machine and is mounted at boot. Check it
+      // exists so the failure happens here, with a fixable message, not
+      // inside a container.
       if (!existsSync(`${claudeAuthDir()}/.credentials.json`)) {
         return reply.code(400).send({
           error:
-            'No Claude subscription login found on this host. Run `claude` once ' +
-            'and log in, then create this profile again. See docs/ai-profiles.md.',
+            'No Claude login file found on this host. On Linux: run `claude` once and log in. ' +
+            'On macOS the login lives in the Keychain, so instead run `claude setup-token` ' +
+            'and paste the token here. See docs/ai-profiles.md.',
         });
       }
     }

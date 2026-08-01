@@ -35,7 +35,18 @@ on the machine where you logged in (`~/.config/anthropic/` for the `ant` CLI,
 So: the subscription is cheaper, and it should absolutely be usable — but the
 supported shape is **`kind: 'subscription'` + `host.kind: 'local'`**. The agent
 runs on the machine where the login already exists and reuses the credential
-in place; AgentClaw never holds or copies the token. That covers the actual
+in place; AgentClaw never holds or copies the token.
+
+### macOS hosts: the setup-token path
+
+On Linux the login is a file (`~/.claude/.credentials.json`) that gets mounted
+into each runtime. On macOS Claude Code stores the credential in the Keychain
+— there is no file to mount, and Linux containers can't read a Mac's Keychain.
+The supported route there is `claude setup-token`: it mints a long-lived
+(~1 year) token tied to the subscription, which AgentClaw stores encrypted and
+injects as `CLAUDE_CODE_OAUTH_TOKEN` at boot instead of mounting `~/.claude`.
+Paste it into the token field when creating the subscription profile. When it
+eventually expires, run setup-token again and recreate the profile. That covers the actual
 use case (Chris's own agents on the DGX Spark on his Max plan) without us
 brokering someone else's seat.
 
