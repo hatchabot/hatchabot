@@ -65,8 +65,16 @@ phone app follows the identical flow — that's the point.
 
 ## Phases
 
-1. **Seam** — introduce the mode switch and principal plumbing with the
-   password mode as default. Pure refactor, no behavior change. Shippable.
+1. **Seam** — ✅ shipped 2026-08-01. `AGENTCLAW_AUTH=password|identity`
+   (`authModeFromEnv`, password default; identity mode refuses to boot until
+   phase 2 rather than silently serving an unauthenticated install).
+   `src/api/principal.ts` owns the caller: auth sets `req.principal`, routes
+   read `ownerIdOf(req)` instead of sniffing the legacy header, and every
+   by-id route resolves through `ownedAgent(req, id)` so a foreign agent 404s
+   (previously ownerId scoping existed only on list routes — the audit's
+   finding 8). Sessions are now bound to a hash of the current password, so
+   rotating `AGENTCLAW_PASSWORD` invalidates outstanding 30-day cookies.
+   Covered by test/auth.test.ts.
 2. **Identity mode** — JWKS verification + web login via REST + CLI login.
    Test on the Spark against a real Identity Platform project.
 3. **Migration** — dev-owner adoption flow.

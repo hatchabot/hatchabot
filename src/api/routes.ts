@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
@@ -20,6 +20,7 @@ import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestra
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
 import type { Agent } from '../domain/types.js';
+import { ownerIdOf } from './principal.js';
 
 export interface ApiDeps {
   store: Store;
@@ -69,15 +70,6 @@ const CreateAgent = z.object({
   sharedMemory: z.boolean().optional(),
 });
 
-/**
- * MVP auth is a placeholder: the caller asserts an owner id via header. Swap in
- * a real identity provider before this leaves the workbench — every route here
- * scopes by ownerId, so that swap is one hook, not a rewrite.
- */
-function ownerIdOf(headers: Record<string, unknown>): string {
-  const raw = headers['x-agentclaw-owner'];
-  return typeof raw === 'string' && raw ? raw : 'dev-owner';
-}
 
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
@@ -89,6 +81,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     { parseAs: 'buffer', bodyLimit: 512 * 1024 * 1024 },
     (_req, body, done) => done(null, body),
   );
+
+  /**
+   * Resolve an agent by id AND check it belongs to the caller. Every by-id
+   * route goes through this — without it, ownerId scoping exists only on the
+   * list endpoints and provides no isolation the moment a second owner exists
+   * (docs/identity.md phase 1).
+   */
+  const ownedAgent = (req: FastifyRequest, id: string): Agent | undefined => {
+    const agent = store.getAgent(id);
+    if (!agent || agent.ownerId !== ownerIdOf(req)) return undefined;
+    return agent;
+  };
 
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
@@ -152,12 +156,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.get('/v1/ai-profiles', async (req) => {
     return store
-      .listAIProfiles(ownerIdOf(req.headers as Record<string, unknown>))
+      .listAIProfiles(ownerIdOf(req))
       .map(({ secretRef: _s, ...safe }) => safe);
   });
 
   app.get('/v1/hosts', async (req) => {
-    return store.listHosts(ownerIdOf(req.headers as Record<string, unknown>));
+    return store.listHosts(ownerIdOf(req));
   });
 
   app.get('/v1/pool', async () => {
@@ -197,7 +201,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
     const profile = {
       id,
-      ownerId: ownerIdOf(req.headers as Record<string, unknown>),
+      ownerId: ownerIdOf(req),
       name: body.name,
       vendor: body.vendor,
       kind: body.kind,
@@ -255,7 +259,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post('/v1/agents', async (req, reply) => {
     const parsed = CreateAgent.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });
-    const ownerId = ownerIdOf(req.headers as Record<string, unknown>);
+    const ownerId = ownerIdOf(req);
 
     const profile = store.getAIProfile(parsed.data.aiProfileId);
     const host = store.getHost(parsed.data.hostId);
@@ -300,7 +304,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   };
 
   app.get('/v1/agents', async (req) => {
-    const agents = store.listAgents(ownerIdOf(req.headers as Record<string, unknown>));
+    const agents = store.listAgents(ownerIdOf(req));
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -344,7 +348,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Params: { id: string }; Querystring: { lines?: string } }>(
     '/v1/agents/:id/logs',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
       const lines = Math.min(Number(req.query.lines ?? 80) || 80, 500);
       const text = await providerFor(agent.hostId).logs(agent.runtimeRef, lines);
@@ -366,7 +370,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.patch<{ Params: { id: string }; Body: { name?: string; sharedMemory?: boolean } }>(
     '/v1/agents/:id',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const parsed = z
         .object({
@@ -423,7 +427,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Params: { id: string; name: string } }>(
     '/v1/agents/:id/files/:name',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
       if (!EDITABLE_FILES.has(req.params.name)) return reply.code(400).send({ error: 'Not editable' });
       if (agent.state !== 'RUNNING') {
@@ -440,7 +444,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.put<{ Params: { id: string; name: string }; Body: { content?: string } }>(
     '/v1/agents/:id/files/:name',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
       if (!EDITABLE_FILES.has(req.params.name)) return reply.code(400).send({ error: 'Not editable' });
       const content = (req.body as { content?: string } | null)?.content;
@@ -461,7 +465,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   );
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const channel = store.getChannelForAgent(agent.id);
     return {
@@ -475,7 +479,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // On-demand Control UI credential — same shape as the bot-token reveal, so
   // the token is fetched by an explicit click, not broadcast in every poll.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/gateway', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent?.gatewayPort || !agent.gatewayToken) {
       return reply.code(404).send({ error: 'This agent has no debug gateway yet — rebuild it.' });
     }
@@ -486,7 +490,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string }; Body: { token?: string } }>(
     '/v1/agents/:id/channel-token',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       const token = (req.body as { token?: string } | null)?.token?.trim();
       if (!token) return reply.code(400).send({ error: 'token required' });
@@ -512,7 +516,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // Owner-facing reveal of the agent's bot token — for recycling a hand-made
   // bot into a new agent after deleting this one. Owner-authed like all /v1.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/bot-token', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
     if (!agent || !channel) return reply.code(404).send({ error: 'Not found' });
     return {
@@ -530,7 +534,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // download is a credential. The export leaves the agent STOPPED here: once
   // it's imported elsewhere, two pollers on one bot would flip-flop.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     try {
       const { filename, data } = await exportAgent(
@@ -555,7 +559,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return reply.code(400).send({ error: 'Send the .agentclaw file as the request body.' });
       }
-      const ownerId = ownerIdOf(req.headers as Record<string, unknown>);
+      const ownerId = ownerIdOf(req);
       // Resolve the host up front so the right provider handles the restore.
       const hosts = store.listHosts(ownerId);
       const host = req.query.hostId
@@ -579,7 +583,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Rebuild: new container from the current image, volume (memory) kept.
   app.post<{ Params: { id: string } }>('/v1/agents/:id/rebuild', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
@@ -603,7 +607,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Retry after FAILED (or nudge a stuck PROVISIONING after a restart).
   app.post<{ Params: { id: string } }>('/v1/agents/:id/provision', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     kickProvision(agent.id);
     return reply.code(202).send(store.getAgent(agent.id));
@@ -612,9 +616,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // ---- invites & join (§12.3) --------------------------------------------
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/invites', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    const ownerId = ownerIdOf(req.headers as Record<string, unknown>);
+    const ownerId = ownerIdOf(req);
     const { code, expiresAt } = createInvite(store, agent.id, ownerId);
     const path = `/join/${code}`;
     return reply.code(201).send({
@@ -626,7 +630,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/members', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     return store.listMemberships(agent.id).filter((m) => m.status === 'active');
   });
@@ -634,7 +638,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.delete<{ Params: { id: string; userId: string } }>(
     '/v1/agents/:id/members/:userId',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       try {
         await revokeMember(
@@ -703,7 +707,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // it so an off-tailnet invitee can join by pointing their camera at the
   // owner's screen instead of retyping a link.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/qr.svg', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
     if (!channel?.deepLink) return reply.code(404).send({ error: 'Not found' });
     const svg = await QRCode.toString(channel.deepLink, {
@@ -717,7 +721,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // Pending pairing requests on a live agent — the app renders these as
   // "someone wants to talk to <agent>" cards for the owner to approve.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/pairing', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
     if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
     if (agent.state !== 'RUNNING') return [];
@@ -727,7 +731,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string }; Body: { code?: string } }>(
     '/v1/agents/:id/pairing/approve',
     async (req, reply) => {
-      const agent = store.getAgent(req.params.id);
+      const agent = ownedAgent(req, req.params.id);
       const channel = agent && store.getChannelForAgent(agent.id);
       const code = (req.body as { code?: string } | null)?.code;
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
@@ -753,7 +757,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   );
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/stop', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     // Guard the transition here so a mid-rebuild stop is a 409, not a 500.
     if (agent.state !== 'RUNNING') {
@@ -764,7 +768,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
@@ -774,7 +778,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
-    const agent = store.getAgent(req.params.id);
+    const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // Wait for any in-flight provision/rebuild: deleting underneath one would
     // let it re-create the container AFTER the purge, leaving an orphan that

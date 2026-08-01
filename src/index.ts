@@ -11,7 +11,7 @@ import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
-import { registerAuth } from './api/auth.js';
+import { authModeFromEnv, registerAuth } from './api/auth.js';
 import { reconcileAgents } from './orchestrator/reconcile.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
@@ -63,6 +63,7 @@ await reconcileAgents(store, providers, (e, d) => app.log.info(d, e));
 await registerAuth(app, {
   password: process.env.AGENTCLAW_PASSWORD,
   secret: LocalSecretStore.keyFromEnv(),
+  mode: authModeFromEnv(),
 });
 await registerRoutes(app, {
   store,
