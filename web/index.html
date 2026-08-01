@@ -94,7 +94,9 @@
     position: fixed; left: 50%; transform: translateX(-50%); bottom: 92px;
     background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
     padding: 10px 18px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none;
+    max-width: min(560px, 90vw);
   }
+  .toast.show { pointer-events: auto; cursor: pointer; }
   .toast.show { opacity: 1; }
 </style>
 </head>
@@ -290,10 +292,14 @@ document.addEventListener('keydown', (e) => {
 // dialogs shouldn't be escapable into a broken page when auth is required
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
 
-function toast(msg) {
+let toastTimer;
+function toast(msg, ms) {
   const t = $('toast');
   t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2600);
+  clearTimeout(toastTimer);
+  // Long messages (errors, mostly) get reading time; a tap dismisses early.
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms ?? Math.max(2600, msg.length * 60));
+  t.onclick = () => { clearTimeout(toastTimer); t.classList.remove('show'); };
 }
 
 // ---- setup: first-run subscription profile --------------------------------
@@ -663,7 +669,7 @@ async function importAgentFile(file) {
     if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
     toast(`${data.name} imported — booting`);
     await refresh(true);
-  } catch (e) { toast(e.message); }
+  } catch (e) { toast(e.message, 30000); }
   finally { $('importFile').value = ''; }
 }
 
