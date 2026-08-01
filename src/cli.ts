@@ -11,9 +11,9 @@
  * AGENTCLAW_PASSWORD, or --url/--password flags.
  */
 import { readFile, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // Flags > environment > ~/.config/agentclaw/env (KEY=VALUE lines, chmod 600 —
 // keeps the password out of shell history and .bashrc).
@@ -35,6 +35,7 @@ function configDefaults(): Record<string, string> {
 const USAGE = `agentclaw <command> [options]
 
 Commands:
+  login [--email <addr>]       Sign in (identity mode); stores a refresh token
   list                         Agents with state, model, and last activity
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
          [--private] [--bot-token <tok>]
@@ -78,6 +79,50 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
 interface Ctx {
   url: string;
   cookie: string;
+  /** Identity mode: a fresh ID token, exchanged from the stored refresh token. */
+  bearer?: string;
+}
+
+interface IdentityConfig {
+  authMode: string;
+  identity?: { apiKey?: string; projectId?: string };
+}
+
+/** ~/.config/agentclaw/env — same file the password default lives in. */
+function configPath(): string {
+  return join(homedir(), '.config', 'agentclaw', 'env');
+}
+
+function writeConfigValue(key: string, value: string): void {
+  const path = configPath();
+  let lines: string[] = [];
+  try {
+    lines = readFileSync(path, 'utf8').split('\n').filter((l) => !l.startsWith(`${key}=`));
+  } catch { /* first write */ }
+  lines = lines.filter((l) => l.trim().length > 0);
+  lines.push(`${key}=${value}`);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, lines.join('\n') + '\n', { mode: 0o600 });
+}
+
+async function serverConfig(url: string): Promise<IdentityConfig> {
+  try {
+    const res = await fetch(`${url}/v1/config`);
+    if (res.ok) return (await res.json()) as IdentityConfig;
+  } catch { /* older server: password mode */ }
+  return { authMode: 'password' };
+}
+
+/** Refresh token → short-lived ID token (the securetoken endpoint is form-encoded). */
+async function idTokenFrom(refreshToken: string, apiKey: string): Promise<string> {
+  const res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`,
+  });
+  const data = (await res.json()) as any;
+  if (!res.ok) fail(`session expired (${data?.error?.message ?? res.status}) — run: agentclaw login`);
+  return data.id_token as string;
 }
 
 function fail(msg: string): never {
@@ -115,9 +160,12 @@ async function login(url: string, password: string): Promise<Ctx> {
 }
 
 async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Response> {
+  const auth: Record<string, string> = ctx.bearer
+    ? { authorization: `Bearer ${ctx.bearer}` }
+    : { cookie: ctx.cookie };
   const res = await fetch(`${ctx.url}${path}`, {
     ...init,
-    headers: { cookie: ctx.cookie, ...(init.headers ?? {}) },
+    headers: { ...auth, ...(init.headers ?? {}) },
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}) as any);
@@ -153,6 +201,35 @@ const ago = (iso?: string) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+/** Interactive sign-in for identity mode; stores the refresh token 0600. */
+async function doLogin(url: string, server: IdentityConfig, flags: Map<string, string>): Promise<void> {
+  if (server.authMode !== 'identity') {
+    fail('this server uses a shared password — set AGENTCLAW_PASSWORD instead (no login needed)');
+  }
+  const apiKey = server.identity?.apiKey ?? fail('server did not advertise an identity API key');
+  const { createInterface } = await import('node:readline');
+  const ask = (q: string): Promise<string> => {
+    process.stderr.write(q);
+    const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
+    return new Promise((r) => rl.once('line', (l) => { rl.close(); r(l.trim()); }));
+  };
+  const email = flags.get('email') || (await ask('Email: '));
+  const password = await ask('Password: ');
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password, returnSecureToken: true }),
+    },
+  );
+  const data = (await res.json()) as any;
+  if (!res.ok) fail(`sign-in failed: ${data?.error?.message ?? res.status}`);
+  writeConfigValue('AGENTCLAW_REFRESH_TOKEN', data.refreshToken);
+  console.log(`signed in as ${data.email}`);
+  console.log(`refresh token saved to ${configPath()} (chmod 600)`);
+}
+
 async function main() {
   const { flags, positional } = parseArgs(process.argv.slice(2));
   const [cmd, ...rest] = positional;
@@ -167,7 +244,22 @@ async function main() {
   ).replace(/\/$/, '');
   const password =
     flags.get('password') ?? process.env.AGENTCLAW_PASSWORD ?? defaults.AGENTCLAW_PASSWORD ?? '';
-  const ctx = await login(url, password);
+
+  const server = await serverConfig(url);
+  if (cmd === 'login') {
+    await doLogin(url, server, flags);
+    return;
+  }
+
+  let ctx: Ctx;
+  if (server.authMode === 'identity') {
+    const refresh = process.env.AGENTCLAW_REFRESH_TOKEN ?? defaults.AGENTCLAW_REFRESH_TOKEN;
+    const apiKey = server.identity?.apiKey;
+    if (!refresh || !apiKey) fail('this server uses accounts — run: agentclaw login');
+    ctx = { url, cookie: '', bearer: await idTokenFrom(refresh, apiKey) };
+  } else {
+    ctx = await login(url, password);
+  }
 
   const jsonPost = (path: string, body: unknown, method = 'POST') =>
     api(ctx, path, {

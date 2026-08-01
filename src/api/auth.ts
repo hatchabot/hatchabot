@@ -2,9 +2,17 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER } from './principal.js';
+import {
+  identityConfigFromEnv,
+  IdentityError,
+  IdentityVerifier,
+  principalFor,
+} from './identity.js';
 
 const COOKIE = 'agentclaw_session';
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+/** Identity-mode browser sessions are shorter: the token behind them is too. */
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
 export interface AuthOptions {
   /** Shared password (AGENTCLAW_PASSWORD). Unset = auth disabled, loudly. */
@@ -18,6 +26,8 @@ export interface AuthOptions {
    *   docs/identity.md; the verifier lands in phase 2.
    */
   mode?: AuthMode;
+  /** Test seam / DI for identity mode. */
+  verifier?: IdentityVerifier;
 }
 
 export type AuthMode = 'password' | 'identity';
@@ -45,11 +55,8 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
 
   const mode: AuthMode = opts.mode ?? 'password';
   if (mode === 'identity') {
-    // Phase 2 (docs/identity.md) plugs the JWKS verifier in here. Failing
-    // loudly beats silently serving an installation with no auth at all.
-    throw new Error(
-      'AGENTCLAW_AUTH=identity is not implemented yet — see docs/identity.md. Use password mode.',
-    );
+    await registerIdentityAuth(app, opts);
+    return;
   }
 
   if (!opts.password) {
@@ -111,7 +118,9 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
       return;
     }
     const path = req.url.split('?')[0] ?? '';
-    if (path === '/' || path === '/healthz' || path === '/v1/login') return;
+    // /v1/config tells the login screen which mode to render — it must be
+    // readable before anyone is authenticated.
+    if (path === '/' || path === '/healthz' || path === '/v1/login' || path === '/v1/config') return;
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
@@ -119,6 +128,93 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
       // A valid password session IS the installation's single owner. In
       // identity mode this becomes the verified token subject.
       req.principal = { ownerId: LOCAL_OWNER, via: 'password' };
+      return;
+    }
+    return reply.code(401).send({ error: 'auth required' });
+  });
+}
+
+/**
+ * Identity mode: the caller proves who they are with an Identity Platform ID
+ * token (Authorization: Bearer …, or a cookie the browser got by posting one
+ * to /v1/session). The control plane never sees a password — Google does the
+ * authenticating, we do the verifying.
+ */
+async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
+  const verifier = opts.verifier ?? new IdentityVerifier(identityConfigFromEnv());
+
+  // The browser trades a verified ID token for a short session cookie, so the
+  // token itself never sits in localStorage and every page load isn't a
+  // round-trip to Google.
+  const sign = (payload: string): string =>
+    createHmac('sha256', opts.secret).update(payload).digest('hex');
+
+  const mintSession = (sub: string, expMs: number): string => {
+    const payload = `${sub}:${expMs}`;
+    return `${Buffer.from(payload).toString('base64url')}.${sign(payload)}`;
+  };
+
+  const readSession = (cookie: string | undefined): { sub: string } | undefined => {
+    if (!cookie) return undefined;
+    const [b64, sig] = cookie.split('.');
+    if (!b64 || !sig) return undefined;
+    const payload = Buffer.from(b64, 'base64url').toString('utf8');
+    const expected = sign(payload);
+    if (sig.length !== expected.length) return undefined;
+    if (!timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8'))) return undefined;
+    const [sub, expStr] = payload.split(':');
+    if (!sub || Number(expStr) < Date.now()) return undefined;
+    return { sub };
+  };
+
+  app.post<{ Body: { idToken?: string } }>('/v1/session', async (req, reply) => {
+    const idToken = (req.body as { idToken?: string } | null)?.idToken;
+    if (!idToken) return reply.code(400).send({ error: 'idToken required' });
+    try {
+      const token = await verifier.verify(idToken);
+      // Sessions never outlive the token that created them by much.
+      const exp = Math.min(token.expMs, Date.now() + SESSION_TTL_MS);
+      reply.setCookie(COOKIE, mintSession(token.sub, exp), {
+        httpOnly: true,
+        sameSite: 'strict',
+        path: '/',
+        maxAge: Math.floor((exp - Date.now()) / 1000),
+      });
+      const principal = principalFor(token);
+      return { ok: true, ownerId: principal.ownerId, email: principal.email };
+    } catch (err) {
+      if (err instanceof IdentityError) return reply.code(401).send({ error: err.userMessage });
+      throw err;
+    }
+  });
+
+  app.post('/v1/logout', async (_req, reply) => {
+    reply.clearCookie(COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
+  app.addHook('onRequest', async (req, reply) => {
+    const path = req.url.split('?')[0] ?? '';
+    if (path === '/' || path === '/healthz' || path === '/v1/config') return;
+    if (path === '/v1/session' || path === '/v1/logout') return;
+    if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
+
+    // Bearer token (CLI, phone app) — verified on every call.
+    const authz = req.headers.authorization;
+    if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
+      try {
+        req.principal = principalFor(await verifier.verify(authz.slice(7)));
+        return;
+      } catch (err) {
+        const msg = err instanceof IdentityError ? err.userMessage : 'auth required';
+        return reply.code(401).send({ error: msg });
+      }
+    }
+
+    // Browser session cookie minted from an already-verified token.
+    const session = readSession(req.cookies[COOKIE]);
+    if (session) {
+      req.principal = { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub };
       return;
     }
     return reply.code(401).send({ error: 'auth required' });

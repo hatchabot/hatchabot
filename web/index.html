@@ -119,13 +119,28 @@
 
 <dialog id="loginDlg">
   <h3 style="margin:0 0 4px">Welcome back</h3>
-  <div class="sub">Enter the AgentClaw password for this machine.</div>
-  <label>Password</label>
-  <input type="password" id="loginPw" autocomplete="current-password">
-  <div class="err" id="loginErr"></div>
-  <div class="actions" style="justify-content:flex-end">
-    <button class="primary" id="loginBtn" onclick="doLogin()">Unlock</button>
+  <div id="pwLogin">
+    <div class="sub">Enter the AgentClaw password for this machine.</div>
+    <label>Password</label>
+    <input type="password" id="loginPw" autocomplete="current-password">
+    <div class="actions" style="justify-content:flex-end">
+      <button class="primary" id="loginBtn" onclick="doLogin()">Unlock</button>
+    </div>
   </div>
+  <div id="idLogin" style="display:none">
+    <div class="sub">Sign in to AgentClaw.</div>
+    <div id="gsiBtn" style="margin-top:14px;display:flex;justify-content:center"></div>
+    <div class="sub" style="text-align:center;margin:14px 0 0">or with an email address</div>
+    <label>Email</label>
+    <input type="text" id="loginEmail" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="loginIdPw" autocomplete="current-password">
+    <div class="actions" style="justify-content:space-between">
+      <button onclick="idSignUp()">Create account</button>
+      <button class="primary" onclick="idSignIn()">Sign in</button>
+    </div>
+  </div>
+  <div class="err" id="loginErr"></div>
 </dialog>
 
 <dialog id="createDlg">
@@ -284,8 +299,101 @@ const api = async (path, opts = {}) => {
 
 // ---- auth ------------------------------------------------------------------
 
+let appConfig = { authMode: 'password' };
+
+async function loadConfig() {
+  try { appConfig = await (await fetch('/v1/config')).json(); } catch { /* keep default */ }
+  const identity = appConfig.authMode === 'identity';
+  $('pwLogin').style.display = identity ? 'none' : '';
+  $('idLogin').style.display = identity ? '' : 'none';
+  if (identity) loadGoogleButton();
+}
+
+// Google Identity Services renders the button and hands back a Google ID
+// token; Identity Platform exchanges it for one of ours.
+function loadGoogleButton() {
+  const cid = appConfig.identity?.googleClientId;
+  if (!cid || window.google?.accounts) return;
+  const s = document.createElement('script');
+  s.src = 'https://accounts.google.com/gsi/client';
+  s.async = true;
+  s.onload = () => {
+    google.accounts.id.initialize({ client_id: cid, callback: onGoogleCredential });
+    google.accounts.id.renderButton($('gsiBtn'), { theme: 'filled_black', size: 'large', text: 'signin_with' });
+  };
+  document.head.appendChild(s);
+}
+
+const idpUrl = (method) =>
+  `https://identitytoolkit.googleapis.com/v1/accounts:${method}?key=${appConfig.identity.apiKey}`;
+
+async function idpCall(method, body) {
+  const res = await fetch(idpUrl(method), {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(friendlyIdpError(data?.error?.message ?? 'Sign-in failed'));
+  return data;
+}
+
+function friendlyIdpError(code) {
+  const map = {
+    EMAIL_EXISTS: 'That email already has an account — sign in instead.',
+    EMAIL_NOT_FOUND: 'No account for that email.',
+    INVALID_PASSWORD: 'Wrong password.',
+    INVALID_LOGIN_CREDENTIALS: 'Wrong email or password.',
+    USER_DISABLED: 'That account is disabled.',
+    WEAK_PASSWORD: 'Password must be at least 6 characters.',
+    OPERATION_NOT_ALLOWED: 'That sign-in method is not enabled for this project.',
+  };
+  return map[String(code).split(' :')[0]] ?? String(code);
+}
+
+/** Trade a verified Identity Platform token for an AgentClaw session. */
+async function startSession(idToken) {
+  await api('/v1/session', { method: 'POST', body: { idToken } });
+  loginDlg.close();
+  $('loginIdPw').value = '';
+  await refresh(true);
+}
+
+async function onGoogleCredential(response) {
+  try {
+    const out = await idpCall('signInWithIdp', {
+      postBody: `id_token=${encodeURIComponent(response.credential)}&providerId=google.com`,
+      requestUri: location.origin,
+      returnSecureToken: true,
+    });
+    await startSession(out.idToken);
+  } catch (e) { $('loginErr').textContent = e.message; }
+}
+
+async function idSignIn() {
+  try {
+    const out = await idpCall('signInWithPassword', {
+      email: $('loginEmail').value.trim(), password: $('loginIdPw').value, returnSecureToken: true,
+    });
+    await startSession(out.idToken);
+  } catch (e) { $('loginErr').textContent = e.message; }
+}
+
+async function idSignUp() {
+  try {
+    const out = await idpCall('signUp', {
+      email: $('loginEmail').value.trim(), password: $('loginIdPw').value, returnSecureToken: true,
+    });
+    await startSession(out.idToken);
+  } catch (e) { $('loginErr').textContent = e.message; }
+}
+
 function showLogin() {
-  if (!loginDlg.open) { $('loginErr').textContent = ''; loginDlg.showModal(); $('loginPw').focus(); }
+  if (!loginDlg.open) {
+    $('loginErr').textContent = '';
+    loadConfig().then(() => {
+      loginDlg.showModal();
+      (appConfig.authMode === 'identity' ? $('loginEmail') : $('loginPw')).focus();
+    });
+  }
 }
 async function doLogin() {
   $('loginBtn').disabled = true;
@@ -297,7 +405,8 @@ async function doLogin() {
   finally { $('loginBtn').disabled = false; }
 }
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && loginDlg.open) doLogin();
+  if (e.key !== 'Enter' || !loginDlg.open) return;
+  appConfig.authMode === 'identity' ? idSignIn() : doLogin();
 });
 // dialogs shouldn't be escapable into a broken page when auth is required
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());

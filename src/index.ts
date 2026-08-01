@@ -82,6 +82,7 @@ await registerRoutes(app, {
   webIndexPath: resolve(import.meta.dirname, '../web/index.html'),
   webJoinPath: resolve(import.meta.dirname, '../web/join.html'),
   publicUrl: process.env.AGENTCLAW_PUBLIC_URL,
+  authMode: authModeFromEnv(),
 });
 
 await app.listen({ port: PORT, host: '0.0.0.0' });

@@ -45,6 +45,8 @@ export interface ApiDeps {
    * invitee's phone.
    */
   publicUrl?: string;
+  /** Drives the login screen the unauthenticated page renders. */
+  authMode?: 'password' | 'identity';
 }
 
 const CreateAIProfile = z.discriminatedUnion('kind', [
@@ -163,6 +165,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   }
 
   app.get('/healthz', async () => ({ ok: true }));
+
+  // What the login screen needs before anyone is authenticated. The API key
+  // is publishable by design (Google: "API keys for Firebase services do not
+  // need to be treated as secrets") — it identifies the project, it doesn't
+  // authorise anything on its own.
+  app.get('/v1/config', async () => ({
+    authMode: deps.authMode ?? 'password',
+    identity:
+      deps.authMode === 'identity'
+        ? {
+            projectId: process.env.AGENTCLAW_GCP_PROJECT,
+            apiKey: process.env.AGENTCLAW_IDENTITY_API_KEY,
+            googleClientId: process.env.AGENTCLAW_GOOGLE_CLIENT_ID,
+          }
+        : undefined,
+  }));
 
   // ---- profiles & hosts ----------------------------------------------------
 

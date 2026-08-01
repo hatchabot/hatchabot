@@ -43,11 +43,14 @@ describe('auth mode switch', () => {
     expect(() => authModeFromEnv({ AGENTCLAW_AUTH: 'nope' } as any)).toThrow(/password.*identity/i);
   });
 
-  it('refuses to boot in identity mode until the verifier exists', async () => {
+  it('refuses to boot in identity mode without a configured project', async () => {
     const app = Fastify();
+    const saved = process.env.AGENTCLAW_GCP_PROJECT;
+    delete process.env.AGENTCLAW_GCP_PROJECT;
     await expect(
       registerAuth(app, { password: 'pw', secret: SECRET, mode: 'identity' }),
-    ).rejects.toThrow(/not implemented/i);
+    ).rejects.toThrow(/AGENTCLAW_GCP_PROJECT/);
+    if (saved) process.env.AGENTCLAW_GCP_PROJECT = saved;
   });
 });
 
