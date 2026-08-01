@@ -24,8 +24,12 @@ describe('buildConfigCommands multi-model', () => {
     // 2026.6.11 rejects agents.defaults.modelPolicy — must not be emitted.
     expect(argFor(cmds, 'agents.defaults.modelPolicy')).toBeUndefined();
 
+    // ONE model source of truth: the runtime default, re-applied every seed.
+    // No frozen per-agent --model, and the heal strips pre-existing ones.
+    expect(argFor(cmds, 'agents.defaults.model.primary')).toBe('anthropic/claude-opus-4-8');
     const add = cmds.find((c) => c.argv[0] === 'agents')!.argv;
-    expect(add[add.indexOf('--model') + 1]).toBe('anthropic/claude-opus-4-8');
+    expect(add).not.toContain('--model');
+    expect(cmds.some((c) => c.rawShell?.includes('delete a.model'))).toBe(true);
   });
 
   it('configures models for api-key auth without claude-cli runtime entries', () => {

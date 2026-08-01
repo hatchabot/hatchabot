@@ -33,6 +33,12 @@ export interface ConfigCommand {
   argv: string[];
   /** Piped to the command's stdin (e.g. `models auth paste-token`). */
   stdin?: string;
+  /**
+   * Verbatim shell line to run INSTEAD of the openclaw invocation — the
+   * escape hatch for state the CLI has no verb for. Must be a static string
+   * (no interpolated values).
+   */
+  rawShell?: string;
   /** True when the value is a secret and must be redacted in logs. */
   sensitive?: boolean;
 }
@@ -173,9 +179,18 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     '--workspace',
     workspaceDir,
   ];
-  if (prefixedModel) add.push('--model', prefixedModel);
+  // Deliberately NO --model: a per-agent model would be a frozen copy that
+  // survives migration and defeats profile edits. Agents follow the
+  // re-applied agents.defaults.model.primary — one source of truth.
   if (patch.telegram) add.push('--bind', `telegram:${patch.telegram.accountId}`);
   cmds.push({ argv: add });
+
+  // Heal volumes seeded before this rule (and imported ones): strip any
+  // frozen per-agent model so the default actually governs.
+  cmds.push({
+    argv: [],
+    rawShell: `node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;for(const a of (c.agents&&c.agents.list)||[]){if(a.model){delete a.model;n++}}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));'`,
+  });
 
   if (patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
     cmds.push({
@@ -201,6 +216,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
 /** Renders the commands for logging, with secrets masked. */
 export function describeConfigCommands(cmds: ConfigCommand[]): string[] {
   return cmds.map((c) => {
+    if (c.rawShell) return `sh: ${c.rawShell}`;
     // stdin-fed secrets never appear in argv — mask the pipe, not the args.
     if (c.stdin) return `<redacted> | openclaw ${c.argv.join(' ')}`;
     const argv = c.sensitive ? [...c.argv.slice(0, -1), '<redacted>'] : c.argv;

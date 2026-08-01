@@ -134,7 +134,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
       for (const cmd of buildConfigCommands(spec.workspace.configPatch)) {
         const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
-        const line = cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke;
+        const line = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
         script.push(
           cmd.argv[0] === 'agents' && cmd.argv[1] === 'add'
             ? `if [ ! -d ${shq(workspaceDir)} ]; then ${line}; fi`
