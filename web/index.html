@@ -208,7 +208,18 @@
     changes on their next Rebuild.
   </div>
   <div id="aiList"></div>
-  <h4 style="margin:16px 0 4px">Add another</h4>
+  <h4 style="margin:16px 0 4px">CLI access</h4>
+  <div class="sub">
+    A token for <code>agentclaw</code> on the command line. Works with any
+    sign-in method — needed if you sign in with Google, which has no password
+    for the CLI to use.
+  </div>
+  <div id="cliTokenOut" class="invite-link" style="display:none"></div>
+  <div class="actions" style="justify-content:flex-start">
+    <button onclick="newCliToken()">New token</button>
+  </div>
+
+  <h4 style="margin:16px 0 4px">Add another AI source</h4>
   <select id="aiKind" onchange="const k = this.value === 'api_key'; $('aiKeyRow').style.display = k ? '' : 'none'; $('aiTokenRow').style.display = k ? 'none' : ''">
     <option value="subscription">Claude subscription (login on this machine)</option>
     <option value="api_key">API key</option>
@@ -500,6 +511,17 @@ async function delAiProfile(id, name) {
     await api(`/v1/ai-profiles/${id}`, { method: 'DELETE' });
     toast('Removed');
     await refresh(true); renderAiList();
+  } catch (e) { $('aiErr').textContent = e.message; }
+}
+
+async function newCliToken() {
+  try {
+    const t = await api('/v1/cli-tokens', { method: 'POST', body: { label: 'CLI' } });
+    const out = $('cliTokenOut');
+    out.style.display = '';
+    out.textContent = t.token;
+    toast('Copy it now — it is not shown again', 20000);
+    try { await navigator.clipboard.writeText(t.token); toast('Token copied — run: agentclaw login', 20000); } catch {}
   } catch (e) { $('aiErr').textContent = e.message; }
 }
 

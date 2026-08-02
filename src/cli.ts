@@ -35,7 +35,9 @@ function configDefaults(): Record<string, string> {
 const USAGE = `agentclaw <command> [options]
 
 Commands:
-  login [--email <addr>]       Sign in (identity mode); stores a refresh token
+  login [--token <tok>]        Save an access token from the app (⚙ → CLI access).
+                               Works with any sign-in method, including Google.
+                               [--email <addr>] uses email/password instead.
   list                         Agents with state, model, and last activity
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
          [--private] [--bot-token <tok>]
@@ -203,6 +205,29 @@ const ago = (iso?: string) => {
 
 /** Interactive sign-in for identity mode; stores the refresh token 0600. */
 async function doLogin(url: string, server: IdentityConfig, flags: Map<string, string>): Promise<void> {
+  const { createInterface: mkRl } = await import('node:readline');
+  const prompt = (q: string): Promise<string> => {
+    process.stderr.write(q);
+    const rl = mkRl({ input: process.stdin, output: process.stderr, terminal: false });
+    return new Promise((r) => rl.once('line', (l) => { rl.close(); r(l.trim()); }));
+  };
+
+  // An access token minted by the app. The only path that works for accounts
+  // with no password — i.e. anyone who signed in with Google.
+  if (flags.has('token') || !flags.has('email')) {
+    const token =
+      flags.get('token') ||
+      (await prompt(
+        `Open ${url} → ⚙ AI → "CLI access" → New token, then paste it here.\nToken: `,
+      ));
+    if (!token.startsWith('agentclaw_')) fail('that does not look like an AgentClaw token');
+    const res = await fetch(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });
+    if (!res.ok) fail(`that token was rejected (${res.status})`);
+    writeConfigValue('AGENTCLAW_TOKEN', token);
+    console.log(`signed in. Token saved to ${configPath()} (chmod 600)`);
+    return;
+  }
+
   if (server.authMode !== 'identity') {
     fail('this server uses a shared password — set AGENTCLAW_PASSWORD instead (no login needed)');
   }
@@ -251,8 +276,12 @@ async function main() {
     return;
   }
 
+  const savedToken = process.env.AGENTCLAW_TOKEN ?? defaults.AGENTCLAW_TOKEN;
+
   let ctx: Ctx;
-  if (server.authMode === 'identity') {
+  if (savedToken) {
+    ctx = { url, cookie: '', bearer: savedToken };
+  } else if (server.authMode === 'identity') {
     const refresh = process.env.AGENTCLAW_REFRESH_TOKEN ?? defaults.AGENTCLAW_REFRESH_TOKEN;
     const apiKey = server.identity?.apiKey;
     if (!refresh || !apiKey) fail('this server uses accounts — run: agentclaw login');

@@ -324,6 +324,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { deleted: true };
   });
 
+  // ---- CLI tokens ----------------------------------------------------------
+  // How a non-browser client authenticates. Minted from an already-signed-in
+  // session, so it works the same whether the owner uses Google, email, or
+  // the shared password.
+
+  app.get('/v1/cli-tokens', async (req) => store.listCliTokens(ownerIdOf(req)));
+
+  app.post<{ Body: { label?: string } }>('/v1/cli-tokens', async (req, reply) => {
+    const label = (req.body as { label?: string } | null)?.label ?? 'CLI';
+    const { id, token } = store.createCliToken(ownerIdOf(req), label);
+    // Shown once — only the hash is kept.
+    return reply.code(201).send({ id, token });
+  });
+
+  app.delete<{ Params: { id: string } }>('/v1/cli-tokens/:id', async (req, reply) => {
+    if (!store.revokeCliToken(ownerIdOf(req), req.params.id)) {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+    return { revoked: true };
+  });
+
   // ---- agents ---------------------------------------------------------------
 
   app.post('/v1/agents', async (req, reply) => {

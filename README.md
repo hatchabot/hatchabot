@@ -83,6 +83,10 @@ link and approve them when they message it.
 management. It's linked by `setup-host.sh`; configure it with
 `~/.config/agentclaw/env` (`AGENTCLAW_URL`, `AGENTCLAW_PASSWORD`) or flags.
 
+With per-user accounts, mint a token in the app (**⚙ AI → CLI access → New
+token**) and run `agentclaw login` — that works with any sign-in method,
+including Google, which has no password for a CLI to use.
+
 ```sh
 agentclaw list                          # state, model, last activity
 agentclaw create "Kitchen Helper"       # incl. the BotFather step if needed

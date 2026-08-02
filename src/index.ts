@@ -80,6 +80,7 @@ await registerAuth(app, {
   password: process.env.AGENTCLAW_PASSWORD,
   secret: LocalSecretStore.keyFromEnv(),
   mode: authModeFromEnv(),
+  cliTokenOwner: (token) => store.ownerForCliToken(token),
   onAuthenticated: (principal) => {
     // Phase 3: the first real account adopts what password mode owned. Runs
     // at most once per process — it fires on every authenticated request.

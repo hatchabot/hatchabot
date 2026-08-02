@@ -88,6 +88,47 @@ describe('password sessions', () => {
   });
 });
 
+describe('CLI tokens', () => {
+  it('authenticate in password mode and are rejected when unknown', async () => {
+    const store = new Store(new Database(':memory:'));
+    const { token } = store.createCliToken('user-abc', 'laptop');
+    const app = Fastify();
+    await registerAuth(app, {
+      password: 'pw', secret: SECRET, mode: 'password',
+      cliTokenOwner: (t) => store.ownerForCliToken(t),
+    });
+    app.get('/v1/whoami', async (req) => principalOf(req));
+
+    const ok = await app.inject({
+      method: 'GET', url: '/v1/whoami', headers: { authorization: `Bearer ${token}` },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().ownerId).toBe('user-abc');
+
+    const bad = await app.inject({
+      method: 'GET', url: '/v1/whoami', headers: { authorization: 'Bearer agentclaw_nope' },
+    });
+    expect(bad.statusCode).toBe(401);
+  });
+
+  it('are stored hashed and stop working once revoked', () => {
+    const store = new Store(new Database(':memory:'));
+    const { id, token } = store.createCliToken('user-abc', 'laptop');
+    const row: any = (store as any).db
+      .prepare('SELECT token_hash FROM cli_tokens WHERE id = ?').get(id);
+    expect(row.token_hash).not.toContain(token); // never stored in the clear
+    expect(store.ownerForCliToken(token)).toBe('user-abc');
+    expect(store.revokeCliToken('user-abc', id)).toBe(true);
+    expect(store.ownerForCliToken(token)).toBeUndefined();
+  });
+
+  it("cannot be revoked by a different owner", () => {
+    const store = new Store(new Database(':memory:'));
+    const { id } = store.createCliToken('user-abc', 'laptop');
+    expect(store.revokeCliToken('user-someone-else', id)).toBe(false);
+  });
+});
+
 describe('principalOf', () => {
   it('honours the legacy owner header when no session principal is set', () => {
     const req = { headers: { 'x-agentclaw-owner': 'someone-else' } } as any;

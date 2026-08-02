@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
   Agent,
@@ -70,6 +70,16 @@ export class Store {
         reason TEXT NOT NULL, files TEXT NOT NULL, created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS snapshots_agent ON snapshots (agent_id, created_at);
+
+      -- Long-lived tokens for non-browser clients (the CLI, scripts, a future
+      -- phone app). Stored hashed: a database leak must not yield usable
+      -- credentials. Independent of how the owner signs in, so Google-only
+      -- accounts get CLI access too.
+      CREATE TABLE IF NOT EXISTS cli_tokens (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS cli_tokens_owner ON cli_tokens (owner_id);
 
       CREATE TABLE IF NOT EXISTS invites (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
@@ -377,6 +387,48 @@ export class Store {
     return adopt(newOwnerId);
   }
 
+  // ---- CLI tokens --------------------------------------------------------
+
+  /** Returns the token exactly once; only its hash is persisted. */
+  createCliToken(ownerId: string, label: string): { id: string; token: string } {
+    const raw = randomBytes(32).toString('base64url');
+    const token = `agentclaw_${raw}`;
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO cli_tokens (id, owner_id, token_hash, label, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(id, ownerId, hashToken(token), label.trim().slice(0, 64) || 'CLI', new Date().toISOString());
+    return { id, token };
+  }
+
+  /** The owner this token belongs to, or undefined. Records the use. */
+  ownerForCliToken(token: string): string | undefined {
+    const row = this.db
+      .prepare(`SELECT id, owner_id FROM cli_tokens WHERE token_hash = ?`)
+      .get(hashToken(token)) as { id: string; owner_id: string } | undefined;
+    if (!row) return undefined;
+    this.db
+      .prepare(`UPDATE cli_tokens SET last_used_at = ? WHERE id = ?`)
+      .run(new Date().toISOString(), row.id);
+    return row.owner_id;
+  }
+
+  listCliTokens(ownerId: string): Array<{ id: string; label: string; createdAt: string; lastUsedAt?: string }> {
+    return (
+      this.db
+        .prepare(`SELECT id, label, created_at, last_used_at FROM cli_tokens WHERE owner_id = ? ORDER BY created_at DESC`)
+        .all(ownerId) as any[]
+    ).map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, lastUsedAt: r.last_used_at ?? undefined }));
+  }
+
+  revokeCliToken(ownerId: string, id: string): boolean {
+    return (
+      this.db.prepare(`DELETE FROM cli_tokens WHERE id = ? AND owner_id = ?`).run(id, ownerId).changes === 1
+    );
+  }
+
   // ---- Snapshots ---------------------------------------------------------
 
   insertSnapshot(s: {
@@ -631,6 +683,11 @@ export class Store {
       .all(agentId) as { channel_user_id: string }[];
     return rows.map((r) => r.channel_user_id);
   }
+}
+
+/** Tokens are compared by hash, never stored in the clear. */
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
 }
 
 function rowToAgent(r: any): Agent {

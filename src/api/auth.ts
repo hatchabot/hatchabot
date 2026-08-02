@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER, type Principal } from './principal.js';
 import {
@@ -40,6 +40,12 @@ export interface AuthOptions {
    * hand a password-mode installation's data to its first real account.
    */
   onAuthenticated?: (principal: Principal) => void;
+  /**
+   * Resolves a long-lived CLI token to its owner. Works in BOTH auth modes,
+   * so a Google-only account can still use the CLI (Google has no headless
+   * password flow to offer it).
+   */
+  cliTokenOwner?: (token: string) => string | undefined;
 }
 
 export type AuthMode = 'password' | 'identity';
@@ -136,6 +142,11 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
+    const cliOwner = cliBearer(req, opts);
+    if (cliOwner) {
+      req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
+      return;
+    }
     if (validSession(req.cookies[COOKIE])) {
       // A valid password session IS the installation's single owner. In
       // identity mode this becomes the verified token subject.
@@ -213,6 +224,12 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (path === '/v1/session' || path === '/v1/logout') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
 
+    const cliOwner = cliBearer(req, opts);
+    if (cliOwner) {
+      req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
+      return;
+    }
+
     // Bearer token (CLI, phone app) — verified on every call.
     const authz = req.headers.authorization;
     if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
@@ -234,4 +251,15 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     }
     return reply.code(401).send({ error: 'auth required' });
   });
+}
+
+
+/**
+ * An `agentclaw_…` bearer is a long-lived token this installation minted, not
+ * an identity-provider token — resolve it locally.
+ */
+function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {
+  const authz = req.headers.authorization;
+  if (typeof authz !== 'string' || !authz.startsWith('Bearer agentclaw_')) return undefined;
+  return opts.cliTokenOwner?.(authz.slice(7));
 }
