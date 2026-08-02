@@ -147,6 +147,28 @@ describe('identity auth mode', () => {
     expect(me.json()).toMatchObject({ ownerId: 'user-uid-abc' });
   });
 
+  it('does not mark the session cookie secure over plain HTTP', async () => {
+    // A secure cookie on an http:// origin is silently DISCARDED by the
+    // browser, which turns sign-in into an infinite login loop with no error
+    // anywhere. Shipped once; never again.
+    const f = await app();
+    const res = await f.inject({
+      method: 'POST', url: '/v1/session', payload: { idToken: makeToken() },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.cookies[0]!.secure).toBeFalsy();
+  });
+
+  it('marks it secure when the request arrived over HTTPS', async () => {
+    const f = await app();
+    const res = await f.inject({
+      method: 'POST', url: '/v1/session',
+      headers: { 'x-forwarded-proto': 'https' },
+      payload: { idToken: makeToken() },
+    });
+    expect(res.cookies[0]!.secure).toBe(true);
+  });
+
   it('refuses to mint a session from a bad token', async () => {
     const f = await app();
     const res = await f.inject({
