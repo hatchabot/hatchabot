@@ -3,6 +3,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, MemberRole } from '../domain/types.js';
 import { buildRuntimeSpec, slugify, waitForHealthy, type ProvisionDeps } from './provision.js';
+import { clearBusy, markBusy } from './busy.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -163,6 +164,14 @@ export async function importAgent(
   data: Buffer,
   opts: ImportOptions,
 ): Promise<Agent> {
+  return importAgentInner(deps, data, opts);
+}
+
+async function importAgentInner(
+  deps: ProvisionDeps,
+  data: Buffer,
+  opts: ImportOptions,
+): Promise<Agent> {
   const { store, secrets, provider } = deps;
   const log = deps.log ?? (() => {});
 
@@ -227,6 +236,8 @@ export async function importAgent(
     updatedAt: now,
   };
   store.insertAgent(agent);
+  // From here the agent exists but is mid-build: reconcile must not judge it.
+  markBusy(agent.id);
 
   const secretRef = `channel/${agent.id}/bot-token`;
   let runtimeRef: string | undefined;
@@ -278,7 +289,9 @@ export async function importAgent(
       120,
     );
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
-    return store.setAgentState(agent.id, 'RUNNING');
+    const live = store.setAgentState(agent.id, 'RUNNING');
+    clearBusy(agent.id);
+    return live;
   } catch (err) {
     // Roll back completely: a "Retry" on a half-imported agent would boot it
     // with a fresh seeded volume — an empty-headed impostor of the archive.
@@ -289,6 +302,7 @@ export async function importAgent(
     store.deleteMemberships(agent.id);
     store.setAgentState(agent.id, 'DELETING');
     store.setAgentState(agent.id, 'DELETED');
+    clearBusy(agent.id);
     log('import.rolled_back', { agentId: agent.id, error: String(err) });
     throw new TransferError(
       `Import failed and was rolled back — fix the cause and import again. (${String(

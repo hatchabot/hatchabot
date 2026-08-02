@@ -5,6 +5,7 @@ import type { RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
 import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
+import { whileBusy } from './busy.js';
 import { buildWorkspaceSeed } from '../openclaw/workspace.js';
 import type { Agent } from '../domain/types.js';
 
@@ -89,6 +90,13 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
  * back so nothing keeps billing or stays leased (§11.3).
  */
 export async function runProvisionSteps(
+  deps: ProvisionDeps,
+  agentId: string,
+): Promise<ProvisionResult> {
+  return whileBusy(agentId, () => runProvisionStepsInner(deps, agentId));
+}
+
+async function runProvisionStepsInner(
   deps: ProvisionDeps,
   agentId: string,
 ): Promise<ProvisionResult> {
@@ -296,6 +304,10 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
  * the existing storage, and the seed script never overwrites existing files.
  */
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
+  return whileBusy(agentId, () => rebuildAgentInner(deps, agentId));
+}
+
+async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<Agent> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
   const sleep = deps.sleep ?? defaultSleep;

@@ -44,6 +44,8 @@ export interface PreflightAnswer {
   ok: boolean;
   /** Why not, in words the owner can act on. */
   reasons: string[];
+  /** Machine-readable tags for refusals the owner may want to override. */
+  warnings?: string[];
   /** What the destination would use, so the owner can sanity-check it. */
   hostName?: string;
   aiProfileName?: string;
@@ -73,12 +75,30 @@ export function preflight(
   if (!host) reasons.push('No host is configured here to run it.');
 
   const profiles = store.listAIProfiles(ownerId);
-  const profile = profiles.find((p) => p.vendor === req.vendor) ?? profiles[0];
+  const match = profiles.find((p) => p.vendor === req.vendor);
+  const profile = match ?? profiles[0];
   if (!profile) reasons.push('No AI source is configured here.');
+
+  // A vendor mismatch is not a collision, but it IS a surprise: an agent
+  // running on a local model would silently start billing an API, and one on
+  // a subscription would need a credential this machine may not have. Refuse,
+  // and let the owner set up a matching source or accept the change knowingly.
+  const warnings: string[] = [];
+  if (profile && req.vendor && !match) {
+    const detail =
+      req.vendor === 'local'
+        ? `it runs on a local model, and this machine has no local model server configured — ` +
+          `it would fall back to ${profile.name} (${profile.model}).`
+        : `it runs on "${req.vendor}", and this machine only offers ${profile.name} ` +
+          `(${profile.vendor}/${profile.model}).`;
+    reasons.push(`No matching AI source: ${detail}`);
+    warnings.push('vendor-mismatch');
+  }
 
   return {
     ok: reasons.length === 0,
     reasons,
+    warnings,
     hostName: host?.name,
     aiProfileName: profile?.name,
     aiModel: profile?.model,

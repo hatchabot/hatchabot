@@ -93,6 +93,22 @@ describe('preflight', () => {
     expect(a.reasons.join(' ')).toMatch(/already wired/);
   });
 
+  it('refuses a local-model agent when the destination has no local source', async () => {
+    const w = await world(); // only an anthropic profile exists here
+    const a = preflight(w.store, 'o', { slug: 'fresh', accountId: 'freshbot', vendor: 'local' });
+    expect(a.ok).toBe(false);
+    expect(a.reasons.join(' ')).toMatch(/no local model server/i);
+    expect(a.warnings).toContain('vendor-mismatch');
+    // and it names what it WOULD have fallen back to, so the owner can judge
+    expect(a.reasons.join(' ')).toMatch(/Claude/);
+  });
+
+  it('accepts when the vendor matches', async () => {
+    const w = await world();
+    const a = preflight(w.store, 'o', { slug: 'fresh', accountId: 'freshbot', vendor: 'anthropic' });
+    expect(a.ok).toBe(true);
+  });
+
   it('refuses when the destination has no AI source', () => {
     const store = new Store(new Database(':memory:'));
     store.insertHost({
@@ -106,6 +122,15 @@ describe('preflight', () => {
 });
 
 describe('migrateAgent', () => {
+  it('never exports when the destination refuses on a vendor mismatch', async () => {
+    const w = await world();
+    peerResponds({
+      preflight: { ok: false, reasons: ['No matching AI source: it runs on a local model…'], warnings: ['vendor-mismatch'] },
+    });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/No matching AI source/);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING'); // untouched
+  });
+
   it('moves the agent and leaves the source STOPPED, never deleted', async () => {
     const w = await world();
     peerResponds({});

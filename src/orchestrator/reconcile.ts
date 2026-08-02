@@ -1,5 +1,6 @@
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
+import { isBusy } from './busy.js';
 
 /**
  * Boot-time truth sync: the registry's idea of each agent vs what the runtime
@@ -45,6 +46,9 @@ export async function reconcileAgents(
   log: (event: string, detail: Record<string, unknown>) => void,
 ): Promise<void> {
   for (const agent of store.listAllActiveAgents()) {
+    // An agent mid-provision/rebuild/import looks broken to docker by
+    // definition. Judging it here is how a healthy import got marked FAILED.
+    if (isBusy(agent.id)) continue;
     try {
       const host = store.getHost(agent.hostId);
       const provider = host && providers.get(host.provider);
