@@ -175,6 +175,19 @@ describe('agent export/import', () => {
     });
   });
 
+  it('restores state the runtime user can actually read', async () => {
+    // Regression: hardening the extraction with --no-same-owner left every
+    // file root-owned, so the agent (uid 1000) got EACCES on openclaw.json
+    // and EVERY import failed. The provider must hand back readable state.
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation();
+    const agent = await importAgent(dst.deps, data, { ownerId: 'o' });
+    expect(agent.state).toBe('RUNNING');
+    expect(dst.provider.stateStore.get(agent.runtimeRef!)!.toString()).toBe('the-agents-memory');
+  });
+
   it('rejects garbage files', async () => {
     const dst = await installation();
     await expect(

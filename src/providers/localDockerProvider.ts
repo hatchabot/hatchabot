@@ -291,10 +291,16 @@ export class LocalDockerProvider implements RuntimeProvider {
   async importState(runtimeRef: string, data: Buffer): Promise<void> {
     const { volume } = this.#names(runtimeRef);
     await new Promise<void>((resolve, reject) => {
+      // An archive is untrusted input, so it must not dictate ownership or
+      // carry setuid bits — but the runtime runs as uid 1000 and has to be
+      // able to read what we extract. --no-same-owner alone left everything
+      // root-owned and every import failed with EACCES on openclaw.json.
+      // So: refuse the archive's ownership, then set the correct one, and
+      // strip setuid/setgid while KEEPING modes (credentials rely on 0600).
       const child = spawn(this.docker, [
-        // An archive is untrusted input: never let it set ownership or modes.
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
-        'tar', 'xz', '--no-same-owner', '--no-same-permissions', '-C', '/vol',
+        'sh', '-c',
+        'tar xz --no-same-owner -C /vol && chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]);
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));
