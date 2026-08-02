@@ -73,6 +73,37 @@ describe('boot reconcile', () => {
   });
 });
 
+describe('unhealthy detection', () => {
+  it('logs an unhealthy running agent instead of silently leaving it green', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({
+      id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box',
+      settings: {}, createdAt: 'now',
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'o', name: 'A', slug: 'a1', state: 'PROVISIONING',
+      aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    // healthyAfter is high enough that status() reports running-but-unhealthy
+    const provider = new MockProvider({ healthyAfter: 99 });
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'a1',
+      workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } },
+      env: {},
+    });
+    await provider.start(runtimeRef);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    store.setAgentState('a1', 'RUNNING');
+
+    const events: string[] = [];
+    await reconcileAgents(store, new Map([['mock', provider as RuntimeProvider]]), (e) => events.push(e));
+    expect(events).toContain('reconcile.unhealthy');
+    // state is left alone — a wedged gateway may recover on its own
+    expect(store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+});
+
 describe('boot reconcile: parked agents', () => {
   function parkedWorld(withRuntime: boolean, pendingAction: boolean) {
     const store = new Store(new Database(':memory:'));

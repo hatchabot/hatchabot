@@ -11,6 +11,34 @@ import type { Store } from '../store/store.js';
  * Rules are deliberately conservative: reconcile only mends states, it never
  * starts or destroys runtimes on its own.
  */
+/**
+ * Runs at boot AND on a timer. Docker's `--restart unless-stopped` covers a
+ * process that exits; nothing covers a container that is up but wedged, which
+ * is why the health bit is read rather than just the phase.
+ */
+export function startReconcileLoop(
+  store: Store,
+  providers: Map<string, RuntimeProvider>,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  intervalMs = Number(process.env.AGENTCLAW_RECONCILE_MS ?? 120_000),
+): NodeJS.Timeout {
+  let running = false;
+  const tick = async () => {
+    if (running) return; // never overlap a slow sweep with the next one
+    running = true;
+    try {
+      await reconcileAgents(store, providers, log);
+    } catch (err) {
+      log('reconcile.loop_error', { error: String(err) });
+    } finally {
+      running = false;
+    }
+  };
+  const timer = setInterval(tick, intervalMs);
+  timer.unref();
+  return timer;
+}
+
 export async function reconcileAgents(
   store: Store,
   providers: Map<string, RuntimeProvider>,
@@ -67,6 +95,14 @@ export async function reconcileAgents(
       } else if (status.phase === 'stopped' && s === 'PROVISIONING' && !agent.pendingAction) {
         store.setAgentState(agent.id, 'FAILED', 'Setup was interrupted — tap Retry.');
         log('reconcile.interrupted', { agentId: agent.id });
+      } else if (status.phase === 'running' && s === 'RUNNING' && !status.healthy) {
+        // The container is up but its gateway isn't answering — the way an
+        // agent actually dies. Previously invisible: the chip stayed green
+        // and only "last active" quietly stopped moving.
+        log('reconcile.unhealthy', { agentId: agent.id });
+      } else if (status.phase === 'error' && s === 'RUNNING') {
+        store.setAgentState(agent.id, 'FAILED', `The runtime reported an error: ${status.message}`);
+        log('reconcile.runtime_error', { agentId: agent.id, message: status.message });
       }
     } catch (err) {
       log('reconcile.error', { agentId: agent.id, error: String(err) });

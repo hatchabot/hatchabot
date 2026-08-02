@@ -230,12 +230,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * stripping it belongs here rather than in each route's spread — four
    * mutation routes previously leaked it by returning the raw row.
    */
-  const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => ({
-    ...agent,
-    gatewayToken: undefined,
-    hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
-    ...extra,
-  });
+  const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => {
+    const desired = store.getAIProfile(agent.aiProfileId);
+    return {
+      ...agent,
+      gatewayToken: undefined,
+      hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
+      /** What the runtime is actually running right now. */
+      model: agent.appliedModel ?? desired?.model,
+      /** What it WILL run after a rebuild, when that differs. */
+      pendingModel:
+        agent.appliedProfileId && agent.appliedProfileId !== agent.aiProfileId
+          ? desired?.model
+          : agent.appliedModel && desired && agent.appliedModel !== desired.model
+            ? desired.model
+            : undefined,
+      ...extra,
+    };
+  };
 
   const snapshotDeps = (agent: Agent) => ({
     store,
@@ -328,6 +340,26 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get('/v1/hosts', async (req) => {
     return store.listHosts(ownerIdOf(req));
   });
+
+  /**
+   * Which local models are resident right now. A cold model means the next
+   * message stalls ~10s while tens of GB load — worth showing rather than
+   * letting the owner wonder whether the agent is broken.
+   */
+  const warmCache = { at: 0, models: [] as string[] };
+  const warmLocalModels = async (baseUrl: string): Promise<string[]> => {
+    if (Date.now() - warmCache.at < 15_000) return warmCache.models;
+    try {
+      const root = baseUrl.replace(/\/v1\/?$/, '');
+      const res = await fetch(`${root}/api/ps`, { signal: AbortSignal.timeout(2000) });
+      const data = (await res.json()) as { models?: Array<{ name?: string }> };
+      warmCache.models = (data.models ?? []).map((m) => m.name ?? '').filter(Boolean);
+    } catch {
+      warmCache.models = [];
+    }
+    warmCache.at = Date.now();
+    return warmCache.models;
+  };
 
   app.get('/v1/pool', async () => {
     return { availableBots: deps.channel.pool.availableCount() };
@@ -542,8 +574,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           // Default model from the agent's AI profile. Applied config can lag
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.
-          model: store.getAIProfile(a.aiProfileId)?.model,
           lastActiveAt: await lastActiveFor(a),
+          modelWarm: await (async () => {
+            const p = store.getAIProfile(a.aiProfileId);
+            if (p?.vendor !== 'local' || !p.baseUrl) return undefined;
+            return (await warmLocalModels(p.baseUrl)).includes(a.appliedModel ?? p.model);
+          })(),
           openclawVersion,
           updateAvailable,
         });

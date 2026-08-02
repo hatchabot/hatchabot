@@ -97,6 +97,8 @@ export class Store {
       `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN base_url TEXT`,
       `ALTER TABLE cli_tokens ADD COLUMN expires_at TEXT`,
+      `ALTER TABLE agents ADD COLUMN applied_profile_id TEXT`,
+      `ALTER TABLE agents ADD COLUMN applied_model TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
     ]) {
@@ -106,6 +108,16 @@ export class Store {
         /* column exists */
       }
     }
+
+    // Agents provisioned before applied-tracking existed were configured with
+    // whatever profile they still point at. Backfill, so the "will switch on
+    // rebuild" badge doesn't fire spuriously for every pre-existing agent.
+    this.db.exec(`
+      UPDATE agents SET
+        applied_profile_id = ai_profile_id,
+        applied_model = (SELECT model FROM ai_profiles WHERE id = agents.ai_profile_id)
+      WHERE applied_profile_id IS NULL AND state != 'DELETED'
+    `);
   }
 
   // ---- AI profiles -------------------------------------------------------
@@ -660,6 +672,17 @@ export class Store {
       .run(name, new Date().toISOString(), id);
   }
 
+  /**
+   * Record what the runtime was last actually configured with. The agent row
+   * carries the *desired* profile; this is the *applied* one, and the gap
+   * between them is what "Rebuild to apply" means.
+   */
+  setAgentApplied(id: string, aiProfileId: string, model: string): void {
+    this.db
+      .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ? WHERE id = ?`)
+      .run(aiProfileId, model, id);
+  }
+
   setAgentAIProfile(id: string, aiProfileId: string): void {
     this.db
       .prepare(`UPDATE agents SET ai_profile_id = ?, updated_at = ? WHERE id = ?`)
@@ -745,6 +768,8 @@ function rowToAgent(r: any): Agent {
     persona: r.persona,
     sharedMemory: !!r.shared_memory,
     pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
+    appliedProfileId: r.applied_profile_id ?? undefined,
+    appliedModel: r.applied_model ?? undefined,
     gatewayPort: r.gateway_port ?? undefined,
     gatewayToken: r.gateway_token ?? undefined,
     createdAt: r.created_at,

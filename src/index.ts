@@ -13,7 +13,7 @@ import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
 import { authModeFromEnv, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
-import { reconcileAgents } from './orchestrator/reconcile.js';
+import { reconcileAgents, startReconcileLoop } from './orchestrator/reconcile.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
 const DB_PATH = process.env.AGENTCLAW_DB ?? 'data/agentclaw.sqlite';
@@ -134,6 +134,10 @@ if (bindHost === '127.0.0.1' && !process.env.AGENTCLAW_PASSWORD) {
       'Set a password (or AGENTCLAW_BIND) to accept connections from elsewhere.',
   );
 }
+// Keep mending state after boot: a container that wedges at 3am should not
+// stay green until someone notices.
+startReconcileLoop(store, providers, (e, d) => app.log.info(d, e));
+
 await app.listen({ port: PORT, host: bindHost });
 app.log.info(
   { availableBots: pool.availableCount(), localHostId: LOCAL_HOST_ID, url: `http://localhost:${PORT}` },

@@ -237,6 +237,10 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   // it keeps the door open for invitees who join after a rebuild — a hard
   // allowlist would silently reject their first contact. allowFrom seeds the
   // known members on fresh volumes.
+  // Every path that configures a runtime comes through here, so this is the
+  // one place that knows what actually got applied.
+  store.setAgentApplied(agentId, profile.id, profile.model);
+
   const allowFrom = store.listAllowedChannelUserIds(agentId);
   // Debug door: each agent's Control UI published on a stable host port
   // behind a per-agent gateway token.

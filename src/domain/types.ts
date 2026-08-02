@@ -82,6 +82,10 @@ export interface Agent {
   persona: string;
   /** One-to-many agents share MEMORY.md across members (§12.5). */
   sharedMemory: boolean;
+  /** The AI profile the runtime was last configured with (vs the desired one). */
+  appliedProfileId?: string;
+  /** The model that configuration actually used. */
+  appliedModel?: string;
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */
   gatewayPort?: number;
   /** Gateway auth token for that Control UI. */
