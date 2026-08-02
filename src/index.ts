@@ -123,7 +123,18 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   });
 }
 
-await app.listen({ port: PORT, host: '0.0.0.0' });
+// Without a password every request is treated as the owner. Agent containers
+// can reach this process on the docker bridge, so binding 0.0.0.0 in that
+// state hands the whole fleet to any prompt-injected agent. Bind loopback
+// instead and say so.
+const bindHost = process.env.AGENTCLAW_BIND ?? (process.env.AGENTCLAW_PASSWORD ? '0.0.0.0' : '127.0.0.1');
+if (bindHost === '127.0.0.1' && !process.env.AGENTCLAW_PASSWORD) {
+  app.log.warn(
+    'AGENTCLAW_PASSWORD is not set — auth is disabled, so binding 127.0.0.1 only. ' +
+      'Set a password (or AGENTCLAW_BIND) to accept connections from elsewhere.',
+  );
+}
+await app.listen({ port: PORT, host: bindHost });
 app.log.info(
   { availableBots: pool.availableCount(), localHostId: LOCAL_HOST_ID, url: `http://localhost:${PORT}` },
   'AgentClaw control plane up',

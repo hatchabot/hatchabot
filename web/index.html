@@ -588,7 +588,7 @@ $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   $('agentProfile').innerHTML = profiles.map(p =>
-    `<option value="${p.id}">${esc(p.name)} — ${esc(p.model)}</option>`).join('');
+    `<option value="${p.id}">${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}</option>`).join('');
   createDlg.showModal();
   $('agentName').focus();
 };
@@ -674,6 +674,8 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${jsq(a.name)}')">Edit…</button>
         <button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>` : ''}
+      ${a.state !== 'RUNNING' && a.runtimeRef
+        ? `<button onclick="openLogs('${a.id}', '${jsq(a.name)}')" title="What the runtime last said">Logs</button>` : ''}
       ${a.state === 'RUNNING' && a.hasGateway
         ? `<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')" title="This agent's own OpenClaw Control UI (debug)">OpenClaw</button>` : ''}
       ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
@@ -785,14 +787,39 @@ async function restoreSnapshot(snapId, label) {
   } catch (e) { $('editErr').textContent = e.message; }
 }
 
+/**
+ * One local model fits in memory at a time. Two agents on two DIFFERENT
+ * local models evict each other on every message — each reply then pays a
+ * ~10s reload. Warn before the user builds that for themselves.
+ */
+function localClashWarning(chosen, exceptAgentId) {
+  if (chosen?.vendor !== 'local') return '';
+  const clash = agents.find(a => {
+    if (a.id === exceptAgentId) return null;
+    const p = profiles.find(x => x.id === a.aiProfileId);
+    return p?.vendor === 'local' && p.model !== chosen.model;
+  });
+  if (!clash) return '';
+  const other = profiles.find(x => x.id === clash.aiProfileId);
+  return `\n\n⚠ "${clash.name}" already uses the local model ${other?.model}. ` +
+    `This machine keeps ONE local model in memory, so the two agents would ` +
+    `evict each other and every reply would stall ~10s while the model reloads.`;
+}
+
 async function switchProfile() {
   const id = $('editProfile').value;
   const chosen = profiles.find(p => p.id === id);
-  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.`)) return;
+  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.${localClashWarning(chosen, editAgentId)}`)) return;
   $('profileBtn').disabled = true;
   try {
     await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { aiProfileId: id } });
-    toast('AI source changed — Rebuild to apply it');
+    if (confirm('Saved. Rebuild now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in Telegram afterwards — a fresh conversation suits a new model.')) {
+      await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
+      toast('Rebuilding with the new AI source');
+      editDlg.close();
+    } else {
+      toast('Saved — Rebuild to apply it');
+    }
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('profileBtn').disabled = false; }

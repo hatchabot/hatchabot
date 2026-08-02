@@ -99,6 +99,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
         '--replace',
       ],
     });
+  } else {
+    // Moving OFF a local profile must not leave the old server configured —
+    // the same "stale config the gateway might prefer" class we keep hitting.
+    cmds.push({ argv: ['config', 'set', 'models.providers.ollama', '{}', '--replace'] });
   }
 
   // Runtime-wide default model. Without it, OpenClaw's OWN default agent

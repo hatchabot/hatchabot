@@ -147,6 +147,52 @@ describe('cross-owner isolation (audit regressions)', () => {
     expect(del.statusCode).toBe(404);
   });
 
+  it("refuses to point an agent at another owner's AI profile", async () => {
+    const store = twoOwners();
+    store.insertAIProfile({
+      id: 'p-stranger', ownerId: STRANGER, name: 'Theirs', vendor: 'anthropic',
+      kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/x', createdAt: 'now',
+    });
+    const f = await app(store);
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: as(OWNER),
+      payload: { aiProfileId: 'p-stranger' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p'); // unchanged
+  });
+
+  it('switches to a profile the caller owns', async () => {
+    const store = twoOwners();
+    const f = await app(store);
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: as(OWNER),
+      payload: { aiProfileId: 'p-owner' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p-owner');
+  });
+
+  it('scopes CLI tokens per owner across list and revoke', async () => {
+    const store = twoOwners();
+    const mine = store.createCliToken(OWNER, 'mine');
+    store.createCliToken(STRANGER, 'theirs');
+    const f = await app(store);
+
+    const list = await f.inject({ method: 'GET', url: '/v1/cli-tokens', headers: as(OWNER) });
+    expect(list.json()).toHaveLength(1);
+    expect(list.json()[0].label).toBe('mine');
+    // and the raw token never comes back from a listing
+    expect(JSON.stringify(list.json())).not.toContain(mine.token);
+
+    const theirs = store.listCliTokens(STRANGER)[0]!;
+    const del = await f.inject({
+      method: 'DELETE', url: `/v1/cli-tokens/${theirs.id}`, headers: as(OWNER),
+    });
+    expect(del.statusCode).toBe(404);
+    expect(store.listCliTokens(STRANGER)).toHaveLength(1);
+  });
+
   it('never returns the gateway token from mutation responses', async () => {
     const store = twoOwners();
     store.ensureGatewayAccess('a1');

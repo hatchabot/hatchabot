@@ -33,8 +33,8 @@ server-side, and the web app can log in through Identity Platform's REST API
 
 ### Principal plumbing
 
-`ownerIdOf()` currently returns the constant `dev-owner`. It becomes the
-verified principal's uid. Every store query already filters by `ownerId` —
+`ownerIdOf()` returns the verified principal's uid (in password mode, the
+single local owner). Every store query already filters by `ownerId` —
 the schema needs no change, which is the payoff of having threaded ownerId
 from day one.
 
@@ -43,8 +43,8 @@ from day one.
 One-time, on first login after switching modes: if rows owned by
 `dev-owner` exist and no other real owner does, re-key them to the
 authenticated uid (`UPDATE ... SET owner_id = ?`  across agents, profiles,
-hosts, invites, memberships). Logged loudly. This turns Chris's Spark into
-account #1 without export/import.
+hosts, invites, memberships). Logged loudly. This turns an existing
+installation into account #1 without export/import.
 
 ### Members become accounts (full invites)
 
@@ -82,7 +82,7 @@ phone app follows the identical flow — that's the point.
    `signInWithIdp`) and email/password via the Identity Toolkit REST API;
    `agentclaw login` stores a refresh token 0600. `/v1/config` (open in both
    modes) tells the login screen which mode to render.
-   Project `agentclaw-504222`; env: `AGENTCLAW_GCP_PROJECT`,
+   Configured via env: `AGENTCLAW_GCP_PROJECT`,
    `AGENTCLAW_IDENTITY_API_KEY`, `AGENTCLAW_GOOGLE_CLIENT_ID`.
 3. **Migration** — ✅ shipped 2026-08-01. `Store.adoptLocalOwnerData` re-keys
    agents/profiles/hosts/memberships/invites from `dev-owner` to the first
@@ -99,8 +99,8 @@ phone app follows the identical flow — that's the point.
    invitee can log in and see the agent; skipping it keeps the old
    Telegram-only membership. Covered by test/roles.test.ts.
 
-Each phase lands green on the Spark before the next; nothing requires Cloud
-Run to exist yet.
+Each phase lands green on a real installation before the next; nothing
+requires Cloud Run to exist yet.
 
 ## Non-goals (for now)
 

@@ -96,8 +96,12 @@ fi
 say "Done. Next steps:"
 cat <<'EOF'
   1. Open http://localhost:8080 and unlock with your password.
-  2. Connect an AI source (⚙ AI): if this machine has a Claude Pro/Max login
-     (`claude` CLI, logged in), one tap; otherwise paste an API key.
+  2. Connect an AI source (⚙ AI). Three options:
+       - a Claude Pro/Max login already on this machine (one tap),
+       - an API key,
+       - a local model server you run yourself (Ollama) — no credential,
+         nothing leaves this machine. See "Running on your own hardware"
+         in README.md.
   3. Create an agent — or import one:  agentclaw import <file>.agentclaw
      (Remember: the exported copy on the old machine stays STOPPED.)
   4. Off-LAN access for invitees: see docs/tailscale.md.

@@ -123,10 +123,24 @@ describe('buildConfigCommands multi-model', () => {
     expect(cmds.some((c) => c.argv.includes('paste-token'))).toBe(false);
   });
 
-  it('does not emit an ollama provider block for anthropic profiles', () => {
+  it('clears any stale ollama provider block for anthropic profiles', () => {
     const cmds = buildConfigCommands({ agentId: 'a1', model: 'claude-opus-4-8', authMode: 'api-key' });
-    expect(argFor(cmds, 'models.providers.ollama')).toBeUndefined();
+    // Moving OFF local must not leave the old server configured.
+    expect(argFor(cmds, 'models.providers.ollama')).toBe('{}');
     expect(argFor(cmds, 'agents.defaults.model.primary')).toBe('anthropic/claude-opus-4-8');
+  });
+
+  it('defaults the ollama baseUrl to the bridge, never loopback', () => {
+    const cmds = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key', provider: 'ollama' });
+    const prov = JSON.parse(argFor(cmds, 'models.providers.ollama')!);
+    // localhost inside a container is the container — the classic misconfig.
+    expect(prov.baseUrl).toBe('http://172.17.0.1:11434/v1');
+    expect(prov.baseUrl).not.toContain('localhost');
+  });
+
+  it('routes a google profile through the google provider, not anthropic', () => {
+    const cmds = buildConfigCommands({ agentId: 'a1', model: 'gemini-3-pro', authMode: 'api-key', provider: 'google' });
+    expect(argFor(cmds, 'agents.defaults.model.primary')).toBe('google/gemini-3-pro');
   });
 
   it('keeps the single-model shape when models is absent', () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   AUTO_KEEP,
+  MAX_FILE_BYTES,
   captureSnapshot,
   restoreSnapshot,
   SnapshotError,
@@ -19,7 +20,12 @@ function fileWorld(initial: Record<string, string>) {
     provider.execLog.push(['sh', script]);
     const m = script.match(/agents\/[^/]+\/agent\/([A-Za-z.]+)/);
     const name = m?.[1] ?? '';
-    if (script.startsWith('head -c')) return { code: 0, stdout: files[name] ?? '', stderr: '' };
+    if (script.startsWith('head -c')) {
+      // Model the real `head -c N` truncation, so a test can tell the
+      // difference between reading N and reading N+1 bytes.
+      const n = Number(script.match(/^head -c (\d+)/)?.[1] ?? Infinity);
+      return { code: 0, stdout: (files[name] ?? '').slice(0, n), stderr: '' };
+    }
     const b64 = script.match(/echo "([^"]+)"/)?.[1] ?? '';
     files[name] = Buffer.from(b64, 'base64').toString('utf8');
     return { code: 0, stdout: '', stderr: '' };
@@ -65,6 +71,19 @@ describe('captureSnapshot', () => {
     await expect(captureSnapshot(w.deps, 'a1')).rejects.toBeInstanceOf(SnapshotError);
     // nothing half-captured
     expect(w.store.listSnapshots('a1')).toHaveLength(0);
+  });
+
+  it('detects a file just one byte over the cap', async () => {
+    // Only possible because capture reads MAX_FILE_BYTES + 1: reading exactly
+    // the cap makes oversize indistinguishable from a file of exactly the cap.
+    const w = fileWorld({ ...SEED, 'MEMORY.md': 'x'.repeat(MAX_FILE_BYTES + 1) });
+    await expect(captureSnapshot(w.deps, 'a1')).rejects.toBeInstanceOf(SnapshotError);
+  });
+
+  it('accepts a file of exactly the cap', async () => {
+    const w = fileWorld({ ...SEED, 'MEMORY.md': 'x'.repeat(MAX_FILE_BYTES) });
+    const snap = await captureSnapshot(w.deps, 'a1');
+    expect(snap.files).toContain('MEMORY.md');
   });
 
   it('refuses when the files come back empty (unhealthy runtime)', async () => {

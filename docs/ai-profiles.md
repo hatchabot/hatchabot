@@ -9,7 +9,7 @@ difference decides what AgentClaw can host.
 An `ANTHROPIC_API_KEY` is a bearer string. We store it encrypted, inject it into
 the runtime at boot, and it works identically on a cloud container and a local
 box. Billing is metered per token against the key's organisation. This is the
-only credential type `POST /v1/ai-profiles` currently accepts for cloud hosting.
+only credential type that would work on a host you don't control.
 
 ## Claude Max subscription — owner-hosted only
 
@@ -46,9 +46,9 @@ The supported route there is `claude setup-token`: it mints a long-lived
 (~1 year) token tied to the subscription, which AgentClaw stores encrypted and
 injects as `CLAUDE_CODE_OAUTH_TOKEN` at boot instead of mounting `~/.claude`.
 Paste it into the token field when creating the subscription profile. When it
-eventually expires, run setup-token again and recreate the profile. That covers the actual
-use case (Chris's own agents on the DGX Spark on his Max plan) without us
-brokering someone else's seat.
+eventually expires, run setup-token again and recreate the profile. That covers the real
+use case — your own agents, on your own machine, on your own plan — without
+anyone brokering someone else's seat.
 
 Cloud-hosted agents take an API key. The app should say so plainly at profile
 creation time rather than letting a user pick a combination that will expire
@@ -71,6 +71,11 @@ Two things to know:
   the docker bridge, `http://172.17.0.1:11434/v1`. The server must bind
   somewhere the container can reach (`OLLAMA_HOST=0.0.0.0:11434`, or bind the
   bridge address only).
+- **Keep the model resident.** Ollama unloads after 5 minutes by default, so
+  every message following a gap pays a full model load (tens of seconds, and
+  it feels like the machine has hung). Set `OLLAMA_KEEP_ALIVE=-1`. Pair it
+  with `OLLAMA_MAX_LOADED_MODELS=1` so a `/model` switch can't hold two large
+  models in memory at once.
 - **Prefer 8-bit quantization for agents.** Benchmarks put 8-bit within ~2% of
   full precision while 4-bit loses 2–8%, concentrated in structured output —
   which is exactly tool calling. A smaller model at Q8 drives an agent loop

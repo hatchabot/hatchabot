@@ -12,12 +12,12 @@ that into "reachable from anywhere, by exactly the people you choose" without
 opening a single port to the internet. This is the family-scale access story:
 the invite flow works from a phone on cellular, not just your wifi.
 
-## Current state on this host
+## What you get
 
-- Tailscale is installed and up; this machine is `my-host`
-  (`100.64.0.1`, MagicDNS `my-host.example.ts.net`).
-- The app is reachable tailnet-wide **today** at
-  **http://my-host.example.ts.net:8080**.
+- Once Tailscale is up, the machine has a stable MagicDNS name like
+  `<your-machine>.<your-tailnet>.ts.net`.
+- The app is then reachable tailnet-wide at
+  **http://<your-machine>.<your-tailnet>.ts.net:8080** — no ports opened.
 - `AGENTCLAW_PUBLIC_URL` in `.env` makes invite links use that address, so a
   link minted while you browse localhost still works from an invitee's phone.
 
@@ -29,7 +29,7 @@ family case.
 1. They install the Tailscale app (iOS/Android) and create an account.
 2. You invite them to your tailnet: https://login.tailscale.com/admin/users →
    **Invite users**. (Alternatively, share only this machine:
-   admin console → Machines → `my-host` → **Share**.)
+   admin console → Machines → `<your-machine>` → **Share**.)
 3. They accept, toggle Tailscale on. Done — your invite links now open on
    their phone, and Telegram chat with the agents works regardless (Telegram
    is public infrastructure; Tailscale is only needed for the AgentClaw pages).
@@ -48,10 +48,10 @@ tailscale serve --bg http://localhost:8080
 
 If the second command mentions enabling HTTPS certificates: admin console →
 **DNS** → *Enable HTTPS*, then rerun it. Afterwards the app lives at
-`https://my-host.example.ts.net` (no port), and `.env` should switch to:
+`https://<your-machine>.<your-tailnet>.ts.net` (no port), and `.env` should switch to:
 
 ```
-AGENTCLAW_PUBLIC_URL=https://my-host.example.ts.net
+AGENTCLAW_PUBLIC_URL=https://<your-machine>.<your-tailnet>.ts.net
 ```
 
 then `systemctl --user restart agentclaw`.
@@ -59,7 +59,7 @@ then `systemctl --user restart agentclaw`.
 ## Deliberately NOT enabled: Funnel
 
 `tailscale funnel` would publish the app to the open internet (no Tailscale
-app needed for invitees). We don't: the app's auth is one shared LAN-grade
-password, and join pages are reachable by code alone. That's the right
-tradeoff for a tailnet, not for the public internet. Revisit only alongside
-real per-user identity.
+app needed for invitees). In **password mode** that's a bad trade: one shared
+password guards everything. With `AGENTCLAW_AUTH=identity` (per-user accounts,
+see docs/identity.md) the calculus changes — but note the join pages are still
+reachable by invite code alone, by design.

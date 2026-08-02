@@ -58,7 +58,16 @@ const LocalProfile = z.object({
   model: z.string().min(1),
   models: z.array(z.string().min(1)).max(16).optional(),
   /** As the AGENT sees it — containers can't reach the host's loopback. */
-  baseUrl: z.string().url().default('http://172.17.0.1:11434/v1'),
+  /**
+   * Must be a private address: "nothing leaves this machine" has to be
+   * enforced, not just documented. z.string().url() alone accepts
+   * https://evil.com and file:// — both silently break the promise.
+   */
+  baseUrl: z
+    .string()
+    .url()
+    .refine(isPrivateModelUrl, 'Must be an http:// address on this machine or a private network')
+    .default('http://172.17.0.1:11434/v1'),
 });
 
 const CreateAIProfile = z.union([
@@ -101,6 +110,84 @@ const CreateAgent = z.object({
   sharedMemory: z.boolean().optional(),
 });
 
+
+/**
+ * Reachability + model check for a local model server. The control plane can
+ * reach the docker bridge (it owns it), so this validates the same address
+ * the agent will use.
+ */
+/** A local model server must live on this box or a private network. */
+export function isPrivateModelUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const h = u.hostname;
+  return (
+    h === 'localhost' ||
+    h === '::1' ||
+    /^127\./.test(h) ||
+    /^10\./.test(h) ||
+    /^192\.168\./.test(h) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+    /^169\.254\./.test(h) ||
+    h.endsWith('.local') ||
+    h.endsWith('.internal')
+  );
+}
+
+async function checkLocalServer(
+  baseUrl: string,
+  model: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  // Loopback is the trap: the control plane runs on the host and CAN reach
+  // it, so a naive reachability probe passes — but the agent runs in a
+  // container where localhost is the container itself. Reject it outright.
+  const host = (() => {
+    try {
+      return new URL(baseUrl).hostname;
+    } catch {
+      return '';
+    }
+  })();
+  if (host === 'localhost' || host === '::1' || /^127\./.test(host)) {
+    return {
+      ok: false,
+      error:
+        `${baseUrl} points at this machine's loopback, which an agent container ` +
+        `cannot reach — inside a container "localhost" is the container itself. ` +
+        `Use the docker bridge instead: http://172.17.0.1:11434/v1`,
+    };
+  }
+
+  const root = baseUrl.replace(/\/v1\/?$/, '');
+  let tags: { models?: Array<{ name?: string }> };
+  try {
+    const res = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return { ok: false, error: `The model server answered ${res.status} at ${root}.` };
+    tags = (await res.json()) as typeof tags;
+  } catch {
+    return {
+      ok: false,
+      error:
+        `Couldn't reach a model server at ${baseUrl}. Note this address must work ` +
+        `from inside a container — the host's own localhost does not. Try ` +
+        `http://172.17.0.1:11434/v1, and make sure the server listens on more ` +
+        `than loopback (Ollama: OLLAMA_HOST=0.0.0.0:11434).`,
+    };
+  }
+  const names = (tags.models ?? []).map((m) => m.name).filter(Boolean) as string[];
+  if (names.length && !names.includes(model)) {
+    return {
+      ok: false,
+      error: `That server has no model "${model}". It offers: ${names.slice(0, 8).join(', ')}.`,
+    };
+  }
+  return { ok: true };
+}
 
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
@@ -255,7 +342,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     let secretRef: string | undefined;
 
     if (body.kind === 'local') {
-      // Nothing to store: a local server needs no credential.
+      // No credential to store — which makes this the ONE profile kind where
+      // the config is the only thing that can be wrong. Check it here, where
+      // the error is fixable, instead of letting the agent provision green
+      // and then stay silent on Telegram forever.
+      const check = await checkLocalServer(body.baseUrl, body.model);
+      if (!check.ok) return reply.code(400).send({ error: check.error });
     } else if (body.kind === 'api_key') {
       secretRef = `ai-profile/${id}`;
       await secrets.put(secretRef, body.apiKey);
@@ -334,7 +426,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id);
     if (using.length > 0) {
       return reply.code(400).send({
-        error: `${using.length} agent${using.length === 1 ? ' is' : 's are'} using this AI source — delete them first.`,
+        error:
+          `Still in use by ${using.map((a) => a.name).join(', ')} — ` +
+          `switch ${using.length === 1 ? 'it' : 'them'} to another AI source first (Edit → AI source).`,
       });
     }
     if (profile.secretRef) await secrets.delete(profile.secretRef).catch(() => {});
@@ -768,7 +862,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           body,
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
         );
-        return reply.code(201).send(agent);
+        return reply.code(201).send(publicAgent(agent));
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -1015,6 +1109,6 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       store.deleteChannelForAgent(agent.id);
     }
     store.deleteSnapshotsFor(agent.id);
-    return store.setAgentState(agent.id, 'DELETED');
+    return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
 }

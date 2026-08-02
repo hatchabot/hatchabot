@@ -258,7 +258,9 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         model: profile.model,
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
-        provider: local ? 'ollama' : 'anthropic',
+        // Model refs are provider-prefixed; a Google profile configured as
+        // `anthropic/gemini-…` provisions healthy and fails on first use.
+        provider: local ? 'ollama' : profile.vendor === 'google' ? 'google' : 'anthropic',
         baseUrl: profile.baseUrl,
         setupToken: oauthToken,
         gatewayToken: gateway.token,

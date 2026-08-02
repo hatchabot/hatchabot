@@ -77,7 +77,8 @@ export class Store {
       -- accounts get CLI access too.
       CREATE TABLE IF NOT EXISTS cli_tokens (
         id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
-        label TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT
+        label TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT,
+        expires_at TEXT
       );
       CREATE INDEX IF NOT EXISTS cli_tokens_owner ON cli_tokens (owner_id);
 
@@ -95,6 +96,7 @@ export class Store {
       `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN base_url TEXT`,
+      `ALTER TABLE cli_tokens ADD COLUMN expires_at TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
     ]) {
@@ -382,6 +384,9 @@ export class Store {
         `UPDATE hosts SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE memberships SET user_id = ? WHERE user_id = ?`,
         `UPDATE invites SET created_by = ? WHERE created_by = ?`,
+        // Without this a CLI token keeps working as the old owner and returns
+        // an EMPTY fleet — "all my agents are gone" instead of "log in again".
+        `UPDATE cli_tokens SET owner_id = ? WHERE owner_id = ?`,
       ]) {
         rows += this.db.prepare(sql).run(owner, localOwner).changes;
       }
@@ -393,24 +398,43 @@ export class Store {
   // ---- CLI tokens --------------------------------------------------------
 
   /** Returns the token exactly once; only its hash is persisted. */
-  createCliToken(ownerId: string, label: string): { id: string; token: string } {
+  createCliToken(
+    ownerId: string,
+    label: string,
+    ttlDays = 90,
+  ): { id: string; token: string; expiresAt: string } {
     const raw = randomBytes(32).toString('base64url');
     const token = `agentclaw_${raw}`;
     const id = randomUUID();
+    // Bounded lifetime: an eternal bearer token outlives a disabled account,
+    // since a cliBearer request never re-consults the identity provider.
+    const expiresAt = new Date(Date.now() + ttlDays * 86_400_000).toISOString();
     this.db
       .prepare(
-        `INSERT INTO cli_tokens (id, owner_id, token_hash, label, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO cli_tokens (id, owner_id, token_hash, label, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, ownerId, hashToken(token), label.trim().slice(0, 64) || 'CLI', new Date().toISOString());
-    return { id, token };
+      .run(
+        id,
+        ownerId,
+        hashToken(token),
+        label.trim().slice(0, 64) || 'CLI',
+        new Date().toISOString(),
+        expiresAt,
+      );
+    return { id, token, expiresAt };
   }
 
   /** The owner this token belongs to, or undefined. Records the use. */
   ownerForCliToken(token: string): string | undefined {
     const row = this.db
-      .prepare(`SELECT id, owner_id FROM cli_tokens WHERE token_hash = ?`)
-      .get(hashToken(token)) as { id: string; owner_id: string } | undefined;
+      .prepare(
+        `SELECT id, owner_id FROM cli_tokens
+         WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .get(hashToken(token), new Date().toISOString()) as
+      | { id: string; owner_id: string }
+      | undefined;
     if (!row) return undefined;
     this.db
       .prepare(`UPDATE cli_tokens SET last_used_at = ? WHERE id = ?`)
@@ -418,12 +442,20 @@ export class Store {
     return row.owner_id;
   }
 
-  listCliTokens(ownerId: string): Array<{ id: string; label: string; createdAt: string; lastUsedAt?: string }> {
+  listCliTokens(
+    ownerId: string,
+  ): Array<{ id: string; label: string; createdAt: string; lastUsedAt?: string; expiresAt?: string }> {
     return (
       this.db
-        .prepare(`SELECT id, label, created_at, last_used_at FROM cli_tokens WHERE owner_id = ? ORDER BY created_at DESC`)
+        .prepare(`SELECT id, label, created_at, last_used_at, expires_at FROM cli_tokens WHERE owner_id = ? ORDER BY created_at DESC`)
         .all(ownerId) as any[]
-    ).map((r) => ({ id: r.id, label: r.label, createdAt: r.created_at, lastUsedAt: r.last_used_at ?? undefined }));
+    ).map((r) => ({
+      id: r.id,
+      label: r.label,
+      createdAt: r.created_at,
+      lastUsedAt: r.last_used_at ?? undefined,
+      expiresAt: r.expires_at ?? undefined,
+    }));
   }
 
   revokeCliToken(ownerId: string, id: string): boolean {
