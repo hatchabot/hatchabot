@@ -167,13 +167,21 @@ Design decisions worth knowing before you read the code:
 
 ```sh
 ./scripts/restart.sh                  # restart (systemd or launchd)
-./scripts/backup-volumes.sh           # manual volume backup; nightly by timer
+./scripts/backup-volumes.sh           # manual backup; nightly by timer
 ./scripts/build-runtime-image.sh      # rebuild the agent image
 npm test                              # 103 tests
 ```
 
 Logs: `journalctl --user -u agentclaw -f` (Linux) or `tail -f data/server.log`
 (macOS).
+
+**What a backup contains.** Each nightly run writes the control-plane database
+(agent registry, memberships, encrypted credentials, memory snapshots), a copy
+of `AGENTCLAW_SECRET_KEY` — without which those credentials can't be decrypted
+— and one tarball per agent volume (the agent's memory and OpenClaw state).
+Restoring the database alone brings back everything AgentClaw knows; restoring
+a volume brings back what an agent knows. Backups are as sensitive as the
+system itself and live in a `0700` directory.
 
 ## Status and limitations
 
