@@ -108,6 +108,7 @@ export class Store {
       `ALTER TABLE cli_tokens ADD COLUMN expires_at TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_profile_id TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_model TEXT`,
+      `ALTER TABLE agents ADD COLUMN migrated_to TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
     ]) {
@@ -727,6 +728,15 @@ export class Store {
    * carries the *desired* profile; this is the *applied* one, and the gap
    * between them is what "Rebuild to apply" means.
    */
+  /**
+   * Record that this agent now lives on another server. Starting it again
+   * would put two runtimes on one bot token — so this is a tombstone that
+   * lifecycle routes refuse to act on until it is explicitly cleared.
+   */
+  setAgentMigratedTo(id: string, note: string | null): void {
+    this.db.prepare(`UPDATE agents SET migrated_to = ? WHERE id = ?`).run(note, id);
+  }
+
   setAgentApplied(id: string, aiProfileId: string, model: string): void {
     this.db
       .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ? WHERE id = ?`)
@@ -818,6 +828,7 @@ function rowToAgent(r: any): Agent {
     persona: r.persona,
     sharedMemory: !!r.shared_memory,
     pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
+    migratedTo: r.migrated_to ?? undefined,
     appliedProfileId: r.applied_profile_id ?? undefined,
     appliedModel: r.applied_model ?? undefined,
     gatewayPort: r.gateway_port ?? undefined,

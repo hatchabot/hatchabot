@@ -55,7 +55,7 @@ export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent'
  */
 export function batchConfigCommands(cmds: ConfigCommand[]): ConfigCommand[] {
   const out: ConfigCommand[] = [];
-  let run: Array<{ path: string; value: unknown }> = [];
+  let run: Array<{ path: string; value: unknown; raw: string }> = [];
   let sensitive = false;
 
   /**
@@ -77,11 +77,19 @@ export function batchConfigCommands(cmds: ConfigCommand[]): ConfigCommand[] {
   const flush = () => {
     if (run.length === 0) return;
     if (run.length === 1) {
+      // A single set uses the plain form, which wants the original string —
+      // OpenClaw parses it as JSON5 itself.
       const only = run[0]!;
-      out.push({ argv: ['config', 'set', only.path, only.value, '--replace'], sensitive });
+      out.push({ argv: ['config', 'set', only.path, only.raw, '--replace'], sensitive });
     } else {
       out.push({
-        argv: ['config', 'set', '--batch-json', JSON.stringify(run), '--replace'],
+        argv: [
+          'config',
+          'set',
+          '--batch-json',
+          JSON.stringify(run.map(({ path, value }) => ({ path, value }))),
+          '--replace',
+        ],
         sensitive,
       });
     }
@@ -99,7 +107,7 @@ export function batchConfigCommands(cmds: ConfigCommand[]): ConfigCommand[] {
       typeof c.argv[3] === 'string' &&
       c.argv[2] !== '--batch-json';
     if (plainSet) {
-      run.push({ path: c.argv[2]!, value: asValue(c.argv[3]!) });
+      run.push({ path: c.argv[2]!, value: asValue(c.argv[3]!), raw: c.argv[3]! });
       sensitive ||= !!c.sensitive;
       continue;
     }

@@ -215,6 +215,13 @@ export async function migrateAgent(
     );
   }
 
+  // Tombstone the source. Without this nothing stops a later Start, Rebuild
+  // or Retry from resurrecting a copy whose bot now belongs elsewhere — which
+  // is exactly how a "successful" move ends with two live pollers.
+  store.setAgentMigratedTo(
+    agentId,
+    `${peer.name} (${new Date().toISOString().slice(0, 10)})`,
+  );
   log('migrate.done', { agentId, peer: peer.name, remoteAgentId: remote.id });
   return {
     movedTo: peer.name,

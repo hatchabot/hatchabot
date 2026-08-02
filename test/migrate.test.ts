@@ -177,6 +177,22 @@ describe('migrateAgent', () => {
     expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
   });
 
+  it('tombstones the source so it cannot be restarted into a second poller', async () => {
+    const w = await world();
+    peerResponds({});
+    await migrateAgent(w.deps as any, 'a1', PEER);
+    const moved = w.store.getAgent('a1')!;
+    expect(moved.state).toBe('STOPPED');
+    expect(moved.migratedTo).toContain('Desktop');
+  });
+
+  it('leaves no tombstone when the move fails', async () => {
+    const w = await world();
+    peerResponds({ importStatus: 400, import: { error: 'nope' } });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow();
+    expect(w.store.getAgent('a1')!.migratedTo).toBeUndefined();
+  });
+
   it('refuses to move an agent that is mid-flight', async () => {
     const w = await world();
     w.store.setAgentState('a1', 'REBUILDING');

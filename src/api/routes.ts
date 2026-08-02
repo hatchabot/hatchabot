@@ -250,6 +250,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     };
   };
 
+  /**
+   * A moved agent's bot now belongs to another server. Starting, rebuilding
+   * or retrying this copy would put two runtimes on one token and they would
+   * fight over every message — so refuse until the owner explicitly says the
+   * move was undone.
+   */
+  const movedAway = (agent: Agent, reply: any): boolean => {
+    if (!agent.migratedTo) return false;
+    reply.code(409).send({
+      error:
+        `"${agent.name}" was moved to ${agent.migratedTo}. Starting this copy would make two ` +
+        `agents poll the same Telegram bot and messages would go to whichever answers first. ` +
+        `If the move was undone, clear it first (Edit → "Runs here again").`,
+    });
+    return true;
+  };
+
   const snapshotDeps = (agent: Agent) => ({
     store,
     provider: providerFor(agent.hostId),
@@ -622,13 +639,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           sharedMemory: z.boolean().optional(),
           /** Switch which AI drives this agent — applied on the next rebuild. */
           aiProfileId: z.string().min(1).optional(),
+          /** Clear the moved-away tombstone: "this really does run here now". */
+          runsHere: z.literal(true).optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      const { name, sharedMemory: shared, aiProfileId } = parsed.data;
-      if (name === undefined && shared === undefined && aiProfileId === undefined) {
+      const { name, sharedMemory: shared, aiProfileId, runsHere } = parsed.data;
+      if (name === undefined && shared === undefined && aiProfileId === undefined && !runsHere) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
+
+      if (runsHere) store.setAgentMigratedTo(agent.id, null);
 
       if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
 
@@ -1010,6 +1031,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/rebuild', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
     if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
     }
@@ -1041,6 +1063,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/provision', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
     kickProvision(agent.id);
     return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });
@@ -1214,6 +1237,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/start', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
     if (agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
     }

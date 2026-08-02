@@ -82,6 +82,11 @@ export interface Agent {
   persona: string;
   /** One-to-many agents share MEMORY.md across members (§12.5). */
   sharedMemory: boolean;
+  /**
+   * Set once this agent has been moved to another server. Its runtime here is
+   * a stale copy: starting it would make two pollers fight over one bot token.
+   */
+  migratedTo?: string;
   /** The AI profile the runtime was last configured with (vs the desired one). */
   appliedProfileId?: string;
   /** The model that configuration actually used. */

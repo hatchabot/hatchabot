@@ -575,6 +575,15 @@ async function delPeer(id, name) {
   catch (e) { toast(e.message); }
 }
 
+async function runsHere(id, name) {
+  if (!confirm(`Mark "${name}" as running here again?\n\nOnly do this if it is NOT running on the other server — two copies polling one Telegram bot will fight over every message.`)) return;
+  try {
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { runsHere: true } });
+    toast('Cleared — you can start it here now');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
 async function migrateAgent(id, name) {
   let peers;
   try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
@@ -714,6 +723,8 @@ function agentCard(a) {
     ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}</div>` : ''}
     ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">An OpenClaw update is ready. Rebuild applies it — memory is kept.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
+    ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
+      <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
     ${a.pendingModel ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
