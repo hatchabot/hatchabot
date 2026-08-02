@@ -11,12 +11,17 @@ import {
 
 const COOKIE = 'agentclaw_session';
 /**
- * Identity mode targets the public internet, where a cookie must not ride
- * plain HTTP. Home installs are http://localhost / tailnet, so the flag is
- * opt-out via AGENTCLAW_INSECURE_COOKIES=1.
+ * Mark the session cookie `secure` only when the request actually arrived over
+ * HTTPS (directly or via a terminating proxy). Setting it unconditionally
+ * breaks every plain-HTTP install: the browser silently DISCARDS a secure
+ * cookie on an http:// origin, so login appears to succeed and then loops.
+ * On HTTPS the flag still does its job.
  */
-const secureCookies = (mode: string) =>
-  mode === 'identity' && process.env.AGENTCLAW_INSECURE_COOKIES !== '1';
+function requestIsHttps(req: FastifyRequest): boolean {
+  const forwarded = req.headers['x-forwarded-proto'];
+  const proto = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+  return (proto ?? req.protocol) === 'https';
+}
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 /** Identity-mode browser sessions are shorter: the token behind them is too. */
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -200,7 +205,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       reply.setCookie(COOKIE, mintSession(token.sub, exp), {
         httpOnly: true,
         sameSite: 'strict',
-        secure: secureCookies('identity'),
+        secure: requestIsHttps(req),
         path: '/',
         maxAge: Math.floor((exp - Date.now()) / 1000),
       });
