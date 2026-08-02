@@ -54,6 +54,8 @@ Commands:
   start|stop|rebuild <agent>   Lifecycle controls
   retry <agent>                Retry a FAILED agent's provisioning
   rename <agent> <new name>    Change the display name
+  ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
+                               (applies on the agent's next rebuild)
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
   approve <agent> <code>       Let a pending requester in (creates a member)
@@ -369,6 +371,25 @@ async function main() {
       const name = rest.slice(1).join(' ').trim() || fail('give the new name');
       await jsonPost(`/v1/agents/${a.id}`, { name }, 'PATCH');
       console.log(`renamed to "${name}"`);
+      return;
+    }
+    case 'ai': {
+      const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
+      if (!rest[0]) {
+        for (const p of profiles) {
+          console.log(`${p.id}  ${p.model.padEnd(24)} ${p.vendor === 'local' ? 'local' : p.kind}  ${p.name}`);
+        }
+        console.log('\nagentclaw ai <agent> <profileId>   to point an agent at one');
+        return;
+      }
+      const a = await resolveAgent(ctx, rest[0]);
+      if (!rest[1]) {
+        const cur = profiles.find((p) => p.id === a.aiProfileId);
+        console.log(`${a.name}: ${cur?.name ?? '(unknown)'} — ${cur?.model ?? a.model}`);
+        return;
+      }
+      await jsonPost(`/v1/agents/${a.id}`, { aiProfileId: rest[1] }, 'PATCH');
+      console.log(`"${a.name}" will use that AI source after: agentclaw rebuild "${a.name}"`);
       return;
     }
     case 'invite': {

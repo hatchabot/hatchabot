@@ -178,6 +178,15 @@
     <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
     <button id="renameBtn" onclick="renameAgent()">Rename</button>
   </div>
+  <label>AI source <span style="color:var(--dim)">— which model drives this agent</span></label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <select id="editProfile" style="flex:1;min-width:0"></select>
+    <button id="profileBtn" onclick="switchProfile()">Use this</button>
+  </div>
+  <div class="sub">
+    Each agent can use a different AI. Add sources in <b>⚙ AI</b>; switching
+    here applies on the agent's next Rebuild.
+  </div>
   <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
@@ -726,6 +735,9 @@ async function openEdit(id, name) {
   editAgentId = id;
   $('editAgent').textContent = name;
   $('editName').value = name;
+  const cur = agents.find(x => x.id === id);
+  $('editProfile').innerHTML = profiles.map(p =>
+    `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}</option>`).join('');
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   $('editErr').textContent = '';
@@ -771,6 +783,19 @@ async function restoreSnapshot(snapId, label) {
     await loadEditFile();
     await loadSnapshots();
   } catch (e) { $('editErr').textContent = e.message; }
+}
+
+async function switchProfile() {
+  const id = $('editProfile').value;
+  const chosen = profiles.find(p => p.id === id);
+  if (!confirm(`Use "${chosen?.name}" (${chosen?.model}) for this agent?\n\nApplies on the next Rebuild — its memory is kept.`)) return;
+  $('profileBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { aiProfileId: id } });
+    toast('AI source changed — Rebuild to apply it');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('profileBtn').disabled = false; }
 }
 
 async function showBotToken() {
