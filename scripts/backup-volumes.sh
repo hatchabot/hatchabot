@@ -50,6 +50,9 @@ for vol in $(docker volume ls -q | grep -E '^agentclaw-' || true); do
   # root on the host to reach /var/lib/docker.
   docker run --rm -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
     bash -c "tar czf '/out/$vol.tgz' -C /data ."
+  # The tar runs as root INSIDE a container, so the host umask does not apply
+  # to what it writes. These hold bot tokens — tighten them explicitly.
+  chmod 600 "$DEST/$vol.tgz"
   echo "  ✓ $vol → $DEST/$vol.tgz"
   count=$((count + 1))
 done
