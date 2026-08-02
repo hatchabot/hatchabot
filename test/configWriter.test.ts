@@ -1,8 +1,63 @@
 import { describe, expect, it } from 'vitest';
-import { buildConfigCommands, describeConfigCommands } from '../src/openclaw/configWriter.js';
+import {
+  batchConfigCommands,
+  buildConfigCommands,
+  describeConfigCommands,
+} from '../src/openclaw/configWriter.js';
 
 const argFor = (cmds: ReturnType<typeof buildConfigCommands>, path: string): string | undefined =>
   cmds.find((c) => c.argv[0] === 'config' && c.argv[2] === path)?.argv[3];
+
+describe('batchConfigCommands', () => {
+  it('collapses consecutive plain sets into one invocation, preserving order', () => {
+    const raw = buildConfigCommands({
+      agentId: 'a1', model: 'm', authMode: 'api-key', provider: 'ollama', gatewayToken: 'x',
+      telegram: { accountId: 'b', botToken: 't', dmPolicy: 'pairing', allowFrom: ['1'] },
+    });
+    const batched = batchConfigCommands(raw);
+    expect(batched.length).toBeLessThan(raw.length);
+
+    const batch = batched.find((c) => c.argv.includes('--batch-json'))!;
+    const ops = JSON.parse(batch.argv[batch.argv.indexOf('--batch-json') + 1]!);
+    const rawSets = raw.filter((c) => !c.rawShell && !c.stdin && c.argv[1] === 'set');
+    expect(ops.map((o: any) => o.path)).toEqual(rawSets.map((c) => c.argv[2]));
+    // Object values must survive as OBJECTS. Passing the JSON string makes
+    // OpenClaw reject it: "expected record, received string".
+    const providers = ops.find((o: any) => o.path === 'models.providers.ollama');
+    expect(typeof providers.value).toBe('object');
+    expect(providers.value.api).toBe('openai-completions');
+    // and a plain scalar stays a plain string
+    expect(ops.find((o: any) => o.path === 'gateway.mode').value).toBe('local');
+    // booleans must become real booleans — 'true' as a string is rejected
+    // with "channels.telegram.enabled: must be boolean"
+    expect(ops.find((o: any) => o.path === 'channels.telegram.enabled').value).toBe(true);
+  });
+
+  it('never merges across a non-set command', () => {
+    const batched = batchConfigCommands([
+      { argv: ['config', 'set', 'a', '1'] },
+      { argv: ['agents', 'add', 'x'] },
+      { argv: ['config', 'set', 'b', '2'] },
+    ]);
+    // agents add must still sit between them: config order is load-bearing
+    expect(batched.map((c) => c.argv[0])).toEqual(['config', 'agents', 'config']);
+  });
+
+  it('keeps a stdin command (paste-token) separate and marks the batch sensitive', () => {
+    const batched = batchConfigCommands([
+      { argv: ['config', 'set', 'auth.token', 'secret'], sensitive: true },
+      { argv: ['config', 'set', 'gateway.mode', 'local'] },
+      { argv: ['models', 'auth', 'paste-token'], stdin: 'tok', sensitive: true },
+    ]);
+    expect(batched).toHaveLength(2);
+    expect(batched[0]!.sensitive).toBe(true);
+    expect(batched[1]!.stdin).toBe('tok');
+    // the batch payload holds secret VALUES, so the whole payload is masked
+    const described = describeConfigCommands(batched).join('\n');
+    expect(described).not.toContain('secret');
+    expect(described).toContain('--batch-json <redacted>');
+  });
+});
 
 describe('buildConfigCommands multi-model', () => {
   it('registers every model on claude-cli, primary first and deduped', () => {

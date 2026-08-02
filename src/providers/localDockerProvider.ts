@@ -11,7 +11,7 @@ import type {
   RuntimeStatus,
 } from './provider.js';
 import { ProviderError } from './provider.js';
-import { buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { batchConfigCommands, buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
 const execFileP = promisify(execFile);
 
@@ -140,7 +140,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // `agents add` and the workspace file copies must not touch an existing
       // agent — overwriting MEMORY.md on rebuild would lobotomize it.
       const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
-      for (const cmd of buildConfigCommands(spec.workspace.configPatch)) {
+      for (const cmd of batchConfigCommands(buildConfigCommands(spec.workspace.configPatch))) {
         const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
         const line = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
         script.push(

@@ -45,6 +45,71 @@ export interface ConfigCommand {
 
 export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent';
 
+/**
+ * Collapse consecutive plain `config set` commands into one `--batch-json`
+ * invocation. Each `openclaw` start costs ~600ms inside the runtime, and a
+ * seed issues a dozen of them — batching turns ~7.5s of process startup into
+ * one call. Order is preserved, and anything that is not a plain set (agents
+ * add, paste-token, the heal script) breaks the run, so semantics are
+ * unchanged.
+ */
+export function batchConfigCommands(cmds: ConfigCommand[]): ConfigCommand[] {
+  const out: ConfigCommand[] = [];
+  let run: Array<{ path: string; value: unknown }> = [];
+  let sensitive = false;
+
+  /**
+   * The single-set form hands OpenClaw a string it parses as JSON5; batch
+   * mode takes `value` literally, so an object must be passed as an object or
+   * it lands in the config as a string ("expected record, received string").
+   */
+  const asValue = (raw: string): unknown => {
+    // JSON.parse IS the discriminator, matching the single-set form's JSON5
+    // parse-with-string-fallback: '{"a":1}' → object, 'true' → boolean,
+    // '["*"]' → array, but 'local'/'loopback'/'none' stay strings.
+    try {
+      return JSON.parse(raw.trim());
+    } catch {
+      return raw;
+    }
+  };
+
+  const flush = () => {
+    if (run.length === 0) return;
+    if (run.length === 1) {
+      const only = run[0]!;
+      out.push({ argv: ['config', 'set', only.path, only.value, '--replace'], sensitive });
+    } else {
+      out.push({
+        argv: ['config', 'set', '--batch-json', JSON.stringify(run), '--replace'],
+        sensitive,
+      });
+    }
+    run = [];
+    sensitive = false;
+  };
+
+  for (const c of cmds) {
+    const plainSet =
+      !c.rawShell &&
+      !c.stdin &&
+      c.argv[0] === 'config' &&
+      c.argv[1] === 'set' &&
+      typeof c.argv[2] === 'string' &&
+      typeof c.argv[3] === 'string' &&
+      c.argv[2] !== '--batch-json';
+    if (plainSet) {
+      run.push({ path: c.argv[2]!, value: asValue(c.argv[3]!) });
+      sensitive ||= !!c.sensitive;
+      continue;
+    }
+    flush();
+    out.push(c);
+  }
+  flush();
+  return out;
+}
+
 export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[] {
   const cmds: ConfigCommand[] = [];
   const workspaceDir = WORKSPACE_DIR_TEMPLATE.replace('{slug}', patch.agentId);
@@ -251,7 +316,15 @@ export function describeConfigCommands(cmds: ConfigCommand[]): string[] {
     if (c.rawShell) return `sh: ${c.rawShell}`;
     // stdin-fed secrets never appear in argv — mask the pipe, not the args.
     if (c.stdin) return `<redacted> | openclaw ${c.argv.join(' ')}`;
-    const argv = c.sensitive ? [...c.argv.slice(0, -1), '<redacted>'] : c.argv;
-    return `openclaw ${argv.join(' ')}`;
+    if (!c.sensitive) return `openclaw ${c.argv.join(' ')}`;
+    // A batch carries its values INSIDE the JSON payload, so masking the last
+    // argument (as the single-set form does) would leave secrets in the log.
+    const batchAt = c.argv.indexOf('--batch-json');
+    if (batchAt !== -1) {
+      const argv = [...c.argv];
+      argv[batchAt + 1] = '<redacted>';
+      return `openclaw ${argv.join(' ')}`;
+    }
+    return `openclaw ${[...c.argv.slice(0, -1), '<redacted>'].join(' ')}`;
   });
 }
