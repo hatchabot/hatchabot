@@ -95,6 +95,40 @@ describe('buildConfigCommands multi-model', () => {
     expect(argFor(cmds, 'gateway.bind')).toBe('loopback');
   });
 
+  it('local vendor: ollama provider block, ollama/ refs, no anthropic auth', () => {
+    const cmds = buildConfigCommands({
+      agentId: 'a1',
+      model: 'qwen3.6:27b-q8_0',
+      models: ['qwen3.6:35b-a3b-q8_0'],
+      authMode: 'api-key',
+      provider: 'ollama',
+      baseUrl: 'http://172.17.0.1:11434/v1',
+    });
+
+    const prov = JSON.parse(argFor(cmds, 'models.providers.ollama')!);
+    expect(prov).toMatchObject({
+      baseUrl: 'http://172.17.0.1:11434/v1',
+      api: 'openai-completions',
+    });
+
+    // refs and the default carry the ollama prefix, not anthropic
+    expect(argFor(cmds, 'agents.defaults.model.primary')).toBe('ollama/qwen3.6:27b-q8_0');
+    const models = JSON.parse(argFor(cmds, 'agents.defaults.models')!);
+    expect(Object.keys(models)).toEqual(['ollama/qwen3.6:27b-q8_0', 'ollama/qwen3.6:35b-a3b-q8_0']);
+    // served directly — never through the claude-cli runtime
+    expect(models['ollama/qwen3.6:27b-q8_0']).toEqual({});
+    // and no Anthropic credential plumbing — the profile map is cleared so a
+    // leftover claude-cli entry can't be preferred by the gateway
+    expect(argFor(cmds, 'auth.profiles')).toBe('{}');
+    expect(cmds.some((c) => c.argv.includes('paste-token'))).toBe(false);
+  });
+
+  it('does not emit an ollama provider block for anthropic profiles', () => {
+    const cmds = buildConfigCommands({ agentId: 'a1', model: 'claude-opus-4-8', authMode: 'api-key' });
+    expect(argFor(cmds, 'models.providers.ollama')).toBeUndefined();
+    expect(argFor(cmds, 'agents.defaults.model.primary')).toBe('anthropic/claude-opus-4-8');
+  });
+
   it('keeps the single-model shape when models is absent', () => {
     const cmds = buildConfigCommands({
       agentId: 'a1',

@@ -69,6 +69,14 @@ export interface OpenClawConfigPatch {
    */
   authMode: 'oauth-claude-cli' | 'api-key';
   /**
+   * `anthropic` (default) or `ollama` — a model server the owner runs. The
+   * writer prefixes model refs with this and, for ollama, emits the provider
+   * block pointing at `baseUrl`.
+   */
+  provider?: 'anthropic' | 'ollama';
+  /** Where the local model server listens, as the container sees it. */
+  baseUrl?: string;
+  /**
    * `claude setup-token` value for subscription auth without a mountable
    * ~/.claude (macOS hosts). Registered into OpenClaw's auth store at seed
    * time; models then ride the native anthropic provider.

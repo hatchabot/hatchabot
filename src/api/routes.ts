@@ -52,7 +52,18 @@ export interface ApiDeps {
   verifier?: IdentityVerifier;
 }
 
-const CreateAIProfile = z.discriminatedUnion('kind', [
+const LocalProfile = z.object({
+  kind: z.literal('local'),
+  name: z.string().min(1),
+  model: z.string().min(1),
+  models: z.array(z.string().min(1)).max(16).optional(),
+  /** As the AGENT sees it — containers can't reach the host's loopback. */
+  baseUrl: z.string().url().default('http://172.17.0.1:11434/v1'),
+});
+
+const CreateAIProfile = z.union([
+  LocalProfile,
+  z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('api_key'),
     name: z.string().min(1),
@@ -71,6 +82,7 @@ const CreateAIProfile = z.discriminatedUnion('kind', [
      *  login lives in the macOS Keychain instead of ~/.claude. */
     oauthToken: z.string().min(1).optional(),
   }),
+  ]),
 ]);
 
 /** Zod issues render as "Request failed" in the app; send a sentence. */
@@ -242,7 +254,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const id = randomUUID();
     let secretRef: string | undefined;
 
-    if (body.kind === 'api_key') {
+    if (body.kind === 'local') {
+      // Nothing to store: a local server needs no credential.
+    } else if (body.kind === 'api_key') {
       secretRef = `ai-profile/${id}`;
       await secrets.put(secretRef, body.apiKey);
     } else if (body.oauthToken) {
@@ -265,14 +279,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     }
 
+    const isLocal = body.kind === 'local';
     const profile = {
       id,
       ownerId: ownerIdOf(req),
       name: body.name,
-      vendor: body.vendor,
-      kind: body.kind,
+      // A local profile is its own vendor, and always api_key-shaped as far
+      // as the rest of the system is concerned (no OAuth, no mount).
+      vendor: (isLocal ? 'local' : body.vendor) as 'anthropic' | 'google' | 'local',
+      kind: (isLocal ? 'api_key' : body.kind) as 'api_key' | 'subscription',
       model: body.model,
       models: body.models,
+      baseUrl: isLocal ? body.baseUrl : undefined,
       secretRef,
       createdAt: new Date().toISOString(),
     };
@@ -462,7 +480,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // and private — only while the agent has no other members (the disclosure
   // people joined under must not change shape beneath them) and only while
   // RUNNING, because the AGENTS.md policy section is rewritten in place.
-  app.patch<{ Params: { id: string }; Body: { name?: string; sharedMemory?: boolean } }>(
+  app.patch<{ Params: { id: string }; Body: { name?: string; sharedMemory?: boolean; aiProfileId?: string } }>(
     '/v1/agents/:id',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
@@ -471,15 +489,32 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         .object({
           name: z.string().trim().min(1).max(64).optional(),
           sharedMemory: z.boolean().optional(),
+          /** Switch which AI drives this agent — applied on the next rebuild. */
+          aiProfileId: z.string().min(1).optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      const { name, sharedMemory: shared } = parsed.data;
-      if (name === undefined && shared === undefined) {
+      const { name, sharedMemory: shared, aiProfileId } = parsed.data;
+      if (name === undefined && shared === undefined && aiProfileId === undefined) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
 
       if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
+
+      if (aiProfileId !== undefined && aiProfileId !== agent.aiProfileId) {
+        // Must be the caller's own profile — same rule as agent creation.
+        const target = store.getAIProfile(aiProfileId);
+        if (!target || target.ownerId !== ownerIdOf(req)) {
+          return reply.code(400).send({ error: 'Unknown AI profile' });
+        }
+        const host = store.getHost(agent.hostId);
+        if (target.vendor !== 'local' && target.kind === 'subscription' && host?.kind !== 'local') {
+          return reply.code(400).send({
+            error: 'A subscription profile can only power agents on your own machine.',
+          });
+        }
+        store.setAgentAIProfile(agent.id, aiProfileId);
+      }
 
       let policyUpdated = true;
       if (shared !== undefined && shared !== agent.sharedMemory) {

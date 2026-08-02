@@ -211,18 +211,26 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   if (!channelRow) throw new Error(`Agent ${agentId} has no channel yet`);
 
   const botToken = await secrets.get(channelRow.secretRef);
-  const subscription = profile.kind === 'subscription';
+  // A local model server needs no credential of any kind: no key to inject,
+  // no ~/.claude to mount, nothing that can leak. It is the only vendor where
+  // "your data never leaves the machine" is literally true.
+  const local = profile.vendor === 'local';
+  const subscription = !local && profile.kind === 'subscription';
   if (subscription && host.kind !== 'local') {
     // Enforced at the API too; belt and suspenders here because this is the
     // last gate before a credential decision. See docs/ai-profiles.md.
     throw new Error('Subscription AI profiles can only run on local hosts');
   }
-  const modelKey = subscription ? undefined : await secrets.get(requireRef(profile.secretRef));
+  const modelKey =
+    subscription || local ? undefined : await secrets.get(requireRef(profile.secretRef));
   // Subscription with a stored secret = a `claude setup-token` token (macOS
   // hosts, where the login lives in the Keychain and can't be file-mounted).
   // Claude Code reads it from CLAUDE_CODE_OAUTH_TOKEN; no ~/.claude mount.
   const oauthToken =
     subscription && profile.secretRef ? await secrets.get(profile.secretRef) : undefined;
+  if (local && !profile.baseUrl) {
+    throw new Error('Local AI profile has no model server URL');
+  }
 
   // Always pairing mode, never a hard allowlist: pairing already enforces
   // §12.4 (only approved senders chat; strangers get a pending request), AND
@@ -250,6 +258,8 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         model: profile.model,
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
+        provider: local ? 'ollama' : 'anthropic',
+        baseUrl: profile.baseUrl,
         setupToken: oauthToken,
         gatewayToken: gateway.token,
         telegram: {

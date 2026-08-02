@@ -220,10 +220,19 @@
   </div>
 
   <h4 style="margin:16px 0 4px">Add another AI source</h4>
-  <select id="aiKind" onchange="const k = this.value === 'api_key'; $('aiKeyRow').style.display = k ? '' : 'none'; $('aiTokenRow').style.display = k ? 'none' : ''">
+  <select id="aiKind" onchange="aiKindChanged()">
     <option value="subscription">Claude subscription (login on this machine)</option>
     <option value="api_key">API key</option>
+    <option value="local">Local model server (Ollama) — no credential, nothing leaves this machine</option>
   </select>
+  <div id="aiLocalRow" style="display:none">
+    <input type="text" id="aiBaseUrl" value="http://172.17.0.1:11434/v1"
+           placeholder="Model server URL as the AGENT sees it">
+    <div class="sub">
+      Must be reachable from inside a container — the host's own
+      <code>localhost</code> is not. The default is the Docker bridge.
+    </div>
+  </div>
   <input type="text" id="aiName" placeholder="Name (e.g. Work Claude)" maxlength="64">
   <div id="aiKeyRow" style="display:none">
     <select id="aiVendor"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
@@ -483,7 +492,7 @@ function renderAiList() {
   $('aiList').innerHTML = profiles.map(p => `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${esc(p.name)}</b>
-      <span class="chip">${p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
+      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
       <div style="display:flex;gap:6px;width:100%">
         <input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" title="Default model" style="flex:1;min-width:0">
         <input type="text" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(', '))}"
@@ -514,6 +523,16 @@ async function delAiProfile(id, name) {
   } catch (e) { $('aiErr').textContent = e.message; }
 }
 
+function aiKindChanged() {
+  const k = $('aiKind').value;
+  $('aiKeyRow').style.display = k === 'api_key' ? '' : 'none';
+  $('aiTokenRow').style.display = k === 'subscription' ? '' : 'none';
+  $('aiLocalRow').style.display = k === 'local' ? '' : 'none';
+  $('aiModel').placeholder = k === 'local'
+    ? 'Default model (e.g. qwen3.6:27b-q8_0)'
+    : 'Default model (e.g. claude-opus-4-8)';
+}
+
 async function newCliToken() {
   try {
     const t = await api('/v1/cli-tokens', { method: 'POST', body: { label: 'CLI' } });
@@ -532,7 +551,10 @@ async function addAiProfile() {
   if (!name || !model) { $('aiErr').textContent = 'Name and default model are required.'; return; }
   const extra = $('aiModelsAdd').value.split(',').map(s => s.trim()).filter(Boolean);
   const body = { kind, name, model, models: extra.length ? [model, ...extra] : undefined };
-  if (kind === 'subscription') {
+  if (kind === 'local') {
+    body.baseUrl = $('aiBaseUrl').value.trim() || undefined;
+  }
+  else if (kind === 'subscription') {
     body.vendor = 'anthropic';
     body.oauthToken = $('aiToken').value.trim() || undefined;
   }

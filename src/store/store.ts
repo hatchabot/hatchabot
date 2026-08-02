@@ -94,6 +94,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN pending_action TEXT`,
       `ALTER TABLE memberships ADD COLUMN display_name TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
+      `ALTER TABLE ai_profiles ADD COLUMN base_url TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
     ]) {
@@ -110,10 +111,12 @@ export class Store {
   insertAIProfile(p: AIProfile): void {
     this.db
       .prepare(
-        `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, models, secret_ref, created_at)
-         VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @models, @secretRef, @createdAt)`,
+        `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, models, base_url,
+                                  secret_ref, created_at)
+         VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @models, @baseUrl,
+                 @secretRef, @createdAt)`,
       )
-      .run({ secretRef: null, ...p, models: p.models ? JSON.stringify(p.models) : null });
+      .run({ secretRef: null, baseUrl: null, ...p, models: p.models ? JSON.stringify(p.models) : null });
   }
 
   setAIProfileModel(id: string, model: string): void {
@@ -625,6 +628,12 @@ export class Store {
       .run(name, new Date().toISOString(), id);
   }
 
+  setAgentAIProfile(id: string, aiProfileId: string): void {
+    this.db
+      .prepare(`UPDATE agents SET ai_profile_id = ?, updated_at = ? WHERE id = ?`)
+      .run(aiProfileId, new Date().toISOString(), id);
+  }
+
   setAgentSharedMemory(id: string, shared: boolean): void {
     this.db
       .prepare(`UPDATE agents SET shared_memory = ?, updated_at = ? WHERE id = ?`)
@@ -720,6 +729,7 @@ function rowToAIProfile(r: any): AIProfile {
     kind: r.kind,
     model: r.model,
     models: r.models ? JSON.parse(r.models) : undefined,
+    baseUrl: r.base_url ?? undefined,
     secretRef: r.secret_ref ?? undefined,
     createdAt: r.created_at,
   };

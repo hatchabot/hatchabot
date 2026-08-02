@@ -29,7 +29,12 @@ export type HostKind = 'cloud' | 'local';
  */
 export type AIProfileKind = 'api_key' | 'subscription';
 
-export type AIVendor = 'anthropic' | 'google';
+/**
+ * `local` is a model server you run yourself (Ollama today). It is the only
+ * vendor with no credential at all — nothing to store, nothing to inject, and
+ * nothing leaves the machine.
+ */
+export type AIVendor = 'anthropic' | 'google' | 'local';
 
 export interface AIProfile {
   id: string;
@@ -45,6 +50,12 @@ export interface AIProfile {
    * picker's order.
    */
   models?: string[];
+  /**
+   * Where a `local` vendor's model server listens, as the AGENT sees it —
+   * containers can't reach the host's loopback, so this is typically the
+   * docker bridge (http://172.17.0.1:11434).
+   */
+  baseUrl?: string;
   /**
    * Reference into the SecretStore — never the secret itself. Absent for
    * subscription profiles: the OAuth credential stays on the host machine

@@ -194,6 +194,19 @@ describe('buildRuntimeSpec', () => {
     expect(spec.workspace.configPatch.setupToken).toBe('sk-test');
   });
 
+  it('local vendor: no credential injected, no mount, ollama provider in the patch', async () => {
+    const w = await world({ profile: { kind: 'api_key', vendor: 'local', secretRef: undefined } });
+    (w.store as any).db
+      .prepare('UPDATE ai_profiles SET base_url = ?, model = ? WHERE id = ?')
+      .run('http://172.17.0.1:11434/v1', 'qwen3.6:27b-q8_0', 'p1');
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.env).toEqual({}); // nothing to inject
+    expect(spec.hostMounts).toEqual([]); // no ~/.claude
+    expect(spec.workspace.configPatch.provider).toBe('ollama');
+    expect(spec.workspace.configPatch.baseUrl).toBe('http://172.17.0.1:11434/v1');
+  });
+
   it('refuses a subscription profile on a non-local host (provision fails + rolls back)', async () => {
     const w = await world({ hostKind: 'gce', profile: { kind: 'subscription', secretRef: undefined } });
     const { agent } = await provisionAgent(w.deps, INPUT);

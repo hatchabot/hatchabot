@@ -74,7 +74,32 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     cmds.push({ argv: ['config', 'set', 'gateway.bind', 'loopback'] });
   }
 
-  const prefixedModel = patch.model ? `anthropic/${patch.model}` : undefined;
+  // Model refs are `<provider>/<model>`. A local server is its own provider,
+  // so the prefix — and everything downstream — follows it.
+  const provider = patch.provider ?? 'anthropic';
+  const prefixedModel = patch.model ? `${provider}/${patch.model}` : undefined;
+
+  if (provider === 'ollama') {
+    // Drop any Anthropic auth profile a previous config left behind. Same
+    // lesson as the import fix: a stale profile the gateway might prefer is
+    // exactly how "configured correctly but fails at runtime" happens.
+    cmds.push({ argv: ['config', 'set', 'auth.profiles', '{}', '--replace'] });
+    // OpenClaw talks to Ollama over its OpenAI-compatible endpoint. baseUrl
+    // must be reachable FROM THE CONTAINER: the host's loopback is not.
+    cmds.push({
+      argv: [
+        'config',
+        'set',
+        'models.providers.ollama',
+        JSON.stringify({
+          baseUrl: patch.baseUrl ?? 'http://172.17.0.1:11434/v1',
+          apiKey: 'ollama-local', // required by the OpenAI shape; unused locally
+          api: 'openai-completions',
+        }),
+        '--replace',
+      ],
+    });
+  }
 
   // Runtime-wide default model. Without it, OpenClaw's OWN default agent
   // "main" (which the Control UI lands on) falls back to the factory default
@@ -85,9 +110,9 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // Primary first, deduped: patch.models may or may not repeat patch.model.
   const allModels = [
     ...new Set([patch.model, ...(patch.models ?? [])].filter((m): m is string => !!m)),
-  ].map((m) => `anthropic/${m}`);
+  ].map((m) => `${provider}/${m}`);
 
-  if (patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
+  if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
     // Subscription via a `claude setup-token` token (macOS hosts — the login
     // lives in the Keychain, so there is no ~/.claude to mount). The gateway
     // ignores ambient env for auth; the token must live in ITS auth store.
@@ -105,7 +130,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
         '--replace',
       ],
     });
-  } else if (patch.authMode === 'oauth-claude-cli') {
+  } else if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli') {
     // Subscription path: OpenClaw drives the Claude Code CLI, which reads the
     // OAuth credential from the mounted ~/.claude. --replace for the same
     // reason as the token branch: an imported volume may carry the OTHER auth
@@ -127,10 +152,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // the claude-cli runtime — without that a model is listed but unusable.
     // (agents.defaults.modelPolicy would be the precise allowlist, but
     // 2026.6.11 rejects the key: "Unrecognized key: modelPolicy".)
-    // Token-auth models run through OpenClaw's native anthropic provider, not
-    // the claude-cli runtime (which would demand its own login).
+    // Only the Anthropic subscription path rides the claude-cli runtime; a
+    // local model is served directly by its provider.
     const entry =
-      patch.authMode === 'oauth-claude-cli' && !patch.setupToken
+      provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && !patch.setupToken
         ? { agentRuntime: { id: 'claude-cli' } }
         : {};
     // --replace: this path is AgentClaw-owned (the profile is the source of
@@ -195,7 +220,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     rawShell: `node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;for(const a of (c.agents&&c.agents.list)||[]){if(a.model){delete a.model;n++}}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));'`,
   });
 
-  if (patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
+  if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
     cmds.push({
       argv: [
         'models', 'auth', '--agent', patch.agentId,

@@ -54,6 +54,28 @@ Cloud-hosted agents take an API key. The app should say so plainly at profile
 creation time rather than letting a user pick a combination that will expire
 under them.
 
+## Local models — no credential at all
+
+`vendor: 'local'` points an agent at a model server you run yourself (Ollama
+today, over its OpenAI-compatible endpoint). It is the only profile kind with
+**no credential anywhere**: nothing in the secret store, no env var injected,
+no `~/.claude` mounted. That also makes it the only configuration where "your
+family's data never leaves this machine" is literally true — and it sidesteps
+the prompt-injection blast radius that the mounted subscription credential
+carries.
+
+Two things to know:
+
+- **`baseUrl` is what the AGENT sees, not what you see.** Containers cannot
+  reach the host's loopback, so `http://localhost:11434` fails. The default is
+  the docker bridge, `http://172.17.0.1:11434/v1`. The server must bind
+  somewhere the container can reach (`OLLAMA_HOST=0.0.0.0:11434`, or bind the
+  bridge address only).
+- **Prefer 8-bit quantization for agents.** Benchmarks put 8-bit within ~2% of
+  full precision while 4-bit loses 2–8%, concentrated in structured output —
+  which is exactly tool calling. A smaller model at Q8 drives an agent loop
+  more reliably than a bigger one at Q4.
+
 ## Current state in code
 
 - `AIProfile.kind` carries the distinction (`src/domain/types.ts`).
