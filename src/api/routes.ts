@@ -731,7 +731,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (agent.state === 'RUNNING') {
       await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-rebuild');
     }
-    if (!inflight.has(agent.id)) {
+    if (inflight.has(agent.id)) {
+      return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
+    }
+    {
       const task = rebuildAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
           log: (e, d) => app.log.info(d, e) },

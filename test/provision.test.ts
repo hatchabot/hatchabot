@@ -107,6 +107,37 @@ describe('runProvisionSteps', () => {
   });
 });
 
+describe('rollback must not destroy existing memory', () => {
+  it('does NOT purge the volume when a retry fails on an existing runtime', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const ref = w.store.getAgent(agent.id)!.runtimeRef!;
+
+    // Retry against a provider that fails to start: the volume predates this
+    // run, so rollback must leave it alone. Purging here destroyed months of
+    // memory in the field.
+    const broken = new MockProvider({ failOn: 'start' });
+    broken.runtimes.set(ref, (w.provider as any).runtimes.get(ref));
+    broken.stateStore.set(ref, Buffer.from('the-agents-memory'));
+    // The real path: a live agent goes FAILED (e.g. reconcile after a reboot),
+    // the owner taps Retry, and the retry's health check times out.
+    w.store.setAgentState(agent.id, 'FAILED', 'runtime missing');
+    await runProvisionSteps({ ...w.deps, provider: broken }, agent.id);
+
+    expect(w.store.getAgent(agent.id)!.state).toBe('FAILED');
+    expect(broken.runtimes.get(ref)!.purged).toBe(false);
+    expect(broken.stateStore.get(ref)!.toString()).toBe('the-agents-memory');
+  });
+
+  it('DOES purge storage it created itself', async () => {
+    const w = await world({ failOn: 'start' });
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    expect(agent.state).toBe('FAILED');
+    const rt = [...(w.provider as any).runtimes.values()][0] as any;
+    expect(rt?.purged).toBe(true);
+  });
+});
+
 describe('rebuildAgent', () => {
   it('walks RUNNING → REBUILDING → RUNNING reusing the same runtime ref', async () => {
     const w = await world();

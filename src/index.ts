@@ -31,6 +31,11 @@ for (const f of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {
   }
 }
 
+// Keep the main DB file current. In WAL mode all writes land in -wal until a
+// checkpoint, so an un-checkpointed database copies as an EMPTY file — which
+// has already produced one worthless backup on this host.
+db.pragma('wal_autocheckpoint = 256');
+
 const store = new Store(db);
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());
 const pool = new TelegramPoolProvisioner(db, secrets);
@@ -103,6 +108,19 @@ await registerRoutes(app, {
       ? new IdentityVerifier(identityConfigFromEnv())
       : undefined,
 });
+
+// Checkpoint and close cleanly so the on-disk file is whole after a restart.
+for (const sig of ['SIGTERM', 'SIGINT'] as const) {
+  process.once(sig, () => {
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      db.close();
+    } catch (err) {
+      app.log.error({ err }, 'shutdown checkpoint failed');
+    }
+    process.exit(0);
+  });
+}
 
 await app.listen({ port: PORT, host: '0.0.0.0' });
 app.log.info(

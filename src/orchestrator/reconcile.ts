@@ -34,6 +34,13 @@ export async function reconcileAgents(
       const status = await provider.status(agent.runtimeRef);
       const s = agent.state;
 
+      // Docker unreachable: leave every agent exactly as it is. Guessing here
+      // is how a healthy fleet gets marked FAILED after a reboot.
+      if (status.phase === 'unknown') {
+        log('reconcile.host_unreachable', { agentId: agent.id });
+        continue;
+      }
+
       if (
         status.phase === 'absent' &&
         (s === 'RUNNING' || s === 'STOPPED' || s === 'PROVISIONING' || s === 'REBUILDING')

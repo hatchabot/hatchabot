@@ -175,6 +175,11 @@ npm test                              # 103 tests
 Logs: `journalctl --user -u agentclaw -f` (Linux) or `tail -f data/server.log`
 (macOS).
 
+**Never `cp` a running database.** AgentClaw uses SQLite in WAL mode, so an
+un-checkpointed `data/agentclaw.sqlite` copies as an *empty* file. Use
+`./scripts/backup-volumes.sh` (which uses SQLite's online backup API) or stop
+the service first — shutdown checkpoints the WAL.
+
 **What a backup contains.** Each nightly run writes the control-plane database
 (agent registry, memberships, encrypted credentials, memory snapshots), a copy
 of `AGENTCLAW_SECRET_KEY` — without which those credentials can't be decrypted

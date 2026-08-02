@@ -93,6 +93,8 @@ export interface OpenClawConfigPatch {
 }
 
 export type RuntimeStatus =
+  /** The runtime host itself could not be reached — say nothing about the agent. */
+  | { phase: 'unknown' }
   | { phase: 'absent' }
   | { phase: 'starting' }
   | { phase: 'running'; healthy: boolean }

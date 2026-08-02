@@ -141,7 +141,12 @@ export async function runProvisionSteps(
 
     // Step 4: runtime + persistent volume.
     const { runtimeRef } = await provider.provision(spec);
-    rollback.push(() => provider.destroy(runtimeRef, { purge: true }));
+    // Purge ONLY storage this run created. On a retry, spec.previousRef makes
+    // provision() reuse the existing volume — purging it there destroys the
+    // agent's memory permanently, turning a transient failure (slow boot,
+    // port clash, image missing) into irreversible loss.
+    const createdStorage = !spec.previousRef;
+    rollback.push(() => provider.destroy(runtimeRef, { purge: createdStorage }));
     store.setAgentRuntimeRef(agentId, runtimeRef);
     log('runtime.provisioned', { agentId, runtimeRef });
 
@@ -149,8 +154,10 @@ export async function runProvisionSteps(
     await provider.start(runtimeRef);
     log('runtime.started', { agentId, runtimeRef });
 
-    // Step 7: health check.
-    await waitForHealthy(provider, runtimeRef, sleep);
+    // Step 7: health check. Generous, because a retry boots an agent that may
+    // have months of sessions to load — and timing out here used to trigger a
+    // rollback that purged its volume.
+    await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.healthy', { agentId, runtimeRef });
 
     // Step 8: live.

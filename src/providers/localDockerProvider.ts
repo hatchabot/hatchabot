@@ -203,7 +203,15 @@ export class LocalDockerProvider implements RuntimeProvider {
   async status(runtimeRef: string): Promise<RuntimeStatus> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker(['inspect', '-f', '{{.State.Status}}', container]);
-    if (res.code !== 0) return { phase: 'absent' };
+    if (res.code !== 0) {
+      // A daemon that is down is NOT a container that is gone. Conflating them
+      // let a boot-order race mark every healthy agent FAILED — and the owner's
+      // Retry then risked their memory. Report unknown and let callers wait.
+      if (/cannot connect to the docker daemon|is the docker daemon running/i.test(res.stderr)) {
+        return { phase: 'unknown' };
+      }
+      return { phase: 'absent' };
+    }
     const state = res.stdout.trim();
     if (state === 'exited' || state === 'created' || state === 'paused') {
       return { phase: 'stopped' };
@@ -320,6 +328,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     try {
       const { stdout, stderr } = await execFileP(this.docker, args, {
         maxBuffer: 8 * 1024 * 1024,
+        // A hung daemon must fail this call, not freeze the control plane.
+        timeout: Number(process.env.AGENTCLAW_DOCKER_TIMEOUT_MS ?? 60_000),
+        killSignal: 'SIGKILL',
       });
       return { code: 0, stdout, stderr };
     } catch (err: any) {
