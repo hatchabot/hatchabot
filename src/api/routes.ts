@@ -19,6 +19,7 @@ import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
+import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import type { Agent } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
 import type { IdentityVerifier } from './identity.js';
@@ -846,6 +847,105 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       pooled: deps.channel.pool.owns(channel.accountId),
     };
   });
+
+  // ---- peers & migration ---------------------------------------------------
+
+  app.get('/v1/peers', async (req) =>
+    store.listPeers(ownerIdOf(req)).map(({ secretRef: _s, ...safe }) => safe),
+  );
+
+  app.post<{ Body: { name?: string; url?: string; token?: string } }>(
+    '/v1/peers',
+    async (req, reply) => {
+      const parsed = z
+        .object({
+          name: z.string().trim().min(1).max(64),
+          url: z.string().url(),
+          /** An access token minted on THAT server (⚙ AI → CLI access). */
+          token: z.string().min(1),
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      const { name, url, token } = parsed.data;
+
+      // Prove the token works before storing it, so a typo fails here rather
+      // than halfway through a migration.
+      try {
+        const probe = await fetch(`${url.replace(/\/$/, '')}/v1/agents`, {
+          headers: { authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (probe.status === 401) {
+          return reply.code(400).send({ error: 'That server rejected the token.' });
+        }
+        if (!probe.ok) {
+          return reply.code(400).send({ error: `That server answered ${probe.status}.` });
+        }
+      } catch {
+        return reply.code(400).send({ error: `Couldn't reach an AgentClaw server at ${url}.` });
+      }
+
+      const id = randomUUID();
+      const secretRef = `peer/${id}/token`;
+      await secrets.put(secretRef, token);
+      store.insertPeer({
+        id,
+        ownerId: ownerIdOf(req),
+        name,
+        url,
+        secretRef,
+        createdAt: new Date().toISOString(),
+      });
+      return reply.code(201).send({ id, name, url });
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/v1/peers/:id', async (req, reply) => {
+    const peer = store.getPeer(ownerIdOf(req), req.params.id);
+    if (!peer) return reply.code(404).send({ error: 'Not found' });
+    await secrets.delete(peer.secretRef).catch(() => {});
+    store.deletePeer(ownerIdOf(req), peer.id);
+    return { deleted: true };
+  });
+
+  /** Asked BY another server before it sends us an agent. Changes nothing. */
+  app.post<{ Body: { slug?: string; accountId?: string; vendor?: string } }>(
+    '/v1/agents/preflight',
+    async (req, reply) => {
+      const parsed = z
+        .object({
+          slug: z.string().min(1).max(64),
+          accountId: z.string().min(1).max(64),
+          vendor: z.string().max(32).optional(),
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      return preflight(store, ownerIdOf(req), parsed.data);
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { peerId?: string } }>(
+    '/v1/agents/:id/migrate',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const peerId = (req.body as { peerId?: string } | null)?.peerId;
+      const peer = peerId && store.getPeer(ownerIdOf(req), peerId);
+      if (!peer) return reply.code(400).send({ error: 'Unknown server' });
+      try {
+        return await migrateAgent(
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+            log: (e, d) => app.log.info(d, e) },
+          agent.id,
+          peer,
+        );
+      } catch (err) {
+        if (err instanceof MigrateError) return reply.code(400).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
 
   // ---- export & import (agent portability) ---------------------------------
 

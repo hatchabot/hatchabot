@@ -56,6 +56,11 @@ Commands:
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
                                (applies on the agent's next rebuild)
+  servers                      Other AgentClaw servers you can move agents to
+  servers add <name> <url> <token>
+                               Register one (token from that server's ⚙ AI)
+  migrate <agent> <server>     Move an agent there: preflight, transfer, verify.
+                               The source is left STOPPED, never deleted.
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
   approve <agent> <code>       Let a pending requester in (creates a member)
@@ -390,6 +395,32 @@ async function main() {
       }
       await jsonPost(`/v1/agents/${a.id}`, { aiProfileId: rest[1] }, 'PATCH');
       console.log(`"${a.name}" will use that AI source after: agentclaw rebuild "${a.name}"`);
+      return;
+    }
+    case 'servers': {
+      if (rest[0] === 'add') {
+        const [, name, url, token] = rest;
+        if (!name || !url || !token) fail('usage: agentclaw servers add <name> <url> <token>');
+        const p: any = await (await jsonPost('/v1/peers', { name, url, token })).json();
+        console.log(`added "${p.name}" (${p.url})`);
+        return;
+      }
+      const peers: any[] = await (await api(ctx, '/v1/peers')).json() as any[];
+      if (!peers.length) return console.log('no servers yet — agentclaw servers add <name> <url> <token>');
+      for (const p of peers) console.log(`${p.id}  ${p.name.padEnd(20)} ${p.url}`);
+      return;
+    }
+    case 'migrate': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw migrate <agent> <server>'));
+      const ref = rest[1] ?? fail('give the destination server (see: agentclaw servers)');
+      const peers: any[] = await (await api(ctx, '/v1/peers')).json() as any[];
+      const peer = peers.find((p) => p.id === ref || p.name === ref);
+      if (!peer) fail(`no server matches "${ref}"`);
+      console.log(`moving "${a.name}" to ${peer.name}…`);
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/migrate`, { peerId: peer.id })).json();
+      console.log(`done — now running on ${res.movedTo} as ${res.remoteAgentId}`);
+      console.log(`"${a.name}" here is ${res.sourceState} and was NOT deleted.`);
+      console.log(`Keep it that way: two copies polling one bot token fight over messages.`);
       return;
     }
     case 'invite': {

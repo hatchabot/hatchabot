@@ -82,6 +82,15 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS cli_tokens_owner ON cli_tokens (owner_id);
 
+      -- Other AgentClaw installations this owner can move agents to. The
+      -- access token is a credential, so it lives in the SecretStore and only
+      -- its ref is here.
+      CREATE TABLE IF NOT EXISTS peers (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
+        url TEXT NOT NULL, secret_ref TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS peers_owner ON peers (owner_id);
+
       CREATE TABLE IF NOT EXISTS invites (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -405,6 +414,47 @@ export class Store {
       return rows;
     });
     return adopt(newOwnerId);
+  }
+
+  // ---- Peers (other AgentClaw servers) ------------------------------------
+
+  insertPeer(p: {
+    id: string;
+    ownerId: string;
+    name: string;
+    url: string;
+    secretRef: string;
+    createdAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO peers (id, owner_id, name, url, secret_ref, created_at)
+         VALUES (@id, @ownerId, @name, @url, @secretRef, @createdAt)`,
+      )
+      .run(p);
+  }
+
+  listPeers(ownerId: string): Array<{ id: string; name: string; url: string; secretRef: string }> {
+    return (
+      this.db
+        .prepare(`SELECT id, name, url, secret_ref FROM peers WHERE owner_id = ? ORDER BY created_at`)
+        .all(ownerId) as any[]
+    ).map((r) => ({ id: r.id, name: r.name, url: r.url, secretRef: r.secret_ref }));
+  }
+
+  getPeer(ownerId: string, id: string):
+    | { id: string; name: string; url: string; secretRef: string }
+    | undefined {
+    const r = this.db
+      .prepare(`SELECT id, name, url, secret_ref FROM peers WHERE id = ? AND owner_id = ?`)
+      .get(id, ownerId) as any;
+    return r ? { id: r.id, name: r.name, url: r.url, secretRef: r.secret_ref } : undefined;
+  }
+
+  deletePeer(ownerId: string, id: string): boolean {
+    return (
+      this.db.prepare(`DELETE FROM peers WHERE id = ? AND owner_id = ?`).run(id, ownerId).changes === 1
+    );
   }
 
   // ---- CLI tokens --------------------------------------------------------

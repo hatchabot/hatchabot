@@ -6,7 +6,42 @@ hints about the AI it ran on. Import re-provisions it against the *target*
 machine's own AI source and host — so an agent can move from a subscription
 laptop to an API-key server and keep its mind.
 
-## The move
+## One-step move between servers
+
+If both machines run AgentClaw, register the destination once and move agents
+with a single action — no files to shuttle.
+
+On the **destination**: ⚙ AI → CLI access → **New token**, and copy it.
+
+On the **source**: ⚙ AI → Other servers → add its name, URL and that token.
+AgentClaw checks the token works before saving it.
+
+Then use **Move…** on the agent card, or:
+
+```sh
+agentclaw servers                      # list registered servers
+agentclaw migrate "Kitchen Helper" Desktop
+```
+
+What happens, in order:
+
+1. **Preflight** — the destination is asked whether it *would* accept: is the
+   agent id free, is that bot already wired to something there, does it have a
+   host and an AI source. Nothing has changed yet, so a refusal costs nothing.
+2. **Export** — the agent is snapshotted and **stopped** here. From this moment
+   nothing is polling its bot.
+3. **Import** — the destination provisions and starts it. It is now the only
+   copy running.
+4. **Verify** — if it did not come up there, the move is undone.
+
+**If anything fails, your agent is put back exactly as it was.** The
+destination rolls itself back completely, and the source is restarted. The one
+thing that is *not* automatic is deleting the source: it is left **stopped**,
+because an automatic delete would make a mistaken move unrecoverable. Delete it
+yourself once you have confirmed the agent works on the other machine — and
+until then, never start it, or two runtimes will fight over one bot token.
+
+## Moving by file instead
 
 On the target machine (once):
 

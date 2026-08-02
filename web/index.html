@@ -217,6 +217,19 @@
     changes on their next Rebuild.
   </div>
   <div id="aiList"></div>
+  <h4 style="margin:16px 0 4px">Other servers</h4>
+  <div class="sub">
+    Register another AgentClaw and you can move agents to it in one step.
+    Paste an access token minted on <i>that</i> server (its ⚙ AI → CLI access).
+  </div>
+  <div id="peerList"></div>
+  <input type="text" id="peerName" placeholder="Name (e.g. Desktop)" maxlength="64">
+  <input type="text" id="peerUrl" placeholder="http://desktop:8080">
+  <input type="password" id="peerToken" placeholder="Access token from that server" autocomplete="off">
+  <div class="actions" style="justify-content:flex-start">
+    <button id="peerAddBtn" onclick="addPeer()">Add server</button>
+  </div>
+
   <h4 style="margin:16px 0 4px">CLI access</h4>
   <div class="sub">
     A token for <code>agentclaw</code> on the command line. Works with any
@@ -493,6 +506,7 @@ async function createSubscriptionProfile() {
 
 function openAiDlg() {
   renderAiList();
+  renderPeers();
   $('aiErr').textContent = '';
   aiDlg.showModal();
 }
@@ -530,6 +544,53 @@ async function delAiProfile(id, name) {
     toast('Removed');
     await refresh(true); renderAiList();
   } catch (e) { $('aiErr').textContent = e.message; }
+}
+
+async function renderPeers() {
+  try {
+    const peers = await api('/v1/peers');
+    $('peerList').innerHTML = peers.length
+      ? peers.map(p => `<div class="pair"><span class="grow">🖥 <b>${esc(p.name)}</b> <span style="color:var(--dim)">${esc(p.url)}</span></span>
+          <button class="danger" onclick="delPeer('${p.id}','${jsq(p.name)}')">×</button></div>`).join('')
+      : '<div class="sub">None yet.</div>';
+  } catch { /* listing is best-effort */ }
+}
+
+async function addPeer() {
+  const name = $('peerName').value.trim(), url = $('peerUrl').value.trim(), token = $('peerToken').value.trim();
+  if (!name || !url || !token) { $('aiErr').textContent = 'Name, URL and token are all needed.'; return; }
+  $('peerAddBtn').disabled = true;
+  try {
+    await api('/v1/peers', { method: 'POST', body: { name, url, token } });
+    $('peerName').value = ''; $('peerUrl').value = ''; $('peerToken').value = '';
+    toast('Server added');
+    await renderPeers();
+  } catch (e) { $('aiErr').textContent = e.message; }
+  finally { $('peerAddBtn').disabled = false; }
+}
+
+async function delPeer(id, name) {
+  if (!confirm(`Forget "${name}"? Agents already moved there are unaffected.`)) return;
+  try { await api(`/v1/peers/${id}`, { method: 'DELETE' }); await renderPeers(); }
+  catch (e) { toast(e.message); }
+}
+
+async function migrateAgent(id, name) {
+  let peers;
+  try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
+  if (!peers.length) return toast('Add another server first (⚙ AI → Other servers)', 8000);
+  const list = peers.map((p, i) => `${i + 1}. ${p.name} (${p.url})`).join('\n');
+  const pick = prompt(`Move "${name}" to which server?\n\n${list}\n\nEnter a number:`);
+  if (pick === null) return;
+  const peer = peers[Number(pick) - 1];
+  if (!peer) return toast('No such server');
+  if (!confirm(`Move "${name}" to ${peer.name}?\n\nIt stops here, transfers with its memory and members, and starts there. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
+  toast(`Moving ${name} to ${peer.name}…`, 60000);
+  try {
+    const res = await api(`/v1/agents/${id}/migrate`, { method: 'POST', body: { peerId: peer.id } });
+    toast(`Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 30000); }
 }
 
 function aiKindChanged() {
@@ -686,7 +747,8 @@ function agentCard(a) {
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
-           <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>` : ''}
+           <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>
+           <button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')" title="Move to another AgentClaw server in one step">Move…</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
     </div>
