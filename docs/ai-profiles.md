@@ -81,6 +81,27 @@ Two things to know:
   which is exactly tool calling. A smaller model at Q8 drives an agent loop
   more reliably than a bigger one at Q4.
 
+## Sharing your files with an agent
+
+An agent normally sees only its own workspace. **Edit → "Folders this agent
+can read"** mounts a host folder into its container at `/data/<folder>`,
+**read-only**, for that agent alone.
+
+Two properties make this safe enough to offer:
+
+- **Read-only, enforced by the kernel** — not by asking the agent nicely. An
+  agent runs with permission prompts disabled, so a writable mount would make
+  one bad instruction destructive.
+- **Refused paths** — credential directories (`~/.claude`, `~/.ssh`,
+  `~/.config/agentclaw`), system paths (`/etc`, `/root`, `/proc`, `/sys`), the
+  docker volume root, and `/` itself. Traversal is normalised before the check.
+
+What it does *not* protect against: **anyone who can message the agent can ask
+about those files.** Share per agent accordingly — and remember a shared-memory
+agent may write what it reads into a memory every member can see. The safest
+combination is a local model plus a shared folder: no credential in the
+container and nothing sent off the machine.
+
 ## Current state in code
 
 - `AIProfile.kind` carries the distinction (`src/domain/types.ts`).

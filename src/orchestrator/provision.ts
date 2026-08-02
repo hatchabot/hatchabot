@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { basename, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
@@ -289,10 +291,19 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
       : oauthToken
         ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken }
         : {},
-    hostMounts:
-      subscription && !oauthToken
+    hostMounts: [
+      ...(subscription && !oauthToken
         ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
-        : [],
+        : []),
+      // Owner-chosen folders, always read-only. An agent runs with permission
+      // prompts disabled and is reachable by everyone in it, so write access
+      // would make one bad instruction destructive.
+      ...(agent.sharedPaths ?? []).map((p) => ({
+        source: p,
+        target: `/data/${basename(p)}`,
+        readonly: true,
+      })),
+    ],
   };
 }
 
@@ -383,6 +394,31 @@ function requireRef(ref: string | undefined): string {
  * directory is mounted (not the single file) because the CLI refreshes tokens
  * by rewriting the file, and a single-file bind mount would detach on rename.
  */
+/**
+ * Paths that must never be handed to an agent: they would give it the keys to
+ * the whole installation rather than access to your data.
+ */
+export function sharePathProblem(p: string, opts: { home?: string } = {}): string | undefined {
+  const home = opts.home ?? homedir();
+  if (!p.startsWith('/')) return 'Use an absolute path.';
+  const norm = resolve(p).replace(/\/+$/, '') || '/';
+  if (norm === '/') return 'Sharing the whole filesystem is not allowed.';
+  const forbidden = [
+    [resolve(home, '.claude'), 'that holds your Claude credentials'],
+    [resolve(home, '.ssh'), 'that holds your SSH keys'],
+    [resolve(home, '.config/agentclaw'), 'that holds AgentClaw access tokens'],
+    ['/etc', 'system configuration'],
+    ['/root', "the root user's home"],
+    ['/var/lib/docker', 'every agent volume, including other agents'],
+    ['/proc', 'kernel state'],
+    ['/sys', 'kernel state'],
+  ] as const;
+  for (const [bad, why] of forbidden) {
+    if (norm === bad || norm.startsWith(`${bad}/`)) return `Refusing ${norm}: ${why}.`;
+  }
+  return undefined;
+}
+
 export function claudeAuthDir(): string {
   return `${process.env.HOME ?? '/root'}/.claude`;
 }

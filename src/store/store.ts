@@ -91,6 +91,16 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS peers_owner ON peers (owner_id);
 
+      -- What has happened to each agent. The orchestrators already emit these
+      -- as log lines; persisting them is what turns "it broke on Tuesday" from
+      -- unanswerable into a card the owner can read.
+      CREATE TABLE IF NOT EXISTS agent_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id TEXT NOT NULL, at TEXT NOT NULL,
+        event TEXT NOT NULL, detail TEXT
+      );
+      CREATE INDEX IF NOT EXISTS agent_events_at ON agent_events (agent_id, id DESC);
+
       CREATE TABLE IF NOT EXISTS invites (
         id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -109,6 +119,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN applied_profile_id TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_model TEXT`,
       `ALTER TABLE agents ADD COLUMN migrated_to TEXT`,
+      `ALTER TABLE agents ADD COLUMN shared_paths TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
     ]) {
@@ -415,6 +426,52 @@ export class Store {
       return rows;
     });
     return adopt(newOwnerId);
+  }
+
+  // ---- Events --------------------------------------------------------------
+
+  /** Keep the newest `keep` events per agent; older ones are pruned on write. */
+  recordEvent(agentId: string, event: string, detail?: Record<string, unknown>, keep = 200): void {
+    // Never let a log line become a way to store secrets or unbounded data.
+    const safe = detail ? JSON.stringify(detail).slice(0, 2000) : null;
+    this.db
+      .prepare(`INSERT INTO agent_events (agent_id, at, event, detail) VALUES (?, ?, ?, ?)`)
+      .run(agentId, new Date().toISOString(), event.slice(0, 64), safe);
+    this.db
+      .prepare(
+        `DELETE FROM agent_events WHERE agent_id = ? AND id NOT IN (
+           SELECT id FROM agent_events WHERE agent_id = ? ORDER BY id DESC LIMIT ?
+         )`,
+      )
+      .run(agentId, agentId, keep);
+  }
+
+  /** Newest first, across every agent this owner can see. */
+  listEvents(agentIds: string[], limit = 60): Array<{
+    agentId: string;
+    at: string;
+    event: string;
+    detail?: Record<string, unknown>;
+  }> {
+    if (agentIds.length === 0) return [];
+    const marks = agentIds.map(() => '?').join(',');
+    return (
+      this.db
+        .prepare(
+          `SELECT agent_id, at, event, detail FROM agent_events
+           WHERE agent_id IN (${marks}) ORDER BY id DESC LIMIT ?`,
+        )
+        .all(...agentIds, limit) as any[]
+    ).map((r) => ({
+      agentId: r.agent_id,
+      at: r.at,
+      event: r.event,
+      detail: r.detail ? JSON.parse(r.detail) : undefined,
+    }));
+  }
+
+  deleteEventsFor(agentId: string): void {
+    this.db.prepare(`DELETE FROM agent_events WHERE agent_id = ?`).run(agentId);
   }
 
   // ---- Peers (other AgentClaw servers) ------------------------------------
@@ -733,6 +790,13 @@ export class Store {
    * would put two runtimes on one bot token — so this is a tombstone that
    * lifecycle routes refuse to act on until it is explicitly cleared.
    */
+  /** Host folders this agent may read. Applied on its next rebuild. */
+  setAgentSharedPaths(id: string, paths: string[]): void {
+    this.db
+      .prepare(`UPDATE agents SET shared_paths = ?, updated_at = ? WHERE id = ?`)
+      .run(paths.length ? JSON.stringify(paths) : null, new Date().toISOString(), id);
+  }
+
   setAgentMigratedTo(id: string, note: string | null): void {
     this.db.prepare(`UPDATE agents SET migrated_to = ? WHERE id = ?`).run(note, id);
   }
@@ -829,6 +893,7 @@ function rowToAgent(r: any): Agent {
     sharedMemory: !!r.shared_memory,
     pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
     migratedTo: r.migrated_to ?? undefined,
+    sharedPaths: r.shared_paths ? JSON.parse(r.shared_paths) : undefined,
     appliedProfileId: r.applied_profile_id ?? undefined,
     appliedModel: r.applied_model ?? undefined,
     gatewayPort: r.gateway_port ?? undefined,

@@ -10,6 +10,7 @@ import { InvalidBotTokenError } from '../channels/telegramManual.js';
 import {
   claudeAuthDir,
   createAgentRecord,
+  sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
 } from '../orchestrator/provision.js';
@@ -193,6 +194,25 @@ async function checkLocalServer(
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
 
+  /**
+   * Orchestrators already report what they do; this sends it to the log AND
+   * to the agent's timeline, so the app can answer "what happened to this
+   * agent?" instead of only "what state is it in now?".
+   */
+  const trace =
+    (agentId?: string) =>
+    (event: string, detail: Record<string, unknown>): void => {
+      app.log.info(detail, event);
+      const id = agentId ?? (typeof detail.agentId === 'string' ? detail.agentId : undefined);
+      if (id) {
+        try {
+          store.recordEvent(id, event, detail);
+        } catch {
+          /* a timeline write must never break the operation it describes */
+        }
+      }
+    };
+
   // Agent archives arrive as raw bytes (import). 512 MB ceiling — a family
   // agent's volume snapshot is MBs, but sessions grow.
   app.addContentTypeParser(
@@ -270,7 +290,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const snapshotDeps = (agent: Agent) => ({
     store,
     provider: providerFor(agent.hostId),
-    log: (e: string, d: Record<string, unknown>) => app.log.info(d, e),
+    log: trace(agent.id),
   });
 
   const providerFor = (hostId: string): RuntimeProvider => {
@@ -291,7 +311,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const agent = store.getAgent(agentId);
       if (!agent) return;
       const provider = providerFor(agent.hostId);
-      const log = (e: string, d: Record<string, unknown>) => app.log.info(d, e);
+      const log = trace(agentId);
       const result = await runProvisionSteps(
         { store, secrets, provider, channel: deps.channel, log },
         agentId,
@@ -641,15 +661,43 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           aiProfileId: z.string().min(1).optional(),
           /** Clear the moved-away tombstone: "this really does run here now". */
           runsHere: z.literal(true).optional(),
+          /** Host folders this agent may READ. Applied on the next rebuild. */
+          sharedPaths: z.array(z.string().min(1).max(512)).max(8).optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const { name, sharedMemory: shared, aiProfileId, runsHere } = parsed.data;
-      if (name === undefined && shared === undefined && aiProfileId === undefined && !runsHere) {
+      if (
+        name === undefined &&
+        shared === undefined &&
+        aiProfileId === undefined &&
+        !runsHere &&
+        parsed.data.sharedPaths === undefined
+      ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
 
       if (runsHere) store.setAgentMigratedTo(agent.id, null);
+
+      if (parsed.data.sharedPaths) {
+        const paths = parsed.data.sharedPaths.map((p) => p.trim()).filter(Boolean);
+        for (const p of paths) {
+          // Refuse the dangerous ones by name, and require the folder to
+          // exist — a typo would otherwise mount an empty directory and the
+          // agent would simply report finding nothing.
+          const problem = sharePathProblem(p);
+          if (problem) return reply.code(400).send({ error: problem });
+          if (!existsSync(p)) {
+            return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
+          }
+        }
+        if (new Set(paths.map((p) => p.replace(/\/+$/, '').split('/').pop())).size !== paths.length) {
+          return reply.code(400).send({
+            error: 'Two folders share a name — the agent would see them at the same place.',
+          });
+        }
+        store.setAgentSharedPaths(agent.id, paths);
+      }
 
       if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
 
@@ -869,6 +917,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     };
   });
 
+  /** Recent activity across every agent the caller can see. */
+  app.get<{ Querystring: { limit?: string } }>('/v1/events', async (req) => {
+    const visible = store.listVisibleAgents(ownerIdOf(req));
+    const names = new Map(visible.map((a) => [a.id, a.name]));
+    const limit = Math.min(Number(req.query.limit ?? 40) || 40, 200);
+    return store.listEvents([...names.keys()], limit).map((e) => ({
+      ...e,
+      agentName: names.get(e.agentId),
+    }));
+  });
+
   // ---- peers & migration ---------------------------------------------------
 
   app.get('/v1/peers', async (req) =>
@@ -956,7 +1015,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       try {
         return await migrateAgent(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-            log: (e, d) => app.log.info(d, e) },
+            log: trace(agent.id) },
           agent.id,
           peer,
         );
@@ -979,7 +1038,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     try {
       const { filename, data } = await exportAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-          log: (e, d) => app.log.info(d, e) },
+          log: trace(agent.id) },
         agent.id,
       );
       return reply
@@ -1014,8 +1073,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
       try {
         const agent = await importAgent(
-          { store, secrets, provider: providerFor(host.id), channel: deps.channel,
-            log: (e, d) => app.log.info(d, e) },
+          // No id yet — trace() picks it up from the orchestrator's log detail.
+          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace() },
           body,
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
         );
@@ -1045,7 +1104,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     {
       const task = rebuildAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-          log: (e, d) => app.log.info(d, e) },
+          log: trace(agent.id) },
         agent.id,
       );
       inflight.set(
@@ -1097,7 +1156,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       try {
         await revokeMember(
-          { store, provider: providerFor(agent.hostId), log: (e, d) => app.log.info(d, e) },
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           agent.id,
           req.params.userId,
         );
@@ -1140,7 +1199,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const channelRow = store.getChannelForAgent(agent.id);
       if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
         void claimFirstContact(
-          { store, provider: providerFor(agent.hostId), log: (e, d) => app.log.info(d, e) },
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           {
             agentId: agent.id,
             runtimeRef: agent.runtimeRef,
@@ -1205,7 +1264,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!code) return reply.code(400).send({ error: 'code required' });
       try {
         const admitted = await admitMember(
-          { store, provider: providerFor(agent.hostId), log: (e, d) => app.log.info(d, e) },
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           {
             agentId: agent.id,
             runtimeRef: agent.runtimeRef,
@@ -1269,6 +1328,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       store.deleteChannelForAgent(agent.id);
     }
     store.deleteSnapshotsFor(agent.id);
+    store.deleteEventsFor(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
 }

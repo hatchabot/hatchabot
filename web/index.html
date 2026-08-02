@@ -113,6 +113,13 @@
   </header>
   <div id="setup"></div>
   <div id="agents"></div>
+  <div class="card" id="activityCard" hidden>
+    <div class="row">
+      <span class="name grow">Recent activity</span>
+      <span class="sub" id="activityCount"></span>
+    </div>
+    <div id="activity" style="margin-top:8px;max-height:260px;overflow:auto"></div>
+  </div>
 </div>
 
 <button class="fab" id="fabBtn" title="New agent" hidden>+</button>
@@ -186,6 +193,16 @@
   <div class="sub">
     Each agent can use a different AI. Add sources in <b>⚙ AI</b>; switching
     here applies on the agent's next Rebuild.
+  </div>
+  <label>Folders this agent can read <span style="color:var(--dim)">— on this machine, read-only</span></label>
+  <div id="pathList"></div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="pathNew" placeholder="/home/you/Documents/notes" style="flex:1;min-width:0">
+    <button id="pathAddBtn" onclick="addSharedPath()">Share</button>
+  </div>
+  <div class="sub">
+    The agent sees these at <code>/data/&lt;folder&gt;</code> and cannot write to them.
+    Anyone who can message this agent can ask about their contents. Applies on the next Rebuild.
   </div>
   <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
   <div style="display:flex;gap:8px;align-items:center">
@@ -311,7 +328,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let profiles = [], hosts = [], agents = [], pairings = {}, members = {};
+let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editPaths = [];
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
@@ -720,7 +737,7 @@ function agentCard(a) {
       </div>
       <span class="chip ${a.state}">${a.state}</span>
     </div>
-    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}</div>` : ''}
+    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}${a.sharedPaths?.length ? ` · reads ${a.sharedPaths.length} folder${a.sharedPaths.length > 1 ? 's' : ''}` : ''}</div>` : ''}
     ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">An OpenClaw update is ready. Rebuild applies it — memory is kept.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
@@ -817,6 +834,7 @@ async function openEdit(id, name) {
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}</option>`).join('');
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
+  renderSharedPaths(cur?.sharedPaths);
   $('editErr').textContent = '';
   $('snapList').innerHTML = '';
   editDlg.showModal();
@@ -898,6 +916,76 @@ async function switchProfile() {
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('profileBtn').disabled = false; }
+}
+
+function renderSharedPaths(paths) {
+  editPaths = paths ?? [];
+  $('pathList').innerHTML = editPaths.length
+    ? editPaths.map((p, i) => `<div class="pair"><span class="grow">📁 <code>${esc(p)}</code></span>
+        <button class="danger" onclick="removeSharedPath(${i})">×</button></div>`).join('')
+    : '<div class="sub">None — this agent can only see its own workspace.</div>';
+}
+
+async function saveSharedPaths() {
+  await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: editPaths } });
+  await refresh(false);
+}
+
+async function addSharedPath() {
+  const p = $('pathNew').value.trim();
+  if (!p) return;
+  const next = [...editPaths, p];
+  $('pathAddBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: next } });
+    $('pathNew').value = '';
+    renderSharedPaths(next);
+    toast('Shared — Rebuild to apply it');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('pathAddBtn').disabled = false; }
+}
+
+async function removeSharedPath(i) {
+  const next = editPaths.filter((_, n) => n !== i);
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: next } });
+    renderSharedPaths(next);
+    toast('Removed — Rebuild to apply it');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+}
+
+const EVENT_WORDS = {
+  'runtime.provisioned': 'runtime created', 'runtime.started': 'started',
+  'runtime.healthy': 'came online', 'runtime.rebuilt': 'rebuilt',
+  'provision.failed': 'failed to set up', 'rebuild.failed': 'rebuild failed',
+  'channel.provisioned': 'got its Telegram bot', 'claim.bound': 'owner linked on Telegram',
+  'member.admitted': 'let someone in', 'member.revoked': 'removed a member',
+  'snapshot.captured': 'snapshot saved', 'snapshot.restored': 'files restored',
+  'agent.exported': 'exported', 'agent.imported': 'imported',
+  'migrate.done': 'moved to another server', 'migrate.rolled_back': 'move undone',
+  'reconcile.unhealthy': 'stopped answering', 'reconcile.runtime_missing': 'runtime went missing',
+  'reconcile.marked_stopped': 'found stopped', 'reconcile.marked_running': 'found running',
+  'import.rolled_back': 'import undone',
+};
+
+async function loadActivity() {
+  try {
+    const evs = await api('/v1/events?limit=40');
+    const card = $('activityCard');
+    card.hidden = evs.length === 0;
+    $('activityCount').textContent = evs.length ? `last ${evs.length}` : '';
+    $('activity').innerHTML = evs.map(e => {
+      const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
+      const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
+      return `<div style="display:flex;gap:8px;padding:4px 0;border-bottom:1px solid var(--line);font-size:13px">
+        <span style="color:var(--dim);white-space:nowrap;min-width:74px">${ago(e.at)}</span>
+        <span style="min-width:0;flex:1"><b>${esc(e.agentName ?? 'agent')}</b>
+          <span style="color:${bad ? 'var(--bad)' : 'var(--dim)'}">${esc(what)}</span></span>
+      </div>`;
+    }).join('');
+  } catch { /* the feed is never worth breaking the page for */ }
 }
 
 async function showBotToken() {
@@ -1118,6 +1206,7 @@ async function refresh(withMeta) {
       }).catch(() => {});
     }
     agents = await api('/v1/agents');
+    loadActivity();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       const running = agents.filter(a => a.state === 'RUNNING');

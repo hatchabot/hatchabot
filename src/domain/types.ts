@@ -83,6 +83,12 @@ export interface Agent {
   /** One-to-many agents share MEMORY.md across members (§12.5). */
   sharedMemory: boolean;
   /**
+   * Host folders mounted read-only into this agent's container, so it can
+   * read your data. Deliberately per-agent: the homework tutor should not
+   * inherit what the finance agent can see.
+   */
+  sharedPaths?: string[];
+  /**
    * Set once this agent has been moved to another server. Its runtime here is
    * a stale copy: starting it would make two pollers fight over one bot token.
    */

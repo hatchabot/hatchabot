@@ -34,6 +34,12 @@ and lifecycle; OpenClaw runs the agent.
 - **Invites with two tiers.** Send a link (or a QR code) for chat-only access,
   or have the invitee sign in so they can also log into AgentClaw and see the
   agents they belong to.
+- **Let an agent read your files.** Share a folder with a specific agent and
+  it can read your data — mounted read-only, per agent, never system paths or
+  credential directories. Pair it with a local model and nothing leaves the
+  machine at all.
+- **A running history.** The app shows what has actually happened — agents
+  rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
 - **Shared or private memory.** A family agent's memory is common to everyone
   in it — and everyone is told so. A personal agent's isn't.
 - **Portability.** Move an agent to another AgentClaw server in one step — it
