@@ -55,10 +55,10 @@ async function init() {
   card.innerHTML = `
     <div style="color:var(--dim);font-size:14px">You've been invited to</div>
     <div class="agent">${esc(info.agentName)}</div>
-    <div class="notice">
+    ${info.sharedMemory ? `<div class="notice">
       <b>Heads up:</b> this is a shared agent. Things you tell it may be
       remembered and shared with the other people who use it.
-    </div>
+    </div>` : ''}
     <label>Your name (so others know who's here)</label>
     <input id="name" maxlength="64" placeholder="e.g. Sam">
     <div id="gsi" style="display:flex;justify-content:center;margin:12px 0"></div>

@@ -48,12 +48,19 @@ export async function readCoreFiles(
 ): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
   for (const name of CORE_FILES) {
-    // Cap the read: these live in SQLite and are captured automatically, so
-    // an oversized MEMORY.md must not bloat the control plane.
+    // Read one byte past the cap so an oversized file is *detectable*:
+    // silently truncating would store a partial MEMORY.md and later restore
+    // it over the real one — data loss by the system meant to prevent it.
     const res = await provider.execShell(
       runtimeRef,
-      `head -c ${MAX_FILE_BYTES} ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`,
+      `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(slug, name))} 2>/dev/null || true`,
     );
+    if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
+      throw new SnapshotError(
+        `${name} is larger than ${Math.floor(MAX_FILE_BYTES / 1024)} KB — too big to snapshot safely. ` +
+          'Trim it, or back the agent up with an export instead.',
+      );
+    }
     if (res.stdout) files[name] = res.stdout;
   }
   return files;

@@ -60,6 +60,13 @@ describe('captureSnapshot', () => {
     await expect(captureSnapshot(w.deps, 'a1')).rejects.toBeInstanceOf(SnapshotError);
   });
 
+  it('refuses an oversized file instead of silently truncating it', async () => {
+    const w = fileWorld({ ...SEED, 'MEMORY.md': 'x'.repeat(300 * 1024) });
+    await expect(captureSnapshot(w.deps, 'a1')).rejects.toBeInstanceOf(SnapshotError);
+    // nothing half-captured
+    expect(w.store.listSnapshots('a1')).toHaveLength(0);
+  });
+
   it('refuses when the files come back empty (unhealthy runtime)', async () => {
     const w = fileWorld({});
     await expect(captureSnapshot(w.deps, 'a1')).rejects.toBeInstanceOf(SnapshotError);

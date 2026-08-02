@@ -17,7 +17,10 @@ if [ ! -f .env ]; then
 fi
 
 mkdir -p ~/.config/systemd/user
-cp deploy/agentclaw.service ~/.config/systemd/user/agentclaw.service
+# Substitute the real repo location — the unit used to hardcode ~/agentclaw,
+# so any other clone path failed silently at boot.
+sed "s|__AGENTCLAW_DIR__|$(pwd)|g" deploy/agentclaw.service \
+  > ~/.config/systemd/user/agentclaw.service
 cp deploy/agentclaw-backup.service ~/.config/systemd/user/agentclaw-backup.service
 cp deploy/agentclaw-backup.timer ~/.config/systemd/user/agentclaw-backup.timer
 systemctl --user daemon-reload

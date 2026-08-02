@@ -857,7 +857,10 @@ async function openGateway(id, slug) {
     const g = await api(`/v1/agents/${id}/gateway`);
     // Fetched on click, never in the poll: the token grants full control of
     // this agent's gateway. Loopback-published, so localhost is the host.
-    window.open(`http://localhost:${g.port}/chat/${slug}#token=${g.token}`, '_blank', 'noopener');
+    // Same host you're browsing AgentClaw on — 'localhost' broke every
+    // remote/tailnet browser. The port is published on the host's loopback,
+    // so this works from the host itself; remote browsers need a tunnel.
+    window.open(`http://${location.hostname}:${g.port}/chat/${slug}#token=${g.token}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }
 

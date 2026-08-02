@@ -7,10 +7,10 @@
 Description=AgentClaw control plane
 
 [Service]
-WorkingDirectory=%h/agentclaw
+WorkingDirectory=__AGENTCLAW_DIR__
 # Holds AGENTCLAW_SECRET_KEY (and PORT). Never committed — see .gitignore.
-EnvironmentFile=%h/agentclaw/.env
-ExecStart=%h/agentclaw/node_modules/.bin/tsx src/index.ts
+EnvironmentFile=__AGENTCLAW_DIR__/.env
+ExecStart=__AGENTCLAW_DIR__/node_modules/.bin/tsx src/index.ts
 Restart=always
 RestartSec=3
 # tsx exits 143 on SIGTERM; that's a clean shutdown, not a failure.

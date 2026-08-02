@@ -97,6 +97,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       container,
       '--restart',
       'unless-stopped',
+      // One misbehaving agent must not fill the disk or the box. Overridable
+      // for hosts that want to run bigger agents.
+      '--log-opt', 'max-size=10m',
+      '--log-opt', 'max-file=3',
+      '--memory', process.env.AGENTCLAW_AGENT_MEMORY ?? '2g',
+      '--pids-limit', process.env.AGENTCLAW_AGENT_PIDS ?? '512',
       '-v',
       `${volume}:/home/node/.openclaw`,
     ];

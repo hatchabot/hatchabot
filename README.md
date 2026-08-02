@@ -197,6 +197,13 @@ Working and used daily by its author, but young — expect rough edges.
 - **Not audited by a third party.** It has been reviewed for the obvious
   classes (authorization, injection, secret handling) and has tests for them,
   but it holds real credentials — run it on a network you trust.
+- **Agents are powerful, and that is the design.** Each runs Claude Code with
+  permission prompts disabled, a shell, and unrestricted outbound internet. On
+  the subscription path your `~/.claude` credential directory is bind-mounted
+  into every agent container read-write (the CLI refreshes tokens in place).
+  A prompt injection — from a member, or from a page an agent fetches — is
+  therefore a real risk to that credential. Give agents to people you trust,
+  and prefer an API-key profile if that tradeoff bothers you.
 
 ## License
 
