@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { existsSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Store } from '../store/store.js';
@@ -189,4 +190,117 @@ export async function applyWorkspace(
     bytes: preview.bytes,
   });
   return { files: preview.files.length, bytes: preview.bytes };
+}
+
+/**
+ * The bot a hand-built agent already owns.
+ *
+ * Telegram caps one account at ~20 bots, and a workspace being adopted almost
+ * always has a bot already — with the family's real chat history in it. Minting
+ * a fresh one therefore spends a scarce slot to give everybody a stranger to
+ * talk to. Reusing the existing one costs nothing and keeps the conversation.
+ */
+export interface ExistingBot {
+  /** The old instance's agent id, for telling the owner what to stop. */
+  sourceAgentId: string;
+  accountId: string;
+  botToken: string;
+  /** Telegram user ids already cleared to talk to it. Carrying these over is
+   *  what stops the owner having to pair with their own adopted agent. */
+  allowFrom: string[];
+  /** Still switched on in the hand-built instance — meaning that instance will
+   *  poll this bot the moment it is running. */
+  enabledInSource: boolean;
+}
+
+interface OpenClawConfig {
+  agents?: { list?: Array<{ id?: string; workspace?: string; agentDir?: string }> };
+  bindings?: Array<{ agentId?: string; match?: { channel?: string; accountId?: string } }>;
+  channels?: {
+    telegram?: {
+      accounts?: Record<string, { botToken?: string; allowFrom?: string[]; enabled?: boolean }>;
+    };
+  };
+}
+
+/**
+ * Resolve workspace → agent → binding → bot token in the hand-built instance's
+ * config. Returns undefined rather than throwing: no existing bot is a normal
+ * case (the owner just makes one), not an error.
+ */
+export function findExistingBot(
+  workspaceDir: string,
+  configPath = resolve(homedir(), '.openclaw/openclaw.json'),
+): ExistingBot | undefined {
+  let cfg: OpenClawConfig;
+  try {
+    cfg = JSON.parse(readFileSync(configPath, 'utf8')) as OpenClawConfig;
+  } catch {
+    return undefined;
+  }
+  const want = resolve(workspaceDir);
+  const agent = (cfg.agents?.list ?? []).find(
+    (a) =>
+      (a.workspace && resolve(a.workspace) === want) ||
+      (a.agentDir && resolve(a.agentDir) === want),
+  );
+  if (!agent?.id) return undefined;
+
+  const accountId = (cfg.bindings ?? []).find(
+    (b) => b.agentId === agent.id && (b.match?.channel ?? 'telegram') === 'telegram',
+  )?.match?.accountId;
+  if (!accountId) return undefined;
+
+  const account = cfg.channels?.telegram?.accounts?.[accountId];
+  if (!account?.botToken) return undefined;
+  const allowFrom = (account.allowFrom ?? []).filter((id) => /^\d{1,32}$/.test(id));
+  return {
+    sourceAgentId: agent.id,
+    accountId,
+    botToken: account.botToken,
+    allowFrom,
+    enabledInSource: account.enabled !== false,
+  };
+}
+
+/**
+ * Ask Telegram itself whether anyone else is polling this bot.
+ *
+ * Three-state on purpose: "couldn't reach Telegram" is not "nobody is polling",
+ * and neither is "nobody answered in the split second we asked".
+ *
+ * This is the only authoritative answer: getUpdates replies 409 when another
+ * process holds the poll, whatever manages that process. It matters most for
+ * reuse, where the old instance is usually still running — and two pollers on
+ * one token is not a clean failure, it is messages vanishing at random into
+ * whichever copy won the race.
+ *
+ * offset=-1 peeks at the newest update without acknowledging it, so a live
+ * conversation loses nothing.
+ */
+export type PollState = 'busy' | 'quiet' | 'unknown';
+
+/**
+ * NOTE ON WHAT THIS CAN PROVE: 'quiet' is not 'safe'. Telegram answers 409 only
+ * when a getUpdates call is in flight at that instant, so a poller resting
+ * between long-polls is indistinguishable from no poller at all — verified
+ * against a bot the running instance owned, which answered ok:true. Use this to
+ * CONFIRM a conflict, never to clear one; `enabledInSource` is the deterministic
+ * signal.
+ */
+export async function botPollState(
+  botToken: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<PollState> {
+  try {
+    const res = await fetchImpl(
+      `https://api.telegram.org/bot${botToken}/getUpdates?offset=-1&limit=1&timeout=0`,
+    );
+    if (res.status === 409) return 'busy';
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error_code?: number };
+    if (body.error_code === 409) return 'busy';
+    return body.ok ? 'quiet' : 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }

@@ -40,6 +40,34 @@ belongs in a folder the agent *reads*, not in a copy the agent *owns*:
 agentclaw folders "Tech Advisor" ~/condo-documents
 ```
 
+### Reuse the bot it already has
+
+Telegram caps one account at about **20 bots**, which is the real limit on how
+many agents you can run — not CPU or memory. A workspace you are adopting
+almost always already owns a bot, so:
+
+```sh
+agentclaw adopt ~/.openclaw/workspace-conf-advisor "Conference Advisor" --reuse-bot
+```
+
+takes that bot over. It costs no new slot, and everyone who already messages
+`@CnfAdvBot` keeps the same conversation instead of being handed a stranger.
+The people on its allowlist come across as members too, so nobody — including
+you — has to pair with an agent they were already talking to.
+
+Because a Telegram bot may only be polled by one process, adopt refuses while
+the old instance still has that bot switched on, and tells you how to hand it
+over:
+
+```sh
+openclaw config set channels.telegram.accounts.CnfAdvBot.enabled false
+systemctl --user restart openclaw-gateway
+```
+
+It checks the old instance's own config for this, not Telegram: a poller
+resting between long-polls is indistinguishable from no poller at all, so
+asking Telegram can confirm a conflict but can never rule one out.
+
 **The original is only ever read.** It keeps working until you retire it, so
 you can compare the two. One rule: do not point both at the same Telegram
 bot, or they will fight over every message — AgentClaw refuses to wire a bot

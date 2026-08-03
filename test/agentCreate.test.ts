@@ -126,3 +126,30 @@ describe('a refused bot token must not stay pending', () => {
   });
 
 });
+
+describe('adopting carries the people already allowed to talk', () => {
+  it('admits seeded Telegram ids without pairing', async () => {
+    const { store, f } = await world();
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as,
+      payload: {
+        name: 'Tech Advisor', aiProfileId: 'p1', hostId: 'h1',
+        seedMembers: ['1000000001'],
+      },
+    });
+    expect(res.statusCode).toBe(202);
+    const id = res.json().id;
+    // This list becomes allowFrom in the rendered config. Without it the owner
+    // has to approve themselves to talk to their own adopted agent.
+    expect(store.listAllowedChannelUserIds(id)).toEqual(['1000000001']);
+  });
+
+  it('rejects anything that is not a Telegram user id', async () => {
+    const { f } = await world();
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as,
+      payload: { name: 'X', aiProfileId: 'p1', hostId: 'h1', seedMembers: ['../../etc'] },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});

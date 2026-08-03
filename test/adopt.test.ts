@@ -3,7 +3,13 @@ import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { AdoptError, inspectWorkspace, packWorkspace } from '../src/orchestrator/adopt.js';
+import {
+  AdoptError,
+  findExistingBot,
+  inspectWorkspace,
+  botPollState,
+  packWorkspace,
+} from '../src/orchestrator/adopt.js';
 
 let ws: string;
 beforeAll(() => {
@@ -96,5 +102,76 @@ describe('packWorkspace', () => {
     expect(listing).toContain('INVESTING_RULES.md');
     expect(listing).not.toContain('openclaw-agent.sqlite');
     expect(listing).not.toContain('auth-profiles.json');
+  });
+});
+
+describe('reusing the bot a workspace already owns', () => {
+  const cfgFor = (dir: string) => {
+    const p = join(mkdtempSync(join(tmpdir(), 'acl-cfg-')), 'openclaw.json');
+    writeFileSync(p, JSON.stringify({
+      agents: { list: [
+        { id: 'main' },
+        { id: 'tech-advisor', workspace: dir, agentDir: dir + '/agent' },
+      ] },
+      bindings: [
+        { type: 'route', agentId: 'other', match: { channel: 'telegram', accountId: 'OtherBot' } },
+        { type: 'route', agentId: 'tech-advisor', match: { channel: 'telegram', accountId: 'TechAdvBot' } },
+      ],
+      channels: { telegram: { accounts: {
+        OtherBot: { botToken: 'nope' },
+        TechAdvBot: { botToken: '123:secret', allowFrom: ['1000000001', 'bogus'] },
+      } } },
+    }));
+    return p;
+  };
+
+  it('resolves workspace -> agent -> binding -> token', () => {
+    const found = findExistingBot(ws, cfgFor(ws));
+    expect(found?.accountId).toBe('TechAdvBot');
+    expect(found?.botToken).toBe('123:secret');
+    expect(found?.sourceAgentId).toBe('tech-advisor');
+  });
+
+  it('carries only well-formed Telegram ids, so the owner skips pairing', () => {
+    // The whole point: adopting used to make you approve yourself.
+    expect(findExistingBot(ws, cfgFor(ws))?.allowFrom).toEqual(['1000000001']);
+  });
+
+  it('returns nothing for a workspace with no bot, rather than throwing', () => {
+    const other = mkdtempSync(join(tmpdir(), 'acl-nobot-'));
+    expect(findExistingBot(other, cfgFor(ws))).toBeUndefined();
+    expect(findExistingBot(ws, '/no/such/config.json')).toBeUndefined();
+  });
+
+  it('confirms a conflict but never reports one clear', async () => {
+    const conflict = async () => new Response(JSON.stringify({ ok: false, error_code: 409 }), { status: 409 });
+    expect(await botPollState('t', conflict as unknown as typeof fetch)).toBe('busy');
+    // 'quiet', deliberately not 'free': a poller resting between long-polls
+    // answers ok:true exactly like an unused bot, so this can never clear one.
+    const quiet = async () => new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+    expect(await botPollState('t', quiet as unknown as typeof fetch)).toBe('quiet');
+    // Unreachable Telegram must never read as "free" — that would green-light
+    // the one thing this check exists to prevent.
+    const down = async () => { throw new Error('offline'); };
+    expect(await botPollState('t', down as unknown as typeof fetch)).toBe('unknown');
+  });
+
+  it('reports whether the source instance would still poll the bot', () => {
+    // The deterministic signal the refusal actually turns on.
+    const dir = mkdtempSync(join(tmpdir(), 'acl-en-'));
+    writeFileSync(join(dir, 'SOUL.md'), '# s');
+    const mk = (enabled?: boolean) => {
+      const p = join(mkdtempSync(join(tmpdir(), 'acl-c-')), 'openclaw.json');
+      writeFileSync(p, JSON.stringify({
+        agents: { list: [{ id: 'a', workspace: dir }] },
+        bindings: [{ agentId: 'a', match: { channel: 'telegram', accountId: 'B' } }],
+        channels: { telegram: { accounts: { B: { botToken: 't', ...(enabled === undefined ? {} : { enabled }) } } } },
+      }));
+      return p;
+    };
+    expect(findExistingBot(dir, mk(true))?.enabledInSource).toBe(true);
+    expect(findExistingBot(dir, mk(false))?.enabledInSource).toBe(false);
+    // Absent means on, matching how OpenClaw reads it.
+    expect(findExistingBot(dir, mk())?.enabledInSource).toBe(true);
   });
 });

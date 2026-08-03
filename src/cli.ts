@@ -42,8 +42,10 @@ Commands:
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
          [--private] [--bot-token <tok>]
                                Create an agent and wait for it to boot.
-                               Prompts for a BotFather token if the bot pool
-                               is empty (or use --bot-token to recycle one).
+                               --reuse-bot takes over the bot that workspace
+                               already owns: no new bot slot (Telegram caps you
+                               at ~20) and the same chat everyone already uses.
+                               Otherwise prompts for a BotFather token.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
   export <agent> [-o <file>]   Download an agent as a portable .agentclaw file
@@ -56,7 +58,7 @@ Commands:
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
                                (applies on the agent's next rebuild)
-  adopt <workspace-dir> <name> [--bot-token <tok>] [--profile <id>]
+  adopt <workspace-dir> <name> [--reuse-bot] [--bot-token <tok>] [--profile <id>]
                                Turn an existing OpenClaw agent's workspace
                                into a managed AgentClaw agent (copies the
                                WHOLE folder; the original is only read)
@@ -147,7 +149,7 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -316,7 +318,13 @@ async function main() {
     process.stderr.write(promptText);
     const { createInterface } = await import('node:readline');
     const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
-    return new Promise((resolve) => rl.once('line', (l) => { rl.close(); resolve(l.trim()); }));
+    return new Promise((res, rej) => {
+      let got = false;
+      rl.once('line', (l) => { got = true; rl.close(); res(l.trim()); });
+      // Non-interactive stdin closes without ever emitting a line. Without
+      // this the command hangs forever holding a half-made agent.
+      rl.once('close', () => { if (!got) rej(new Error('no input available — pass the value as a flag')); });
+    });
   };
 
   const pollAgent = async (id: string): Promise<any> => {
@@ -418,14 +426,45 @@ async function main() {
         console.log(`  skipping ${preview.skipped.join(', ')} — built for this machine, and the agent can rebuild them`);
       }
 
+      const bot = preview.existingBot;
+      if (bot) {
+        console.log(`  already has a bot: @${bot.accountId} (used by "${bot.sourceAgentId}" in your hand-built instance)`);
+        if (!flags.has('reuse-bot')) {
+          console.log(`  --reuse-bot takes it over: costs no new bot slot, and whoever already`);
+          console.log(`  messages @${bot.accountId} keeps the same conversation.`);
+        }
+      }
+      if (flags.has('reuse-bot')) {
+        if (!bot) fail(`no existing bot is bound to ${preview.path} — drop --reuse-bot and make one with @BotFather`);
+        // Telegram hands each message to exactly ONE poller. Taking over a bot
+        // the old instance still polls does not fail loudly — messages just
+        // start disappearing into whichever copy won the race.
+        if (bot.enabledInSource || bot.polling === 'busy') {
+          fail(`@${bot.accountId} is still live for "${bot.sourceAgentId}" in your hand-built instance.\n` +
+            `Hand the bot over there first — two pollers on one token lose messages silently:\n` +
+            `  openclaw config set channels.telegram.accounts.${bot.accountId}.enabled false\n` +
+            `  systemctl --user restart openclaw-gateway\n` +
+            `Then run this again.`);
+        }
+      }
+
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
       const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
       const profile = flags.get('profile') ?? profiles[0]?.id ?? fail('no AI source configured');
       const host = (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
 
       console.log(`creating "${name}"…`);
+      // Carry the people already cleared to talk to it, so adopting doesn't
+      // make the owner pair with their own agent. Independent of which bot it
+      // ends up on: the allowlist names Telegram *users*, and they are the same
+      // people whether or not the bot is reused.
+      const seedMembers: string[] = bot?.allowFrom ?? [];
+      if (seedMembers.length) {
+        console.log(`  keeping ${seedMembers.length} approved chat member(s) — no re-pairing`);
+      }
       const created: any = await (await jsonPost('/v1/agents', {
         name, aiProfileId: profile, hostId: host, sharedMemory: false,
+        ...(seedMembers.length ? { seedMembers } : {}),
       })).json();
 
       // Everything past this point owns a half-made agent. If any step fails we
@@ -435,7 +474,11 @@ async function main() {
       let res: any;
       try {
         let a = await pollAgent(created.id);
-        if (a.pendingAction?.type === 'bot_token') {
+        if (a.pendingAction?.type === 'bot_token' && flags.has('reuse-bot')) {
+          await jsonPost(`/v1/agents/${a.id}/channel-token`, { fromWorkspace: dir });
+          console.log(`  took over @${bot!.accountId} — same bot, same conversations`);
+          a = await pollAgent(a.id);
+        } else if (a.pendingAction?.type === 'bot_token') {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
           let tok = flags.get('bot-token');
           // A wrong or already-used token is a typo-grade mistake, and we are

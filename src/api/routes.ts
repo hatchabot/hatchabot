@@ -22,7 +22,13 @@ import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestra
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
-import { AdoptError, applyWorkspace, inspectWorkspace } from '../orchestrator/adopt.js';
+import {
+  AdoptError,
+  applyWorkspace,
+  findExistingBot,
+  inspectWorkspace,
+  botPollState,
+} from '../orchestrator/adopt.js';
 import type { Agent } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
 import type { IdentityVerifier } from './identity.js';
@@ -112,6 +118,9 @@ const CreateAgent = z.object({
   aiProfileId: z.string().min(1),
   hostId: z.string().min(1),
   sharedMemory: z.boolean().optional(),
+  /** Telegram user ids to admit without pairing — carried from an adopted
+   *  agent, so the people already talking to it are not made to knock. */
+  seedMembers: z.array(z.string().regex(/^\d{1,32}$/)).max(32).optional(),
 });
 
 
@@ -571,7 +580,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       });
     }
 
-    const agent = createAgentRecord(store, { ownerId, ...parsed.data });
+    const { seedMembers, ...create } = parsed.data;
+    const agent = createAgentRecord(store, { ownerId, ...create });
+    // Must land before provisioning renders the config: allowFrom is seeded
+    // onto the fresh volume there, and a member added afterwards would have to
+    // pair like a stranger.
+    for (const channelUserId of seedMembers ?? []) {
+      store.insertMembership({
+        id: randomUUID(),
+        agentId: agent.id,
+        userId: `telegram:${channelUserId}`,
+        role: 'user',
+        channelUserId,
+        status: 'active',
+        joinedAt: new Date().toISOString(),
+      });
+    }
     kickProvision(agent.id);
     return reply.code(202).send(agent);
   });
@@ -894,12 +918,43 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   // The parked-provisioning resume: user pasted their BotFather token.
-  app.post<{ Params: { id: string }; Body: { token?: string } }>(
+  app.post<{ Params: { id: string }; Body: { token?: string; fromWorkspace?: string } }>(
     '/v1/agents/:id/channel-token',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      const token = (req.body as { token?: string } | null)?.token?.trim();
+      const body = (req.body ?? {}) as { token?: string; fromWorkspace?: string };
+      let token = body.token?.trim();
+
+      // Reuse: the bot a hand-built workspace already owns. Resolved here
+      // rather than sent by the client, so the token stays on the server that
+      // already holds it — a reuse flow that round-trips a live credential
+      // through a terminal is a worse trade than the bot slot it saves.
+      if (!token && body.fromWorkspace) {
+        const existing = findExistingBot(body.fromWorkspace);
+        if (!existing) {
+          return reply.code(400).send({
+            error: `No existing Telegram bot is bound to ${body.fromWorkspace}.`,
+          });
+        }
+        // Deterministic check first: if that instance still has the account
+        // switched on it will poll this bot, and two pollers on one token lose
+        // messages silently rather than failing.
+        if (existing.enabledInSource) {
+          return reply.code(409).send({
+            error:
+              `@${existing.accountId} is still enabled for "${existing.sourceAgentId}" in your ` +
+              `hand-built instance. Turn it off there first, or both copies will fight over ` +
+              `every message.`,
+          });
+        }
+        if ((await botPollState(existing.botToken)) === 'busy') {
+          return reply.code(409).send({
+            error: `Something is still polling @${existing.accountId}. Stop it, then try again.`,
+          });
+        }
+        token = existing.botToken;
+      }
       if (!token) return reply.code(400).send({ error: 'token required' });
       try {
         const { username } = await deps.channel.submitToken(agent.id, token);
@@ -957,7 +1012,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const path = (req.body as { path?: string } | null)?.path;
     if (!path) return reply.code(400).send({ error: 'path required' });
     try {
-      return inspectWorkspace(path);
+      const preview = inspectWorkspace(path);
+      // Surface the bot this workspace already owns. The token never leaves
+      // the server — the caller only needs to know one exists, and whether
+      // taking it over is safe right now.
+      const bot = findExistingBot(path);
+      return {
+        ...preview,
+        existingBot: bot
+          ? {
+              accountId: bot.accountId,
+              sourceAgentId: bot.sourceAgentId,
+              allowFrom: bot.allowFrom,
+              enabledInSource: bot.enabledInSource,
+              polling: await botPollState(bot.botToken),
+            }
+          : undefined,
+      };
     } catch (err) {
       if (err instanceof AdoptError) return reply.code(400).send({ error: err.userMessage });
       throw err;
