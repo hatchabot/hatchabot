@@ -40,6 +40,10 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
     return this.manual.submitToken(agentId, botToken);
   }
 
+  discardPending(agentId: string): void {
+    this.manual.discardPending(agentId);
+  }
+
   async release(accountId: string): Promise<void> {
     if (this.pool.owns(accountId)) {
       await this.pool.release(accountId);

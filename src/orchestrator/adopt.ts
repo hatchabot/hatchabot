@@ -37,13 +37,34 @@ const EXCLUDE = [
   'auth-profiles.json',
   'auth-state.json',
   '.git',
+  // Build artifacts: compiled for THIS machine, with absolute host paths baked
+  // in, and regenerable from the manifests we do copy. Carrying them across is
+  // worse than skipping them — you get binaries that don't run in the
+  // container. A real workspace here held a 1.2 GB venv/ next to 800 KB of
+  // actual notes.
+  'node_modules',
+  'venv',
+  '.venv',
+  '__pycache__',
+  '.mypy_cache',
+  '.pytest_cache',
+  '.ruff_cache',
+  '.DS_Store',
 ];
+
+/** Above this, adopting is almost certainly a mistake — and the tar would
+ *  outgrow the 1 GB buffer and fail with something unreadable. */
+const MAX_BYTES = 750 * 1024 * 1024;
+const MAX_FILES = 20_000;
 
 export interface WorkspacePreview {
   path: string;
   files: string[];
   markdownFiles: string[];
   bytes: number;
+  /** Artifact directories found and deliberately not copied, so the count
+   *  never looks like something silently vanished. */
+  skipped: string[];
 }
 
 /**
@@ -59,10 +80,51 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
   const problem = sharePathProblem(path);
   if (problem) throw new AdoptError(problem);
 
-  const entries = readdirSync(path, { withFileTypes: true });
-  const files = entries
-    .filter((e) => e.isFile() && !EXCLUDE.includes(e.name))
-    .map((e) => e.name);
+  // Walk the whole tree, because packWorkspace copies the whole tree. Counting
+  // only the top level made the preview lie: a real workspace keeps its daily
+  // notes in memory/ and its work in projects/, so "8 files" announced a copy
+  // that actually moved 17.
+  const files: string[] = [];
+  const skipped: string[] = [];
+  let bytes = 0;
+  let truncated = false;
+  const walk = (dir: string, prefix: string, depth: number): void => {
+    if (depth > 12) return;
+    if (files.length >= MAX_FILES) {
+      truncated = true;
+      return;
+    }
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (EXCLUDE.includes(e.name)) {
+        if (e.isDirectory()) skipped.push(prefix ? `${prefix}/${e.name}` : e.name);
+        continue;
+      }
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      // Dirent reflects lstat, so symlinks are neither isFile nor isDirectory
+      // and are skipped — which also means no symlink loops to worry about.
+      if (e.isDirectory()) {
+        walk(resolve(dir, e.name), rel, depth + 1);
+      } else if (e.isFile()) {
+        files.push(rel);
+        try {
+          bytes += statSync(resolve(dir, e.name)).size;
+        } catch {
+          /* raced with a write; the estimate is advisory */
+        }
+      }
+    }
+  };
+  walk(path, '', 0);
+  if (truncated || bytes > MAX_BYTES) {
+    throw new AdoptError(
+      `${path} holds ${truncated ? `over ${MAX_FILES} files` : `${(bytes / 1e6).toFixed(0)} MB`} ` +
+        `after skipping build artifacts. That is too big to copy into an agent — ` +
+        `move the bulk data somewhere else and share that folder with the agent ` +
+        `instead (agentclaw folders), so it reads the data in place rather than ` +
+        `owning a copy of it.`,
+    );
+  }
+
   const markdownFiles = files.filter((f) => f.toLowerCase().endsWith('.md'));
   if (markdownFiles.length === 0) {
     throw new AdoptError(
@@ -70,15 +132,7 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
         `Expected SOUL.md, AGENTS.md, MEMORY.md or similar.`,
     );
   }
-  let bytes = 0;
-  for (const f of files) {
-    try {
-      bytes += statSync(resolve(path, f)).size;
-    } catch {
-      /* raced with a write; the estimate is advisory */
-    }
-  }
-  return { path, files, markdownFiles, bytes };
+  return { path, files, markdownFiles, bytes, skipped };
 }
 
 /** Tar the workspace, excluding session databases and credentials. */

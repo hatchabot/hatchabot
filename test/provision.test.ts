@@ -107,6 +107,29 @@ describe('runProvisionSteps', () => {
   });
 });
 
+describe('one bot token, one runtime', () => {
+  it('refuses to wire an agent to an identity another agent already holds', async () => {
+    const w = await world();
+    const first = await provisionAgent(w.deps, INPUT);
+    expect(first.agent.state).toBe('RUNNING');
+    expect(w.store.getChannelForAgent(first.agent.id)?.accountId).toBe('stubbot');
+
+    // The stub hands out @stubbot again — which is what a rejected-but-still-
+    // pending token does on a Retry. Two containers polling one token flip-flop
+    // every message, so this has to fail rather than "work".
+    const second = await provisionAgent(w.deps, { ...INPUT, name: 'Second' });
+    expect(second.agent.state).toBe('FAILED');
+    expect(second.agent.stateReason).toContain('Kitchen');
+    expect(w.store.getChannelForAgent(second.agent.id)).toBeUndefined();
+
+    // And the first agent is untouched: releasing @stubbot here would delete
+    // the token that IS the first agent's identity.
+    expect(w.channel.released).toEqual([]);
+    expect(w.store.getAgent(first.agent.id)?.state).toBe('RUNNING');
+    expect(w.store.getChannelForAgent(first.agent.id)?.accountId).toBe('stubbot');
+  });
+});
+
 describe('rollback must not destroy existing memory', () => {
   it('does NOT purge the volume when a retry fails on an existing runtime', async () => {
     const w = await world();

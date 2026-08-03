@@ -21,13 +21,35 @@ SOUL/AGENTS/MEMORY, but IDENTITY.md, USER.md, TOOLS.md and whatever domain
 files the agent has accumulated, because that is usually where its real
 knowledge lives.
 
-Excluded on purpose: session databases (`openclaw-agent.sqlite*`) and
-credential files (`auth-profiles.json`, `auth-state.json`) — the new agent
-gets its own.
+Excluded on purpose:
+
+- session databases (`openclaw-agent.sqlite*`) and credential files
+  (`auth-profiles.json`, `auth-state.json`) — the new agent gets its own;
+- build artifacts (`node_modules`, `venv`, `__pycache__`, and friends) —
+  they are compiled for the host they were built on, with absolute paths
+  baked in, so copying them into a container gives you broken binaries
+  rather than a working agent. Adopt names what it skipped.
+
+The size guard exists because of that last point: one real workspace here
+was 823 MB across 20,000 files, of which 1.2 GB was a Python `venv` sitting
+next to 800 KB of actual notes. If what remains after skipping artifacts is
+still very large, adopt refuses and points you at folder sharing — bulk data
+belongs in a folder the agent *reads*, not in a copy the agent *owns*:
+
+```sh
+agentclaw folders "Tech Advisor" ~/condo-documents
+```
 
 **The original is only ever read.** It keeps working until you retire it, so
 you can compare the two. One rule: do not point both at the same Telegram
-bot, or they will fight over every message.
+bot, or they will fight over every message — AgentClaw refuses to wire a bot
+that already belongs to another agent, at the API and again at provisioning
+time, because two pollers on one token is unrecoverable confusion rather
+than a clean error.
+
+If you recycle a bot from a retired agent, its Telegram display name stays
+whatever BotFather knows. Send `/setname` to @BotFather to rename it, or the
+new agent shows up under the old one's name.
 
 ## What happens to shared folders when an agent moves
 

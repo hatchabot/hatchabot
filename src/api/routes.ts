@@ -13,6 +13,7 @@ import {
   sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
+  slugify,
 } from '../orchestrator/provision.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
@@ -554,6 +555,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       });
     }
 
+    // The slug is derived from the name and is UNIQUE per owner — it becomes
+    // a container name and a workspace path. Catch the collision here: letting
+    // it reach the INSERT surfaces a raw SQLite error as "Internal Server
+    // Error", which tells the owner nothing about what to do next.
+    const slug = slugify(parsed.data.name);
+    const clash = store
+      .listAllActiveAgents()
+      .find((a) => a.ownerId === ownerId && a.slug === slug);
+    if (clash) {
+      return reply.code(409).send({
+        error:
+          `You already have an agent called "${clash.name}" (${clash.state.toLowerCase()}). ` +
+          `Pick a different name, or delete that one first.`,
+      });
+    }
+
     const agent = createAgentRecord(store, { ownerId, ...parsed.data });
     kickProvision(agent.id);
     return reply.code(202).send(agent);
@@ -888,6 +905,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         const { username } = await deps.channel.submitToken(agent.id, token);
         const inUseBy = store.findAgentUsingAccount(username);
         if (inUseBy && inUseBy.id !== agent.id) {
+          // submitToken() has already stashed it as this agent's pending
+          // identity. Forget it, or a later Retry provisions the agent onto
+          // the other agent's bot and both poll the same token.
+          deps.channel.discardPending?.(agent.id);
           return reply.code(400).send({
             error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.`,
           });

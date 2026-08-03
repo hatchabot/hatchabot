@@ -128,6 +128,21 @@ async function runProvisionStepsInner(
         agentName: agent.name,
         slug: agent.slug,
       });
+      // A Telegram bot token may only ever be polled by ONE runtime: two
+      // copies flip-flop every message between them. The API checks this when
+      // a token is pasted, but a rejected token can still be sitting in the
+      // provisioner's pending map, so a later Retry would arrive here holding
+      // an identity that belongs to somebody else. This is the last gate
+      // before it becomes a real channel row, so check it here too.
+      const clash = store.findAgentUsingAccount(result.accountId);
+      if (clash && clash.id !== agentId) {
+        // Deliberately NOT released: release() deletes the stored token for
+        // this account, and that token is the OTHER agent's credential.
+        throw new ChannelConflictError(
+          `@${result.accountId} already belongs to "${clash.name}". Each agent needs its ` +
+            `own bot — create another with @BotFather and paste that token instead.`,
+        );
+      }
       rollback.push(async () => {
         await channel.release(result.accountId);
         store.deleteChannelForAgent(agentId);
@@ -440,6 +455,14 @@ function userMessageFor(err: unknown): string {
     return String((err as { userMessage: unknown }).userMessage);
   }
   return 'Something went wrong setting up your agent. Try again?';
+}
+
+/** A messaging identity that already belongs to another agent. */
+export class ChannelConflictError extends Error {
+  constructor(readonly userMessage: string) {
+    super(userMessage);
+    this.name = 'ChannelConflictError';
+  }
 }
 
 export function slugify(name: string): string {

@@ -13,7 +13,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 // Flags > environment > ~/.config/agentclaw/env (KEY=VALUE lines, chmod 600 —
 // keeps the password out of shell history and .bashrc).
@@ -60,6 +60,10 @@ Commands:
                                Turn an existing OpenClaw agent's workspace
                                into a managed AgentClaw agent (copies the
                                WHOLE folder; the original is only read)
+  folders <agent> [<path>...|--none]
+                               Show, or set, the host folders an agent may read
+                               (read-only, appears as /data/<name>; pass every
+                               folder you want kept — omitted ones are dropped)
   servers                      Other AgentClaw servers you can move agents to
   servers add <name> <url> <token>
                                Register one (token from that server's ⚙ AI)
@@ -143,7 +147,7 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -407,7 +411,12 @@ async function main() {
 
       const preview: any = await (await jsonPost('/v1/workspaces/inspect', { path: dir })).json();
       console.log(`${preview.path}`);
-      console.log(`  ${preview.files.length} files (${(preview.bytes / 1e6).toFixed(1)} MB), incl. ${preview.markdownFiles.join(', ')}`);
+      const md: string[] = preview.markdownFiles;
+      const shown = md.slice(0, 8).join(', ') + (md.length > 8 ? `, +${md.length - 8} more` : '');
+      console.log(`  ${preview.files.length} files (${(preview.bytes / 1e6).toFixed(1)} MB), ${md.length} markdown: ${shown}`);
+      if (preview.skipped?.length) {
+        console.log(`  skipping ${preview.skipped.join(', ')} — built for this machine, and the agent can rebuild them`);
+      }
 
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
       const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
@@ -419,22 +428,65 @@ async function main() {
         name, aiProfileId: profile, hostId: host, sharedMemory: false,
       })).json();
 
-      let a = await pollAgent(created.id);
-      if (a.pendingAction?.type === 'bot_token') {
-        let tok = flags.get('bot-token');
-        if (!tok) {
+      // Everything past this point owns a half-made agent. If any step fails we
+      // delete it before exiting: leaving it behind would hold the name, so the
+      // obvious next move — run the same command again — would fail on a
+      // collision instead of retrying.
+      let res: any;
+      try {
+        let a = await pollAgent(created.id);
+        if (a.pendingAction?.type === 'bot_token') {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
-          tok = await askLine('Paste bot token: ');
+          let tok = flags.get('bot-token');
+          // A wrong or already-used token is a typo-grade mistake, and we are
+          // sitting at a prompt — ask again rather than discard the agent.
+          for (let attempt = 0; ; attempt++) {
+            if (!tok) tok = await askLine('Paste bot token: ');
+            try {
+              await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok });
+              break;
+            } catch (err) {
+              if (attempt >= 2 || flags.get('bot-token')) throw err;
+              console.error(`  ${err instanceof Error ? err.message : String(err)}`);
+              tok = undefined;
+            }
+          }
+          a = await pollAgent(a.id);
         }
-        await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok });
-        a = await pollAgent(a.id);
-      }
-      if (a.state === 'FAILED') fail(`could not start: ${a.stateReason ?? 'unknown'}`);
+        if (a.state === 'FAILED') throw new Error(`could not start: ${a.stateReason ?? 'unknown'}`);
 
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/adopt-workspace`, { path: dir })).json();
+        res = await (await jsonPost(`/v1/agents/${a.id}/adopt-workspace`, { path: dir })).json();
+      } catch (err) {
+        await api(ctx, `/v1/agents/${created.id}`, { method: 'DELETE' }).catch(() => {});
+        fail(`${err instanceof Error ? err.message : String(err)}\n` +
+          `Nothing was adopted and "${name}" was cleaned up — fix the cause and run it again.`);
+      }
       console.log(`adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into "${name}".`);
       console.log(`The original at ${preview.path} is untouched — retire it when you're happy,`);
       console.log(`and do not point both at the same Telegram bot.`);
+      return;
+    }
+    case 'folders': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw folders <agent> [<path>...]'));
+      if (flags.has('none')) {
+        await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: [] }, 'PATCH');
+        console.log(`"${a.name}" no longer reads any host folder (on its next rebuild).`);
+        return;
+      }
+      if (rest.length < 2) {
+        const paths: string[] = a.sharedPaths ?? [];
+        if (!paths.length) return console.log(`"${a.name}" reads no host folders.`);
+        console.log(`"${a.name}" reads (read-only, as /data/<name>):`);
+        for (const p of paths) console.log(`  ${p}`);
+        return;
+      }
+      // Whole-list semantics, matching the API: pass every folder you want,
+      // or none to stop sharing. Anything omitted is dropped.
+      const paths = rest.slice(1).map((p) => resolve(p.replace(/^~(?=\/|$)/, homedir())));
+      await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: paths }, 'PATCH');
+      console.log(`"${a.name}" now reads:`);
+      for (const p of paths) console.log(`  ${p}  →  /data/${p.split('/').pop()}`);
+      console.log('Takes effect on the next rebuild: agentclaw rebuild ' + JSON.stringify(a.name));
       return;
     }
     case 'servers': {

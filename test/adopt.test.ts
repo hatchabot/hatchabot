@@ -15,6 +15,18 @@ beforeAll(() => {
   writeFileSync(join(ws, 'openclaw-agent.sqlite'), 'x'.repeat(5000));
   writeFileSync(join(ws, 'auth-profiles.json'), '{"secret":"do-not-copy"}');
   mkdirSync(join(ws, '.git'), { recursive: true });
+  writeFileSync(join(ws, '.git', 'HEAD'), 'ref: refs/heads/main');
+  mkdirSync(join(ws, 'memory'), { recursive: true });
+  writeFileSync(join(ws, 'memory', '2026-06-14.md'), '# day one\n');
+  mkdirSync(join(ws, 'projects'), { recursive: true });
+  writeFileSync(join(ws, 'projects', 'spec.md'), '# spec\n');
+  mkdirSync(join(ws, 'nested'), { recursive: true });
+  writeFileSync(join(ws, 'nested', 'auth-profiles.json'), '{"secret":"nope"}');
+  // The real thing: a 1.2 GB venv and a node_modules sat next to the notes.
+  mkdirSync(join(ws, 'node_modules', 'pkg'), { recursive: true });
+  writeFileSync(join(ws, 'node_modules', 'pkg', 'index.js'), 'module.exports=1');
+  mkdirSync(join(ws, 'venv', 'bin'), { recursive: true });
+  writeFileSync(join(ws, 'venv', 'bin', 'python'), 'binary');
 });
 
 describe('inspectWorkspace', () => {
@@ -22,8 +34,39 @@ describe('inspectWorkspace', () => {
     const p = inspectWorkspace(ws);
     expect(p.markdownFiles).toContain('INVESTING_RULES.md');
     expect(p.markdownFiles).toContain('IDENTITY.md');
-    expect(p.markdownFiles.length).toBe(7);
     expect(p.bytes).toBeGreaterThan(0);
+  });
+
+  it('counts subdirectories, because that is what gets copied', () => {
+    // A real workspace keeps daily notes in memory/ and work in projects/.
+    // Counting only the top level understated tech-advisor as 8 files when
+    // the copy actually moved 17.
+    const p = inspectWorkspace(ws);
+    expect(p.files).toContain('memory/2026-06-14.md');
+    expect(p.files).toContain('projects/spec.md');
+    expect(p.markdownFiles.length).toBe(9);
+  });
+
+  it('skips build artifacts and says which, rather than silently dropping them', () => {
+    const p = inspectWorkspace(ws);
+    expect(p.files.some((f) => f.includes('node_modules'))).toBe(false);
+    expect(p.files.some((f) => f.includes('venv/'))).toBe(false);
+    expect(p.skipped).toContain('node_modules');
+    expect(p.skipped).toContain('venv');
+  });
+
+  it('refuses a workspace whose real content is too big to own a copy of', () => {
+    const big = mkdtempSync(join(tmpdir(), 'acl-big-'));
+    writeFileSync(join(big, 'SOUL.md'), '# soul');
+    mkdirSync(join(big, 'data'), { recursive: true });
+    for (let i = 0; i < 40; i++) writeFileSync(join(big, 'data', `f${i}.bin`), Buffer.alloc(20 * 1024 * 1024));
+    expect(() => inspectWorkspace(big)).toThrow(/too big|share it as a folder/);
+  });
+
+  it('excludes credentials at any depth, not just the top level', () => {
+    const p = inspectWorkspace(ws);
+    expect(p.files.some((f) => f.includes('auth-profiles.json'))).toBe(false);
+    expect(p.files.some((f) => f.startsWith('.git/'))).toBe(false);
   });
 
   it('excludes session databases and credentials', () => {

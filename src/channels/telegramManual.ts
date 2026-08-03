@@ -41,6 +41,16 @@ export class TelegramManualProvisioner implements ChannelProvisioner {
     return { username };
   }
 
+  /**
+   * Drop a token we accepted but then refused (e.g. it belongs to another
+   * agent). Without this the token stays pending for this agent, and the next
+   * thing to resume provisioning — a Retry click — would wire the agent to
+   * somebody else's bot.
+   */
+  discardPending(agentId: string): void {
+    this.#pending.delete(agentId);
+  }
+
   async provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel> {
     const pending = this.#pending.get(req.agentId);
     if (!pending) {

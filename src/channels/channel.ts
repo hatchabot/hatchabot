@@ -50,6 +50,10 @@ export interface ChannelProvisioner {
   /** Release the identity. Called on rollback and on agent deletion. */
   release(accountId: string): Promise<void>;
 
+  /** Forget a submitted-but-refused identity for this agent, if the
+   *  implementation holds one pending. */
+  discardPending?(agentId: string): void;
+
   /**
    * Push the member allowlist to the platform where the platform itself can
    * enforce it. For Telegram this is a no-op — enforcement lives in the agent's
