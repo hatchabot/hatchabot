@@ -6,6 +6,39 @@ hints about the AI it ran on. Import re-provisions it against the *target*
 machine's own AI source and host — so an agent can move from a subscription
 laptop to an API-key server and keep its mind.
 
+## Adopting an agent you built by hand
+
+If you already run OpenClaw agents outside AgentClaw, you can bring one in
+without retyping anything:
+
+```sh
+agentclaw adopt ~/.openclaw/workspace-tech-advisor "Tech Advisor"
+```
+
+It prints what it found, creates a managed agent (asking for a BotFather
+token if the pool is empty), and copies the **entire** workspace — not just
+SOUL/AGENTS/MEMORY, but IDENTITY.md, USER.md, TOOLS.md and whatever domain
+files the agent has accumulated, because that is usually where its real
+knowledge lives.
+
+Excluded on purpose: session databases (`openclaw-agent.sqlite*`) and
+credential files (`auth-profiles.json`, `auth-state.json`) — the new agent
+gets its own.
+
+**The original is only ever read.** It keeps working until you retire it, so
+you can compare the two. One rule: do not point both at the same Telegram
+bot, or they will fight over every message.
+
+## What happens to shared folders when an agent moves
+
+Folder shares are *host paths*, and a path on one machine rarely exists on
+another. They are therefore carried in the archive as a **declaration**, never
+auto-applied: preflight refuses the move if the destination lacks those
+folders, telling you which. Create them there (or re-share different ones
+after the move) and it proceeds. The agent never silently arrives blind to
+the data it was built around, and never silently reads a same-named folder
+that happens to hold something else.
+
 ## One-step move between servers
 
 If both machines run AgentClaw, register the destination once and move agents

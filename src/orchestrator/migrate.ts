@@ -1,6 +1,7 @@
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 import { exportAgent, TransferError } from './transfer.js';
+import { existsSync } from 'node:fs';
 import type { ProvisionDeps } from './provision.js';
 
 /**
@@ -59,7 +60,7 @@ export interface PreflightAnswer {
 export function preflight(
   store: Store,
   ownerId: string,
-  req: { slug: string; accountId: string; vendor?: string },
+  req: { slug: string; accountId: string; vendor?: string; sharedPaths?: string[] },
 ): PreflightAnswer {
   const reasons: string[] = [];
 
@@ -93,6 +94,18 @@ export function preflight(
           `(${profile.vendor}/${profile.model}).`;
     reasons.push(`No matching AI source: ${detail}`);
     warnings.push('vendor-mismatch');
+  }
+
+  // Folder shares are host paths. Say so rather than let the agent arrive
+  // quietly blind to the data it was built around.
+  const missingPaths = (req.sharedPaths ?? []).filter((p) => !existsSync(p));
+  if (missingPaths.length) {
+    reasons.push(
+      `It reads ${missingPaths.length} folder(s) that do not exist here (${missingPaths
+        .slice(0, 2)
+        .join(', ')}). Create them, or re-share different folders after the move.`,
+    );
+    warnings.push('missing-shared-paths');
   }
 
   return {
@@ -151,6 +164,7 @@ export async function migrateAgent(
         slug: agent.slug,
         accountId: channel.accountId,
         vendor: profile?.vendor,
+        sharedPaths: agent.sharedPaths,
       }),
     });
     if (res.status === 401) throw new MigrateError(`${peer.name} rejected our access token.`);

@@ -56,6 +56,10 @@ Commands:
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
                                (applies on the agent's next rebuild)
+  adopt <workspace-dir> <name> [--bot-token <tok>] [--profile <id>]
+                               Turn an existing OpenClaw agent's workspace
+                               into a managed AgentClaw agent (copies the
+                               WHOLE folder; the original is only read)
   servers                      Other AgentClaw servers you can move agents to
   servers add <name> <url> <token>
                                Register one (token from that server's ⚙ AI)
@@ -395,6 +399,42 @@ async function main() {
       }
       await jsonPost(`/v1/agents/${a.id}`, { aiProfileId: rest[1] }, 'PATCH');
       console.log(`"${a.name}" will use that AI source after: agentclaw rebuild "${a.name}"`);
+      return;
+    }
+    case 'adopt': {
+      const dir = rest[0] ?? fail('usage: agentclaw adopt <workspace-dir> <name>');
+      const name = rest.slice(1).join(' ').trim() || fail('give the new agent a name');
+
+      const preview: any = await (await jsonPost('/v1/workspaces/inspect', { path: dir })).json();
+      console.log(`${preview.path}`);
+      console.log(`  ${preview.files.length} files (${(preview.bytes / 1e6).toFixed(1)} MB), incl. ${preview.markdownFiles.join(', ')}`);
+
+      const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
+      const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
+      const profile = flags.get('profile') ?? profiles[0]?.id ?? fail('no AI source configured');
+      const host = (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
+
+      console.log(`creating "${name}"…`);
+      const created: any = await (await jsonPost('/v1/agents', {
+        name, aiProfileId: profile, hostId: host, sharedMemory: false,
+      })).json();
+
+      let a = await pollAgent(created.id);
+      if (a.pendingAction?.type === 'bot_token') {
+        let tok = flags.get('bot-token');
+        if (!tok) {
+          console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
+          tok = await askLine('Paste bot token: ');
+        }
+        await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok });
+        a = await pollAgent(a.id);
+      }
+      if (a.state === 'FAILED') fail(`could not start: ${a.stateReason ?? 'unknown'}`);
+
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/adopt-workspace`, { path: dir })).json();
+      console.log(`adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into "${name}".`);
+      console.log(`The original at ${preview.path} is untouched — retire it when you're happy,`);
+      console.log(`and do not point both at the same Telegram bot.`);
       return;
     }
     case 'servers': {

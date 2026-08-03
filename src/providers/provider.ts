@@ -173,6 +173,13 @@ export interface RuntimeProvider {
    * the import path, so the seeded skeleton is replaced by the real state.
    */
   importState(runtimeRef: string, data: Buffer): Promise<void>;
+
+  /**
+   * Restore a tarball into ONE agent's workspace directory, leaving the rest
+   * of the runtime's state alone. Used to adopt an existing OpenClaw agent's
+   * files (SOUL/MEMORY/AGENTS and everything else it has accumulated).
+   */
+  importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void>;
 }
 
 export interface RuntimeInfo {

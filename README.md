@@ -34,6 +34,8 @@ and lifecycle; OpenClaw runs the agent.
 - **Invites with two tiers.** Send a link (or a QR code) for chat-only access,
   or have the invitee sign in so they can also log into AgentClaw and see the
   agents they belong to.
+- **Adopt agents you already have.** Point AgentClaw at an existing OpenClaw
+  workspace and it becomes a managed agent, whole workspace intact.
 - **Let an agent read your files.** Share a folder with a specific agent and
   it can read your data — mounted read-only, per agent, never system paths or
   credential directories. Pair it with a local model and nothing leaves the

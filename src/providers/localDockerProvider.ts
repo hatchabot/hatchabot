@@ -319,6 +319,35 @@ export class LocalDockerProvider implements RuntimeProvider {
     });
   }
 
+  async importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void> {
+    const { volume } = this.#names(runtimeRef);
+    const dir = `/vol/agents/${slug}/agent`;
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(this.docker, [
+        'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
+        'sh', '-c',
+        // Same untrusted-input rules as importState: refuse the archive's
+        // ownership, then set the one the runtime actually needs.
+        `mkdir -p ${dir} && tar xz --no-same-owner -C ${dir} && ` +
+          `chown -R 1000:1000 /vol/agents && chmod -R a-s /vol/agents`,
+      ]);
+      let stderr = '';
+      child.stderr.on('data', (c) => (stderr += c));
+      child.on('error', reject);
+      child.on('close', (code) =>
+        code === 0
+          ? resolve()
+          : reject(
+              new ProviderError(
+                `workspace import failed (${code}): ${stderr.slice(-500)}`,
+                "Couldn't copy the agent's files into its new home.",
+              ),
+            ),
+      );
+      child.stdin.end(data);
+    });
+  }
+
   async #must(args: string[], userMessage: string): Promise<ExecResult> {
     const res = await this.#docker(args);
     if (res.code !== 0) {

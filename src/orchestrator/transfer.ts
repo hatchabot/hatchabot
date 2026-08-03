@@ -26,7 +26,15 @@ export interface ExportManifest {
   format: typeof EXPORT_FORMAT;
   version: number;
   exportedAt: string;
-  agent: { name: string; slug: string; persona: string; sharedMemory: boolean };
+  agent: {
+    name: string;
+    slug: string;
+    persona: string;
+    sharedMemory: boolean;
+    /** Host folders it could read. Paths are machine-specific — carried as a
+     *  declaration so the destination can check them, never auto-applied. */
+    sharedPaths?: string[];
+  };
   ai: { vendor: string; model: string; models?: string[] };
   channel: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
   memberships: Array<{
@@ -64,6 +72,7 @@ const ManifestSchema = z.object({
     slug: z.string().regex(SLUG_RE),
     persona: z.string().max(8000),
     sharedMemory: z.boolean(),
+    sharedPaths: z.array(z.string().max(512)).max(8).optional(),
   }),
   ai: z.object({
     vendor: z.string().max(32),
@@ -126,6 +135,7 @@ export async function exportAgent(
       slug: agent.slug,
       persona: agent.persona,
       sharedMemory: agent.sharedMemory,
+      sharedPaths: agent.sharedPaths,
     },
     ai: {
       vendor: profile?.vendor ?? 'anthropic',
@@ -232,6 +242,9 @@ async function importAgentInner(
     hostId: host.id,
     persona: manifest.agent.persona,
     sharedMemory: manifest.agent.sharedMemory,
+    // Deliberately NOT carried over: a path that exists on the source may not
+    // exist here, and silently mounting a same-named folder would be worse
+    // than mounting nothing. Preflight warns; the owner re-shares explicitly.
     createdAt: now,
     updatedAt: now,
   };

@@ -126,6 +126,13 @@ export class MockProvider implements RuntimeProvider {
     this.stateStore.set(runtimeRef, data);
   }
 
+  readonly workspaceStore = new Map<string, Buffer>();
+
+  async importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void> {
+    this.#require(runtimeRef);
+    this.workspaceStore.set(`${runtimeRef}:${slug}`, data);
+  }
+
   #require(runtimeRef: string): MockRuntime {
     const rt = this.runtimes.get(runtimeRef);
     if (!rt || rt.purged) {

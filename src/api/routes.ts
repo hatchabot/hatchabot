@@ -21,6 +21,7 @@ import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestra
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
+import { AdoptError, applyWorkspace, inspectWorkspace } from '../orchestrator/adopt.js';
 import type { Agent } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
 import type { IdentityVerifier } from './identity.js';
@@ -927,6 +928,42 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       agentName: names.get(e.agentId),
     }));
   });
+
+  // ---- adopting an existing OpenClaw agent ---------------------------------
+
+  /** Look before you leap: what would be adopted from this folder? */
+  app.post<{ Body: { path?: string } }>('/v1/workspaces/inspect', async (req, reply) => {
+    const path = (req.body as { path?: string } | null)?.path;
+    if (!path) return reply.code(400).send({ error: 'path required' });
+    try {
+      return inspectWorkspace(path);
+    } catch (err) {
+      if (err instanceof AdoptError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+  });
+
+  /** Copy an existing workspace into an agent that already exists here. */
+  app.post<{ Params: { id: string }; Body: { path?: string } }>(
+    '/v1/agents/:id/adopt-workspace',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const path = (req.body as { path?: string } | null)?.path;
+      if (!path) return reply.code(400).send({ error: 'path required' });
+      try {
+        return await applyWorkspace(
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+            log: trace(agent.id) },
+          agent.id,
+          path,
+        );
+      } catch (err) {
+        if (err instanceof AdoptError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
 
   // ---- peers & migration ---------------------------------------------------
 
