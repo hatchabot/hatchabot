@@ -113,6 +113,9 @@ export interface ExecResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** The command was killed for taking too long — a hung daemon, not a
+   *  command that ran and failed. Callers must not read "gone" into it. */
+  timedOut?: boolean;
 }
 
 export interface RuntimeProvider {

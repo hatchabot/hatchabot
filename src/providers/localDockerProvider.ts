@@ -207,6 +207,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       // A daemon that is down is NOT a container that is gone. Conflating them
       // let a boot-order race mark every healthy agent FAILED — and the owner's
       // Retry then risked their memory. Report unknown and let callers wait.
+      // A timed-out inspect is the same situation arriving a different way: a
+      // stalled daemon (IO load, backup running) says nothing about the
+      // container, and its stderr is empty so the regex below can't catch it.
+      if (res.timedOut) return { phase: 'unknown' };
       if (/cannot connect to the docker daemon|is the docker daemon running/i.test(res.stderr)) {
         return { phase: 'unknown' };
       }
@@ -369,6 +373,16 @@ export class LocalDockerProvider implements RuntimeProvider {
       });
       return { code: 0, stdout, stderr };
     } catch (err: any) {
+      // execFile's timeout kill surfaces as killed+signal with empty streams —
+      // indistinguishable from "exited 1, said nothing" unless flagged here.
+      if (err?.killed && err?.signal) {
+        return {
+          code: 1,
+          timedOut: true,
+          stdout: String(err.stdout ?? ''),
+          stderr: `docker ${args[0]} timed out`,
+        };
+      }
       if (typeof err?.code === 'number' || err?.stdout !== undefined) {
         return {
           code: typeof err.code === 'number' ? err.code : 1,

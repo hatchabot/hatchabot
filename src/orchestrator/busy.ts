@@ -22,8 +22,27 @@ export function isBusy(agentId: string): boolean {
   return busy.has(agentId);
 }
 
-/** Run `fn` with the agent marked busy, clearing it however that ends. */
+/** A second lifecycle operation arrived while one was still running. */
+export class AgentBusyError extends Error {
+  constructor(readonly userMessage: string) {
+    super(userMessage);
+    this.name = 'AgentBusyError';
+  }
+}
+
+/**
+ * Run `fn` with the agent marked busy, clearing it however that ends.
+ *
+ * Exclusive: a caller arriving while the agent is already busy is refused,
+ * not queued. Overlapping lifecycle operations (a Rebuild during a migrate's
+ * stopped window, an adopt during a rebuild) don't merely race — they end in
+ * two containers polling one bot token, or a container replaced underneath a
+ * volume restore. Refusing loudly is the only safe answer.
+ */
 export async function whileBusy<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  if (busy.has(agentId)) {
+    throw new AgentBusyError('Another operation is already running on this agent.');
+  }
   markBusy(agentId);
   try {
     return await fn();

@@ -166,6 +166,7 @@ async function runProvisionStepsInner(
 
     // Step 4: runtime + persistent volume.
     const { runtimeRef } = await provider.provision(spec);
+    recordApplied(store, agentId);
     // Purge ONLY storage this run created. On a retry, spec.previousRef makes
     // provision() reuse the existing volume — purging it there destroys the
     // agent's memory permanently, turning a transient failure (slow boot,
@@ -262,10 +263,6 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   // it keeps the door open for invitees who join after a rebuild — a hard
   // allowlist would silently reject their first contact. allowFrom seeds the
   // known members on fresh volumes.
-  // Every path that configures a runtime comes through here, so this is the
-  // one place that knows what actually got applied.
-  store.setAgentApplied(agentId, profile.id, profile.model);
-
   const allowFrom = store.listAllowedChannelUserIds(agentId);
   // Debug door: each agent's Control UI published on a stable host port
   // behind a per-agent gateway token.
@@ -357,16 +354,37 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       return current ?? agent;
     }
     const { runtimeRef } = await provider.provision(spec);
+    recordApplied(store, agentId);
     await provider.start(runtimeRef);
-    await waitForHealthy(provider, runtimeRef, sleep);
+    // As generous as a retry's health wait: a rebuild boots an agent with its
+    // whole history to load, and 30s used to fail exactly the agents that had
+    // been used the most.
+    await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.rebuilt', { agentId, runtimeRef });
     return store.setAgentState(agentId, 'RUNNING');
   } catch (err) {
     const reason = userMessageFor(err);
     log('rebuild.failed', { agentId, reason, error: String(err) });
+    // The container may be up and POLLING THE BOT (a health timeout means
+    // "slow", not "dead") while the card says FAILED — and reconcile never
+    // mends running+FAILED. Stop it so a failed rebuild is actually stopped,
+    // which is also what the health-timeout message promises the user.
+    const ref = store.getAgent(agentId)?.runtimeRef;
+    if (ref) await provider.stop(ref).catch(() => {});
     store.setAgentState(agentId, 'FAILED', reason);
     return store.getAgent(agentId)!;
   }
+}
+
+/**
+ * Record what the runtime is actually running. Called only after a provider
+ * accepted the rendered spec — recording at render time made a failed rebuild
+ * claim the new model while the old container kept running the old one.
+ */
+export function recordApplied(store: Store, agentId: string): void {
+  const agent = store.getAgent(agentId);
+  const profile = agent && store.getAIProfile(agent.aiProfileId);
+  if (profile) store.setAgentApplied(agentId, profile.id, profile.model);
 }
 
 /** Create + provision in one call — the shape scripts and tests want. */

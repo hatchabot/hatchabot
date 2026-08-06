@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { migrateAgent, MigrateError, preflight } from '../src/orchestrator/migrate.js';
+import { isBusy } from '../src/orchestrator/busy.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -165,16 +166,79 @@ describe('migrateAgent', () => {
     expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
   });
 
-  it('restarts the source when the peer is unreachable mid-transfer', async () => {
+  it('restarts the source when the destination confirms nothing landed', async () => {
     const w = await world();
+    // The import call dies, but the destination is reachable and its agent
+    // list has no "kitchen" — the import really did roll back over there.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
+      const u = String(url);
+      if (u.endsWith('/preflight')) {
+        return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
+      }
+      if (u.endsWith('/v1/agents') && (init?.method ?? 'GET') === 'GET') {
+        return new Response(JSON.stringify([]), { status: 200 });
+      }
+      throw new Error('ECONNRESET');
+    });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/unchanged/);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('never restarts the source when it cannot confirm the agent did not land', async () => {
+    const w = await world();
+    // Peer completely unreachable after preflight: the import may have
+    // committed over there. Restarting the source on that guess is the
+    // two-pollers failure — the source must stay stopped.
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
       if (String(url).endsWith('/preflight')) {
         return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
       }
       throw new Error('ECONNRESET');
     });
-    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toBeInstanceOf(MigrateError);
-    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/couldn't confirm/);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    expect(w.store.getAgent('a1')!.migratedTo).toBeUndefined();
+  });
+
+  it('tombstones without restarting when the agent landed despite the dropped connection', async () => {
+    const w = await world();
+    // The response was lost but the destination committed: its list shows
+    // kitchen RUNNING. Both sides polling is the one unacceptable outcome.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any, init?: any) => {
+      const u = String(url);
+      if (u.endsWith('/preflight')) {
+        return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
+      }
+      if (u.endsWith('/v1/agents') && (init?.method ?? 'GET') === 'GET') {
+        return new Response(JSON.stringify([{ slug: 'kitchen', state: 'RUNNING' }]), { status: 200 });
+      }
+      throw new Error('ECONNRESET');
+    });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/DID arrive/);
+    const src = w.store.getAgent('a1')!;
+    expect(src.state).toBe('STOPPED');
+    expect(src.migratedTo).toContain('Desktop');
+  });
+
+  it('holds the busy flag for the whole move, so nothing else judges the stopped source', async () => {
+    const w = await world();
+    let busyDuringImport: boolean | undefined;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+      const u = String(url);
+      if (u.endsWith('/preflight')) {
+        return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
+      }
+      if (u.endsWith('/v1/agents/import')) {
+        busyDuringImport = isBusy('a1');
+        return new Response(JSON.stringify({ id: 'remote1', name: 'Kitchen', state: 'RUNNING' }), {
+          status: 201, headers: { 'content-type': 'application/json' },
+        });
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    });
+    await migrateAgent(w.deps as any, 'a1', PEER);
+    expect(busyDuringImport).toBe(true);
+    expect(isBusy('a1')).toBe(false);
   });
 
   it('tombstones the source so it cannot be restarted into a second poller', async () => {

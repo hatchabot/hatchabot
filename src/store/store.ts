@@ -433,7 +433,13 @@ export class Store {
   /** Keep the newest `keep` events per agent; older ones are pruned on write. */
   recordEvent(agentId: string, event: string, detail?: Record<string, unknown>, keep = 200): void {
     // Never let a log line become a way to store secrets or unbounded data.
-    const safe = detail ? JSON.stringify(detail).slice(0, 2000) : null;
+    // Truncation must stay valid JSON: one raw .slice() mid-string made every
+    // listEvents() call throw until the row aged out — the activity feed
+    // bricking itself exactly when a long docker error was worth reading.
+    let safe = detail ? JSON.stringify(detail) : null;
+    if (safe && safe.length > 2000) {
+      safe = JSON.stringify({ truncated: true, detail: safe.slice(0, 1900) });
+    }
     this.db
       .prepare(`INSERT INTO agent_events (agent_id, at, event, detail) VALUES (?, ?, ?, ?)`)
       .run(agentId, new Date().toISOString(), event.slice(0, 64), safe);
@@ -466,7 +472,9 @@ export class Store {
       agentId: r.agent_id,
       at: r.at,
       event: r.event,
-      detail: r.detail ? JSON.parse(r.detail) : undefined,
+      // Rows written before truncation kept JSON valid may still be torn —
+      // one bad row must not take the whole timeline down with it.
+      detail: r.detail ? safeParse(r.detail) : undefined,
     }));
   }
 
@@ -876,6 +884,14 @@ export class Store {
 /** Tokens are compared by hash, never stored in the clear. */
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+function safeParse(text: string): Record<string, unknown> | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { unparseable: text };
+  }
 }
 
 function rowToAgent(r: any): Agent {

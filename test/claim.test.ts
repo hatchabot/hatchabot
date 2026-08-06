@@ -39,8 +39,10 @@ describe('claimFirstContact', () => {
       env: {},
     });
 
+    // RUNNING, as in real life: the claim watcher only starts once the agent
+    // is live, and bails out for itself when the agent stops being RUNNING.
     store.insertAgent({
-      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'PROVISIONING',
+      id: 'a1', ownerId: 'u1', name: 'A', slug: 'a1', state: 'RUNNING',
       aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
       createdAt: 'now', updatedAt: 'now',
     });
@@ -72,6 +74,11 @@ describe('claimFirstContact', () => {
       slug: 'a2',
       workspace: { files: {}, configPatch: { agentId: 'a2', authMode: 'api-key' } },
       env: {},
+    });
+    store.insertAgent({
+      id: 'a2', ownerId: 'u1', name: 'B', slug: 'a2', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
     });
     let now = 0;
     const claimed = await claimFirstContact(

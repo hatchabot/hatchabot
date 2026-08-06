@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { Store } from '../store/store.js';
 import { sharePathProblem } from './provision.js';
 import type { ProvisionDeps } from './provision.js';
+import { whileBusy } from './busy.js';
 
 const execFileP = promisify(execFile);
 
@@ -162,10 +163,25 @@ export async function applyWorkspace(
   agentId: string,
   sourceDir: string,
 ): Promise<{ files: number; bytes: number }> {
+  // Busy while the workspace is being replaced: a Rebuild passing its own
+  // guards mid-copy would docker rm the container underneath the restore.
+  return whileBusy(agentId, () => applyWorkspaceInner(deps, agentId, sourceDir));
+}
+
+async function applyWorkspaceInner(
+  deps: AdoptDeps,
+  agentId: string,
+  sourceDir: string,
+): Promise<{ files: number; bytes: number }> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
   const agent = store.getAgent(agentId);
   if (!agent?.runtimeRef) throw new AdoptError('That agent has no runtime yet.');
+  // Mid-provision, mid-rebuild or FAILED, the runtime is not a stable target
+  // for a tar extract — and DELETING would resurrect files into a purge.
+  if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+    throw new AdoptError(`Can't adopt into this agent while it is ${agent.state}.`);
+  }
 
   const preview = inspectWorkspace(sourceDir);
   const tar = await packWorkspace(sourceDir);
@@ -177,7 +193,18 @@ export async function applyWorkspace(
     await provider.stop(agent.runtimeRef);
     store.setAgentState(agentId, 'STOPPED');
   }
-  await provider.importWorkspace(agent.runtimeRef, agent.slug, tar);
+  try {
+    await provider.importWorkspace(agent.runtimeRef, agent.slug, tar);
+  } catch (err) {
+    // The extract is not atomic — the workspace may now hold an arbitrary
+    // prefix of the archive. The agent must not come back up believing that
+    // half-truth; leave it stopped and say what happened.
+    log('adopt.import_failed', { agentId, from: preview.path, error: String(err) });
+    throw new AdoptError(
+      `Copying the workspace in failed partway — the agent is left stopped because its files ` +
+        `may be half-replaced. Adopt again (a clean copy fixes a torn one), or restore a snapshot.`,
+    );
+  }
   if (wasRunning) {
     await provider.start(agent.runtimeRef);
     store.setAgentState(agentId, 'RUNNING');

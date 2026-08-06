@@ -3,6 +3,7 @@ import type { Store } from '../store/store.js';
 import { exportAgent, TransferError } from './transfer.js';
 import { existsSync } from 'node:fs';
 import type { ProvisionDeps } from './provision.js';
+import { whileBusy } from './busy.js';
 
 /**
  * Move an agent to another AgentClaw installation in one action.
@@ -131,6 +132,41 @@ async function peerFetch(
   });
 }
 
+/**
+ * Did the agent actually arrive at the destination? Consulted only when the
+ * import call itself gave no answer. Three-state on purpose, like
+ * botPollState: "couldn't ask" must never read as "it isn't there".
+ *
+ * A slug still PROVISIONING means the import is mid-flight over there — its
+ * own rollback will either finish it or remove it, so wait it out rather
+ * than guess.
+ */
+async function destinationHasAgent(
+  deps: MigrateDeps,
+  peer: Peer,
+  slug: string,
+): Promise<'yes' | 'no' | 'unknown'> {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 0; attempt < 12; attempt++) {
+    if (attempt > 0) await sleep(15_000);
+    let agents: Array<{ slug?: string; state?: string }>;
+    try {
+      const res = await peerFetch(deps, peer, '/v1/agents', { method: 'GET' });
+      if (!res.ok) continue;
+      agents = (await res.json()) as Array<{ slug?: string; state?: string }>;
+    } catch {
+      continue;
+    }
+    const found = agents.find((a) => a.slug === slug);
+    // A rolled-back import deletes its agent, so "not in the active list" is
+    // a real answer: nothing landed.
+    if (!found) return 'no';
+    if (found.state === 'RUNNING') return 'yes';
+    // Mid-import — keep waiting for its own success-or-rollback to resolve.
+  }
+  return 'unknown';
+}
+
 export interface MigrateResult {
   movedTo: string;
   remoteAgentId: string;
@@ -139,6 +175,19 @@ export interface MigrateResult {
 }
 
 export async function migrateAgent(
+  deps: MigrateDeps,
+  agentId: string,
+  peer: Peer,
+): Promise<MigrateResult> {
+  // Busy for the whole move: between export stopping the source and the
+  // tombstone landing, the agent looks like an ordinary STOPPED agent — a
+  // Start, Rebuild or Delete in that window boots or purges the copy whose
+  // bot is about to belong elsewhere. (Routes check isBusy; this also stops
+  // reconcile from judging the stopped source mid-move.)
+  return whileBusy(agentId, () => migrateAgentInner(deps, agentId, peer));
+}
+
+async function migrateAgentInner(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
@@ -208,6 +257,7 @@ export async function migrateAgent(
     });
     const body = (await res.json().catch(() => ({}))) as any;
     if (!res.ok) {
+      // A real answer from the destination: it refused and rolled back.
       await undo(`import rejected: ${body.error ?? res.status}`);
       throw new MigrateError(
         `${peer.name} couldn't import it: ${body.error ?? res.status}. Your agent is unchanged.`,
@@ -216,8 +266,34 @@ export async function migrateAgent(
     remote = body;
   } catch (err) {
     if (err instanceof MigrateError) throw err;
-    await undo(`transfer failed: ${String(err)}`);
-    throw new MigrateError(`The transfer to ${peer.name} failed. Your agent is unchanged.`);
+    // NO answer from the destination — which is not the same as "it failed".
+    // The import takes minutes (volume restore + health wait); a dropped
+    // connection or proxy timeout can lose the response AFTER the destination
+    // committed and started polling. Restarting the source on that guess is
+    // how a "failed" migration ends with two live pollers. Ask before undoing.
+    const landed = await destinationHasAgent(deps, peer, agent.slug);
+    if (landed === 'no') {
+      await undo(`transfer failed: ${String(err)}`);
+      throw new MigrateError(`The transfer to ${peer.name} failed. Your agent is unchanged.`);
+    }
+    if (landed === 'yes') {
+      log('migrate.landed_despite_error', { agentId, peer: peer.name, error: String(err) });
+      store.setAgentMigratedTo(
+        agentId,
+        `${peer.name} (${new Date().toISOString().slice(0, 10)})`,
+      );
+      throw new MigrateError(
+        `The connection to ${peer.name} dropped, but the agent DID arrive and is running there. ` +
+          `This copy stays stopped and marked as moved.`,
+      );
+    }
+    // Can't tell. Leaving the source stopped is recoverable (the owner can
+    // start it once they've looked); starting it next to a live copy is not.
+    throw new MigrateError(
+      `The transfer to ${peer.name} failed and we couldn't confirm whether the agent arrived ` +
+        `there. This copy is left stopped to be safe — check ${peer.name}, then either delete ` +
+        `this copy (it arrived) or start it again (it didn't).`,
+    );
   }
 
   // 4. Verify it actually came up there before we consider this done.

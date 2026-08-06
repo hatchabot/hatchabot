@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { reconcileAgents } from '../src/orchestrator/reconcile.js';
+import { clearBusy, markBusy } from '../src/orchestrator/busy.js';
 import type { RuntimeProvider } from '../src/providers/provider.js';
 import type { AgentState } from '../src/domain/types.js';
 
@@ -36,6 +37,21 @@ async function setup(dbState: AgentState, runtimePhase: 'running' | 'stopped' | 
   await reconcileAgents(store, providers, () => {});
   return store.getAgent('a1')!;
 }
+
+describe('busy agents are never judged', () => {
+  it('leaves a busy agent alone even when its runtime looks gone', async () => {
+    // The exact regression busy.ts exists for: mid-import/migrate a container
+    // being replaced looks "absent", and reconcile marking it FAILED turned
+    // the operation's final RUNNING write into an illegal transition — which
+    // surfaced to the user as a rolled-back migration.
+    markBusy('a1');
+    try {
+      expect((await setup('RUNNING', 'absent')).state).toBe('RUNNING');
+    } finally {
+      clearBusy('a1');
+    }
+  });
+});
 
 describe('boot reconcile', () => {
   it('marks a running-in-docker agent RUNNING when DB says STOPPED', async () => {

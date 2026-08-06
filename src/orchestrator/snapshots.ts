@@ -22,7 +22,13 @@ export const AUTO_KEEP = 20;
 /** Per-file ceiling for both snapshot capture and edits (256 KB). */
 export const MAX_FILE_BYTES = 256 * 1024;
 
-export type SnapshotReason = 'manual' | 'pre-edit' | 'pre-restore' | 'pre-rebuild' | 'scheduled';
+export type SnapshotReason =
+  | 'manual'
+  | 'pre-edit'
+  | 'pre-restore'
+  | 'pre-rebuild'
+  | 'pre-adopt'
+  | 'scheduled';
 
 export interface SnapshotDeps {
   store: Store;

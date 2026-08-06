@@ -175,3 +175,60 @@ describe('reusing the bot a workspace already owns', () => {
     expect(findExistingBot(dir, mk())?.enabledInSource).toBe(true);
   });
 });
+
+describe('applyWorkspace', () => {
+  async function agentWorld(state: 'RUNNING' | 'STOPPED' | 'REBUILDING' = 'RUNNING') {
+    const { default: Database } = await import('better-sqlite3');
+    const { Store } = await import('../src/store/store.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'kitchen',
+      workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } },
+      env: {},
+    });
+    store.insertAgent({
+      id: 'a1', ownerId: 'o', name: 'Kitchen', slug: 'kitchen', state: 'PROVISIONING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: true,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    store.setAgentState('a1', 'RUNNING');
+    if (state !== 'RUNNING') {
+      await provider.stop(runtimeRef);
+      if (state === 'STOPPED') store.setAgentState('a1', 'STOPPED');
+      if (state === 'REBUILDING') store.setAgentState('a1', 'REBUILDING');
+    } else {
+      await provider.start(runtimeRef);
+    }
+    const deps = { store, provider, secrets: {} as any, channel: {} as any };
+    return { store, provider, runtimeRef, deps };
+  }
+
+  it('copies the workspace in and brings a running agent back up', async () => {
+    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const w = await agentWorld('RUNNING');
+    const res = await applyWorkspace(w.deps as any, 'a1', ws);
+    expect(res.files).toBeGreaterThan(0);
+    expect(w.provider.workspaceStore.has(`${w.runtimeRef}:kitchen`)).toBe(true);
+    expect(w.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('refuses an agent that is mid-rebuild — the runtime is not a stable target', async () => {
+    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const w = await agentWorld('REBUILDING');
+    await expect(applyWorkspace(w.deps as any, 'a1', ws)).rejects.toThrow(/REBUILDING/);
+  });
+
+  it('leaves the agent STOPPED with a clear message when the copy tears partway', async () => {
+    const { applyWorkspace } = await import('../src/orchestrator/adopt.js');
+    const w = await agentWorld('RUNNING');
+    // The extract is not atomic: a mid-copy failure may leave an arbitrary
+    // prefix of the archive over the old files. Booting that half-truth is
+    // worse than staying down.
+    w.provider.importWorkspace = async () => { throw new Error('broken pipe'); };
+    await expect(applyWorkspace(w.deps as any, 'a1', ws)).rejects.toThrow(/left stopped/);
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+  });
+});

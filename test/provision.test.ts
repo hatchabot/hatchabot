@@ -191,6 +191,41 @@ describe('rebuildAgent', () => {
     w.store.setAgentRuntimeRef(agent.id, 'mock://x');
     await expect(rebuildAgent(w.deps, agent.id)).rejects.toThrow(/Cannot rebuild/);
   });
+
+  it('stops the replacement container when the health check gives up', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const ref = w.store.getAgent(agent.id)!.runtimeRef!;
+    // A container that starts but never comes healthy — the way a slow or
+    // wedged gateway actually fails. Without an explicit stop it would sit
+    // there POLLING THE BOT while the card says FAILED, and reconcile has no
+    // running+FAILED rule to ever mend that.
+    const slow = new MockProvider({ healthyAfter: 100_000 });
+    slow.runtimes.set(ref, (w.provider as any).runtimes.get(ref));
+    const rebuilt = await rebuildAgent({ ...w.deps, provider: slow }, agent.id);
+    expect(rebuilt.state).toBe('FAILED');
+    expect(slow.runtimes.get(ref)!.phase).toBe('stopped');
+  });
+
+  it('keeps reporting the OLD model when a rebuild onto a new profile fails', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    expect(w.store.getAgent(agent.id)!.appliedModel).toBe('claude-opus-4-8');
+
+    // Owner switches the profile, then the rebuild dies before the provider
+    // accepts the new spec. Recording "applied" at spec-render time made the
+    // card claim the new model while the old container kept running.
+    w.store.insertAIProfile({
+      id: 'p2', ownerId: 'o', name: 'AI2', vendor: 'anthropic', kind: 'api_key',
+      model: 'claude-fable-5', secretRef: 'ai/p1', createdAt: 'now',
+    });
+    w.store.setAgentAIProfile(agent.id, 'p2');
+    const broken = new MockProvider({ failOn: 'provision' });
+    const rebuilt = await rebuildAgent({ ...w.deps, provider: broken }, agent.id);
+    expect(rebuilt.state).toBe('FAILED');
+    expect(w.store.getAgent(agent.id)!.appliedProfileId).toBe('p1');
+    expect(w.store.getAgent(agent.id)!.appliedModel).toBe('claude-opus-4-8');
+  });
 });
 
 describe('buildRuntimeSpec', () => {

@@ -94,6 +94,14 @@ export async function claimFirstContact(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
+    // The watcher runs detached from the provision task, so the agent can be
+    // deleted or stopped underneath it — then there is nothing left to claim,
+    // and polling a gone container for the rest of the window is just noise.
+    const agent = deps.store.getAgent(opts.agentId);
+    if (!agent || agent.state !== 'RUNNING') {
+      log('claim.window_abandoned', { agentId: opts.agentId, state: agent?.state });
+      return null;
+    }
     const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId);
     const first = requests[0];
     if (first) {

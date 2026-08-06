@@ -136,3 +136,27 @@ describe('container and volume shape', () => {
     expect(line).toContain('chmod -R a-s');
   });
 });
+
+describe('a stalled daemon is not a missing container', () => {
+  it('reports unknown, never absent, when docker inspect times out', async () => {
+    // A timed-out inspect has empty stderr, so the daemon-down regex can't
+    // rescue it — reading it as "absent" made reconcile FAIL every healthy
+    // agent whenever the daemon stalled (IO load, backups). The timeout must
+    // surface as unknown so callers wait instead of judging.
+    const slowDir = mkdtempSync(join(tmpdir(), 'acl-slow-'));
+    const slowStub = join(slowDir, 'docker');
+    writeFileSync(slowStub, '#!/usr/bin/env bash\nsleep 5\n', { mode: 0o755 });
+    chmodSync(slowStub, 0o755);
+    const slow = new LocalDockerProvider({ docker: slowStub, image: 'test-image:latest' });
+
+    const prev = process.env.AGENTCLAW_DOCKER_TIMEOUT_MS;
+    process.env.AGENTCLAW_DOCKER_TIMEOUT_MS = '200';
+    try {
+      const status = await slow.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper');
+      expect(status.phase).toBe('unknown');
+    } finally {
+      if (prev === undefined) delete process.env.AGENTCLAW_DOCKER_TIMEOUT_MS;
+      else process.env.AGENTCLAW_DOCKER_TIMEOUT_MS = prev;
+    }
+  });
+});

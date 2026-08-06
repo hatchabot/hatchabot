@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, MemberRole } from '../domain/types.js';
-import { buildRuntimeSpec, slugify, waitForHealthy, type ProvisionDeps } from './provision.js';
+import {
+  buildRuntimeSpec,
+  recordApplied,
+  slugify,
+  waitForHealthy,
+  type ProvisionDeps,
+} from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
 
 /**
@@ -292,6 +298,7 @@ async function importAgentInner(
     await provider.importState(runtimeRef, Buffer.from(manifest.state, 'base64'));
     const respec = await buildRuntimeSpec(deps, agent.id);
     await provider.provision(respec);
+    recordApplied(store, agent.id);
     await provider.start(runtimeRef);
     // First boot on an import can be slow (cold image on Docker Desktop's VM,
     // imported sessions to load) — give it 2 minutes, not the default 30s.
@@ -302,25 +309,32 @@ async function importAgentInner(
       120,
     );
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
-    const live = store.setAgentState(agent.id, 'RUNNING');
-    clearBusy(agent.id);
-    return live;
+    return store.setAgentState(agent.id, 'RUNNING');
   } catch (err) {
     // Roll back completely: a "Retry" on a half-imported agent would boot it
     // with a fresh seeded volume — an empty-headed impostor of the archive.
     // Leaving nothing behind keeps "import again" the one true retry path.
-    if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
-    await secrets.delete(secretRef).catch(() => {});
-    store.deleteChannelForAgent(agent.id);
-    store.deleteMemberships(agent.id);
-    store.setAgentState(agent.id, 'DELETING');
-    store.setAgentState(agent.id, 'DELETED');
-    clearBusy(agent.id);
+    // Each step guarded: one rollback step failing (a store hiccup, a state
+    // moved out from under us) must not abandon the rest half-done.
+    try {
+      if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
+      await secrets.delete(secretRef).catch(() => {});
+      store.deleteChannelForAgent(agent.id);
+      store.deleteMemberships(agent.id);
+      store.setAgentState(agent.id, 'DELETING');
+      store.setAgentState(agent.id, 'DELETED');
+    } catch (rollbackErr) {
+      log('import.rollback_failed', { agentId: agent.id, error: String(rollbackErr) });
+    }
     log('import.rolled_back', { agentId: agent.id, error: String(err) });
     throw new TransferError(
       `Import failed and was rolled back — fix the cause and import again. (${String(
         err instanceof Error ? err.message : err,
       ).slice(0, 300)})`,
     );
+  } finally {
+    // However this ends, the busy flag must not outlive it: a stuck flag makes
+    // reconcile skip this agent forever.
+    clearBusy(agent.id);
   }
 }

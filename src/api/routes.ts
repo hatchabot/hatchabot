@@ -17,6 +17,7 @@ import {
 } from '../orchestrator/provision.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
+import { AgentBusyError, isBusy } from '../orchestrator/busy.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
@@ -298,6 +299,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return true;
   };
 
+  /**
+   * A lifecycle request against an agent mid-migrate/adopt/import. Those
+   * operations hold the busy flag precisely because, from the outside, the
+   * agent looks like an ordinary stopped one — and acting on that look is how
+   * a mid-migration Start ends with two runtimes polling one bot token.
+   */
+  const busyNow = (agent: Agent, reply: any): boolean => {
+    if (!isBusy(agent.id)) return false;
+    reply.code(409).send({ error: 'Another operation is already running on this agent.' });
+    return true;
+  };
+
   const snapshotDeps = (agent: Agent) => ({
     store,
     provider: providerFor(agent.hostId),
@@ -328,10 +341,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         agentId,
       );
       // Fresh agent went live in pairing mode → watch for the owner's first
-      // message and bind it (the §12.4 claim).
+      // message and bind it (the §12.4 claim). DETACHED: the claim window is
+      // 10 minutes of idle polling on an agent that is already live — holding
+      // `inflight` for it made Delete hang and Rebuild answer 409 that whole
+      // time. The watcher notices for itself when the agent goes away.
       const channelRow = store.getChannelForAgent(agentId);
       if (result.agent.state === 'RUNNING' && result.agent.runtimeRef && channelRow) {
-        await claimFirstContact(
+        void claimFirstContact(
           { store, provider, log },
           {
             agentId,
@@ -339,7 +355,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             accountId: channelRow.accountId,
             forUserId: result.agent.ownerId,
           },
-        );
+        ).catch((err) => app.log.error({ err, agentId }, 'owner claim failed'));
       }
     })();
     inflight.set(
@@ -1041,8 +1057,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
       const path = (req.body as { path?: string } | null)?.path;
       if (!path) return reply.code(400).send({ error: 'path required' });
+      // Same cheap insurance as a rebuild: the copy overwrites memory files.
+      if (agent.state === 'RUNNING') {
+        await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-adopt');
+      }
       try {
         return await applyWorkspace(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
@@ -1051,6 +1072,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           path,
         );
       } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof AdoptError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
@@ -1126,6 +1148,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           slug: z.string().min(1).max(64),
           accountId: z.string().min(1).max(64),
           vendor: z.string().max(32).optional(),
+          // Zod strips unknown keys — omitting this silently discarded the
+          // sender's folder list and made the missing-folders refusal dead
+          // code for every real (HTTP) migration.
+          sharedPaths: z.array(z.string().max(512)).max(8).optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1149,6 +1175,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           peer,
         );
       } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof MigrateError) return reply.code(400).send({ error: err.userMessage });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -1164,6 +1191,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
     try {
       const { filename, data } = await exportAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
@@ -1220,6 +1248,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
     if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
     }
@@ -1252,6 +1281,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
     kickProvision(agent.id);
     return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });
@@ -1414,6 +1444,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.post<{ Params: { id: string } }>('/v1/agents/:id/stop', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
     // Guard the transition here so a mid-rebuild stop is a 409, not a 500.
     if (agent.state !== 'RUNNING') {
       return reply.code(409).send({ error: `Cannot stop while ${agent.state}` });
@@ -1426,6 +1457,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
     if (agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
     }
@@ -1436,6 +1468,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    // A migrate/adopt/import mid-flight: refuse rather than wait — those run
+    // for minutes, and purging the volume under an in-progress export is loss.
+    if (busyNow(agent, reply)) return reply;
     // Wait for any in-flight provision/rebuild: deleting underneath one would
     // let it re-create the container AFTER the purge, leaving an orphan that
     // still holds the bot token and keeps polling Telegram.
