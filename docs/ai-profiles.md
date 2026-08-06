@@ -112,5 +112,5 @@ container and nothing sent off the machine.
   Profile creation checks the login exists on this host; the local-host-only
   rule is enforced where an agent binds a profile to a host — belt and
   suspenders in `POST /v1/agents` and `buildRuntimeSpec`.
-- Profiles are managed from the app (⚙ AI): default model, the switchable
+- Profiles are managed from the app (⚙ Settings → AI sources): default model, the switchable
   `/model` list, additional API-key profiles.

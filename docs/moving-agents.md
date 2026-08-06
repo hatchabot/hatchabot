@@ -31,9 +31,10 @@ Excluded on purpose:
   rather than a working agent. Adopt names what it skipped.
 
 The size guard exists because of that last point: one real workspace here
-was 823 MB across 20,000 files, of which 1.2 GB was a Python `venv` sitting
-next to 800 KB of actual notes. If what remains after skipping artifacts is
-still very large, adopt refuses and points you at folder sharing — bulk data
+was over a gigabyte across 20,000 files, nearly all of it a Python `venv`
+sitting next to 800 KB of actual notes. If what remains after skipping
+artifacts is still over the limit (750 MB or 20,000 files), adopt refuses
+and points you at folder sharing — bulk data
 belongs in a folder the agent *reads*, not in a copy the agent *owns*:
 
 ```sh
@@ -94,9 +95,9 @@ that happens to hold something else.
 If both machines run AgentClaw, register the destination once and move agents
 with a single action — no files to shuttle.
 
-On the **destination**: ⚙ AI → CLI access → **New token**, and copy it.
+On the **destination**: ⚙ Settings → Access → **New token**, and copy it.
 
-On the **source**: ⚙ AI → Other servers → add its name, URL and that token.
+On the **source**: ⚙ Settings → Servers → add its name, URL and that token.
 AgentClaw checks the token works before saving it.
 
 Then use **Move…** on the agent card, or:
@@ -131,7 +132,7 @@ On the target machine (once):
 ```sh
 git clone https://github.com/cksci/agentclaw-ai.git agentclaw
 cd agentclaw && ./scripts/setup-host.sh
-# then open http://localhost:8080 and connect an AI source (⚙ AI)
+# then open http://localhost:8080 and connect an AI source (⚙ Settings → AI sources)
 ```
 
 Then, from anywhere:

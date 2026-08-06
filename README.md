@@ -48,11 +48,11 @@ and lifecycle; OpenClaw runs the agent.
   is preflight-checked, transferred with its memory, members and Telegram
   identity, verified on arrival, and rolled back if anything fails. Or export
   it to a single file and import it wherever you like.
-- **Bring your own AI — or none at all.** An Anthropic API key, a Claude
-  Pro/Max subscription on a machine where you're already logged in, or a
-  **local model server you run yourself** (Ollama). The local path needs no
-  credential of any kind: nothing stored, nothing injected, nothing leaving
-  the machine.
+- **Bring your own AI — or none at all.** An Anthropic or Google Gemini API
+  key, a Claude Pro/Max subscription on a machine where you're already logged
+  in, or a **local model server you run yourself** (Ollama). The local path
+  needs no credential of any kind: nothing stored, nothing injected, nothing
+  leaving the machine.
 - **Different agents can use different AIs.** The kitchen helper on a local
   model, the homework tutor on Claude — chosen per agent, changed any time.
 
@@ -61,7 +61,7 @@ and lifecycle; OpenClaw runs the agent.
 - **Linux or macOS** with **Docker** (Docker Desktop is fine) and **Node.js 22+**
 - **A Telegram account** (to create bots via [@BotFather](https://t.me/botfather) —
   about 60 seconds per agent, or pre-stock a pool so it's zero)
-- **An AI**: an Anthropic API key, the `claude` CLI logged in, **or** a local
+- **An AI**: an Anthropic or Google Gemini API key, the `claude` CLI logged in, **or** a local
   model server (see below) — the local path needs no account or credential
 - A machine that stays on, if you want the agents to stay reachable
 
@@ -80,7 +80,7 @@ re-run.
 
 Then open **http://localhost:8080**, unlock with your password, and:
 
-1. **Connect an AI source** (⚙ AI). If the `claude` CLI is logged in on this
+1. **Connect an AI source** (⚙ Settings → AI sources). If the `claude` CLI is logged in on this
    machine, it's one tap. On macOS, run `claude setup-token` and paste the
    token (see [docs/ai-profiles.md](docs/ai-profiles.md)). Otherwise paste an
    API key — or pick **Local model server** and point it at your own Ollama.
@@ -98,9 +98,12 @@ link and approve them when they message it.
 `agentclaw` speaks the same API as the web app, for scripting and remote
 management. It's linked by `setup-host.sh`; configure it with
 `~/.config/agentclaw/env` (`AGENTCLAW_URL`, `AGENTCLAW_PASSWORD`) or flags.
+Every value in that file also works as a plain environment variable —
+including `AGENTCLAW_TOKEN` and `AGENTCLAW_REFRESH_TOKEN`, for scripts that
+shouldn't touch your config file. Env vars beat the file; flags beat both.
 
-With per-user accounts, mint a token in the app (**⚙ AI → CLI access → New
-token**) and run `agentclaw login` — that works with any sign-in method,
+With per-user accounts, mint a token in the app (**⚙ Settings → Access →
+New token**) and run `agentclaw login` — that works with any sign-in method,
 including Google, which has no password for a CLI to use.
 
 ```sh
@@ -178,8 +181,9 @@ sudo systemctl restart ollama
 ollama pull qwen3.6:27b-q8_0
 ```
 
-Then add the AI source in **⚙ AI → Local model server**, using the docker
-bridge address (`http://172.17.0.1:11434/v1`) — *not* `localhost`. AgentClaw
+Then add the AI source in **⚙ Settings → AI sources** (pick **Local model
+server**), using the docker bridge address (`http://172.17.0.1:11434/v1`) —
+*not* `localhost`. AgentClaw
 checks reachability and that the model exists before saving.
 
 Expect a large model to occupy tens of GB of RAM while resident and to take
@@ -228,7 +232,7 @@ Design decisions worth knowing before you read the code:
 
 ```sh
 ./scripts/restart.sh                  # restart (systemd or launchd)
-./scripts/backup-volumes.sh           # manual backup; nightly by timer
+./scripts/backup-volumes.sh           # manual backup; also runs nightly
 ./scripts/build-runtime-image.sh      # rebuild the agent image
 npm test                              # unit tests + web syntax check
 ```
@@ -241,13 +245,36 @@ un-checkpointed `data/agentclaw.sqlite` copies as an *empty* file. Use
 `./scripts/backup-volumes.sh` (which uses SQLite's online backup API) or stop
 the service first — shutdown checkpoints the WAL.
 
-**What a backup contains.** Each nightly run writes the control-plane database
+**What a backup contains.** The nightly run (a systemd user timer on Linux, a
+launchd daily job on macOS — both installed by `setup-host.sh`) writes a dated
+directory under `AGENTCLAW_BACKUP_DIR` holding the control-plane database
 (agent registry, memberships, encrypted credentials, memory snapshots), a copy
 of `AGENTCLAW_SECRET_KEY` — without which those credentials can't be decrypted
 — and one tarball per agent volume (the agent's memory and OpenClaw state).
 Restoring the database alone brings back everything AgentClaw knows; restoring
 a volume brings back what an agent knows. Backups are as sensitive as the
 system itself and live in a `0700` directory.
+
+**Restoring from backup.** Stop the service first (`./scripts/restart.sh`
+knows how to start it again afterwards; agent containers should be stopped
+too). Then, from the dated backup directory you want:
+
+1. Copy `agentclaw.sqlite` over `data/agentclaw.sqlite` (or wherever
+   `AGENTCLAW_DB` points).
+2. Check that `.env` still has the `AGENTCLAW_SECRET_KEY` line saved in the
+   backup's `secret-key.env` — put it back if not. Without that exact key,
+   every stored bot token and API key in the database is unrecoverable, and
+   changing it also invalidates existing sessions (everyone signs in again).
+3. Restore each agent volume you need, with that agent stopped:
+
+   ```sh
+   docker run --rm -v <volume>:/data -v <backup-dir>:/in:ro \
+     agentclaw-runtime:latest bash -c 'cd /data && tar xzf /in/<volume>.tgz'
+   ```
+
+4. Restart the service. If an agent comes up confused — wrong model, stale
+   config — use **Rebuild**: the container is disposable, the volume you just
+   restored is not.
 
 ## Status and limitations
 

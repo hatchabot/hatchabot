@@ -7,7 +7,9 @@
 > its first message. Tailscale is only needed for someone to open AgentClaw's
 > web pages, including the classic invite-link join flow below.
 
-AgentClaw's control plane binds `0.0.0.0:8080` on the host. Tailscale turns
+With a password set, AgentClaw's control plane binds `0.0.0.0:8080` on the
+host (without `AGENTCLAW_PASSWORD` it deliberately binds `127.0.0.1` only,
+since every request would be treated as the owner). Tailscale turns
 that into "reachable from anywhere, by exactly the people you choose" without
 opening a single port to the internet. This is the family-scale access story:
 the invite flow works from a phone on cellular, not just your wifi.

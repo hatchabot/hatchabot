@@ -35,17 +35,15 @@ function configDefaults(): Record<string, string> {
 const USAGE = `agentclaw <command> [options]
 
 Commands:
-  login [--token <tok>]        Save an access token from the app (⚙ → CLI access).
+  login [--token <tok>]        Save an access token from the app (⚙ Settings → Access).
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
   list                         Agents with state, model, and last activity
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
          [--private] [--bot-token <tok>]
                                Create an agent and wait for it to boot.
-                               --reuse-bot takes over the bot that workspace
-                               already owns: no new bot slot (Telegram caps you
-                               at ~20) and the same chat everyone already uses.
-                               Otherwise prompts for a BotFather token.
+                               Prompts for a BotFather token if the bot pool
+                               is empty.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
   export <agent> [-o <file>]   Download an agent as a portable .agentclaw file
@@ -68,7 +66,8 @@ Commands:
                                folder you want kept — omitted ones are dropped)
   servers                      Other AgentClaw servers you can move agents to
   servers add <name> <url> <token>
-                               Register one (token from that server's ⚙ AI)
+                               Register one (token from that server's
+                               ⚙ Settings → Access)
   migrate <agent> <server>     Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
   invite <agent>               Mint a join link for the web flow
@@ -235,7 +234,7 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
     const token =
       flags.get('token') ||
       (await prompt(
-        `Open ${url} → ⚙ AI → "CLI access" → New token, then paste it here.\nToken: `,
+        `Open ${url} → ⚙ Settings → Access → New token, then paste it here.\nToken: `,
       ));
     if (!token.startsWith('agentclaw_')) fail('that does not look like an AgentClaw token');
     const res = await fetch(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });
@@ -340,7 +339,7 @@ async function main() {
       const name = rest.join(' ').trim() || fail('usage: agentclaw create <name> [options]');
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
       const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
-      const profile = flags.get('profile') ?? profiles[0]?.id ?? fail('no AI profile — set one up first (web ⚙ AI)');
+      const profile = flags.get('profile') ?? profiles[0]?.id ?? fail('no AI profile — set one up first (web ⚙ Settings → AI sources)');
       const host = flags.get('host') ?? (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
       const res = await jsonPost('/v1/agents', {
         name,
