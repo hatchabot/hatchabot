@@ -81,6 +81,18 @@ Two things to know:
   which is exactly tool calling. A smaller model at Q8 drives an agent loop
   more reliably than a bigger one at Q4.
 
+## Sharing an AI source with other accounts
+
+With per-user identity, every account brings its own AI sources — a second
+sign-in starts with none, and it cannot lean on this machine's Claude login
+(that file is the machine owner's Max subscription; billing it silently
+would be wrong). Sharing is the owner's explicit call instead: flip
+**Shared** on your profile (⚙ Settings → AI sources) and every account on
+this installation can pick it for their agents — labelled "(shared)" in
+their create dialog. Flip it off and no new agents can take it; agents
+already on it keep working until switched. Only the profile's owner can
+edit, share, or delete it.
+
 ## Sharing your files with an agent
 
 An agent normally sees only its own workspace. **Edit → "Folders this agent

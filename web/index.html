@@ -563,10 +563,19 @@ function openAiDlg(tab) {
 }
 
 function renderAiList() {
-  $('aiList').innerHTML = profiles.map(p => `
+  $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${esc(p.name)}</b>
       <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
+      <span class="sub">shared by the server owner — usable for your agents, managed by them</span>
+    </div>` : `
+    <div class="pair" style="flex-wrap:wrap;gap:6px">
+      <b>${esc(p.name)}</b>
+      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
+      <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
+             title="Let every account on this server use this source for their agents — they spend on it">
+        <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked)"> Shared
+      </label>
       <div style="display:flex;gap:6px;width:100%">
         <input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" title="Default model" style="flex:1;min-width:0">
         <input type="text" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(', '))}"
@@ -575,6 +584,14 @@ function renderAiList() {
         <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">×</button>
       </div>
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
+}
+
+async function shareAiProfile(id, shared) {
+  try {
+    await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { shared } });
+    toast(shared ? 'Shared with everyone on this server' : 'No longer shared — existing agents keep it until switched');
+    await refresh(true); renderAiList();
+  } catch (e) { $('aiErr').textContent = e.message; renderAiList(); }
 }
 
 async function saveAiProfile(id) {
@@ -709,7 +726,7 @@ $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   $('agentProfile').innerHTML = profiles.map(p =>
-    `<option value="${p.id}">${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}</option>`).join('');
+    `<option value="${p.id}">${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}${p.mine === false ? ' (shared)' : ''}</option>`).join('');
   createDlg.showModal();
   $('agentName').focus();
 };

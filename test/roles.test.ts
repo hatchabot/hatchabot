@@ -153,6 +153,49 @@ describe('cross-owner isolation (audit regressions)', () => {
     expect(res.json().ownerId).toBe(MEMBER);
   });
 
+  it('shares an AI source with the whole installation when its owner opts in', async () => {
+    // The deliberate Max-sharing path: the owner flips Shared on THEIR
+    // profile; other accounts can then run their own agents on it. Spend is
+    // shared knowingly, and flipping it back stops new use.
+    const store = twoOwners();
+    const f = await app(store);
+
+    const share = await f.inject({
+      method: 'PATCH', url: '/v1/ai-profiles/p-owner', headers: as(OWNER),
+      payload: { shared: true },
+    });
+    expect(share.statusCode).toBe(200);
+
+    const listed = (await f.inject({
+      method: 'GET', url: '/v1/ai-profiles', headers: as(MEMBER),
+    })).json();
+    expect(listed.map((p: any) => p.id)).toContain('p-owner');
+    expect(listed.find((p: any) => p.id === 'p-owner').mine).toBe(false);
+
+    const create = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as(MEMBER),
+      payload: { name: 'On Shared AI', aiProfileId: 'p-owner', hostId: 'h1' },
+    });
+    expect(create.statusCode).toBe(202);
+    expect(create.json().ownerId).toBe(MEMBER);
+
+    // Unshare: no NEW use, and only the owner can flip the switch at all.
+    await f.inject({
+      method: 'PATCH', url: '/v1/ai-profiles/p-owner', headers: as(OWNER),
+      payload: { shared: false },
+    });
+    const blocked = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as(MEMBER),
+      payload: { name: 'Too Late', aiProfileId: 'p-owner', hostId: 'h1' },
+    });
+    expect(blocked.statusCode).toBe(400);
+    const foreignFlip = await f.inject({
+      method: 'PATCH', url: '/v1/ai-profiles/p-owner', headers: as(MEMBER),
+      payload: { shared: true },
+    });
+    expect(foreignFlip.statusCode).toBe(404);
+  });
+
   it("refuses to ride the machine owner's on-disk Claude login", async () => {
     // A subscription profile with no token mounts the HOST's ~/.claude — the
     // machine owner's Max login. A second account creating one would silently

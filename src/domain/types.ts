@@ -62,6 +62,12 @@ export interface AIProfile {
    * (~/.claude) and is mounted, never copied into AgentClaw's store.
    */
   secretRef?: string;
+  /**
+   * Owner opted in to every account on this installation using this source
+   * for THEIR agents — deliberately sharing a Max subscription (or a key)
+   * with the family. Off by default: sharing spend is an explicit act.
+   */
+  shared?: boolean;
   createdAt: string;
 }
 

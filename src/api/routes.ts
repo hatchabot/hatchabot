@@ -397,9 +397,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // ---- profiles & hosts ----------------------------------------------------
 
   app.get('/v1/ai-profiles', async (req) => {
+    // `mine` tells the app which rows the caller may edit/share/delete —
+    // a shared profile appears in everyone's list but has one owner.
     return store
       .listAIProfiles(ownerIdOf(req))
-      .map(({ secretRef: _s, ...safe }) => safe);
+      .map(({ secretRef: _s, ...safe }) => ({ ...safe, mine: safe.ownerId === ownerIdOf(req) }));
   });
 
   app.get('/v1/hosts', async (req) => {
@@ -464,9 +466,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (localHost && localHost.ownerId !== ownerIdOf(req)) {
         return reply.code(400).send({
           error:
-            "This machine's Claude login belongs to the account that set the server up. " +
-            'Run `claude setup-token` under your own Claude account and paste that token ' +
-            'here instead — or use an API key or a local model.',
+            "This machine's Claude login belongs to the account that set the server up — " +
+            'they can share their AI source with everyone here (Settings → AI sources → ' +
+            'Shared). Or run `claude setup-token` under your own Claude account and paste ' +
+            'that token here — or use an API key or a local model.',
         });
       }
       if (!existsSync(`${claudeAuthDir()}/.credentials.json`)) {
@@ -513,12 +516,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         .object({
           model: z.string().trim().min(1).optional(),
           models: z.array(z.string().min(1)).max(16).optional(),
+          /** Owner opt-in: every account on this installation may use this
+           *  source for their agents. Shared spend, so explicit only. */
+          shared: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       if (parsed.data.model !== undefined) store.setAIProfileModel(profile.id, parsed.data.model);
       if ('models' in ((req.body ?? {}) as object)) {
         store.setAIProfileModels(profile.id, parsed.data.models);
+      }
+      if (parsed.data.shared !== undefined) {
+        store.setAIProfileShared(profile.id, parsed.data.shared);
       }
       const updated = store.getAIProfile(profile.id)!;
       const { secretRef: _s, ...safe } = updated;
@@ -579,7 +588,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // (see Store.listHosts) — what stays per-account is the AI credential.
     const profile = store.getAIProfile(parsed.data.aiProfileId);
     const host = store.getHost(parsed.data.hostId);
-    if (!profile || profile.ownerId !== ownerId) {
+    if (!profile || (profile.ownerId !== ownerId && !profile.shared)) {
       return reply.code(400).send({ error: 'Unknown AI profile' });
     }
     if (!host || (host.ownerId !== ownerId && host.kind !== 'local')) {
@@ -773,9 +782,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
 
       if (aiProfileId !== undefined && aiProfileId !== agent.aiProfileId) {
-        // Must be the caller's own profile — same rule as agent creation.
+        // The caller's own profile, or one shared with the installation —
+        // same rule as agent creation.
         const target = store.getAIProfile(aiProfileId);
-        if (!target || target.ownerId !== ownerIdOf(req)) {
+        if (!target || (target.ownerId !== ownerIdOf(req) && !target.shared)) {
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
         const host = store.getHost(agent.hostId);
@@ -1237,7 +1247,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!host) return reply.code(400).send({ error: 'No host available to import onto.' });
       if (req.query.aiProfileId) {
         const p = store.getAIProfile(req.query.aiProfileId);
-        if (!p || p.ownerId !== ownerId) {
+        if (!p || (p.ownerId !== ownerId && !p.shared)) {
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
       }

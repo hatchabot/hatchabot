@@ -122,6 +122,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN shared_paths TEXT`,
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
+      `ALTER TABLE ai_profiles ADD COLUMN shared INTEGER NOT NULL DEFAULT 0`,
     ]) {
       try {
         this.db.exec(alter);
@@ -147,11 +148,21 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, models, base_url,
-                                  secret_ref, created_at)
+                                  secret_ref, shared, created_at)
          VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @models, @baseUrl,
-                 @secretRef, @createdAt)`,
+                 @secretRef, @shared, @createdAt)`,
       )
-      .run({ secretRef: null, baseUrl: null, ...p, models: p.models ? JSON.stringify(p.models) : null });
+      .run({
+        secretRef: null,
+        baseUrl: null,
+        ...p,
+        models: p.models ? JSON.stringify(p.models) : null,
+        shared: p.shared ? 1 : 0,
+      });
+  }
+
+  setAIProfileShared(id: string, shared: boolean): void {
+    this.db.prepare(`UPDATE ai_profiles SET shared = ? WHERE id = ?`).run(shared ? 1 : 0, id);
   }
 
   setAIProfileModel(id: string, model: string): void {
@@ -174,8 +185,11 @@ export class Store {
   }
 
   listAIProfiles(ownerId: string): AIProfile[] {
+    // Own profiles plus any another account deliberately shared with the
+    // installation (see AIProfile.shared) — the shared-host counterpart for
+    // credentials, opt-in instead of automatic because it is shared spend.
     const rows = this.db
-      .prepare(`SELECT * FROM ai_profiles WHERE owner_id = ? ORDER BY created_at`)
+      .prepare(`SELECT * FROM ai_profiles WHERE owner_id = ? OR shared = 1 ORDER BY created_at`)
       .all(ownerId) as any[];
     return rows.map(rowToAIProfile);
   }
@@ -935,6 +949,7 @@ function rowToAIProfile(r: any): AIProfile {
     models: r.models ? JSON.parse(r.models) : undefined,
     baseUrl: r.base_url ?? undefined,
     secretRef: r.secret_ref ?? undefined,
+    shared: !!r.shared,
     createdAt: r.created_at,
   };
 }
