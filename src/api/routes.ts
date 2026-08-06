@@ -345,8 +345,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // 10 minutes of idle polling on an agent that is already live — holding
       // `inflight` for it made Delete hang and Rebuild answer 409 that whole
       // time. The watcher notices for itself when the agent goes away.
+      // Skipped entirely when the owner's Telegram identity was carried over
+      // from an earlier agent (createAgentRecord): they're in allowFrom
+      // already, so there is no pairing request to watch for.
       const channelRow = store.getChannelForAgent(agentId);
-      if (result.agent.state === 'RUNNING' && result.agent.runtimeRef && channelRow) {
+      const ownerBound = store
+        .listMemberships(agentId)
+        .some((m) => m.userId === result.agent.ownerId && m.channelUserId);
+      if (result.agent.state === 'RUNNING' && result.agent.runtimeRef && channelRow && !ownerBound) {
         void claimFirstContact(
           { store, provider, log },
           {

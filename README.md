@@ -87,7 +87,8 @@ Then open **http://localhost:8080**, unlock with your password, and:
 2. **Tap +** to create an agent. If the bot pool is empty you'll be asked for a
    BotFather token — the app walks you through it.
 3. **Tap the Telegram link and say hi.** That first message claims the agent as
-   yours. Then just chat.
+   yours. Then just chat. (Only your first-ever agent needs this claim — later
+   agents recognize your Telegram account from birth and answer immediately.)
 
 To let others in, use **Invite…** on the agent card — send the link, or have
 them scan the QR, or (if they're not on your network) send the agent's Telegram

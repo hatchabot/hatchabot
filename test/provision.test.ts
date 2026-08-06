@@ -228,6 +228,31 @@ describe('rebuildAgent', () => {
   });
 });
 
+describe('pairing happens once per person, not once per agent', () => {
+  it("seeds a later agent's allowlist with the owner's already-bound Telegram id", async () => {
+    const w = await world();
+    // Agent #1: the first-contact claim bound the owner's Telegram identity.
+    const first = await provisionAgent(w.deps, INPUT);
+    w.store.bindMembershipChannelUser(first.agent.id, 'o', '1000000001');
+
+    // Agent #2 must trust the same person from birth: id carried onto the
+    // owner membership and into allowFrom — no "access not configured", no
+    // pairing code, no second message.
+    const second = await provisionAgent(w.deps, { ...INPUT, name: 'Second' });
+    // (channel stub reuses @stubbot, so the clash guard fails this one — the
+    // membership row is what we're testing, and it's created up front.)
+    const owner = w.store.listMemberships(second.agent.id).find((m) => m.userId === 'o');
+    expect(owner?.channelUserId).toBe('1000000001');
+  });
+
+  it('leaves the very first agent to the pairing claim (nothing known yet)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const owner = w.store.listMemberships(agent.id).find((m) => m.userId === 'o');
+    expect(owner?.channelUserId).toBeUndefined();
+  });
+});
+
 describe('buildRuntimeSpec', () => {
   it('api-key profile: key in env, no mounts, members seeded into allowFrom', async () => {
     const w = await world();

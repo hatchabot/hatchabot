@@ -73,11 +73,17 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
   store.insertAgent(agent);
 
   // Owner is a member from the start — the allowlist has to contain somebody.
+  // And if any earlier agent already bound their Telegram identity, carry it
+  // over: seeded into allowFrom, their first message just works — the pairing
+  // dance ("access not configured", a code, a second message) happens once
+  // per person, not once per agent.
+  const known = store.knownChannelUserId(input.ownerId);
   store.insertMembership({
     id: randomUUID(),
     agentId: agent.id,
     userId: input.ownerId,
     role: 'owner',
+    ...(known ? { channelUserId: known } : {}),
     status: 'active',
     joinedAt: now,
   });

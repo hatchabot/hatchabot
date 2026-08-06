@@ -888,6 +888,23 @@ export class Store {
       .run(channelUserId, new Date().toISOString(), agentId, userId);
   }
 
+  /**
+   * The Telegram identity this user is already known by, from any of their
+   * agents. Once one first-contact claim has bound it, every LATER agent can
+   * trust the same person from birth — creating agent #5 should not make the
+   * owner pair with their own bot a fifth time.
+   */
+  knownChannelUserId(userId: string): string | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT channel_user_id FROM memberships
+         WHERE user_id = ? AND channel_user_id IS NOT NULL AND status = 'active'
+         ORDER BY joined_at DESC LIMIT 1`,
+      )
+      .get(userId) as { channel_user_id: string } | undefined;
+    return r?.channel_user_id;
+  }
+
   /** Active members' channel ids — this is what becomes the bot allowlist. */
   listAllowedChannelUserIds(agentId: string): string[] {
     const rows = this.db
