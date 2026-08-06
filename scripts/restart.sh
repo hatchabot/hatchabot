@@ -13,7 +13,10 @@ else
 fi
 
 # Wait for it to answer, so "restarted" means "actually serving".
-PORT="$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2 || true)"
+# .env values may be quoted or carry an inline comment — take the bare value.
+PORT="$(sed -n 's/^PORT=//p' .env 2>/dev/null \
+  | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
+  | tail -n1 || true)"
 PORT="${PORT:-8080}"
 for _ in $(seq 1 30); do
   if curl -sf -o /dev/null "http://localhost:${PORT}/healthz"; then

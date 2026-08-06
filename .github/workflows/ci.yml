@@ -5,9 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,3 +22,6 @@ jobs:
       - run: npm run typecheck
       # `npm test` also syntax-checks the single-file web app.
       - run: npm test
+      # Whole provision/rollback loop in-process against the mock provider —
+      # sub-second, no docker, no network, no secrets.
+      - run: npm run e2e

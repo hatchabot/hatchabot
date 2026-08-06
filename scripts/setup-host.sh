@@ -29,7 +29,11 @@ if [ ! -f .env ]; then
   [ -n "$PW" ] || { echo "Password cannot be empty."; exit 1; }
   {
     echo "AGENTCLAW_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
-    echo "AGENTCLAW_PASSWORD=$PW"
+    # Two parsers read this line: the macOS launchd wrapper sources .env as
+    # shell, and systemd's EnvironmentFile parses it itself. Single quotes are
+    # the one quoting both understand (systemd strips them, shell honours
+    # them) — %q's backslash escapes would reach systemd literally.
+    printf "AGENTCLAW_PASSWORD='%s'\n" "$(printf '%s' "$PW" | sed "s/'/'\\\\''/g")"
     echo "PORT=8080"
     echo "# Set when reachable beyond localhost, e.g. via Tailscale — used in invite links:"
     echo "# AGENTCLAW_PUBLIC_URL=http://<this-machine>.<tailnet>.ts.net:8080"
@@ -80,18 +84,52 @@ PLIST
   launchctl load -w "$PLIST"
   echo "Manage with: launchctl {load|unload} -w $PLIST"
   echo "Logs: tail -f $REPO/data/server.log"
+
+  # Nightly backups — the launchd counterpart of the systemd timer Linux hosts
+  # get; without it a macOS host has no automatic backups at all.
+  BACKUP_PLIST="$HOME/Library/LaunchAgents/com.agentclaw.backup.plist"
+  cat > "$BACKUP_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.agentclaw.backup</string>
+  <key>ProgramArguments</key><array>
+    <string>/bin/bash</string><string>-c</string>
+    <string>cd "$REPO" &amp;&amp; set -a &amp;&amp; . ./.env &amp;&amp; set +a &amp;&amp; exec ./scripts/backup-volumes.sh</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>$NODE_DIR:$DOCKER_DIR:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key><dict>
+    <key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key><string>$REPO/data/backup.log</string>
+  <key>StandardErrorPath</key><string>$REPO/data/backup.log</string>
+</dict></plist>
+PLIST
+  launchctl unload -w "$BACKUP_PLIST" 2>/dev/null || true
+  launchctl load -w "$BACKUP_PLIST"
+  echo "Nightly backups at 03:30: launchctl {load|unload} -w $BACKUP_PLIST"
 else
   say "Installing the systemd user service…"
   ./scripts/install-service.sh
 fi
 
 say "Linking the agentclaw CLI…"
-npm link >/dev/null
+# On a system-wide Node the global prefix (/usr/lib) is root-owned and
+# `npm link` dies with EACCES — the CLI is optional, so don't sink the setup.
+if ! npm link >/dev/null; then
+  echo "⚠ npm link failed (usually EACCES on a system-wide Node). To fix:"
+  echo "    npm config set prefix ~/.npm-global"
+  echo "    add ~/.npm-global/bin to your PATH, then re-run: npm link"
+fi
 mkdir -p ~/.config/agentclaw
 if ! grep -q '^AGENTCLAW_PASSWORD=' ~/.config/agentclaw/env 2>/dev/null; then
-  grep '^AGENTCLAW_PASSWORD=' .env >> ~/.config/agentclaw/env
-  chmod 600 ~/.config/agentclaw/env
+  # A hand-written .env may have no password line (e.g. identity mode) —
+  # the CLI prompts in that case, so don't let set -e die on the last step.
+  grep '^AGENTCLAW_PASSWORD=' .env >> ~/.config/agentclaw/env || true
 fi
+chmod 600 ~/.config/agentclaw/env
 
 say "Done. Next steps:"
 cat <<'EOF'

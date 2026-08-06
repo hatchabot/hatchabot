@@ -10,6 +10,9 @@ Description=AgentClaw control plane
 WorkingDirectory=__AGENTCLAW_DIR__
 # Holds AGENTCLAW_SECRET_KEY (and PORT). Never committed — see .gitignore.
 EnvironmentFile=__AGENTCLAW_DIR__/.env
+# systemd user managers start with a minimal PATH; node (nvm) and docker can
+# live outside it, so install-service.sh bakes their real locations in here.
+Environment=PATH=__AGENTCLAW_PATH__
 ExecStart=__AGENTCLAW_DIR__/node_modules/.bin/tsx src/index.ts
 Restart=always
 RestartSec=3

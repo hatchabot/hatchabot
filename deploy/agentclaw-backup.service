@@ -1,7 +1,15 @@
+# AgentClaw nightly backup — oneshot driven by agentclaw-backup.timer.
+# Installed by scripts/install-service.sh into ~/.config/systemd/user/.
 [Unit]
 Description=AgentClaw nightly volume backup
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/agentclaw
-ExecStart=%h/agentclaw/scripts/backup-volumes.sh
+WorkingDirectory=__AGENTCLAW_DIR__
+# So AGENTCLAW_BACKUP_DIR / AGENTCLAW_PREFIX overrides apply to timed runs
+# the same way they do to manual ones.
+EnvironmentFile=__AGENTCLAW_DIR__/.env
+# systemd user managers start with a minimal PATH; node (nvm) and docker can
+# live outside it, so install-service.sh bakes their real locations in here.
+Environment=PATH=__AGENTCLAW_PATH__
+ExecStart=__AGENTCLAW_DIR__/scripts/backup-volumes.sh

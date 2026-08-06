@@ -11,7 +11,11 @@
 #   docker run --rm -v <volume>:/data -v <backup-dir>:/in:ro \
 #     agentclaw-runtime:latest bash -c 'cd /data && tar xzf /in/<volume>.tgz'
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
+# The server namespaces its volumes under AGENTCLAW_PREFIX — back up whatever
+# namespace this installation actually uses, not a hardcoded one.
+PREFIX="${AGENTCLAW_PREFIX:-agentclaw}"
 BASE="${AGENTCLAW_BACKUP_DIR:-$HOME/agentclaw-backups}"
 DEST="$BASE/$(date +%F)"
 IMAGE="${AGENTCLAW_IMAGE:-agentclaw-runtime:latest}"
@@ -20,6 +24,8 @@ KEEP_DAYS="${AGENTCLAW_BACKUP_KEEP_DAYS:-14}"
 # Tarballs contain openclaw.json — bot tokens and gateway tokens in the clear.
 mkdir -p "$BASE" && chmod 700 "$BASE"
 mkdir -m 700 -p "$DEST"
+# mkdir -m only applies on creation — tighten a pre-existing directory too.
+chmod 700 "$DEST"
 umask 077
 
 # The control plane's own database first: it holds the encrypted bot tokens,
@@ -27,37 +33,66 @@ umask 077
 # but AgentClaw would forget every agent it ever made. Use SQLite's online
 # backup API — the DB is in WAL mode, so `cp` on a running server can tear.
 DB_PATH="${AGENTCLAW_DB:-data/agentclaw.sqlite}"
-if [ -f "$DB_PATH" ]; then
-  node -e '
-    const Database = require("better-sqlite3");
-    const db = new Database(process.argv[1], { readonly: true });
-    db.backup(process.argv[2]).then(() => { db.close(); })
-      .catch((e) => { console.error(e); process.exit(1); });
-  ' "$DB_PATH" "$DEST/agentclaw.sqlite"
-  chmod 600 "$DEST/agentclaw.sqlite"
-  echo "  ✓ control plane database → $DEST/agentclaw.sqlite"
-  # Without the key the backup's secrets are undecryptable, so keep a copy
-  # beside it. Both are only as safe as this directory (0700).
-  if [ -f .env ]; then
-    grep '^AGENTCLAW_SECRET_KEY=' .env > "$DEST/secret-key.env" 2>/dev/null || true
+if [ ! -f "$DB_PATH" ]; then
+  echo "✗ No database at $DB_PATH — a backup without the registry is not a backup." >&2
+  exit 1
+fi
+node -e '
+  const Database = require("better-sqlite3");
+  const db = new Database(process.argv[1], { readonly: true });
+  db.backup(process.argv[2]).then(() => { db.close(); })
+    .catch((e) => { console.error(e); process.exit(1); });
+' "$DB_PATH" "$DEST/agentclaw.sqlite"
+chmod 600 "$DEST/agentclaw.sqlite"
+echo "  ✓ control plane database → $DEST/agentclaw.sqlite"
+# Without the key the backup's secrets are undecryptable, so keep a copy
+# beside it. Both are only as safe as this directory (0700).
+if [ -f .env ]; then
+  if grep '^AGENTCLAW_SECRET_KEY=' .env > "$DEST/secret-key.env"; then
     chmod 600 "$DEST/secret-key.env"
+  else
+    # An empty secret-key.env would read as "key backed up" at restore time.
+    rm -f "$DEST/secret-key.env"
+    echo "  ⚠ .env has no AGENTCLAW_SECRET_KEY — this backup's secrets cannot be decrypted without the key!" >&2
   fi
 fi
 
+# The runtime image normally provides tar; on a host that hasn't built it yet
+# any stock image will do — tar is all we need here.
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "  ⚠ $IMAGE not found — falling back to debian:stable-slim for tar." >&2
+  IMAGE="debian:stable-slim"
+fi
+
 count=0
-for vol in $(docker volume ls -q | grep -E '^agentclaw-' || true); do
+failed=0
+for vol in $(docker volume ls -q | grep -E "^${PREFIX}-" || true); do
   # Read-only mount; tar from inside a throwaway container so we never need
-  # root on the host to reach /var/lib/docker.
-  docker run --rm -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
-    bash -c "tar czf '/out/$vol.tgz' -C /data ."
-  # The tar runs as root INSIDE a container, so the host umask does not apply
-  # to what it writes. These hold bot tokens — tighten them explicitly.
+  # root on the host to reach /var/lib/docker. Run as the invoking user (so
+  # the host owns the tarball) with umask 077 (so it is never world-readable,
+  # even transiently or when tar dies halfway).
+  # GNU tar exits 1 for "file changed as we read it" — expected on a live
+  # volume, and the archive is still usable. Only >1 is a hard failure, and
+  # one bad volume must not abort the rest of the run.
+  rc=0
+  docker run --rm --user "$(id -u):$(id -g)" -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
+    bash -c "umask 077 && tar czf '/out/$vol.tgz' -C /data ." || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    echo "  ✗ $vol failed (exit $rc)" >&2
+    failed=$((failed + 1))
+    continue
+  fi
   chmod 600 "$DEST/$vol.tgz"
   echo "  ✓ $vol → $DEST/$vol.tgz"
   count=$((count + 1))
 done
 
-# Prune old snapshot directories.
-find "$BASE" -mindepth 1 -maxdepth 1 -type d -mtime "+$KEEP_DAYS" -exec rm -rf {} +
+# Prune old snapshots — only our own date-named directories, since the
+# destination may be a shared path (e.g. a NAS) with unrelated neighbours.
+find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS" -exec rm -rf {} +
 
 echo "Backed up $count volume(s) to $DEST (keeping $KEEP_DAYS days)"
+if [ "$failed" -gt 0 ]; then
+  echo "✗ $failed volume(s) failed — this backup is incomplete." >&2
+  exit 1
+fi
