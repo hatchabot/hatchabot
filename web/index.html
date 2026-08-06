@@ -566,12 +566,12 @@ function renderAiList() {
   $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${esc(p.name)}</b>
-      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
+      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login") : `${esc(p.vendor)} key`}</span>
       <span class="sub">shared by the server owner — usable for your agents, managed by them</span>
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${esc(p.name)}</b>
-      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? 'subscription' : `${esc(p.vendor)} key`}</span>
+      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login") : `${esc(p.vendor)} key`}</span>
       <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
              title="Let every account on this server use this source for their agents — they spend on it">
         <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked)"> Shared

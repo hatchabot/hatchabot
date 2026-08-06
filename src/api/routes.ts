@@ -399,9 +399,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get('/v1/ai-profiles', async (req) => {
     // `mine` tells the app which rows the caller may edit/share/delete —
     // a shared profile appears in everyone's list but has one owner.
-    return store
-      .listAIProfiles(ownerIdOf(req))
-      .map(({ secretRef: _s, ...safe }) => ({ ...safe, mine: safe.ownerId === ownerIdOf(req) }));
+    // `credential` says WHAT authenticates this source (never the secret
+    // itself): the two subscription flavours are indistinguishable in the
+    // UI otherwise, and "did I paste a setup-token or is this the machine
+    // login?" is a question the owner should not need the database for.
+    return store.listAIProfiles(ownerIdOf(req)).map(({ secretRef, ...safe }) => ({
+      ...safe,
+      mine: safe.ownerId === ownerIdOf(req),
+      credential:
+        safe.vendor === 'local'
+          ? 'none'
+          : safe.kind === 'subscription'
+            ? secretRef
+              ? 'setup-token'
+              : 'machine-login'
+            : 'api-key',
+    }));
   });
 
   app.get('/v1/hosts', async (req) => {
