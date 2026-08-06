@@ -129,6 +129,11 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     reply.setCookie(COOKIE, `${exp}.${sign(exp)}`, {
       httpOnly: true,
       sameSite: 'strict',
+      // Behind HTTPS (Tailscale serve, a terminating proxy) the 30-day cookie
+      // must not ride a forced plaintext request; plain-HTTP LAN installs
+      // still work because the flag is only set when the request came in
+      // encrypted. Same rule as identity mode below.
+      secure: requestIsHttps(req),
       path: '/',
       maxAge: Math.floor(TTL_MS / 1000),
     });
@@ -191,7 +196,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (sig.length !== expected.length) return undefined;
     if (!timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8'))) return undefined;
     const [sub, expStr] = payload.split(':');
-    if (!sub || Number(expStr) < Date.now()) return undefined;
+    // NaN never compares true, so a missing exp would fail OPEN — guard it
+    // the same way password-mode's validSession does.
+    const exp = Number(expStr);
+    if (!sub || !Number.isFinite(exp) || exp < Date.now()) return undefined;
     return { sub };
   };
 
