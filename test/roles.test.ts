@@ -125,13 +125,59 @@ describe('cross-owner isolation (audit regressions)', () => {
     return store;
   }
 
-  it("refuses to create an agent on another owner's host or AI profile", async () => {
+  it("refuses to create an agent with another owner's AI profile", async () => {
     const f = await app(twoOwners());
     const res = await f.inject({
       method: 'POST', url: '/v1/agents', headers: as(MEMBER),
       payload: { name: 'Sneaky', aiProfileId: 'p-owner', hostId: 'h1' },
     });
-    expect(res.statusCode).toBe(400); // not 202 — no container on the owner's box
+    expect(res.statusCode).toBe(400); // not 202 — no billing someone else's key
+  });
+
+  it('lets a second account create its OWN agent on the shared local host', async () => {
+    // The local host is the machine itself — an installation resource. What
+    // stays per-account is the AI credential, so a second signed-in account
+    // with its own profile must not be stuck at "Setup incomplete".
+    const store = twoOwners();
+    store.insertAIProfile({
+      id: 'p-member', ownerId: MEMBER, name: 'Their AI', vendor: 'anthropic',
+      kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/m', createdAt: 'now',
+    });
+    expect(store.listHosts(MEMBER).map((h) => h.id)).toContain('h1');
+    const f = await app(store);
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as(MEMBER),
+      payload: { name: 'Their Agent', aiProfileId: 'p-member', hostId: 'h1' },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(res.json().ownerId).toBe(MEMBER);
+  });
+
+  it("refuses to ride the machine owner's on-disk Claude login", async () => {
+    // A subscription profile with no token mounts the HOST's ~/.claude — the
+    // machine owner's Max login. A second account creating one would silently
+    // bill its agents to somebody else's subscription.
+    const f = await app(twoOwners());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/ai-profiles', headers: as(MEMBER),
+      payload: { kind: 'subscription', name: 'Freeload', vendor: 'anthropic', model: 'claude-opus-4-8' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/your own Claude account/);
+  });
+
+  it('accepts a second account bringing its own setup-token', async () => {
+    // The deliberate-sharing path: a token pasted in is that account's own
+    // credential (or one knowingly handed over) — no silent freeloading.
+    const f = await app(twoOwners());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/ai-profiles', headers: as(MEMBER),
+      payload: {
+        kind: 'subscription', name: 'Mine', vendor: 'anthropic',
+        model: 'claude-opus-4-8', oauthToken: 'sk-ant-oat-their-own',
+      },
+    });
+    expect(res.statusCode).toBe(201);
   });
 
   it("refuses to edit or delete another owner's AI profile", async () => {

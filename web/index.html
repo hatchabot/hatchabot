@@ -718,7 +718,8 @@ async function createAgent() {
   const name = $('agentName').value.trim();
   if (!name) { $('createErr').textContent = 'Give it a name.'; return; }
   const localHost = hosts.find(h => h.kind === 'local') ?? hosts[0];
-  if (!localHost || !profiles[0]) { $('createErr').textContent = 'Setup incomplete.'; return; }
+  if (!profiles[0]) { $('createErr').textContent = 'Add an AI source first: ⚙ Settings → AI sources.'; return; }
+  if (!localHost) { $('createErr').textContent = 'No host is configured on this server.'; return; }
   $('createBtn').disabled = true;
   try {
     await api('/v1/agents', { method: 'POST', body: {

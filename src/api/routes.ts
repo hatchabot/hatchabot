@@ -455,9 +455,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       await secrets.put(secretRef, body.oauthToken);
     } else {
       // Subscription via the on-disk login: nothing to store — the OAuth
-      // credential stays on the host machine and is mounted at boot. Check it
-      // exists so the failure happens here, with a fixable message, not
-      // inside a container.
+      // credential stays on the host machine and is mounted at boot. That
+      // file is the MACHINE OWNER'S Claude login, so on a shared local host
+      // only the account that owns the host row may lean on it; anyone else
+      // would silently bill their agents to someone else's subscription.
+      // They can still paste a setup-token of their own (the branch above).
+      const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+      if (localHost && localHost.ownerId !== ownerIdOf(req)) {
+        return reply.code(400).send({
+          error:
+            "This machine's Claude login belongs to the account that set the server up. " +
+            'Run `claude setup-token` under your own Claude account and paste that token ' +
+            'here instead — or use an API key or a local model.',
+        });
+      }
       if (!existsSync(`${claudeAuthDir()}/.credentials.json`)) {
         return reply.code(400).send({
           error:
@@ -562,14 +573,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const ownerId = ownerIdOf(req);
 
     // Ownership, not mere existence: without this any authenticated caller
-    // could run a container on the owner's host using the owner's AI
-    // credentials. Unknown-vs-not-yours are the same answer on purpose.
+    // could run a container using the owner's AI credentials. Unknown-vs-
+    // not-yours are the same answer on purpose. The one exception is a LOCAL
+    // host: the machine is shared with every account on this installation
+    // (see Store.listHosts) — what stays per-account is the AI credential.
     const profile = store.getAIProfile(parsed.data.aiProfileId);
     const host = store.getHost(parsed.data.hostId);
     if (!profile || profile.ownerId !== ownerId) {
       return reply.code(400).send({ error: 'Unknown AI profile' });
     }
-    if (!host || host.ownerId !== ownerId) {
+    if (!host || (host.ownerId !== ownerId && host.kind !== 'local')) {
       return reply.code(400).send({ error: 'Unknown host' });
     }
     if (profile.kind === 'subscription' && host.kind !== 'local') {

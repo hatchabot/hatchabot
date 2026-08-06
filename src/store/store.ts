@@ -192,8 +192,13 @@ export class Store {
   }
 
   listHosts(ownerId: string): Host[] {
+    // A local host IS this machine — an installation resource, not one
+    // account's possession. Every signed-in account may run agents on it
+    // (the row's owner_id still records who set the server up; see the
+    // subscription-profile guard in routes.ts for where that distinction
+    // matters). Cloud hosts, when they exist, stay strictly per-owner.
     const rows = this.db
-      .prepare(`SELECT id FROM hosts WHERE owner_id = ? ORDER BY created_at`)
+      .prepare(`SELECT id FROM hosts WHERE owner_id = ? OR kind = 'local' ORDER BY created_at`)
       .all(ownerId) as { id: string }[];
     return rows.map((r) => this.getHost(r.id)!).filter(Boolean);
   }
