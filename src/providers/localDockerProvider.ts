@@ -245,6 +245,16 @@ export class LocalDockerProvider implements RuntimeProvider {
     return this.#docker(['exec', container, 'bash', '-c', script]);
   }
 
+  async execShellOnVolume(runtimeRef: string, script: string): Promise<ExecResult> {
+    const { volume } = this.#names(runtimeRef);
+    // The runtime image (has bash + node, runs as uid 1000 like the files on
+    // the volume), mounted at the path the agent itself sees.
+    return this.#docker([
+      'run', '--rm', '-v', `${volume}:/home/node/.openclaw`, this.image,
+      'bash', '-c', script,
+    ]);
+  }
+
   async info(runtimeRef: string): Promise<RuntimeInfo> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker([

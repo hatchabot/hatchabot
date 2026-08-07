@@ -96,6 +96,7 @@ describe('revokeMember', () => {
       secretRef: 'chan/a1', deepLink: 'https://t.me/MixedCaseBot', createdAt: 'now',
     });
     s.store.setAgentRuntimeRef('a1', s.opts.runtimeRef);
+    await s.provider.start(s.opts.runtimeRef);
     s.store.setAgentState('a1', 'RUNNING');
     s.store.insertMembership({
       id: 'm2', agentId: 'a1', userId: 'u2', role: 'user',
@@ -104,15 +105,31 @@ describe('revokeMember', () => {
     return s;
   }
 
-  it('revokes, scrubs the lowercased allowlist file, and bounces the runtime', async () => {
+  it('revokes and scrubs the lowercased allowlist file on the volume', async () => {
     const { store, provider } = await withMember();
     await revokeMember({ store, provider }, 'a1', 'u2');
     expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
     expect(store.listAllowedChannelUserIds('a1')).toEqual([]);
-    const sh = provider.execLog.find((a) => a[0] === 'sh')!;
+    // On the VOLUME, not via exec into the container: the credentials file is
+    // what actually admits people (OpenClaw unions it with config), and this
+    // path also works while the agent is stopped. No restart needed — the
+    // runtime re-reads the file per message.
+    const sh = provider.execLog.find((a) => a[0] === 'sh-volume')!;
     expect(sh[1]).toContain('telegram-mixedcasebot-allowFrom.json');
     expect(sh[1]).toContain('555');
-    expect(provider.runtimes.get('mock://a1')!.phase).toBe('running'); // restarted
+    expect(provider.runtimes.get('mock://a1')!.phase).toBe('running'); // untouched
+  });
+
+  it('scrubs the allowlist even when the agent is stopped', async () => {
+    const { store, provider } = await withMember();
+    await provider.stop('mock://a1');
+    store.setAgentState('a1', 'STOPPED');
+    await revokeMember({ store, provider }, 'a1', 'u2');
+    // Before the one-shot-container fix this path failed (docker exec needs a
+    // running container) with advice to rebuild — which would NOT have
+    // revoked: the file survives rebuilds on the volume.
+    expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(true);
+    expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
   });
 
   it("refuses to remove the owner and is idempotent on re-revoke", async () => {
@@ -124,10 +141,10 @@ describe('revokeMember', () => {
     expect(provider.execLog.length).toBe(callsAfterFirst);
   });
 
-  it('keeps the DB revocation but reports failure when the scrub fails', async () => {
+  it('keeps the DB revocation but reports failure honestly when the scrub fails', async () => {
     const { store, provider } = await withMember();
-    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'boom' });
-    await expect(revokeMember({ store, provider }, 'a1', 'u2')).rejects.toBeInstanceOf(RevokeError);
+    provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'boom' });
+    await expect(revokeMember({ store, provider }, 'a1', 'u2')).rejects.toThrow(/still be able to chat/);
     expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
   });
 
@@ -135,6 +152,6 @@ describe('revokeMember', () => {
     const { store, provider } = await withMember();
     store.insertMembership({ id: 'm3', agentId: 'a1', userId: 'u3', role: 'user', status: 'active' });
     await revokeMember({ store, provider }, 'a1', 'u3');
-    expect(provider.execLog.some((a) => a[0] === 'sh')).toBe(false);
+    expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(false);
   });
 });

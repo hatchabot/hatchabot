@@ -8,8 +8,15 @@ import { approvePairing, listPairingRequests } from './claim.js';
  * (§12.3 step 5). OpenClaw keeps pairing approvals in
  * credentials/telegram-<account>-allowFrom.json on the agent's volume, and its
  * CLI has approve/list but no verb to un-approve — so the removal is a small
- * file surgery via execShell, followed by a runtime restart to make the
- * gateway reload it.
+ * file surgery.
+ *
+ * This file surgery is the ONLY act that actually revokes. Verified against
+ * OpenClaw 2026.6.11 source: under dmPolicy=pairing the runtime admits the
+ * UNION of config allowFrom and this credentials file, the file survives
+ * rebuilds (it lives on the volume), and it is re-read per message (mtime
+ * cache) — so "rebuild to enforce it" was never true, and no gateway restart
+ * is needed for the edit to take effect. The surgery runs in a one-shot
+ * container against the volume so it works on a stopped agent too.
  */
 export interface RevokeDeps {
   store: Store;
@@ -148,7 +155,9 @@ export async function revokeMember(
 
   // Telegram user ids are numeric; anything else never reaches a shell string.
   if (!/^\d{1,32}$/.test(member.channelUserId)) {
-    throw new RevokeError('Removed from the member list, but their chat id looks wrong — rebuild the agent to enforce it.');
+    throw new RevokeError(
+      'Removed from the member list, but their chat id looks wrong — the bot may still answer them. Remove them again, or delete the agent.',
+    );
   }
   // Filename uses the lowercased account id (observed on 2026.6.11).
   const file = `/home/node/.openclaw/credentials/telegram-${channel.accountId.toLowerCase()}-allowFrom.json`;
@@ -160,17 +169,14 @@ export async function revokeMember(
       d.allowFrom = (d.allowFrom || []).filter((x) => String(x) !== ${JSON.stringify(member.channelUserId)});
       fs.writeFileSync(f, JSON.stringify(d, null, 2));
     }'`;
-  const res = await provider.execShell(agent.runtimeRef, script);
+  const res = await provider.execShellOnVolume(agent.runtimeRef, script);
   if (res.code !== 0) {
+    // Say what is actually true: they stay allowed until this file is fixed.
+    // A rebuild would NOT fix it — the file survives on the volume.
     throw new RevokeError(
-      'Removed from the member list, but updating the bot allowlist failed — rebuild the agent to enforce it.',
+      'Removed from the member list, but updating the bot allowlist failed — ' +
+        'they may still be able to chat. Remove them again to retry.',
     );
-  }
-
-  // Restart so the gateway drops any cached allowlist state.
-  if (agent.state === 'RUNNING') {
-    await provider.stop(agent.runtimeRef).catch(() => {});
-    await provider.start(agent.runtimeRef);
   }
   log('member.allowlist_scrubbed', { agentId, userId, channelUserId: member.channelUserId });
 }

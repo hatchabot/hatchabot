@@ -150,6 +150,15 @@ export interface RuntimeProvider {
    */
   execShell(runtimeRef: string, script: string): Promise<ExecResult>;
 
+  /**
+   * Run a shell script against the agent's VOLUME in a one-shot container,
+   * independent of the agent's own container — works while it is stopped,
+   * and while it runs (durable state is all on the volume; writers must be
+   * safe against concurrent reads). The volume is mounted at the same path
+   * the agent sees it, so scripts use the same file paths either way.
+   */
+  execShellOnVolume(runtimeRef: string, script: string): Promise<ExecResult>;
+
   /** What this runtime is actually running (image identity, OpenClaw version). */
   info(runtimeRef: string): Promise<RuntimeInfo>;
 
