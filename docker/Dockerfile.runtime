@@ -16,7 +16,12 @@
 FROM node:22-slim
 
 ARG OPENCLAW_VERSION=2026.6.11
-ARG CLAUDE_CODE_VERSION=latest
+# Pinned, not "latest": docker caches this layer per OPENCLAW_VERSION, so
+# "latest" silently means "whatever was latest the FIRST time this host
+# built it" — two hosts building the same tag got different claude-code
+# versions, undermining the candidate → smoke → promote flow. Bump it here
+# (with the openclaw version or alone) to actually ship a new one.
+ARG CLAUDE_CODE_VERSION=2.1.224
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates git curl procps \

@@ -106,6 +106,12 @@ describe('container and volume shape', () => {
     expect(argv()).not.toMatch(/-p 19100:18789/);
   });
 
+  it('runs with an init process, so orphaned grandchildren get reaped', async () => {
+    await provider.provision(spec() as any);
+    const create = argv().split('\n').find((l) => l.startsWith('create '));
+    expect(create).toContain('--init');
+  });
+
   it('keeps the volume unless purge is explicitly requested', async () => {
     const { runtimeRef } = await provider.provision(spec() as any);
     writeFileSync(LOG, '');

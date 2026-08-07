@@ -97,6 +97,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       container,
       '--restart',
       'unless-stopped',
+      // PID 1 is a node process (openclaw gateway) and node does not reap
+      // orphaned grandchildren — Claude Code spawns bash/git/etc., and any
+      // orphan that outlives its parent would sit as a zombie for the whole
+      // life of a long-lived agent. tini (docker's --init) reaps them.
+      '--init',
       // One misbehaving agent must not fill the disk or the box. Overridable
       // for hosts that want to run bigger agents.
       '--log-opt', 'max-size=10m',
