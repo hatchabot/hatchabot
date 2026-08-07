@@ -7,9 +7,12 @@
 #   ./scripts/backup-volumes.sh            # manual run
 #   AGENTCLAW_BACKUP_DIR=/mnt/nas/claw …   # override destination
 #
-# Restore (agent must be stopped):
-#   docker run --rm -v <volume>:/data -v <backup-dir>:/in:ro \
-#     agentclaw-runtime:latest bash -c 'cd /data && tar xzf /in/<volume>.tgz'
+# Restore (agent must be stopped; --user root because a FRESH volume is
+# root-owned and the image's own user can't mkdir in it — the new-machine
+# case. Verified by scripts/restore-drill.sh, which caught exactly this):
+#   docker run --rm --user root -v <volume>:/data -v <backup-dir>:/in:ro \
+#     agentclaw-runtime:latest \
+#     bash -c 'cd /data && tar xzf /in/<volume>.tgz --no-same-owner && chown -R 1000:1000 /data'
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

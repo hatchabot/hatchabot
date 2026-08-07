@@ -266,12 +266,21 @@ too). Then, from the dated backup directory you want:
    backup's `secret-key.env` — put it back if not. Without that exact key,
    every stored bot token and API key in the database is unrecoverable, and
    changing it also invalidates existing sessions (everyone signs in again).
-3. Restore each agent volume you need, with that agent stopped:
+3. Restore each agent volume you need, with that agent stopped. Run as root
+   inside the container, then hand the files to the runtime user — a fresh
+   volume (the new-machine case) is root-owned, so extracting as the image's
+   own user fails on the first directory:
 
    ```sh
-   docker run --rm -v <volume>:/data -v <backup-dir>:/in:ro \
-     agentclaw-runtime:latest bash -c 'cd /data && tar xzf /in/<volume>.tgz'
+   docker run --rm --user root -v <volume>:/data -v <backup-dir>:/in:ro \
+     agentclaw-runtime:latest \
+     bash -c 'cd /data && tar xzf /in/<volume>.tgz --no-same-owner && chown -R 1000:1000 /data'
    ```
+
+   Prove the whole procedure any time with `./scripts/restore-drill.sh` — it
+   verifies the newest backup end to end (database integrity, the saved key
+   decrypting a real secret, a volume restoring into a throwaway) without
+   touching the live system.
 
 4. Restart the service. If an agent comes up confused — wrong model, stale
    config — use **Rebuild**: the container is disposable, the volume you just
