@@ -116,6 +116,10 @@
             style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
     <button id="aiBtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()"
             style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ Settings</button>
+    <span class="sub" id="whoami" style="margin-left:8px"></span>
+    <button id="logoutBtn" onclick="signOut()"
+            title="Sign out of this browser. Tabs share one login — for two accounts at once, use a private window or another browser profile."
+            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Sign out</button>
     <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
@@ -386,6 +390,7 @@ async function loadConfig() {
   const identity = appConfig.authMode === 'identity';
   $('pwLogin').style.display = identity ? 'none' : '';
   $('idLogin').style.display = identity ? '' : 'none';
+  renderWhoami();
   if (identity) loadGoogleButton();
 }
 
@@ -431,10 +436,27 @@ function friendlyIdpError(code) {
 
 /** Trade a verified Identity Platform token for an AgentClaw session. */
 async function startSession(idToken) {
-  await api('/v1/session', { method: 'POST', body: { idToken } });
+  const out = await api('/v1/session', { method: 'POST', body: { idToken } });
+  // The cookie only carries the subject — remember the email locally so the
+  // header can say WHO this browser is signed in as (all tabs share it).
+  if (out.email) localStorage.setItem('agentclaw_email', out.email);
+  renderWhoami();
   loginDlg.close();
   $('loginIdPw').value = '';
   await refresh(true);
+}
+
+function renderWhoami() {
+  const el = $('whoami');
+  if (el) el.textContent = appConfig.authMode === 'identity'
+    ? (localStorage.getItem('agentclaw_email') ?? '') : '';
+}
+
+async function signOut() {
+  // Best-effort server side; the reload lands on the login dialog either way.
+  try { await api('/v1/logout', { method: 'POST' }); } catch { /* already out */ }
+  localStorage.removeItem('agentclaw_email');
+  location.reload();
 }
 
 async function onGoogleCredential(response) {
@@ -1290,6 +1312,7 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+loadConfig(); // whoami + auth mode even when the cookie is already valid
 refresh(true);
 </script>
 </body>

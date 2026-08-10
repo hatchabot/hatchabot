@@ -140,6 +140,14 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     return { ok: true };
   });
 
+  // Symmetric with identity mode: lock the app on a shared screen, or switch
+  // who this tab is. Exempt from auth below — logging out with an already
+  // dead session must succeed, not 401.
+  app.post('/v1/logout', async (_req, reply) => {
+    reply.clearCookie(COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
   app.addHook('onRequest', async (req, reply) => {
     if (!opts.password) {
       req.principal = { ownerId: LOCAL_OWNER, via: 'password' };
@@ -149,6 +157,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // /v1/config tells the login screen which mode to render — it must be
     // readable before anyone is authenticated.
     if (path === '/' || path === '/healthz' || path === '/v1/login' || path === '/v1/config') return;
+    if (path === '/v1/logout') return;
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;

@@ -81,6 +81,24 @@ describe('password sessions', () => {
     expect((await after.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie } })).statusCode).toBe(401);
   });
 
+  it('signs out: the cookie is cleared and works without a live session', async () => {
+    const app = await appWith('correct-horse');
+    const cookie = await loginCookie(app, 'correct-horse');
+    expect(
+      (await app.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie } })).statusCode,
+    ).toBe(200);
+
+    const out = await app.inject({ method: 'POST', url: '/v1/logout', headers: { cookie } });
+    expect(out.statusCode).toBe(200);
+    // The clear arrives as a set-cookie that empties/expires the session.
+    const cleared = out.cookies.find((c: any) => c.name === 'agentclaw_session');
+    expect(cleared?.value).toBe('');
+
+    // Logging out while already logged out must succeed too — a stale tab's
+    // button press is not an error.
+    expect((await app.inject({ method: 'POST', url: '/v1/logout' })).statusCode).toBe(200);
+  });
+
   it('leaves the invitee join surface unauthenticated', async () => {
     const app = await appWith('pw');
     app.get('/v1/invites/:code', async () => ({ valid: false }));
