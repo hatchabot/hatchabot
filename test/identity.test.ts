@@ -215,6 +215,25 @@ describe('identity auth mode', () => {
     expect(store.getAgent('a1')!.ownerId).toBe('user-uid-abc');
   });
 
+  it('re-keys peers too, so migration targets survive the first sign-in', async () => {
+    const store = new (await import('../src/store/store.js')).Store(
+      new (await import('better-sqlite3')).default(':memory:'),
+    );
+    store.insertHost({
+      id: 'h1', ownerId: 'dev-owner', kind: 'local', provider: 'mock', name: 'box',
+      settings: {}, createdAt: 'now',
+    });
+    store.insertPeer({
+      id: 'peer1', ownerId: 'dev-owner', name: 'Laptop', url: 'http://laptop:8080',
+      secretRef: 'peer/x', createdAt: 'now',
+    });
+    expect(store.adoptLocalOwnerData('user-real')).toBeGreaterThan(0);
+    // Without the peers re-key, listPeers(newOwner) came back empty and every
+    // configured migration target silently vanished.
+    expect(store.listPeers('user-real').map((p) => p.id)).toContain('peer1');
+    expect(store.listPeers('dev-owner')).toHaveLength(0);
+  });
+
   it('rejects a forged session cookie', async () => {
     const f = await app();
     const forged = `${Buffer.from('uid-abc:9999999999999').toString('base64url')}.deadbeef`;

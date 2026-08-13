@@ -662,6 +662,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       });
     }
 
+    // Optional per-account ceiling: on a shared box this bounds how many
+    // agents (and pool bots, ports, containers) one account can consume.
+    // Unset = no limit, preserving the single-owner default.
+    const maxPerAccount = Number(process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT ?? 0);
+    if (maxPerAccount > 0 && store.listAgents(ownerId).length >= maxPerAccount) {
+      return reply.code(429).send({
+        error: `You've reached the limit of ${maxPerAccount} agents on this server. Delete one first.`,
+      });
+    }
+
     // The slug is derived from the name and is UNIQUE per owner — it becomes
     // a container name and a workspace path. Catch the collision here: letting
     // it reach the INSERT surfaces a raw SQLite error as "Internal Server
@@ -1599,6 +1609,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // still holds the bot token and keeps polling Telegram.
     const running = inflight.get(agent.id);
     if (running) await running.catch(() => {});
+    // Re-check busy AFTER that wait: a migrate/adopt could have grabbed the
+    // flag the instant the rebuild released it, and purging the volume under
+    // an in-progress export is loss.
+    if (isBusy(agent.id)) {
+      return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
+    }
     store.setAgentState(agent.id, 'DELETING');
     if (agent.runtimeRef) {
       await providerFor(agent.hostId).destroy(agent.runtimeRef, { purge: true });

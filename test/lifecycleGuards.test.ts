@@ -129,6 +129,25 @@ describe('moved-away agents cannot be resurrected', () => {
   });
 });
 
+describe('per-account agent cap', () => {
+  it('refuses to create past AGENTCLAW_MAX_AGENTS_PER_ACCOUNT with 429', async () => {
+    const { f } = await world(); // world() already seeds profile p1 and agent a1
+    const prev = process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT;
+    process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT = '1'; // world() already has a1
+    try {
+      const res = await f.inject({
+        method: 'POST', url: '/v1/agents', headers: as,
+        payload: { name: 'Second', aiProfileId: 'p1', hostId: 'h1' },
+      });
+      expect(res.statusCode).toBe(429);
+      expect(res.json().error).toMatch(/limit of 1 agents/);
+    } finally {
+      if (prev === undefined) delete process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT;
+      else process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT = prev;
+    }
+  });
+});
+
 describe('delete is 404 the second time, not a 500', () => {
   it('answers 404 on a re-delete instead of an illegal DELETED->DELETING', async () => {
     const { f } = await world();

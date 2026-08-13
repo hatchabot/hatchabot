@@ -419,6 +419,15 @@ export class Store {
    *
    * Returns the number of rows re-keyed (0 = nothing to adopt).
    */
+  /**
+   * Run a synchronous unit of work atomically. better-sqlite3 transactions
+   * are synchronous, so the callback must not await — used for multi-statement
+   * invariants like "burn the invite AND create the membership, or neither".
+   */
+  transact<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   adoptLocalOwnerData(newOwnerId: string, localOwner = 'dev-owner'): number {
     if (newOwnerId === localOwner) return 0;
     const adopt = this.db.transaction((owner: string) => {
@@ -435,7 +444,13 @@ export class Store {
         `UPDATE ai_profiles SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE hosts SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE memberships SET user_id = ? WHERE user_id = ?`,
+        // Every column that keys off the owner id, or the row silently
+        // orphans under dev-owner: peer servers (else migration targets
+        // vanish on first sign-in), and the two membership/invite back-refs.
+        `UPDATE memberships SET invited_by = ? WHERE invited_by = ?`,
+        `UPDATE peers SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE invites SET created_by = ? WHERE created_by = ?`,
+        `UPDATE invites SET redeemed_by = ? WHERE redeemed_by = ?`,
         // Without this a CLI token keeps working as the old owner and returns
         // an EMPTY fleet — "all my agents are gone" instead of "log in again".
         `UPDATE cli_tokens SET owner_id = ? WHERE owner_id = ?`,
@@ -457,7 +472,10 @@ export class Store {
     // bricking itself exactly when a long docker error was worth reading.
     let safe = detail ? JSON.stringify(detail) : null;
     if (safe && safe.length > 2000) {
-      safe = JSON.stringify({ truncated: true, detail: safe.slice(0, 1900) });
+      // Slice conservatively: wrapping the sliced JSON as a string value
+      // re-escapes it (quotes/backslashes ~double), so 900 raw chars keeps
+      // the STORED value under the 2000 bound rather than overshooting it.
+      safe = JSON.stringify({ truncated: true, detail: safe.slice(0, 900) });
     }
     this.db
       .prepare(`INSERT INTO agent_events (agent_id, at, event, detail) VALUES (?, ?, ?, ?)`)

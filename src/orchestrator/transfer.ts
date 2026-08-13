@@ -108,6 +108,15 @@ const ManifestSchema = z.object({
 /** Uncompressed ceiling — a gzip bomb must not OOM the control plane. */
 const MAX_STATE_BYTES = 256 * 1024 * 1024;
 
+/**
+ * Largest raw (gzipped-tar) state that still fits under MAX_STATE_BYTES once
+ * base64-inflated (×4/3) and wrapped in the manifest JSON. Beyond this the
+ * export would either produce a file no import could ever accept, or trip
+ * Node's max-string-length inside JSON.stringify with an opaque RangeError —
+ * so we refuse it up front with a message the owner can act on.
+ */
+const MAX_RAW_STATE_BYTES = Math.floor((MAX_STATE_BYTES - 8192) * 0.75);
+
 export async function exportAgent(
   deps: ProvisionDeps,
   agentId: string,
@@ -126,12 +135,39 @@ export async function exportAgent(
 
   // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
   // of an export is usually that the agent is about to live somewhere else.
-  if (agent.state === 'RUNNING') {
+  const wasRunning = agent.state === 'RUNNING';
+  if (wasRunning) {
     await provider.stop(agent.runtimeRef);
     store.setAgentState(agentId, 'STOPPED');
   }
 
-  const state = await provider.exportState(agent.runtimeRef);
+  // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
+  // which owns its own undo) would strand a running agent silently STOPPED —
+  // it stops answering Telegram with no error the owner ever sees. Put it back.
+  const restoreIfRunning = async () => {
+    if (wasRunning) {
+      await provider.start(agent.runtimeRef!).catch(() => {});
+      store.setAgentState(agentId, 'RUNNING');
+    }
+  };
+
+  let state: Buffer;
+  try {
+    state = await provider.exportState(agent.runtimeRef);
+  } catch (err) {
+    // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
+    // which owns its own undo) would strand a running agent silently STOPPED.
+    await restoreIfRunning();
+    throw err;
+  }
+  if (state.length > MAX_RAW_STATE_BYTES) {
+    await restoreIfRunning();
+    throw new TransferError(
+      `This agent's saved state is ${(state.length / 1e6).toFixed(0)} MB — too large to move as ` +
+        `a single file (the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB). Trim old ` +
+        `sessions, or keep the bulk data in a shared folder instead of the agent's own volume.`,
+    );
+  }
   const manifest: ExportManifest = {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
@@ -226,10 +262,17 @@ async function importAgentInner(
     );
   }
 
+  // Prefer the importer's OWN profile over a profile merely shared with the
+  // installation — defaulting onto someone else's shared subscription would
+  // silently bill them. Own+vendor-match → own → any vendor-match → anything.
   const profiles = store.listAIProfiles(opts.ownerId);
+  const mine = profiles.filter((p) => p.ownerId === opts.ownerId);
   const profile = opts.aiProfileId
     ? store.getAIProfile(opts.aiProfileId)
-    : (profiles.find((p) => p.vendor === manifest.ai.vendor) ?? profiles[0]);
+    : (mine.find((p) => p.vendor === manifest.ai.vendor) ??
+      mine[0] ??
+      profiles.find((p) => p.vendor === manifest.ai.vendor) ??
+      profiles[0]);
   if (!profile) throw new TransferError('Set up an AI source before importing.');
   const host = opts.hostId
     ? store.getHost(opts.hostId)
@@ -329,16 +372,24 @@ async function importAgentInner(
     // Leaving nothing behind keeps "import again" the one true retry path.
     // Each step guarded: one rollback step failing (a store hiccup, a state
     // moved out from under us) must not abandon the rest half-done.
-    try {
-      if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
-      await secrets.delete(secretRef).catch(() => {});
-      store.deleteChannelForAgent(agent.id);
-      store.deleteMemberships(agent.id);
+    // Each step guarded on its own so one failing does not skip the rest —
+    // above all the tombstone MUST land, or the half-made PROVISIONING row
+    // keeps the slug and bot accountId and refuses the "import again" retry.
+    const step = (fn: () => void) => {
+      try {
+        fn();
+      } catch (e) {
+        log('import.rollback_step_failed', { agentId: agent.id, error: String(e) });
+      }
+    };
+    if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
+    await secrets.delete(secretRef).catch(() => {});
+    step(() => store.deleteChannelForAgent(agent.id));
+    step(() => store.deleteMemberships(agent.id));
+    step(() => {
       store.setAgentState(agent.id, 'DELETING');
       store.setAgentState(agent.id, 'DELETED');
-    } catch (rollbackErr) {
-      log('import.rollback_failed', { agentId: agent.id, error: String(rollbackErr) });
-    }
+    });
     log('import.rolled_back', { agentId: agent.id, error: String(err) });
     throw new TransferError(
       `Import failed and was rolled back — fix the cause and import again. (${String(

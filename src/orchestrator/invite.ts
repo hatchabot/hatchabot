@@ -16,9 +16,19 @@ const INVITE_TTL_MS = 48 * 60 * 60 * 1000;
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 
 export function generateInviteCode(): string {
-  const bytes = randomBytes(10);
+  // Rejection sampling instead of `byte % 31`: 256 isn't a multiple of 31, so
+  // the modulo mapping biased toward the alphabet's first 8 symbols. Draw
+  // fresh bytes and discard the top non-uniform tail so every symbol is
+  // equally likely (it matters little for 49 bits of entropy, but it's free).
+  const max = 256 - (256 % ALPHABET.length); // 248 — the unbiased range
   let code = '';
-  for (let i = 0; i < 10; i++) code += ALPHABET[bytes[i]! % ALPHABET.length];
+  while (code.length < 10) {
+    for (const b of randomBytes(16)) {
+      if (b >= max) continue;
+      code += ALPHABET[b % ALPHABET.length];
+      if (code.length === 10) break;
+    }
+  }
   return code;
 }
 
@@ -90,26 +100,31 @@ export function redeemInvite(
   if (existing && existing.status === 'active') {
     throw new InviteInvalidError('used'); // already a member of this agent
   }
-  if (!store.markInviteRedeemed(code.trim().toUpperCase(), userId)) {
-    throw new InviteInvalidError('used'); // lost the race
-  }
   const name = displayName.trim().slice(0, 64) || 'Guest';
-  if (existing) {
-    // A previously-revoked account member is re-admitted, not blocked forever
-    // (insertMembership would also hit UNIQUE(agent_id, user_id)). Reactivate
-    // the row and let the caller's claim re-bind their telegram id.
-    store.reactivateMembership(check.agentId, userId, name);
-  } else {
-    store.insertMembership({
-      id: randomUUID(),
-      agentId: check.agentId,
-      userId,
-      role: 'user',
-      displayName: name,
-      status: 'active',
-      joinedAt: new Date().toISOString(),
-    });
-  }
+  // Atomic: burn the code AND create/reactivate the membership together, or
+  // neither. A crash between them used to leave a single-use code spent with
+  // no member — "already used" for someone who never actually joined.
+  store.transact(() => {
+    if (!store.markInviteRedeemed(code.trim().toUpperCase(), userId)) {
+      throw new InviteInvalidError('used'); // lost the race — rolls back
+    }
+    if (existing) {
+      // A previously-revoked account member is re-admitted, not blocked forever
+      // (insertMembership would also hit UNIQUE(agent_id, user_id)). Reactivate
+      // the row and let the caller's claim re-bind their telegram id.
+      store.reactivateMembership(check.agentId, userId, name);
+    } else {
+      store.insertMembership({
+        id: randomUUID(),
+        agentId: check.agentId,
+        userId,
+        role: 'user',
+        displayName: name,
+        status: 'active',
+        joinedAt: new Date().toISOString(),
+      });
+    }
+  });
   return { membershipUserId: userId, agentId: check.agentId };
 }
 

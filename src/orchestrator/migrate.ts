@@ -76,9 +76,12 @@ export function preflight(
   const host = hosts.find((h) => h.kind === 'local') ?? hosts[0];
   if (!host) reasons.push('No host is configured here to run it.');
 
+  // Prefer the receiver's OWN source over one merely shared with the box, so
+  // the preview reflects what the agent would actually run on (and bill).
   const profiles = store.listAIProfiles(ownerId);
-  const match = profiles.find((p) => p.vendor === req.vendor);
-  const profile = match ?? profiles[0];
+  const mine = profiles.filter((p) => p.ownerId === ownerId);
+  const match = mine.find((p) => p.vendor === req.vendor) ?? profiles.find((p) => p.vendor === req.vendor);
+  const profile = match ?? mine[0] ?? profiles[0];
   if (!profile) reasons.push('No AI source is configured here.');
 
   // A vendor mismatch is not a collision, but it IS a surprise: an agent

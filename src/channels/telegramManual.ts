@@ -79,13 +79,16 @@ export async function verifyBotToken(
   fetchImpl: typeof fetch = fetch,
 ): Promise<string> {
   const res = await fetchImpl(`https://api.telegram.org/bot${botToken}/getMe`);
-  const body = (await res.json()) as {
-    ok: boolean;
+  // A Telegram outage / proxy can answer with an HTML error page, not JSON —
+  // res.json() then throws a raw TypeError that surfaced as an opaque 500.
+  // Treat anything non-JSON as "couldn't verify", which is what it is.
+  const body = (await res.json().catch(() => null)) as {
+    ok?: boolean;
     result?: { username?: string };
     description?: string;
-  };
-  if (!body.ok || !body.result?.username) {
-    throw new InvalidBotTokenError(body.description ?? 'Telegram rejected that token');
+  } | null;
+  if (!body?.ok || !body.result?.username) {
+    throw new InvalidBotTokenError(body?.description ?? 'Telegram rejected that token');
   }
   return body.result.username;
 }

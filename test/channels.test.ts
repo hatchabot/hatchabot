@@ -4,6 +4,7 @@ import { TelegramPoolProvisioner, PoolExhaustedError } from '../src/channels/tel
 import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
+import { verifyBotToken, InvalidBotTokenError } from '../src/channels/telegramManual.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {
@@ -18,6 +19,31 @@ class MemSecrets implements SecretStore {
 }
 
 const REQ = { agentId: 'a1', agentName: 'Kitchen', slug: 'kitchen' };
+
+describe('verifyBotToken', () => {
+  const ok = (username: string): typeof fetch =>
+    (async () => new Response(JSON.stringify({ ok: true, result: { username } }),
+      { headers: { 'content-type': 'application/json' } })) as any;
+
+  it('returns the bot username on a good token', async () => {
+    expect(await verifyBotToken('123:abc', ok('kitchenbot'))).toBe('kitchenbot');
+  });
+
+  it('treats a non-JSON response (outage/proxy page) as invalid, not a crash', async () => {
+    // Telegram down → an HTML error page; res.json() throws a raw TypeError
+    // that used to surface as an opaque 500. Must become a friendly error.
+    const htmlPage: typeof fetch = (async () =>
+      new Response('<html>502 Bad Gateway</html>', { headers: { 'content-type': 'text/html' } })) as any;
+    await expect(verifyBotToken('123:abc', htmlPage)).rejects.toBeInstanceOf(InvalidBotTokenError);
+  });
+
+  it('rejects a token Telegram says no to', async () => {
+    const rejected: typeof fetch = (async () =>
+      new Response(JSON.stringify({ ok: false, description: 'Unauthorized' }),
+        { headers: { 'content-type': 'application/json' } })) as any;
+    await expect(verifyBotToken('123:abc', rejected)).rejects.toBeInstanceOf(InvalidBotTokenError);
+  });
+});
 
 describe('TelegramPoolProvisioner', () => {
   it('leases idempotently per agent and counts availability', async () => {

@@ -63,6 +63,28 @@ async function seedSourceAgent(src: Awaited<ReturnType<typeof installation>>) {
   return runtimeRef;
 }
 
+describe('export failure handling', () => {
+  it('restarts a running agent if the snapshot fails after quiescing', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    src.provider.exportState = async () => { throw new Error('docker exploded'); };
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/docker exploded/);
+    // Not stranded STOPPED: a plain export must leave a running agent running.
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+    expect(src.provider.runtimes.get(ref)!.phase).toBe('running');
+  });
+
+  it('refuses an over-large agent with a clear message, and restarts it', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    // Fake a huge volume without allocating it: the size guard reads .length
+    // and throws before touching the bytes.
+    src.provider.exportState = async () => ({ length: 200 * 1024 * 1024 } as any);
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move/);
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+});
+
 describe('agent export/import', () => {
   it('round-trips an agent to a second installation intact', async () => {
     const src = await installation();
