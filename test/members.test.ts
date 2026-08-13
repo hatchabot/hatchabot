@@ -115,7 +115,8 @@ describe('revokeMember', () => {
     // path also works while the agent is stopped. No restart needed — the
     // runtime re-reads the file per message.
     const sh = provider.execLog.find((a) => a[0] === 'sh-volume')!;
-    expect(sh[1]).toContain('telegram-mixedcasebot-allowFrom.json');
+    expect(sh[1]).toContain('mixedcasebot'); // lowercased account id
+    expect(sh[1]).toContain('allowFrom.json');
     expect(sh[1]).toContain('555');
     expect(provider.runtimes.get('mock://a1')!.phase).toBe('running'); // untouched
   });
@@ -141,11 +142,31 @@ describe('revokeMember', () => {
     expect(provider.execLog.length).toBe(callsAfterFirst);
   });
 
-  it('keeps the DB revocation but reports failure honestly when the scrub fails', async () => {
+  it('leaves the member active and retryable when the scrub fails', async () => {
     const { store, provider } = await withMember();
     provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'boom' });
     await expect(revokeMember({ store, provider }, 'a1', 'u2')).rejects.toThrow(/still be able to chat/);
+    // NOT flipped: the scrub is the thing that revokes, so a failed scrub must
+    // leave the row active — otherwise "remove them again" hits the idempotent
+    // early-return and never retries (the member stays permanently allowed).
+    expect(store.getMembership('a1', 'u2')!.status).toBe('active');
+
+    // Retry now actually re-runs the scrub and succeeds.
+    provider.execResponses.delete('sh-volume');
+    await revokeMember({ store, provider }, 'a1', 'u2');
     expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
+  });
+
+  it('scrubs BOTH the credentials file and openclaw.json config allowlist', async () => {
+    const { store, provider } = await withMember();
+    await revokeMember({ store, provider }, 'a1', 'u2');
+    const sh = provider.execLog.find((a) => a[0] === 'sh-volume')!;
+    // The runtime admits the union of the two, and rebuild re-seeds config
+    // from active members — scrubbing only the credentials file left a
+    // member baked into config at the last rebuild still able to chat.
+    expect(sh[1]).toContain('allowFrom.json');   // credentials file
+    expect(sh[1]).toContain('openclaw.json');     // config file
+    expect(sh[1]).toContain('555');
   });
 
   it('skips runtime surgery for a member with no telegram identity', async () => {

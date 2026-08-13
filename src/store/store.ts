@@ -878,14 +878,26 @@ export class Store {
       .run(name, agentId, userId);
   }
 
-  /** Records which telegram identity the first-contact claim bound (§12.4). */
-  bindMembershipChannelUser(agentId: string, userId: string, channelUserId: string): void {
-    this.db
+  /**
+   * Bind the telegram identity a first-contact claim approved (§12.4).
+   * Conditional and reported: refuses to overwrite a membership that is
+   * already bound, and refuses to bind an id that already belongs to ANOTHER
+   * active membership on this agent. Concurrent claim windows (owner's 10-min
+   * + an invitee's 30-min) otherwise raced to bind requests[0] and could swap
+   * two people's identities across memberships. Returns true only if this call
+   * actually made the binding.
+   */
+  bindMembershipChannelUser(agentId: string, userId: string, channelUserId: string): boolean {
+    const holder = this.getActiveMembershipByChannelUser(agentId, channelUserId);
+    if (holder && holder.userId !== userId) return false; // belongs to someone else
+    const res = this.db
       .prepare(
         `UPDATE memberships SET channel_user_id = ?, joined_at = COALESCE(joined_at, ?)
-         WHERE agent_id = ? AND user_id = ?`,
+         WHERE agent_id = ? AND user_id = ? AND status = 'active'
+           AND (channel_user_id IS NULL OR channel_user_id = ?)`,
       )
-      .run(channelUserId, new Date().toISOString(), agentId, userId);
+      .run(channelUserId, new Date().toISOString(), agentId, userId, channelUserId);
+    return res.changes > 0;
   }
 
   /**

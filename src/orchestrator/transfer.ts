@@ -264,14 +264,27 @@ async function importAgentInner(
     // Memberships travel verbatim, except the owner seat belongs to whoever
     // imports — it's their installation now. Inside the try: a malformed row
     // must roll back with everything else, not strand a half-made agent.
+    const seen = new Set<string>();
     for (const m of manifest.memberships) {
+      const userId = m.role === 'owner' ? opts.ownerId : m.userId;
+      // Dedup by RESULTING userId: a `user` row whose id already equals the
+      // importer (same Google account on both installs — "family member takes
+      // the agent home") would otherwise collide with the remapped owner row
+      // on UNIQUE(agent_id, user_id) and roll the whole import back.
+      if (seen.has(userId)) continue;
+      seen.add(userId);
       store.insertMembership({
         id: randomUUID(),
         agentId: agent.id,
-        userId: m.role === 'owner' ? opts.ownerId : m.userId,
+        userId,
         role: m.role,
         displayName: m.displayName,
-        channelUserId: m.channelUserId,
+        // The owner seat's telegram id is the PREVIOUS owner's — the importer
+        // is a different person, so drop it and let them claim first contact.
+        // Carrying it over would (a) admit the stranger to this bot and
+        // (b) poison knownChannelUserId so every future agent seeds and skips
+        // the claim onto that stranger's id.
+        channelUserId: m.role === 'owner' ? undefined : m.channelUserId,
         status: m.status,
         joinedAt: now,
       });

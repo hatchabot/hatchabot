@@ -95,27 +95,42 @@ export async function claimFirstContact(
 
   while (Date.now() < deadline) {
     // The watcher runs detached from the provision task, so the agent can be
-    // deleted or stopped underneath it — then there is nothing left to claim,
-    // and polling a gone container for the rest of the window is just noise.
+    // deleted, failed, or removed underneath it. Abandon only when there is
+    // genuinely nothing to claim; a transient STOPPED/REBUILDING/PROVISIONING
+    // (a routine rebuild two minutes into an invitee's 30-min window) means
+    // "wait", not "give up" — giving up there stranded the invitee in
+    // manual-approval limbo with no error anywhere.
     const agent = deps.store.getAgent(opts.agentId);
-    if (!agent || agent.state !== 'RUNNING') {
+    if (!agent || agent.state === 'DELETING' || agent.state === 'DELETED' || agent.state === 'FAILED') {
       log('claim.window_abandoned', { agentId: opts.agentId, state: agent?.state });
       return null;
     }
-    const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId);
-    const first = requests[0];
-    if (first) {
-      const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code);
-      if (ok) {
-        deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id);
-        log('claim.bound', {
-          agentId: opts.agentId,
-          channelUserId: first.id,
-          username: first.meta?.username,
-        });
-        return first.id;
+    // The membership we're binding for was already claimed (e.g. by an earlier
+    // window, or pair-once seeded it) — nothing left to do.
+    const target = deps.store.getMembership(opts.agentId, opts.forUserId);
+    if (target?.channelUserId) return target.channelUserId;
+
+    if (agent.state === 'RUNNING') {
+      const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId);
+      // Skip requests whose sender already belongs to another membership on
+      // this agent: a concurrent window may have just bound them, and binding
+      // that id here would swap two people's identities.
+      const claimable = requests.filter(
+        (r) => !deps.store.getActiveMembershipByChannelUser(opts.agentId, r.id),
+      );
+      const first = claimable[0];
+      if (first) {
+        const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code);
+        if (ok && deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id)) {
+          log('claim.bound', {
+            agentId: opts.agentId,
+            channelUserId: first.id,
+            username: first.meta?.username,
+          });
+          return first.id;
+        }
+        log('claim.approve_failed', { agentId: opts.agentId, code: first.code });
       }
-      log('claim.approve_failed', { agentId: opts.agentId, code: first.code });
     }
     await sleep(pollIntervalMs);
   }

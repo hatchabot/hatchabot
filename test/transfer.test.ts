@@ -85,9 +85,15 @@ describe('agent export/import', () => {
     expect(await dst.secrets.get(chan.secretRef)).toBe('bot-token-123');
     // members travelled; owner seat re-assigned to the importer
     const members = dst.store.listMemberships(agent.id);
-    expect(members.find((m) => m.role === 'owner')!.userId).toBe('owner-b');
+    const owner = members.find((m) => m.role === 'owner')!;
+    expect(owner.userId).toBe('owner-b');
+    // ...but the PREVIOUS owner's telegram id does NOT travel onto the new
+    // owner seat — the importer is a different person and must claim first
+    // contact. Carrying it would admit that stranger and poison pair-once.
+    expect(owner.channelUserId).toBeUndefined();
     expect(members.find((m) => m.displayName === 'Gran')!.channelUserId).toBe('222');
-    expect(dst.store.listAllowedChannelUserIds(agent.id).sort()).toEqual(['111', '222']);
+    // Only the non-owner member's id seeds the allowlist; the owner re-claims.
+    expect(dst.store.listAllowedChannelUserIds(agent.id).sort()).toEqual(['222']);
     // the volume state was restored before start
     const state = dst.provider.stateStore.get(agent.runtimeRef!)!;
     expect(state.toString()).toBe('the-agents-memory');
