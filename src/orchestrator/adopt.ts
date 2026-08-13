@@ -91,7 +91,14 @@ export function inspectWorkspace(dir: string): WorkspacePreview {
   let bytes = 0;
   let truncated = false;
   const walk = (dir: string, prefix: string, depth: number): void => {
-    if (depth > 12) return;
+    // A deep tree must still be COUNTED, or the preview lies and the size/file
+    // guards don't fire — packWorkspace tars the whole thing regardless of
+    // depth. Treat hitting the depth ceiling as "too deep to vet", same as
+    // over-many files, rather than silently ignoring what lies below.
+    if (depth > 40) {
+      truncated = true;
+      return;
+    }
     if (files.length >= MAX_FILES) {
       truncated = true;
       return;

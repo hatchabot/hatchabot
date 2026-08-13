@@ -50,6 +50,13 @@ export function checkInvite(store: Store, code: string): InviteCheck {
   if (!invite) return { valid: false, reason: 'unknown' };
   if (invite.redeemedAt) return { valid: false, reason: 'used' };
   if (new Date(invite.expiresAt).getTime() < Date.now()) return { valid: false, reason: 'expired' };
+  // The agent may have been deleted after the link was minted — joining a
+  // tombstone would create a membership against an agent with no bot to talk
+  // to and a triumphant "you're in!" page. Treat it as a dead link.
+  const agent = store.getAgent(invite.agentId);
+  if (!agent || agent.state === 'DELETED' || agent.state === 'DELETING') {
+    return { valid: false, reason: 'unknown' };
+  }
   return { valid: true, agentId: invite.agentId };
 }
 
@@ -79,21 +86,30 @@ export function redeemInvite(
   // Keying the membership on the account id is what lets them log in later
   // and see this agent; otherwise it's an opaque per-invite id.
   const userId = accountId ?? `member-${randomUUID()}`;
-  if (accountId && store.getMembership(check.agentId, accountId)) {
+  const existing = accountId ? store.getMembership(check.agentId, accountId) : undefined;
+  if (existing && existing.status === 'active') {
     throw new InviteInvalidError('used'); // already a member of this agent
   }
   if (!store.markInviteRedeemed(code.trim().toUpperCase(), userId)) {
     throw new InviteInvalidError('used'); // lost the race
   }
-  store.insertMembership({
-    id: randomUUID(),
-    agentId: check.agentId,
-    userId,
-    role: 'user',
-    displayName: displayName.trim().slice(0, 64) || 'Guest',
-    status: 'active',
-    joinedAt: new Date().toISOString(),
-  });
+  const name = displayName.trim().slice(0, 64) || 'Guest';
+  if (existing) {
+    // A previously-revoked account member is re-admitted, not blocked forever
+    // (insertMembership would also hit UNIQUE(agent_id, user_id)). Reactivate
+    // the row and let the caller's claim re-bind their telegram id.
+    store.reactivateMembership(check.agentId, userId, name);
+  } else {
+    store.insertMembership({
+      id: randomUUID(),
+      agentId: check.agentId,
+      userId,
+      role: 'user',
+      displayName: name,
+      status: 'active',
+      joinedAt: new Date().toISOString(),
+    });
+  }
   return { membershipUserId: userId, agentId: check.agentId };
 }
 

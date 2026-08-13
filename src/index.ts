@@ -14,6 +14,7 @@ import { registerRoutes } from './api/routes.js';
 import { authModeFromEnv, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
 import { reconcileAgents, startReconcileLoop } from './orchestrator/reconcile.js';
+import { LOCAL_OWNER } from './api/principal.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
 const DB_PATH = process.env.AGENTCLAW_DB ?? 'data/agentclaw.sqlite';
@@ -85,6 +86,11 @@ await registerAuth(app, {
     // Phase 3: the first real account adopts what password mode owned. Runs
     // at most once per process — it fires on every authenticated request.
     if (adoptionChecked) return;
+    // Only a REAL account can adopt. A leftover dev-owner CLI token
+    // authenticating first (a cron/script after a mode switch) would
+    // otherwise consume the one-shot latch and adopt nothing, leaving the
+    // human's first sign-in facing an empty fleet.
+    if (principal.ownerId === LOCAL_OWNER) return;
     adoptionChecked = true;
     const rows = store.adoptLocalOwnerData(principal.ownerId);
     if (rows > 0) {

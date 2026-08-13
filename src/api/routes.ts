@@ -429,18 +429,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // itself): the two subscription flavours are indistinguishable in the
     // UI otherwise, and "did I paste a setup-token or is this the machine
     // login?" is a question the owner should not need the database for.
-    return store.listAIProfiles(ownerIdOf(req)).map(({ secretRef, ...safe }) => ({
-      ...safe,
-      mine: safe.ownerId === ownerIdOf(req),
-      credential:
-        safe.vendor === 'local'
-          ? 'none'
-          : safe.kind === 'subscription'
-            ? secretRef
-              ? 'setup-token'
-              : 'machine-login'
-            : 'api-key',
-    }));
+    return store.listAIProfiles(ownerIdOf(req)).map(({ secretRef, ownerId, baseUrl, ...safe }) => {
+      const mine = ownerId === ownerIdOf(req);
+      return {
+        ...safe,
+        mine,
+        // Don't leak another account's identifier or their internal model-
+        // server address just because they shared a profile with the box.
+        ownerId: mine ? ownerId : undefined,
+        baseUrl: mine ? baseUrl : undefined,
+        credential:
+          safe.vendor === 'local'
+            ? 'none'
+            : safe.kind === 'subscription'
+              ? secretRef
+                ? 'setup-token'
+                : 'machine-login'
+              : 'api-key',
+      };
+    });
   });
 
   app.get('/v1/hosts', async (req) => {
@@ -452,19 +459,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * message stalls ~10s while tens of GB load — worth showing rather than
    * letting the owner wonder whether the agent is broken.
    */
-  const warmCache = { at: 0, models: [] as string[] };
+  // Keyed by baseUrl: two local profiles point at different model servers, so
+  // a single global cache reported the FIRST server's warm set for the second
+  // agent's card for up to 15s. One entry per server instead.
+  const warmCache = new Map<string, { at: number; models: string[] }>();
   const warmLocalModels = async (baseUrl: string): Promise<string[]> => {
-    if (Date.now() - warmCache.at < 15_000) return warmCache.models;
+    const hit = warmCache.get(baseUrl);
+    if (hit && Date.now() - hit.at < 15_000) return hit.models;
+    let models: string[] = [];
     try {
       const root = baseUrl.replace(/\/v1\/?$/, '');
       const res = await fetch(`${root}/api/ps`, { signal: AbortSignal.timeout(2000) });
       const data = (await res.json()) as { models?: Array<{ name?: string }> };
-      warmCache.models = (data.models ?? []).map((m) => m.name ?? '').filter(Boolean);
+      models = (data.models ?? []).map((m) => m.name ?? '').filter(Boolean);
     } catch {
-      warmCache.models = [];
+      models = [];
     }
-    warmCache.at = Date.now();
-    return warmCache.models;
+    warmCache.set(baseUrl, { at: Date.now(), models });
+    return models;
   };
 
   app.get('/v1/pool', async () => {
@@ -579,12 +591,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!profile || profile.ownerId !== ownerIdOf(req)) {
       return reply.code(404).send({ error: 'Not found' });
     }
+    // In-use check must span all owners (a shared profile may power another
+    // account's agent), but the message must not name THEIR agents to you.
     const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id);
     if (using.length > 0) {
+      const mine = using.filter((a) => a.ownerId === ownerIdOf(req));
+      const others = using.length - mine.length;
+      const parts = [
+        ...mine.map((a) => a.name),
+        ...(others > 0 ? [`${others} agent(s) on other accounts`] : []),
+      ];
       return reply.code(400).send({
         error:
-          `Still in use by ${using.map((a) => a.name).join(', ')} — ` +
-          `switch ${using.length === 1 ? 'it' : 'them'} to another AI source first (Edit → AI source).`,
+          `Still in use by ${parts.join(', ')} — ` +
+          `switch ${using.length === 1 ? 'it' : 'them'} to another AI source first, or ` +
+          `unshare this one and let those agents keep it until they move.`,
       });
     }
     if (profile.secretRef) await secrets.delete(profile.secretRef).catch(() => {});
@@ -750,7 +771,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-      const lines = Math.min(Number(req.query.lines ?? 80) || 80, 500);
+      // Clamp both ends: a negative `?lines` slipped through Math.min into
+      // `docker logs --tail -5`, which means "everything".
+      const lines = Math.min(Math.max(Math.floor(Number(req.query.lines ?? 80)) || 80, 1), 500);
       const text = await providerFor(agent.hostId).logs(agent.runtimeRef, lines);
       return { text };
     },
@@ -1092,7 +1115,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Querystring: { limit?: string } }>('/v1/events', async (req) => {
     const visible = store.listVisibleAgents(ownerIdOf(req));
     const names = new Map(visible.map((a) => [a.id, a.name]));
-    const limit = Math.min(Number(req.query.limit ?? 40) || 40, 200);
+    // Clamp low too: a negative `?limit` became SQLite `LIMIT -1` (no limit),
+    // dumping the whole event table.
+    const limit = Math.min(Math.max(Math.floor(Number(req.query.limit ?? 40)) || 40, 1), 200);
     return store.listEvents([...names.keys()], limit).map((e) => ({
       ...e,
       agentName: names.get(e.agentId),
@@ -1561,6 +1586,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    // Already gone (or going): a second DELETE would drive DELETED→DELETING,
+    // an illegal transition that surfaced as a 500. It's done — say so.
+    if (agent.state === 'DELETED' || agent.state === 'DELETING') {
+      return reply.code(404).send({ error: 'Not found' });
+    }
     // A migrate/adopt/import mid-flight: refuse rather than wait — those run
     // for minutes, and purging the volume under an in-progress export is loss.
     if (busyNow(agent, reply)) return reply;
@@ -1586,6 +1616,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     store.deleteSnapshotsFor(agent.id);
     store.deleteEventsFor(agent.id);
+    // Kill any outstanding invite links: redeeming one after deletion would
+    // mint a membership against a tombstone with no bot to talk to.
+    store.expireInvitesFor(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
 }

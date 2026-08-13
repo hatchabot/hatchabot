@@ -747,6 +747,16 @@ export class Store {
     return res.changes === 1;
   }
 
+  /** Burn every outstanding invite for an agent (used on delete). */
+  expireInvitesFor(agentId: string): void {
+    this.db
+      .prepare(
+        `UPDATE invites SET redeemed_at = ?, redeemed_by = 'agent-deleted'
+         WHERE agent_id = ? AND redeemed_at IS NULL`,
+      )
+      .run(new Date().toISOString(), agentId);
+  }
+
   listMemberships(agentId: string): Array<{
     userId: string;
     role: string;
@@ -870,6 +880,22 @@ export class Store {
     this.db
       .prepare(`UPDATE memberships SET status = 'revoked' WHERE agent_id = ? AND user_id = ?`)
       .run(agentId, userId);
+  }
+
+  /**
+   * Re-admit a previously revoked member (a fresh invite they redeem again).
+   * Clears the old bound telegram id so they claim first contact anew — the
+   * person behind the account may have changed, and pairing re-binds it.
+   */
+  reactivateMembership(agentId: string, userId: string, displayName: string): void {
+    this.db
+      .prepare(
+        `UPDATE memberships
+           SET status = 'active', display_name = ?, channel_user_id = NULL,
+               joined_at = ?
+         WHERE agent_id = ? AND user_id = ?`,
+      )
+      .run(displayName, new Date().toISOString(), agentId, userId);
   }
 
   setMembershipDisplayName(agentId: string, userId: string, name: string): void {

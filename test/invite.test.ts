@@ -48,4 +48,37 @@ describe('invites (§12.3)', () => {
     });
     expect(checkInvite(store, 'EXPIRED234')).toEqual({ valid: false, reason: 'expired' });
   });
+
+  it('treats a link to a deleted agent as a dead link, not a valid join', () => {
+    const store = makeStore();
+    const { code } = createInvite(store, 'a1', 'owner');
+    store.setAgentState('a1', 'DELETING');
+    store.setAgentState('a1', 'DELETED');
+    expect(checkInvite(store, code).valid).toBe(false);
+    expect(() => redeemInvite(store, code, 'Late')).toThrow(InviteInvalidError);
+  });
+
+  it('re-admits a previously revoked account member on a fresh invite', () => {
+    const store = makeStore();
+    // Account-keyed member (signed-in invitee), then revoked.
+    redeemInvite(store, createInvite(store, 'a1', 'owner').code, 'Bob', 'user-bob');
+    store.revokeMembership('a1', 'user-bob');
+    expect(store.getMembership('a1', 'user-bob')!.status).toBe('revoked');
+
+    // A new invite must let them back in (not "already used" forever), and
+    // reactivate the existing row rather than hit UNIQUE(agent_id, user_id).
+    const rejoined = redeemInvite(store, createInvite(store, 'a1', 'owner').code, 'Bob again', 'user-bob');
+    expect(rejoined.membershipUserId).toBe('user-bob');
+    const m = store.getMembership('a1', 'user-bob')!;
+    expect(m.status).toBe('active');
+    expect(m.channelUserId).toBeUndefined(); // re-claims first contact
+    expect(store.listMemberships('a1').filter((x) => x.userId === 'user-bob')).toHaveLength(1);
+  });
+
+  it('still blocks a second invite for a currently-active member', () => {
+    const store = makeStore();
+    redeemInvite(store, createInvite(store, 'a1', 'owner').code, 'Bob', 'user-bob');
+    expect(() => redeemInvite(store, createInvite(store, 'a1', 'owner').code, 'Bob', 'user-bob'))
+      .toThrow(InviteInvalidError);
+  });
 });

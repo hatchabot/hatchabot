@@ -129,6 +129,15 @@ describe('moved-away agents cannot be resurrected', () => {
   });
 });
 
+describe('delete is 404 the second time, not a 500', () => {
+  it('answers 404 on a re-delete instead of an illegal DELETED->DELETING', async () => {
+    const { f } = await world();
+    expect((await f.inject({ method: 'DELETE', url: '/v1/agents/a1', headers: as })).statusCode).toBe(200);
+    const again = await f.inject({ method: 'DELETE', url: '/v1/agents/a1', headers: as });
+    expect(again.statusCode).toBe(404);
+  });
+});
+
 describe('POST /v1/agents/preflight', () => {
   it('carries sharedPaths through to the folder check', async () => {
     const { f } = await world();

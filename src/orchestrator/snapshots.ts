@@ -197,6 +197,8 @@ function defaultLabel(reason: SnapshotReason): string {
       return 'before a restore';
     case 'pre-rebuild':
       return 'before a rebuild';
+    case 'pre-adopt':
+      return 'before adopting a workspace';
     case 'scheduled':
       return 'automatic';
     default:
