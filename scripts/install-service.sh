@@ -24,16 +24,23 @@ chmod 600 .env
 # docker outside /usr/bin are invisible to them, so bake the real locations
 # into both units (the macOS launchd branch of setup-host.sh does the same,
 # for the same reason).
-NODE_DIR="$(dirname "$(command -v node)")"
-DOCKER_DIR="$(dirname "$(command -v docker)")"
-SERVICE_PATH="$NODE_DIR:$DOCKER_DIR:/usr/local/bin:/usr/bin:/bin"
+# Resolve node/docker explicitly and fail loudly if missing — `dirname ""`
+# would otherwise silently bake "." into the unit's PATH.
+NODE_BIN="$(command -v node)" || { echo "node not found on PATH — install Node 22+ first." >&2; exit 1; }
+DOCKER_BIN="$(command -v docker)" || { echo "docker not found on PATH — install Docker first." >&2; exit 1; }
+SERVICE_PATH="$(dirname "$NODE_BIN"):$(dirname "$DOCKER_BIN"):/usr/local/bin:/usr/bin:/bin"
 
 mkdir -p ~/.config/systemd/user
 # Substitute the real repo location — the units used to hardcode ~/agentclaw,
-# so any other clone path failed silently at boot.
-sed -e "s|__AGENTCLAW_DIR__|$(pwd)|g" -e "s|__AGENTCLAW_PATH__|$SERVICE_PATH|g" \
+# so any other clone path failed silently at boot. Escape sed-replacement
+# metacharacters (& | \) so a clone path containing them can't corrupt the
+# generated unit.
+sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+DIR_ESC="$(sed_escape "$(pwd)")"
+PATH_ESC="$(sed_escape "$SERVICE_PATH")"
+sed -e "s|__AGENTCLAW_DIR__|$DIR_ESC|g" -e "s|__AGENTCLAW_PATH__|$PATH_ESC|g" \
   deploy/agentclaw.service > ~/.config/systemd/user/agentclaw.service
-sed -e "s|__AGENTCLAW_DIR__|$(pwd)|g" -e "s|__AGENTCLAW_PATH__|$SERVICE_PATH|g" \
+sed -e "s|__AGENTCLAW_DIR__|$DIR_ESC|g" -e "s|__AGENTCLAW_PATH__|$PATH_ESC|g" \
   deploy/agentclaw-backup.service > ~/.config/systemd/user/agentclaw-backup.service
 cp deploy/agentclaw-backup.timer ~/.config/systemd/user/agentclaw-backup.timer
 systemctl --user daemon-reload

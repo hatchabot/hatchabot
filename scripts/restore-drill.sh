@@ -26,10 +26,11 @@ IMAGE="${AGENTCLAW_IMAGE:-agentclaw-runtime:latest}"
 
 if [ $# -ge 1 ]; then
   BACKUP="$1"
+  [ -d "$BACKUP" ] || { echo "✗ No such backup directory: $BACKUP" >&2; exit 1; }
 else
   BACKUP="$(find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | sort | tail -n1)"
+  [ -n "$BACKUP" ] && [ -d "$BACKUP" ] || { echo "✗ No backup directory found under $BASE" >&2; exit 1; }
 fi
-[ -n "$BACKUP" ] && [ -d "$BACKUP" ] || { echo "✗ No backup directory found under $BASE" >&2; exit 1; }
 echo "Drilling restore from: $BACKUP"
 
 SCRATCH="$(mktemp -d)"

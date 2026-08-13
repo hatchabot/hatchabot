@@ -19,9 +19,14 @@ import { buildConfigCommands, describeConfigCommands } from '../src/openclaw/con
 
 const db = new Database(':memory:');
 const store = new Store(db);
+// Use the same key derivation the server does (keyFromEnv), so a
+// passphrase-style AGENTCLAW_SECRET_KEY in the environment doesn't crash the
+// e2e with "must be 32 bytes"; default to a fixed hex key when unset.
 const secrets = new LocalSecretStore(
   db,
-  Buffer.from(process.env.AGENTCLAW_SECRET_KEY ?? '0'.repeat(64), 'hex'),
+  process.env.AGENTCLAW_SECRET_KEY
+    ? LocalSecretStore.keyFromEnv()
+    : Buffer.from('0'.repeat(64), 'hex'),
 );
 const channel = new TelegramPoolProvisioner(db, secrets);
 
