@@ -17,7 +17,7 @@ import {
 } from '../orchestrator/provision.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
-import { AgentBusyError, isBusy } from '../orchestrator/busy.js';
+import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
@@ -937,9 +937,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      // Restore writes the volume — the one mutating route that lacked a busy
+      // guard, so a restore could interleave with a migrate/adopt/export
+      // reading or replacing the same volume. Hold the flag for the write.
+      if (busyNow(agent, reply)) return reply;
       try {
-        return await restoreSnapshot(snapshotDeps(agent), agent.id, req.params.snapId);
+        return await whileBusy(agent.id, () =>
+          restoreSnapshot(snapshotDeps(agent), agent.id, req.params.snapId),
+        );
       } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof SnapshotError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
@@ -1206,6 +1213,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      // A tombstoned copy still holds the live bot token — migrating it again
+      // ships that token to a third server and mints a second poller, the
+      // exact thing the tombstone exists to prevent.
+      if (movedAway(agent, reply)) return reply;
       const peerId = (req.body as { peerId?: string } | null)?.peerId;
       const peer = peerId && store.getPeer(ownerIdOf(req), peerId);
       if (!peer) return reply.code(400).send({ error: 'Unknown server' });
@@ -1233,18 +1244,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
+    // A moved-away copy's archive carries the live bot token — refuse it.
+    if (movedAway(agent, reply)) return reply;
     if (busyNow(agent, reply)) return reply;
     try {
-      const { filename, data } = await exportAgent(
-        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-          log: trace(agent.id) },
-        agent.id,
+      // HOLD the busy flag for the whole export, not just check it: exportAgent
+      // quiesces then tars the volume (minutes on a large agent), and without
+      // the flag a concurrent Start passed its guards and booted the container
+      // to write the volume mid-`tar`, silently tearing the archive.
+      const { filename, data } = await whileBusy(agent.id, () =>
+        exportAgent(
+          { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+            log: trace(agent.id) },
+          agent.id,
+        ),
       );
       return reply
         .type('application/octet-stream')
         .header('content-disposition', `attachment; filename="${filename}"`)
         .send(data);
     } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
       if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
       throw err;
     }

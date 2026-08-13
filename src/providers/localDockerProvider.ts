@@ -216,9 +216,21 @@ export class LocalDockerProvider implements RuntimeProvider {
       // stalled daemon (IO load, backup running) says nothing about the
       // container, and its stderr is empty so the regex below can't catch it.
       if (res.timedOut) return { phase: 'unknown' };
-      if (/cannot connect to the docker daemon|is the docker daemon running/i.test(res.stderr)) {
+      // Any "can't reach/use the daemon" error means the container's fate is
+      // unknown, NOT that it is gone. Besides the daemon being down, this
+      // covers a permission error (user briefly out of the docker group after
+      // a reboot) and TLS/context/connect misconfig — all of which otherwise
+      // fell through to `absent` and made reconcile FAIL the whole fleet.
+      if (
+        /cannot connect to the docker daemon|is the docker daemon running|permission denied|denied while trying to connect|error during connect|cannot connect|no such host|context .* not found/i.test(
+          res.stderr,
+        )
+      ) {
         return { phase: 'unknown' };
       }
+      // Default stays `absent`: a genuine "No such container" (the common
+      // stderr on inspect of a removed container) must still be caught so a
+      // vanished runtime gets flagged for Retry.
       return { phase: 'absent' };
     }
     const state = res.stdout.trim();

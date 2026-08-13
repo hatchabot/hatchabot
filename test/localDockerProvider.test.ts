@@ -143,6 +143,35 @@ describe('container and volume shape', () => {
   });
 });
 
+describe('daemon-access errors are unknown, not absent', () => {
+  it('reports unknown on a docker permission-denied error', async () => {
+    // A user briefly out of the docker group after a reboot: inspect exits
+    // non-zero with "permission denied", which used to fall through to absent
+    // and make boot reconcile FAIL the whole fleet.
+    const d = mkdtempSync(join(tmpdir(), 'acl-perm-'));
+    const permStub = join(d, 'docker');
+    writeFileSync(permStub,
+      '#!/usr/bin/env bash\n' +
+      'echo "Got permission denied while trying to connect to the Docker daemon socket" >&2\n' +
+      'exit 1\n', { mode: 0o755 });
+    chmodSync(permStub, 0o755);
+    const p = new LocalDockerProvider({ docker: permStub, image: 'test-image:latest' });
+    const status = await p.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper');
+    expect(status.phase).toBe('unknown');
+  });
+
+  it('still reports absent on a genuine "No such container"', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-gone-'));
+    const goneStub = join(d, 'docker');
+    writeFileSync(goneStub,
+      '#!/usr/bin/env bash\necho "Error: No such container: x" >&2\nexit 1\n', { mode: 0o755 });
+    chmodSync(goneStub, 0o755);
+    const p = new LocalDockerProvider({ docker: goneStub, image: 'test-image:latest' });
+    const status = await p.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper');
+    expect(status.phase).toBe('absent');
+  });
+});
+
 describe('a stalled daemon is not a missing container', () => {
   it('reports unknown, never absent, when docker inspect times out', async () => {
     // A timed-out inspect has empty stderr, so the daemon-down regex can't

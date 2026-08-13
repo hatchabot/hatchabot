@@ -103,6 +103,30 @@ describe('moved-away agents cannot be resurrected', () => {
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toMatch(/moved to Desktop/);
   });
+
+  it('refuses to EXPORT a moved-away copy — the archive holds the live token', async () => {
+    const { store, f } = await world();
+    store.setAgentState('a1', 'STOPPED');
+    store.setAgentMigratedTo('a1', 'Desktop (2026-08-06)');
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/export', headers: as });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/moved to Desktop/);
+  });
+
+  it('refuses to re-MIGRATE a moved-away copy to a third server', async () => {
+    const { store, f } = await world();
+    store.setAgentState('a1', 'STOPPED');
+    store.setAgentMigratedTo('a1', 'Desktop (2026-08-06)');
+    store.insertPeer({
+      id: 'peer1', ownerId: OWNER, name: 'Laptop', url: 'http://laptop:8080',
+      secretRef: 'peer/x', createdAt: 'now',
+    });
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents/a1/migrate', headers: as, payload: { peerId: 'peer1' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/moved to Desktop/);
+  });
 });
 
 describe('POST /v1/agents/preflight', () => {
