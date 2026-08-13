@@ -34,7 +34,7 @@ echo "Drilling restore from: $BACKUP"
 
 SCRATCH="$(mktemp -d)"
 chmod 700 "$SCRATCH"
-DRILL_VOL="agentclaw-restore-drill-$$"
+DRILL_VOL="acl-restore-drill-$$"
 cleanup() {
   rm -rf "$SCRATCH"
   docker volume rm -f "$DRILL_VOL" >/dev/null 2>&1 || true
@@ -69,9 +69,18 @@ if [ ! -f "$BACKUP/secret-key.env" ]; then
   echo "✗ Backup has no secret-key.env — its secrets are unrecoverable without the live .env." >&2
   fail=1
 else
-  # tsx: reuse the real LocalSecretStore rather than re-implementing crypto here.
+  # Read the key value safely: it may be a passphrase with spaces or glob
+  # characters (keyFromEnv stretches any passphrase), so an unquoted
+  # `env $(grep …)` would word-split or glob-expand it and test the wrong
+  # string. Strip the KEY= prefix and any shell quoting, pass it as one arg.
+  key_line="$(grep -m1 '^AGENTCLAW_SECRET_KEY=' "$BACKUP/secret-key.env" || true)"
+  key_val="${key_line#AGENTCLAW_SECRET_KEY=}"
+  case "$key_val" in
+    "'"*"'") key_val="${key_val#\'}"; key_val="${key_val%\'}" ;;   # strip single quotes
+    '"'*'"') key_val="${key_val#\"}"; key_val="${key_val%\"}" ;;   # strip double quotes
+  esac
   AGENTCLAW_DRILL_DB="$SCRATCH/db.sqlite" AGENTCLAW_REPO="$(pwd)" \
-    env $(grep '^AGENTCLAW_SECRET_KEY=' "$BACKUP/secret-key.env") \
+    AGENTCLAW_SECRET_KEY="$key_val" \
     ./node_modules/.bin/tsx -e '
       import Database from "better-sqlite3";
       async function main() {
@@ -90,20 +99,33 @@ else
 fi
 
 # --- 3. The volumes ----------------------------------------------------------
+# Portable file size: GNU `stat -c %s`, BSD/macOS `stat -f %z` (the drill runs
+# on macOS hosts too, where the old GNU-only form aborted the whole script).
+filesize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
+
 count=0
 largest=""
 largest_bytes=0
-for tgz in "$BACKUP"/*-vol.tgz; do
-  [ -e "$tgz" ] || break
+# Match both modern (…-slug-<id>-vol.tgz) and legacy (…-vol-<short>.tgz) names.
+for tgz in "$BACKUP"/*-vol.tgz "$BACKUP"/*-vol-*.tgz; do
+  [ -e "$tgz" ] || continue
   if ! tar tzf "$tgz" >/dev/null 2>&1; then
     echo "  ✗ unreadable archive: $(basename "$tgz")" >&2
     fail=1
     continue
   fi
   count=$((count + 1))
-  bytes=$(stat -c %s "$tgz")
+  bytes=$(filesize "$tgz")
   if [ "$bytes" -gt "$largest_bytes" ]; then largest_bytes=$bytes; largest="$tgz"; fi
 done
+
+# A backup with NO volume tarballs is not a passing backup — it is the exact
+# silent-empty case this drill exists to catch. (The DB alone restores the
+# registry but no agent remembers anything.)
+if [ "$count" -eq 0 ]; then
+  echo "  ✗ No volume archives in this backup — agent state was not captured." >&2
+  fail=1
+fi
 echo "  ✓ $count volume archive(s) readable"
 
 if [ -n "$largest" ]; then
@@ -118,10 +140,11 @@ if [ -n "$largest" ]; then
     bash -c "cd /data && tar xzf '/in/$(basename "$largest")' --no-same-owner && chown -R 1000:1000 /data"
   then
     # The layout OpenClaw actually boots from: an agents/ tree with a workspace.
-    listing=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" \
-      bash -c "find /data -maxdepth 3 | head -50")
+    # Match the dir exactly (not a truncated listing that head could cut off).
+    has_agents=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" \
+      bash -c "find /data -maxdepth 1 -type d -name agents | head -1")
     files=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" bash -c "find /data -type f | wc -l")
-    if echo "$listing" | grep -q '/data/agents/' && [ "$files" -gt 0 ]; then
+    if [ -n "$has_agents" ] && [ "$files" -gt 0 ]; then
       echo "  ✓ $(basename "$largest") restores: $files files, agents/ tree present"
     else
       echo "  ✗ $(basename "$largest") restored but the OpenClaw layout is missing" >&2

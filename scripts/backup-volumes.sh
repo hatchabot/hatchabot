@@ -67,20 +67,36 @@ if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   IMAGE="debian:stable-slim"
 fi
 
+# List the volumes FIRST, and distinguish "daemon down" from "no volumes".
+# `docker volume ls` failing (daemon down/permission) must not masquerade as
+# an empty list — that produced a 0-volume "success" that then pruned the last
+# good backups. Only a clean exit with genuinely no matches is "nothing here".
+if ! all_vols="$(docker volume ls -q)"; then
+  echo "✗ Could not list docker volumes (daemon down or no permission) — backup aborted, nothing pruned." >&2
+  exit 1
+fi
+vols="$(printf '%s\n' "$all_vols" | grep -E "^${PREFIX}-" || true)"
+if [ -z "$vols" ]; then
+  echo "✗ No ${PREFIX}-* volumes found. The DB was backed up, but no agent state was — refusing to prune." >&2
+  exit 1
+fi
+
 count=0
 failed=0
-for vol in $(docker volume ls -q | grep -E "^${PREFIX}-" || true); do
+while IFS= read -r vol; do
+  [ -n "$vol" ] || continue
   # Read-only mount; tar from inside a throwaway container so we never need
-  # root on the host to reach /var/lib/docker. Run as the invoking user (so
-  # the host owns the tarball) with umask 077 (so it is never world-readable,
-  # even transiently or when tar dies halfway).
+  # root on the host to reach /var/lib/docker. Run as root so it can read
+  # uid-1000 volume files on ANY host (macOS uid is 501), then chown the
+  # output to the invoking user and umask 077 so the tarball is host-owned
+  # and never world-readable, even on the failure path.
   # GNU tar exits 1 for "file changed as we read it" — expected on a live
   # volume, and the archive is still usable. Only >1 is a hard failure, and
   # one bad volume must not abort the rest of the run.
   rc=0
-  docker run --rm --user "$(id -u):$(id -g)" -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
-    bash -c "umask 077 && tar czf '/out/$vol.tgz' -C /data ." || rc=$?
-  if [ "$rc" -gt 1 ]; then
+  docker run --rm --user root -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
+    bash -c "umask 077 && tar czf '/out/$vol.tgz' -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz' 2>/dev/null; exit \$rc" || rc=$?
+  if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz" ]; then
     echo "  ✗ $vol failed (exit $rc)" >&2
     failed=$((failed + 1))
     continue
@@ -88,14 +104,16 @@ for vol in $(docker volume ls -q | grep -E "^${PREFIX}-" || true); do
   chmod 600 "$DEST/$vol.tgz"
   echo "  ✓ $vol → $DEST/$vol.tgz"
   count=$((count + 1))
-done
+done <<EOF
+$vols
+EOF
 
-# Prune old snapshots — only our own date-named directories, since the
-# destination may be a shared path (e.g. a NAS) with unrelated neighbours.
-find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS" -exec rm -rf {} +
-
-echo "Backed up $count volume(s) to $DEST (keeping $KEEP_DAYS days)"
-if [ "$failed" -gt 0 ]; then
-  echo "✗ $failed volume(s) failed — this backup is incomplete." >&2
+# Prune ONLY after confirming this backup is complete — a failing/partial run
+# must never delete the last good snapshots. Restricted to our own date-named
+# directories, since the destination may be a shared path (e.g. a NAS).
+if [ "$failed" -gt 0 ] || [ "$count" -eq 0 ]; then
+  echo "✗ $failed volume(s) failed, $count succeeded — incomplete backup, nothing pruned." >&2
   exit 1
 fi
+find "$BASE" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -mtime "+$KEEP_DAYS" -exec rm -rf {} +
+echo "Backed up $count volume(s) to $DEST (keeping $KEEP_DAYS days)"
