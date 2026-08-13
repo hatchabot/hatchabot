@@ -25,11 +25,29 @@ function configDefaults(): Record<string, string> {
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith('#') && l.includes('='))
-        .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+        .map((l) => [l.slice(0, l.indexOf('=')), unquoteEnvValue(l.slice(l.indexOf('=') + 1))]),
     );
   } catch {
     return {};
   }
+}
+
+/**
+ * setup-host.sh writes the password shell-single-quoted (the one form both
+ * systemd's EnvironmentFile and shell sourcing agree on), e.g.
+ * `AGENTCLAW_PASSWORD='p@ss'`. Without undoing that here the CLI sent the
+ * literal quotes and every login 401'd while the web UI worked. Mirror the
+ * two quoting styles a shell would: single-quoted (with `'\''` escapes) and
+ * double-quoted; leave a bare value untouched.
+ */
+function unquoteEnvValue(v: string): string {
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) {
+    return v.slice(1, -1).replace(/'\\''/g, "'");
+  }
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    return v.slice(1, -1).replace(/\\(["\\$`])/g, '$1');
+  }
+  return v;
 }
 
 const USAGE = `agentclaw <command> [options]
