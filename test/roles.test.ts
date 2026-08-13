@@ -196,6 +196,40 @@ describe('cross-owner isolation (audit regressions)', () => {
     expect(foreignFlip.statusCode).toBe(404);
   });
 
+  it('lets only the machine owner mount host folders (sharedPaths / inspect)', async () => {
+    // The local host is owned by OWNER. A second account must not be able to
+    // point their own agent at an arbitrary host directory and read it at
+    // uid 1000 — the blocklist is owner-blind, so this is gated on host
+    // ownership instead.
+    const store = twoOwners();
+    store.insertAgent({
+      id: 'a-member', ownerId: MEMBER, name: 'Theirs', slug: 'theirs', state: 'RUNNING',
+      aiProfileId: 'p-owner', hostId: 'h1', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    const f = await app(store);
+
+    const inspect = await f.inject({
+      method: 'POST', url: '/v1/workspaces/inspect', headers: as(MEMBER),
+      payload: { path: '/home/someone/private' },
+    });
+    expect(inspect.statusCode).toBe(403);
+
+    const mount = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a-member', headers: as(MEMBER),
+      payload: { sharedPaths: ['/home/someone/private'] },
+    });
+    expect(mount.statusCode).toBe(403);
+
+    // The machine owner is allowed through the gate (fails later on the path
+    // itself — a nonexistent folder — not on 403).
+    const ownerInspect = await f.inject({
+      method: 'POST', url: '/v1/workspaces/inspect', headers: as(OWNER),
+      payload: { path: '/home/someone/definitely-not-real' },
+    });
+    expect(ownerInspect.statusCode).toBe(400);
+  });
+
   it("refuses to ride the machine owner's on-disk Claude login", async () => {
     // A subscription profile with no token mounts the HOST's ~/.claude — the
     // machine owner's Max login. A second account creating one would silently

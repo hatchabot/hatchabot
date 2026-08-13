@@ -113,6 +113,11 @@ function zodMessage(err: z.ZodError): string {
   return `${where}${i.message}`;
 }
 
+/** Shown when a non-machine-owner tries to name a host path. */
+const HOST_PATH_DENIED =
+  'Only the account that set up this machine can mount or adopt host folders. ' +
+  'Ask them to share the folder with your agent, or import an exported agent instead.';
+
 const CreateAgent = z.object({
   name: z.string().min(1).max(64),
   persona: z.string().max(4000).optional(),
@@ -316,6 +321,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     provider: providerFor(agent.hostId),
     log: trace(agent.id),
   });
+
+  /**
+   * May this caller name arbitrary HOST paths (inspect / adopt / sharedPaths /
+   * fromWorkspace)? Only the account that owns the local host — i.e. the
+   * person who set the machine up. Those routes mount or read host
+   * directories at uid 1000; the `sharePathProblem` blocklist protects a few
+   * well-known secrets but is owner-blind, so on a shared box a second
+   * account could otherwise mount another user's home and read it through
+   * their own agent. Refuse rather than widen the blocklist.
+   */
+  const ownsLocalHost = (req: FastifyRequest): boolean => {
+    const ownerId = ownerIdOf(req);
+    const local = store.listHosts(ownerId).find((h) => h.kind === 'local');
+    return !!local && local.ownerId === ownerId;
+  };
 
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
@@ -780,6 +800,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
       if (parsed.data.sharedPaths) {
         const paths = parsed.data.sharedPaths.map((p) => p.trim()).filter(Boolean);
+        // Mounting host folders is the machine owner's privilege only — the
+        // blocklist below is owner-blind, so on a shared box a second account
+        // could otherwise read another user's files through their own agent.
+        if (paths.length && !ownsLocalHost(req)) {
+          return reply.code(403).send({ error: HOST_PATH_DENIED });
+        }
         for (const p of paths) {
           // Refuse the dangerous ones by name, and require the folder to
           // exist — a typo would otherwise mount an empty directory and the
@@ -996,6 +1022,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // already holds it — a reuse flow that round-trips a live credential
       // through a terminal is a worse trade than the bot slot it saves.
       if (!token && body.fromWorkspace) {
+        // Reading an OpenClaw config off an arbitrary host path is the same
+        // host-path privilege as inspect/adopt — machine owner only.
+        if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
         const existing = findExistingBot(body.fromWorkspace);
         if (!existing) {
           return reply.code(400).send({
@@ -1074,6 +1103,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   /** Look before you leap: what would be adopted from this folder? */
   app.post<{ Body: { path?: string } }>('/v1/workspaces/inspect', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     const path = (req.body as { path?: string } | null)?.path;
     if (!path) return reply.code(400).send({ error: 'path required' });
     try {
@@ -1106,6 +1136,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
       if (busyNow(agent, reply)) return reply;
       const path = (req.body as { path?: string } | null)?.path;
       if (!path) return reply.code(400).send({ error: 'path required' });

@@ -596,7 +596,7 @@ function renderAiList() {
       <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login") : `${esc(p.vendor)} key`}</span>
       <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
              title="Let every account on this server use this source for their agents — they spend on it">
-        <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked)"> Shared
+        <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
       </label>
       <div style="display:flex;gap:6px;width:100%">
         <input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" title="Default model" style="flex:1;min-width:0">
@@ -608,7 +608,19 @@ function renderAiList() {
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
 }
 
-async function shareAiProfile(id, shared) {
+async function shareAiProfile(id, shared, isMachineLogin) {
+  // A machine-login subscription is not "shared spend" — it hands the actual
+  // Claude login on this box to another account's agent, which they control
+  // and can drive over Telegram to read the credential. Make that explicit
+  // before turning it on; anything else shares only a key or a local server.
+  if (shared && isMachineLogin && !confirm(
+    "This source is THIS MACHINE'S Claude login.\n\n" +
+    "Sharing it lets other accounts' agents sign in as you — and an agent its " +
+    "owner controls could read your login and use it beyond this app. Only do " +
+    "this for people you'd hand your password to.\n\n" +
+    "Prefer: give them a `claude setup-token` of their own, or share an API-key " +
+    "or local-model source instead.\n\nShare your machine login anyway?"
+  )) { renderAiList(); return; }   // revert the checkbox
   try {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { shared } });
     toast(shared ? 'Shared with everyone on this server' : 'No longer shared — existing agents keep it until switched');
