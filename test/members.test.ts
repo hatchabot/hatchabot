@@ -167,6 +167,13 @@ describe('revokeMember', () => {
     expect(sh[1]).toContain('allowFrom.json');   // credentials file
     expect(sh[1]).toContain('openclaw.json');     // config file
     expect(sh[1]).toContain('555');
+    // Lock the deliberate casing asymmetry: the credentials FILENAME is
+    // lowercased (OpenClaw's on-disk convention) while the config KEY keeps
+    // the original case (matching what configWriter seeds). The account here
+    // is 'MixedCaseBot' — both forms must appear, or a "helpful" lowercasing
+    // of the config lookup would silently miss every mixed-case bot.
+    expect(sh[1]).toContain('mixedcasebot'); // credentials path (lowercased)
+    expect(sh[1]).toContain('MixedCaseBot'); // config account key (original case)
   });
 
   it('skips runtime surgery for a member with no telegram identity', async () => {

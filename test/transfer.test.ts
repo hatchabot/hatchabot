@@ -201,6 +201,24 @@ describe('agent export/import', () => {
       expect(dst.store.listAllActiveAgents()).toHaveLength(0);
       expect(dst.store.findAgentUsingAccount('kitchenbot')).toBeUndefined();
     });
+
+    it('keeps the importer as OWNER even if a same-id user row is listed first', async () => {
+      // A `user` member whose id equals the importer, placed BEFORE the owner
+      // row in the manifest. Owner-first ordering must ensure the importer
+      // gets the owner seat, not a revocable user membership.
+      const data = await archiveWith((m) => {
+        m.memberships = [
+          { userId: 'importer', role: 'user', channelUserId: '333', status: 'active' },
+          { userId: 'o', role: 'owner', channelUserId: '111', status: 'active' },
+        ];
+      });
+      const dst = await installation('importer'); // importer's own host + AI profile
+      const agent = await importAgent(dst.deps, data, { ownerId: 'importer' });
+      const members = dst.store.listMemberships(agent.id);
+      expect(members.find((x) => x.userId === 'importer')!.role).toBe('owner');
+      // and only one row for the importer (the dup was skipped)
+      expect(members.filter((x) => x.userId === 'importer')).toHaveLength(1);
+    });
   });
 
   it('restores state the runtime user can actually read', async () => {

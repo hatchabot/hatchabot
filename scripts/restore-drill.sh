@@ -107,9 +107,13 @@ filesize() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
 count=0
 largest=""
 largest_bytes=0
+seen_tgz=" "
 # Match both modern (…-slug-<id>-vol.tgz) and legacy (…-vol-<short>.tgz) names.
+# The two globs can overlap (a slug containing "vol-"), so dedup by path.
 for tgz in "$BACKUP"/*-vol.tgz "$BACKUP"/*-vol-*.tgz; do
   [ -e "$tgz" ] || continue
+  case "$seen_tgz" in *" $tgz "*) continue ;; esac
+  seen_tgz="$seen_tgz$tgz "
   if ! tar tzf "$tgz" >/dev/null 2>&1; then
     echo "  ✗ unreadable archive: $(basename "$tgz")" >&2
     fail=1
@@ -140,13 +144,13 @@ if [ -n "$largest" ]; then
   if docker run --rm --user root -v "$DRILL_VOL:/data" -v "$BACKUP:/in:ro" "$IMAGE" \
     bash -c "cd /data && tar xzf '/in/$(basename "$largest")' --no-same-owner && chown -R 1000:1000 /data"
   then
-    # The layout OpenClaw actually boots from: an agents/ tree with a workspace.
-    # Match the dir exactly (not a truncated listing that head could cut off).
-    has_agents=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" \
-      bash -c "find /data -maxdepth 1 -type d -name agents | head -1")
-    files=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" bash -c "find /data -type f | wc -l")
-    if [ -n "$has_agents" ] && [ "$files" -gt 0 ]; then
-      echo "  ✓ $(basename "$largest") restores: $files files, agents/ tree present"
+    # The layout OpenClaw actually boots from: an agents/ tree with real files
+    # UNDER it (an empty agents/ dir is not a usable restore — require a file
+    # inside, not merely the directory's existence).
+    agent_files=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" \
+      bash -c "find /data/agents -type f 2>/dev/null | wc -l")
+    if [ "$agent_files" -gt 0 ]; then
+      echo "  ✓ $(basename "$largest") restores: $agent_files files under agents/"
     else
       echo "  ✗ $(basename "$largest") restored but the OpenClaw layout is missing" >&2
       fail=1

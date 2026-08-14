@@ -77,7 +77,16 @@ if ! all_vols="$(docker volume ls -q)"; then
 fi
 vols="$(printf '%s\n' "$all_vols" | grep -E "^${PREFIX}-" || true)"
 if [ -z "$vols" ]; then
-  echo "✗ No ${PREFIX}-* volumes found. The DB was backed up, but no agent state was — refusing to prune." >&2
+  # No matching volumes — distinguish a genuinely fresh box (no agents yet,
+  # fine) from "agents exist but their volumes are missing or under a
+  # different AGENTCLAW_PREFIX" (dangerous — must not prune good backups).
+  # The DB we just copied is the source of truth for how many agents exist.
+  agent_count="$(node -e 'const D=require("better-sqlite3");const db=new D(process.argv[1],{readonly:true});process.stdout.write(String(db.prepare("SELECT COUNT(*) c FROM agents WHERE state != \x27DELETED\x27").get().c))' "$DEST/agentclaw.sqlite" 2>/dev/null || echo unknown)"
+  if [ "$agent_count" = "0" ]; then
+    echo "No agents yet — database backed up, no volumes to capture."
+    exit 0
+  fi
+  echo "✗ $agent_count agent(s) in the DB but no ${PREFIX}-* volumes found (AGENTCLAW_PREFIX mismatch?) — refusing to prune." >&2
   exit 1
 fi
 
@@ -101,7 +110,10 @@ while IFS= read -r vol; do
     failed=$((failed + 1))
     continue
   fi
-  chmod 600 "$DEST/$vol.tgz"
+  # Already 0600 from the in-container umask; this is belt-and-suspenders and
+  # must not abort the run (a root-owned tarball after a chown hiccup can't be
+  # chmod'd by the invoking user, but it's already 600).
+  chmod 600 "$DEST/$vol.tgz" 2>/dev/null || true
   echo "  ✓ $vol → $DEST/$vol.tgz"
   count=$((count + 1))
 done <<EOF

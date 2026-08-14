@@ -145,9 +145,15 @@ export async function exportAgent(
   // which owns its own undo) would strand a running agent silently STOPPED —
   // it stops answering Telegram with no error the owner ever sees. Put it back.
   const restoreIfRunning = async () => {
-    if (wasRunning) {
-      await provider.start(agent.runtimeRef!).catch(() => {});
+    if (!wasRunning) return;
+    // Only claim RUNNING if the container actually came back — matching
+    // migrate's undo. Setting RUNNING after a swallowed start() failure would
+    // leave the DB lying (RUNNING over a stopped container) until reconcile.
+    try {
+      await provider.start(agent.runtimeRef!);
       store.setAgentState(agentId, 'RUNNING');
+    } catch (startErr) {
+      log('export.restart_failed', { agentId, error: String(startErr) });
     }
   };
 
@@ -307,8 +313,15 @@ async function importAgentInner(
     // Memberships travel verbatim, except the owner seat belongs to whoever
     // imports — it's their installation now. Inside the try: a malformed row
     // must roll back with everything else, not strand a half-made agent.
+    // Owner rows first, so a `user` row whose id already equals the importer
+    // can never be inserted BEFORE the owner seat and demote the importer to
+    // a plain member (revocable, no owner privileges). Dedup then drops the
+    // duplicate. Guards against a manifest whose row order isn't joined_at.
+    const ordered = [...manifest.memberships].sort(
+      (a, b) => (a.role === 'owner' ? 0 : 1) - (b.role === 'owner' ? 0 : 1),
+    );
     const seen = new Set<string>();
-    for (const m of manifest.memberships) {
+    for (const m of ordered) {
       const userId = m.role === 'owner' ? opts.ownerId : m.userId;
       // Dedup by RESULTING userId: a `user` row whose id already equals the
       // importer (same Google account on both installs — "family member takes
