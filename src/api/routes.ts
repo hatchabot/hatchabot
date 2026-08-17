@@ -586,6 +586,62 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     },
   );
 
+  // What models this profile could switch between — so the app can offer a
+  // pick-list instead of making the owner hand-type IDs (a typo like
+  // "claude-opus-4.8" provisions green and only fails on first use). Live for
+  // a local server (it knows what it has pulled); a curated current list for
+  // the cloud vendors. Own profile only.
+  app.get<{ Params: { id: string } }>('/v1/ai-profiles/:id/available-models', async (req, reply) => {
+    const profile = store.getAIProfile(req.params.id);
+    if (!profile || (profile.ownerId !== ownerIdOf(req) && !profile.shared)) {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+    if (profile.vendor === 'local') {
+      if (!profile.baseUrl) return { models: [] };
+      const root = profile.baseUrl.replace(/\/v1\/?$/, '');
+      try {
+        const res = await fetch(`${root}/api/tags`, { signal: AbortSignal.timeout(4000) });
+        if (!res.ok) return { models: [], error: `The model server answered ${res.status}.` };
+        const data = (await res.json()) as { models?: Array<{ name?: string }> };
+        return { models: (data.models ?? []).map((m) => m.name ?? '').filter(Boolean) };
+      } catch {
+        return { models: [], error: "Couldn't reach the model server to list its models." };
+      }
+    }
+    if (profile.vendor === 'google') {
+      // Live list, since key holders get exactly what their key can call.
+      const key = profile.secretRef ? await secrets.get(profile.secretRef).catch(() => undefined) : undefined;
+      if (!key) return { models: [] };
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(key)}`,
+          { signal: AbortSignal.timeout(6000) },
+        );
+        if (!res.ok) return { models: [] };
+        const data = (await res.json()) as { models?: Array<{ name?: string; supportedGenerationMethods?: string[] }> };
+        const models = (data.models ?? [])
+          .filter((m) => (m.supportedGenerationMethods ?? []).includes('generateContent'))
+          .map((m) => (m.name ?? '').replace(/^models\//, ''))
+          .filter(Boolean);
+        return { models };
+      } catch {
+        return { models: [] };
+      }
+    }
+    // Anthropic: a curated current list (subscription profiles hold no API
+    // key to query the Models API, and a static list is offline-safe). Update
+    // here when the family changes.
+    return {
+      models: [
+        'claude-opus-5',
+        'claude-sonnet-5',
+        'claude-haiku-4-5',
+        'claude-opus-4-8',
+        'claude-fable-5',
+      ],
+    };
+  });
+
   app.delete<{ Params: { id: string } }>('/v1/ai-profiles/:id', async (req, reply) => {
     const profile = store.getAIProfile(req.params.id);
     if (!profile || profile.ownerId !== ownerIdOf(req)) {

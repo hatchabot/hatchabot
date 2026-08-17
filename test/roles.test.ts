@@ -230,6 +230,23 @@ describe('cross-owner isolation (audit regressions)', () => {
     expect(ownerInspect.statusCode).toBe(400);
   });
 
+  it('lists a curated model set for an anthropic profile, owner-scoped', async () => {
+    const store = twoOwners(); // p-owner is anthropic, owned by OWNER
+    const f = await app(store);
+    const res = await f.inject({
+      method: 'GET', url: '/v1/ai-profiles/p-owner/available-models', headers: as(OWNER),
+    });
+    expect(res.statusCode).toBe(200);
+    const models = res.json().models as string[];
+    expect(models).toContain('claude-opus-5');
+    expect(models.length).toBeGreaterThan(2);
+
+    // A stranger (no ownership, not shared) can't enumerate it.
+    expect((await f.inject({
+      method: 'GET', url: '/v1/ai-profiles/p-owner/available-models', headers: as(STRANGER),
+    })).statusCode).toBe(404);
+  });
+
   it("refuses to ride the machine owner's on-disk Claude login", async () => {
     // A subscription profile with no token mounts the HOST's ~/.claude — the
     // machine owner's Max login. A second account creating one would silently

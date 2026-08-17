@@ -112,8 +112,10 @@
   <header>
     <h1>Agent<b>Claw</b></h1>
     <span class="sub" id="poolInfo"></span>
+    <button id="rebuildAllBtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden
+            style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Rebuild all</button>
     <button id="importBtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()"
-            style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
+            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
     <button id="aiBtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()"
             style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ Settings</button>
     <span class="sub" id="whoami" style="margin-left:8px"></span>
@@ -602,10 +604,55 @@ function renderAiList() {
         <input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" title="Default model" style="flex:1;min-width:0">
         <input type="text" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(', '))}"
                placeholder="More switchable models, comma-separated" title="Switchable in chat via /model" style="flex:2;min-width:0">
+        <button onclick="pickModels('${p.id}')" title="Pick from the models this source offers, instead of typing them">Pick…</button>
         <button onclick="saveAiProfile('${p.id}')">Save</button>
         <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">×</button>
       </div>
+      <div id="aiPick-${p.id}" class="sub" style="width:100%;display:none;flex-wrap:wrap;gap:6px;margin-top:2px"></div>
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
+}
+
+// Populate the switchable list from what the source actually offers — click
+// chips instead of typing IDs. Local servers report live; cloud vendors a
+// curated current list.
+async function pickModels(id) {
+  const box = $(`aiPick-${id}`);
+  box.style.display = 'flex';
+  box.innerHTML = '<span>Loading available models…</span>';
+  let available = [];
+  try {
+    const out = await api(`/v1/ai-profiles/${id}/available-models`);
+    available = out.models ?? [];
+    if (!available.length) { box.innerHTML = `<span>${out.error ? esc(out.error) : 'No models to list for this source — type them instead.'}</span>`; return; }
+  } catch (e) { box.innerHTML = `<span>Couldn't load models: ${esc(e.message)}</span>`; return; }
+
+  const field = $(`aiModels-${id}`);
+  const dflt = $(`aiModel-${id}`).value.trim();
+  const render = () => {
+    const chosen = new Set(field.value.split(',').map(s => s.trim()).filter(Boolean));
+    box.innerHTML = available.map(m => {
+      const on = chosen.has(m) || m === dflt;
+      const isDefault = m === dflt;
+      return `<button type="button" onclick="toggleModel('${id}', ${jsq(JSON.stringify(m))})"
+        ${isDefault ? 'disabled title="This is the default model"' : ''}
+        style="border:1px solid var(--line);border-radius:14px;padding:3px 10px;cursor:${isDefault ? 'default' : 'pointer'};
+        background:${on ? 'var(--accent-soft, #e8effb)' : 'transparent'};color:inherit;font-size:12px;opacity:${isDefault ? '.6' : '1'}">
+        ${on ? '✓ ' : ''}${esc(m)}${isDefault ? ' · default' : ''}</button>`;
+    }).join('') + '<span style="width:100%;margin-top:2px">Click to add or remove, then Save.</span>';
+  };
+  box._render = render; box._available = available; box._field = field; box._default = dflt;
+  render();
+}
+
+function toggleModel(id, mJson) {
+  const m = JSON.parse(mJson);
+  const box = $(`aiPick-${id}`);
+  const field = box._field;
+  const set = new Set(field.value.split(',').map(s => s.trim()).filter(Boolean));
+  if (m === box._default) return;             // default is always included
+  set.has(m) ? set.delete(m) : set.add(m);
+  field.value = [...set].join(', ');
+  box._render();
 }
 
 async function shareAiProfile(id, shared, isMachineLogin) {
@@ -1177,6 +1224,31 @@ async function rebuild(id) {
   } catch (e) { toast(e.message); }
 }
 
+async function rebuildAll() {
+  const list = rebuildableAgents();
+  if (!list.length) { toast('Nothing to rebuild right now.'); return; }
+  if (!confirm(
+    `Rebuild ${list.length} agents on the current runtime image?\n\n` +
+    `Each gets a new container (memory kept) and briefly goes offline while it ` +
+    `restarts. A pre-rebuild snapshot is taken automatically.`
+  )) return;
+
+  const btn = $('rebuildAllBtn'); btn.disabled = true;
+  let started = 0, skipped = 0;
+  // Fire sequentially: each call returns as soon as its rebuild is queued, so
+  // this staggers the snapshots rather than hammering the box all at once.
+  // Each agent keeps its own guards server-side (busy, moved-away, in-flight).
+  for (const a of list) {
+    try {
+      await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} });
+      started++;
+    } catch { skipped++; }
+  }
+  btn.disabled = false;
+  toast(`Rebuilding ${started} agent${started === 1 ? '' : 's'}${skipped ? ` — ${skipped} skipped (busy or already changing)` : ''}. Memory is kept.`);
+  await refresh(false);
+}
+
 async function del(id, name) {
   // Deliberately annoying: deletion erases the agent's memory forever, so it
   // costs a typed confirmation, not a reflex click.
@@ -1257,8 +1329,18 @@ async function approve(id, code) {
   } catch (e) { toast(e.message); }
 }
 
+/** Agents this account can rebuild right now (owned, live-or-stopped, not moved away). */
+function rebuildableAgents() {
+  return agents.filter(a =>
+    (a.role ? a.role === 'owner' : true) &&
+    a.runtimeRef && !a.migratedTo &&
+    (a.state === 'RUNNING' || a.state === 'STOPPED'));
+}
+
 function renderAgents() {
   const el = $('agents');
+  // Show "Rebuild all" only when there's more than one agent to rebuild.
+  $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
   if (profiles.length && agents.length === 0) {
     el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
     return;
