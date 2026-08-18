@@ -198,14 +198,25 @@
     <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
     <button id="renameBtn" onclick="renameAgent()">Rename</button>
   </div>
-  <label>AI source <span style="color:var(--dim)">— which model drives this agent</span></label>
+  <label>AI source <span style="color:var(--dim)">— the AI account behind this agent</span></label>
   <div style="display:flex;gap:8px;align-items:center">
-    <select id="editProfile" style="flex:1;min-width:0"></select>
+    <select id="editProfile" style="flex:1;min-width:0" onchange="onEditProfileChange()"></select>
     <button id="profileBtn" onclick="switchProfile()">Use this</button>
   </div>
   <div class="sub">
     Each agent can use a different AI. Add sources in <b>⚙ Settings</b>; switching
     here applies on the agent's next Rebuild.
+  </div>
+  <div id="modelRow" style="display:none">
+    <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="editModel" style="flex:1;min-width:0"></select>
+      <button id="modelBtn" onclick="switchModel()">Use this</button>
+    </div>
+    <div class="sub">
+      Pick per agent from the source's models, or follow its default. Applies on the
+      next Rebuild. (Local sources always run their one model, so there's no choice.)
+    </div>
   </div>
   <label>Folders this agent can read <span style="color:var(--dim)">— on this machine, read-only</span></label>
   <div id="pathList"></div>
@@ -599,6 +610,13 @@ const vendorChip = p => p.vendor === 'local' ? 'local · no credential'
   : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login")
   : `${esc(p.vendor)} key`;
 
+// The AI-source dropdowns name the source by its KIND, not a specific model —
+// the model is chosen separately in the per-agent Model picker, so repeating
+// one here just invited "which model am I actually on?" confusion.
+const vendorLabel = v => v === 'local' ? 'Local' : v === 'google' ? 'Gemini' : 'Claude';
+const sourceOptionLabel = p =>
+  `${esc(p.name)} — ${vendorLabel(p.vendor)}${p.mine === false ? ' (shared)' : ''}`;
+
 // The default model: a dropdown when we know what the source offers, a text
 // box as a graceful fallback (models not loaded yet, or a source that can't
 // list them). The current default is always an option even if it's not in the
@@ -861,7 +879,7 @@ $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   $('agentProfile').innerHTML = profiles.map(p =>
-    `<option value="${p.id}">${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}${p.mine === false ? ' (shared)' : ''}</option>`).join('');
+    `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('');
   createDlg.showModal();
   $('agentName').focus();
 };
@@ -1018,7 +1036,8 @@ async function openEdit(id, name) {
   $('editName').value = name;
   const cur = agents.find(x => x.id === id);
   $('editProfile').innerHTML = profiles.map(p =>
-    `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${esc(p.name)} — ${esc(p.model)}${p.vendor === 'local' ? ' (local)' : ''}</option>`).join('');
+    `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
+  renderModelPickerForAgent(cur);
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   renderSharedPaths(cur?.sharedPaths);
@@ -1086,6 +1105,77 @@ function localClashWarning(chosen, exceptAgentId) {
     `evict each other and every reply would stall ~10s while the model reloads.`;
 }
 
+/**
+ * The per-agent model picker. Shown only for cloud sources (a local source
+ * runs its one model, so there's nothing to choose). The first option follows
+ * the source's default; the rest are the source's switchable models. The empty
+ * value means "no override" — the PATCH sends null to clear it.
+ */
+function renderModelPicker(menu, def, override) {
+  const row = $('modelRow');
+  if (!menu?.length) { row.style.display = 'none'; return; }
+  row.style.display = '';
+  // A pin no longer on the menu (source edited under it) must not silently
+  // read as "Source default" — surface it as an explicit, selected option so
+  // the UI reports what the agent is actually still pinned to.
+  const stale = override && !menu.includes(override);
+  $('editModel').innerHTML =
+    `<option value=""${!override ? ' selected' : ''}>Source default (${esc(def)})</option>` +
+    menu.map(m =>
+      `<option value="${esc(m)}"${m === override ? ' selected' : ''}>${esc(m)}${m === def ? ' — default' : ''}</option>`
+    ).join('') +
+    (stale ? `<option value="${esc(override)}" selected>${esc(override)} — no longer offered</option>` : '');
+}
+
+// The agent's own view (its saved profile + pin) vs a view of a source the
+// user just selected in the dropdown but hasn't applied yet.
+function renderModelPickerForAgent(agent) {
+  renderModelPicker(agent?.profileModels, agent?.profileDefaultModel, agent?.modelOverride);
+}
+function renderModelPickerForProfile(p) {
+  if (!p || p.vendor === 'local') { renderModelPicker([], undefined, undefined); return; }
+  const menu = [p.model, ...(p.models ?? [])].filter((m, i, a) => m && a.indexOf(m) === i);
+  // Switching source drops any old pin — show the new source's default.
+  renderModelPicker(menu, p.model, undefined);
+}
+
+// The source dropdown changed: reflect the newly-chosen source's models
+// immediately (before "Use this" is pressed), so the picker never lists the
+// previous source's models. But a model can't be PINNED until the source
+// switch itself is applied (the server validates the pin against the agent's
+// CURRENT source), so disable the model button with a hint until then.
+function onEditProfileChange() {
+  const cur = agents.find(x => x.id === editAgentId);
+  const sel = $('editProfile').value;
+  const btn = $('modelBtn');
+  if (sel === cur?.aiProfileId) {
+    renderModelPickerForAgent(cur);
+    btn.disabled = false;
+    btn.title = '';
+    return;
+  }
+  renderModelPickerForProfile(profiles.find(p => p.id === sel));
+  btn.disabled = true;
+  btn.title = 'Apply the source change first (Use this, above), then pick a model.';
+}
+
+async function switchModel() {
+  const model = $('editModel').value || null; // '' → null clears the override
+  $('modelBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { model } });
+    if (confirm(`Saved. Rebuild now to run ${model ? `"${model}"` : 'the source default'}?\n\nThe agent restarts (memory kept) and is briefly offline.`)) {
+      await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
+      toast('Rebuilding with the new model');
+      editDlg.close();
+    } else {
+      toast('Saved — Rebuild to apply it');
+    }
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('modelBtn').disabled = false; }
+}
+
 async function switchProfile() {
   const id = $('editProfile').value;
   const chosen = profiles.find(p => p.id === id);
@@ -1101,6 +1191,12 @@ async function switchProfile() {
       toast('Saved — Rebuild to apply it');
     }
     await refresh(false);
+    // Dialog stayed open: the agent is now on the new source (and any stranded
+    // pin was cleared server-side). Re-render the model picker from the fresh
+    // agent so it lists the new source's models, not the old ones.
+    renderModelPickerForAgent(agents.find(x => x.id === editAgentId));
+    $('modelBtn').disabled = false;
+    $('modelBtn').title = '';
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('profileBtn').disabled = false; }
 }

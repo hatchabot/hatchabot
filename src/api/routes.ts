@@ -10,6 +10,7 @@ import { InvalidBotTokenError } from '../channels/telegramManual.js';
 import {
   claudeAuthDir,
   createAgentRecord,
+  effectiveModel,
   sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
@@ -30,7 +31,7 @@ import {
   inspectWorkspace,
   botPollState,
 } from '../orchestrator/adopt.js';
-import type { Agent } from '../domain/types.js';
+import type { Agent, AIProfile } from '../domain/types.js';
 import { ownerIdOf } from './principal.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -124,10 +125,30 @@ const CreateAgent = z.object({
   aiProfileId: z.string().min(1),
   hostId: z.string().min(1),
   sharedMemory: z.boolean().optional(),
+  /** Optional per-agent model override, chosen from the profile's menu. */
+  model: z.string().min(1).max(64).optional(),
   /** Telegram user ids to admit without pairing — carried from an adopted
    *  agent, so the people already talking to it are not made to knock. */
   seedMembers: z.array(z.string().regex(/^\d{1,32}$/)).max(32).optional(),
 });
+
+/**
+ * A per-agent model override is only valid for a cloud profile and must be one
+ * the profile actually offers — its default plus its switchable menu — so a
+ * typo can't provision green and fail on first use. Returns an error string,
+ * or undefined when the override is acceptable (or absent).
+ */
+function modelOverrideProblem(profile: AIProfile, model: string | null | undefined): string | undefined {
+  if (model == null) return undefined; // clearing / not setting is always fine
+  if (profile.vendor === 'local') {
+    return 'Local sources run one model at a time, so agents follow the source’s model — set it on the source, not per agent.';
+  }
+  const menu = new Set([profile.model, ...(profile.models ?? [])]);
+  if (!menu.has(model)) {
+    return `"${model}" isn’t one of this source’s models. Add it to the source’s switchable list first.`;
+  }
+  return undefined;
+}
 
 
 /**
@@ -270,19 +291,29 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    */
   const publicAgent = (agent: Agent, extra: Record<string, unknown> = {}) => {
     const desired = store.getAIProfile(agent.aiProfileId);
+    // What this agent WILL run: its own override if any, else the profile
+    // default (local ignores the override — effectiveModel handles that).
+    const desiredModel = desired ? effectiveModel(agent, desired) : undefined;
+    const switched =
+      (agent.appliedProfileId && agent.appliedProfileId !== agent.aiProfileId) ||
+      (!!agent.appliedModel && !!desiredModel && agent.appliedModel !== desiredModel);
     return {
       ...agent,
       gatewayToken: undefined,
       hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
       /** What the runtime is actually running right now. */
-      model: agent.appliedModel ?? desired?.model,
-      /** What it WILL run after a rebuild, when that differs. */
-      pendingModel:
-        agent.appliedProfileId && agent.appliedProfileId !== agent.aiProfileId
-          ? desired?.model
-          : agent.appliedModel && desired && agent.appliedModel !== desired.model
-            ? desired.model
-            : undefined,
+      model: agent.appliedModel ?? desiredModel,
+      /** What it WILL run after a rebuild, when that differs from now. */
+      pendingModel: switched ? desiredModel : undefined,
+      /** The models this agent could switch to (its profile's menu), so the
+       *  app can offer a per-agent picker without another round-trip. */
+      profileModels: desired && desired.vendor !== 'local'
+        ? [desired.model, ...(desired.models ?? [])].filter((m, i, a) => a.indexOf(m) === i)
+        : [],
+      profileDefaultModel: desired?.model,
+      /** The raw per-agent override (undefined = follows the default), so the
+       *  picker can show which choice is currently in effect. */
+      modelOverride: agent.model,
       ...extra,
     };
   };
@@ -580,6 +611,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (parsed.data.shared !== undefined) {
         store.setAIProfileShared(profile.id, parsed.data.shared);
       }
+      // Editing the model or its switchable list can orphan a per-agent pin.
+      // effectiveModel already refuses to run a stale pin; also clear it from
+      // stored state so the app doesn't misreport what an agent runs.
+      if (parsed.data.model !== undefined || 'models' in ((req.body ?? {}) as object)) {
+        const fresh = store.getAIProfile(profile.id)!;
+        store.clearStaleAgentModels(fresh.id, [fresh.model, ...(fresh.models ?? [])]);
+      }
       const updated = store.getAIProfile(profile.id)!;
       const { secretRef: _s, ...safe } = updated;
       return safe;
@@ -717,6 +755,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           'Pick a local host, or use an API-key profile for cloud hosting.',
       });
     }
+
+    // A per-agent model override, if given, must belong to the profile's menu
+    // and never applies to a local source.
+    const modelProblem = modelOverrideProblem(profile, parsed.data.model);
+    if (modelProblem) return reply.code(400).send({ error: modelProblem });
 
     // Optional per-account ceiling: on a shared box this bounds how many
     // agents (and pool bots, ports, containers) one account can consume.
@@ -867,6 +910,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           sharedMemory: z.boolean().optional(),
           /** Switch which AI drives this agent — applied on the next rebuild. */
           aiProfileId: z.string().min(1).optional(),
+          /**
+           * Per-agent model override, chosen from the profile's menu — applied
+           * on the next rebuild. `null` clears it (back to the profile default).
+           */
+          model: z.string().min(1).max(64).nullable().optional(),
           /** Clear the moved-away tombstone: "this really does run here now". */
           runsHere: z.literal(true).optional(),
           /** Host folders this agent may READ. Applied on the next rebuild. */
@@ -874,11 +922,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      const { name, sharedMemory: shared, aiProfileId, runsHere } = parsed.data;
+      const { name, sharedMemory: shared, aiProfileId, model, runsHere } = parsed.data;
       if (
         name === undefined &&
         shared === undefined &&
         aiProfileId === undefined &&
+        model === undefined &&
         !runsHere &&
         parsed.data.sharedPaths === undefined
       ) {
@@ -913,22 +962,42 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAgentSharedPaths(agent.id, paths);
       }
 
-      if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
-
+      // Validate the AI-source switch AND the model override together, BEFORE
+      // writing either. A combined request with a valid profile but an off-menu
+      // model must be rejected whole — not leave the agent half-switched.
+      let switchingProfile = false;
+      let target = store.getAIProfile(agent.aiProfileId); // the profile it WILL have
       if (aiProfileId !== undefined && aiProfileId !== agent.aiProfileId) {
         // The caller's own profile, or one shared with the installation —
         // same rule as agent creation.
-        const target = store.getAIProfile(aiProfileId);
-        if (!target || (target.ownerId !== ownerIdOf(req) && !target.shared)) {
+        const next = store.getAIProfile(aiProfileId);
+        if (!next || (next.ownerId !== ownerIdOf(req) && !next.shared)) {
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
         const host = store.getHost(agent.hostId);
-        if (target.vendor !== 'local' && target.kind === 'subscription' && host?.kind !== 'local') {
+        if (next.vendor !== 'local' && next.kind === 'subscription' && host?.kind !== 'local') {
           return reply.code(400).send({
             error: 'A subscription profile can only power agents on your own machine.',
           });
         }
-        store.setAgentAIProfile(agent.id, aiProfileId);
+        target = next;
+        switchingProfile = true;
+      }
+      if (model !== undefined) {
+        if (!target) return reply.code(400).send({ error: 'Unknown AI profile' });
+        const problem = modelOverrideProblem(target, model);
+        if (problem) return reply.code(400).send({ error: problem });
+      }
+
+      // All checks passed — apply the writes.
+      if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
+      if (switchingProfile) store.setAgentAIProfile(agent.id, aiProfileId!);
+      if (model !== undefined) {
+        store.setAgentModel(agent.id, model);
+      } else if (switchingProfile && agent.model && target && modelOverrideProblem(target, agent.model)) {
+        // The switch strands the old pin (new source lacks it, or is local).
+        // Drop it so the agent falls back to the new source's default.
+        store.setAgentModel(agent.id, null);
       }
 
       let policyUpdated = true;

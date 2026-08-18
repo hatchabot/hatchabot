@@ -123,6 +123,9 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN shared INTEGER NOT NULL DEFAULT 0`,
+      // Optional per-agent model override (cloud only). NULL = follow the
+      // profile's default model.
+      `ALTER TABLE agents ADD COLUMN model TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -237,15 +240,16 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
-                             host_id, runtime_ref, persona, shared_memory, pending_action,
+                             host_id, runtime_ref, persona, shared_memory, model, pending_action,
                              created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
-                 @hostId, @runtimeRef, @persona, @sharedMemory, @pendingAction,
+                 @hostId, @runtimeRef, @persona, @sharedMemory, @model, @pendingAction,
                  @createdAt, @updatedAt)`,
       )
       .run({
         stateReason: null,
         runtimeRef: null,
+        model: null,
         ...a,
         sharedMemory: a.sharedMemory ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
@@ -868,6 +872,33 @@ export class Store {
       .run(aiProfileId, new Date().toISOString(), id);
   }
 
+  /** Per-agent model override; null clears it (agent follows the profile default). */
+  setAgentModel(id: string, model: string | null): void {
+    this.db
+      .prepare(`UPDATE agents SET model = ?, updated_at = ? WHERE id = ?`)
+      .run(model, new Date().toISOString(), id);
+  }
+
+  /**
+   * Drop any per-agent model pin on `profileId` that is no longer on the given
+   * menu — called when a source's model list is edited, so a pin the source can
+   * no longer serve doesn't linger in stored state (and misreport in the UI).
+   * `effectiveModel` already refuses to run a stale pin; this keeps the row
+   * honest too. Returns how many agents were cleared.
+   */
+  clearStaleAgentModels(profileId: string, validModels: string[]): number {
+    // NULL out where model IS NOT NULL and NOT in the valid set. Build the IN
+    // list with placeholders — validModels is a small, owner-controlled menu.
+    const placeholders = validModels.map(() => '?').join(',');
+    const notInMenu = validModels.length ? `AND model NOT IN (${placeholders})` : '';
+    return this.db
+      .prepare(
+        `UPDATE agents SET model = NULL, updated_at = ?
+         WHERE ai_profile_id = ? AND model IS NOT NULL ${notInMenu}`,
+      )
+      .run(new Date().toISOString(), profileId, ...validModels).changes;
+  }
+
   setAgentSharedMemory(id: string, shared: boolean): void {
     this.db
       .prepare(`UPDATE agents SET shared_memory = ?, updated_at = ? WHERE id = ?`)
@@ -999,6 +1030,7 @@ function rowToAgent(r: any): Agent {
     runtimeRef: r.runtime_ref ?? undefined,
     persona: r.persona,
     sharedMemory: !!r.shared_memory,
+    model: r.model ?? undefined,
     pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
     migratedTo: r.migrated_to ?? undefined,
     sharedPaths: r.shared_paths ? JSON.parse(r.shared_paths) : undefined,

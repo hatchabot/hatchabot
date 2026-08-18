@@ -18,6 +18,8 @@ export interface CreateAgentInput {
   aiProfileId: string;
   hostId: string;
   sharedMemory?: boolean;
+  /** Optional per-agent model override (cloud only); absent = profile default. */
+  model?: string;
 }
 
 export interface ProvisionDeps {
@@ -67,6 +69,8 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
     // honest when everyone knows memory is common. Private is the opt-out for
     // a strictly personal agent.
     sharedMemory: input.sharedMemory ?? true,
+    // Only meaningful for cloud profiles; effectiveModel() ignores it for local.
+    model: profile.vendor === 'local' ? undefined : input.model || undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -287,7 +291,7 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
       }),
       configPatch: {
         agentId: agent.slug,
-        model: profile.model,
+        model: effectiveModel(agent, profile),
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         // Model refs are provider-prefixed; a Google profile configured as
@@ -390,7 +394,30 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
 export function recordApplied(store: Store, agentId: string): void {
   const agent = store.getAgent(agentId);
   const profile = agent && store.getAIProfile(agent.aiProfileId);
-  if (profile) store.setAgentApplied(agentId, profile.id, profile.model);
+  if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
+}
+
+/**
+ * The model an agent actually runs: its own override if set, else the
+ * profile's default. Local profiles ignore the override — only one model fits
+ * in the GPU's memory, so every local agent follows the profile's one model.
+ *
+ * The override is honoured ONLY while it is still on the profile's menu. A pin
+ * validated when set can go stale later — the owner edits the source and drops
+ * that model, or changes the default. This is the last line that decides what
+ * reaches the runtime, so it falls back to the default rather than write a
+ * model the source can no longer serve (which would green-build then die on
+ * first use). Keeping the guarantee here means it holds no matter how the pin
+ * went stale, not just on the paths we remembered to sweep.
+ */
+export function effectiveModel(
+  agent: { model?: string },
+  profile: { vendor: string; model: string; models?: string[] },
+): string {
+  if (profile.vendor === 'local') return profile.model;
+  if (!agent.model) return profile.model;
+  const menu = [profile.model, ...(profile.models ?? [])];
+  return menu.includes(agent.model) ? agent.model : profile.model;
 }
 
 /** Create + provision in one call — the shape scripts and tests want. */

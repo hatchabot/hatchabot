@@ -93,6 +93,38 @@ their create dialog. Flip it off and no new agents can take it; agents
 already on it keep working until switched. Only the profile's owner can
 edit, share, or delete it.
 
+## Per-agent model — pick without switching sources
+
+One AI source can drive many agents on different models. A source has a
+**default model** plus a switchable `/model` list; each agent may pin any model
+from that list, or follow the default. Set it in **Edit → Model** (the row
+appears only for cloud sources) — it applies on the agent's next Rebuild.
+
+Why this shape:
+
+- **Cloud only.** A local source runs one model at a time (only one fits in the
+  GPU), so every local agent follows the source's single model and the picker
+  is hidden. The pin is refused server-side for local sources.
+- **Stored on the agent, not the volume.** The override lives in AgentClaw's DB
+  (`agents.model`) and is written into OpenClaw config at provision time via
+  `effectiveModel(agent, profile)` — never persisted into the frozen volume
+  copy, which would survive a later change and silently override it.
+- **`effectiveModel` = the agent's override if set *and still on the menu*,
+  else the source default.** It is the single point that resolves what a runtime
+  actually runs, used by both `buildRuntimeSpec` and the applied-model
+  bookkeeping — so the guarantee below holds no matter how a pin went stale.
+- **Validated against the menu — when set, and again at run time.** A pin must
+  be the source's default or one of its switchable models, so a typo fails at
+  the API rather than green-lighting a container that dies on first use. Because
+  a pin can *later* fall off the menu (the owner edits the source and drops that
+  model), two things defend the guarantee: editing a source's model list sweeps
+  and clears any agent pin no longer offered (so stored state stays honest), and
+  `effectiveModel` falls back to the default for a stale pin (so even an
+  un-swept one never reaches the runtime).
+- **Travels with a move only if it still fits.** Export carries the pin;
+  import keeps it only when the destination source (cloud) offers that model,
+  otherwise it drops back to that source's default.
+
 ## Sharing your files with an agent
 
 An agent normally sees only its own workspace. **Edit → "Folders this agent

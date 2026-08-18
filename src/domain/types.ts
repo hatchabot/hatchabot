@@ -89,6 +89,12 @@ export interface Agent {
   /** One-to-many agents share MEMORY.md across members (§12.5). */
   sharedMemory: boolean;
   /**
+   * Optional per-agent model override, chosen from the profile's model menu.
+   * Absent = follow the profile's default. Ignored for local profiles (only
+   * one local model fits in memory), so it never applies there.
+   */
+  model?: string;
+  /**
    * Host folders mounted read-only into this agent's container, so it can
    * read your data. Deliberately per-agent: the homework tutor should not
    * inherit what the finance agent can see.

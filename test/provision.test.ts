@@ -60,6 +60,8 @@ async function world(opts: { failOn?: 'provision' | 'start'; parkFirst?: boolean
     vendor: (opts.profile?.vendor ?? 'anthropic') as any,
     kind: (opts.profile?.kind ?? 'api_key') as any,
     model: 'claude-opus-4-8',
+    // A realistic cloud menu so per-agent pins to a listed model are honoured.
+    models: ['claude-sonnet-5', 'claude-haiku-4-5'],
     secretRef: 'secretRef' in (opts.profile ?? {}) ? opts.profile!.secretRef : 'ai/p1',
     createdAt: 'now',
   });
@@ -305,6 +307,61 @@ describe('buildRuntimeSpec', () => {
     expect(s1.ports).toEqual([{ host: 19100, container: 18789 }]);
     expect(s2.ports).toEqual(s1.ports);
     expect(s1.workspace.configPatch.gatewayToken).toBe(s2.workspace.configPatch.gatewayToken);
+  });
+});
+
+describe('per-agent model override', () => {
+  it('cloud: buildRuntimeSpec runs the override, applied model records it', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, { ...INPUT, model: 'claude-sonnet-5' });
+    expect(agent.model).toBe('claude-sonnet-5');
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch.model).toBe('claude-sonnet-5');
+    // recordApplied stamps the model the runtime actually used.
+    await runProvisionSteps(w.deps, agent.id);
+    expect(w.store.getAgent(agent.id)!.appliedModel).toBe('claude-sonnet-5');
+  });
+
+  it('cloud: no override follows the profile default', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    expect(agent.model).toBeUndefined();
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch.model).toBe('claude-opus-4-8');
+  });
+
+  it('local: the override is dropped — local agents follow the source’s one model', async () => {
+    const w = await world({ profile: { kind: 'api_key', vendor: 'local', secretRef: undefined } });
+    (w.store as any).db
+      .prepare('UPDATE ai_profiles SET base_url = ?, model = ? WHERE id = ?')
+      .run('http://172.17.0.1:11434/v1', 'qwen3.6:27b-q8_0', 'p1');
+    // Ask for an override anyway: createAgentRecord must refuse to store it.
+    const { agent } = await provisionAgent(w.deps, { ...INPUT, model: 'claude-sonnet-5' });
+    expect(agent.model).toBeUndefined();
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch.model).toBe('qwen3.6:27b-q8_0');
+  });
+
+  it('setAgentModel round-trips and clears back to null', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.setAgentModel(agent.id, 'claude-sonnet-5');
+    expect(w.store.getAgent(agent.id)!.model).toBe('claude-sonnet-5');
+    w.store.setAgentModel(agent.id, null);
+    expect(w.store.getAgent(agent.id)!.model).toBeUndefined();
+  });
+
+  it('a pin dropped from the source menu later never reaches the runtime', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, { ...INPUT, model: 'claude-sonnet-5' });
+    expect((await buildRuntimeSpec(w.deps, agent.id)).workspace.configPatch.model)
+      .toBe('claude-sonnet-5');
+    // Owner edits the source and drops claude-sonnet-5 from the menu. The pin
+    // is now stale — effectiveModel must fall back to the default rather than
+    // write a model the source can no longer serve.
+    w.store.setAIProfileModels('p1', ['claude-haiku-4-5']);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch.model).toBe('claude-opus-4-8');
   });
 });
 

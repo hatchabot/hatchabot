@@ -40,6 +40,9 @@ export interface ExportManifest {
     /** Host folders it could read. Paths are machine-specific — carried as a
      *  declaration so the destination can check them, never auto-applied. */
     sharedPaths?: string[];
+    /** Per-agent model override. Applied on import only if the destination
+     *  profile's menu still offers it; otherwise dropped to the default. */
+    model?: string;
   };
   ai: { vendor: string; model: string; models?: string[] };
   channel: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
@@ -79,6 +82,7 @@ const ManifestSchema = z.object({
     persona: z.string().max(8000),
     sharedMemory: z.boolean(),
     sharedPaths: z.array(z.string().max(512)).max(8).optional(),
+    model: z.string().max(64).optional(),
   }),
   ai: z.object({
     vendor: z.string().max(32),
@@ -184,6 +188,7 @@ export async function exportAgent(
       persona: agent.persona,
       sharedMemory: agent.sharedMemory,
       sharedPaths: agent.sharedPaths,
+      model: agent.model,
     },
     ai: {
       vendor: profile?.vendor ?? 'anthropic',
@@ -297,6 +302,16 @@ async function importAgentInner(
     hostId: host.id,
     persona: manifest.agent.persona,
     sharedMemory: manifest.agent.sharedMemory,
+    // The per-agent model override survives the move only if the destination
+    // profile is cloud and still offers it — landing on a different profile
+    // (or a local one) drops it back to that profile's default rather than
+    // pinning a model the new source can't serve.
+    model:
+      profile.vendor !== 'local' &&
+      manifest.agent.model &&
+      [profile.model, ...(profile.models ?? [])].includes(manifest.agent.model)
+        ? manifest.agent.model
+        : undefined,
     // Deliberately NOT carried over: a path that exists on the source may not
     // exist here, and silently mounting a same-named folder would be worse
     // than mounting nothing. Preflight warns; the owner re-shares explicitly.

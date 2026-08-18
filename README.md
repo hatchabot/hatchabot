@@ -53,8 +53,11 @@ and lifecycle; OpenClaw runs the agent.
   in, or a **local model server you run yourself** (Ollama). The local path
   needs no credential of any kind: nothing stored, nothing injected, nothing
   leaving the machine.
-- **Different agents can use different AIs.** The kitchen helper on a local
-  model, the homework tutor on Claude — chosen per agent, changed any time.
+- **Different agents can use different AIs — and different models.** The
+  kitchen helper on a local model, the homework tutor on Claude — chosen per
+  agent, changed any time. One Claude source can drive a cheap model for simple
+  agents and a top model for the demanding ones; each agent picks from that
+  source's model list, or follows its default.
 
 ## Requirements
 

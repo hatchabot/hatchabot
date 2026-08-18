@@ -423,7 +423,9 @@ async function main() {
       const a = await resolveAgent(ctx, rest[0]);
       if (!rest[1]) {
         const cur = profiles.find((p) => p.id === a.aiProfileId);
-        console.log(`${a.name}: ${cur?.name ?? '(unknown)'} — ${cur?.model ?? a.model}`);
+        // Prefer the agent's effective model (its per-agent override if any)
+        // over the source's default — that's what this agent actually runs.
+        console.log(`${a.name}: ${cur?.name ?? '(unknown)'} — ${a.model ?? cur?.model}`);
         return;
       }
       await jsonPost(`/v1/agents/${a.id}`, { aiProfileId: rest[1] }, 'PATCH');

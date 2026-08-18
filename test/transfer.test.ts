@@ -121,6 +121,34 @@ describe('agent export/import', () => {
     expect(state.toString()).toBe('the-agents-memory');
   });
 
+  it('carries a per-agent model override when the destination source offers it', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.setAgentModel('a1', 'claude-sonnet-5');
+    const { data } = await exportAgent(src.deps, 'a1');
+
+    const dst = await installation('owner-b');
+    // Destination source lists that model on its menu → the pin survives.
+    (dst.store as any).db
+      .prepare(`UPDATE ai_profiles SET models = ? WHERE id = 'p1'`)
+      .run(JSON.stringify(['claude-sonnet-5']));
+    const agent = await importAgent(dst.deps, data, { ownerId: 'owner-b' });
+    expect(agent.model).toBe('claude-sonnet-5');
+  });
+
+  it('drops the override when the destination source cannot serve it', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.setAgentModel('a1', 'claude-sonnet-5');
+    const { data } = await exportAgent(src.deps, 'a1');
+
+    // Destination source only offers its default (claude-opus-4-8), so the
+    // pin is dropped back to the default rather than left dangling.
+    const dst = await installation('owner-b');
+    const agent = await importAgent(dst.deps, data, { ownerId: 'owner-b' });
+    expect(agent.model).toBeUndefined();
+  });
+
   it('refuses a second import of the same bot identity', async () => {
     const src = await installation();
     await seedSourceAgent(src);
