@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.2.1] — 2026-08-18
+
+### Fixed
+- **Adopt no longer lists the owner as a member of their own agent.** Adopting a
+  hand-built OpenClaw agent seeds members from the source bot's `allowFrom`,
+  which includes the owner's own Telegram id — and the owner seat already
+  carries it via pair-once, so the owner ended up listed twice (owner + member).
+  Seeding now skips any Telegram id already admitted (the owner seat included),
+  and dedupes repeats within the seed list. Existing split rows can be repaired
+  with `scripts/link-owner-telegram.ts`.
+
 ## [0.2.0] — 2026-08-18
 
 ### Added

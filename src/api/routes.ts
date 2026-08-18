@@ -793,6 +793,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // onto the fresh volume there, and a member added afterwards would have to
     // pair like a stranger.
     for (const channelUserId of seedMembers ?? []) {
+      // Skip anyone already admitted. Most importantly the OWNER: adopt seeds
+      // from the source bot's allowFrom, which includes the owner's own
+      // Telegram id — and createAgentRecord already bound it to the owner seat
+      // via pair-once. Seeding it again would list the owner twice (owner seat
+      // + a member row), the exact split link-owner-telegram.ts had to repair.
+      // Also dedupes any repeated ids within seedMembers itself.
+      if (store.getActiveMembershipByChannelUser(agent.id, channelUserId)) continue;
       store.insertMembership({
         id: randomUUID(),
         agentId: agent.id,

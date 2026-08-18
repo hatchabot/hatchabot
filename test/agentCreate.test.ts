@@ -152,4 +152,49 @@ describe('adopting carries the people already allowed to talk', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('does not seed the owner as a member of their own agent', async () => {
+    const { store, f } = await world();
+    // First agent binds the owner's Telegram id to their owner seat, so
+    // pair-once will carry it onto the next agent's owner seat.
+    const first = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as,
+      payload: { name: 'First', aiProfileId: 'p1', hostId: 'h1' },
+    });
+    store.bindMembershipChannelUser(first.json().id, OWNER, '1000000001');
+
+    // Adopt-style create: the source allowFrom carries the owner's own id AND
+    // a real other member. Only the other member should become a member row.
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as,
+      payload: {
+        name: 'Stock Advisor', aiProfileId: 'p1', hostId: 'h1',
+        seedMembers: ['1000000001', '222333'],
+      },
+    });
+    expect(res.statusCode).toBe(202);
+    const id = res.json().id;
+    const members = store.listMemberships(id);
+    // Owner appears exactly once, as the owner — never also as a 'user'.
+    expect(members.filter((m) => m.channelUserId === '1000000001').map((m) => m.role))
+      .toEqual(['owner']);
+    // The genuine other member is still seeded.
+    expect(members.some((m) => m.role === 'user' && m.channelUserId === '222333')).toBe(true);
+    // Access is intact: both ids reach the allowlist (deduped).
+    expect(store.listAllowedChannelUserIds(id).sort()).toEqual(['222333', '1000000001']);
+  });
+
+  it('dedupes repeated ids within seedMembers', async () => {
+    const { store, f } = await world();
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents', headers: as,
+      payload: {
+        name: 'Dupes', aiProfileId: 'p1', hostId: 'h1',
+        seedMembers: ['555', '555'],
+      },
+    });
+    expect(res.statusCode).toBe(202);
+    const id = res.json().id;
+    expect(store.listMemberships(id).filter((m) => m.channelUserId === '555')).toHaveLength(1);
+  });
 });
