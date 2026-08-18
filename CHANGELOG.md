@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.3.0] — 2026-08-18
+
+### Added
+- **Python, git, and ssh in the runtime image.** Agents whose workspaces carry
+  scripts can now run them (`python3 script.py`, as cron jobs do) and use git
+  over SSH. The base image stays lean — it ships the interpreters and git, but
+  **no** third-party Python packages.
+- **Per-agent Python libraries on the volume.** An agent installs what it needs
+  onto its own durable volume — `pip install --target /home/node/.openclaw/pylibs <pkg>`
+  — and the entrypoint prepends that dir to `PYTHONPATH`. Heavy, app-specific
+  stacks (e.g. pandas/numpy/yfinance for a market agent) stay out of the image
+  every other agent shares, and survive rebuilds because the volume is durable.
+  See `docs/agent-environment.md`.
+
+### Notes
+- Adopting a hand-built agent brings its **workspace**, but not the runtime
+  environment it accreted on the host (Python libs, data directories, crons).
+  `docs/agent-environment.md` documents how to reconstruct that: volume libs,
+  read-only data mounts (agent folders), and git-clone-on-volume for versioned
+  data the agent maintains (with a repo-scoped deploy key). Making this
+  declarative and carried by `adopt` is planned follow-up.
+
 ## [0.2.1] — 2026-08-18
 
 ### Fixed
