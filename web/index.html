@@ -356,6 +356,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editPaths = [];
+let availableModels = {}; // profile id -> string[] of models the source offers (cached while the dialog is open)
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
@@ -576,106 +577,136 @@ function showTab(name) {
   }
 }
 
-function openAiDlg(tab) {
-  renderAiList();
-  renderPeers();
+async function openAiDlg(tab) {
   $('aiErr').textContent = '';
   // Deep-link the tab so "add a server first" can land you where the work is,
   // rather than on a page you then have to hunt through.
   showTab(tab || 'ai');
   aiDlg.showModal();
+  renderAiList();       // instant paint (dropdowns fall back to text until models load)
+  renderPeers();
+  // Fetch what each of your sources offers, then re-render so the model fields
+  // become dropdowns instead of text boxes.
+  await Promise.all(profiles.filter(p => p.mine !== false).map(async p => {
+    if (availableModels[p.id]) return;
+    try { availableModels[p.id] = (await api(`/v1/ai-profiles/${p.id}/available-models`)).models ?? []; }
+    catch { availableModels[p.id] = []; }
+  }));
+  if (aiDlg.open) renderAiList();
+}
+
+const vendorChip = p => p.vendor === 'local' ? 'local · no credential'
+  : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login")
+  : `${esc(p.vendor)} key`;
+
+// The default model: a dropdown when we know what the source offers, a text
+// box as a graceful fallback (models not loaded yet, or a source that can't
+// list them). The current default is always an option even if it's not in the
+// fetched list, so it can never be silently dropped.
+function defaultModelControl(p) {
+  const avail = availableModels[p.id];
+  const box = 'flex:1;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text);font-size:13px';
+  if (Array.isArray(avail) && avail.length) {
+    const opts = [p.model, ...avail].filter((m, i, a) => m && a.indexOf(m) === i);
+    return `<select id="aiModel-${p.id}" onchange="renderExtras('${p.id}')" style="${box}">
+      ${opts.map(m => `<option value="${esc(m)}" ${m === p.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}
+    </select>`;
+  }
+  return `<input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" oninput="renderExtras('${p.id}')" style="${box}">`;
 }
 
 function renderAiList() {
   $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${esc(p.name)}</b>
-      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login") : `${esc(p.vendor)} key`}</span>
+      <span class="chip">${vendorChip(p)}</span>
       <span class="sub">shared by the server owner — usable for your agents, managed by them</span>
     </div>` : `
-    <div class="pair" style="flex-wrap:wrap;gap:6px">
-      <b>${esc(p.name)}</b>
-      <span class="chip">${p.vendor === 'local' ? 'local · no credential' : p.kind === 'subscription' ? (p.credential === 'setup-token' ? 'subscription · setup-token' : "subscription · this machine's Claude login") : `${esc(p.vendor)} key`}</span>
-      <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
-             title="Let every account on this server use this source for their agents — they spend on it">
-        <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
-      </label>
-      <div style="display:flex;gap:6px;width:100%">
-        <input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" title="Default model" style="flex:1;min-width:0">
-        <input type="text" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(', '))}"
-               placeholder="More switchable models, comma-separated" title="Switchable in chat via /model" style="flex:2;min-width:0">
-        <button onclick="pickModels('${p.id}')" title="Pick from the models this source offers, instead of typing them">Pick…</button>
-        <button onclick="saveAiProfile('${p.id}')">Save</button>
-        <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">×</button>
+    <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
+      <div style="display:flex;align-items:center;gap:6px;width:100%">
+        <b>${esc(p.name)}</b>
+        <span class="chip">${vendorChip(p)}</span>
+        <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
+               title="Let every account on this server use this source for their agents — they spend on it">
+          <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
+        </label>
       </div>
-      <div id="aiPick-${p.id}" class="sub" style="width:100%;display:none;flex-wrap:wrap;gap:6px;margin-top:2px"></div>
+      <div style="display:flex;align-items:center;gap:10px;width:100%">
+        <label class="sub" style="min-width:104px">Default model</label>
+        ${defaultModelControl(p)}
+      </div>
+      <div style="display:flex;gap:10px;width:100%">
+        <label class="sub" style="min-width:104px;padding-top:5px">Also switchable</label>
+        <div id="aiExtras-${p.id}" style="flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:30px"></div>
+        <input type="hidden" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(','))}">
+      </div>
+      <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
+        <button class="primary" onclick="saveAiProfile('${p.id}')">Save</button>
+        <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">Delete</button>
+      </div>
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
+  // Populate the switchable-model bubbles for each owned profile.
+  profiles.filter(p => p.mine !== false).forEach(p => renderExtras(p.id));
 }
 
-// Populate the switchable list from what the source actually offers — a
-// dropdown to add, removable tags to drop, so nobody hand-types model IDs.
-// Local servers report live; cloud vendors a curated current list.
-async function pickModels(id) {
-  const box = $(`aiPick-${id}`);
-  box.style.display = 'block';
-  box.textContent = 'Loading available models…';
-  let available = [];
-  try {
-    const out = await api(`/v1/ai-profiles/${id}/available-models`);
-    available = out.models ?? [];
-    if (!available.length) { box.textContent = out.error || 'No models to list for this source — type them instead.'; return; }
-  } catch (e) { box.textContent = "Couldn't load models: " + e.message; return; }
+// The "also switchable" set: removable bubbles + an "add" dropdown of what's
+// left, so nobody hand-types a model id. Backed by the hidden aiModels input
+// (kept comma-joined for Save). Model ids ride in data-attributes / option
+// values and are read via event delegation — never interpolated into an
+// inline handler, so escaping can't break the click.
+function renderExtras(id) {
+  const box = $(`aiExtras-${id}`);
+  if (!box) return;
+  const field = $(`aiModels-${id}`);
+  const dfltEl = $(`aiModel-${id}`);
+  const dflt = dfltEl ? dfltEl.value.trim() : '';
+  const avail = Array.isArray(availableModels[id]) ? availableModels[id] : [];
+  // Extras never include the default (it's already the default).
+  const chosen = field.value.split(',').map(s => s.trim()).filter(Boolean).filter(m => m !== dflt);
+  field.value = chosen.join(',');
 
-  box._available = available;
-  box._field = $(`aiModels-${id}`);          // holds the EXTRA models (comma list)
-  box._default = $(`aiModel-${id}`).value.trim();
+  const tags = chosen.map(m =>
+    `<span style="display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:14px;padding:3px 4px 3px 11px;font-size:12px">
+      ${esc(m)}
+      <button type="button" data-remove="${esc(m)}" aria-label="Remove ${esc(m)}"
+        style="border:none;background:none;cursor:pointer;color:var(--dim);font-size:16px;line-height:1;padding:0 3px">×</button>
+    </span>`).join('');
 
-  // Event delegation — the model id lives in dataset/value, never interpolated
-  // into an inline handler, so escaping can't break the click (the bug the
-  // chips had).
+  const opts = avail.filter(m => m !== dflt && !chosen.includes(m));
+  const ctrlStyle = 'font-size:12px;padding:4px 7px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text)';
+  let adder;
+  if (opts.length) {
+    adder = `<select data-add aria-label="Add a switchable model" style="${ctrlStyle}">
+      <option value="" disabled selected>＋ Add a model…</option>
+      ${opts.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
+    </select>`;
+  } else if (avail.length) {
+    adder = `<span class="sub">all models added</span>`;
+  } else {
+    // No list available (server unreachable / no key) — let them type as a fallback.
+    adder = `<input data-add-text placeholder="type a model id, then Enter" style="${ctrlStyle};min-width:180px">`;
+  }
+  box.innerHTML = tags + adder + (chosen.length || opts.length ? '' : ' <span class="sub">none — add one to let agents /model-switch</span>');
+
   if (!box._wired) {
+    const setExtras = (list) => { field.value = [...new Set(list)].filter(m => m !== ($(`aiModel-${id}`)?.value.trim())).join(','); renderExtras(id); };
     box.addEventListener('change', (e) => {
-      if (e.target.tagName === 'SELECT' && e.target.value) {
-        setPickModels(box, [...pickChosen(box), e.target.value]);
-        e.target.value = '';
-      }
+      if (e.target.hasAttribute('data-add') && e.target.value) { setExtras([...chosenNow(id), e.target.value]); }
     });
     box.addEventListener('click', (e) => {
       const rm = e.target.closest('[data-remove]');
-      if (rm) setPickModels(box, pickChosen(box).filter(m => m !== rm.getAttribute('data-remove')));
+      if (rm) setExtras(chosenNow(id).filter(m => m !== rm.getAttribute('data-remove')));
+    });
+    box.addEventListener('keydown', (e) => {
+      if (e.target.hasAttribute('data-add-text') && e.key === 'Enter') {
+        e.preventDefault(); const v = e.target.value.trim(); if (v) setExtras([...chosenNow(id), v]);
+      }
     });
     box._wired = true;
   }
-  renderPick(box);
 }
-
-function pickChosen(box) {
-  return box._field.value.split(',').map(s => s.trim()).filter(Boolean);
-}
-function setPickModels(box, list) {
-  box._field.value = [...new Set(list)].join(', ');
-  renderPick(box);
-}
-function renderPick(box) {
-  const chosen = pickChosen(box);
-  const shown = [box._default, ...chosen].filter((m, i, a) => m && a.indexOf(m) === i);
-  const tags = shown.map(m => {
-    const isDefault = m === box._default;
-    return `<span style="display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:14px;padding:3px 4px 3px 10px;font-size:12px">
-      ${esc(m)}${isDefault ? ' · default' : ''}
-      ${isDefault ? '' : `<button type="button" data-remove="${esc(m)}" aria-label="Remove ${esc(m)}"
-        style="border:none;background:none;cursor:pointer;color:var(--dim);font-size:15px;line-height:1;padding:0 2px">×</button>`}
-    </span>`;
-  }).join('');
-  const opts = box._available.filter(m => m !== box._default && !chosen.includes(m));
-  const dropdown = opts.length
-    ? `<select aria-label="Add a model" style="font-size:12px;padding:4px 6px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--text)">
-         <option value="" disabled selected>＋ Add a model…</option>
-         ${opts.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
-       </select>`
-    : `<span class="sub">All available models are in the list.</span>`;
-  box.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">${tags}${dropdown}</div>
-    <span class="sub" style="display:block;margin-top:4px">Add from the list or remove a tag, then Save.</span>`;
+function chosenNow(id) {
+  return $(`aiModels-${id}`).value.split(',').map(s => s.trim()).filter(Boolean);
 }
 
 async function shareAiProfile(id, shared, isMachineLogin) {
