@@ -74,6 +74,25 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
     throw new AdmitError("Couldn't approve the request — try again.");
   }
 
+  // The owner talking to their OWN agent should claim the owner seat, not
+  // become a "member" of it. On an agent whose owner seat was never bound to
+  // Telegram (typically one created before pair-once), the owner's first
+  // message lands here as a pending request; without this it would mint a
+  // member row named from their Telegram profile — the same person listed
+  // twice. If this telegram id is the owner's own (known from any of their
+  // agents), bind the owner seat instead.
+  const agent = store.getAgent(opts.agentId);
+  if (agent && store.knownChannelUserId(agent.ownerId) === req.id) {
+    store.bindMembershipChannelUser(opts.agentId, agent.ownerId, req.id);
+    log('member.owner_self_claim', { agentId: opts.agentId, channelUserId: req.id });
+    return {
+      userId: agent.ownerId,
+      displayName: 'You', // the owner seat is rendered as "You", never a name
+      channelUserId: req.id,
+      alreadyMember: true,
+    };
+  }
+
   // Re-approval for someone already admitted (e.g. after a rebuild reset the
   // runtime's pairing state) must not mint a second membership.
   const existing = store.getActiveMembershipByChannelUser(opts.agentId, req.id);

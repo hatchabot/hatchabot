@@ -71,6 +71,28 @@ describe('admitMember', () => {
     expect(provider.execLog.some((a) => a[0] === 'message')).toBe(false);
   });
 
+  it('binds the OWNER seat (no member copy) when the owner messages their own agent', async () => {
+    // Owner u1's Telegram id 555 is already known from another agent, and this
+    // agent's owner seat was never bound (a pre-pair-once agent). Approving the
+    // owner's own pairing request must claim the owner seat, not mint a
+    // "member" duplicate of the owner.
+    const { store, provider, opts } = await setup();
+    store.insertAgent({
+      id: 'other', ownerId: 'u1', name: 'Other', slug: 'other', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'mo', agentId: 'other', userId: 'u1', role: 'owner', channelUserId: '555', status: 'active' });
+    expect(store.knownChannelUserId('u1')).toBe('555');
+
+    const res = await admitMember({ store, provider }, opts);
+    expect(res).toMatchObject({ userId: 'u1', alreadyMember: true }); // the owner, not a new member
+    // Owner seat on a1 is now bound; no member-* row was created.
+    expect(store.getMembership('a1', 'u1')!.channelUserId).toBe('555');
+    expect(store.listMemberships('a1')).toHaveLength(1); // owner only
+    expect(store.listMemberships('a1').every((m) => m.role === 'owner')).toBe(true);
+  });
+
   it('rejects a code that is no longer pending', async () => {
     const { store, provider, opts } = await setup();
     await expect(admitMember({ store, provider }, { ...opts, code: 'GONE' })).rejects.toBeInstanceOf(
