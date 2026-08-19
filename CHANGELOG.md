@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.3.1] — 2026-08-18
+
+### Added
+- **Native TLS.** Set `AGENTCLAW_TLS_CERT` and `AGENTCLAW_TLS_KEY` (PEM file
+  paths) to serve HTTPS directly — no reverse proxy required for a small
+  single-host deployment. It's both-or-neither (a half-configured pair fails
+  loudly rather than silently serving plaintext). A reverse proxy that
+  terminates TLS in front stays a valid alternative; the app just no longer
+  requires one.
+
+### Changed
+- Startup now warns when bound to a non-loopback address **without** TLS — the
+  password and all traffic would otherwise cross the network in the clear.
+
 ## [0.3.0] — 2026-08-18
 
 ### Added

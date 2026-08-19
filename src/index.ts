@@ -1,8 +1,8 @@
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { hostname } from 'node:os';
 import Database from 'better-sqlite3';
-import Fastify from 'fastify';
+import Fastify, { type FastifyServerOptions } from 'fastify';
 import { Store } from './store/store.js';
 import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
@@ -72,7 +72,30 @@ if (!store.getHost(LOCAL_HOST_ID)) {
   });
 }
 
-const app = Fastify({ logger: true });
+// Optional native TLS: point AGENTCLAW_TLS_CERT and AGENTCLAW_TLS_KEY at PEM
+// files to serve HTTPS directly, no reverse proxy needed. It's both or neither
+// — a cert without a key (or vice versa) is a misconfiguration we'd rather fail
+// loudly on than silently fall back to plaintext for.
+const tlsCertPath = process.env.AGENTCLAW_TLS_CERT;
+const tlsKeyPath = process.env.AGENTCLAW_TLS_KEY;
+if (!!tlsCertPath !== !!tlsKeyPath) {
+  throw new Error(
+    'TLS is half-configured: set BOTH AGENTCLAW_TLS_CERT and AGENTCLAW_TLS_KEY (PEM file paths), or neither.',
+  );
+}
+const tls =
+  tlsCertPath && tlsKeyPath
+    ? { cert: readFileSync(tlsCertPath), key: readFileSync(tlsKeyPath) }
+    : undefined;
+
+// Fastify reads `https` at runtime to build a TLS server, but that option lives
+// on a different overload that infers a secure-server instance type — which the
+// rest of the app (registerRoutes/registerAuth expecting the default instance)
+// then rejects. Attach it past the base type so `app` stays the default type;
+// the runtime behaviour is identical.
+const serverOptions: FastifyServerOptions = { logger: true };
+if (tls) (serverOptions as FastifyServerOptions & { https: unknown }).https = tls;
+const app = Fastify(serverOptions);
 
 // Mend any state drift from reboots/crashes before serving a single request —
 // containers auto-restart with the box, the DB doesn't know that.
@@ -140,12 +163,27 @@ if (bindHost === '127.0.0.1' && !process.env.AGENTCLAW_PASSWORD) {
       'Set a password (or AGENTCLAW_BIND) to accept connections from elsewhere.',
   );
 }
+// Reachable from off-box but serving plaintext: the password and every request
+// travel in the clear. Loud warning, not a refusal — a TLS-terminating proxy in
+// front (Caddy/nginx/LB) is a valid setup where the app itself needn't do TLS.
+if (bindHost !== '127.0.0.1' && !tls) {
+  app.log.warn(
+    'Serving plain HTTP on a non-loopback address — the password and all traffic are ' +
+      'unencrypted in transit. Set AGENTCLAW_TLS_CERT/AGENTCLAW_TLS_KEY, or put a TLS ' +
+      'proxy in front, before exposing this to an untrusted network.',
+  );
+}
 // Keep mending state after boot: a container that wedges at 3am should not
 // stay green until someone notices.
 startReconcileLoop(store, providers, (e, d) => app.log.info(d, e));
 
 await app.listen({ port: PORT, host: bindHost });
 app.log.info(
-  { availableBots: pool.availableCount(), localHostId: LOCAL_HOST_ID, url: `http://localhost:${PORT}` },
+  {
+    availableBots: pool.availableCount(),
+    localHostId: LOCAL_HOST_ID,
+    tls: !!tls,
+    url: `${tls ? 'https' : 'http'}://localhost:${PORT}`,
+  },
   'AgentClaw control plane up',
 );
