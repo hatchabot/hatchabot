@@ -122,6 +122,8 @@
     <span class="sub" id="poolInfo"></span>
     <button id="rebuildAllBtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden
             style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Rebuild all</button>
+    <button id="installBtn" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden
+            style="margin-left:8px;background:var(--accent);border:1px solid var(--accent);border-radius:8px;padding:4px 10px;cursor:pointer;color:var(--accent-ink);font-weight:600">⬇ Install app</button>
     <button id="importBtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()"
             style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
     <button id="aiBtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()"
@@ -1572,6 +1574,41 @@ refresh(true);
   // Best-effort: a failure here never blocks the app.
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
+
+  // In-app install. Chrome/Edge/Android fire beforeinstallprompt; we stash it
+  // and reveal the header button. iOS Safari has no such event, so we surface
+  // the button proactively there and explain the manual gesture on tap.
+  let deferredInstall = null;
+  const installBtn = document.getElementById('installBtn');
+  const standalone =
+    window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredInstall = e;
+    if (installBtn && !standalone) installBtn.hidden = false;
+  });
+  window.addEventListener('appinstalled', () => {
+    deferredInstall = null;
+    if (installBtn) installBtn.hidden = true;
+  });
+  if (isIOS && !standalone && installBtn) installBtn.hidden = false;
+
+  async function installApp() {
+    if (deferredInstall) {
+      deferredInstall.prompt();
+      const { outcome } = await deferredInstall.userChoice;
+      if (outcome === 'accepted' && installBtn) installBtn.hidden = true;
+      deferredInstall = null;
+      return;
+    }
+    alert(
+      isIOS
+        ? 'To install: tap the Share button, then “Add to Home Screen”.'
+        : 'To install: open your browser menu and choose “Install app” or “Add to Home screen”. (Requires an https:// address.)',
+    );
   }
 </script>
 </body>
