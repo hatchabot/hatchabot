@@ -225,8 +225,17 @@ transport). Reads run immediately; mutations require a confirm tap; it starts
    `.env.mgmt` (chmod 600); optionally `AGENTCLAW_URL`.
 4. `npm run mgmt`, or install `deploy/agentclaw-mgmt-bot.service` as a user unit.
 
-It refuses to start with an empty allowlist. The LLM layer (Phase 2) plugs into
-the same broker — reads free, mutations through the existing confirm gates.
+Or let the CLI do steps 2–4: `agentclaw mgmt-bot setup`.
+
+It refuses to start with an empty allowlist.
+
+**Phase 2 (implemented) — natural language.** Set `AGENTCLAW_MGMT_ANTHROPIC_KEY`
+(or `ANTHROPIC_API_KEY`) and plain-text messages route to an LLM
+(`AGENTCLAW_MGMT_MODEL`, default `claude-sonnet-5`) that proposes tools through
+the **same broker** — reads run, changes still become confirm cards. Without a
+key the bot is slash-commands only. The model holds no token and no `/v1`
+access; it gains no authority the broker doesn't already gate. Slash commands
+keep working alongside it.
 
 ---
 
@@ -289,7 +298,7 @@ The native app (push, offline, in-app chat) is the upgrade, not the prerequisite
 |---|---|---|---|
 | 0 | **PWA-ify the web UI** | hours | Installable phone app now |
 | 1 | **Broker + slash commands** (password mode): tool tiers, confirm gates, allowlist, read + lifecycle + approvals + notifications — **no LLM yet** | days | Fast phone ops + push; the hardened surface everything else builds on |
-| 2 | **LLM layer** on top of the same broker: natural-language reads/queries/summaries, mutate-by-proposal into the existing confirm gates | days | Conversational management, safely |
+| 2 | **LLM layer** on top of the same broker: natural-language reads/queries/summaries, mutate-by-proposal into the existing confirm gates — *implemented (`src/mgmt/llm.ts`)* | days | Conversational management, safely |
 | 3 | **SSE stream** + **OpenAPI spec** | ~2 days | Live updates; typed app client |
 | 4 | **Native app** + **push relay** | weeks | Polished app, background alerts, secret entry, create/config |
 | 5 | **Identity-mode linking** for bot & app | days | Real multi-user |

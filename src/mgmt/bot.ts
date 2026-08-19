@@ -1,4 +1,5 @@
 import { Broker, type AgentSummary, type Proposer, type ToolResult } from './broker.js';
+import type { AgentSink, LlmAgent } from './llm.js';
 
 /**
  * Transport-agnostic management bot logic (Phase 1: deterministic slash
@@ -25,11 +26,14 @@ export interface ManagementBotOptions {
   ownerId: string;
   /** Telegram user ids permitted to control the fleet. */
   allowlist: Iterable<number>;
+  /** Phase 2: if present, plain-text (non-slash) messages go to the LLM. */
+  llm?: LlmAgent;
 }
 
 export class ManagementBot {
   #allow: Set<number>;
   #ownerId: string;
+  #llm?: LlmAgent;
 
   constructor(
     private readonly broker: Broker,
@@ -38,6 +42,7 @@ export class ManagementBot {
   ) {
     this.#allow = new Set(opts.allowlist);
     this.#ownerId = opts.ownerId;
+    this.#llm = opts.llm;
   }
 
   #who(chatId: number, fromUserId: number): Proposer {
@@ -50,7 +55,28 @@ export class ManagementBot {
       await this.tx.sendMessage(chatId, '⛔ Not authorized.');
       return;
     }
-    const [cmd, ...rest] = text.trim().split(/\s+/);
+    const trimmed = text.trim();
+
+    // Non-slash text is natural language → the LLM (Phase 2), if configured.
+    // The LLM proposes tools through the SAME broker; mutations still confirm.
+    if (!trimmed.startsWith('/')) {
+      if (!this.#llm) {
+        await this.tx.sendMessage(chatId, `I only understand commands here.\n${HELP}`);
+        return;
+      }
+      const sink: AgentSink = {
+        say: async (t) => void (await this.tx.sendMessage(chatId, t)),
+        proposeCard: async (confirmId, summary) => this.#postCard(chatId, confirmId, summary),
+      };
+      try {
+        await this.#llm.respond(this.#who(chatId, fromUserId), trimmed, sink);
+      } catch (e) {
+        await this.tx.sendMessage(chatId, `⚠ Assistant error: ${(e as Error).message}`);
+      }
+      return;
+    }
+
+    const [cmd, ...rest] = trimmed.split(/\s+/);
     const arg = rest.join(' ');
 
     switch (cmd) {
@@ -107,18 +133,22 @@ export class ManagementBot {
       return;
     }
     if ('pending' in res) {
-      // A mutate — post the confirmation card and remember its message id.
-      const { confirmId, summary } = res.pending;
-      const { messageId } = await this.tx.sendMessage(chatId, `Confirm: ${summary}?`, [
-        [
-          { text: '✅ Confirm', data: `cfm:${confirmId}:y` },
-          { text: '✖ Cancel', data: `cfm:${confirmId}:n` },
-        ],
-      ]);
-      this.broker.pending.attachMessage(confirmId, messageId);
+      await this.#postCard(chatId, res.pending.confirmId, res.pending.summary);
       return;
     }
     await this.tx.sendMessage(chatId, renderData(res.tool, res.data));
+  }
+
+  /** Post a mutate confirmation card and remember its message id, so both the
+   *  slash path and the LLM path present confirmations identically. */
+  async #postCard(chatId: number, confirmId: string, summary: string): Promise<void> {
+    const { messageId } = await this.tx.sendMessage(chatId, `Confirm: ${summary}?`, [
+      [
+        { text: '✅ Confirm', data: `cfm:${confirmId}:y` },
+        { text: '✖ Cancel', data: `cfm:${confirmId}:n` },
+      ],
+    ]);
+    this.broker.pending.attachMessage(confirmId, messageId);
   }
 
   /** A button tap. `data` is `cfm:<id>:<y|n>`. */

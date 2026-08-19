@@ -21,6 +21,8 @@ import { Broker } from './broker.js';
 import { PendingStore } from './pendingStore.js';
 import { ManagementBot } from './bot.js';
 import { GrammyTransport } from './telegram.js';
+import { LlmAgent } from './llm.js';
+import { AnthropicChatModel } from './anthropicModel.js';
 
 // Load .env.mgmt from the working directory if present, so `npm run mgmt` works
 // straight after `agentclaw mgmt-bot setup`. Under systemd the EnvironmentFile
@@ -70,8 +72,17 @@ const pending = new PendingStore();
 const broker = new Broker(api, pending, {
   audit: (event, detail) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...detail })),
 });
+
+// Phase 2 (optional): natural-language control via an LLM. Enabled only when an
+// Anthropic key is present — without it, the bot is slash-commands only. The LLM
+// proposes tools through the SAME broker, so it gains no extra authority.
+const anthropicKey = process.env.AGENTCLAW_MGMT_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY;
+const llm = anthropicKey
+  ? new LlmAgent(new AnthropicChatModel(anthropicKey, process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5'), broker)
+  : undefined;
+
 const bot = new Bot(botToken);
-const mgmt = new ManagementBot(broker, new GrammyTransport(bot.api), { ownerId, allowlist });
+const mgmt = new ManagementBot(broker, new GrammyTransport(bot.api), { ownerId, allowlist, llm });
 
 bot.on('message:text', async (ctx) => {
   if (!ctx.from) return;
@@ -98,6 +109,7 @@ await bot.start({
         baseUrl,
         allowlisted: allowlist.length,
         mode: broker.readWrite ? 'read-write' : 'read-only',
+        llm: llm ? (process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5') : 'off (no API key)',
       }),
     ),
 });
