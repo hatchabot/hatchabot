@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -430,6 +431,28 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Re-read per request: dev-friendly, and this page is tiny.
       const html = readFileSync(deps.webIndexPath!, 'utf8');
       return reply.type('text/html; charset=utf-8').send(html);
+    });
+
+    // PWA assets so the web app is installable to a phone home screen. Served
+    // unauthenticated by design — they're the static shell (no data); the auth
+    // hook exempts these exact paths. The service worker never caches /v1/*.
+    const webDir = dirname(deps.webIndexPath);
+    app.get('/manifest.webmanifest', async (_req, reply) =>
+      reply.type('application/manifest+json').send(readFileSync(join(webDir, 'manifest.webmanifest'))),
+    );
+    app.get('/sw.js', async (_req, reply) =>
+      reply
+        .header('service-worker-allowed', '/')
+        .header('cache-control', 'no-cache')
+        .type('text/javascript; charset=utf-8')
+        .send(readFileSync(join(webDir, 'sw.js'), 'utf8')),
+    );
+    app.get<{ Params: { name: string } }>('/icons/:name', async (req, reply) => {
+      // Whitelist the filename shape — no path traversal reaches the disk read.
+      if (!/^[a-z0-9-]+\.png$/.test(req.params.name)) return reply.code(404).send({ error: 'Not found' });
+      const p = join(webDir, 'icons', req.params.name);
+      if (!existsSync(p)) return reply.code(404).send({ error: 'Not found' });
+      return reply.header('cache-control', 'public, max-age=86400').type('image/png').send(readFileSync(p));
     });
   }
 

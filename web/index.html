@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>AgentClaw</title>
+<!-- Installable app (PWA) -->
+<meta name="theme-color" content="#14161a">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AgentClaw">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
   :root {
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
@@ -1558,6 +1566,13 @@ function esc(s) {
 
 loadConfig(); // whoami + auth mode even when the cookie is already valid
 refresh(true);
+</script>
+<script>
+  // Register the service worker so the app is installable and shell-cached.
+  // Best-effort: a failure here never blocks the app.
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
 </script>
 </body>
 </html>

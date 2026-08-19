@@ -158,6 +158,8 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // readable before anyone is authenticated.
     if (path === '/' || path === '/healthz' || path === '/v1/login' || path === '/v1/config') return;
     if (path === '/v1/logout') return;
+    // PWA shell assets carry no data — reachable before login so the app can install.
+    if (path === '/manifest.webmanifest' || path === '/sw.js' || path.startsWith('/icons/')) return;
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
@@ -245,6 +247,8 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/session' || path === '/v1/logout') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
+    // PWA shell assets carry no data — reachable before login so the app can install.
+    if (path === '/manifest.webmanifest' || path === '/sw.js' || path.startsWith('/icons/')) return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
