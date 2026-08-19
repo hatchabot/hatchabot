@@ -121,6 +121,9 @@ Inputs are schema-validated (agent id must resolve to one the owner owns; enums
 for model, etc.). The broker's token is owner-scoped, and it starts in
 **read-only mode** — a `/mode readwrite` toggle (allowlisted) arms mutations.
 
+Full tool JSON schemas, the resolution rules, the result envelope, and the
+confirm-token design are in **`docs/management-broker.md`**.
+
 ### Confirmation-gate flow (the core safety mechanism)
 A hijacked model can only *propose*; you see the concrete action before it fires.
 
