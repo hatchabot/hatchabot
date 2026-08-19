@@ -9,3 +9,5 @@ data/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+.env.mgmt
+.env.*

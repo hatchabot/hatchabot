@@ -1,0 +1,34 @@
+# AgentClaw management bot — optional user-level systemd unit.
+# Phase 1: deterministic slash commands over Telegram (no LLM). See
+# docs/control-interfaces.md and src/mgmt/index.ts.
+#
+# Install by hand (setup-host.sh does NOT enable this — it's opt-in and needs
+# its own BotFather bot + a cli-token):
+#   1. cp deploy/agentclaw-mgmt-bot.service ~/.config/systemd/user/  (fill the
+#      __PLACEHOLDERS__ the same way install-service.sh does for the main unit)
+#   2. create __AGENTCLAW_DIR__/.env.mgmt (chmod 600) with:
+#        AGENTCLAW_MGMT_BOT_TOKEN=...   # from BotFather
+#        AGENTCLAW_MGMT_TOKEN=...       # POST /v1/cli-tokens on the control plane
+#        AGENTCLAW_MGMT_ALLOWLIST=123456789,987654321
+#        # AGENTCLAW_URL=http://localhost:8080   (default)
+#   3. systemctl --user enable --now agentclaw-mgmt-bot
+#
+# Its secrets live in a SEPARATE env file from the control plane's .env, so the
+# bot token and cli-token are isolated to this process.
+[Unit]
+Description=AgentClaw management bot
+After=agentclaw.service
+Wants=agentclaw.service
+
+[Service]
+WorkingDirectory=__AGENTCLAW_DIR__
+EnvironmentFile=__AGENTCLAW_DIR__/.env.mgmt
+Environment=PATH=__AGENTCLAW_PATH__
+ExecStart=__AGENTCLAW_DIR__/node_modules/.bin/tsx src/mgmt/index.ts
+Restart=always
+RestartSec=3
+# tsx exits 143 on SIGTERM; clean shutdown, not a failure.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

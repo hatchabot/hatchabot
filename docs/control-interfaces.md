@@ -214,6 +214,20 @@ Never over Telegram — the bot deep-links to the web app instead:
 - [ ] Rate-limit per chat; ignore edited-message replays of callbacks.
 - [ ] Kill switch: a `/pause` that disables the broker instantly.
 
+### Running it (Phase 1 — implemented)
+The deterministic broker + slash commands ship in `src/mgmt/` (`grammy`
+transport). Reads run immediately; mutations require a confirm tap; it starts
+**read-only** (send `/mode readwrite` to arm). To run:
+
+1. Create a bot with BotFather → `AGENTCLAW_MGMT_BOT_TOKEN`.
+2. Mint a bearer on the control plane: `POST /v1/cli-tokens` → `AGENTCLAW_MGMT_TOKEN`.
+3. Put both, plus `AGENTCLAW_MGMT_ALLOWLIST=<your telegram id(s)>`, in a
+   `.env.mgmt` (chmod 600); optionally `AGENTCLAW_URL`.
+4. `npm run mgmt`, or install `deploy/agentclaw-mgmt-bot.service` as a user unit.
+
+It refuses to start with an empty allowlist. The LLM layer (Phase 2) plugs into
+the same broker — reads free, mutations through the existing confirm gates.
+
 ---
 
 ## B. Mobile app

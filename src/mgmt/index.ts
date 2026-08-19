@@ -1,0 +1,85 @@
+/**
+ * Management bot entry point (Phase 1: deterministic slash commands, no LLM).
+ *
+ * Runs as its own process, separate from the control plane, and holds two
+ * secrets from the environment: its own BotFather token and a cli-token that
+ * grants it owner-level /v1 access. Start it as a systemd unit — see
+ * deploy/agentclaw-mgmt-bot.service and docs/control-interfaces.md.
+ *
+ * Required env:
+ *   AGENTCLAW_MGMT_BOT_TOKEN   BotFather token for the management bot
+ *   AGENTCLAW_MGMT_TOKEN       a cli-token (POST /v1/cli-tokens) — the bearer
+ *   AGENTCLAW_MGMT_ALLOWLIST   comma-separated Telegram user ids allowed to control
+ * Optional:
+ *   AGENTCLAW_URL              control plane base URL (default http://localhost:8080)
+ *   AGENTCLAW_MGMT_OWNER       owner id for audit/proposer records (default "local")
+ */
+import { Bot } from 'grammy';
+import { HttpApiClient } from './apiClient.js';
+import { Broker } from './broker.js';
+import { PendingStore } from './pendingStore.js';
+import { ManagementBot } from './bot.js';
+import { GrammyTransport } from './telegram.js';
+
+function required(name: string): string {
+  const v = process.env[name];
+  if (!v) {
+    console.error(`Missing required env ${name}. See src/mgmt/index.ts header.`);
+    process.exit(1);
+  }
+  return v;
+}
+
+const botToken = required('AGENTCLAW_MGMT_BOT_TOKEN');
+const apiToken = required('AGENTCLAW_MGMT_TOKEN');
+const baseUrl = process.env.AGENTCLAW_URL ?? 'http://localhost:8080';
+const ownerId = process.env.AGENTCLAW_MGMT_OWNER ?? 'local';
+
+// A management bot with NO allowlist would accept nobody (bot.ts rejects
+// unknown ids), which is a silent misconfiguration. Refuse to start instead, so
+// the operator sets it — never accidentally ship an open control bot.
+const allowlist = (process.env.AGENTCLAW_MGMT_ALLOWLIST ?? '')
+  .split(',')
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0);
+if (allowlist.length === 0) {
+  console.error('AGENTCLAW_MGMT_ALLOWLIST is empty — set the Telegram id(s) allowed to control the fleet.');
+  process.exit(1);
+}
+
+const api = new HttpApiClient(baseUrl, apiToken);
+const pending = new PendingStore();
+const broker = new Broker(api, pending, {
+  audit: (event, detail) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...detail })),
+});
+const bot = new Bot(botToken);
+const mgmt = new ManagementBot(broker, new GrammyTransport(bot.api), { ownerId, allowlist });
+
+bot.on('message:text', async (ctx) => {
+  if (!ctx.from) return;
+  await mgmt.onMessage(ctx.chat.id, ctx.from.id, ctx.message.text);
+});
+
+bot.on('callback_query:data', async (ctx) => {
+  const cq = ctx.callbackQuery;
+  if (!ctx.from || !cq.message) return;
+  await mgmt.onCallback(cq.message.chat.id, ctx.from.id, cq.id, cq.data, cq.message.message_id);
+});
+
+bot.catch((err) => console.error('mgmt bot error', err.error));
+
+// Drop resolved/expired confirmations periodically.
+setInterval(() => pending.sweep(), 60_000).unref();
+
+await bot.start({
+  onStart: (me) =>
+    console.log(
+      JSON.stringify({
+        event: 'mgmt.up',
+        bot: `@${me.username}`,
+        baseUrl,
+        allowlisted: allowlist.length,
+        mode: broker.readWrite ? 'read-write' : 'read-only',
+      }),
+    ),
+});
