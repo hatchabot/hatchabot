@@ -14,12 +14,30 @@
  *   AGENTCLAW_URL              control plane base URL (default http://localhost:8080)
  *   AGENTCLAW_MGMT_OWNER       owner id for audit/proposer records (default "local")
  */
+import { readFileSync } from 'node:fs';
 import { Bot } from 'grammy';
 import { HttpApiClient } from './apiClient.js';
 import { Broker } from './broker.js';
 import { PendingStore } from './pendingStore.js';
 import { ManagementBot } from './bot.js';
 import { GrammyTransport } from './telegram.js';
+
+// Load .env.mgmt from the working directory if present, so `npm run mgmt` works
+// straight after `agentclaw mgmt-bot setup`. Under systemd the EnvironmentFile
+// has already set these — existing values win, so this never overrides them.
+try {
+  for (const line of readFileSync('.env.mgmt', 'utf8').split('\n')) {
+    const t = line.trim();
+    if (!t || t.startsWith('#') || !t.includes('=')) continue;
+    const key = t.slice(0, t.indexOf('='));
+    let val = t.slice(t.indexOf('=') + 1);
+    if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1).replace(/'\\''/g, "'");
+    else if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+    if (process.env[key] === undefined) process.env[key] = val;
+  }
+} catch {
+  /* no .env.mgmt — rely on the ambient environment */
+}
 
 function required(name: string): string {
   const v = process.env[name];

@@ -11,9 +11,11 @@
  * AGENTCLAW_PASSWORD, or --url/--password flags.
  */
 import { readFile, writeFile } from 'node:fs/promises';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 // Flags > environment > ~/.config/agentclaw/env (KEY=VALUE lines, chmod 600 —
 // keeps the password out of shell history and .bashrc).
@@ -99,6 +101,10 @@ Commands:
   restore <agent> <snapshotId> Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
+  mgmt-bot <setup|status|disable> [--bot-token <tok>] [--yes]
+                               Set up the Telegram management bot: mints a token,
+                               pre-fills your Telegram id, writes .env.mgmt, and
+                               installs the service (needs a BotFather token).
 
 Global options:
   --url <url>        Control plane (env AGENTCLAW_URL, default http://localhost:8080)
@@ -164,6 +170,47 @@ async function idTokenFrom(refreshToken: string, apiKey: string): Promise<string
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
   process.exit(1);
+}
+
+/** <repo> root, from this file's location (<repo>/src/cli.ts). */
+function repoDir(): string {
+  return resolve(dirname(fileURLToPath(import.meta.url)), '..');
+}
+
+/** Run `systemctl --user …`, never throwing — returns exit code + output. */
+function systemctlUser(args: string[]): { code: number; out: string } {
+  try {
+    const out = execFileSync('systemctl', ['--user', ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { code: 0, out: out.trim() };
+  } catch (e) {
+    const err = e as { status?: number; stdout?: string; stderr?: string };
+    return { code: err.status ?? 1, out: (err.stdout || err.stderr || '').toString().trim() };
+  }
+}
+
+/** Template deploy/<unit> into ~/.config/systemd/user and enable it now. */
+function installUserUnit(unitName: string): boolean {
+  try {
+    const tmpl = readFileSync(join(repoDir(), 'deploy', unitName), 'utf8');
+    const unit = tmpl
+      .replace(/__AGENTCLAW_DIR__/g, repoDir())
+      .replace(/__AGENTCLAW_PATH__/g, process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin');
+    const dest = join(homedir(), '.config', 'systemd', 'user', unitName);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, unit);
+    systemctlUser(['daemon-reload']);
+    return systemctlUser(['enable', '--now', unitName]).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Single-quote for a systemd EnvironmentFile / shell .env line. */
+function envQuote(v: string): string {
+  return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot']);
@@ -307,6 +354,21 @@ async function main() {
   const server = await serverConfig(url);
   if (cmd === 'login') {
     await doLogin(url, server, flags);
+    return;
+  }
+
+  // Local host ops that don't touch the control plane — answer before auth.
+  if (cmd === 'mgmt-bot' && (rest[0] === 'status' || rest[0] === 'disable')) {
+    const unit = 'agentclaw-mgmt-bot.service';
+    if (rest[0] === 'status') {
+      console.log(`service: ${systemctlUser(['is-active', unit]).out || 'unknown'} (${systemctlUser(['is-enabled', unit]).out || 'unknown'})`);
+      const envPath = join(repoDir(), '.env.mgmt');
+      console.log(`config : ${existsSync(envPath) ? envPath : 'not set up — run: agentclaw mgmt-bot setup'}`);
+    } else {
+      const r = systemctlUser(['disable', '--now', unit]);
+      console.log(r.code === 0 ? 'Management bot stopped and disabled.' : `systemctl: ${r.out}`);
+      console.log('(.env.mgmt kept — delete it yourself to remove the stored secrets.)');
+    }
     return;
   }
 
@@ -710,6 +772,73 @@ async function main() {
       const lines = flags.get('lines') ?? '80';
       const { text } = (await (await api(ctx, `/v1/agents/${a.id}/logs?lines=${lines}`)).json()) as any;
       console.log(text || '(no recent output)');
+      return;
+    }
+    case 'mgmt-bot': {
+      const unit = 'agentclaw-mgmt-bot.service';
+      const envPath = join(repoDir(), '.env.mgmt');
+      // status/disable are handled before auth, above; only setup reaches here.
+      if ((rest[0] ?? 'setup') !== 'setup') fail('usage: agentclaw mgmt-bot <setup|status|disable>');
+
+      console.error('Setting up the AgentClaw management bot.\n');
+      // 1. Mint the bot's own owner-scoped bearer.
+      const minted = (await (await jsonPost('/v1/cli-tokens', { label: 'mgmt-bot' })).json()) as {
+        token: string;
+      };
+      // 2. Pre-fill the allowlist from the owner's Telegram id (the owner seat
+      //    on any existing agent), so you don't have to look up your numeric id.
+      const found = new Set<string>();
+      for (const a of await agents(ctx)) {
+        try {
+          const members = (await (await api(ctx, `/v1/agents/${a.id}/members`)).json()) as any[];
+          for (const m of members) if (m.role === 'owner' && m.channelUserId) found.add(String(m.channelUserId));
+        } catch {
+          /* skip agents we can't read members for */
+        }
+      }
+      let allow = [...found];
+      if (allow.length) {
+        const ans = (await askLine(`Allow these Telegram id(s) to control the fleet: ${allow.join(', ')}? [Y/n] `)).toLowerCase();
+        if (ans === 'n' || ans === 'no') allow = [];
+      }
+      if (!allow.length) {
+        const raw = await askLine('Telegram user id(s) allowed to control (comma-separated): ');
+        allow = raw.split(',').map((s) => s.trim()).filter(Boolean);
+      }
+      if (!allow.length) fail('an allowlist is required — the bot would otherwise accept nobody.');
+      if (!allow.every((id) => /^\d{1,20}$/.test(id))) fail('Telegram ids are numeric.');
+
+      // 3. The one thing no tool can automate: the BotFather token.
+      const botToken =
+        flags.get('bot-token') || (await askLine('Paste the BotFather token for the management bot: '));
+      if (!/^\d{6,}:[A-Za-z0-9_-]{30,}$/.test(botToken)) {
+        fail('that does not look like a BotFather token (e.g. 123456789:AA…).');
+      }
+
+      // 4. Write .env.mgmt (secrets isolated from the control plane's .env).
+      writeFileSync(
+        envPath,
+        [
+          `AGENTCLAW_MGMT_BOT_TOKEN=${envQuote(botToken)}`,
+          `AGENTCLAW_MGMT_TOKEN=${envQuote(minted.token)}`,
+          `AGENTCLAW_MGMT_ALLOWLIST=${allow.join(',')}`,
+          `AGENTCLAW_URL=${ctx.url}`,
+          '',
+        ].join('\n'),
+        { mode: 0o600 },
+      );
+      console.error(`wrote ${envPath} (chmod 600)`);
+
+      // 5. Install + start the service (best-effort; falls back to a manual hint).
+      const wantSvc =
+        flags.has('yes') ||
+        (await askLine('Install and start the background service now? [Y/n] ')).toLowerCase() !== 'n';
+      if (wantSvc && installUserUnit(unit)) {
+        console.log('\n✅ Management bot installed and running.');
+        console.log('   DM your bot /list to check. It starts READ-ONLY — send /mode readwrite to arm changes.');
+      } else {
+        console.log(`\nConfig ready. Start it with:  npm run mgmt   (from ${repoDir()})`);
+      }
       return;
     }
     default:
