@@ -64,17 +64,36 @@ app today with just tokens.
 
 ## A. Telegram management bot
 
-### Architecture
-A small **command bot** (grammY / node-telegram-bot-api) run as its own process
-(a systemd unit beside the control plane, or an OpenClaw-hosted job). It holds
-one `cli-token`, long-polls Telegram, and maps commands → `/v1`. **Not** an LLM
-agent — control-plane mutations must be deterministic and injection-proof; an
-LLM that can be talked into `DELETE /v1/agents/:id` is disqualified from holding
-that power.
+### Architecture — a spectrum, and where we land
+Three designs, by how much authority the model holds directly:
 
-It needs its own BotFather bot (bots are a hand-minted pool, ~20/account ceiling
-— budget one slot), separate from the bots you chat with agents on. Name it
-unmistakably (`@MyClawAdminBot`).
+1. **Pure command bot** — deterministic slash-commands → `/v1`. Max safety, min
+   flexibility; can only answer what you pre-built.
+2. **LLM + confirmed tool broker** *(recommended)* — the model parses, reasons,
+   and summarizes; it **proposes** actions as typed tool-intents; a deterministic
+   **broker** decides and executes. Reads auto-run; mutations are human-confirmed.
+   Natural language and cross-fleet reasoning, without handing raw authority to a
+   token-predictor exposed to untrusted text.
+3. **Autonomous LLM holding the raw token** — powerful and **disqualified**: an
+   agent that can be talked into `DELETE /v1/agents/:id` must not exist.
+
+We build **#2**. The load-bearing idea is **separate reasoning from authority**:
+the model never holds the `cli-token` and never calls `/v1` directly. It emits
+structured tool calls into a broker (a small service beside the bot) that holds
+the token, enforces policy, and is the *only* thing that touches `/v1`.
+
+```
+Telegram ──▶ bot ──▶ [LLM: parse/reason] ──▶ tool-intent
+                                                  │
+                          allowlist + policy ◀────┤
+                                                  ▼
+                    read → execute now      mutate → confirm button ──▶ broker ──▶ /v1
+```
+
+The bot runs as its own process (a systemd unit beside the control plane, or an
+OpenClaw-hosted job) and needs its own BotFather bot (bots are a hand-minted
+pool, ~20/account ceiling — budget one slot), separate from the bots you chat
+with agents on. Name it unmistakably (`@MyClawAdminBot`).
 
 ### Identity binding
 - **Password mode:** an env allowlist of your Telegram id(s); the bot acts as
@@ -83,9 +102,56 @@ unmistakably (`@MyClawAdminBot`).
   your account; you send `/link <code>` to the bot; the bot binds your Telegram
   id → your owner and stores a per-user token. Unlinked ids get nothing.
 
-Every inbound update is checked against the allowlist **before** any API call.
+Every inbound update is checked against the allowlist **before** the model runs,
+and again in the broker before any `/v1` call. The allowlist is a code check, not
+a prompt instruction — the system prompt is never a security boundary.
 
-### Command surface
+### The broker & tool tiers
+The model is given a fixed set of **typed, least-privilege tools** — never a
+"call any endpoint" escape hatch. Each tool has a tier that fixes its handling,
+in the broker, regardless of what the model (or injected text) "wants":
+
+| Tier | Handling | Tools → endpoint |
+|---|---|---|
+| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `agent_status` → `GET /v1/agents/:id`; `logs` → `GET …/logs`; `members` → `GET …/members`; `pending` → `GET …/pairing`; `pool` → `GET /v1/pool`; `events` → `GET /v1/events` |
+| **mutate** | require a human-confirm tap showing the **resolved** action | `start`/`stop`/`rebuild` → `POST …/{start,stop,rebuild}`; `approve_member` → `POST …/pairing/approve`; `remove_member` → `DELETE …/members/:userId`; `set_model` → `PATCH /v1/agents/:id` |
+| **forbidden** | not exposed to the model at all — deep-link to web | `add_ai_key`, paste bot token, set password, edit `SOUL.md`/`MEMORY.md`, `delete_agent` (or gate behind a typed-name double-confirm) |
+
+Inputs are schema-validated (agent id must resolve to one the owner owns; enums
+for model, etc.). The broker's token is owner-scoped, and it starts in
+**read-only mode** — a `/mode readwrite` toggle (allowlisted) arms mutations.
+
+### Confirmation-gate flow (the core safety mechanism)
+A hijacked model can only *propose*; you see the concrete action before it fires.
+
+1. Model emits a mutate intent, e.g. `stop{agent:"tech-advisor"}`.
+2. Broker **resolves** it to a specific target and renders a card:
+   *"⏹ Stop **Tech Advisor** (`id 169c…`)?"* with `[Confirm] [Cancel]`.
+   `callback_data` carries an opaque, single-use, short-TTL token — never
+   free-form model text — so the button can't be forged or replayed.
+3. On `[Confirm]`: re-check allowlist → broker calls `/v1` → edit the message
+   with the result. On `[Cancel]` or timeout: nothing happens.
+
+Irreversible/batch actions get extra friction (typed-name confirm; no "confirm
+all"). Keep destructive confirmations rare and specific to avoid tap-fatigue.
+
+### Untrusted-content rules (closing the injection surface)
+The model reads fleet content that *other, less-trusted things produced* — agent
+memory, logs, and **member display names taken from Telegram profiles**. Treat
+all of it as hostile input:
+
+- **No outbound tools.** The management agent's only output is messages back to
+  *you*. No web-fetch, no send-elsewhere — this removes the exfiltration leg, so
+  even a fully hijacked read-only model has nowhere to leak to.
+- **Metadata first.** Feed the model states, counts, names-as-fenced-strings; pull
+  raw memory/log bodies only on explicit request, clearly delimited, never as
+  free instructions.
+- **Data is never authority.** Content the model reads can inform its *proposals*
+  but can't widen its tool set or skip a confirm — those live in the broker.
+
+### Slash commands (the deterministic layer, always available)
+The typed commands coexist with the model — power-user shortcuts and a no-LLM
+fallback. They hit the same broker tools, so the same tiers/confirms apply.
 
 | Command | Does | Endpoint(s) |
 |---|---|---|
@@ -123,17 +189,27 @@ messages you, with action buttons where relevant:
 
 ### Explicitly out of scope (the limitations, restated as rules)
 Never over Telegram — the bot deep-links to the web app instead:
-- entering **AI API keys, bot tokens, or the app password** (chat isn't a secret
-  channel — see `control-interfaces` rationale in the app-question thread);
+- entering **AI API keys, bot tokens, or the app password** — Telegram messages
+  live in its cloud, appear in history, and aren't end-to-end encrypted, so chat
+  is not a secret-entry channel;
 - editing `SOUL.md` / `MEMORY.md` or multi-field config;
 - anything where a 4096-char message or clumsy file upload is the wrong tool.
 
 ### Security checklist
-- [ ] Strict Telegram-id allowlist, checked on every update and callback.
+- [ ] Strict Telegram-id allowlist, enforced in code before the model runs and
+      again in the broker — never via the system prompt.
+- [ ] Model holds **no** token and **no** `/v1` access; only typed tool-intents.
+- [ ] Tool tiers fixed in the broker: reads auto, mutations human-confirmed,
+      secret/irreversible actions not exposed at all.
+- [ ] Confirmation cards show the **resolved** target; `callback_data` is an
+      opaque single-use short-TTL token (no free-form model text).
+- [ ] **No outbound tools** on the management agent — output is only back to you.
+- [ ] Broker starts read-only; mutations need an explicit `/mode readwrite`.
+- [ ] Fleet content (memory, logs, member names) treated as untrusted input.
 - [ ] Token stored encrypted; scoped/labeled; revocable independently.
-- [ ] Confirmations on destructive actions; no LLM in the mutation path.
-- [ ] All actions land in `/v1/events` (audit trail).
+- [ ] Every proposed and executed action lands in `/v1/events` (audit trail).
 - [ ] Rate-limit per chat; ignore edited-message replays of callbacks.
+- [ ] Kill switch: a `/pause` that disables the broker instantly.
 
 ---
 
@@ -195,12 +271,15 @@ The native app (push, offline, in-app chat) is the upgrade, not the prerequisite
 | Phase | Deliverable | Effort | Unlocks |
 |---|---|---|---|
 | 0 | **PWA-ify the web UI** | hours | Installable phone app now |
-| 1 | **Telegram command bot** (password mode): read + lifecycle + approvals + notifications | days | Fast phone ops + push, best value/effort |
-| 2 | **SSE stream** + **OpenAPI spec** | ~2 days | Live updates; typed app client |
-| 3 | **Native app** + **push relay** | weeks | Polished app, background alerts, secret entry, create/config |
-| 4 | **Identity-mode linking** for bot & app | days | Real multi-user |
-| 5 | **In-app agent chat** via the gateway bridge | ~week | App becomes chat surface too |
+| 1 | **Broker + slash commands** (password mode): tool tiers, confirm gates, allowlist, read + lifecycle + approvals + notifications — **no LLM yet** | days | Fast phone ops + push; the hardened surface everything else builds on |
+| 2 | **LLM layer** on top of the same broker: natural-language reads/queries/summaries, mutate-by-proposal into the existing confirm gates | days | Conversational management, safely |
+| 3 | **SSE stream** + **OpenAPI spec** | ~2 days | Live updates; typed app client |
+| 4 | **Native app** + **push relay** | weeks | Polished app, background alerts, secret entry, create/config |
+| 5 | **Identity-mode linking** for bot & app | days | Real multi-user |
+| 6 | **In-app agent chat** via the gateway bridge | ~week | App becomes chat surface too |
 
-Recommended start: Phase 0 (today), then Phase 1 — the bot delivers the most
-utility per unit of work, and Phases 2–3 are the foundations the native app
-stands on.
+Recommended start: Phase 0 (today), then Phase 1. Build the **broker first with
+deterministic commands** — it's the security-critical piece (tiers, confirms,
+allowlist), so harden and validate it *before* the LLM in Phase 2, which only
+ever *proposes* into gates that already exist. That ordering is the whole point:
+the model can grow more capable without ever growing more authority.
