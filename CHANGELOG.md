@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.6.0] — 2026-08-20
+
+### Added
+- **Per-agent secrets / environment variables.** Give an agent its own
+  credentials — an API key a script needs — in **⚙ Edit → Environment
+  variables**. Values are secrets: stored encrypted in the SecretStore, never
+  returned by the API, write-only from the app (only names are shown), and
+  injected into the runtime on the next rebuild. A reserved set
+  (`ANTHROPIC_API_KEY`, `PATH`, `PYTHONPATH`, …) is refused so a variable can't
+  shadow the agent's managed AI auth or its runtime paths — and the managed env
+  is merged last, so it wins regardless. See `docs/agent-environment.md`.
+  - *Not yet carried by export/migrate* — re-add variables after moving an agent.
+
+### Fixed
+- Deleting an agent now scrubs its **data-source deploy keys and env-var
+  secrets** from the SecretStore, not just its bot token — a tombstone no longer
+  leaves live credentials behind.
+
 ## [0.5.0] — 2026-08-20
 
 ### Added
