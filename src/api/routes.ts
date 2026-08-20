@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -315,8 +315,48 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       /** The raw per-agent override (undefined = follows the default), so the
        *  picker can show which choice is currently in effect. */
       modelOverride: agent.model,
+      /** Everything this agent can access, unified: legacy read-only folders
+       *  plus richer DataSources. One list so the app can show "what data does
+       *  this agent have" at a glance. */
+      dataSources: dataSourcesFor(agent),
+      dataSummary: dataSummaryFor(agent),
       ...extra,
     };
+  };
+
+  /** Legacy shared_paths + data_sources, as one uniform list for the app. */
+  const dataSourcesFor = (agent: Agent) => [
+    ...(agent.sharedPaths ?? []).map((p) => ({
+      id: `legacy:${p}`,
+      kind: 'folder' as const,
+      access: 'ro' as const,
+      mountName: basename(p),
+      hostPath: p,
+      legacy: true,
+    })),
+    ...store.listDataSources(agent.id).map((d) => ({
+      id: d.id,
+      kind: d.kind,
+      access: d.access,
+      mountName: d.mountName,
+      hostPath: d.hostPath,
+      repoUrl: d.repoUrl,
+      legacy: false,
+    })),
+  ];
+
+  /** One-line "reads 2 folders · 1 writable folder" for the card. */
+  const dataSummaryFor = (agent: Agent): string | undefined => {
+    const all = dataSourcesFor(agent);
+    if (!all.length) return undefined;
+    const ro = all.filter((d) => d.kind === 'folder' && d.access === 'ro').length;
+    const rw = all.filter((d) => d.kind === 'folder' && d.access === 'rw').length;
+    const git = all.filter((d) => d.kind === 'git').length;
+    const parts: string[] = [];
+    if (ro) parts.push(`reads ${ro} folder${ro > 1 ? 's' : ''}`);
+    if (rw) parts.push(`${rw} writable folder${rw > 1 ? 's' : ''}`);
+    if (git) parts.push(`${git} git repo${git > 1 ? 's' : ''}`);
+    return parts.join(' · ');
   };
 
   /**
@@ -1201,6 +1241,68 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     return { port: agent.gatewayPort, token: agent.gatewayToken };
   });
+
+  // Add a data source. Slice A: folders, read-only or writable. Writable is the
+  // owner writing to their own disk — same machine-owner gate as any host mount,
+  // plus the blocklist; the app warns before offering it. Applied on rebuild.
+  app.post<{ Params: { id: string }; Body: { kind?: string; access?: string; path?: string } }>(
+    '/v1/agents/:id/data-sources',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const parsed = z
+        .object({
+          kind: z.literal('folder'), // git lands in Slice B
+          access: z.enum(['ro', 'rw']),
+          path: z.string().min(1).max(512),
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      const { access, path } = parsed.data;
+      const p = path.trim();
+
+      // Mounting host folders — read or write — is the machine owner's privilege.
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      const problem = sharePathProblem(p);
+      if (problem) return reply.code(400).send({ error: problem });
+      if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
+
+      // No two sources at the same /data/<name>, across legacy + rich.
+      const mountName = basename(p.replace(/\/+$/, ''));
+      const taken = new Set([
+        ...(agent.sharedPaths ?? []).map((x) => basename(x.replace(/\/+$/, ''))),
+        ...store.listDataSources(agent.id).map((d) => d.mountName),
+      ]);
+      if (taken.has(mountName)) {
+        return reply.code(409).send({
+          error: `Another source already lives at /data/${mountName}. Rename or remove it first.`,
+        });
+      }
+
+      store.insertDataSource({
+        id: randomUUID(),
+        agentId: agent.id,
+        kind: 'folder',
+        access,
+        mountName,
+        hostPath: p,
+        createdAt: new Date().toISOString(),
+      });
+      return publicAgent(store.getAgent(agent.id)!);
+    },
+  );
+
+  app.delete<{ Params: { id: string; dsId: string } }>(
+    '/v1/agents/:id/data-sources/:dsId',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (!store.deleteDataSource(agent.id, req.params.dsId)) {
+        return reply.code(404).send({ error: 'No such data source.' });
+      }
+      return publicAgent(store.getAgent(agent.id)!);
+    },
+  );
 
   // The parked-provisioning resume: user pasted their BotFather token.
   app.post<{ Params: { id: string }; Body: { token?: string; fromWorkspace?: string } }>(

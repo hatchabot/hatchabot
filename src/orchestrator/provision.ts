@@ -317,14 +317,25 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
       ...(subscription && !oauthToken
         ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
         : []),
-      // Owner-chosen folders, always read-only. An agent runs with permission
-      // prompts disabled and is reachable by everyone in it, so write access
-      // would make one bad instruction destructive.
+      // Legacy owner-chosen folders, always read-only. An agent runs with
+      // permission prompts disabled and is reachable by everyone in it, so write
+      // access would make one bad instruction destructive.
       ...(agent.sharedPaths ?? []).map((p) => ({
         source: p,
         target: `/data/${basename(p)}`,
         readonly: true,
       })),
+      // Data sources of kind 'folder' — the same bind mount, but access is
+      // per-source: 'rw' drops the :ro flag (gated + warned at the API). (Git
+      // sources are cloned onto the volume in Slice B, not mounted here.)
+      ...store
+        .listDataSources(agent.id)
+        .filter((d) => d.kind === 'folder' && d.hostPath)
+        .map((d) => ({
+          source: d.hostPath!,
+          target: `/data/${d.mountName}`,
+          readonly: d.access === 'ro',
+        })),
     ],
   };
 }

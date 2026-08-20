@@ -299,6 +299,17 @@ describe('buildRuntimeSpec', () => {
     expect(w.channel.released).toEqual(['stubbot']); // lease not kept
   });
 
+  it('data-source folders mount with per-source ro/rw access', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertDataSource({ id: 'd1', agentId: agent.id, kind: 'folder', access: 'ro', mountName: 'notes', hostPath: '/srv/notes', createdAt: 'now' });
+    w.store.insertDataSource({ id: 'd2', agentId: agent.id, kind: 'folder', access: 'rw', mountName: 'work', hostPath: '/srv/work', createdAt: 'now' });
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    const mounts = (spec.hostMounts ?? []).filter((m) => m.target.startsWith('/data/'));
+    expect(mounts).toContainEqual({ source: '/srv/notes', target: '/data/notes', readonly: true });
+    expect(mounts).toContainEqual({ source: '/srv/work', target: '/data/work', readonly: false });
+  });
+
   it('allocates a stable gateway port/token across calls', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);

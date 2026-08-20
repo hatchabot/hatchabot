@@ -5,6 +5,7 @@ import type {
   AgentState,
   AIProfile,
   Channel,
+  DataSource,
   Host,
   Membership,
   MemberRole,
@@ -106,6 +107,17 @@ export class Store {
         role TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL, redeemed_at TEXT, redeemed_by TEXT
       );
+
+      -- Everything an agent can access, unified across kinds (folder, git, …)
+      -- so "what data does this agent have?" is one query. Legacy read-only
+      -- folders still live on agents.shared_paths; these are the richer sources.
+      CREATE TABLE IF NOT EXISTS data_sources (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+        kind TEXT NOT NULL, access TEXT NOT NULL, mount_name TEXT NOT NULL,
+        host_path TEXT, repo_url TEXT, secret_ref TEXT, pub_key TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS data_sources_agent ON data_sources (agent_id);
     `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
@@ -854,6 +866,53 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET shared_paths = ?, updated_at = ? WHERE id = ?`)
       .run(paths.length ? JSON.stringify(paths) : null, new Date().toISOString(), id);
+  }
+
+  // ---- data sources (richer than the legacy shared_paths folders) ----
+
+  listDataSources(agentId: string): DataSource[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM data_sources WHERE agent_id = ? ORDER BY created_at`)
+        .all(agentId) as any[]
+    ).map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      kind: r.kind,
+      access: r.access,
+      mountName: r.mount_name,
+      hostPath: r.host_path ?? undefined,
+      repoUrl: r.repo_url ?? undefined,
+      secretRef: r.secret_ref ?? undefined,
+      pubKey: r.pub_key ?? undefined,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getDataSource(agentId: string, id: string): DataSource | undefined {
+    return this.listDataSources(agentId).find((d) => d.id === id);
+  }
+
+  insertDataSource(d: DataSource): void {
+    this.db
+      .prepare(
+        `INSERT INTO data_sources (id, agent_id, kind, access, mount_name, host_path, repo_url, secret_ref, pub_key, created_at)
+         VALUES (@id, @agentId, @kind, @access, @mountName, @hostPath, @repoUrl, @secretRef, @pubKey, @createdAt)`,
+      )
+      .run({
+        hostPath: null,
+        repoUrl: null,
+        secretRef: null,
+        pubKey: null,
+        ...d,
+      });
+  }
+
+  deleteDataSource(agentId: string, id: string): boolean {
+    return (
+      this.db.prepare(`DELETE FROM data_sources WHERE agent_id = ? AND id = ?`).run(agentId, id)
+        .changes > 0
+    );
   }
 
   setAgentMigratedTo(id: string, note: string | null): void {

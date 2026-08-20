@@ -228,15 +228,20 @@
       next Rebuild. (Local sources always run their one model, so there's no choice.)
     </div>
   </div>
-  <label>Folders this agent can read <span style="color:var(--dim)">— on this machine, read-only</span></label>
-  <div id="pathList"></div>
+  <label>Data this agent can access <span style="color:var(--dim)">— folders on this machine</span></label>
+  <div id="dataList"></div>
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="pathNew" placeholder="/home/you/Documents/notes" style="flex:1;min-width:0">
-    <button id="pathAddBtn" onclick="addSharedPath()">Share</button>
+    <select id="pathAccess" style="width:auto">
+      <option value="ro">Read-only</option>
+      <option value="rw">Writable</option>
+    </select>
+    <button id="pathAddBtn" onclick="addDataSource()">Add</button>
   </div>
   <div class="sub">
-    The agent sees these at <code>/data/&lt;folder&gt;</code> and cannot write to them.
-    Anyone who can message this agent can ask about their contents. Applies on the next Rebuild.
+    The agent sees these at <code>/data/&lt;folder&gt;</code>. Anyone who can message it can ask
+    about their contents — and for <b>writable</b> folders, change or delete them, so grant that
+    sparingly. Applies on the next Rebuild.
   </div>
   <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
   <div style="display:flex;gap:8px;align-items:center">
@@ -385,7 +390,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editPaths = [];
+let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
 let availableModels = {}; // profile id -> string[] of models the source offers (cached while the dialog is open)
 
 const api = async (path, opts = {}) => {
@@ -979,7 +984,7 @@ function agentCard(a) {
       </div>
       <span class="chip ${a.state}">${a.state}</span>
     </div>
-    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}${a.sharedPaths?.length ? ` · reads ${a.sharedPaths.length} folder${a.sharedPaths.length > 1 ? 's' : ''}` : ''}</div>` : ''}
+    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}${a.dataSummary ? ` · ${esc(a.dataSummary)}` : ''}</div>` : ''}
     ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
@@ -1077,7 +1082,7 @@ async function openEdit(id, name) {
   renderModelPickerForAgent(cur);
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
-  renderSharedPaths(cur?.sharedPaths);
+  renderDataList(cur?.dataSources);
   $('editErr').textContent = '';
   $('snapList').innerHTML = '';
   editDlg.showModal();
@@ -1238,39 +1243,50 @@ async function switchProfile() {
   finally { $('profileBtn').disabled = false; }
 }
 
-function renderSharedPaths(paths) {
-  editPaths = paths ?? [];
-  $('pathList').innerHTML = editPaths.length
-    ? editPaths.map((p, i) => `<div class="pair"><span class="grow">📁 <code>${esc(p)}</code></span>
-        <button class="danger" onclick="removeSharedPath(${i})">×</button></div>`).join('')
+// The unified data list: legacy read-only folders + richer data sources, each
+// with a kind icon and an access badge, so it's obvious what the agent can see.
+function renderDataList(sources) {
+  editData = sources ?? [];
+  const badge = d => d.access === 'rw'
+    ? '<span style="color:var(--accent);font-weight:600">writable</span>'
+    : '<span style="color:var(--dim)">read-only</span>';
+  const icon = d => d.kind === 'git' ? '🔧' : (d.access === 'rw' ? '✏️' : '📁');
+  $('dataList').innerHTML = editData.length
+    ? editData.map(d => `<div class="pair"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
+        <span class="sub">→ /data/${esc(d.mountName)} · ${badge(d)}</span></span>
+        <button class="danger" onclick="removeDataSource('${jsq(d.id)}')">×</button></div>`).join('')
     : '<div class="sub">None — this agent can only see its own workspace.</div>';
 }
 
-async function saveSharedPaths() {
-  await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: editPaths } });
-  await refresh(false);
-}
-
-async function addSharedPath() {
+async function addDataSource() {
   const p = $('pathNew').value.trim();
   if (!p) return;
-  const next = [...editPaths, p];
+  const access = $('pathAccess').value;
+  if (access === 'rw' && !confirm(`Give the agent WRITE access to ${p}?\n\nIt can change or delete files there, and anyone who can message it can trigger that. Only do this for data you're comfortable it editing.`)) return;
   $('pathAddBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: next } });
+    const updated = await api(`/v1/agents/${editAgentId}/data-sources`, { method: 'POST', body: { kind: 'folder', access, path: p } });
     $('pathNew').value = '';
-    renderSharedPaths(next);
-    toast('Shared — Rebuild to apply it');
+    renderDataList(updated.dataSources);
+    toast('Added — Rebuild to apply it');
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('pathAddBtn').disabled = false; }
 }
 
-async function removeSharedPath(i) {
-  const next = editPaths.filter((_, n) => n !== i);
+async function removeDataSource(id) {
+  const src = editData.find(d => d.id === id);
+  if (!src) return;
   try {
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: next } });
-    renderSharedPaths(next);
+    let updated;
+    if (src.legacy) {
+      // Legacy folders still live on sharedPaths — drop this one from that list.
+      const paths = editData.filter(d => d.legacy && d.id !== id).map(d => d.hostPath);
+      updated = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedPaths: paths } });
+    } else {
+      updated = await api(`/v1/agents/${editAgentId}/data-sources/${id}`, { method: 'DELETE' });
+    }
+    renderDataList(updated.dataSources);
     toast('Removed — Rebuild to apply it');
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }

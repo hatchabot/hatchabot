@@ -95,9 +95,9 @@ export interface Agent {
    */
   model?: string;
   /**
-   * Host folders mounted read-only into this agent's container, so it can
-   * read your data. Deliberately per-agent: the homework tutor should not
-   * inherit what the finance agent can see.
+   * Legacy read-only host folders. Superseded by DataSource (kind 'folder',
+   * access 'ro') but kept working untouched: existing agents' mounts must not
+   * churn. New folders — including writable ones — are DataSources.
    */
   sharedPaths?: string[];
   /**
@@ -126,6 +126,31 @@ export interface Agent {
 export interface PendingAction {
   type: 'bot_token';
   instructions: string;
+}
+
+/**
+ * One thing an agent can access, unified across kinds so "what data does this
+ * agent have?" has a single answer. The agent sees it at `/data/<mountName>`.
+ *
+ * - `folder` — a host directory bind-mounted (`hostPath`). `ro` is kernel-safe;
+ *   `rw` lets the agent write to your disk and is gated + warned.
+ * - `git` — a repo cloned into the agent's volume (`repoUrl`), edited/committed
+ *   there. `rw` carries a write deploy key; the private key lives in the
+ *   SecretStore (`secretRef`), the public one is shown for setup (`pubKey`).
+ *   (Provisioning for git lands in Slice B; the shape is here so it's additive.)
+ */
+export interface DataSource {
+  id: string;
+  agentId: string;
+  kind: 'folder' | 'git';
+  access: 'ro' | 'rw';
+  /** Where the agent sees it: `/data/<mountName>`. Unique per agent. */
+  mountName: string;
+  hostPath?: string;
+  repoUrl?: string;
+  secretRef?: string;
+  pubKey?: string;
+  createdAt: string;
 }
 
 export interface Host {
