@@ -80,10 +80,14 @@ Commands:
                                Turn an existing OpenClaw agent's workspace
                                into a managed AgentClaw agent (copies the
                                WHOLE folder; the original is only read)
-  folders <agent> [<path>...|--none]
-                               Show, or set, the host folders an agent may read
-                               (read-only, appears as /data/<name>; pass every
-                               folder you want kept — omitted ones are dropped)
+  folders <agent>              List everything an agent can access (folders and
+                               git repos), each at /data/<name>
+  folders <agent> add <path> [--rw]
+                               Share a host folder (read-only, or --rw writable)
+  folders <agent> add-repo <git-url> [--rw]
+                               Clone a git repo onto the agent's volume; prints
+                               the deploy key to add to the repo
+  folders <agent> rm <name>    Stop sharing a folder or repo (by its /data/<name>)
   servers                      Other AgentClaw servers you can move agents to
   servers add <name> <url> <token>
                                Register one (token from that server's
@@ -213,7 +217,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -590,27 +594,66 @@ async function main() {
       console.log(`and do not point both at the same Telegram bot.`);
       return;
     }
+    case 'data':
     case 'folders': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw folders <agent> [<path>...]'));
+      const usage = 'usage: agentclaw folders <agent> [add <path> [--rw] | add-repo <git-url> [--rw] | rm <name>]';
+      const a = await resolveAgent(ctx, rest[0] ?? fail(usage));
+      const sub = rest[1];
+
+      // Back-compat: --none still clears the legacy read-only folder list.
       if (flags.has('none')) {
         await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: [] }, 'PATCH');
-        console.log(`"${a.name}" no longer reads any host folder (on its next rebuild).`);
+        console.log(`"${a.name}" no longer reads any legacy host folder (on its next rebuild).`);
         return;
       }
-      if (rest.length < 2) {
-        const paths: string[] = a.sharedPaths ?? [];
-        if (!paths.length) return console.log(`"${a.name}" reads no host folders.`);
-        console.log(`"${a.name}" reads (read-only, as /data/<name>):`);
-        for (const p of paths) console.log(`  ${p}`);
+
+      if (sub === 'add') {
+        const raw = rest[2] ?? fail('usage: agentclaw folders <agent> add <path> [--rw]');
+        const p = resolve(raw.replace(/^~(?=\/|$)/, homedir()));
+        const access = flags.has('rw') ? 'rw' : 'ro';
+        await jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'folder', access, path: p });
+        console.log(`added ${access} folder ${p}  →  /data/${p.split('/').pop()} for "${a.name}".`);
+        console.log('Takes effect on the next rebuild: agentclaw rebuild ' + JSON.stringify(a.name));
         return;
       }
-      // Whole-list semantics, matching the API: pass every folder you want,
-      // or none to stop sharing. Anything omitted is dropped.
-      const paths = rest.slice(1).map((p) => resolve(p.replace(/^~(?=\/|$)/, homedir())));
-      await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: paths }, 'PATCH');
-      console.log(`"${a.name}" now reads:`);
-      for (const p of paths) console.log(`  ${p}  →  /data/${p.split('/').pop()}`);
-      console.log('Takes effect on the next rebuild: agentclaw rebuild ' + JSON.stringify(a.name));
+      if (sub === 'add-repo') {
+        const url = rest[2] ?? fail('usage: agentclaw folders <agent> add-repo <git-url> [--rw]');
+        const access = flags.has('rw') ? 'rw' : 'ro';
+        const up: any = await (await jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'git', access, repoUrl: url })).json();
+        const src = (up.dataSources ?? []).filter((d: any) => d.kind === 'git').slice(-1)[0];
+        console.log(`added ${access} git repo  →  /data/${src?.mountName ?? '?'} for "${a.name}".`);
+        if (src?.pubKey) {
+          console.log(`\nAdd this deploy key to the repo${access === 'rw' ? ' (tick "Allow write access")' : ''}, then rebuild:`);
+          console.log(src.pubKey);
+        }
+        return;
+      }
+      if (sub === 'rm') {
+        const ref = rest[2] ?? fail('usage: agentclaw folders <agent> rm <name>');
+        const src = (a.dataSources ?? []).find((d: any) => d.mountName === ref || d.id === ref);
+        if (!src) fail(`no data source named "${ref}" on "${a.name}" — see: agentclaw folders ${JSON.stringify(a.name)}`);
+        if (src.legacy) {
+          // Legacy folders live in the whole-list sharedPaths; drop just this one.
+          const remaining = (a.sharedPaths ?? []).filter((p: string) => p !== src.hostPath);
+          await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: remaining }, 'PATCH');
+        } else {
+          await api(ctx, `/v1/agents/${a.id}/data-sources/${src.id}`, { method: 'DELETE' });
+        }
+        console.log(`removed /data/${src.mountName} from "${a.name}" — rebuild to apply.`);
+        return;
+      }
+      if (sub) fail(`unknown subcommand "${sub}" — ${usage}`);
+
+      // List: one unified view of everything the agent can access (legacy
+      // read-only folders + folder/git data sources), matching the web UI.
+      const sources: any[] = a.dataSources ?? [];
+      if (!sources.length) return console.log(`"${a.name}" has no data sources.`);
+      console.log(`"${a.name}" data (each mounted at /data/<name>):`);
+      for (const d of sources) {
+        const where = d.kind === 'git' ? d.repoUrl : d.hostPath;
+        const tag = `${d.access} ${d.kind}`.padEnd(11);
+        console.log(`  ${tag} ${String(d.mountName).padEnd(16)} ${where}${d.legacy ? '   (legacy)' : ''}`);
+      }
       return;
     }
     case 'servers': {
