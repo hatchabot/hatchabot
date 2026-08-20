@@ -43,6 +43,9 @@ and lifecycle; OpenClaw runs the agent.
   it with a local model and nothing leaves the machine at all.
 - **Organize your fleet.** Sort agents into named groups and reorder them within
   a group, so a large fleet stays legible.
+- **Manage scheduled tasks.** See an agent's cron jobs (⏰ Tasks), enable or
+  disable them, run one now to test, or delete one — no shelling into the
+  container. Tasks live on the agent's durable volume and survive rebuilds.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
 - **Shared or private memory.** A family agent's memory is common to everyone

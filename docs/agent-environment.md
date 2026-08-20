@@ -64,13 +64,21 @@ be) a git repo.
 folders, and git repos (URL + generated deploy key, cloned on provision) are
 managed declaratively per agent — see [docs/data-sources.md](data-sources.md).
 
+**Scheduled tasks are visible and manageable.** An agent's OpenClaw crons live in
+its own gateway store on the durable volume (they survive rebuilds like MEMORY.md).
+The app's **⏰ Tasks** button (per running agent) lists them and lets you enable,
+disable, **run one now to test**, or delete — driven through the in-container
+`openclaw cron` CLI, never the store directly. *Adding* a task is still done by
+asking the agent in chat; declarative add/edit is the next step.
+
 Still manual, and the intended next steps for a fully declarative environment
 carried by `adopt`/`migrate`:
 
 - a per-agent **tool/lib manifest** (`requirements.txt`/`setup.sh`) run on
   provision and rebuild, so the volume libs (above) are reproducible and portable;
 - **crons carried on adopt**, with host paths rewritten to their in-container
-  equivalents.
+  equivalents (today the tasks themselves are managed in-app, but adopt does not
+  yet copy them across a move).
 
 Until then, reconstruct those pieces by hand as above; the Stock Advisor
 migration is the worked example.
