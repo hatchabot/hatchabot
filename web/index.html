@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+  // Set the theme before first paint so there's no flash. Default: light.
+  document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light';
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>AgentClaw</title>
 <!-- Installable app (PWA) -->
@@ -14,17 +18,32 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
   :root {
+    /* Dark is the fallback if no theme is set. Both themes are also defined
+       explicitly below so the header toggle can switch either way. */
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
     --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88;
     --radius: 12px;
+    color-scheme: dark;
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
+    --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
+    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff; --panel: #ffffff; --panel-2: #f1f3f5; --line: #e2e5ea;
+    --text: #1a1c20; --dim: #6b7079; --accent: #b5791a; --accent-ink: #ffffff;
+    --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8;
+    color-scheme: light;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   }
-  .wrap { max-width: 680px; margin: 0 auto; padding: 24px 16px 80px; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 80px; }
   header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
   h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; }
   h1 b { color: var(--accent); font-weight: 700; }
@@ -126,6 +145,8 @@
             style="margin-left:8px;background:var(--accent);border:1px solid var(--accent);border-radius:8px;padding:4px 10px;cursor:pointer;color:var(--accent-ink);font-weight:600">⬇ Install app</button>
     <button id="importBtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()"
             style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
+    <button id="themeBtn" title="Toggle light / dark" onclick="toggleTheme()"
+            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit"></button>
     <button id="aiBtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()"
             style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ Settings</button>
     <span class="sub" id="whoami" style="margin-left:8px"></span>
@@ -1712,6 +1733,24 @@ refresh(true);
         : 'To install: open your browser menu and choose “Install app” or “Add to Home screen”. (Requires an https:// address.)',
     );
   }
+
+  // Light/dark theme. The <head> script set the initial theme before paint;
+  // here we keep the toggle button label (showing the OTHER mode) and the PWA
+  // theme-color in sync, and persist the choice.
+  function syncThemeChrome() {
+    const light = document.documentElement.dataset.theme === 'light';
+    const btn = document.getElementById('themeBtn');
+    if (btn) btn.textContent = light ? '🌙 Dark' : '☀ Light';
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', light ? '#ffffff' : '#14161a');
+  }
+  function toggleTheme() {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    localStorage.setItem('theme', next);
+    syncThemeChrome();
+  }
+  syncThemeChrome();
 </script>
 </body>
 </html>
