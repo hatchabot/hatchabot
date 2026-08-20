@@ -1321,11 +1321,15 @@ function showDeployKeyForSource(src) {
   const el = $('gitKeyOut');
   el.style.display = '';
   const write = src.access === 'rw';
-  el.textContent =
-    `Copy this ${write ? 'WRITE' : 'read-only'} deploy key and add it to the repo, then Rebuild:\n` +
-    `${src.repoUrl}\n` +
-    `→ on GitHub: the repo → Settings → Deploy keys → Add deploy key${write ? ', and CHECK "Allow write access"' : ''}\n\n` +
-    src.pubKey;
+  // Derive the "add deploy key" page from git@host:owner/repo.git — direct link
+  // for GitHub; a plain instruction for other hosts.
+  const m = /^git@([^:]+):(.+?)(?:\.git)?$/.exec(src.repoUrl || '');
+  const link = m && m[1] === 'github.com'
+    ? `<a href="https://github.com/${esc(m[2])}/settings/keys/new" target="_blank" rel="noopener" style="color:var(--accent);font-weight:600">Open ${esc(m[2])} → Add deploy key ↗</a>`
+    : `Add it at your git host: the repo → Settings → Deploy keys → Add`;
+  el.innerHTML =
+    `<div style="margin-bottom:8px">${link}${write ? ' <span class="sub">— then check “Allow write access”, paste the key below, and Rebuild.</span>' : ' <span class="sub">— paste the key below, then Rebuild.</span>'}</div>` +
+    `<div style="user-select:all;word-break:break-all">${esc(src.pubKey)}</div>`;
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
