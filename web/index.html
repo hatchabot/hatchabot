@@ -264,6 +264,20 @@
       next Rebuild. (Local sources always run their one model, so there's no choice.)
     </div>
   </div>
+  <label>Shared memory <span style="color:var(--dim)">— who this agent's MEMORY.md belongs to</span></label>
+  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
+    <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;margin-top:3px;flex:none">
+    <span>
+      <b>Share memory across everyone who uses this agent</b>
+      <div class="sub" style="margin-top:2px">
+        <b>On</b> — MEMORY.md is a common log for every member: entries are tagged with who
+        said them, and anything written may surface to other members.
+        <b>Off</b> — memory is private to you, untagged, and never surfaced to anyone else.
+        Applies on new conversations. You can only change this while you're the only member.
+      </div>
+    </span>
+  </label>
+  <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
   <label>Data this agent can access <span style="color:var(--dim)">— folders on this machine</span></label>
   <div id="dataList"></div>
   <div style="display:flex;gap:8px;align-items:center">
@@ -1085,8 +1099,6 @@ function agentCard(a) {
         ? `<button onclick="openLogs('${a.id}', '${jsq(a.name)}')" title="What the runtime last said">Logs</button>` : ''}
       ${a.state === 'RUNNING' && a.hasGateway
         ? `<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')" title="This agent's own OpenClaw Control UI (debug)">OpenClaw</button>` : ''}
-      ${a.state === 'RUNNING' && !(members[a.id] ?? []).some(m => m.role !== 'owner' && m.status === 'active')
-        ? `<button onclick="toggleMemory('${a.id}', ${a.sharedMemory})" title="Changes what invitees are told and how the agent treats MEMORY.md">${a.sharedMemory ? 'Make private' : 'Make shared'}</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
@@ -1149,6 +1161,13 @@ async function openEdit(id, name) {
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
+  const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
+  $('editShared').checked = !!cur?.sharedMemory;
+  $('editShared').disabled = otherMembers.length > 0;
+  $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
+  $('editSharedLock').textContent = otherMembers.length
+    ? `Locked — this agent has ${otherMembers.length} other member${otherMembers.length > 1 ? 's' : ''}. Remove them first to change how memory is shared.`
+    : '';
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   renderDataList(cur?.dataSources);
@@ -1615,18 +1634,21 @@ async function importAgentFile(file) {
   finally { $('importFile').value = ''; }
 }
 
-async function toggleMemory(id, currentlyShared) {
-  const msg = currentlyShared
-    ? 'Make memory private? The agent treats MEMORY.md as yours alone, and future invites lose the shared-memory setup. What it already remembers stays.'
-    : 'Make memory shared? People you invite will be told the agent\'s memory is common to every member.';
-  if (!confirm(msg)) return;
+async function toggleSharedFromEdit() {
+  const cb = $('editShared');
+  const want = cb.checked;
+  cb.disabled = true;
+  $('editErr').textContent = '';
   try {
-    const res = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { sharedMemory: !currentlyShared } });
-    toast(res.policyUpdated
-      ? (res.sharedMemory ? 'Memory is now shared' : 'Memory is now private')
-      : 'Setting saved, but updating AGENTS.md failed — edit it by hand');
+    const res = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedMemory: want } });
+    toast(res.sharedMemory ? 'Memory is now shared' : 'Memory is now private');
     await refresh(false);
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    cb.checked = !want; // roll back the toggle the server rejected
+    $('editErr').textContent = e.message;
+  } finally {
+    cb.disabled = false;
+  }
 }
 
 async function approve(id, code) {
