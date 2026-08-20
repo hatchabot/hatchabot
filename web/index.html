@@ -252,10 +252,12 @@
     <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
   </div>
   <div class="sub">
-    A git repo, cloned into the agent's own space (not your disk). It gets a deploy key you
-    add to the repo — read-only, or read-write so it can commit &amp; push. Clones on the next Rebuild.
+    A git repo, cloned into the agent's own space (not your disk). <b>AgentClaw generates a
+    deploy key</b> — you don't paste your own. After adding, copy that key into the repo
+    (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild. Read-only, or
+    read-write so it can commit &amp; push.
   </div>
-  <div id="gitKeyOut" class="invite-link" style="display:none;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+  <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
   <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
@@ -1268,7 +1270,7 @@ function renderDataList(sources) {
   $('dataList').innerHTML = editData.length
     ? editData.map(d => `<div class="pair"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
         <span class="sub">${where(d)}</span></span>
-        ${d.kind === 'git' && d.pubKey ? `<button onclick="showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to the repo">🔑</button>` : ''}
+        ${d.kind === 'git' && d.pubKey ? `<button onclick="showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to the repo on GitHub">🔑 Deploy key</button>` : ''}
         <button class="danger" onclick="removeDataSource('${jsq(d.id)}')">×</button></div>`).join('')
     : '<div class="sub">None — this agent can only see its own workspace.</div>';
 }
@@ -1299,9 +1301,11 @@ function showDeployKeyForSource(src) {
   el.style.display = '';
   const write = src.access === 'rw';
   el.textContent =
-    `Add this ${write ? 'WRITE' : 'read-only'} deploy key to ${src.repoUrl}\n` +
-    `(the repo → Settings → Deploy keys → Add${write ? ', and check "Allow write access"' : ''}), then Rebuild:\n\n` +
+    `Copy this ${write ? 'WRITE' : 'read-only'} deploy key and add it to the repo, then Rebuild:\n` +
+    `${src.repoUrl}\n` +
+    `→ on GitHub: the repo → Settings → Deploy keys → Add deploy key${write ? ', and CHECK "Allow write access"' : ''}\n\n` +
     src.pubKey;
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 async function addDataSource() {
