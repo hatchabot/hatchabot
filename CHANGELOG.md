@@ -2,6 +2,26 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.5.0] — 2026-08-20
+
+### Added
+- **Scheduled tasks in the app.** A new **⏰ Tasks** view on each running agent
+  lists its OpenClaw cron jobs and lets you enable, disable, **run one now to
+  test**, or delete — no shelling into the container. It's driven through the
+  in-container `openclaw cron` CLI (never the store directly), and tasks live on
+  the agent's durable volume, so they survive rebuilds like MEMORY.md. Adding a
+  new task is still done by asking the agent in chat; declarative add/edit is the
+  next step.
+
+### Changed
+- **`agentclaw folders` now manages every kind of data source, not just legacy
+  read-only paths.** It lists folders *and* git repos in one view (matching the
+  web UI) and gains subcommands — `add <path> [--rw]`, `add-repo <git-url> [--rw]`
+  (which prints the deploy key), and `rm <name>` (works on both legacy folders
+  and newer data sources). Previously the CLI read only the old shared-paths
+  list, so an agent given a writable folder or a git repo in the web UI
+  misreported *"reads no host folders."*
+
 ## [0.4.1] — 2026-08-20
 
 ### Added
