@@ -2,6 +2,49 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.4.1] — 2026-08-20
+
+### Added
+- **Organize the fleet.** Sort agents into named groups and reorder them within
+  a group (a dedicated 🏷 Group button plus ▲▼ controls), so a large fleet stays
+  legible.
+- **Shared memory is now an explained checkbox** in ⚙ Edit, replacing the bare
+  "Make private / Make shared" card button. It spells out what shared vs private
+  means, applies on new conversations, and — when the agent has other members —
+  shows *why* it is locked instead of silently disappearing.
+
+### Fixed
+- **The memory-policy toggle can no longer desync.** AGENTS.md is rewritten
+  first, and the stored flag is persisted only if that write succeeds; a failed
+  write now reports an error and changes nothing, instead of leaving the database
+  and the agent's own file permanently disagreeing (nothing reconciled them
+  afterwards — rebuild never overwrites an existing AGENTS.md).
+- **No silent double-mount.** A legacy shared folder that would land at the same
+  `/data/<name>` as an existing data source is now refused, rather than letting
+  Docker quietly keep only one of the two.
+- **Reserved git names blocked.** A git data source whose repo name would collide
+  with the agent's own runtime directories (`agents`, `config`, `sessions`, …) is
+  rejected up front.
+- **Agent ordering no longer ties.** New agents get a strictly-increasing order
+  instead of a wall-clock stamp — two created in the same millisecond used to
+  tie, which made "move up / down" a silent no-op. Moving an agent into another
+  group now drops it at the end of that group rather than an arbitrary spot.
+
+### Changed
+- Buttons show a pressed state, so a tap is unmistakable.
+- Clarified that a git data source's deploy key is identical whether read-only or
+  read-write; write access is granted by ticking "Allow write access" when the
+  key is registered on the host.
+- **Docs:** corrected the management-bot tool names and removed a documented-but-
+  nonexistent `events` tool; marked git data sources as shipped; documented the
+  `AGENTCLAW_TLS_CERT` / `AGENTCLAW_TLS_KEY` and `AGENTCLAW_MAX_AGENTS_PER_ACCOUNT`
+  settings and the `src/mgmt/` management bot in the README; trimmed the
+  duplicated broker documentation.
+
+### Internal
+- Removed dead code: `suggestBotUsername`, `isTerminal`, and the never-read `key`
+  field across the channel interface and its three implementations.
+
 ## [0.4.0] — 2026-08-20
 
 ### Added
