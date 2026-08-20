@@ -331,6 +331,15 @@
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" onclick="newCliToken()">New token</button>
     </div>
+
+    <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 12px">
+    <div class="sub" style="margin-bottom:4px"><b>Management bot</b> — <span id="mgmtBotStatus" style="color:var(--dim)">checking…</span></div>
+    <div class="sub">
+      Optionally control your fleet from Telegram: list, start/stop and rebuild
+      agents, and approve join requests — every change confirmed with a tap. It
+      runs as its own process, so set it up from a terminal on the server:
+    </div>
+    <div class="invite-link" style="margin-top:8px">agentclaw mgmt-bot setup</div>
   </section>
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
@@ -595,6 +604,24 @@ function showTab(name) {
     const on = key === name;
     $(pane).hidden = !on;
     $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
+  }
+  if (name === 'access') refreshMgmtBotStatus();
+}
+
+// Honest status from the mgmt-bot's own cli-token: whether setup has run, and
+// when the bot last used it (a proxy for "it's been active"). We can't claim
+// "running" from here — the bot is a separate process — so we don't.
+async function refreshMgmtBotStatus() {
+  const el = $('mgmtBotStatus');
+  if (!el) return;
+  try {
+    const tokens = await api('/v1/cli-tokens');
+    const t = tokens.find(x => x.label === 'mgmt-bot');
+    if (!t) { el.textContent = 'not set up yet'; el.style.color = 'var(--dim)'; return; }
+    el.textContent = t.lastUsedAt ? `set up · last active ${ago(t.lastUsedAt)}` : 'set up · not used yet';
+    el.style.color = 'var(--accent)';
+  } catch {
+    el.textContent = '';
   }
 }
 
