@@ -113,8 +113,8 @@ in the broker, regardless of what the model (or injected text) "wants":
 
 | Tier | Handling | Tools → endpoint |
 |---|---|---|
-| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `agent_status` → `GET /v1/agents/:id`; `logs` → `GET …/logs`; `members` → `GET …/members`; `pending` → `GET …/pairing`; `pool` → `GET /v1/pool`; `events` → `GET /v1/events` |
-| **mutate** | require a human-confirm tap showing the **resolved** action | `start`/`stop`/`rebuild` → `POST …/{start,stop,rebuild}`; `approve_member` → `POST …/pairing/approve`; `remove_member` → `DELETE …/members/:userId`; `set_model` → `PATCH /v1/agents/:id` |
+| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `get_agent` → `GET /v1/agents/:id`; `get_logs` → `GET …/logs`; `list_members` → `GET …/members`; `list_pending` → `GET …/pairing`; `get_pool` → `GET /v1/pool` |
+| **mutate** | require a human-confirm tap showing the **resolved** action | `start_agent`/`stop_agent`/`rebuild_agent` → `POST …/{start,stop,rebuild}`; `approve_member` → `POST …/pairing/approve`; `remove_member` → `DELETE …/members/:userId`; `set_model` → `PATCH /v1/agents/:id` |
 | **forbidden** | not exposed to the model at all — deep-link to web | `add_ai_key`, paste bot token, set password, edit `SOUL.md`/`MEMORY.md`, `delete_agent` (or gate behind a typed-name double-confirm) |
 
 Inputs are schema-validated (agent id must resolve to one the owner owns; enums
@@ -125,32 +125,22 @@ Full tool JSON schemas, the resolution rules, the result envelope, and the
 confirm-token design are in **`docs/management-broker.md`**.
 
 ### Confirmation-gate flow (the core safety mechanism)
-A hijacked model can only *propose*; you see the concrete action before it fires.
-
-1. Model emits a mutate intent, e.g. `stop{agent:"tech-advisor"}`.
-2. Broker **resolves** it to a specific target and renders a card:
-   *"⏹ Stop **Tech Advisor** (`id 169c…`)?"* with `[Confirm] [Cancel]`.
-   `callback_data` carries an opaque, single-use, short-TTL token — never
-   free-form model text — so the button can't be forged or replayed.
-3. On `[Confirm]`: re-check allowlist → broker calls `/v1` → edit the message
-   with the result. On `[Cancel]` or timeout: nothing happens.
+A hijacked model can only *propose*; the broker resolves the intent to a concrete
+target, renders a `[Confirm] [Cancel]` card whose `callback_data` is an opaque,
+single-use, short-TTL token, and only calls `/v1` on your tap. See
+`docs/management-broker.md` for the confirm-token flow in full.
 
 Irreversible/batch actions get extra friction (typed-name confirm; no "confirm
 all"). Keep destructive confirmations rare and specific to avoid tap-fatigue.
 
 ### Untrusted-content rules (closing the injection surface)
 The model reads fleet content that *other, less-trusted things produced* — agent
-memory, logs, and **member display names taken from Telegram profiles**. Treat
-all of it as hostile input:
-
-- **No outbound tools.** The management agent's only output is messages back to
-  *you*. No web-fetch, no send-elsewhere — this removes the exfiltration leg, so
-  even a fully hijacked read-only model has nowhere to leak to.
-- **Metadata first.** Feed the model states, counts, names-as-fenced-strings; pull
-  raw memory/log bodies only on explicit request, clearly delimited, never as
-  free instructions.
-- **Data is never authority.** Content the model reads can inform its *proposals*
-  but can't widen its tool set or skip a confirm — those live in the broker.
+memory, logs, and **member display names taken from Telegram profiles** — and all
+of it is treated as hostile input. The load-bearing rule specific to this client:
+**no outbound tools** — the management agent's only output is messages back to
+*you*, which removes the exfiltration leg entirely. Beyond that, content is fed
+metadata-first and can inform proposals but never widen the tool set or skip a
+confirm. See `docs/management-broker.md` for the full untrusted-content handling.
 
 ### Slash commands (the deterministic layer, always available)
 The typed commands coexist with the model — power-user shortcuts and a no-LLM
@@ -199,20 +189,13 @@ Never over Telegram — the bot deep-links to the web app instead:
 - anything where a 4096-char message or clumsy file upload is the wrong tool.
 
 ### Security checklist
-- [ ] Strict Telegram-id allowlist, enforced in code before the model runs and
-      again in the broker — never via the system prompt.
-- [ ] Model holds **no** token and **no** `/v1` access; only typed tool-intents.
-- [ ] Tool tiers fixed in the broker: reads auto, mutations human-confirmed,
-      secret/irreversible actions not exposed at all.
-- [ ] Confirmation cards show the **resolved** target; `callback_data` is an
-      opaque single-use short-TTL token (no free-form model text).
-- [ ] **No outbound tools** on the management agent — output is only back to you.
-- [ ] Broker starts read-only; mutations need an explicit `/mode readwrite`.
-- [ ] Fleet content (memory, logs, member names) treated as untrusted input.
-- [ ] Token stored encrypted; scoped/labeled; revocable independently.
-- [ ] Every proposed and executed action lands in `/v1/events` (audit trail).
-- [ ] Rate-limit per chat; ignore edited-message replays of callbacks.
-- [ ] Kill switch: a `/pause` that disables the broker instantly.
+The bot's security rests on a strict in-code Telegram-id allowlist (never the
+system prompt), a model that holds no token and no `/v1` access, broker-fixed
+tool tiers with human-confirmed mutations, resolved-target confirm cards on
+opaque single-use tokens, no outbound tools, read-only-by-default with an
+explicit `/mode readwrite`, untrusted-content handling, per-chat rate limits, an
+audit trail, and a `/pause` kill switch. The broker-side invariants and the
+policy it enforces are enumerated in `docs/management-broker.md`.
 
 ### Running it (Phase 1 — implemented)
 The deterministic broker + slash commands ship in `src/mgmt/` (`grammy`

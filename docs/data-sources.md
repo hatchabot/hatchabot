@@ -14,7 +14,7 @@ Each source declares four things: **kind** (folder / git / …), **access** (`ro
 |---|---|---|---|
 | **folder** | `ro` | host dir bind-mounted read-only at `/data/<name>` | kernel-enforced; blocklist refuses secrets/system paths |
 | **folder** | `rw` | same bind mount, writable | machine-owner only + blocklist; the app warns — the agent can change/delete those files |
-| **git** *(Slice B)* | `ro` / `rw` | repo cloned into the agent's volume, edited & committed there | repo-scoped deploy key (private in SecretStore); `rw` = write key. Never a host mount — every change is a reviewable commit |
+| **git** | `ro` / `rw` | repo cloned into the agent's volume, edited & committed there | repo-scoped deploy key (private in SecretStore); `rw` = write key. Never a host mount — every change is a reviewable commit |
 | **gdrive** *(Phase 2)* | `ro` / `rw` | rclone sync of a Drive folder ↔ the volume | Google OAuth, scope-limited to the chosen folder |
 
 ## Why git isn't a writable host mount
@@ -32,8 +32,8 @@ non-versioned data you're comfortable the agent editing.
   folders, git) is a row in the **`data_sources`** table. The API/UI merges both
   into one list, so the split is invisible.
 - `buildRuntimeSpec` turns folder sources into bind mounts (`:ro` unless `rw`);
-  git sources will be cloned onto the volume at provision time (Slice B). Changes
-  apply on the next **Rebuild**, like every other config.
+  a git source is cloned onto the volume at provision time. Changes apply on the
+  next **Rebuild**, like every other config.
 
 ## API
 

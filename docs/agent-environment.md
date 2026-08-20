@@ -46,39 +46,31 @@ kernel, and the refused-paths list still applies (see `ai-profiles.md`).
 edits and commits (e.g. holding-definition `.toml`s). Do **not** mount the host
 working copy read-write: a container running with permissions disabled, reachable
 by anyone who can message the bot, would write straight into your host
-filesystem and its git working copy. Instead the agent **clones the repo into
-its own volume** and pushes to the remote — host untouched, every change a
-reviewable commit, blast radius contained to the one repo. Credential: a
-**repo-scoped SSH deploy key with write access**, generated on the volume so
-nothing account-wide enters the container:
-
-```
-ssh-keygen -t ed25519 -N "" -f /home/node/.openclaw/.ssh/<name>_deploy
-# add the .pub to the repo as a WRITE deploy key (revocable, one repo only)
-ssh-keyscan -t ed25519 github.com > /home/node/.openclaw/.ssh/known_hosts
-git clone git@github.com:<owner>/<repo>.git /home/node/.openclaw/<repo>
-git -C /home/node/.openclaw/<repo> config core.sshCommand \
-  "ssh -i /home/node/.openclaw/.ssh/<name>_deploy -o IdentitiesOnly=yes \
-   -o UserKnownHostsFile=/home/node/.openclaw/.ssh/known_hosts -o StrictHostKeyChecking=yes"
-```
-
-Point the agent's scripts at the clone path, not a `/data/<name>` mount.
+filesystem and its git working copy. Instead the agent works from its **own clone
+on the volume** and pushes to the remote — host untouched, every change a
+reviewable commit, blast radius contained to the one repo. This is now a
+first-class **git data source**: the app generates the repo-scoped deploy key,
+clones onto the volume, and wires up the SSH command for you — no manual
+`ssh-keygen`/`git clone`. Add one via ⚙ Edit → Data (or
+`POST /v1/agents/:id/data-sources`); see [docs/data-sources.md](data-sources.md).
 
 **3. Local mutable data with no git** — a writable mount, only as an explicit,
 owner-gated, loudly-warned opt-in. Prefer pattern 2 whenever the data is (or can
 be) a git repo.
 
-## Planned: declarative environments
+## Declarative environments — shipped and planned
 
-The above is manual today. The intended product shape is to make an agent's
-environment declarative and carried by `adopt`/`migrate`:
+**Data sources are already first-class config.** Read-only mounts, writable
+folders, and git repos (URL + generated deploy key, cloned on provision) are
+managed declaratively per agent — see [docs/data-sources.md](data-sources.md).
+
+Still manual, and the intended next steps for a fully declarative environment
+carried by `adopt`/`migrate`:
 
 - a per-agent **tool/lib manifest** (`requirements.txt`/`setup.sh`) run on
-  provision and rebuild, so the volume libs are reproducible and portable;
-- **data sources** as first-class config — read-only mounts *and* git repos
-  (URL + deploy key), cloned on provision;
+  provision and rebuild, so the volume libs (above) are reproducible and portable;
 - **crons carried on adopt**, with host paths rewritten to their in-container
   equivalents.
 
-Until then, reconstruct the environment by hand as above; the Stock Advisor
+Until then, reconstruct those pieces by hand as above; the Stock Advisor
 migration is the worked example.
