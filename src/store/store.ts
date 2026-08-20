@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
   Agent,
+  AgentEnvVar,
   AgentState,
   AIProfile,
   Channel,
@@ -116,6 +117,12 @@ export class Store {
         kind TEXT NOT NULL, access TEXT NOT NULL, mount_name TEXT NOT NULL,
         host_path TEXT, repo_url TEXT, secret_ref TEXT, pub_key TEXT,
         created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS agent_env (
+        id TEXT PRIMARY KEY, agent_id TEXT NOT NULL,
+        name TEXT NOT NULL, secret_ref TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(agent_id, name)
       );
       CREATE INDEX IF NOT EXISTS data_sources_agent ON data_sources (agent_id);
     `);
@@ -925,6 +932,42 @@ export class Store {
   deleteDataSource(agentId: string, id: string): boolean {
     return (
       this.db.prepare(`DELETE FROM data_sources WHERE agent_id = ? AND id = ?`).run(agentId, id)
+        .changes > 0
+    );
+  }
+
+  // ---- Per-agent environment variables (values live in the SecretStore) ---
+
+  listAgentEnv(agentId: string): AgentEnvVar[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM agent_env WHERE agent_id = ? ORDER BY name`)
+        .all(agentId) as any[]
+    ).map((r) => ({
+      id: r.id,
+      agentId: r.agent_id,
+      name: r.name,
+      secretRef: r.secret_ref,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getAgentEnv(agentId: string, id: string): AgentEnvVar | undefined {
+    return this.listAgentEnv(agentId).find((e) => e.id === id);
+  }
+
+  insertAgentEnv(e: AgentEnvVar): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_env (id, agent_id, name, secret_ref, created_at)
+         VALUES (@id, @agentId, @name, @secretRef, @createdAt)`,
+      )
+      .run(e);
+  }
+
+  deleteAgentEnv(agentId: string, id: string): boolean {
+    return (
+      this.db.prepare(`DELETE FROM agent_env WHERE agent_id = ? AND id = ?`).run(agentId, id)
         .changes > 0
     );
   }

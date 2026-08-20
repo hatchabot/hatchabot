@@ -322,6 +322,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
        *  this agent have" at a glance. */
       dataSources: dataSourcesFor(agent),
       dataSummary: dataSummaryFor(agent),
+      /** Per-agent environment variables — names only; the secret values are
+       *  write-only and never leave the SecretStore. */
+      envVars: store.listAgentEnv(agent.id).map((e) => ({ id: e.id, name: e.name, createdAt: e.createdAt })),
       ...extra,
     };
   };
@@ -1357,6 +1360,63 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     },
   );
 
+  // ---- Per-agent environment variables -----------------------------------
+  // An API key or config the agent's own tools need, injected at provision.
+  // Values are secrets: stored in the SecretStore, never returned, applied on
+  // the next rebuild. A small reserved set is refused so a var can't shadow the
+  // agent's managed AI auth or its runtime PATH/PYTHONPATH.
+  const RESERVED_ENV = new Set([
+    'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
+    'PATH', 'HOME', 'PYTHONPATH', 'NODE_OPTIONS',
+  ]);
+
+  app.post<{ Params: { id: string }; Body: { name?: string; value?: string } }>(
+    '/v1/agents/:id/env',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const parsed = z
+        .object({ name: z.string().trim().min(1).max(128), value: z.string().min(1).max(8192) })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      const { name, value } = parsed.data;
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        return reply.code(400).send({
+          error: 'Not a valid variable name — use letters, digits and underscores, not starting with a digit.',
+        });
+      }
+      if (RESERVED_ENV.has(name)) {
+        return reply.code(400).send({ error: `"${name}" is managed by AgentClaw and can't be set here.` });
+      }
+      if (store.listAgentEnv(agent.id).some((e) => e.name === name)) {
+        return reply.code(409).send({ error: `"${name}" is already set — remove it first to change its value.` });
+      }
+      const id = randomUUID();
+      const secretRef = `agent-env/${id}`;
+      await secrets.put(secretRef, value);
+      try {
+        store.insertAgentEnv({ id, agentId: agent.id, name, secretRef, createdAt: new Date().toISOString() });
+      } catch (err) {
+        await secrets.delete(secretRef).catch(() => {});
+        throw err;
+      }
+      return publicAgent(store.getAgent(agent.id)!);
+    },
+  );
+
+  app.delete<{ Params: { id: string; envId: string } }>(
+    '/v1/agents/:id/env/:envId',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const e = store.getAgentEnv(agent.id, req.params.envId);
+      if (!e) return reply.code(404).send({ error: 'No such variable.' });
+      store.deleteAgentEnv(agent.id, req.params.envId);
+      await secrets.delete(e.secretRef).catch(() => {});
+      return publicAgent(store.getAgent(agent.id)!);
+    },
+  );
+
   // Reorder within the agent's group section. Cosmetic, immediate, no rebuild.
   app.post<{ Params: { id: string }; Body: { dir?: string } }>(
     '/v1/agents/:id/move',
@@ -2052,6 +2112,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         await secrets.delete(channel.secretRef).catch(() => {});
       }
       store.deleteChannelForAgent(agent.id);
+    }
+    // Scrub the agent's other stored secrets so a tombstone leaves no live
+    // credentials: data-source deploy keys and env-var values (both keyed by
+    // the source/var id, so release() never touches them).
+    for (const d of store.listDataSources(agent.id)) {
+      if (d.secretRef) await secrets.delete(d.secretRef).catch(() => {});
+    }
+    for (const e of store.listAgentEnv(agent.id)) {
+      await secrets.delete(e.secretRef).catch(() => {});
     }
     store.deleteSnapshotsFor(agent.id);
     store.deleteEventsFor(agent.id);

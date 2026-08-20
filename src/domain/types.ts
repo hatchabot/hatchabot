@@ -159,6 +159,22 @@ export interface DataSource {
   createdAt: string;
 }
 
+/**
+ * A per-agent environment variable, injected into the runtime at provision time
+ * — an API key or config the agent's own tools need (e.g. a market-data key).
+ * The value is treated as a secret: it lives in the SecretStore (`secretRef`),
+ * is never returned by the API, and is write-only from the app (only the name is
+ * shown). Applies on the next rebuild. Managed AI credentials always win over a
+ * same-named var, and a small reserved set is refused at the API.
+ */
+export interface AgentEnvVar {
+  id: string;
+  agentId: string;
+  name: string;
+  secretRef: string;
+  createdAt: string;
+}
+
 export interface Host {
   id: string;
   ownerId: string;

@@ -399,3 +399,20 @@ describe('store gateway/slug helpers', () => {
     expect(w.store.getAgent(a.agent.id)!.slug).not.toBe('kitchen');
   });
 });
+
+describe('per-agent env injection', () => {
+  it('injects env vars, and managed AI creds always win over a same-named var', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertAgentEnv({ id: 'e1', agentId: agent.id, name: 'MARKETDATA_API_KEY', secretRef: 'agent-env/e1', createdAt: 'now' });
+    await w.secrets.put('agent-env/e1', 'mk-123');
+    // Directly insert a var that shadows the AI key (the API refuses this name,
+    // but the merge order must protect the agent even if one slips in).
+    w.store.insertAgentEnv({ id: 'e2', agentId: agent.id, name: 'ANTHROPIC_API_KEY', secretRef: 'agent-env/e2', createdAt: 'now' });
+    await w.secrets.put('agent-env/e2', 'HIJACK');
+
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.env.MARKETDATA_API_KEY).toBe('mk-123');
+    expect(spec.env.ANTHROPIC_API_KEY).toBe('sk-test'); // profile creds, not HIJACK
+  });
+});

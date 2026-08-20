@@ -308,6 +308,19 @@
     read-write so it can commit &amp; push.
   </div>
   <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+  <label>Environment variables <span style="color:var(--dim)">— secrets &amp; config the agent's own tools need</span></label>
+  <div id="envList"></div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="envName" placeholder="MARKETDATA_API_KEY" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
+    <input type="password" id="envValue" placeholder="value" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
+    <button id="envAddBtn" onclick="addEnvVar()">Add</button>
+  </div>
+  <div class="sub">
+    Injected into the agent as environment variables (e.g. an API key a script needs).
+    Values are <b>write-only</b> — stored encrypted, never shown again; you can only replace
+    or remove them. Applies on the next Rebuild. Names AgentClaw manages
+    (<code>ANTHROPIC_API_KEY</code>, <code>PATH</code>, …) are reserved.
+  </div>
   <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
@@ -1188,6 +1201,7 @@ async function openEdit(id, name) {
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   renderDataList(cur?.dataSources);
+  renderEnvList(cur?.envVars);
   $('editErr').textContent = '';
   $('snapList').innerHTML = '';
   editDlg.showModal();
@@ -1431,6 +1445,42 @@ async function removeDataSource(id) {
       updated = await api(`/v1/agents/${editAgentId}/data-sources/${id}`, { method: 'DELETE' });
     }
     renderDataList(updated.dataSources);
+    toast('Removed — Rebuild to apply it');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+}
+
+function renderEnvList(vars) {
+  const list = vars ?? [];
+  $('envList').innerHTML = list.length
+    ? list.map(v => `<div class="pair"><span class="grow">🔑 <code>${esc(v.name)}</code>
+        <span class="sub">value hidden</span></span>
+        <button class="danger" onclick="removeEnvVar('${jsq(v.id)}', '${jsq(v.name)}')">×</button></div>`).join('')
+    : '<div class="sub">None set.</div>';
+}
+
+async function addEnvVar() {
+  const name = $('envName').value.trim();
+  const value = $('envValue').value;
+  if (!name || !value) return;
+  $('envAddBtn').disabled = true;
+  $('editErr').textContent = '';
+  try {
+    const updated = await api(`/v1/agents/${editAgentId}/env`, { method: 'POST', body: { name, value } });
+    $('envName').value = ''; $('envValue').value = '';
+    renderEnvList(updated.envVars);
+    toast('Added — Rebuild to apply it');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('envAddBtn').disabled = false; }
+}
+
+async function removeEnvVar(id, name) {
+  if (!confirm(`Remove ${name}? The agent loses this variable on its next rebuild.`)) return;
+  $('editErr').textContent = '';
+  try {
+    const updated = await api(`/v1/agents/${editAgentId}/env/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    renderEnvList(updated.envVars);
     toast('Removed — Rebuild to apply it');
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }

@@ -283,6 +283,14 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   // Debug door: each agent's Control UI published on a stable host port
   // behind a per-agent gateway token.
   const gateway = store.ensureGatewayAccess(agentId);
+  // Owner-set env vars (e.g. an API key the agent's own tools need). Their
+  // values are secrets; fetch them here. The managed AI credentials are spread
+  // AFTER these below, so a same-named var can never shadow the agent's own AI
+  // auth (the API also refuses those names up front).
+  const perAgentEnv: Record<string, string> = {};
+  for (const e of store.listAgentEnv(agentId)) {
+    perAgentEnv[e.name] = await secrets.get(e.secretRef);
+  }
   return {
     agentId,
     slug: agent.slug,
@@ -314,11 +322,14 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         },
       },
     },
-    env: modelKey
-      ? envForProfile(profile.vendor, modelKey)
-      : oauthToken
-        ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken }
-        : {},
+    env: {
+      ...perAgentEnv,
+      ...(modelKey
+        ? envForProfile(profile.vendor, modelKey)
+        : oauthToken
+          ? { CLAUDE_CODE_OAUTH_TOKEN: oauthToken }
+          : {}),
+    },
     hostMounts: [
       ...(subscription && !oauthToken
         ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
