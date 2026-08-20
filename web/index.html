@@ -426,6 +426,22 @@
   </div>
 </dialog>
 
+<dialog id="cronDlg" style="width:min(720px,94vw)">
+  <h3 style="margin:0 0 4px">Scheduled tasks — <span id="cronAgent"></span></h3>
+  <div class="sub">
+    The agent's own scheduled jobs, kept on its volume (they survive rebuilds).
+    Turn one on or off, <b>run one now</b> to test it, or delete it. Its result
+    arrives the task's usual way (e.g. a Telegram message). Adding a new task is
+    done by asking the agent in chat, for now.
+  </div>
+  <div id="cronList" style="margin-top:12px"></div>
+  <div class="err" id="cronErr"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="loadCrons()">Refresh</button>
+    <button class="primary" onclick="cronDlg.close()">Close</button>
+  </div>
+</dialog>
+
 <dialog id="groupDlg" style="width:min(420px,94vw)">
   <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
   <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
@@ -1094,6 +1110,7 @@ function agentCard(a) {
         <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${jsq(a.name)}')">Edit…</button>
+        <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="View and manage this agent's scheduled tasks">⏰ Tasks</button>
         <button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>` : ''}
       ${a.state !== 'RUNNING' && a.runtimeRef
         ? `<button onclick="openLogs('${a.id}', '${jsq(a.name)}')" title="What the runtime last said">Logs</button>` : ''}
@@ -1515,6 +1532,76 @@ async function loadLogs() {
     $('logsText').textContent = l.text || '(no recent output)';
     $('logsText').scrollTop = $('logsText').scrollHeight;
   } catch (e) { $('logsText').textContent = e.message; }
+}
+
+let cronAgentId = null;
+function cronScheduleLabel(c) {
+  if (c.scheduleKind === 'cron') return c.scheduleExpr + (c.scheduleTz ? ' · ' + c.scheduleTz : '');
+  if (c.scheduleKind === 'every' && c.everyMs) {
+    const m = Math.round(c.everyMs / 60000);
+    return m >= 60 && m % 60 === 0 ? `every ${m / 60}h` : `every ${m}m`;
+  }
+  if (c.scheduleKind === 'at' && c.atMs) return 'once at ' + new Date(c.atMs).toLocaleString();
+  return c.scheduleKind || 'schedule';
+}
+async function openCrons(id, name) {
+  cronAgentId = id;
+  $('cronAgent').textContent = name;
+  $('cronErr').textContent = '';
+  $('cronList').innerHTML = 'Loading…';
+  cronDlg.showModal();
+  await loadCrons();
+}
+async function loadCrons() {
+  if (!cronAgentId) return;
+  $('cronErr').textContent = '';
+  try {
+    const { crons } = await api(`/v1/agents/${cronAgentId}/crons`);
+    renderCrons(crons);
+  } catch (e) { $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
+}
+function renderCrons(crons) {
+  if (!crons.length) {
+    $('cronList').innerHTML = '<div class="sub">No scheduled tasks yet. Ask the agent in chat to add one.</div>';
+    return;
+  }
+  $('cronList').innerHTML = crons.map(c => {
+    const msg = (c.message || '').replace(/\s+/g, ' ').trim();
+    return `<div class="pair" style="align-items:flex-start">
+      <span class="grow">
+        <b>${esc(c.name || '(unnamed task)')}</b> ${c.enabled ? '' : '<span style="color:var(--dim)">· disabled</span>'}
+        <div class="sub">⏱ ${esc(cronScheduleLabel(c))}${c.payloadKind === 'command' ? ' · shell' : ''}</div>
+        ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
+      </span>
+      <button onclick="toggleCron('${jsq(c.id)}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
+      <button onclick="runCron('${jsq(c.id)}')" title="Fire it now to test — the result arrives the task's usual way">Run now</button>
+      <button onclick="deleteCron('${jsq(c.id)}', '${jsq(c.name || 'this task')}')">Delete</button>
+    </div>`;
+  }).join('');
+}
+async function toggleCron(jobId, enabled) {
+  $('cronErr').textContent = '';
+  try {
+    await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(jobId)}`, { method: 'PATCH', body: { enabled } });
+    toast(enabled ? 'Task enabled' : 'Task disabled');
+    await loadCrons();
+  } catch (e) { $('cronErr').textContent = e.message; }
+}
+async function runCron(jobId) {
+  $('cronErr').textContent = '';
+  try {
+    await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(jobId)}/run`, { method: 'POST', body: {} });
+    toast('Fired — watch for the result where the task normally reports');
+  } catch (e) { $('cronErr').textContent = e.message; }
+}
+async function deleteCron(jobId, name) {
+  if (!confirm(`Delete "${name}"? This removes the scheduled task from the agent, and can't be undone here.`)) return;
+  $('cronErr').textContent = '';
+  try {
+    await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+    toast('Task deleted');
+    await loadCrons();
+  } catch (e) { $('cronErr').textContent = e.message; }
 }
 // Telegram Web's documented deep-link: the #@username hash form only resolves
 // in some client states, but tgaddr survives reliably (needs a logged-in

@@ -21,6 +21,7 @@ import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
+import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
@@ -1368,6 +1369,98 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
       store.moveAgent(agent.id, dir);
       return { ok: true };
+    },
+  );
+
+  // ---- Scheduled tasks (OpenClaw crons) ----------------------------------
+  // Crons live in the agent's own OpenClaw gateway store on its durable volume
+  // (they survive rebuilds like MEMORY.md). We drive them through the
+  // in-container `openclaw cron` CLI — never the store directly — exactly as
+  // sessions/pairing do. The gateway must be up, so every route needs RUNNING.
+  const runningAgent = (req: FastifyRequest, id: string, reply: any): Agent | undefined => {
+    const agent = ownedAgent(req, id);
+    if (!agent) {
+      reply.code(404).send({ error: 'Not found' });
+      return undefined;
+    }
+    if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
+      reply.code(409).send({ error: 'Start the agent to manage its scheduled tasks.' });
+      return undefined;
+    }
+    return agent;
+  };
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/crons', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply);
+    if (!agent) return reply;
+    const crons = await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
+    return { crons };
+  });
+
+  // Enable / disable a task.
+  app.patch<{ Params: { id: string; jobId: string }; Body: { enabled?: boolean } }>(
+    '/v1/agents/:id/crons/:jobId',
+    async (req, reply) => {
+      const agent = runningAgent(req, req.params.id, reply);
+      if (!agent) return reply;
+      const enabled = (req.body as { enabled?: boolean } | null)?.enabled;
+      if (typeof enabled !== 'boolean') {
+        return reply.code(400).send({ error: 'enabled must be true or false.' });
+      }
+      if (busyNow(agent, reply)) return reply;
+      try {
+        const ok = await whileBusy(agent.id, () =>
+          setCronEnabled(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId, enabled),
+        );
+        if (!ok) {
+          return reply.code(502).send({ error: `Couldn't ${enabled ? 'enable' : 'disable'} that task — it may no longer exist.` });
+        }
+        return { ok: true, enabled };
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  // Fire a task now ("test fire"). Its output is delivered the task's own way
+  // (e.g. a Telegram announce), so this only reports that it was triggered.
+  app.post<{ Params: { id: string; jobId: string } }>(
+    '/v1/agents/:id/crons/:jobId/run',
+    async (req, reply) => {
+      const agent = runningAgent(req, req.params.id, reply);
+      if (!agent) return reply;
+      if (busyNow(agent, reply)) return reply;
+      try {
+        const ok = await whileBusy(agent.id, () =>
+          runCronNow(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId),
+        );
+        if (!ok) return reply.code(502).send({ error: "Couldn't run that task — it may no longer exist." });
+        return { ok: true };
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  // Delete a task.
+  app.delete<{ Params: { id: string; jobId: string } }>(
+    '/v1/agents/:id/crons/:jobId',
+    async (req, reply) => {
+      const agent = runningAgent(req, req.params.id, reply);
+      if (!agent) return reply;
+      if (busyNow(agent, reply)) return reply;
+      try {
+        const ok = await whileBusy(agent.id, () =>
+          deleteCron(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId),
+        );
+        if (!ok) return reply.code(502).send({ error: "Couldn't delete that task — it may no longer exist." });
+        return { ok: true };
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
     },
   );
 
