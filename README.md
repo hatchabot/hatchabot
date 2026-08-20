@@ -46,6 +46,9 @@ and lifecycle; OpenClaw runs the agent.
 - **Manage scheduled tasks.** See an agent's cron jobs (⏰ Tasks), enable or
   disable them, run one now to test, or delete one — no shelling into the
   container. Tasks live on the agent's durable volume and survive rebuilds.
+- **Give an agent its own secrets.** Set per-agent environment variables (an API
+  key a script needs) in ⚙ Edit — stored encrypted, write-only, and injected on
+  the next rebuild. AgentClaw's own AI credentials always take precedence.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
 - **Shared or private memory.** A family agent's memory is common to everyone

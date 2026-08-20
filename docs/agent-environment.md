@@ -35,6 +35,28 @@ Note: `docker exec ... python3` bypasses the entrypoint and so won't see
 scripts it spawns as children do have it. To reproduce the real environment in a
 one-off check, set it explicitly: `PYTHONPATH=/home/node/.openclaw/pylibs`.
 
+## Secrets & environment variables — per agent
+
+An agent's own tools often need a credential of their own — a market-data API
+key, a webhook secret. Set these per agent in **⚙ Edit → Environment variables**
+(or `POST /v1/agents/:id/env` with `{name, value}`):
+
+- **Values are secrets.** They're stored encrypted in the SecretStore, **never**
+  returned by the API, and write-only from the app — the list shows only names.
+  To change one, remove it and add it again.
+- **Injected at provision**, so they apply on the next **Rebuild**, like every
+  other config.
+- **Managed names win.** AgentClaw's own AI credentials (`ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY`, the OAuth token) and the runtime's `PATH`/`PYTHONPATH`/`HOME`
+  are reserved — the API refuses them, and even if one were set it could not
+  shadow the agent's AI auth (the managed env is merged last).
+- **Deleting the agent scrubs them** from the SecretStore along with its other
+  credentials.
+
+Caveat: env vars are **not yet carried by export/migrate** — the secret values
+live in the SecretStore, not the portable workspace. After moving or importing an
+agent, re-add its variables on the new host. (Carrying them is a follow-up.)
+
 ## Data — three patterns, chosen per folder
 
 **1. Read-only reference data** — broker exports, tax reports, anything the
