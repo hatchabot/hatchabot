@@ -867,6 +867,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
+        let latestOpenclawVersion: string | undefined;
         let updateAvailable = false;
         if (a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           try {
@@ -876,7 +877,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
               provider.currentImageInfo(),
             ]);
             openclawVersion = running.openclawVersion;
+            latestOpenclawVersion = current.openclawVersion;
             // Compare image ids, never tags — :latest gets reassigned in place.
+            // Note this fires for ANY image rebuild, including a same-version one
+            // (e.g. base tooling added), not only an OpenClaw version bump — the
+            // app words it from the two versions so it doesn't over-claim.
             updateAvailable = !!(
               running.imageId && current.imageId && running.imageId !== current.imageId
             );
@@ -898,6 +903,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             return (await warmLocalModels(p.baseUrl)).includes(a.appliedModel ?? p.model);
           })(),
           openclawVersion,
+          latestOpenclawVersion,
           updateAvailable,
         });
       }),

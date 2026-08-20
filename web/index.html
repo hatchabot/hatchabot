@@ -953,7 +953,7 @@ function agentCard(a) {
       <span class="chip ${a.state}">${a.state}</span>
     </div>
     ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}${a.sharedPaths?.length ? ` · reads ${a.sharedPaths.length} folder${a.sharedPaths.length > 1 ? 's' : ''}` : ''}</div>` : ''}
-    ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">An OpenClaw update is ready. Rebuild applies it — memory is kept.</span>
+    ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
       <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
@@ -1490,6 +1490,15 @@ async function approve(id, code) {
 }
 
 /** Agents this account can rebuild right now (owned, live-or-stopped, not moved away). */
+// Word the update prompt from the two OpenClaw versions, so a same-version
+// image rebuild (e.g. new base tooling) isn't mislabelled as a version upgrade.
+function updateBlurb(a) {
+  const from = a.openclawVersion, to = a.latestOpenclawVersion;
+  if (from && to && from !== to)
+    return `OpenClaw ${esc(from)} → ${esc(to)} is ready. Rebuild applies it — memory is kept.`;
+  return `A newer runtime image is ready${to ? ` (same OpenClaw ${esc(to)})` : ''}. Rebuild applies it — memory is kept.`;
+}
+
 function rebuildableAgents() {
   return agents.filter(a =>
     (a.role ? a.role === 'owner' : true) &&
