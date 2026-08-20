@@ -1045,6 +1045,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             error: 'Two folders share a name — the agent would see them at the same place.',
           });
         }
+        // A legacy folder must not shadow a data source at the same /data/<name>:
+        // both mount there and Docker would silently keep only one.
+        const dsNames = new Set(store.listDataSources(agent.id).map((d) => d.mountName));
+        const clash = paths.map((p) => p.replace(/\/+$/, '').split('/').pop()!).find((n) => dsNames.has(n));
+        if (clash) {
+          return reply.code(409).send({
+            error: `A data source already lives at /data/${clash}. Remove it before mounting a folder with the same name.`,
+          });
+        }
         store.setAgentSharedPaths(agent.id, paths);
       }
 
@@ -1086,7 +1095,6 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAgentModel(agent.id, null);
       }
 
-      let policyUpdated = true;
       if (shared !== undefined && shared !== agent.sharedMemory) {
         const others = store
           .listMemberships(agent.id)
@@ -1100,9 +1108,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           return reply.code(409).send({ error: 'Start the agent to change its memory policy.' });
         }
 
-        store.setAgentSharedMemory(agent.id, shared);
-
-        // Rewrite only the policy section; the rest of AGENTS.md is the user's.
+        // Rewrite AGENTS.md FIRST, and only persist the flag if that write
+        // succeeds. Committing the flag before the write (as this once did)
+        // meant a failed rewrite left the stored policy and the agent's actual
+        // AGENTS.md permanently disagreeing — nothing reconciles them later, as
+        // rebuild never overwrites an existing AGENTS.md.
         const provider = providerFor(agent.hostId);
         const path = workspacePath(agent.slug, 'AGENTS.md');
         const read = await provider.execShell(
@@ -1115,12 +1125,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           agent.runtimeRef,
           `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
         );
-        policyUpdated = write.code === 0;
-        if (!policyUpdated) {
+        if (write.code !== 0) {
           app.log.warn({ agentId: agent.id, stderr: write.stderr }, 'memory policy rewrite failed');
+          return reply.code(502).send({
+            error: "Couldn't update the agent's memory policy — nothing was changed. Try again in a moment.",
+          });
         }
+        store.setAgentSharedMemory(agent.id, shared);
       }
-      return publicAgent(store.getAgent(agent.id)!, { policyUpdated });
+      return publicAgent(store.getAgent(agent.id)!);
     },
   );
 
@@ -1302,6 +1315,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const git = normalizeGitUrl(parsed.data.repoUrl ?? '');
     if (!git) {
       return reply.code(400).send({ error: 'Not a recognizable git repo. Use git@host:owner/repo.git or https://host/owner/repo.' });
+    }
+    // git repos clone beside OpenClaw's own dirs under ~/.openclaw; a repo whose
+    // name matches one of them (or a dotfile) would collide with runtime state.
+    const RESERVED = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace']);
+    if (RESERVED.has(git.repoName) || git.repoName.startsWith('.')) {
+      return reply.code(400).send({ error: `"${git.repoName}" is a reserved name — it would collide with the agent's own files. Use a differently named repo.` });
     }
     if (clashes(git.repoName)) {
       return reply.code(409).send({ error: `Another source is already named "${git.repoName}". Remove it first.` });

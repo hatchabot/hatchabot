@@ -62,6 +62,31 @@ describe('agent grouping + ordering', () => {
     expect(order(s)).toEqual(['a1', 'fin2', 'fin1']);
   });
 
+  it('auto-assigns strictly increasing sort_order (no ties) when none is given', () => {
+    const s = make();
+    const mk = (id: string) =>
+      s.insertAgent({
+        id, ownerId: OWNER, name: id.toUpperCase(), slug: id, state: 'RUNNING',
+        aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+        createdAt: '2026-01-01', updatedAt: '2026-01-01',
+      } as Agent);
+    mk('a1'); mk('a2'); mk('a3');
+    // Distinct orders mean the swap is real — with tied stamps this was a no-op.
+    expect(s.moveAgent('a3', 'up')).toBe(true);
+    expect(order(s)).toEqual(['a1', 'a3', 'a2']);
+  });
+
+  it('setAgentGroup drops the agent at the END of the destination group', () => {
+    const s = make();
+    add(s, 'a1', 1);
+    add(s, 'fin1', 1, 'Finance');
+    add(s, 'fin2', 2, 'Finance');
+    s.setAgentGroup('a1', 'Finance');
+    // a1 lands after the existing Finance members, not at a spot implied by its
+    // old (unrelated) order value.
+    expect(order(s)).toEqual(['fin1', 'fin2', 'a1']);
+  });
+
   it('setAgentGroup moves an agent between sections; null clears it', () => {
     const s = make();
     add(s, 'a1', 5);

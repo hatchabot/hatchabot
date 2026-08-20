@@ -117,6 +117,14 @@ describe('git data sources (Slice B)', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('rejects a repo whose name collides with an OpenClaw internal dir', async () => {
+    const { store, f } = await world();
+    const res = await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@github.com:cksci/agents.git' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/reserved/);
+    expect(store.listDataSources('a1')).toHaveLength(0);
+  });
+
   it('deleting a git source scrubs its private key', async () => {
     const { store, secrets, f } = await world();
     const added = (await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@github.com:cksci/defs.git' })).json();
@@ -126,6 +134,19 @@ describe('git data sources (Slice B)', () => {
     await f.inject({ method: 'DELETE', url: `/v1/agents/a1/data-sources/${id}`, headers: as });
     expect(store.listDataSources('a1')).toHaveLength(0);
     expect(secrets.map.has(ref)).toBe(false); // portable secret gone
+  });
+});
+
+describe('legacy sharedPaths vs data sources', () => {
+  it('PATCH sharedPaths refuses a folder that would shadow an existing data source', async () => {
+    const { f } = await world();
+    const dir = tmp();
+    await addSource(f, { kind: 'folder', access: 'ro', path: dir });
+    // Same dir → same /data/<basename> as the data source above: a silent
+    // double-mount, which the route must now reject.
+    const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { sharedPaths: [dir] } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/already lives at \/data\//);
   });
 });
 

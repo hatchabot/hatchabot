@@ -270,8 +270,12 @@ export class Store {
         runtimeRef: null,
         model: null,
         group: null,
-        sortOrder: null,
         ...a,
+        // Land new agents strictly last in their section. A per-owner max+1
+        // avoids the ties a wall-clock stamp produced when two agents were
+        // created in the same millisecond — which made "move up/down" (a swap)
+        // a silent no-op.
+        sortOrder: a.sortOrder ?? this.nextSortOrder(a.ownerId, a.group ?? null),
         sharedMemory: a.sharedMemory ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
@@ -948,11 +952,29 @@ export class Store {
       .run(model, new Date().toISOString(), id);
   }
 
-  /** Set (or clear, with null) the agent's group label. */
+  /** One past the current max order in an owner's section (1 if empty), so a
+   *  new or freshly-regrouped agent sorts strictly last there. */
+  private nextSortOrder(ownerId: string, group: string | null): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM agents
+         WHERE owner_id = ? AND state != 'DELETED'
+           AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)`,
+      )
+      .get(ownerId, group, group) as { n: number };
+    return row.n;
+  }
+
+  /** Set (or clear, with null) the agent's group label. Moving to a different
+   *  section also drops the agent at the END of that section — otherwise its
+   *  stale order value would land it at an arbitrary spot among strangers. */
   setAgentGroup(id: string, group: string | null): void {
+    const agent = this.getAgent(id);
+    if (!agent) return;
+    if ((agent.group ?? null) === group) return; // no change — leave order alone
     this.db
-      .prepare(`UPDATE agents SET group_name = ?, updated_at = ? WHERE id = ?`)
-      .run(group, new Date().toISOString(), id);
+      .prepare(`UPDATE agents SET group_name = ?, sort_order = ?, updated_at = ? WHERE id = ?`)
+      .run(group, this.nextSortOrder(agent.ownerId, group), new Date().toISOString(), id);
   }
 
   /**

@@ -139,9 +139,11 @@ export interface PendingAction {
  * - `folder` — a host directory bind-mounted (`hostPath`). `ro` is kernel-safe;
  *   `rw` lets the agent write to your disk and is gated + warned.
  * - `git` — a repo cloned into the agent's volume (`repoUrl`), edited/committed
- *   there. `rw` carries a write deploy key; the private key lives in the
- *   SecretStore (`secretRef`), the public one is shown for setup (`pubKey`).
- *   (Provisioning for git lands in Slice B; the shape is here so it's additive.)
+ *   there. One ed25519 deploy key is generated either way (private half in the
+ *   SecretStore `secretRef`, public half shown via `pubKey`). `access` records
+ *   intent and drives the setup hint; whether the clone can actually push is
+ *   decided by the "Allow write access" box when the key is registered on the
+ *   host — AgentClaw does not itself block a push.
  */
 export interface DataSource {
   id: string;
