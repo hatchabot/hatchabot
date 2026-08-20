@@ -23,7 +23,6 @@ const BOTFATHER_STEPS = `Open Telegram and message @BotFather:
  */
 export class TelegramManualProvisioner implements ChannelProvisioner {
   readonly kind = 'telegram' as const;
-  readonly key = 'telegram-manual';
 
   /** agentId -> pending token, populated by submitToken(). */
   readonly #pending = new Map<string, { username: string; token: string }>();

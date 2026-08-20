@@ -42,7 +42,6 @@ export class ChannelSetupRequired extends Error {
 
 export interface ChannelProvisioner {
   readonly kind: 'telegram';
-  readonly key: string;
 
   /** Mint or lease a messaging identity for this agent. Idempotent per agent. */
   provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel>;

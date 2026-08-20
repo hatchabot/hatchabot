@@ -30,7 +30,6 @@ function stubChannel(opts: { parkFirst?: boolean } = {}) {
   let provisions = 0;
   const chan: ChannelProvisioner & { released: string[]; provisions: () => number } = {
     kind: 'telegram',
-    key: 'stub',
     released,
     provisions: () => provisions,
     async provision(req) {

@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type {
@@ -20,7 +19,6 @@ import type {
  */
 export class TelegramPoolProvisioner implements ChannelProvisioner {
   readonly kind = 'telegram' as const;
-  readonly key = 'telegram-pool';
 
   constructor(
     private readonly db: Database.Database,
@@ -114,13 +112,4 @@ export class PoolExhaustedError extends Error {
     super('Telegram bot pool exhausted');
     this.name = 'PoolExhaustedError';
   }
-}
-
-/** Deterministic-ish handle suggestion, used when minting pool bots by hand. */
-export function suggestBotUsername(agentName: string): string {
-  const base = agentName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-    .slice(0, 24);
-  return `${base || 'agent'}${randomUUID().slice(0, 4)}bot`;
 }

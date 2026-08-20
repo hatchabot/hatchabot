@@ -20,7 +20,6 @@ import type { TelegramManualProvisioner } from './telegramManual.js';
  */
 export class CompositeTelegramProvisioner implements ChannelProvisioner {
   readonly kind = 'telegram' as const;
-  readonly key = 'telegram-composite';
 
   constructor(
     readonly pool: TelegramPoolProvisioner,

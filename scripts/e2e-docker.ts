@@ -109,7 +109,6 @@ await channel.submitToken('pending', botToken); // placeholder; real key set bel
 const wrapped = {
   ...channel,
   kind: channel.kind,
-  key: channel.key,
   provision: async (req: Parameters<typeof channel.provision>[0]) => {
     await channel.submitToken(req.agentId, botToken!);
     return channel.provision(req);

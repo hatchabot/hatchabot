@@ -34,8 +34,3 @@ export class IllegalTransitionError extends Error {
 export function assertTransition(from: AgentState, to: AgentState): void {
   if (!canTransition(from, to)) throw new IllegalTransitionError(from, to);
 }
-
-/** States where no further work should be scheduled against the agent. */
-export function isTerminal(state: AgentState): boolean {
-  return state === 'DELETED';
-}
