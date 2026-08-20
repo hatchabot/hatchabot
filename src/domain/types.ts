@@ -109,6 +109,10 @@ export interface Agent {
   appliedProfileId?: string;
   /** The model that configuration actually used. */
   appliedModel?: string;
+  /** Owner-defined organization: an optional group label, and a manual order
+   *  (ascending) used within the group. Absent group = "ungrouped". */
+  group?: string;
+  sortOrder?: number;
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */
   gatewayPort?: number;
   /** Gateway auth token for that Control UI. */

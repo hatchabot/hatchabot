@@ -52,6 +52,13 @@
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
   }
+  .movecol { display: flex; flex-direction: column; gap: 2px; }
+  .movebtn { padding: 0 7px; font-size: 10px; line-height: 1.35; color: var(--dim);
+             background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
+  .movebtn:hover { color: var(--text); border-color: var(--accent); }
+  .group-header { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+                  color: var(--dim); margin: 22px 2px 8px; }
+  .group-header:first-child { margin-top: 4px; }
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
@@ -228,6 +235,12 @@
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
     <button id="renameBtn" onclick="renameAgent()">Rename</button>
+  </div>
+  <label>Group <span style="color:var(--dim)">— optional; organizes the agent list</span></label>
+  <div style="display:flex;gap:8px;align-items:center">
+    <input type="text" id="editGroup" maxlength="48" list="groupOptions" placeholder="e.g. Finance (blank = ungrouped)" style="flex:1;min-width:0">
+    <datalist id="groupOptions"></datalist>
+    <button id="groupBtn" onclick="setAgentGroup()">Set group</button>
   </div>
   <label>AI source <span style="color:var(--dim)">— the AI account behind this agent</span></label>
   <div style="display:flex;gap:8px;align-items:center">
@@ -1014,6 +1027,10 @@ function agentCard(a) {
   return `
   <div class="card" id="card-${a.id}">
     <div class="row">
+      <div class="movecol">
+        <button class="movebtn" title="Move up" onclick="moveAgent('${a.id}','up')">▲</button>
+        <button class="movebtn" title="Move down" onclick="moveAgent('${a.id}','down')">▼</button>
+      </div>
       <div class="grow">
         <span class="name">${esc(a.name)}</span>
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
@@ -1113,6 +1130,10 @@ async function openEdit(id, name) {
   $('editAgent').textContent = name;
   $('editName').value = name;
   const cur = agents.find(x => x.id === id);
+  $('editGroup').value = cur?.group || '';
+  // Suggest groups the owner already uses.
+  $('groupOptions').innerHTML = [...new Set(agents.map(a => a.group).filter(Boolean))]
+    .map(g => `<option value="${esc(g)}">`).join('');
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
@@ -1624,6 +1645,22 @@ function rebuildableAgents() {
     (a.state === 'RUNNING' || a.state === 'STOPPED'));
 }
 
+async function moveAgent(id, dir) {
+  try {
+    await api(`/v1/agents/${id}/move`, { method: 'POST', body: { dir } });
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function setAgentGroup() {
+  const g = $('editGroup').value.trim();
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { group: g } });
+    toast(g ? `Grouped under “${g}”` : 'Removed from group');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+}
+
 function renderAgents() {
   const el = $('agents');
   // Show "Rebuild all" only when there's more than one agent to rebuild.
@@ -1640,7 +1677,16 @@ function renderAgents() {
   const focusedId = document.activeElement?.closest('#agents') ? document.activeElement.id : null;
   const caret = focusedId ? document.activeElement.selectionStart : null;
 
-  el.innerHTML = agents.map(agentCard).join('');
+  // Agents arrive already ordered (ungrouped first, then groups A→Z, each by the
+  // owner's manual order). Insert a header when a named group begins.
+  let html = '', lastGroup = null;
+  for (const a of agents) {
+    const g = a.group || '';
+    if (g && g !== lastGroup) html += `<div class="group-header">${esc(g)}</div>`;
+    lastGroup = g;
+    html += agentCard(a);
+  }
+  el.innerHTML = html;
 
   for (const [id, v] of Object.entries(saved)) { const i = $(id); if (i) i.value = v; }
   if (focusedId) {

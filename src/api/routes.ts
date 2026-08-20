@@ -999,20 +999,26 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           runsHere: z.literal(true).optional(),
           /** Host folders this agent may READ. Applied on the next rebuild. */
           sharedPaths: z.array(z.string().min(1).max(512)).max(8).optional(),
+          /** Organize into a group; empty string or null clears it. Cosmetic —
+           *  takes effect immediately, no rebuild. */
+          group: z.string().trim().max(48).nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      const { name, sharedMemory: shared, aiProfileId, model, runsHere } = parsed.data;
+      const { name, sharedMemory: shared, aiProfileId, model, runsHere, group } = parsed.data;
       if (
         name === undefined &&
         shared === undefined &&
         aiProfileId === undefined &&
         model === undefined &&
         !runsHere &&
-        parsed.data.sharedPaths === undefined
+        parsed.data.sharedPaths === undefined &&
+        group === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
+
+      if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
 
       if (runsHere) store.setAgentMigratedTo(agent.id, null);
 
@@ -1328,6 +1334,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // until the next rebuild — harmless, and the portable secret is gone.
       if (src.secretRef) await secrets.delete(src.secretRef).catch(() => {});
       return publicAgent(store.getAgent(agent.id)!);
+    },
+  );
+
+  // Reorder within the agent's group section. Cosmetic, immediate, no rebuild.
+  app.post<{ Params: { id: string }; Body: { dir?: string } }>(
+    '/v1/agents/:id/move',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const dir = (req.body as { dir?: string } | null)?.dir;
+      if (dir !== 'up' && dir !== 'down') {
+        return reply.code(400).send({ error: 'dir must be "up" or "down".' });
+      }
+      store.moveAgent(agent.id, dir);
+      return { ok: true };
     },
   );
 

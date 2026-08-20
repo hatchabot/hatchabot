@@ -138,6 +138,9 @@ export class Store {
       // Optional per-agent model override (cloud only). NULL = follow the
       // profile's default model.
       `ALTER TABLE agents ADD COLUMN model TEXT`,
+      // Owner-defined organization: an optional group label and a manual order.
+      `ALTER TABLE agents ADD COLUMN group_name TEXT`,
+      `ALTER TABLE agents ADD COLUMN sort_order INTEGER`,
     ]) {
       try {
         this.db.exec(alter);
@@ -145,6 +148,10 @@ export class Store {
         /* column exists */
       }
     }
+    // Backfill order for agents created before sort_order existed: rowid is the
+    // insertion sequence, so this preserves the old created-at order. Runs once
+    // (new agents get an explicit sort_order); idempotent via the NULL guard.
+    this.db.exec(`UPDATE agents SET sort_order = rowid WHERE sort_order IS NULL`);
 
     // Agents provisioned before applied-tracking existed were configured with
     // whatever profile they still point at. Backfill, so the "will switch on
@@ -253,15 +260,17 @@ export class Store {
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
                              host_id, runtime_ref, persona, shared_memory, model, pending_action,
-                             created_at, updated_at)
+                             group_name, sort_order, created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
                  @hostId, @runtimeRef, @persona, @sharedMemory, @model, @pendingAction,
-                 @createdAt, @updatedAt)`,
+                 @group, @sortOrder, @createdAt, @updatedAt)`,
       )
       .run({
         stateReason: null,
         runtimeRef: null,
         model: null,
+        group: null,
+        sortOrder: null,
         ...a,
         sharedMemory: a.sharedMemory ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
@@ -289,7 +298,8 @@ export class Store {
 
   listAgents(ownerId: string): Agent[] {
     const rows = this.db
-      .prepare(`SELECT * FROM agents WHERE owner_id = ? AND state != 'DELETED' ORDER BY created_at`)
+      // Owner's order: ungrouped first, groups alphabetically, then sort_order.
+      .prepare(`SELECT * FROM agents WHERE owner_id = ? AND state != 'DELETED' ORDER BY group_name, sort_order, created_at`)
       .all(ownerId) as any[];
     return rows.map(rowToAgent);
   }
@@ -305,7 +315,7 @@ export class Store {
         `SELECT DISTINCT a.* FROM agents a
          LEFT JOIN memberships m ON m.agent_id = a.id AND m.user_id = ? AND m.status = 'active'
          WHERE a.state != 'DELETED' AND (a.owner_id = ? OR m.user_id IS NOT NULL)
-         ORDER BY a.created_at`,
+         ORDER BY a.group_name, a.sort_order, a.created_at`,
       )
       .all(userId, userId) as any[];
     return rows.map(rowToAgent);
@@ -938,6 +948,44 @@ export class Store {
       .run(model, new Date().toISOString(), id);
   }
 
+  /** Set (or clear, with null) the agent's group label. */
+  setAgentGroup(id: string, group: string | null): void {
+    this.db
+      .prepare(`UPDATE agents SET group_name = ?, updated_at = ? WHERE id = ?`)
+      .run(group, new Date().toISOString(), id);
+  }
+
+  /**
+   * Move an agent one place up or down WITHIN its group section, by swapping
+   * sort_order with the adjacent sibling. Returns false at the section boundary
+   * (or if the agent is gone). Group membership never changes here.
+   */
+  moveAgent(id: string, dir: 'up' | 'down'): boolean {
+    const agent = this.getAgent(id);
+    if (!agent) return false;
+    const g = agent.group ?? null;
+    const siblings = this.db
+      .prepare(
+        `SELECT id, sort_order FROM agents
+         WHERE owner_id = ? AND state != 'DELETED'
+           AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)
+         ORDER BY sort_order, created_at`,
+      )
+      .all(agent.ownerId, g, g) as Array<{ id: string; sort_order: number }>;
+    const i = siblings.findIndex((s) => s.id === id);
+    const j = dir === 'up' ? i - 1 : i + 1;
+    if (i < 0 || j < 0 || j >= siblings.length) return false;
+    const a = siblings[i]!;
+    const b = siblings[j]!;
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const upd = this.db.prepare(`UPDATE agents SET sort_order = ?, updated_at = ? WHERE id = ?`);
+      upd.run(b.sort_order, now, a.id);
+      upd.run(a.sort_order, now, b.id);
+    })();
+    return true;
+  }
+
   /**
    * Drop any per-agent model pin on `profileId` that is no longer on the given
    * menu — called when a source's model list is edited, so a pin the source can
@@ -1097,6 +1145,8 @@ function rowToAgent(r: any): Agent {
     appliedModel: r.applied_model ?? undefined,
     gatewayPort: r.gateway_port ?? undefined,
     gatewayToken: r.gateway_token ?? undefined,
+    group: r.group_name ?? undefined,
+    sortOrder: r.sort_order ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
