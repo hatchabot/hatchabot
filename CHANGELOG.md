@@ -2,6 +2,40 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.4.0] — 2026-08-20
+
+### Added
+- **Data sources — one place to see what an agent can access.** A unified,
+  per-agent list (Edit → Data) with a card summary (`reads 2 folders · 1 git
+  repo`). Folders can now be **writable** (gated to the machine owner, warned),
+  and **git repos** are first-class: adding one generates a repo-scoped deploy
+  key (private half in the SecretStore, public half shown with a direct GitHub
+  link), and the repo is cloned onto the agent's volume so it can read — or
+  commit and push. See `docs/data-sources.md`.
+- **Telegram management bot.** Control the fleet from Telegram: list/start/stop/
+  rebuild agents and approve pairing requests, each change confirmed with a tap.
+  Built on a deterministic broker (typed tool tiers, single-use confirm tokens,
+  allowlist) with an optional LLM layer for natural-language control that gains
+  no authority the broker doesn't already gate. Set up with `agentclaw mgmt-bot
+  setup`; discoverable in ⚙ Settings → Access. See `docs/control-interfaces.md`
+  and `docs/management-broker.md`.
+- **Installable app (PWA).** The web UI installs to a phone home screen and runs
+  standalone; an in-app "Install app" button appears in a secure context.
+- **Light / dark theme** with a header toggle (defaults to light), and a wider
+  content column so agent cards use the screen.
+
+### Changed
+- The "update available" card no longer over-claims an OpenClaw version bump when
+  only the runtime image changed — it words itself from the two versions.
+
+### Fixed
+- `npm audit fix` for the `fast-uri` host-confusion advisory (transitive via
+  fastify); `npm audit` now clean.
+
+### Docs
+- GCE single-VM deploy recipe (`docs/deploy-gce.md`); management bot + mobile app
+  spec and broker design.
+
 ## [0.3.1] — 2026-08-18
 
 ### Added
