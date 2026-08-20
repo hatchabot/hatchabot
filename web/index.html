@@ -83,8 +83,16 @@
     font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
     background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
     padding: 7px 14px; border-radius: 8px; text-decoration: none; display: inline-block;
+    transition: background .1s, color .1s, border-color .1s, transform .05s;
   }
   button:hover, .btn:hover { border-color: var(--dim); }
+  /* Press feedback: sink slightly on hold, and flash to the accent on click so
+     it's obvious the tap registered (added briefly by a global handler). */
+  button:active, .btn:active { transform: translateY(1px); }
+  button.pressed, .btn.pressed { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled, .btn:disabled { opacity: .55; cursor: default; transform: none; }
+  /* A working/in-flight action: dim + wait cursor. */
+  button.busy, .btn.busy { opacity: .6; cursor: progress; }
   .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 0 0 14px; }
   .tab {
     background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim);
@@ -235,12 +243,6 @@
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
     <button id="renameBtn" onclick="renameAgent()">Rename</button>
-  </div>
-  <label>Group <span style="color:var(--dim)">— optional; organizes the agent list</span></label>
-  <div style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="editGroup" maxlength="48" list="groupOptions" placeholder="e.g. Finance (blank = ungrouped)" style="flex:1;min-width:0">
-    <datalist id="groupOptions"></datalist>
-    <button id="groupBtn" onclick="setAgentGroup()">Set group</button>
   </div>
   <label>AI source <span style="color:var(--dim)">— the AI account behind this agent</span></label>
   <div style="display:flex;gap:8px;align-items:center">
@@ -407,6 +409,19 @@
   <div class="actions" style="justify-content:flex-end">
     <button onclick="loadLogs()">Refresh</button>
     <button class="primary" onclick="logsDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="groupDlg" style="width:min(420px,94vw)">
+  <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
+  <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
+  <div id="groupChips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px"></div>
+  <input type="text" id="groupDlgInput" list="groupOptions" maxlength="48" placeholder="e.g. Finance" style="width:100%">
+  <datalist id="groupOptions"></datalist>
+  <div class="err" id="groupErr"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="groupDlg.close()">Cancel</button>
+    <button class="primary" onclick="saveGroup()">Save</button>
   </div>
 </dialog>
 
@@ -1060,6 +1075,7 @@ function agentCard(a) {
       }).join('')}
       </div>` : ''}
     <div class="actions">
+      <button onclick="openGroupDlg('${a.id}')" title="Organize this agent into a group">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
         <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
@@ -1130,10 +1146,6 @@ async function openEdit(id, name) {
   $('editAgent').textContent = name;
   $('editName').value = name;
   const cur = agents.find(x => x.id === id);
-  $('editGroup').value = cur?.group || '';
-  // Suggest groups the owner already uses.
-  $('groupOptions').innerHTML = [...new Set(agents.map(a => a.group).filter(Boolean))]
-    .map(g => `<option value="${esc(g)}">`).join('');
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
@@ -1652,13 +1664,30 @@ async function moveAgent(id, dir) {
   } catch (e) { toast(e.message); }
 }
 
-async function setAgentGroup() {
-  const g = $('editGroup').value.trim();
+let groupAgentId = null;
+function openGroupDlg(id) {
+  groupAgentId = id;
+  const a = agents.find(x => x.id === id);
+  $('groupDlgAgent').textContent = a?.name || '';
+  $('groupDlgInput').value = a?.group || '';
+  const groups = [...new Set(agents.map(x => x.group).filter(Boolean))];
+  $('groupOptions').innerHTML = groups.map(g => `<option value="${esc(g)}">`).join('');
+  $('groupChips').innerHTML = groups.length
+    ? groups.map(g => `<button class="btn" onclick="pickGroupChip('${jsq(g)}')">${esc(g)}</button>`).join('')
+    : '<span class="sub">No groups yet — type one below.</span>';
+  $('groupErr').textContent = '';
+  groupDlg.showModal();
+  $('groupDlgInput').focus();
+}
+function pickGroupChip(g) { $('groupDlgInput').value = g; }
+async function saveGroup() {
+  const g = $('groupDlgInput').value.trim();
   try {
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { group: g } });
+    await api(`/v1/agents/${groupAgentId}`, { method: 'PATCH', body: { group: g } });
+    groupDlg.close();
     toast(g ? `Grouped under “${g}”` : 'Removed from group');
     await refresh(false);
-  } catch (e) { $('editErr').textContent = e.message; }
+  } catch (e) { $('groupErr').textContent = e.message; }
 }
 
 function renderAgents() {
@@ -1801,6 +1830,16 @@ refresh(true);
     syncThemeChrome();
   }
   syncThemeChrome();
+
+  // Universal press feedback: briefly flash any clicked button to the accent so
+  // a tap is obviously registered, even before its action's result lands.
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('button, .btn');
+    if (b && !b.disabled) {
+      b.classList.add('pressed');
+      setTimeout(() => b.classList.remove('pressed'), 200);
+    }
+  }, true);
 </script>
 </body>
 </html>
