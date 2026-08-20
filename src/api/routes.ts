@@ -17,6 +17,7 @@ import {
   runProvisionSteps,
   slugify,
 } from '../orchestrator/provision.js';
+import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
@@ -341,6 +342,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       mountName: d.mountName,
       hostPath: d.hostPath,
       repoUrl: d.repoUrl,
+      // Public half of the deploy key — safe to show, and the owner needs it to
+      // grant the repo access (as a read, or write for rw, deploy key).
+      pubKey: d.pubKey,
       legacy: false,
     })),
   ];
@@ -1242,64 +1246,87 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { port: agent.gatewayPort, token: agent.gatewayToken };
   });
 
-  // Add a data source. Slice A: folders, read-only or writable. Writable is the
-  // owner writing to their own disk — same machine-owner gate as any host mount,
-  // plus the blocklist; the app warns before offering it. Applied on rebuild.
-  app.post<{ Params: { id: string }; Body: { kind?: string; access?: string; path?: string } }>(
-    '/v1/agents/:id/data-sources',
-    async (req, reply) => {
-      const agent = ownedAgent(req, req.params.id);
-      if (!agent) return reply.code(404).send({ error: 'Not found' });
-      const parsed = z
-        .object({
-          kind: z.literal('folder'), // git lands in Slice B
-          access: z.enum(['ro', 'rw']),
-          path: z.string().min(1).max(512),
-        })
-        .safeParse(req.body ?? {});
-      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      const { access, path } = parsed.data;
-      const p = path.trim();
+  // Add a data source. Folders are host mounts (ro/rw), gated to the machine
+  // owner + blocklist. Git repos are cloned onto the agent's own volume with a
+  // generated deploy key — no host access, so any agent owner may add one; the
+  // clone happens on the next rebuild. Both apply on rebuild.
+  app.post<{
+    Params: { id: string };
+    Body: { kind?: string; access?: string; path?: string; repoUrl?: string };
+  }>('/v1/agents/:id/data-sources', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const parsed = z
+      .object({
+        kind: z.enum(['folder', 'git']),
+        access: z.enum(['ro', 'rw']),
+        path: z.string().min(1).max(512).optional(),
+        repoUrl: z.string().min(1).max(512).optional(),
+      })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const { kind, access } = parsed.data;
 
-      // Mounting host folders — read or write — is the machine owner's privilege.
+    // Reject a mount-name clash across legacy folders + every data source.
+    const clashes = (name: string) =>
+      new Set([
+        ...(agent.sharedPaths ?? []).map((x) => basename(x.replace(/\/+$/, ''))),
+        ...store.listDataSources(agent.id).map((d) => d.mountName),
+      ]).has(name);
+
+    if (kind === 'folder') {
+      const p = (parsed.data.path ?? '').trim();
+      if (!p) return reply.code(400).send({ error: 'A folder path is required.' });
       if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
       const problem = sharePathProblem(p);
       if (problem) return reply.code(400).send({ error: problem });
       if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
-
-      // No two sources at the same /data/<name>, across legacy + rich.
       const mountName = basename(p.replace(/\/+$/, ''));
-      const taken = new Set([
-        ...(agent.sharedPaths ?? []).map((x) => basename(x.replace(/\/+$/, ''))),
-        ...store.listDataSources(agent.id).map((d) => d.mountName),
-      ]);
-      if (taken.has(mountName)) {
-        return reply.code(409).send({
-          error: `Another source already lives at /data/${mountName}. Rename or remove it first.`,
-        });
+      if (clashes(mountName)) {
+        return reply.code(409).send({ error: `Another source already lives at /data/${mountName}. Rename or remove it first.` });
       }
-
       store.insertDataSource({
-        id: randomUUID(),
-        agentId: agent.id,
-        kind: 'folder',
-        access,
-        mountName,
-        hostPath: p,
-        createdAt: new Date().toISOString(),
+        id: randomUUID(), agentId: agent.id, kind: 'folder', access, mountName,
+        hostPath: p, createdAt: new Date().toISOString(),
       });
       return publicAgent(store.getAgent(agent.id)!);
-    },
-  );
+    }
+
+    // git
+    const git = normalizeGitUrl(parsed.data.repoUrl ?? '');
+    if (!git) {
+      return reply.code(400).send({ error: 'Not a recognizable git repo. Use git@host:owner/repo.git or https://host/owner/repo.' });
+    }
+    if (clashes(git.repoName)) {
+      return reply.code(409).send({ error: `Another source is already named "${git.repoName}". Remove it first.` });
+    }
+    const id = randomUUID();
+    let key: { privateKey: string; publicKey: string };
+    try {
+      key = generateDeployKey(`agentclaw-${agent.slug}-${git.repoName}-deploy`);
+    } catch {
+      return reply.code(500).send({ error: 'Could not generate a deploy key — this server needs `ssh-keygen` (openssh-client).' });
+    }
+    const secretRef = `data-source/${id}`;
+    await secrets.put(secretRef, key.privateKey);
+    store.insertDataSource({
+      id, agentId: agent.id, kind: 'git', access, mountName: git.repoName,
+      repoUrl: git.sshUrl, secretRef, pubKey: key.publicKey, createdAt: new Date().toISOString(),
+    });
+    return publicAgent(store.getAgent(agent.id)!);
+  });
 
   app.delete<{ Params: { id: string; dsId: string } }>(
     '/v1/agents/:id/data-sources/:dsId',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      if (!store.deleteDataSource(agent.id, req.params.dsId)) {
-        return reply.code(404).send({ error: 'No such data source.' });
-      }
+      const src = store.getDataSource(agent.id, req.params.dsId);
+      if (!src) return reply.code(404).send({ error: 'No such data source.' });
+      store.deleteDataSource(agent.id, req.params.dsId);
+      // Drop the deploy key's private half too. The on-volume clone/key linger
+      // until the next rebuild — harmless, and the portable secret is gone.
+      if (src.secretRef) await secrets.delete(src.secretRef).catch(() => {});
       return publicAgent(store.getAgent(agent.id)!);
     },
   );

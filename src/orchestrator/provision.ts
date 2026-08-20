@@ -9,6 +9,7 @@ import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { buildWorkspaceSeed } from '../openclaw/workspace.js';
+import { buildGitSyncScript } from './gitSource.js';
 import type { Agent } from '../domain/types.js';
 
 export interface CreateAgentInput {
@@ -196,6 +197,9 @@ async function runProvisionStepsInner(
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.healthy', { agentId, runtimeRef });
 
+    // Step 7.5: clone/refresh git data sources onto the volume.
+    await syncGitDataSources(deps, agentId, runtimeRef, log);
+
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');
     return { agent: live, deepLink: provisioned.deepLink };
@@ -381,6 +385,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // whole history to load, and 30s used to fail exactly the agents that had
     // been used the most.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
+    await syncGitDataSources(deps, agentId, runtimeRef, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
     return store.setAgentState(agentId, 'RUNNING');
   } catch (err) {
@@ -429,6 +434,45 @@ export function effectiveModel(
   if (!agent.model) return profile.model;
   const menu = [profile.model, ...(profile.models ?? [])];
   return menu.includes(agent.model) ? agent.model : profile.model;
+}
+
+/**
+ * Clone (or refresh) each git data source inside the running container. Runs on
+ * every provision and rebuild, and is idempotent (buildGitSyncScript only clones
+ * when the tree is absent). Best-effort: a repo whose deploy key the owner
+ * hasn't added yet fails to clone — that's theirs to fix (add the key, rebuild),
+ * and it must never fail the whole boot. Errors land in the event log.
+ */
+async function syncGitDataSources(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, secrets, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  for (const d of store.listDataSources(agentId)) {
+    if (d.kind !== 'git' || !d.secretRef || !d.repoUrl) continue;
+    const host = /^git@([^:]+):/.exec(d.repoUrl)?.[1];
+    if (!host) continue;
+    try {
+      const priv = await secrets.get(d.secretRef);
+      const script = buildGitSyncScript(
+        { mountName: d.mountName, sshUrl: d.repoUrl, host },
+        Buffer.from(priv, 'utf8').toString('base64'),
+        { name: agent.name, email: `${agent.slug}@agentclaw.local` },
+      );
+      const res = await provider.execShell(runtimeRef, script);
+      if (res.code !== 0) {
+        log('datasource.git_sync_failed', { agentId, mountName: d.mountName, stderr: res.stderr.slice(0, 300) });
+      } else {
+        log('datasource.git_synced', { agentId, mountName: d.mountName });
+      }
+    } catch (e) {
+      log('datasource.git_sync_error', { agentId, mountName: d.mountName, error: String((e as Error).message ?? e) });
+    }
+  }
 }
 
 /** Create + provision in one call — the shape scripts and tests want. */

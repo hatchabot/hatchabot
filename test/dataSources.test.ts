@@ -29,12 +29,13 @@ afterEach(() => { while (tmps.length) rmSync(tmps.pop()!, { recursive: true, for
 
 async function world(hostOwner = OWNER) {
   const store = new Store(new Database(':memory:'));
+  const secrets = new MemSecrets();
   store.insertHost({ id: 'h1', ownerId: hostOwner, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
   store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
   const f = Fastify();
-  await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
-  return { store, f };
+  await registerRoutes(f, { store, secrets, providers: new Map([['mock', new MockProvider()]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+  return { store, secrets, f };
 }
 
 const addSource = (f: any, body: unknown) =>
@@ -93,6 +94,38 @@ describe('POST /v1/agents/:id/data-sources', () => {
     const { f } = await world('someone-else');
     const res = await addSource(f, { kind: 'folder', access: 'rw', path: tmp() });
     expect(res.statusCode).toBe(403);
+  });
+});
+
+describe('git data sources (Slice B)', () => {
+  it('creates a git source with a generated deploy key and no host access needed', async () => {
+    const { store, secrets, f } = await world('someone-else'); // NOT the machine owner
+    const res = await addSource(f, { kind: 'git', access: 'rw', repoUrl: 'https://github.com/cksci/defs' });
+    expect(res.statusCode).toBe(200); // git needs no local-host ownership
+    const sources = store.listDataSources('a1');
+    expect(sources[0]).toMatchObject({ kind: 'git', access: 'rw', mountName: 'defs', repoUrl: 'git@github.com:cksci/defs.git' });
+    // Public key is surfaced; private key is stored in the SecretStore.
+    const inList = res.json().dataSources.find((d: any) => d.kind === 'git');
+    expect(inList.pubKey).toMatch(/^ssh-ed25519 /);
+    expect(secrets.map.has(sources[0]!.secretRef!)).toBe(true);
+    expect(res.json().dataSummary).toMatch(/1 git repo/);
+  });
+
+  it('rejects an unrecognizable repo url', async () => {
+    const { f } = await world();
+    const res = await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'not a repo' });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('deleting a git source scrubs its private key', async () => {
+    const { store, secrets, f } = await world();
+    const added = (await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@github.com:cksci/defs.git' })).json();
+    const ref = store.listDataSources('a1')[0]!.secretRef!;
+    expect(secrets.map.has(ref)).toBe(true);
+    const id = added.dataSources[0].id;
+    await f.inject({ method: 'DELETE', url: `/v1/agents/a1/data-sources/${id}`, headers: as });
+    expect(store.listDataSources('a1')).toHaveLength(0);
+    expect(secrets.map.has(ref)).toBe(false); // portable secret gone
   });
 });
 

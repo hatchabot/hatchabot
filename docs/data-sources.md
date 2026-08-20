@@ -49,7 +49,10 @@ non-versioned data you're comfortable the agent editing.
 
 - **Slice A (shipped):** the unified Data view + card summary, and **folders**
   read-only *and* writable.
-- **Slice B:** first-class **git** repos — generate the deploy key, clone on
-  provision, pull on demand. The `data_sources` columns are already in place, so
-  it's additive.
+- **Slice B (shipped):** first-class **git** repos. Adding one generates a
+  repo-scoped ed25519 **deploy key** (private half in the SecretStore, public
+  half shown to add to the repo — read, or write for `rw`); `syncGitDataSources`
+  clones it onto the volume on the next provision/rebuild (idempotent, and
+  best-effort so a not-yet-authorized key never fails the boot). Deleting a git
+  source scrubs the private key.
 - **Phase 2:** **Google Drive** via rclone + Google sign-in.

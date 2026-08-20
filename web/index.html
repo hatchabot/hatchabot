@@ -243,6 +243,19 @@
     about their contents — and for <b>writable</b> folders, change or delete them, so grant that
     sparingly. Applies on the next Rebuild.
   </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+    <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git" style="flex:1;min-width:0">
+    <select id="repoAccess" style="width:auto">
+      <option value="ro">Read-only</option>
+      <option value="rw">Read-write</option>
+    </select>
+    <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
+  </div>
+  <div class="sub">
+    A git repo, cloned into the agent's own space (not your disk). It gets a deploy key you
+    add to the repo — read-only, or read-write so it can commit &amp; push. Clones on the next Rebuild.
+  </div>
+  <div id="gitKeyOut" class="invite-link" style="display:none;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
   <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
   <div style="display:flex;gap:8px;align-items:center">
     <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
@@ -1251,11 +1264,44 @@ function renderDataList(sources) {
     ? '<span style="color:var(--accent);font-weight:600">writable</span>'
     : '<span style="color:var(--dim)">read-only</span>';
   const icon = d => d.kind === 'git' ? '🔧' : (d.access === 'rw' ? '✏️' : '📁');
+  const where = d => d.kind === 'git' ? `→ cloned in workspace · ${badge(d)}` : `→ /data/${esc(d.mountName)} · ${badge(d)}`;
   $('dataList').innerHTML = editData.length
     ? editData.map(d => `<div class="pair"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
-        <span class="sub">→ /data/${esc(d.mountName)} · ${badge(d)}</span></span>
+        <span class="sub">${where(d)}</span></span>
+        ${d.kind === 'git' && d.pubKey ? `<button onclick="showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to the repo">🔑</button>` : ''}
         <button class="danger" onclick="removeDataSource('${jsq(d.id)}')">×</button></div>`).join('')
     : '<div class="sub">None — this agent can only see its own workspace.</div>';
+}
+
+async function addGitSource() {
+  const repoUrl = $('repoUrl').value.trim();
+  if (!repoUrl) return;
+  const access = $('repoAccess').value;
+  $('repoAddBtn').disabled = true;
+  try {
+    const updated = await api(`/v1/agents/${editAgentId}/data-sources`, { method: 'POST', body: { kind: 'git', access, repoUrl } });
+    $('repoUrl').value = '';
+    renderDataList(updated.dataSources);
+    // Surface the new repo's deploy key straight away — it must be added to the
+    // repo before the next Rebuild can clone it.
+    showDeployKeyForSource(updated.dataSources.filter(d => d.kind === 'git').slice(-1)[0]);
+    toast('Repo added — add its deploy key, then Rebuild');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('repoAddBtn').disabled = false; }
+}
+
+function showDeployKey(id) { showDeployKeyForSource(editData.find(d => d.id === id)); }
+
+function showDeployKeyForSource(src) {
+  if (!src || !src.pubKey) return;
+  const el = $('gitKeyOut');
+  el.style.display = '';
+  const write = src.access === 'rw';
+  el.textContent =
+    `Add this ${write ? 'WRITE' : 'read-only'} deploy key to ${src.repoUrl}\n` +
+    `(the repo → Settings → Deploy keys → Add${write ? ', and check "Allow write access"' : ''}), then Rebuild:\n\n` +
+    src.pubKey;
 }
 
 async function addDataSource() {
