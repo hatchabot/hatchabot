@@ -39,7 +39,8 @@ non-versioned data you're comfortable the agent editing.
 
 - `GET /v1/agents` / `GET /v1/agents/:id` → each agent carries `dataSources`
   (the unified list) and `dataSummary` (the one-liner).
-- `POST /v1/agents/:id/data-sources` `{ kind, access, path }` — add. Folder mounts
+- `POST /v1/agents/:id/data-sources` `{ kind, access, path | repoUrl }` — add
+  (`path` for a folder, `repoUrl` for a git repo). Folder mounts
   are gated to the machine owner and pass `sharePathProblem`.
 - `DELETE /v1/agents/:id/data-sources/:dsId` — remove.
 - Legacy folders are still managed via `PATCH /v1/agents/:id { sharedPaths }`

@@ -46,10 +46,13 @@ key, a webhook secret. Set these per agent in **⚙ Edit → Environment variabl
   To change one, remove it and add it again.
 - **Injected at provision**, so they apply on the next **Rebuild**, like every
   other config.
-- **Managed names win.** AgentClaw's own AI credentials (`ANTHROPIC_API_KEY`,
-  `GEMINI_API_KEY`, the OAuth token) and the runtime's `PATH`/`PYTHONPATH`/`HOME`
-  are reserved — the API refuses them, and even if one were set it could not
-  shadow the agent's AI auth (the managed env is merged last).
+- **Reserved names are refused by shape, not a fixed list.** This is a security
+  boundary because an agent can run on a profile another account **shared**: the
+  API rejects model-provider/credential families (`ANTHROPIC_*`, `OPENAI_*`,
+  `AWS_*`, …), endpoint/proxy redirects (`ANTHROPIC_BASE_URL`, `*_PROXY`), and
+  loader/TLS knobs (`LD_*`, `NODE_*`, `SSL_*`) — otherwise a borrower could point
+  the shared credential at their own server and steal it. The managed AI env is
+  also merged last, so it can never be shadowed.
 - **Deleting the agent scrubs them** from the SecretStore along with its other
   credentials.
 

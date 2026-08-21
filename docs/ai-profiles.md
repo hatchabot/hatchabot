@@ -93,6 +93,14 @@ their create dialog. Flip it off and no new agents can take it; agents
 already on it keep working until switched. Only the profile's owner can
 edit, share, or delete it.
 
+**Sharing is a credential hand-off, not a metered proxy.** A borrower's agent
+runs with your key as container env (or, for a subscription, your `~/.claude`
+mounted in), so an account you share with can read the raw credential from inside
+their own agent. Per-agent env vars can't redirect it (endpoint/proxy names are
+refused — see `agent-environment.md`), but only share a profile with accounts you
+trust with the underlying key. Prefer a dedicated API key over your Max login for
+sharing where you can.
+
 ## Per-agent model — pick without switching sources
 
 One AI source can drive many agents on different models. A source has a
