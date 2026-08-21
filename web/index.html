@@ -176,6 +176,7 @@
     <div class="row">
       <span class="name grow">Recent activity</span>
       <span class="sub" id="activityCount"></span>
+      <button onclick="openAudit()" title="Full audit log — filter by agent, see details">See all →</button>
     </div>
     <div id="activity" style="margin-top:8px;max-height:260px;overflow:auto"></div>
   </div>
@@ -452,6 +453,28 @@
   <div class="actions" style="justify-content:flex-end">
     <button onclick="loadCrons()">Refresh</button>
     <button class="primary" onclick="cronDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="auditDlg" style="width:min(840px,94vw)">
+  <h3 style="margin:0 0 4px">Audit log</h3>
+  <div class="sub">
+    Everything AgentClaw has done — provisions, rebuilds, members admitted or
+    removed, snapshots, moves, and health changes. Most recent first.
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin:10px 0">
+    <select id="auditAgent" onchange="loadAudit()" style="width:auto"></select>
+    <select id="auditLimit" onchange="loadAudit()" style="width:auto">
+      <option value="50">last 50</option>
+      <option value="100" selected>last 100</option>
+      <option value="200">last 200</option>
+    </select>
+    <span class="grow"></span>
+    <button onclick="loadAudit()">Refresh</button>
+  </div>
+  <div id="auditList" style="max-height:60vh;overflow:auto"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button class="primary" onclick="auditDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -1516,6 +1539,56 @@ async function loadActivity() {
       </div>`;
     }).join('');
   } catch { /* the feed is never worth breaking the page for */ }
+}
+
+// The full audit log: same feed as the card, but browsable — filter to one
+// agent, pull more, and see each event's recorded detail and exact time.
+async function openAudit(agentId) {
+  $('auditAgent').innerHTML = ['<option value="">All agents</option>']
+    .concat((agents ?? []).map(a => `<option value="${a.id}"${a.id === agentId ? ' selected' : ''}>${esc(a.name)}</option>`))
+    .join('');
+  $('auditAgent').value = agentId ?? '';
+  $('auditList').innerHTML = 'Loading…';
+  auditDlg.showModal();
+  await loadAudit();
+}
+async function loadAudit() {
+  const agentId = $('auditAgent').value;
+  const limit = $('auditLimit').value || '100';
+  try {
+    const evs = await api(`/v1/events?limit=${encodeURIComponent(limit)}${agentId ? '&agentId=' + encodeURIComponent(agentId) : ''}`);
+    renderAudit(evs);
+  } catch (e) { $('auditList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+function auditDetail(e) {
+  const d = e.detail;
+  if (!d || typeof d !== 'object') return '';
+  const parts = [];
+  for (const [k, v] of Object.entries(d)) {
+    if (k === 'agentId' || v === null || v === undefined || v === '') continue;
+    let val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    if (val.length > 90) val = val.slice(0, 90) + '…';
+    parts.push(`${esc(k)}=${esc(val)}`);
+    if (parts.length >= 5) break;
+  }
+  return parts.join(' · ');
+}
+function renderAudit(evs) {
+  if (!evs.length) { $('auditList').innerHTML = '<div class="sub">No events recorded yet.</div>'; return; }
+  $('auditList').innerHTML = evs.map(e => {
+    const what = EVENT_WORDS[e.event] ?? e.event.replace(/[._]/g, ' ');
+    const bad = /fail|missing|unhealthy|rolled_back/.test(e.event);
+    const det = auditDetail(e);
+    return `<div style="display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px">
+      <span style="color:var(--dim);white-space:nowrap;min-width:132px" title="${esc(e.at)}">${esc(new Date(e.at).toLocaleString())}</span>
+      <span style="min-width:0;flex:1">
+        <b>${esc(e.agentName ?? 'agent')}</b>
+        <span style="color:${bad ? 'var(--bad)' : 'var(--text)'}"> ${esc(what)}</span>
+        <code style="color:var(--dim);font-size:11px"> ${esc(e.event)}</code>
+        ${det ? `<div class="sub" style="opacity:.85;margin-top:1px;word-break:break-word">${det}</div>` : ''}
+      </span>
+    </div>`;
+  }).join('');
 }
 
 async function showBotToken() {

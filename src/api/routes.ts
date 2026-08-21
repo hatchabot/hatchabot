@@ -1605,13 +1605,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   /** Recent activity across every agent the caller can see. */
-  app.get<{ Querystring: { limit?: string } }>('/v1/events', async (req) => {
+  app.get<{ Querystring: { limit?: string; agentId?: string } }>('/v1/events', async (req) => {
     const visible = store.listVisibleAgents(ownerIdOf(req));
     const names = new Map(visible.map((a) => [a.id, a.name]));
     // Clamp low too: a negative `?limit` became SQLite `LIMIT -1` (no limit),
     // dumping the whole event table.
     const limit = Math.min(Math.max(Math.floor(Number(req.query.limit ?? 40)) || 40, 1), 200);
-    return store.listEvents([...names.keys()], limit).map((e) => ({
+    // Optional filter to one agent — but only one the caller can see, so this
+    // can't be used to probe another owner's timeline.
+    let ids = [...names.keys()];
+    if (req.query.agentId) {
+      if (!names.has(req.query.agentId)) return [];
+      ids = [req.query.agentId];
+    }
+    return store.listEvents(ids, limit).map((e) => ({
       ...e,
       agentName: names.get(e.agentId),
     }));
