@@ -49,6 +49,10 @@ and lifecycle; OpenClaw runs the agent.
 - **Give an agent its own secrets.** Set per-agent environment variables (an API
   key a script needs) in ⚙ Edit — stored encrypted, write-only, and injected on
   the next rebuild. AgentClaw's own AI credentials always take precedence.
+- **See what each agent is using.** A per-agent **📊 Usage** view shows
+  cumulative tokens by model and session count, with honest billing context —
+  *included* for a subscription, *no API cost* for a local model, or the model's
+  price for an API-key agent. Usage, not a fabricated bill.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
   A recent-activity card summarizes it; **See all →** opens the full audit log,
