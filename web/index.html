@@ -491,6 +491,19 @@
   </div>
 </dialog>
 
+<dialog id="healthDlg" style="width:min(560px,94vw)">
+  <h3 style="margin:0 0 4px">Health — <span id="healthAgent"></span></h3>
+  <div class="sub">
+    A live check of the agent's gateway right now — separate from its listed
+    state. An agent can show "running" here yet have quietly stopped answering.
+  </div>
+  <div id="healthBody" style="margin-top:12px"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="loadHealth()">Check again</button>
+    <button class="primary" onclick="healthDlg.close()">Close</button>
+  </div>
+</dialog>
+
 <dialog id="groupDlg" style="width:min(420px,94vw)">
   <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
   <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
@@ -1161,6 +1174,7 @@ function agentCard(a) {
         <button onclick="openEdit('${a.id}', '${jsq(a.name)}')">Edit…</button>
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="View and manage this agent's scheduled tasks">⏰ Tasks</button>
         <button onclick="openUsage('${a.id}', '${jsq(a.name)}')" title="Token usage for this agent">📊 Usage</button>
+        <button onclick="openHealth('${a.id}', '${jsq(a.name)}')" title="Check whether the agent is actually responding right now">❤️ Health</button>
         <button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>` : ''}
       ${a.state !== 'RUNNING' && a.runtimeRef
         ? `<button onclick="openLogs('${a.id}', '${jsq(a.name)}')" title="What the runtime last said">Logs</button>` : ''}
@@ -1650,6 +1664,55 @@ function renderUsage(u) {
     `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens</div>
      <div class="sub" style="margin:2px 0 12px">${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(usageAgentId, models)}</div>
      ${rows}`;
+}
+
+let healthAgentId = null;
+const HEALTH_BADGE = {
+  healthy: ['var(--ok)', 'Responding'],
+  degraded: ['var(--warn)', 'Degraded'],
+  unreachable: ['var(--bad)', 'Not answering'],
+};
+async function openHealth(id, name) {
+  healthAgentId = id;
+  $('healthAgent').textContent = name;
+  $('healthBody').innerHTML = 'Checking…';
+  healthDlg.showModal();
+  await loadHealth();
+}
+async function loadHealth() {
+  if (!healthAgentId) return;
+  $('healthBody').innerHTML = 'Checking…';
+  try {
+    const h = await api(`/v1/agents/${healthAgentId}/health`);
+    renderHealth(h);
+  } catch (e) { $('healthBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+function healthRow(label, ok, detail) {
+  const dot = ok === null ? 'var(--dim)' : ok ? 'var(--ok)' : 'var(--bad)';
+  return `<div class="pair"><span class="grow"><span style="color:${dot}">●</span> ${esc(label)}</span>
+    <span class="sub">${detail ? esc(detail) : ''}</span></div>`;
+}
+function renderHealth(h) {
+  const [color, word] = HEALTH_BADGE[h.status] ?? HEALTH_BADGE.unreachable;
+  let body = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <span style="color:${color};font-size:26px;line-height:1">●</span>
+    <div><div style="font-size:18px;font-weight:700">${word}</div>
+      <div class="sub">${h.checkedAt ? 'checked ' + ago(new Date(h.checkedAt).toISOString()) : 'just now'}</div></div>
+  </div>`;
+  if (!h.reachable) {
+    $('healthBody').innerHTML = body + `<div class="sub">The gateway didn't answer. If this keeps happening, try Rebuild.</div>`;
+    return;
+  }
+  const rows = [];
+  if (h.telegram) {
+    rows.push(healthRow('Telegram connected', h.telegram.connected, h.telegram.connected ? 'live' : (h.telegram.lastError || 'disconnected')));
+    if (h.telegram.reconnectAttempts) rows.push(healthRow('Reconnecting', false, `${h.telegram.reconnectAttempts} attempt${h.telegram.reconnectAttempts > 1 ? 's' : ''}`));
+    const last = h.telegram.lastInboundAt || h.telegram.lastEventAt;
+    if (last) rows.push(healthRow('Last message', null, ago(new Date(last).toISOString())));
+  }
+  if (h.eventLoop) rows.push(healthRow('Event loop', !h.eventLoop.degraded, h.eventLoop.degraded ? (h.eventLoop.reasons.join(', ') || 'degraded') : 'nominal'));
+  if (h.pluginErrors && h.pluginErrors.length) rows.push(healthRow('Plugin errors', false, h.pluginErrors.slice(0, 3).join(', ')));
+  $('healthBody').innerHTML = body + rows.join('');
 }
 
 async function showBotToken() {
