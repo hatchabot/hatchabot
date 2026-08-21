@@ -2,6 +2,48 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.9.1] — 2026-08-21
+
+High-effort audit follow-up (v0.4.1–v0.9.0 surface).
+
+### Security
+- **Per-agent env vars are validated by shape, not a name deny-list.** The old
+  list blocked credential *names* but not endpoint/proxy redirects
+  (`ANTHROPIC_BASE_URL`, `HTTPS_PROXY`, …). On a **shared** AI profile that left a
+  path for a second account to point the shared credential at their own server
+  and exfiltrate it. Model-provider/credential families, proxy vars, and
+  loader/TLS knobs are now all refused; the shared-profile credential hand-off is
+  documented in `docs/ai-profiles.md`.
+- Git data-source hostnames must start alphanumeric — a leading-dash host could
+  reach in-container `ssh` as an option rather than a hostname.
+
+### Fixed
+- **Deleting a migrated-away agent no longer recycles its bot.** The bot belongs
+  to the peer that received the agent; releasing it back into this pool let a new
+  local agent lease it and fight the peer for the same Telegram token.
+- **An interrupted delete is recoverable.** If the runtime teardown fails, the
+  agent parks in FAILED (retryable) instead of wedging in DELETING forever with
+  its secrets un-scrubbed; a retried Delete re-enters and completes.
+- **A combined agent PATCH is atomic.** A request that changed the name/profile
+  *and* the memory policy no longer commits the name/profile when the
+  memory-policy write 502s — the whole request rolls off.
+- Usage and Health "start the agent" errors no longer say "scheduled tasks."
+- Health no longer returns a contradictory `{status: healthy, ok: false}` when
+  the gateway omits its `ok` field.
+
+### Added
+- **`/events` management-bot slash command** — the deterministic layer can now
+  read the fleet timeline, matching the `list_events` tool (was LLM-only).
+
+### Changed
+- The cron "Run now" button guards against a double-fire and confirms a shell task.
+
+### Internal
+- +15 tests (358 total) covering the delete teardown (secret scrub, migrated-bot
+  skip, interrupted-delete retry), the env shape-blocklist, the sharedMemory
+  502/ordering + combined-PATCH atomicity, health degraded combinations, and the
+  cron run/enable failure paths — several were silent-regression gaps.
+
 ## [0.9.0] — 2026-08-21
 
 ### Added
