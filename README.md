@@ -53,6 +53,10 @@ and lifecycle; OpenClaw runs the agent.
   cumulative tokens by model and session count, with honest billing context —
   *included* for a subscription, *no API cost* for a local model, or the model's
   price for an API-key agent. Usage, not a fabricated bill.
+- **Know it's really answering.** A per-agent **❤️ Health** check probes the live
+  gateway — event loop, Telegram connection (with last error), plugin errors — so
+  you can tell a truly-running agent from one that's *listed* as running but has
+  quietly stopped responding.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
   A recent-activity card summarizes it; **See all →** opens the full audit log,
