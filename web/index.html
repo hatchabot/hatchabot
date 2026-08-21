@@ -546,6 +546,14 @@
   </div>
 </dialog>
 
+<dialog id="installDlg" style="width:min(460px,94vw)">
+  <h3 style="margin:0 0 8px">Install AgentClaw</h3>
+  <div id="installBody"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button class="primary" onclick="installDlg.close()">Got it</button>
+  </div>
+</dialog>
+
 <dialog id="groupDlg" style="width:min(420px,94vw)">
   <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
   <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
@@ -2264,11 +2272,22 @@ refresh(true);
       deferredInstall = null;
       return;
     }
-    alert(
-      isIOS
-        ? 'To install: tap the Share button, then “Add to Home Screen”.'
-        : 'To install: open your browser menu and choose “Install app” or “Add to Home screen”. (Requires an https:// address.)',
-    );
+    // No one-tap prompt available (iOS Safari never offers one) — show the
+    // manual gesture as clear numbered steps rather than a terse alert.
+    $('installBody').innerHTML = isIOS
+      ? `<ol style="padding-left:20px;line-height:1.7;margin:0 0 8px">
+           <li>Make sure you're in <b>Safari</b> — not a browser opened inside another app (e.g. tapping the link from Telegram).</li>
+           <li>Tap the <b>Share</b> button — the icon of a <b>square with an arrow pointing up (⬆︎)</b>, in the bar at the bottom of Safari.</li>
+           <li>Scroll down and tap <b>“Add to Home Screen”</b>.</li>
+           <li>Tap <b>“Add”</b> at the top-right.</li>
+         </ol>
+         <div class="sub">Don't see “Add to Home Screen”? You're in an in-app browser — open this page in Safari first, then try again.</div>`
+      : `<ol style="padding-left:20px;line-height:1.7;margin:0 0 8px">
+           <li>Open your browser's menu (⋮ or ⋯).</li>
+           <li>Choose <b>“Install app”</b> or <b>“Add to Home screen”</b>.</li>
+         </ol>
+         <div class="sub">If you don't see it, the page needs an <code>https://</code> address (or <code>localhost</code>) to be installable.</div>`;
+    installDlg.showModal();
   }
 
   // Light/dark theme. The <head> script set the initial theme before paint;

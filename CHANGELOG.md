@@ -2,6 +2,14 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.12.1] — 2026-08-21
+
+### Changed
+- **Clearer "Install app" help.** Instead of a terse one-line alert, tapping
+  Install (when the browser has no one-tap prompt, e.g. iOS Safari) now shows a
+  short numbered guide — where the Share button is, "Add to Home Screen", and the
+  common "you're in an in-app browser" gotcha.
+
 ## [0.12.0] — 2026-08-21
 
 ### Added
