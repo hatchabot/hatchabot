@@ -478,6 +478,19 @@
   </div>
 </dialog>
 
+<dialog id="usageDlg" style="width:min(560px,94vw)">
+  <h3 style="margin:0 0 4px">Usage — <span id="usageAgent"></span></h3>
+  <div class="sub">
+    Cumulative tokens from this agent's OpenClaw sessions, by model. This is usage,
+    not a bill — subscription and local agents have no per-token cost.
+  </div>
+  <div id="usageBody" style="margin-top:12px"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="loadUsage()">Refresh</button>
+    <button class="primary" onclick="usageDlg.close()">Close</button>
+  </div>
+</dialog>
+
 <dialog id="groupDlg" style="width:min(420px,94vw)">
   <h3 style="margin:0 0 8px">Group <span id="groupDlgAgent"></span></h3>
   <div class="sub" style="margin-bottom:8px">Pick an existing group or type a new one. Leave blank to ungroup.</div>
@@ -1147,6 +1160,7 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${jsq(a.name)}')">Edit…</button>
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="View and manage this agent's scheduled tasks">⏰ Tasks</button>
+        <button onclick="openUsage('${a.id}', '${jsq(a.name)}')" title="Token usage for this agent">📊 Usage</button>
         <button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>` : ''}
       ${a.state !== 'RUNNING' && a.runtimeRef
         ? `<button onclick="openLogs('${a.id}', '${jsq(a.name)}')" title="What the runtime last said">Logs</button>` : ''}
@@ -1589,6 +1603,53 @@ function renderAudit(evs) {
       </span>
     </div>`;
   }).join('');
+}
+
+let usageAgentId = null;
+// Per-1M-token list price [input, output], USD — only used to show API-key
+// agents the model's rate so they can judge; never multiplied into a fake total.
+const MODEL_PRICES = {
+  'claude-opus-5': [5, 25], 'claude-opus-4-8': [5, 25], 'claude-opus-4-7': [5, 25], 'claude-opus-4-6': [5, 25],
+  'claude-sonnet-5': [3, 15], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5': [10, 50],
+};
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K';
+  return String(n);
+}
+function billingLine(agentId, models) {
+  const a = (agents ?? []).find(x => x.id === agentId);
+  const p = (profiles ?? []).find(x => x.id === a?.aiProfileId);
+  if (!p) return '';
+  if (p.vendor === 'local') return 'local model — no API cost';
+  if (p.kind === 'subscription') return `included (${esc(p.name)})`;
+  const priced = models.map(m => MODEL_PRICES[m] ? `${esc(m)} at $${MODEL_PRICES[m][0]}/$${MODEL_PRICES[m][1]} per 1M in/out` : null).filter(Boolean);
+  return priced.length ? priced.join(' · ') : 'API key';
+}
+async function openUsage(id, name) {
+  usageAgentId = id;
+  $('usageAgent').textContent = name;
+  $('usageBody').innerHTML = 'Loading…';
+  usageDlg.showModal();
+  await loadUsage();
+}
+async function loadUsage() {
+  if (!usageAgentId) return;
+  try {
+    const u = await api(`/v1/agents/${usageAgentId}/usage`);
+    renderUsage(u);
+  } catch (e) { $('usageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+function renderUsage(u) {
+  if (!u.sessions) { $('usageBody').innerHTML = '<div class="sub">No sessions yet — nothing used.</div>'; return; }
+  const models = u.byModel.map(m => m.model);
+  const rows = u.byModel.map(m => `<div class="pair"><span class="grow"><code>${esc(m.model)}</code>
+      <span class="sub">${m.sessions} session${m.sessions > 1 ? 's' : ''}</span></span>
+      <b>${fmtTokens(m.tokens)}</b></div>`).join('');
+  $('usageBody').innerHTML =
+    `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens</div>
+     <div class="sub" style="margin:2px 0 12px">${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(usageAgentId, models)}</div>
+     ${rows}`;
 }
 
 async function showBotToken() {

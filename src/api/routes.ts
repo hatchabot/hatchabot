@@ -22,6 +22,7 @@ import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
+import { agentUsage } from '../orchestrator/usage.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
@@ -1455,6 +1456,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent) return reply;
     const crons = await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
     return { crons };
+  });
+
+  // Per-agent token usage, read from its OpenClaw session store. Accurate usage,
+  // not a cost figure — the app renders billing context from the AI profile.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply);
+    if (!agent) return reply;
+    return agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
   });
 
   // Enable / disable a task.
