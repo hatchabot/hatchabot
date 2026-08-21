@@ -113,7 +113,7 @@ in the broker, regardless of what the model (or injected text) "wants":
 
 | Tier | Handling | Tools → endpoint |
 |---|---|---|
-| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `get_agent` → `GET /v1/agents/:id`; `get_logs` → `GET …/logs`; `list_members` → `GET …/members`; `list_pending` → `GET …/pairing`; `get_pool` → `GET /v1/pool` |
+| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `get_agent` → `GET /v1/agents/:id`; `get_logs` → `GET …/logs`; `list_members` → `GET …/members`; `list_pending` → `GET …/pairing`; `get_pool` → `GET /v1/pool`; `list_events` → `GET /v1/events` |
 | **mutate** | require a human-confirm tap showing the **resolved** action | `start_agent`/`stop_agent`/`rebuild_agent` → `POST …/{start,stop,rebuild}`; `approve_member` → `POST …/pairing/approve`; `remove_member` → `DELETE …/members/:userId`; `set_model` → `PATCH /v1/agents/:id` |
 | **forbidden** | not exposed to the model at all — deep-link to web | `add_ai_key`, paste bot token, set password, edit `SOUL.md`/`MEMORY.md`, `delete_agent` (or gate behind a typed-name double-confirm) |
 

@@ -51,6 +51,9 @@ and lifecycle; OpenClaw runs the agent.
   the next rebuild. AgentClaw's own AI credentials always take precedence.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
+  A recent-activity card summarizes it; **See all →** opens the full audit log,
+  filterable by agent and showing each event's recorded detail. The management
+  bot can read the same timeline (`list_events`).
 - **Shared or private memory.** A family agent's memory is common to everyone
   in it — and everyone is told so. A personal agent's isn't.
 - **Portability.** Move an agent to another AgentClaw server in one step — it
