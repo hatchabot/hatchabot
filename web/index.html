@@ -1203,11 +1203,14 @@ function agentCard(a) {
         ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
         <button onclick="openDefinition('${a.id}', '${jsq(a.name)}')" title="Name, persona & memory">📖 Definition</button>
-        <button onclick="openConfiguration('${a.id}', '${jsq(a.name)}')" title="AI, data, secrets, bot">⚙ Configuration</button>` : ''}
+        <button onclick="openConfiguration('${a.id}', '${jsq(a.name)}')" title="AI, data, secrets, bot">⚙ Configuration</button>
+        <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
+        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
+           <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>
+           <button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')" title="Move to another AgentClaw server in one step">Move…</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
       ${cardMenu(a)}
@@ -1219,7 +1222,6 @@ function agentCard(a) {
 function cardMenu(a) {
   const items = [];
   if (a.state === 'RUNNING') {
-    items.push(`<button onclick="openCrons('${a.id}', '${jsq(a.name)}')">⏰ Tasks</button>`);
     items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
     items.push(`<button onclick="openHealth('${a.id}', '${jsq(a.name)}')">❤️ Health</button>`);
   }
@@ -1228,10 +1230,6 @@ function cardMenu(a) {
   }
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
-  }
-  if ((a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef) {
-    items.push(`<button onclick="exportAgent('${a.id}', '${jsq(a.name)}')">Export</button>`);
-    items.push(`<button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')">Move…</button>`);
   }
   items.push(`<button onclick="openGroupDlg('${a.id}')">🏷 ${a.group ? esc(a.group) : 'Set group'}</button>`);
   if (a.deepLink && a.state === 'RUNNING') {
