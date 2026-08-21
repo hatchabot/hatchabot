@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.7.0] — 2026-08-21
+
+### Added
+- **Audit-log viewer.** The recent-activity card gains a **See all →** link that
+  opens the full audit log: browse up to 200 events, **filter to one agent**, and
+  see each event's recorded **detail** (which model, which member, the error
+  reason) and exact time — not just the one-line summary the card shows.
+  `GET /v1/events` gains an optional `?agentId=` filter, scoped to agents the
+  caller can already see (no cross-owner probing).
+- **`list_events` management-bot tool.** The Telegram bot can now read the fleet
+  timeline (read tier, optional per-agent filter) — the tool the docs described
+  but hadn't shipped.
+
 ## [0.6.0] — 2026-08-20
 
 ### Added
