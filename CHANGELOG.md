@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.8.0] — 2026-08-21
+
+### Added
+- **Per-agent usage.** A **📊 Usage** view on each running agent shows cumulative
+  tokens **by model**, session count, and last-active — read from the agent's own
+  OpenClaw session store (`GET /v1/agents/:id/usage`). Billing context is honest
+  rather than a fabricated dollar figure: *included (&lt;subscription&gt;)* for a Max
+  profile, *local — no API cost* for Ollama, and the model's list price for an
+  API-key agent so you can judge. (Precise per-agent cost isn't derivable — the
+  counter is combined input+output with no cumulative split, and subscription
+  agents have no marginal cost.)
+
 ## [0.7.0] — 2026-08-21
 
 ### Added
