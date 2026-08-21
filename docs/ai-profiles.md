@@ -105,7 +105,7 @@ sharing where you can.
 
 One AI source can drive many agents on different models. A source has a
 **default model** plus a switchable `/model` list; each agent may pin any model
-from that list, or follow the default. Set it in **Edit → Model** (the row
+from that list, or follow the default. Set it in **⚙ Configuration → Model** (the row
 appears only for cloud sources) — it applies on the agent's next Rebuild.
 
 Why this shape:
@@ -135,7 +135,7 @@ Why this shape:
 
 ## Sharing your files with an agent
 
-An agent normally sees only its own workspace. **Edit → "Folders this agent
+An agent normally sees only its own workspace. **⚙ Configuration → "Data this agent
 can read"** mounts a host folder into its container at `/data/<folder>`,
 **read-only**, for that agent alone.
 

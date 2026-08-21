@@ -100,6 +100,26 @@
   }
   .tab:hover { color: var(--text); }
   .tab[aria-selected="true"] { color: var(--text); font-weight: 650; border-bottom-color: var(--accent); }
+  /* ⋯ overflow menu on agent cards */
+  details.menu { position: relative; display: inline-block; }
+  details.menu > summary {
+    list-style: none; cursor: pointer; user-select: none;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    color: var(--text); font: inherit; font-size: 13px; padding: 6px 12px; line-height: 1.2;
+  }
+  details.menu > summary::-webkit-details-marker { display: none; }
+  details.menu[open] > summary { border-color: var(--accent); }
+  .menu-items {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 168px;
+    display: flex; flex-direction: column; gap: 2px; padding: 5px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 26px rgba(0,0,0,0.28);
+  }
+  .menu-items > button, .menu-items > a {
+    text-align: left; width: 100%; background: none; border: 0; border-radius: 6px;
+    color: var(--text); font: inherit; font-size: 13px; padding: 7px 10px; cursor: pointer;
+  }
+  .menu-items > button:hover, .menu-items > a:hover { background: var(--panel-2); }
   .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .primary:hover { filter: brightness(1.08); }
   .danger { color: var(--bad); }
@@ -234,113 +254,125 @@
 </dialog>
 
 <dialog id="editDlg" style="width:min(640px,94vw)">
-  <h3 style="margin:0 0 4px">Edit <span id="editAgent"></span></h3>
-  <div class="sub">
-    These are the agent's own files. <b>SOUL.md</b> is its persona,
-    <b>MEMORY.md</b> what it remembers. Changes apply to new conversations
-    (send <code>/new</code> in Telegram to start one).
+  <h3 style="margin:0 0 10px">Edit <span id="editAgent"></span></h3>
+  <div class="tabs" role="tablist">
+    <button class="tab" id="tabDef" role="tab" aria-selected="true" onclick="showEditTab('def')">📖 Definition</button>
+    <button class="tab" id="tabCfg" role="tab" aria-selected="false" onclick="showEditTab('cfg')">⚙ Configuration</button>
   </div>
-  <label>Name</label>
-  <div style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
-    <button id="renameBtn" onclick="renameAgent()">Rename</button>
-  </div>
-  <label>AI source <span style="color:var(--dim)">— the AI account behind this agent</span></label>
-  <div style="display:flex;gap:8px;align-items:center">
-    <select id="editProfile" style="flex:1;min-width:0" onchange="onEditProfileChange()"></select>
-    <button id="profileBtn" onclick="switchProfile()">Use this</button>
-  </div>
-  <div class="sub">
-    Each agent can use a different AI. Add sources in <b>⚙ Settings</b>; switching
-    here applies on the agent's next Rebuild.
-  </div>
-  <div id="modelRow" style="display:none">
-    <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
+
+  <section id="paneDef" role="tabpanel">
+    <div class="sub" style="margin-bottom:10px">
+      Who this agent is. <b>SOUL.md</b> is its persona, <b>MEMORY.md</b> what it
+      remembers. File changes apply to new conversations (send <code>/new</code> in
+      Telegram to start one).
+    </div>
+    <label>Name</label>
     <div style="display:flex;gap:8px;align-items:center">
-      <select id="editModel" style="flex:1;min-width:0"></select>
-      <button id="modelBtn" onclick="switchModel()">Use this</button>
+      <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
+      <button id="renameBtn" onclick="renameAgent()">Rename</button>
+    </div>
+    <label>Shared memory <span style="color:var(--dim)">— who this agent's MEMORY.md belongs to</span></label>
+    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
+      <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;margin-top:3px;flex:none">
+      <span>
+        <b>Share memory across everyone who uses this agent</b>
+        <div class="sub" style="margin-top:2px">
+          <b>On</b> — MEMORY.md is a common log for every member: entries are tagged with who
+          said them, and anything written may surface to other members.
+          <b>Off</b> — memory is private to you, untagged, and never surfaced to anyone else.
+          Applies on new conversations. You can only change this while you're the only member.
+        </div>
+      </span>
+    </label>
+    <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
+    <label>File</label>
+    <select id="editFile" onchange="loadEditFile()">
+      <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
+    </select>
+    <textarea id="editContent" style="min-height:260px;font-family:ui-monospace,monospace;font-size:13px;margin-top:10px"></textarea>
+    <div class="actions" style="justify-content:flex-end;margin-top:8px">
+      <button class="primary" id="editSaveBtn" onclick="saveEditFile()">Save file</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <label style="margin:0;flex:1">History <span style="color:var(--dim)">— snapshots of SOUL/AGENTS/MEMORY, taken automatically before edits and rebuilds</span></label>
+      <button id="snapBtn" onclick="takeSnapshot()">Snapshot now</button>
+    </div>
+    <div id="snapList" style="max-height:150px;overflow:auto"></div>
+  </section>
+
+  <section id="paneCfg" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      How this agent runs — its AI, the data it can read, its secrets, and its bot.
+      Changes here apply on the agent's next <b>Rebuild</b>.
+    </div>
+    <label>AI source <span style="color:var(--dim)">— the AI account behind this agent</span></label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="editProfile" style="flex:1;min-width:0" onchange="onEditProfileChange()"></select>
+      <button id="profileBtn" onclick="switchProfile()">Use this</button>
+    </div>
+    <div class="sub">Each agent can use a different AI. Add sources in <b>⚙ Settings</b>.</div>
+    <div id="modelRow" style="display:none">
+      <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="editModel" style="flex:1;min-width:0"></select>
+        <button id="modelBtn" onclick="switchModel()">Use this</button>
+      </div>
+      <div class="sub">
+        Pick per agent from the source's models, or follow its default.
+        (Local sources always run their one model, so there's no choice.)
+      </div>
+    </div>
+    <label>Data this agent can access <span style="color:var(--dim)">— folders &amp; git repos</span></label>
+    <div id="dataList"></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="pathNew" placeholder="/home/you/Documents/notes" style="flex:1;min-width:0">
+      <select id="pathAccess" style="width:auto">
+        <option value="ro">Read-only</option>
+        <option value="rw">Writable</option>
+      </select>
+      <button id="pathAddBtn" onclick="addDataSource()">Add</button>
     </div>
     <div class="sub">
-      Pick per agent from the source's models, or follow its default. Applies on the
-      next Rebuild. (Local sources always run their one model, so there's no choice.)
+      The agent sees these at <code>/data/&lt;folder&gt;</code>. Anyone who can message it can ask
+      about their contents — and for <b>writable</b> folders, change or delete them, so grant that
+      sparingly.
     </div>
-  </div>
-  <label>Shared memory <span style="color:var(--dim)">— who this agent's MEMORY.md belongs to</span></label>
-  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
-    <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;margin-top:3px;flex:none">
-    <span>
-      <b>Share memory across everyone who uses this agent</b>
-      <div class="sub" style="margin-top:2px">
-        <b>On</b> — MEMORY.md is a common log for every member: entries are tagged with who
-        said them, and anything written may surface to other members.
-        <b>Off</b> — memory is private to you, untagged, and never surfaced to anyone else.
-        Applies on new conversations. You can only change this while you're the only member.
-      </div>
-    </span>
-  </label>
-  <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
-  <label>Data this agent can access <span style="color:var(--dim)">— folders on this machine</span></label>
-  <div id="dataList"></div>
-  <div style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="pathNew" placeholder="/home/you/Documents/notes" style="flex:1;min-width:0">
-    <select id="pathAccess" style="width:auto">
-      <option value="ro">Read-only</option>
-      <option value="rw">Writable</option>
-    </select>
-    <button id="pathAddBtn" onclick="addDataSource()">Add</button>
-  </div>
-  <div class="sub">
-    The agent sees these at <code>/data/&lt;folder&gt;</code>. Anyone who can message it can ask
-    about their contents — and for <b>writable</b> folders, change or delete them, so grant that
-    sparingly. Applies on the next Rebuild.
-  </div>
-  <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-    <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git" style="flex:1;min-width:0">
-    <select id="repoAccess" style="width:auto">
-      <option value="ro">Read-only</option>
-      <option value="rw">Read-write</option>
-    </select>
-    <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
-  </div>
-  <div class="sub">
-    A git repo, cloned into the agent's own space (not your disk). <b>AgentClaw generates a
-    deploy key</b> — you don't paste your own. After adding, copy that key into the repo
-    (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild. Read-only, or
-    read-write so it can commit &amp; push.
-  </div>
-  <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
-  <label>Environment variables <span style="color:var(--dim)">— secrets &amp; config the agent's own tools need</span></label>
-  <div id="envList"></div>
-  <div style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="envName" placeholder="MARKETDATA_API_KEY" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
-    <input type="password" id="envValue" placeholder="value" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
-    <button id="envAddBtn" onclick="addEnvVar()">Add</button>
-  </div>
-  <div class="sub">
-    Injected into the agent as environment variables (e.g. an API key a script needs).
-    Values are <b>write-only</b> — stored encrypted, never shown again; you can only replace
-    or remove them. Applies on the next Rebuild. Names AgentClaw manages
-    (<code>ANTHROPIC_API_KEY</code>, <code>PATH</code>, …) are reserved.
-  </div>
-  <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
-  <div style="display:flex;gap:8px;align-items:center">
-    <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
-    <button id="botTokenBtn" onclick="showBotToken()">Show</button>
-  </div>
-  <label>File</label>
-  <select id="editFile" onchange="loadEditFile()">
-    <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
-  </select>
-  <textarea id="editContent" style="min-height:280px;font-family:ui-monospace,monospace;font-size:13px;margin-top:10px"></textarea>
-  <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
-    <label style="margin:0;flex:1">History <span style="color:var(--dim)">— snapshots of SOUL/AGENTS/MEMORY, taken automatically before edits and rebuilds</span></label>
-    <button id="snapBtn" onclick="takeSnapshot()">Snapshot now</button>
-  </div>
-  <div id="snapList" style="max-height:150px;overflow:auto"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git" style="flex:1;min-width:0">
+      <select id="repoAccess" style="width:auto">
+        <option value="ro">Read-only</option>
+        <option value="rw">Read-write</option>
+      </select>
+      <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
+    </div>
+    <div class="sub">
+      A git repo, cloned into the agent's own space (not your disk). <b>AgentClaw generates a
+      deploy key</b> — you don't paste your own. After adding, copy that key into the repo
+      (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild.
+    </div>
+    <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+    <label>Environment variables <span style="color:var(--dim)">— secrets &amp; config the agent's own tools need</span></label>
+    <div id="envList"></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="envName" placeholder="MARKETDATA_API_KEY" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
+      <input type="password" id="envValue" placeholder="value" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
+      <button id="envAddBtn" onclick="addEnvVar()">Add</button>
+    </div>
+    <div class="sub">
+      Injected as environment variables (e.g. an API key a script needs). Values are
+      <b>write-only</b> — stored encrypted, never shown again; you can only replace or remove
+      them. Provider/proxy/loader names are reserved for safety.
+    </div>
+    <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
+      <button id="botTokenBtn" onclick="showBotToken()">Show</button>
+    </div>
+  </section>
+
   <div class="err" id="editErr"></div>
   <div class="actions" style="justify-content:flex-end">
-    <button onclick="editDlg.close()">Cancel</button>
-    <button class="primary" id="editSaveBtn" onclick="saveEditFile()">Save</button>
+    <button class="primary" onclick="editDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -1167,29 +1199,46 @@ function agentCard(a) {
       }).join('')}
       </div>` : ''}
     <div class="actions">
-      <button onclick="openGroupDlg('${a.id}')" title="Organize this agent into a group">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
-        <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
+      ${a.deepLink && a.state === 'RUNNING'
+        ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
-        <button onclick="openEdit('${a.id}', '${jsq(a.name)}')">Edit…</button>
-        <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="View and manage this agent's scheduled tasks">⏰ Tasks</button>
-        <button onclick="openUsage('${a.id}', '${jsq(a.name)}')" title="Token usage for this agent">📊 Usage</button>
-        <button onclick="openHealth('${a.id}', '${jsq(a.name)}')" title="Check whether the agent is actually responding right now">❤️ Health</button>
-        <button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>` : ''}
-      ${a.state !== 'RUNNING' && a.runtimeRef
-        ? `<button onclick="openLogs('${a.id}', '${jsq(a.name)}')" title="What the runtime last said">Logs</button>` : ''}
-      ${a.state === 'RUNNING' && a.hasGateway
-        ? `<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')" title="This agent's own OpenClaw Control UI (debug)">OpenClaw</button>` : ''}
+        <button onclick="openDefinition('${a.id}', '${jsq(a.name)}')" title="Name, persona & memory">📖 Definition</button>
+        <button onclick="openConfiguration('${a.id}', '${jsq(a.name)}')" title="AI, data, secrets, bot">⚙ Configuration</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
-           <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>
-           <button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')" title="Move to another AgentClaw server in one step">Move…</button>` : ''}
+        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
+      ${cardMenu(a)}
     </div>
   </div>`;
+}
+
+/** The ⋯ overflow menu: observational and occasional actions, state-gated. */
+function cardMenu(a) {
+  const items = [];
+  if (a.state === 'RUNNING') {
+    items.push(`<button onclick="openCrons('${a.id}', '${jsq(a.name)}')">⏰ Tasks</button>`);
+    items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
+    items.push(`<button onclick="openHealth('${a.id}', '${jsq(a.name)}')">❤️ Health</button>`);
+  }
+  if (a.state === 'RUNNING' || a.runtimeRef) {
+    items.push(`<button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>`);
+  }
+  if (a.state === 'RUNNING' && a.hasGateway) {
+    items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
+  }
+  if ((a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef) {
+    items.push(`<button onclick="exportAgent('${a.id}', '${jsq(a.name)}')">Export</button>`);
+    items.push(`<button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')">Move…</button>`);
+  }
+  items.push(`<button onclick="openGroupDlg('${a.id}')">🏷 ${a.group ? esc(a.group) : 'Set group'}</button>`);
+  if (a.deepLink && a.state === 'RUNNING') {
+    items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
+  }
+  if (!items.length) return '';
+  return `<details class="menu"><summary>⋯</summary><div class="menu-items" onclick="this.parentElement.open=false">${items.join('')}</div></details>`;
 }
 
 function tokenForm(a) {
@@ -1234,10 +1283,23 @@ function ago(iso) {
 
 let editAgentId = null, logsAgentId = null;
 
-async function openEdit(id, name) {
+const EDIT_TABS = { def: 'paneDef', cfg: 'paneCfg' };
+function showEditTab(name) {
+  for (const [key, pane] of Object.entries(EDIT_TABS)) {
+    const on = key === name;
+    $(pane).hidden = !on;
+    $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
+  }
+}
+function openDefinition(id, name) { return openEdit(id, name, 'def'); }
+function openConfiguration(id, name) { return openEdit(id, name, 'cfg'); }
+
+async function openEdit(id, name, tab = 'def') {
   editAgentId = id;
   $('editAgent').textContent = name;
   $('editName').value = name;
+  $('gitKeyOut').style.display = 'none';
+  showEditTab(tab);
   const cur = agents.find(x => x.id === id);
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
@@ -1947,7 +2009,9 @@ async function openGateway(id, slug) {
     // Same host you're browsing AgentClaw on — 'localhost' broke every
     // remote/tailnet browser. The port is published on the host's loopback,
     // so this works from the host itself; remote browsers need a tunnel.
-    window.open(`http://${location.hostname}:${g.port}/chat/${slug}#token=${g.token}`, '_blank', 'noopener');
+    // OpenClaw's Control UI serves at the gateway root now (the old /chat/<slug>
+    // path 404s on current OpenClaw); the token rides as a URL fragment.
+    window.open(`http://${location.hostname}:${g.port}/#token=${g.token}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }
 
@@ -2202,6 +2266,13 @@ refresh(true);
       setTimeout(() => b.classList.remove('pressed'), 200);
     }
   }, true);
+
+  // Close any open ⋯ card menu when clicking elsewhere.
+  document.addEventListener('click', (e) => {
+    document.querySelectorAll('details.menu[open]').forEach((d) => {
+      if (!d.contains(e.target)) d.open = false;
+    });
+  });
 </script>
 </body>
 </html>

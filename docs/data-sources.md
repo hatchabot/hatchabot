@@ -2,7 +2,7 @@
 
 An agent should have one clear answer to "what data can it see?" — not three
 scattered mechanisms. A **data source** is one thing an agent can access, unified
-across kinds, shown as a single list per agent (Edit → Data) with a card summary
+across kinds, shown as a single list per agent (⚙ Configuration → Data) with a card summary
 (`reads 2 folders · 1 writable folder`).
 
 Each source declares four things: **kind** (folder / git / …), **access** (`ro` /

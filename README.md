@@ -47,7 +47,7 @@ and lifecycle; OpenClaw runs the agent.
   disable them, run one now to test, or delete one — no shelling into the
   container. Tasks live on the agent's durable volume and survive rebuilds.
 - **Give an agent its own secrets.** Set per-agent environment variables (an API
-  key a script needs) in ⚙ Edit — stored encrypted, write-only, and injected on
+  key a script needs) in ⚙ Configuration — stored encrypted, write-only, and injected on
   the next rebuild. AgentClaw's own AI credentials always take precedence.
 - **See what each agent is using.** A per-agent **📊 Usage** view shows
   cumulative tokens by model and session count, with honest billing context —

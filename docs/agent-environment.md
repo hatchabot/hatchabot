@@ -38,7 +38,7 @@ one-off check, set it explicitly: `PYTHONPATH=/home/node/.openclaw/pylibs`.
 ## Secrets & environment variables — per agent
 
 An agent's own tools often need a credential of their own — a market-data API
-key, a webhook secret. Set these per agent in **⚙ Edit → Environment variables**
+key, a webhook secret. Set these per agent in **⚙ Configuration → Environment variables**
 (or `POST /v1/agents/:id/env` with `{name, value}`):
 
 - **Values are secrets.** They're stored encrypted in the SecretStore, **never**
@@ -63,7 +63,7 @@ agent, re-add its variables on the new host. (Carrying them is a follow-up.)
 ## Data — three patterns, chosen per folder
 
 **1. Read-only reference data** — broker exports, tax reports, anything the
-agent only reads. Use an agent folder (⚙ Edit → Folders, or `agentclaw folders`):
+agent only reads. Use an agent folder (⚙ Configuration → Data, or `agentclaw folders`):
 it mounts the host dir read-only at `/data/<name>`. Read-only is enforced by the
 kernel, and the refused-paths list still applies (see `ai-profiles.md`).
 
@@ -76,7 +76,7 @@ on the volume** and pushes to the remote — host untouched, every change a
 reviewable commit, blast radius contained to the one repo. This is now a
 first-class **git data source**: the app generates the repo-scoped deploy key,
 clones onto the volume, and wires up the SSH command for you — no manual
-`ssh-keygen`/`git clone`. Add one via ⚙ Edit → Data (or
+`ssh-keygen`/`git clone`. Add one via ⚙ Configuration → Data (or
 `POST /v1/agents/:id/data-sources`); see [docs/data-sources.md](data-sources.md).
 
 **3. Local mutable data with no git** — a writable mount, only as an explicit,
