@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.11.0] — 2026-08-21
+
+### Changed
+- **Agent card redesign.** The card is leaner: primary actions stay out front
+  (Telegram App · Invite… · 📖 Definition · ⚙ Configuration · Stop/Start ·
+  Rebuild · Delete) and everything observational or occasional moves into a **⋯
+  overflow menu** (Tasks, Usage, Health, Logs, OpenClaw, Export, Move…, Group,
+  Telegram Web).
+- **Edit is split into two tabs**, opened by their own card buttons: **📖
+  Definition** (name, persona & memory files, history, shared-memory) vs **⚙
+  Configuration** (AI source & model, data, env vars, bot token).
+
+### Fixed
+- The **OpenClaw (debug)** link opened a path current OpenClaw 404s
+  (`/chat/<slug>`); it now opens the gateway root, where the Control UI lives.
+- Telegram Web no longer carries a stray accent style; the single accented action
+  is now **Telegram App**, the way you actually open an agent.
+
 ## [0.10.0] — 2026-08-21
 
 ### Added
