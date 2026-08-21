@@ -2,6 +2,23 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.12.0] — 2026-08-21
+
+### Added
+- **OpenClaw runtime-version control.** The app now knows what OpenClaw version
+  the shared runtime image is on and whether a newer **stable** exists upstream
+  (it reads OpenClaw's npm dist-tags):
+  - **⚙ Settings → Runtime** shows the image version, the latest stable on npm
+    (and the `extended-stable` track), and how many agents lag the current image.
+  - `agentclaw runtime` prints the same from the CLI.
+  - `agentclaw upgrade-image [--version <X>] [--candidate]` rebuilds the shared
+    image to a new OpenClaw version (default: latest stable) — `--candidate`
+    builds without promoting `:latest`, so you can smoke-test first.
+  - `GET /v1/runtime` backs both (npm lookup cached, best-effort).
+
+  Deliberately **no web button**: an image rebuild is a slow, host-side,
+  fleet-wide operation, so it lives in the CLI. See `docs/agent-environment.md`.
+
 ## [0.11.2] — 2026-08-21
 
 ### Changed

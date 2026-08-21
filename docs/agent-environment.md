@@ -16,6 +16,39 @@ stack.
 
 Per-agent tools go on the agent's **volume**, not in the image.
 
+## Upgrading OpenClaw (the runtime image)
+
+The OpenClaw version is pinned in `docker/Dockerfile.runtime`
+(`ARG OPENCLAW_VERSION`) and baked into `agentclaw-runtime:latest`. Every agent
+runs from that one image, so **the version is fleet-wide** — but adoption is
+per-agent: an agent keeps its current image until you **Rebuild** it. (The catch:
+once `:latest` moves, *any* Rebuild carries the new version — you can't rebuild an
+agent onto the old one.)
+
+Check where you stand — **⚙ Settings → Runtime**, or:
+
+```
+agentclaw runtime         # image's OpenClaw version vs the latest stable on npm
+```
+
+OpenClaw's stable is the npm `latest` dist-tag (there's also a conservative
+`extended-stable` track). Upgrade the image from the host:
+
+```
+agentclaw upgrade-image                       # build + promote :latest to npm latest
+agentclaw upgrade-image --version <X> --candidate   # build without promoting, to smoke-test
+```
+
+`--candidate` builds `agentclaw-runtime:<X>` but leaves `:latest` untouched, so
+you can `AGENTCLAW_IMAGE=agentclaw-runtime:<X> npm run e2e:docker` before
+`docker tag …:<X> …:latest`. Because OpenClaw's `openclaw.json` schema moves
+between releases, prefer the candidate path for a real version bump. After
+promoting, each agent shows "update available"; **Rebuild** it to adopt the new
+version, memory kept.
+
+There is deliberately **no web button** for this: it's a slow, host-side,
+fleet-wide docker build, so it lives in the CLI, not one click away in a browser.
+
 ## Python libraries — per agent, on the volume
 
 An agent that needs libraries installs them into a dir on its own volume:

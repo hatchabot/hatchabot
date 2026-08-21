@@ -23,6 +23,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { agentUsage } from '../orchestrator/usage.js';
+import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
@@ -67,6 +68,9 @@ export interface ApiDeps {
   authMode?: 'password' | 'identity';
   /** Set in identity mode: lets the join flow bind a membership to an account. */
   verifier?: IdentityVerifier;
+  /** Override the OpenClaw npm dist-tags lookup (tests). Defaults to the real
+   *  registry fetch; the endpoint caches the result. */
+  openclawDistTags?: () => Promise<OpenclawDistTags>;
 }
 
 const LocalProfile = z.object({
@@ -1673,6 +1677,36 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       ...e,
       agentName: names.get(e.agentId),
     }));
+  });
+
+  // ---- runtime image / OpenClaw version status ----------------------------
+  // What OpenClaw version the shared runtime image is on, vs the latest stable
+  // on npm. The image is fleet-wide (every agent rebuilds onto :latest); the
+  // actual rebuild is a deliberate host op (`agentclaw upgrade-image`), so this
+  // is read-only — it tells you *whether* to upgrade, not a button that does it.
+  const getDistTags = deps.openclawDistTags ?? (() => fetchOpenclawDistTags());
+  let distTagsCache: { at: number; tags: OpenclawDistTags } | undefined;
+  app.get('/v1/runtime', async (req) => {
+    const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    let imageVersion: string | undefined;
+    if (localHost) {
+      try {
+        imageVersion = (await providerFor(localHost.id).currentImageInfo()).openclawVersion;
+      } catch {
+        /* image not built yet / docker hiccup — report unknown, don't fail */
+      }
+    }
+    // npm changes rarely and Settings may poll; cache for an hour.
+    if (!distTagsCache || Date.now() - distTagsCache.at > 3_600_000) {
+      distTagsCache = { at: Date.now(), tags: await getDistTags() };
+    }
+    const { latest, extendedStable } = distTagsCache.tags;
+    return {
+      imageVersion,
+      npmLatest: latest,
+      npmExtendedStable: extendedStable,
+      upgradeAvailable: !!(imageVersion && latest && imageVersion !== latest),
+    };
   });
 
   // ---- adopting an existing OpenClaw agent ---------------------------------

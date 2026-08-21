@@ -107,6 +107,12 @@ Commands:
   logs <agent> [-n <lines>]    Recent runtime output
   health <agent>               Live gateway health — is it actually answering
   usage <agent>                Token usage by model
+  runtime                      Runtime image's OpenClaw version vs the npm latest
+  upgrade-image [--version <X>] [--candidate]
+                               Rebuild the shared runtime image to a new OpenClaw
+                               version (default: latest stable), for the whole
+                               fleet. --candidate builds without promoting to
+                               :latest so you can smoke-test first. Run on the host.
   mgmt-bot <setup|status|disable> [--bot-token <tok>] [--yes]
                                Set up the Telegram management bot: mints a token,
                                pre-fills your Telegram id, writes .env.mgmt, and
@@ -219,7 +225,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -737,6 +743,45 @@ async function main() {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw usage <agent>'));
       const u: any = await (await api(ctx, `/v1/agents/${a.id}/usage`)).json();
       console.log(fmtUsage(a.name, u));
+      return;
+    }
+    case 'runtime': {
+      const r: any = await (await api(ctx, '/v1/runtime')).json();
+      console.log(`Runtime image: OpenClaw ${r.imageVersion ?? 'unknown'}`);
+      if (!r.npmLatest) console.log('  (could not reach npm to check the latest stable)');
+      else if (r.upgradeAvailable) console.log(`  ⬆ latest stable on npm is ${r.npmLatest} — upgrade with: agentclaw upgrade-image`);
+      else console.log(`  ✓ up to date with the latest stable (${r.npmLatest})`);
+      if (r.npmExtendedStable) console.log(`  extended-stable track: ${r.npmExtendedStable}`);
+      return;
+    }
+    case 'upgrade-image': {
+      let version = flags.get('version');
+      if (!version) {
+        const r: any = await (await api(ctx, '/v1/runtime')).json();
+        version = r.npmLatest;
+        if (!version) fail('Could not determine the latest OpenClaw version from npm — pass one with --version <X>.');
+        console.log(`No --version given; using the latest stable on npm: ${version}`);
+      }
+      const candidate = flags.has('candidate');
+      const script = join(repoDir(), 'scripts', 'build-runtime-image.sh');
+      if (!existsSync(script)) fail(`Build script not found at ${script} — run this on the AgentClaw host.`);
+      console.log(`Building agentclaw-runtime for OpenClaw ${version}${candidate ? ' (candidate — :latest untouched)' : ' (promotes to :latest)'}…\n`);
+      try {
+        execFileSync('bash', [script], {
+          stdio: 'inherit',
+          env: { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '' },
+        });
+      } catch {
+        fail('Image build failed — see the output above.');
+      }
+      if (candidate) {
+        console.log(`\nCandidate built (:latest untouched). Smoke-test it, then promote:`);
+        console.log(`  AGENTCLAW_IMAGE=agentclaw-runtime:${version} npm run e2e:docker   (from ${repoDir()})`);
+        console.log(`  docker tag agentclaw-runtime:${version} agentclaw-runtime:latest`);
+      } else {
+        console.log(`\nDone — :latest is now OpenClaw ${version}. Each agent shows "update available";`);
+        console.log(`Rebuild it to adopt the new version, memory kept:  agentclaw rebuild "<agent>"`);
+      }
       return;
     }
     case 'servers': {

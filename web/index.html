@@ -382,6 +382,7 @@
     <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
     <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Servers</button>
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
+    <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
   </div>
 
   <section id="paneAi" role="tabpanel">
@@ -456,6 +457,15 @@
       runs as its own process, so set it up from a terminal on the server:
     </div>
     <div class="invite-link" style="margin-top:8px">agentclaw mgmt-bot setup</div>
+  </section>
+
+  <section id="paneRuntime" role="tabpanel" hidden>
+    <div class="sub">
+      The shared runtime image every agent runs. It bakes in the OpenClaw version,
+      and every agent picks it up on its next <b>Rebuild</b>. Upgrading it changes
+      the version fleet-wide, so it's a deliberate command-line step — not a button.
+    </div>
+    <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
   </section>
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
@@ -790,7 +800,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', servers: 'paneServers', access: 'paneAccess' };
+const TABS = { ai: 'paneAi', servers: 'paneServers', access: 'paneAccess', runtime: 'paneRuntime' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -799,6 +809,30 @@ function showTab(name) {
     $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
   }
   if (name === 'access') refreshMgmtBotStatus();
+  if (name === 'runtime') loadRuntime();
+}
+
+async function loadRuntime() {
+  const el = $('runtimeStatus');
+  try {
+    const r = await api('/v1/runtime');
+    const cur = r.imageVersion ? esc(r.imageVersion) : 'unknown (image not built yet?)';
+    let latestLine;
+    if (!r.npmLatest) latestLine = `<div class="sub">Couldn't reach npm to check the latest stable.</div>`;
+    else if (r.upgradeAvailable) latestLine = `<div style="color:var(--warn)">⬆ OpenClaw <b>${esc(r.npmLatest)}</b> is the latest stable — you're on ${cur}.</div>`;
+    else latestLine = `<div style="color:var(--ok)">✓ up to date with the latest stable (${esc(r.npmLatest)}).</div>`;
+    const lagging = (agents ?? []).filter(a => a.updateAvailable).length;
+    el.innerHTML =
+      `<div style="font-size:15px"><b>Runtime image:</b> OpenClaw ${cur}</div>
+       <div style="margin-top:4px">${latestLine}</div>
+       ${r.npmExtendedStable ? `<div class="sub" style="margin-top:2px">extended-stable track: <code>${esc(r.npmExtendedStable)}</code></div>` : ''}
+       ${lagging ? `<div class="sub" style="margin-top:8px">${lagging} agent${lagging > 1 ? 's are' : ' is'} on an older image — <b>Rebuild</b> each to adopt the current one.</div>` : ''}
+       <div class="sub" style="margin-top:12px">Upgrade the image from the host:
+         <div class="invite-link" style="margin-top:6px">agentclaw upgrade-image</div>
+         <div style="margin-top:4px">…or build a candidate to smoke-test first:</div>
+         <div class="invite-link" style="margin-top:4px">agentclaw upgrade-image --version &lt;X&gt; --candidate</div>
+       </div>`;
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
 // Honest status from the mgmt-bot's own cli-token: whether setup has run, and
