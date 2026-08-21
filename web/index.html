@@ -44,8 +44,23 @@
     font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   }
   .wrap { max-width: 1100px; margin: 0 auto; padding: 24px 20px 80px; }
-  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+  header { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+  .hrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .hrow .spacer { margin-left: auto; }
   h1 { font-size: 22px; margin: 0; letter-spacing: 0.3px; }
+  .hbtn { background: none; border: 1px solid var(--line); border-radius: 8px;
+          padding: 5px 12px; cursor: pointer; color: inherit; font: inherit; font-size: 13px; }
+  .hbtn:hover { border-color: var(--dim); }
+  .hbtn.accent { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  /* light/dark slider */
+  .switch { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch-track { width: 38px; height: 22px; border-radius: 11px; background: var(--panel-2);
+                  border: 1px solid var(--line); position: relative; transition: background .15s; }
+  .switch-thumb { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+                  background: var(--accent); transition: left .15s; }
+  .switch input:checked + .switch-track .switch-thumb { left: 18px; }
+  .switch-ico { font-size: 13px; color: var(--dim); }
   h1 b { color: var(--accent); font-weight: 700; }
   .sub { color: var(--dim); font-size: 13px; }
   .card {
@@ -172,22 +187,26 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>Agent<b>Claw</b></h1>
-    <span class="sub" id="poolInfo"></span>
-    <button id="rebuildAllBtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden
-            style="margin-left:auto;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Rebuild all</button>
-    <button id="installBtn" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden
-            style="margin-left:8px;background:var(--accent);border:1px solid var(--accent);border-radius:8px;padding:4px 10px;cursor:pointer;color:var(--accent-ink);font-weight:600">⬇ Install app</button>
-    <button id="importBtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()"
-            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Import</button>
-    <button id="themeBtn" title="Toggle light / dark" onclick="toggleTheme()"
-            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit"></button>
-    <button id="aiBtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()"
-            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">⚙ Settings</button>
-    <span class="sub" id="whoami" style="margin-left:8px"></span>
-    <button id="logoutBtn" onclick="signOut()"
-            title="Sign out of this browser. Tabs share one login — for two accounts at once, use a private window or another browser profile."
-            style="margin-left:8px;background:none;border:1px solid var(--line);border-radius:8px;padding:4px 10px;cursor:pointer;color:inherit">Sign out</button>
+    <div class="hrow">
+      <h1>Agent<b>Claw</b></h1>
+      <span class="sub" id="poolInfo"></span>
+      <span class="spacer"></span>
+      <span class="sub" id="whoami"></span>
+      <label class="switch" title="Light / dark theme">
+        <span class="switch-ico">☀</span>
+        <input type="checkbox" id="themeToggle" onchange="setThemeFromToggle()">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="switch-ico">🌙</span>
+      </label>
+      <button id="logoutBtn" class="hbtn" onclick="signOut()"
+              title="Sign out of this browser. Tabs share one login — for two accounts at once, use a private window or another browser profile.">Sign out</button>
+    </div>
+    <div class="hrow">
+      <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
+      <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
+      <button id="importBtn" class="hbtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()">Import</button>
+      <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
+    </div>
     <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
@@ -2325,14 +2344,14 @@ refresh(true);
   // here we keep the toggle button label (showing the OTHER mode) and the PWA
   // theme-color in sync, and persist the choice.
   function syncThemeChrome() {
-    const light = document.documentElement.dataset.theme === 'light';
-    const btn = document.getElementById('themeBtn');
-    if (btn) btn.textContent = light ? '🌙 Dark' : '☀ Light';
+    const dark = document.documentElement.dataset.theme !== 'light';
+    const toggle = document.getElementById('themeToggle');
+    if (toggle) toggle.checked = dark; // slider right = dark
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', light ? '#ffffff' : '#14161a');
+    if (meta) meta.setAttribute('content', dark ? '#14161a' : '#ffffff');
   }
-  function toggleTheme() {
-    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  function setThemeFromToggle() {
+    const next = document.getElementById('themeToggle').checked ? 'dark' : 'light';
     document.documentElement.dataset.theme = next;
     localStorage.setItem('theme', next);
     syncThemeChrome();

@@ -2,6 +2,13 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.13.1] — 2026-08-21
+
+### Changed
+- **Header reorganized into two rows.** Top row: app name, your account name, a
+  light/dark **slider**, and Sign out. Second row: Rebuild all, Install app,
+  Import, ⚙ Settings. The theme toggle is now a slider (☀/🌙) instead of a button.
+
 ## [0.13.0] — 2026-08-21
 
 ### Changed
