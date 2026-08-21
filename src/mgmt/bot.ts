@@ -107,6 +107,11 @@ export class ManagementBot {
         return this.#run(chatId, fromUserId, 'list_pending', { agent: arg });
       case '/pool':
         return this.#run(chatId, fromUserId, 'get_pool', {});
+      case '/events':
+        return this.#run(chatId, fromUserId, 'list_events', {
+          agent: rest[0],
+          limit: rest[1] ? Number(rest[1]) : undefined,
+        });
       case '/start_agent':
         return this.#run(chatId, fromUserId, 'start_agent', { agent: arg });
       case '/stop':
@@ -181,7 +186,7 @@ export class ManagementBot {
 }
 
 const HELP = [
-  'Fleet: /list [state] · /agent <ref> · /logs <ref> [n] · /members <ref> · /pending <ref> · /pool',
+  'Fleet: /list [state] · /agent <ref> · /logs <ref> [n] · /members <ref> · /pending <ref> · /pool · /events [ref] [n]',
   'Change (needs /mode readwrite): /stop <ref> · /start_agent <ref> · /rebuild <ref> · /model <ref> <model> · /approve <ref> <code>',
   'Safety: /mode readwrite|readonly · /pause · /resume',
 ].join('\n');
@@ -198,6 +203,12 @@ function renderData(tool: string, data: unknown): string {
   }
   if (tool === 'get_logs' && typeof data === 'string') {
     return data.slice(-3500) || '(no logs)';
+  }
+  if (tool === 'list_events' && Array.isArray(data)) {
+    const rows = (data as Array<{ agentName?: string; event: string }>).map(
+      (e) => `• ${e.agentName ?? 'agent'} — ${e.event.replace(/[._]/g, ' ')}`,
+    );
+    return rows.length ? rows.join('\n') : 'No recent activity.';
   }
   return '```\n' + JSON.stringify(data, null, 2).slice(0, 3500) + '\n```';
 }

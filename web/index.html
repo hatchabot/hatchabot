@@ -1627,9 +1627,10 @@ const MODEL_PRICES = {
   'claude-sonnet-5': [3, 15], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5': [10, 50],
 };
 function fmtTokens(n) {
-  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(0) + 'K';
-  return String(n);
+  const v = Number(n) || 0; // guard undefined/NaN/string → "0" not "undefined"
+  if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
+  return String(v);
 }
 function billingLine(agentId, models) {
   const a = (agents ?? []).find(x => x.id === agentId);
@@ -1821,7 +1822,7 @@ function renderCrons(crons) {
         ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
       </span>
       <button onclick="toggleCron('${jsq(c.id)}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
-      <button onclick="runCron('${jsq(c.id)}')" title="Fire it now to test — the result arrives the task's usual way">Run now</button>
+      <button onclick="runCron('${jsq(c.id)}', ${c.payloadKind === 'command'})" title="Fire it now to test — the result arrives the task's usual way">Run now</button>
       <button onclick="deleteCron('${jsq(c.id)}', '${jsq(c.name || 'this task')}')">Delete</button>
     </div>`;
   }).join('');
@@ -1834,12 +1835,17 @@ async function toggleCron(jobId, enabled) {
     await loadCrons();
   } catch (e) { $('cronErr').textContent = e.message; }
 }
-async function runCron(jobId) {
+let cronRunBusy = false;
+async function runCron(jobId, isShell) {
+  if (cronRunBusy) return; // a second click would double-fire the task
+  if (isShell && !confirm('Run this shell task now? It executes a command on the agent.')) return;
+  cronRunBusy = true;
   $('cronErr').textContent = '';
   try {
     await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(jobId)}/run`, { method: 'POST', body: {} });
     toast('Fired — watch for the result where the task normally reports');
   } catch (e) { $('cronErr').textContent = e.message; }
+  finally { cronRunBusy = false; }
 }
 async function deleteCron(jobId, name) {
   if (!confirm(`Delete "${name}"? This removes the scheduled task from the agent, and can't be undone here.`)) return;
