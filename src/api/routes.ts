@@ -508,6 +508,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!existsSync(p)) return reply.code(404).send({ error: 'Not found' });
       return reply.header('cache-control', 'public, max-age=86400').type('image/png').send(readFileSync(p));
     });
+    // A QR of the app's own address, so a phone can scan-to-open it. Public
+    // (like the other PWA shell assets) — it encodes only the reachable URL,
+    // which just opens the login screen, and an <img> can't carry auth anyway.
+    app.get('/app-qr.svg', async (req, reply) => {
+      const origin = deps.publicUrl?.replace(/\/$/, '') || `${req.protocol}://${req.headers.host}`;
+      const svg = await QRCode.toString(origin, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+      return reply.header('cache-control', 'no-cache').type('image/svg+xml').send(svg);
+    });
   }
 
   app.get('/healthz', async () => ({ ok: true }));

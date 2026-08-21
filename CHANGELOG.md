@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.13.0] — 2026-08-21
+
+### Changed
+- **"Get the app" is clearer and works across browsers.** The install button is
+  now always offered (until installed), and opens a dialog with **per-browser
+  steps** (iOS Safari, iOS Chrome/Firefox, Android, desktop) plus a **QR code**
+  of the app's address so you can point another phone's camera at it to open
+  AgentClaw. One-tap install still fires where the browser supports it
+  (Chrome/Edge/Android/desktop).
+
+### Added
+- `GET /app-qr.svg` — a scannable QR of the app's public URL (public, like the
+  other PWA shell assets), backing the "Get the app" dialog.
+
 ## [0.12.1] — 2026-08-21
 
 ### Changed

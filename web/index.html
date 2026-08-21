@@ -546,9 +546,14 @@
   </div>
 </dialog>
 
-<dialog id="installDlg" style="width:min(460px,94vw)">
-  <h3 style="margin:0 0 8px">Install AgentClaw</h3>
+<dialog id="installDlg" style="width:min(480px,94vw)">
+  <h3 style="margin:0 0 8px">Get the app</h3>
+  <div class="sub" style="margin-bottom:10px">Add AgentClaw to your home screen — it opens full-screen, like an app.</div>
   <div id="installBody"></div>
+  <div style="display:flex;gap:14px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+    <img src="/app-qr.svg" alt="Scan to open AgentClaw" width="118" height="118" style="background:#fff;border-radius:8px;padding:5px;flex:none">
+    <div class="sub">On a different phone, point its camera at this code to open AgentClaw, then follow the steps for that phone's browser.</div>
+  </div>
   <div class="actions" style="justify-content:flex-end">
     <button class="primary" onclick="installDlg.close()">Got it</button>
   </div>
@@ -2255,16 +2260,54 @@ refresh(true);
 
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
-    deferredInstall = e;
+    deferredInstall = e; // enables the one-tap path in installApp()
     if (installBtn && !standalone) installBtn.hidden = false;
   });
   window.addEventListener('appinstalled', () => {
     deferredInstall = null;
     if (installBtn) installBtn.hidden = true;
   });
-  if (isIOS && !standalone && installBtn) installBtn.hidden = false;
+  // Always offer "Get the app" unless already installed — the dialog carries the
+  // QR + per-browser steps, so it's useful even where there's no one-tap prompt.
+  if (installBtn && !standalone) installBtn.hidden = false;
+
+  function installSteps() {
+    const ua = navigator.userAgent;
+    const criOS = /crios/i.test(ua), fxiOS = /fxios/i.test(ua), android = /android/i.test(ua);
+    if (isIOS && (criOS || fxiOS)) {
+      return `<b>On this iPhone/iPad (${criOS ? 'Chrome' : 'Firefox'}):</b>
+        <ol style="padding-left:20px;line-height:1.7;margin:6px 0 0">
+          <li>Tap the <b>Share</b> icon — a square with an arrow up (⬆︎).</li>
+          <li>Tap <b>“Add to Home Screen”</b>, then <b>“Add”</b>.</li>
+        </ol>
+        <div class="sub" style="margin-top:6px">Safari usually makes this easiest on iPhone if you'd rather switch.</div>`;
+    }
+    if (isIOS) {
+      return `<b>On this iPhone/iPad (Safari):</b>
+        <ol style="padding-left:20px;line-height:1.7;margin:6px 0 0">
+          <li>Tap the <b>Share</b> button — a <b>square with an arrow pointing up (⬆︎)</b>, in the bar at the <b>bottom</b> of the screen.</li>
+          <li>Scroll down the list and tap <b>“Add to Home Screen”</b>.</li>
+          <li>Tap <b>“Add”</b> (top-right).</li>
+        </ol>
+        <div class="sub" style="margin-top:6px">No “Add to Home Screen” in the list? You're in an in-app browser (opened from Telegram, etc.) — open this page in Safari first.</div>`;
+    }
+    if (android) {
+      return `<b>On this phone (Android):</b>
+        <ol style="padding-left:20px;line-height:1.7;margin:6px 0 0">
+          <li>Open the browser menu (<b>⋮</b>, top-right).</li>
+          <li>Tap <b>“Install app”</b> or <b>“Add to Home screen”</b>, then confirm.</li>
+        </ol>`;
+    }
+    return `<b>On this computer:</b>
+      <ol style="padding-left:20px;line-height:1.7;margin:6px 0 0">
+        <li>Click the <b>install icon</b> in the address bar, or open the browser menu.</li>
+        <li>Choose <b>“Install AgentClaw”</b>.</li>
+      </ol>
+      <div class="sub" style="margin-top:6px">Chrome, Edge and Brave support this. (Needs an https:// or localhost address.)</div>`;
+  }
 
   async function installApp() {
+    // One-tap where the browser supports it (Chrome/Edge/Android/desktop).
     if (deferredInstall) {
       deferredInstall.prompt();
       const { outcome } = await deferredInstall.userChoice;
@@ -2272,21 +2315,9 @@ refresh(true);
       deferredInstall = null;
       return;
     }
-    // No one-tap prompt available (iOS Safari never offers one) — show the
-    // manual gesture as clear numbered steps rather than a terse alert.
-    $('installBody').innerHTML = isIOS
-      ? `<ol style="padding-left:20px;line-height:1.7;margin:0 0 8px">
-           <li>Make sure you're in <b>Safari</b> — not a browser opened inside another app (e.g. tapping the link from Telegram).</li>
-           <li>Tap the <b>Share</b> button — the icon of a <b>square with an arrow pointing up (⬆︎)</b>, in the bar at the bottom of Safari.</li>
-           <li>Scroll down and tap <b>“Add to Home Screen”</b>.</li>
-           <li>Tap <b>“Add”</b> at the top-right.</li>
-         </ol>
-         <div class="sub">Don't see “Add to Home Screen”? You're in an in-app browser — open this page in Safari first, then try again.</div>`
-      : `<ol style="padding-left:20px;line-height:1.7;margin:0 0 8px">
-           <li>Open your browser's menu (⋮ or ⋯).</li>
-           <li>Choose <b>“Install app”</b> or <b>“Add to Home screen”</b>.</li>
-         </ol>
-         <div class="sub">If you don't see it, the page needs an <code>https://</code> address (or <code>localhost</code>) to be installable.</div>`;
+    // Otherwise (notably iOS Safari, which has no one-tap): show per-browser
+    // steps plus a scannable QR.
+    $('installBody').innerHTML = installSteps();
     installDlg.showModal();
   }
 
