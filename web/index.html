@@ -2271,6 +2271,19 @@ refresh(true);
       if (!d.contains(e.target)) d.open = false;
     });
   });
+
+  // Click the backdrop (outside the panel) to dismiss any open dialog — like
+  // Escape already does. A click on a child bubbles up with that child as the
+  // target, so we only act when the dialog element itself is the target AND the
+  // pointer is outside its box.
+  for (const dlg of document.querySelectorAll('dialog')) {
+    dlg.addEventListener('click', (e) => {
+      if (e.target !== dlg) return;
+      const r = dlg.getBoundingClientRect();
+      const inPanel = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      if (!inPanel) dlg.close();
+    });
+  }
 </script>
 </body>
 </html>

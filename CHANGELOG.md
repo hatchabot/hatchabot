@@ -2,6 +2,12 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.11.2] — 2026-08-21
+
+### Changed
+- Clicking the backdrop (outside the panel) now dismisses any open dialog —
+  Configuration, Definition, Tasks, etc. — the same as pressing Escape.
+
 ## [0.11.1] — 2026-08-21
 
 ### Changed
