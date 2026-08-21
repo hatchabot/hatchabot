@@ -2,6 +2,26 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.10.0] — 2026-08-21
+
+### Added
+- **Health & usage on every surface.** `agentclaw health <agent>` and
+  `agentclaw usage <agent>` (CLI), plus `get_health` / `get_usage` read-tier
+  management-bot tools with `/health <ref>` and `/usage <ref>` slash commands —
+  so "is it actually answering?" and "what's it using?" can be asked from the CLI
+  and Telegram, not only the web app. Closes the observability parity gap the
+  audit flagged.
+
+### Changed
+- The CLI `folders` command is extracted into a testable unit, and `cli.ts` now
+  guards its entrypoint (importing it no longer runs the CLI). No behaviour
+  change — its rm legacy-vs-data-source branch is now covered by tests.
+
+### Internal
+- +13 tests: the `folders` command (list, add, add-repo, rm legacy vs data
+  source, `--none`, bad subcommand), the CLI health/usage formatters, and the
+  broker `get_health` / `get_usage` read tools.
+
 ## [0.9.1] — 2026-08-21
 
 High-effort audit follow-up (v0.4.1–v0.9.0 surface).
