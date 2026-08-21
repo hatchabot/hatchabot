@@ -31,6 +31,9 @@ class FakeApi implements ApiClient {
   async getPool() {
     return { availableBots: 3 };
   }
+  async listEvents() {
+    return [];
+  }
   async availableModels() {
     return ['claude-opus-4-8', 'claude-sonnet-5'];
   }

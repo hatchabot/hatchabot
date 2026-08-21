@@ -1,4 +1,4 @@
-import type { ApiClient, AgentSummary, Member, PairingRequest } from './broker.js';
+import type { ApiClient, AgentSummary, Member, PairingRequest, EventRow } from './broker.js';
 
 /**
  * The concrete owner-scoped /v1 client the broker drives. One bearer token (a
@@ -73,6 +73,11 @@ export class HttpApiClient implements ApiClient {
   }
   async getPool(): Promise<{ availableBots: number }> {
     return (await this.#req('GET', '/v1/pool')) as { availableBots: number };
+  }
+  async listEvents(agentId: string | undefined, limit: number): Promise<EventRow[]> {
+    const q = new URLSearchParams({ limit: String(limit) });
+    if (agentId) q.set('agentId', agentId);
+    return (await this.#req('GET', `/v1/events?${q.toString()}`)) as EventRow[];
   }
   async availableModels(profileId: string): Promise<string[]> {
     const r = (await this.#req('GET', `/v1/ai-profiles/${profileId}/available-models`)) as

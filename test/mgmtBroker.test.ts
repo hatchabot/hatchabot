@@ -25,6 +25,10 @@ class FakeApi implements ApiClient {
   async getPool() {
     return { availableBots: 3 };
   }
+  async listEvents(agentId: string | undefined, limit: number) {
+    this.calls.push(`events:${agentId ?? 'all'}:${limit}`);
+    return [{ agentId: 'a1', agentName: 'Tech Advisor', at: 'now', event: 'runtime.rebuilt' }];
+  }
   async availableModels(profileId: string) {
     return this.models[profileId] ?? [];
   }
@@ -76,6 +80,21 @@ describe('broker read tier', () => {
     const { broker } = make({ rw: true });
     const res = await broker.handleTool('delete_agent', { agent: 'a1' }, WHO);
     expect(res).toMatchObject({ ok: false, error: { code: 'FORBIDDEN_TOOL' } });
+  });
+
+  it('list_events reads the fleet timeline, unfiltered', async () => {
+    const { broker, api } = make();
+    const res = await broker.handleTool('list_events', {}, WHO);
+    expect(res.ok).toBe(true);
+    expect((res as any).data).toHaveLength(1);
+    expect(api.calls).toContain('events:all:20');
+  });
+
+  it('list_events resolves and filters to one agent', async () => {
+    const { broker, api } = make();
+    const res = await broker.handleTool('list_events', { agent: 'Tech Advisor', limit: 5 }, WHO);
+    expect(res.ok).toBe(true);
+    expect(api.calls).toContain('events:a1:5');
   });
 });
 

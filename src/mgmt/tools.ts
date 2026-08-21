@@ -99,6 +99,17 @@ export const MANIFEST: ToolDef[] = [
     description: 'Telegram bot pool: free vs used.',
     input_schema: { type: 'object', additionalProperties: false, properties: {} },
   },
+  {
+    name: 'list_events',
+    tier: 'read',
+    description:
+      "Recent fleet activity — provisions, rebuilds, members admitted/removed, snapshots, moves, health changes. Optionally filter to one agent.",
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { agent: agentRef, limit: { type: 'integer', minimum: 1, maximum: 100 } },
+    },
+  },
 
   // ---- mutate tier (propose only; each requires a human confirm) ----
   {

@@ -33,6 +33,14 @@ export interface PairingRequest {
   meta?: { firstName?: string; lastName?: string; username?: string };
 }
 
+export interface EventRow {
+  agentId: string;
+  agentName?: string;
+  at: string;
+  event: string;
+  detail?: Record<string, unknown>;
+}
+
 /** The owner-scoped /v1 client the broker drives. Every call already carries the
  *  owner's bearer token, so results are inherently scoped to that account. */
 export interface ApiClient {
@@ -42,6 +50,7 @@ export interface ApiClient {
   listMembers(id: string): Promise<Member[]>;
   listPairing(id: string): Promise<PairingRequest[]>;
   getPool(): Promise<{ availableBots: number }>;
+  listEvents(agentId: string | undefined, limit: number): Promise<EventRow[]>;
   availableModels(profileId: string): Promise<string[]>;
   startAgent(id: string): Promise<void>;
   stopAgent(id: string): Promise<void>;
@@ -237,6 +246,11 @@ export class Broker {
         return this.api.listPairing((await this.#resolve(args.agent)).id);
       case 'get_pool':
         return this.api.getPool();
+      case 'list_events': {
+        const id = args.agent !== undefined ? (await this.#resolve(args.agent)).id : undefined;
+        const limit = typeof args.limit === 'number' ? args.limit : 20;
+        return this.api.listEvents(id, limit);
+      }
       default:
         throw new BrokerError('FORBIDDEN_TOOL', `Not a read tool: ${name}`);
     }
