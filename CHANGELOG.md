@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.9.0] — 2026-08-21
+
+### Added
+- **Agent health check.** A **❤️ Health** view (per running agent) probes the
+  agent's own OpenClaw gateway live and verdicts it *responding / degraded / not
+  answering*: event-loop health, whether the Telegram channel is actually
+  connected (with the last error and reconnect count), and any plugin errors.
+  This is distinct from the tracked state — an agent can read "running" yet have
+  quietly stopped responding. `GET /v1/agents/:id/health`.
+
 ## [0.8.0] — 2026-08-21
 
 ### Added
