@@ -1090,18 +1090,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (problem) return reply.code(400).send({ error: problem });
       }
 
-      // All checks passed — apply the writes.
-      if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
-      if (switchingProfile) store.setAgentAIProfile(agent.id, aiProfileId!);
-      if (model !== undefined) {
-        store.setAgentModel(agent.id, model);
-      } else if (switchingProfile && agent.model && target && modelOverrideProblem(target, agent.model)) {
-        // The switch strands the old pin (new source lacks it, or is local).
-        // Drop it so the agent falls back to the new source's default.
-        store.setAgentModel(agent.id, null);
-      }
-
-      if (shared !== undefined && shared !== agent.sharedMemory) {
+      // The memory-policy rewrite is the ONLY failable write here (it touches
+      // the container and can 502). Do its checks and the write FIRST, so that a
+      // 400/409/502 leaves the agent entirely unchanged — the DB writes below
+      // are infallible, so applying them last keeps the whole PATCH atomic.
+      const flippingMemory = shared !== undefined && shared !== agent.sharedMemory;
+      if (flippingMemory) {
         const others = store
           .listMemberships(agent.id)
           .filter((m) => m.status === 'active' && m.role !== 'owner');
@@ -1113,19 +1107,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
           return reply.code(409).send({ error: 'Start the agent to change its memory policy.' });
         }
-
-        // Rewrite AGENTS.md FIRST, and only persist the flag if that write
-        // succeeds. Committing the flag before the write (as this once did)
-        // meant a failed rewrite left the stored policy and the agent's actual
-        // AGENTS.md permanently disagreeing — nothing reconciles them later, as
-        // rebuild never overwrites an existing AGENTS.md.
+        // Rewrite AGENTS.md; the flag is persisted below only because we reached
+        // it (the write succeeded). Persisting the flag before the write left the
+        // stored policy and the agent's file permanently disagreeing on failure —
+        // nothing reconciles them (rebuild never overwrites an existing AGENTS.md).
         const provider = providerFor(agent.hostId);
         const path = workspacePath(agent.slug, 'AGENTS.md');
         const read = await provider.execShell(
           agent.runtimeRef,
           `cat ${JSON.stringify(path)} 2>/dev/null || true`,
         );
-        const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared));
+        const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared!));
         const b64 = Buffer.from(next, 'utf8').toString('base64');
         const write = await provider.execShell(
           agent.runtimeRef,
@@ -1137,8 +1129,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             error: "Couldn't update the agent's memory policy — nothing was changed. Try again in a moment.",
           });
         }
-        store.setAgentSharedMemory(agent.id, shared);
       }
+
+      // All checks passed and the only failable write succeeded — apply the
+      // infallible DB writes together, so nothing was half-committed on a 502.
+      if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
+      if (switchingProfile) store.setAgentAIProfile(agent.id, aiProfileId!);
+      if (model !== undefined) {
+        store.setAgentModel(agent.id, model);
+      } else if (switchingProfile && agent.model && target && modelOverrideProblem(target, agent.model)) {
+        // The switch strands the old pin (new source lacks it, or is local).
+        // Drop it so the agent falls back to the new source's default.
+        store.setAgentModel(agent.id, null);
+      }
+      if (flippingMemory) store.setAgentSharedMemory(agent.id, shared!);
+
       return publicAgent(store.getAgent(agent.id)!);
     },
   );
@@ -1365,12 +1370,35 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // ---- Per-agent environment variables -----------------------------------
   // An API key or config the agent's own tools need, injected at provision.
   // Values are secrets: stored in the SecretStore, never returned, applied on
-  // the next rebuild. A small reserved set is refused so a var can't shadow the
-  // agent's managed AI auth or its runtime PATH/PYTHONPATH.
-  const RESERVED_ENV = new Set([
-    'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN',
-    'PATH', 'HOME', 'PYTHONPATH', 'NODE_OPTIONS',
+  // the next rebuild.
+  //
+  // Names are refused by SHAPE, not an exact deny-list. This is a security
+  // boundary, not just hygiene: an agent can run on a profile SHARED by another
+  // account (§multi-user), so a per-agent var must never be able to redirect
+  // where that owner's model credential is sent, or alter code/cert loading.
+  // Blocking only the credential *names* left `ANTHROPIC_BASE_URL` / `HTTPS_PROXY`
+  // open — enough to point the shared key at an attacker and exfiltrate it.
+  const RESERVED_ENV_EXACT = new Set([
+    'PATH', 'HOME', 'PYTHONPATH', 'NODE_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'BASH_ENV',
+    'SHELL', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE',
   ]);
+  const reservedEnvProblem = (name: string): string | undefined => {
+    const u = name.toUpperCase();
+    if (RESERVED_ENV_EXACT.has(u)) return `"${name}" is managed by AgentClaw and can't be set here.`;
+    // Proxy vars (read in either case by curl/requests) redirect all traffic.
+    if (/(^|_)(HTTP|HTTPS|ALL|NO)_PROXY$/.test(u)) {
+      return `"${name}" could redirect the agent's traffic and can't be set here.`;
+    }
+    // Model-provider / cloud credential + endpoint families — the exfil vector.
+    if (/^(ANTHROPIC|CLAUDE|GEMINI|GOOGLE|GCP|VERTEX|OPENAI|AZURE|AWS|COHERE|MISTRAL)_/.test(u)) {
+      return `"${name}" is reserved — model-provider and credential variables can't be set here.`;
+    }
+    // Loader / TLS knobs that alter how the agent loads code or trusts certs.
+    if (/^(LD_|NODE_|OPENSSL_|SSL_)/.test(u)) {
+      return `"${name}" is reserved — it could change how the agent loads code or trusts certificates.`;
+    }
+    return undefined;
+  };
 
   app.post<{ Params: { id: string }; Body: { name?: string; value?: string } }>(
     '/v1/agents/:id/env',
@@ -1387,9 +1415,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           error: 'Not a valid variable name — use letters, digits and underscores, not starting with a digit.',
         });
       }
-      if (RESERVED_ENV.has(name)) {
-        return reply.code(400).send({ error: `"${name}" is managed by AgentClaw and can't be set here.` });
-      }
+      const reserved = reservedEnvProblem(name);
+      if (reserved) return reply.code(400).send({ error: reserved });
       if (store.listAgentEnv(agent.id).some((e) => e.name === name)) {
         return reply.code(409).send({ error: `"${name}" is already set — remove it first to change its value.` });
       }
@@ -1439,14 +1466,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // (they survive rebuilds like MEMORY.md). We drive them through the
   // in-container `openclaw cron` CLI — never the store directly — exactly as
   // sessions/pairing do. The gateway must be up, so every route needs RUNNING.
-  const runningAgent = (req: FastifyRequest, id: string, reply: any): Agent | undefined => {
+  const runningAgent = (
+    req: FastifyRequest,
+    id: string,
+    reply: any,
+    action = 'manage its scheduled tasks',
+  ): Agent | undefined => {
     const agent = ownedAgent(req, id);
     if (!agent) {
       reply.code(404).send({ error: 'Not found' });
       return undefined;
     }
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
-      reply.code(409).send({ error: 'Start the agent to manage its scheduled tasks.' });
+      reply.code(409).send({ error: `Start the agent to ${action}.` });
       return undefined;
     }
     return agent;
@@ -1462,7 +1494,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // Per-agent token usage, read from its OpenClaw session store. Accurate usage,
   // not a cost figure — the app renders billing context from the AI profile.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {
-    const agent = runningAgent(req, req.params.id, reply);
+    const agent = runningAgent(req, req.params.id, reply, 'see its usage');
     if (!agent) return reply;
     return agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
   });
@@ -1471,7 +1503,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // connection, plugin errors). Distinct from the tracked state: an agent can be
   // RUNNING here yet have a gateway that stopped answering.
   app.get<{ Params: { id: string } }>('/v1/agents/:id/health', async (req, reply) => {
-    const agent = runningAgent(req, req.params.id, reply);
+    const agent = runningAgent(req, req.params.id, reply, 'check its health');
     if (!agent) return reply;
     return agentHealth(providerFor(agent.hostId), agent.runtimeRef!);
   });
@@ -2105,9 +2137,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    // Already gone (or going): a second DELETE would drive DELETED→DELETING,
-    // an illegal transition that surfaced as a 500. It's done — say so.
-    if (agent.state === 'DELETED' || agent.state === 'DELETING') {
+    // Fully gone — say so. A DELETING agent, by contrast, is a delete that was
+    // interrupted (destroy threw, or the process was killed mid-teardown); we
+    // let a retry RE-ENTER and finish it, rather than 404-ing it into a
+    // permanent tombstone with secrets un-scrubbed and the bot never released.
+    if (agent.state === 'DELETED') {
       return reply.code(404).send({ error: 'Not found' });
     }
     // A migrate/adopt/import mid-flight: refuse rather than wait — those run
@@ -2124,13 +2158,29 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (isBusy(agent.id)) {
       return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
     }
-    store.setAgentState(agent.id, 'DELETING');
+    if (agent.state !== 'DELETING') store.setAgentState(agent.id, 'DELETING');
     if (agent.runtimeRef) {
-      await providerFor(agent.hostId).destroy(agent.runtimeRef, { purge: true });
+      try {
+        await providerFor(agent.hostId).destroy(agent.runtimeRef, { purge: true });
+      } catch (err) {
+        // The runtime may still be alive (holding the bot token). Do NOT
+        // release the bot or mark DELETED — that would orphan a poller. Park in
+        // FAILED (a legal DELETING→FAILED move) so Delete stays retryable.
+        store.setAgentState(agent.id, 'FAILED', 'Delete could not remove the runtime — tap Delete again.');
+        app.log.error({ agentId: agent.id, err: String(err) }, 'destroy failed during delete');
+        return reply.code(502).send({ error: "Couldn't remove the agent's runtime — try Delete again in a moment." });
+      }
     }
+    // The runtime is gone; everything below is idempotent, so a retry after an
+    // interrupted delete safely finishes the teardown.
     const channel = store.getChannelForAgent(agent.id);
     if (channel) {
-      await deps.channel.release(channel.accountId);
+      // A migrated-away agent's bot now belongs to the peer that received it.
+      // Releasing it back into THIS pool would let a new local agent lease it
+      // and fight the peer for the same token — release only when it stays ours.
+      if (!agent.migratedTo) {
+        await deps.channel.release(channel.accountId);
+      }
       // An imported agent's token lives under channel/<agentId>/bot-token,
       // which release() (keyed by username) never touches — scrub it here so
       // deletion doesn't leave a live credential in the store.

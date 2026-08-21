@@ -30,10 +30,12 @@ export function normalizeGitUrl(input: string): NormalizedGit | null {
   let host: string | undefined;
   let path: string | undefined;
 
+  // Host must START alphanumeric: a leading-dash host like `-oProxyCommand…`
+  // would reach in-container ssh/ssh-keyscan as an option, not a hostname.
   let m =
-    /^git@([a-z0-9.-]+):([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
-    /^ssh:\/\/git@([a-z0-9.-]+)(?::\d+)?\/([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
-    /^https?:\/\/([a-z0-9.-]+)\/([^\s]+?)(?:\.git)?\/?$/i.exec(s);
+    /^git@([a-z0-9][a-z0-9.-]*):([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
+    /^ssh:\/\/git@([a-z0-9][a-z0-9.-]*)(?::\d+)?\/([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
+    /^https?:\/\/([a-z0-9][a-z0-9.-]*)\/([^\s]+?)(?:\.git)?\/?$/i.exec(s);
   if (m) {
     host = m[1];
     path = m[2];

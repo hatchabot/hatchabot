@@ -58,6 +58,27 @@ describe('POST /v1/agents/:id/env', () => {
     expect(store.listAgentEnv('a1')).toHaveLength(0);
   });
 
+  it('refuses credential-redirect / loader vars by shape (not just exact names)', async () => {
+    const { store, f } = await world();
+    // The exfil vector: redirect where a (possibly shared) key is sent, or alter
+    // code/cert loading. None of these are in an exact deny-list.
+    for (const name of [
+      'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'AWS_SECRET_ACCESS_KEY',
+      'HTTPS_PROXY', 'http_proxy', 'ALL_PROXY', 'LD_PRELOAD', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE',
+    ]) {
+      const res = await addEnv(f, { name, value: 'x' });
+      expect(res.statusCode, name).toBe(400);
+    }
+    expect(store.listAgentEnv('a1')).toHaveLength(0);
+  });
+
+  it('still allows a benign, non-credential variable', async () => {
+    const { store, f } = await world();
+    expect((await addEnv(f, { name: 'MARKETDATA_API_KEY', value: 'ok' })).statusCode).toBe(200);
+    expect((await addEnv(f, { name: 'TZ', value: 'America/Toronto' })).statusCode).toBe(200);
+    expect(store.listAgentEnv('a1').map((e) => e.name).sort()).toEqual(['MARKETDATA_API_KEY', 'TZ']);
+  });
+
   it('refuses an invalid variable name', async () => {
     const { f } = await world();
     expect((await addEnv(f, { name: '2bad', value: 'x' })).statusCode).toBe(400);

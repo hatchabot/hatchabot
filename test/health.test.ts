@@ -58,6 +58,40 @@ describe('agentHealth', () => {
     expect(h.telegram).toMatchObject({ connected: false, lastError: 'auth failed', reconnectAttempts: 3 });
   });
 
+  it('degrades on each trigger independently (ok:false / eventLoop / pluginErrors)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const base = { ts: 1, channels: { telegram: { connected: true, running: true, lastError: null, reconnectAttempts: 0 } } };
+    const cases: Array<[string, unknown]> = [
+      ['ok false', { ...base, ok: false }],
+      ['eventLoop degraded', { ...base, ok: true, eventLoop: { degraded: true, reasons: ['lag'] } }],
+      ['plugin errors', { ...base, ok: true, plugins: { errors: ['telegram: boom'] } }],
+    ];
+    for (const [label, json] of cases) {
+      p.execResponses.set('health', { code: 0, stdout: JSON.stringify(json), stderr: '' });
+      const h = await agentHealth(p, ref);
+      expect(h.status, label).toBe('degraded');
+    }
+  });
+
+  it('treats an agent with no Telegram channel as healthy (not degraded)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('health', { code: 0, stdout: JSON.stringify({ ok: true, ts: 1, eventLoop: { degraded: false, reasons: [] } }), stderr: '' });
+    const h = await agentHealth(p, ref);
+    expect(h.status).toBe('healthy');
+    expect(h.telegram).toBeUndefined();
+  });
+
+  it('does not report a contradictory {healthy, ok:false} when ok is absent', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('health', { code: 0, stdout: JSON.stringify({ ts: 1, eventLoop: { degraded: false, reasons: [] } }), stderr: '' });
+    const h = await agentHealth(p, ref);
+    expect(h.status).toBe('healthy');
+    expect(h.ok).toBeUndefined();
+  });
+
   it('reports unreachable on a nonzero exit or unparseable output', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);

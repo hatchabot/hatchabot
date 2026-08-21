@@ -66,7 +66,9 @@ export async function agentHealth(
   return {
     reachable: true,
     status: degraded ? 'degraded' : 'healthy',
-    ok: !!h.ok,
+    // Only echo the gateway's self-report when it actually made one — coercing a
+    // missing value to false produced a contradictory {status:'healthy', ok:false}.
+    ok: typeof h.ok === 'boolean' ? h.ok : undefined,
     eventLoop,
     telegram,
     pluginErrors,

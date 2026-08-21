@@ -144,11 +144,17 @@ describe('cron routes', () => {
     expect(provider.execLog).toContainEqual(['cron', 'rm', 'job-1']);
   });
 
-  it('502s when the cron CLI reports failure', async () => {
+  it('502s when the cron CLI reports failure (delete / run / enable each)', async () => {
     const { provider, f } = await world();
     provider.execResponses.set('cron rm', { code: 2, stdout: '', stderr: 'no such job' });
-    const res = await f.inject({ method: 'DELETE', url: '/v1/agents/a1/crons/nope', headers: as });
-    expect(res.statusCode).toBe(502);
+    provider.execResponses.set('cron run', { code: 2, stdout: '', stderr: 'no such job' });
+    provider.execResponses.set('cron disable', { code: 2, stdout: '', stderr: 'no such job' });
+    const rm = await f.inject({ method: 'DELETE', url: '/v1/agents/a1/crons/nope', headers: as });
+    expect(rm.statusCode).toBe(502);
+    const run = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons/nope/run', headers: as, payload: {} });
+    expect(run.statusCode).toBe(502);
+    const patch = await f.inject({ method: 'PATCH', url: '/v1/agents/a1/crons/nope', headers: as, payload: { enabled: false } });
+    expect(patch.statusCode).toBe(502);
   });
 
   it('404s for an agent the caller does not own', async () => {

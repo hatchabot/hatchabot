@@ -117,6 +117,13 @@ describe('git data sources (Slice B)', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('rejects a repo host that starts with a dash (argv-injection shape)', async () => {
+    const { store, f } = await world();
+    const res = await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@-oProxyCommand.evil:owner/repo.git' });
+    expect(res.statusCode).toBe(400);
+    expect(store.listDataSources('a1')).toHaveLength(0);
+  });
+
   it('rejects a repo whose name collides with an OpenClaw internal dir', async () => {
     const { store, f } = await world();
     const res = await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@github.com:cksci/agents.git' });
