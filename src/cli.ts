@@ -105,6 +105,8 @@ Commands:
   restore <agent> <snapshotId> Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
+  health <agent>               Live gateway health — is it actually answering
+  usage <agent>                Token usage by model
   mgmt-bot <setup|status|disable> [--bot-token <tok>] [--yes]
                                Set up the Telegram management bot: mints a token,
                                pre-fills your Telegram id, writes .env.mgmt, and
@@ -338,6 +340,121 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
   writeConfigValue('AGENTCLAW_REFRESH_TOKEN', data.refreshToken);
   console.log(`signed in as ${data.email}`);
   console.log(`refresh token saved to ${configPath()} (chmod 600)`);
+}
+
+/**
+ * The `folders`/`data` command, extracted from main()'s switch so it can be
+ * unit-tested with a fake API — its rm branch (legacy sharedPaths vs a real
+ * data source) is real logic that would otherwise fail silently.
+ */
+export interface FoldersIo {
+  resolveAgent: (ref: string) => Promise<any>;
+  jsonPost: (path: string, body: unknown, method?: string) => Promise<{ json: () => Promise<any> }>;
+  apiDelete: (path: string) => Promise<unknown>;
+  log: (msg: string) => void;
+  fail: (msg: string) => never;
+  resolvePath: (raw: string) => string;
+}
+
+export async function runFolders(
+  io: FoldersIo,
+  rest: string[],
+  flags: { has(k: string): boolean },
+): Promise<void> {
+  const usage = 'usage: agentclaw folders <agent> [add <path> [--rw] | add-repo <git-url> [--rw] | rm <name>]';
+  const a = await io.resolveAgent(rest[0] ?? io.fail(usage));
+  const sub = rest[1];
+
+  // Back-compat: --none still clears the legacy read-only folder list.
+  if (flags.has('none')) {
+    await io.jsonPost(`/v1/agents/${a.id}`, { sharedPaths: [] }, 'PATCH');
+    io.log(`"${a.name}" no longer reads any legacy host folder (on its next rebuild).`);
+    return;
+  }
+
+  if (sub === 'add') {
+    const raw = rest[2] ?? io.fail('usage: agentclaw folders <agent> add <path> [--rw]');
+    const p = io.resolvePath(raw);
+    const access = flags.has('rw') ? 'rw' : 'ro';
+    await io.jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'folder', access, path: p });
+    io.log(`added ${access} folder ${p}  →  /data/${p.split('/').pop()} for "${a.name}".`);
+    io.log('Takes effect on the next rebuild: agentclaw rebuild ' + JSON.stringify(a.name));
+    return;
+  }
+  if (sub === 'add-repo') {
+    const url = rest[2] ?? io.fail('usage: agentclaw folders <agent> add-repo <git-url> [--rw]');
+    const access = flags.has('rw') ? 'rw' : 'ro';
+    const up: any = await (await io.jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'git', access, repoUrl: url })).json();
+    const src = (up.dataSources ?? []).filter((d: any) => d.kind === 'git').slice(-1)[0];
+    io.log(`added ${access} git repo  →  /data/${src?.mountName ?? '?'} for "${a.name}".`);
+    if (src?.pubKey) {
+      io.log(`\nAdd this deploy key to the repo${access === 'rw' ? ' (tick "Allow write access")' : ''}, then rebuild:`);
+      io.log(src.pubKey);
+    }
+    return;
+  }
+  if (sub === 'rm') {
+    const ref = rest[2] ?? io.fail('usage: agentclaw folders <agent> rm <name>');
+    const src = (a.dataSources ?? []).find((d: any) => d.mountName === ref || d.id === ref);
+    if (!src) io.fail(`no data source named "${ref}" on "${a.name}" — see: agentclaw folders ${JSON.stringify(a.name)}`);
+    if (src.legacy) {
+      // Legacy folders live in the whole-list sharedPaths; drop just this one.
+      const remaining = (a.sharedPaths ?? []).filter((p: string) => p !== src.hostPath);
+      await io.jsonPost(`/v1/agents/${a.id}`, { sharedPaths: remaining }, 'PATCH');
+    } else {
+      await io.apiDelete(`/v1/agents/${a.id}/data-sources/${src.id}`);
+    }
+    io.log(`removed /data/${src.mountName} from "${a.name}" — rebuild to apply.`);
+    return;
+  }
+  if (sub) io.fail(`unknown subcommand "${sub}" — ${usage}`);
+
+  // List: one unified view of everything the agent can access (legacy read-only
+  // folders + folder/git data sources), matching the web UI.
+  const sources: any[] = a.dataSources ?? [];
+  if (!sources.length) {
+    io.log(`"${a.name}" has no data sources.`);
+    return;
+  }
+  io.log(`"${a.name}" data (each mounted at /data/<name>):`);
+  for (const d of sources) {
+    const where = d.kind === 'git' ? d.repoUrl : d.hostPath;
+    const tag = `${d.access} ${d.kind}`.padEnd(11);
+    io.log(`  ${tag} ${String(d.mountName).padEnd(16)} ${where}${d.legacy ? '   (legacy)' : ''}`);
+  }
+}
+
+function fmtTok(n: unknown): string {
+  const v = Number(n) || 0;
+  if (v >= 1e6) return (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
+  return String(v);
+}
+
+/** `agentclaw health <agent>` output — a live gateway probe, mirroring ❤️ Health. */
+export function fmtHealth(name: string, h: any): string {
+  const label =
+    { healthy: 'responding', degraded: 'degraded', unreachable: 'not answering' }[
+      h.status as string
+    ] ?? String(h.status);
+  const lines = [`${name}: ${label}`];
+  if (h.reachable && h.telegram) {
+    const t = h.telegram;
+    lines.push(`  telegram: ${t.connected ? 'connected' : `disconnected${t.lastError ? ` (${t.lastError})` : ''}`}`);
+  }
+  if (h.eventLoop?.degraded) {
+    lines.push(`  event loop: degraded${h.eventLoop.reasons?.length ? ' — ' + h.eventLoop.reasons.join(', ') : ''}`);
+  }
+  if (h.pluginErrors?.length) lines.push(`  plugin errors: ${h.pluginErrors.join(', ')}`);
+  return lines.join('\n');
+}
+
+/** `agentclaw usage <agent>` output — tokens by model, mirroring 📊 Usage. */
+export function fmtUsage(name: string, u: any): string {
+  if (!u.sessions) return `${name}: no sessions yet`;
+  const lines = [`${name}: ${fmtTok(u.totalTokens)} tokens · ${u.sessions} session${u.sessions > 1 ? 's' : ''}`];
+  for (const m of u.byModel ?? []) lines.push(`  ${String(m.model).padEnd(24)} ${fmtTok(m.tokens)}`);
+  return lines.join('\n');
 }
 
 async function main() {
@@ -596,64 +713,30 @@ async function main() {
     }
     case 'data':
     case 'folders': {
-      const usage = 'usage: agentclaw folders <agent> [add <path> [--rw] | add-repo <git-url> [--rw] | rm <name>]';
-      const a = await resolveAgent(ctx, rest[0] ?? fail(usage));
-      const sub = rest[1];
-
-      // Back-compat: --none still clears the legacy read-only folder list.
-      if (flags.has('none')) {
-        await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: [] }, 'PATCH');
-        console.log(`"${a.name}" no longer reads any legacy host folder (on its next rebuild).`);
-        return;
-      }
-
-      if (sub === 'add') {
-        const raw = rest[2] ?? fail('usage: agentclaw folders <agent> add <path> [--rw]');
-        const p = resolve(raw.replace(/^~(?=\/|$)/, homedir()));
-        const access = flags.has('rw') ? 'rw' : 'ro';
-        await jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'folder', access, path: p });
-        console.log(`added ${access} folder ${p}  →  /data/${p.split('/').pop()} for "${a.name}".`);
-        console.log('Takes effect on the next rebuild: agentclaw rebuild ' + JSON.stringify(a.name));
-        return;
-      }
-      if (sub === 'add-repo') {
-        const url = rest[2] ?? fail('usage: agentclaw folders <agent> add-repo <git-url> [--rw]');
-        const access = flags.has('rw') ? 'rw' : 'ro';
-        const up: any = await (await jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'git', access, repoUrl: url })).json();
-        const src = (up.dataSources ?? []).filter((d: any) => d.kind === 'git').slice(-1)[0];
-        console.log(`added ${access} git repo  →  /data/${src?.mountName ?? '?'} for "${a.name}".`);
-        if (src?.pubKey) {
-          console.log(`\nAdd this deploy key to the repo${access === 'rw' ? ' (tick "Allow write access")' : ''}, then rebuild:`);
-          console.log(src.pubKey);
-        }
-        return;
-      }
-      if (sub === 'rm') {
-        const ref = rest[2] ?? fail('usage: agentclaw folders <agent> rm <name>');
-        const src = (a.dataSources ?? []).find((d: any) => d.mountName === ref || d.id === ref);
-        if (!src) fail(`no data source named "${ref}" on "${a.name}" — see: agentclaw folders ${JSON.stringify(a.name)}`);
-        if (src.legacy) {
-          // Legacy folders live in the whole-list sharedPaths; drop just this one.
-          const remaining = (a.sharedPaths ?? []).filter((p: string) => p !== src.hostPath);
-          await jsonPost(`/v1/agents/${a.id}`, { sharedPaths: remaining }, 'PATCH');
-        } else {
-          await api(ctx, `/v1/agents/${a.id}/data-sources/${src.id}`, { method: 'DELETE' });
-        }
-        console.log(`removed /data/${src.mountName} from "${a.name}" — rebuild to apply.`);
-        return;
-      }
-      if (sub) fail(`unknown subcommand "${sub}" — ${usage}`);
-
-      // List: one unified view of everything the agent can access (legacy
-      // read-only folders + folder/git data sources), matching the web UI.
-      const sources: any[] = a.dataSources ?? [];
-      if (!sources.length) return console.log(`"${a.name}" has no data sources.`);
-      console.log(`"${a.name}" data (each mounted at /data/<name>):`);
-      for (const d of sources) {
-        const where = d.kind === 'git' ? d.repoUrl : d.hostPath;
-        const tag = `${d.access} ${d.kind}`.padEnd(11);
-        console.log(`  ${tag} ${String(d.mountName).padEnd(16)} ${where}${d.legacy ? '   (legacy)' : ''}`);
-      }
+      await runFolders(
+        {
+          resolveAgent: (ref) => resolveAgent(ctx, ref),
+          jsonPost,
+          apiDelete: (p) => api(ctx, p, { method: 'DELETE' }),
+          log: console.log,
+          fail,
+          resolvePath: (raw) => resolve(raw.replace(/^~(?=\/|$)/, homedir())),
+        },
+        rest,
+        flags,
+      );
+      return;
+    }
+    case 'health': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw health <agent>'));
+      const h: any = await (await api(ctx, `/v1/agents/${a.id}/health`)).json();
+      console.log(fmtHealth(a.name, h));
+      return;
+    }
+    case 'usage': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw usage <agent>'));
+      const u: any = await (await api(ctx, `/v1/agents/${a.id}/usage`)).json();
+      console.log(fmtUsage(a.name, u));
       return;
     }
     case 'servers': {
@@ -889,4 +972,8 @@ async function main() {
   }
 }
 
-main().catch((err) => fail(String(err?.message ?? err)));
+// Run only when invoked as the CLI, not when a test imports this module for its
+// exported helpers (runFolders, …).
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch((err) => fail(String(err?.message ?? err)));
+}
