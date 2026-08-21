@@ -89,7 +89,8 @@ what the model *proposes*; it can never change a tool's tier or target endpoint.
 ```
 
 Also read-tier, same shape: `list_members` (`GET …/members`), `get_pool`
-(`GET /v1/pool`), `list_events` (`GET /v1/events`, optional `agent` filter).
+(`GET /v1/pool`), `list_events` (`GET /v1/events`, optional `agent` filter),
+`get_health` (`GET …/health`), `get_usage` (`GET …/usage`).
 
 `$defs.agentRef` is shared:
 

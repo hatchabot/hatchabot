@@ -112,6 +112,10 @@ export class ManagementBot {
           agent: rest[0],
           limit: rest[1] ? Number(rest[1]) : undefined,
         });
+      case '/health':
+        return this.#run(chatId, fromUserId, 'get_health', { agent: arg });
+      case '/usage':
+        return this.#run(chatId, fromUserId, 'get_usage', { agent: arg });
       case '/start_agent':
         return this.#run(chatId, fromUserId, 'start_agent', { agent: arg });
       case '/stop':
@@ -187,6 +191,7 @@ export class ManagementBot {
 
 const HELP = [
   'Fleet: /list [state] · /agent <ref> · /logs <ref> [n] · /members <ref> · /pending <ref> · /pool · /events [ref] [n]',
+  'Check: /health <ref> · /usage <ref>',
   'Change (needs /mode readwrite): /stop <ref> · /start_agent <ref> · /rebuild <ref> · /model <ref> <model> · /approve <ref> <code>',
   'Safety: /mode readwrite|readonly · /pause · /resume',
 ].join('\n');
@@ -209,6 +214,21 @@ function renderData(tool: string, data: unknown): string {
       (e) => `• ${e.agentName ?? 'agent'} — ${e.event.replace(/[._]/g, ' ')}`,
     );
     return rows.length ? rows.join('\n') : 'No recent activity.';
+  }
+  if (tool === 'get_health' && data && typeof data === 'object') {
+    const h = data as any;
+    const label = { healthy: '✅ responding', degraded: '⚠️ degraded', unreachable: '❌ not answering' }[h.status as string] ?? String(h.status);
+    const bits = [label];
+    if (h.reachable && h.telegram) bits.push(`telegram ${h.telegram.connected ? 'connected' : `disconnected${h.telegram.lastError ? ` (${h.telegram.lastError})` : ''}`}`);
+    if (h.eventLoop?.degraded) bits.push('event loop degraded');
+    if (h.pluginErrors?.length) bits.push(`${h.pluginErrors.length} plugin error(s)`);
+    return bits.join(' · ');
+  }
+  if (tool === 'get_usage' && data && typeof data === 'object') {
+    const u = data as any;
+    if (!u.sessions) return 'No sessions yet.';
+    const rows = (u.byModel ?? []).map((m: any) => `• ${m.model} — ${m.tokens}`);
+    return `${u.totalTokens} tokens · ${u.sessions} session(s)\n${rows.join('\n')}`;
   }
   return '```\n' + JSON.stringify(data, null, 2).slice(0, 3500) + '\n```';
 }

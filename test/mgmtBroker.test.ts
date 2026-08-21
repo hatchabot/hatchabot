@@ -29,6 +29,14 @@ class FakeApi implements ApiClient {
     this.calls.push(`events:${agentId ?? 'all'}:${limit}`);
     return [{ agentId: 'a1', agentName: 'Tech Advisor', at: 'now', event: 'runtime.rebuilt' }];
   }
+  async getHealth(id: string) {
+    this.calls.push(`health:${id}`);
+    return { status: 'healthy' as const, reachable: true, telegram: { connected: true, lastError: null } };
+  }
+  async getUsage(id: string) {
+    this.calls.push(`usage:${id}`);
+    return { totalTokens: 1500, sessions: 2, byModel: [{ model: 'claude-opus-4-8', tokens: 1500 }] };
+  }
   async availableModels(profileId: string) {
     return this.models[profileId] ?? [];
   }
@@ -95,6 +103,18 @@ describe('broker read tier', () => {
     const res = await broker.handleTool('list_events', { agent: 'Tech Advisor', limit: 5 }, WHO);
     expect(res.ok).toBe(true);
     expect(api.calls).toContain('events:a1:5');
+  });
+
+  it('get_health / get_usage are read-tier and resolve the agent', async () => {
+    const { broker, api } = make();
+    const h = await broker.handleTool('get_health', { agent: 'Tech Advisor' }, WHO);
+    expect(h.ok).toBe(true);
+    expect((h as any).data.status).toBe('healthy');
+    expect(api.calls).toContain('health:a1');
+    const u = await broker.handleTool('get_usage', { agent: 'a1' }, WHO);
+    expect(u.ok).toBe(true);
+    expect((u as any).data.totalTokens).toBe(1500);
+    expect(api.calls).toContain('usage:a1');
   });
 });
 

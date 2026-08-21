@@ -110,6 +110,29 @@ export const MANIFEST: ToolDef[] = [
       properties: { agent: agentRef, limit: { type: 'integer', minimum: 1, maximum: 100 } },
     },
   },
+  {
+    name: 'get_health',
+    tier: 'read',
+    description:
+      "Whether an agent is actually answering right now: a live gateway probe (event loop, Telegram connection, plugin errors).",
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { agent: agentRef },
+      required: ['agent'],
+    },
+  },
+  {
+    name: 'get_usage',
+    tier: 'read',
+    description: 'Token usage by model for one agent.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { agent: agentRef },
+      required: ['agent'],
+    },
+  },
 
   // ---- mutate tier (propose only; each requires a human confirm) ----
   {

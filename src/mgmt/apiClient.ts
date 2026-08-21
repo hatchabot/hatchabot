@@ -1,4 +1,4 @@
-import type { ApiClient, AgentSummary, Member, PairingRequest, EventRow } from './broker.js';
+import type { ApiClient, AgentSummary, Member, PairingRequest, EventRow, HealthResult, UsageResult } from './broker.js';
 
 /**
  * The concrete owner-scoped /v1 client the broker drives. One bearer token (a
@@ -78,6 +78,12 @@ export class HttpApiClient implements ApiClient {
     const q = new URLSearchParams({ limit: String(limit) });
     if (agentId) q.set('agentId', agentId);
     return (await this.#req('GET', `/v1/events?${q.toString()}`)) as EventRow[];
+  }
+  async getHealth(id: string): Promise<HealthResult> {
+    return (await this.#req('GET', `/v1/agents/${id}/health`)) as HealthResult;
+  }
+  async getUsage(id: string): Promise<UsageResult> {
+    return (await this.#req('GET', `/v1/agents/${id}/usage`)) as UsageResult;
   }
   async availableModels(profileId: string): Promise<string[]> {
     const r = (await this.#req('GET', `/v1/ai-profiles/${profileId}/available-models`)) as

@@ -41,6 +41,20 @@ export interface EventRow {
   detail?: Record<string, unknown>;
 }
 
+export interface HealthResult {
+  status: 'healthy' | 'degraded' | 'unreachable';
+  reachable: boolean;
+  telegram?: { connected: boolean; lastError?: string | null };
+  eventLoop?: { degraded: boolean; reasons?: string[] };
+  pluginErrors?: string[];
+}
+
+export interface UsageResult {
+  totalTokens: number;
+  sessions: number;
+  byModel: Array<{ model: string; tokens: number }>;
+}
+
 /** The owner-scoped /v1 client the broker drives. Every call already carries the
  *  owner's bearer token, so results are inherently scoped to that account. */
 export interface ApiClient {
@@ -51,6 +65,8 @@ export interface ApiClient {
   listPairing(id: string): Promise<PairingRequest[]>;
   getPool(): Promise<{ availableBots: number }>;
   listEvents(agentId: string | undefined, limit: number): Promise<EventRow[]>;
+  getHealth(id: string): Promise<HealthResult>;
+  getUsage(id: string): Promise<UsageResult>;
   availableModels(profileId: string): Promise<string[]>;
   startAgent(id: string): Promise<void>;
   stopAgent(id: string): Promise<void>;
@@ -251,6 +267,10 @@ export class Broker {
         const limit = typeof args.limit === 'number' ? args.limit : 20;
         return this.api.listEvents(id, limit);
       }
+      case 'get_health':
+        return this.api.getHealth((await this.#resolve(args.agent)).id);
+      case 'get_usage':
+        return this.api.getUsage((await this.#resolve(args.agent)).id);
       default:
         throw new BrokerError('FORBIDDEN_TOOL', `Not a read tool: ${name}`);
     }

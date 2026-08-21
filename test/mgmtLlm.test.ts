@@ -34,6 +34,12 @@ class FakeApi implements ApiClient {
   async listEvents() {
     return [];
   }
+  async getHealth() {
+    return { status: 'healthy' as const, reachable: true };
+  }
+  async getUsage() {
+    return { totalTokens: 0, sessions: 0, byModel: [] };
+  }
   async availableModels() {
     return ['claude-opus-4-8', 'claude-sonnet-5'];
   }
