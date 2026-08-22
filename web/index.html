@@ -204,10 +204,12 @@
     <div class="hrow">
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
       <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
-      <button id="importBtn" class="hbtn" title="Load a saved agent (.agentclaw file)" onclick="$('importFile').click()">Load</button>
+      <button id="importBtn" class="hbtn" title="Load a saved agent (a full copy — .agentclaw file)" onclick="$('importFile').click()">Load</button>
+      <button id="tmplBtn" class="hbtn" title="Import a shared agent template — creates a fresh agent you give your own bot" onclick="$('tmplFile').click()">Import</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
     </div>
     <input type="file" id="importFile" accept=".agentclaw" hidden onchange="loadAgentFile(this.files[0])">
+    <input type="file" id="tmplFile" accept=".agentclaw" hidden onchange="importTemplateFile(this.files[0])">
   </header>
   <div id="setup"></div>
   <div id="agents"></div>
@@ -1298,6 +1300,9 @@ function cardMenu(a) {
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
   }
+  if (a.state === 'RUNNING') {
+    items.push(`<button onclick="exportTemplate('${a.id}', '${jsq(a.name)}')" title="Shareable trained copy — no bot token, members, or memory. Safe to email.">📤 Export (share)</button>`);
+  }
   if (a.deepLink && a.state === 'RUNNING') {
     items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
   }
@@ -2097,6 +2102,33 @@ async function loadAgentFile(file) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || data.message || 'Load failed');
     toast(`${data.name} loaded — booting`);
+    await refresh(true);
+  } catch (e) { toast(e.message, 30000); }
+}
+
+// Template = a shareable trained copy. Export downloads it; Import stands up a
+// fresh agent (you give it its own bot) and reports what it still needs.
+function exportTemplate(id) {
+  window.location.href = `/v1/agents/${id}/export`;
+}
+
+async function importTemplateFile(file) {
+  if (!file) return;
+  try {
+    const res = await fetch('/v1/agents/import', {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: file,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
+    const needs = [];
+    for (const d of (data.needs?.dataSources ?? [])) needs.push(`${d.kind} “${d.mountName}”`);
+    for (const n of (data.needs?.envVars ?? [])) needs.push(`env ${n}`);
+    const tail = needs.length
+      ? ` — set up in ⚙ Configuration: ${needs.join(', ')}`
+      : '';
+    toast(`Imported “${data.name}” — connect its Telegram bot, then it's yours${tail}`, 45000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
   finally { $('importFile').value = ''; }

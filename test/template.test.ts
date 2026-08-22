@@ -1,0 +1,90 @@
+import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import { Store } from '../src/store/store.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
+import { exportTemplate, importTemplate, parseTemplate } from '../src/orchestrator/template.js';
+import { buildWorkspaceSeed } from '../src/openclaw/workspace.js';
+
+/**
+ * A template is a SHAREABLE copy: trained files, no identity. These tests pin
+ * the two guarantees that make it safe to email — nothing identifying leaves in
+ * the file, and importing stands up a FRESH agent (own owner, no members, seeded
+ * with the trained SOUL/AGENTS, fresh memory).
+ */
+
+async function world() {
+  const store = new Store(new Database(':memory:'));
+  const provider = new MockProvider();
+  store.insertHost({ id: 'h1', ownerId: 'owner-a', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+  store.insertAIProfile({ id: 'pa', ownerId: 'owner-a', name: 'A-AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/pa', createdAt: 'now' });
+  store.insertAIProfile({ id: 'pb', ownerId: 'owner-b', name: 'B-AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/pb', createdAt: 'now' });
+  const { runtimeRef } = await provider.provision({
+    agentId: 'a1', slug: 'advisor', workspace: { files: {}, configPatch: { agentId: 'advisor', authMode: 'api-key' } }, env: {},
+  } as any);
+  store.insertAgent({ id: 'a1', ownerId: 'owner-a', name: 'Advisor', slug: 'advisor', state: 'RUNNING', aiProfileId: 'pa', hostId: 'h1', runtimeRef, persona: 'a wise advisor', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+  // A member (the exporter's family) and a data source + env var it uses.
+  store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'owner-a', role: 'owner', status: 'active' });
+  store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'family-1', role: 'user', status: 'active', channelUserId: '555111' });
+  store.insertDataSource({ id: 'ds1', agentId: 'a1', kind: 'git', access: 'ro', mountName: 'defs', repoUrl: 'git@github.com:o/defs.git', secretRef: 'data-source/ds1', pubKey: 'k', createdAt: 'now' });
+  store.insertAgentEnv({ id: 'e1', agentId: 'a1', name: 'MARKETDATA_API_KEY', secretRef: 'agent-env/e1', createdAt: 'now' });
+  provider.execResponses.set('sh', { code: 0, stdout: '# TRAINED CONTENT', stderr: '' });
+  return { store, provider };
+}
+
+describe('exportTemplate', () => {
+  it('captures the trained files + needs, and leaks NO identity', async () => {
+    const { store, provider } = await world();
+    const { filename, data } = await exportTemplate({ store, provider }, 'a1');
+    const m = parseTemplate(data);
+    expect(filename).toMatch(/\.template\.agentclaw$/);
+    expect(m.format).toBe('agentclaw-template');
+    expect(m.files['SOUL.md']).toContain('TRAINED');
+    expect(m.files['AGENTS.md']).toContain('TRAINED');
+    expect(m.ai.vendor).toBe('anthropic');
+    expect(m.dataNeeds).toEqual([{ kind: 'git', access: 'ro', mountName: 'defs', repoUrl: 'git@github.com:o/defs.git' }]);
+    expect(m.envNeeds).toEqual(['MARKETDATA_API_KEY']);
+    // No bot token, members, Telegram IDs, sessions, or memory anywhere.
+    const raw = JSON.stringify(m);
+    for (const leak of ['botToken', 'channel', 'memberships', 'family-1', '555111', 'MEMORY.md']) {
+      expect(raw).not.toContain(leak);
+    }
+  });
+
+  it('refuses to export a stopped agent', async () => {
+    const { store, provider } = await world();
+    store.setAgentState('a1', 'STOPPED');
+    await expect(exportTemplate({ store, provider }, 'a1')).rejects.toThrow(/Start the agent/);
+  });
+});
+
+describe('importTemplate', () => {
+  it('stands up a FRESH agent: new owner, no members, seeded trained files, needs listed', async () => {
+    const { store, provider } = await world();
+    const { data } = await exportTemplate({ store, provider }, 'a1');
+
+    const { agent, needs } = importTemplate({ store, provider }, data, { ownerId: 'owner-b' });
+    expect(agent.id).not.toBe('a1');
+    expect(agent.ownerId).toBe('owner-b');
+    expect(agent.state).toBe('PROVISIONING');
+    expect(agent.aiProfileId).toBe('pb'); // the importer's OWN profile
+    // No members carried — only the importer's owner seat.
+    expect(store.listMemberships(agent.id).filter((mm) => mm.role !== 'owner')).toHaveLength(0);
+    // Needs surfaced for the importer to wire up.
+    expect(needs.envVars).toEqual(['MARKETDATA_API_KEY']);
+    expect(needs.dataSources).toHaveLength(1);
+
+    // The trained files are staged to seed at first provision…
+    const seed = store.getAgentSeed(agent.id);
+    expect(seed['SOUL.md']).toContain('TRAINED');
+    // …and the seed overrides SOUL/AGENTS but leaves a FRESH MEMORY.md.
+    const files = buildWorkspaceSeed({ agentName: agent.name, slug: agent.slug, persona: '', sharedMemory: false, seedFiles: seed });
+    expect(files['SOUL.md']).toContain('TRAINED');
+    expect(files['MEMORY.md']).toMatch(/Memory/);
+    expect(files['MEMORY.md']).not.toContain('TRAINED');
+  });
+
+  it('rejects a non-template / corrupt file', () => {
+    const { store, provider } = { store: new Store(new Database(':memory:')), provider: new MockProvider() };
+    expect(() => importTemplate({ store, provider }, Buffer.from('not a template'), { ownerId: 'o' })).toThrow();
+  });
+});

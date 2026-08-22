@@ -302,6 +302,9 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         slug: agent.slug,
         persona: agent.persona,
         sharedMemory: agent.sharedMemory,
+        // A template import stashes its trained SOUL.md/AGENTS.md here; the seed
+        // script only writes files that don't yet exist, so this seeds once.
+        seedFiles: store.getAgentSeed(agentId),
       }),
       configPatch: {
         agentId: agent.slug,

@@ -6,6 +6,11 @@ export interface WorkspaceInput {
   persona: string;
   /** True for one-to-many agents: MEMORY.md becomes a shared knowledge base. */
   sharedMemory: boolean;
+  /** Verbatim file contents to seed instead of the generated ones — how a
+   *  template import lands its trained SOUL.md / AGENTS.md. Keys not given fall
+   *  back to the generated default (so an imported template gets a fresh
+   *  MEMORY.md, not the exporter's). */
+  seedFiles?: Record<string, string>;
 }
 
 /**
@@ -71,9 +76,12 @@ contributed it and when, so provenance survives even as the file grows.
 Durable facts about the person this agent serves.
 `;
 
+  // A template import overrides SOUL.md / AGENTS.md with its trained versions;
+  // anything it doesn't carry (e.g. MEMORY.md) keeps the fresh generated default.
   return {
     'SOUL.md': soul,
     'AGENTS.md': agents,
     'MEMORY.md': memory,
+    ...(input.seedFiles ?? {}),
   };
 }

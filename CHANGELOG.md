@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.16.0] — 2026-08-22
+
+### Added
+- **Share a trained agent — Export / Import (templates).** A template is a
+  shareable copy of an agent with **no identity**: it carries the trained
+  `SOUL.md` + `AGENTS.md`, the AI *vendor* preference, and a checklist of the
+  data sources and env-var *names* it expects — but **no bot token, members,
+  conversation history, or memory**. Safe to email.
+  - **Export** (agent card ⋯ menu, or `agentclaw export`) downloads the template.
+  - **Import** (header, or `agentclaw import`) stands up a **fresh** agent: the
+    importer owns it, gives it its own bot (pool or paste — the normal create
+    flow), binds their own AI source, and invites their own people. The trained
+    files seed the new agent at first provision; import reports what still needs
+    wiring up. `GET /v1/agents/:id/export`, `POST /v1/agents/import`.
+  - Distinct from **Save/Load** (same agent, whole identity) and **Rehost**
+    (server→server move). Memory is excluded by default; opt-in curated memory
+    is a planned follow-up.
+
 ## [0.15.0] — 2026-08-22
 
 ### Changed

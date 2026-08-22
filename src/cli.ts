@@ -71,6 +71,11 @@ Commands:
                                treat as a secret; the agent is left STOPPED)
   load <file> [--profile <aiProfileId>] [--host <id>]
                                Load a saved agent and boot it
+  export <agent> [-o <file>]   Export a shareable TEMPLATE — the agent's trained
+                               SOUL/AGENTS, no bot token, members, or memory
+  import <file> [--name <n>] [--profile <aiProfileId>]
+                               Import a template as a fresh agent (you give it
+                               its own bot); prints what it still needs
   start|stop|rebuild <agent>   Lifecycle controls
   retry <agent>                Retry a FAILED agent's provisioning
   rename <agent> <new name>    Change the display name
@@ -893,6 +898,37 @@ async function main() {
       });
       const agent: any = await res.json();
       console.log(`loaded "${agent.name}" (${agent.state})`);
+      return;
+    }
+    case 'export': { // template — a shareable trained copy (no identity)
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw export <agent> [-o file]'));
+      const res = await api(ctx, `/v1/agents/${a.id}/export`);
+      const out = flags.get('out') ?? `${a.slug}.template.agentclaw`;
+      await writeFile(out, Buffer.from(await res.arrayBuffer()));
+      console.log(`exported template to ${out}`);
+      console.log('a shareable copy — no bot token, members, or memory. Safe to send to someone.');
+      return;
+    }
+    case 'import': { // template
+      const file = rest[0] ?? fail('usage: agentclaw import <file> [--name <name>] [--profile <aiProfileId>]');
+      const data = await readFile(file);
+      const params = new URLSearchParams();
+      if (flags.has('name')) params.set('name', flags.get('name')!);
+      if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
+      if (flags.has('host')) params.set('hostId', flags.get('host')!);
+      const q = params.size ? `?${params}` : '';
+      const res = await api(ctx, `/v1/agents/import${q}`, {
+        method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: data,
+      });
+      const j: any = await res.json();
+      console.log(`imported "${j.name}" (${j.state}) — connect its Telegram bot to finish.`);
+      const ds = (j.needs?.dataSources ?? []).map((d: any) => `${d.kind} ${d.mountName}`);
+      const env = j.needs?.envVars ?? [];
+      if (ds.length || env.length) {
+        console.log('it still needs setting up:');
+        for (const d of ds) console.log(`  data: ${d}`);
+        for (const e of env) console.log(`  env:  ${e}`);
+      }
       return;
     }
     case 'start':

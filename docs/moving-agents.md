@@ -165,3 +165,29 @@ header.
   members ride along with their Telegram bindings intact.
 - Importing where a same-slug agent already *lives* is refused; a previously
   deleted agent's tombstone doesn't block a re-import.
+
+## Share a trained copy — Export / Import (templates)
+
+Save/Load and Rehost move **the same agent** — same bot, same people, same
+memory. To hand someone a copy of an agent you *built and trained*, use a
+**template** instead (**Export** on the agent card's ⋯ menu; **Import** in the
+header, or `agentclaw export` / `import`).
+
+A template is deliberately **stripped of identity**, so it's safe to email:
+
+| Carried | Left out |
+|---|---|
+| the trained **`SOUL.md` + `AGENTS.md`** | the **bot token** |
+| the AI **vendor** preference | all **members** and their Telegram IDs |
+| a checklist of **data sources & env-var names** it expects | conversation history |
+| — | **memory** (`MEMORY.md`) — excluded by default |
+
+**Import stands up a fresh agent.** The importer owns it, gives it its **own**
+bot (a pool bot or a pasted BotFather token — the normal create flow), binds
+their **own** AI source, and invites their **own** people. The trained
+`SOUL.md`/`AGENTS.md` seed the new agent at first provision. Import then prints
+what the agent still needs — any data sources or env vars the template declared —
+for the recipient to wire up in **⚙ Configuration**.
+
+Save/Load = "the same agent, elsewhere." Export/Import = "a trained copy, for
+someone else."

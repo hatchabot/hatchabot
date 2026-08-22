@@ -68,6 +68,10 @@ and lifecycle; OpenClaw runs the agent.
   it is preflight-checked, transferred with its memory, members and Telegram
   identity, verified on arrival, and rolled back if anything fails. Or **Save**
   it to a single file and **Load** it wherever you like.
+- **Share a trained agent.** Built a good one? **Export** it as a template — its
+  persona and instructions, with *no* bot token, members, or memory — and send
+  the file (it's safe to email). **Import** stands up a fresh copy the recipient
+  runs with their *own* bot and their *own* people.
 - **Bring your own AI — or none at all.** An Anthropic or Google Gemini API
   key, a Claude Pro/Max subscription on a machine where you're already logged
   in, or a **local model server you run yourself** (Ollama). The local path

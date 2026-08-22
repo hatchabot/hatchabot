@@ -24,6 +24,7 @@ import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
+import { exportTemplate, importTemplate } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
@@ -1957,6 +1958,64 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
         );
         return reply.code(201).send(publicAgent(agent));
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  // ---- shareable template (Export / Import) -------------------------------
+  // A trained copy with NO identity (no token, members, or memory) — safe to
+  // email. Export reads the agent's SOUL.md/AGENTS.md; Import stands up a FRESH
+  // agent that provisions its own bot (pool or paste), owned by the importer.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
+    try {
+      const { filename, data } = await exportTemplate(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        agent.id,
+      );
+      return reply
+        .type('application/octet-stream')
+        .header('content-disposition', `attachment; filename="${filename}"`)
+        .send(data);
+    } catch (err) {
+      if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+  });
+
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string } }>(
+    '/v1/agents/import',
+    async (req, reply) => {
+      const body = req.body;
+      if (!Buffer.isBuffer(body) || body.length === 0) {
+        return reply.code(400).send({ error: 'Send the template file as the request body.' });
+      }
+      const ownerId = ownerIdOf(req);
+      const hosts = store.listHosts(ownerId);
+      const host = req.query.hostId
+        ? hosts.find((h) => h.id === req.query.hostId)
+        : (hosts.find((h) => h.kind === 'local') ?? hosts[0]);
+      if (!host) return reply.code(400).send({ error: 'No host available to import onto.' });
+      if (req.query.aiProfileId) {
+        const p = store.getAIProfile(req.query.aiProfileId);
+        if (!p || (p.ownerId !== ownerId && !p.shared)) {
+          return reply.code(400).send({ error: 'Unknown AI profile' });
+        }
+      }
+      try {
+        const { agent, needs } = importTemplate(
+          { store, provider: providerFor(host.id), log: trace() },
+          body,
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name },
+        );
+        // Fresh agent → provision its own bot the normal way (pool or paste).
+        kickProvision(agent.id);
+        return reply.code(201).send({ ...publicAgent(agent), needs });
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;

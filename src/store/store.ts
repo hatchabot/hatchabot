@@ -130,6 +130,13 @@ export class Store {
         owner_id TEXT NOT NULL, group_name TEXT NOT NULL, sort_order INTEGER NOT NULL,
         PRIMARY KEY (owner_id, group_name)
       );
+      -- Verbatim workspace files a template import wants seeded at first provision
+      -- (its trained SOUL.md / AGENTS.md). Read by buildRuntimeSpec; the seed
+      -- script only writes files that don't already exist, so it's a one-time seed.
+      CREATE TABLE IF NOT EXISTS agent_seed (
+        agent_id TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL,
+        PRIMARY KEY (agent_id, name)
+      );
       CREATE INDEX IF NOT EXISTS data_sources_agent ON data_sources (agent_id);
     `);
     // Additive dev migrations for databases created before these columns
@@ -370,6 +377,25 @@ export class Store {
     );
     this.db.transaction(() => groups.forEach((g, idx) => upsert.run(ownerId, g, idx)))();
     return true;
+  }
+
+  // ---- Template seed files (one-time, at first provision) -----------------
+
+  setAgentSeed(agentId: string, files: Record<string, string>): void {
+    const ins = this.db.prepare(
+      `INSERT INTO agent_seed (agent_id, name, content) VALUES (?, ?, ?)
+       ON CONFLICT(agent_id, name) DO UPDATE SET content = excluded.content`,
+    );
+    this.db.transaction(() => {
+      for (const [name, content] of Object.entries(files)) ins.run(agentId, name, content);
+    })();
+  }
+
+  getAgentSeed(agentId: string): Record<string, string> {
+    const rows = this.db
+      .prepare(`SELECT name, content FROM agent_seed WHERE agent_id = ?`)
+      .all(agentId) as Array<{ name: string; content: string }>;
+    return Object.fromEntries(rows.map((r) => [r.name, r.content]));
   }
 
   /**
