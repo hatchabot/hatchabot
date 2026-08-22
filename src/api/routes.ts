@@ -1868,7 +1868,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   );
 
   app.post<{ Params: { id: string }; Body: { peerId?: string } }>(
-    '/v1/agents/:id/migrate',
+    '/v1/agents/:id/rehost',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
@@ -1900,7 +1900,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // The archive contains the bot token — it IS the agent's identity — so the
   // download is a credential. The export leaves the agent STOPPED here: once
   // it's imported elsewhere, two pollers on one bot would flip-flop.
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/save', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // A moved-away copy's archive carries the live bot token — refuse it.
@@ -1930,7 +1930,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   app.post<{ Querystring: { aiProfileId?: string; hostId?: string } }>(
-    '/v1/agents/import',
+    '/v1/agents/load',
     async (req, reply) => {
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {

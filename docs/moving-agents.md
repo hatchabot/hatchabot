@@ -100,11 +100,11 @@ On the **destination**: ⚙ Settings → Access → **New token**, and copy it.
 On the **source**: ⚙ Settings → Servers → add its name, URL and that token.
 AgentClaw checks the token works before saving it.
 
-Then use **Move…** on the agent card, or:
+Then use **Rehost** on the agent card, or:
 
 ```sh
 agentclaw servers                      # list registered servers
-agentclaw migrate "Kitchen Helper" Desktop
+agentclaw rehost "Kitchen Helper" Desktop
 ```
 
 What happens, in order:
@@ -139,15 +139,15 @@ Then, from anywhere:
 
 ```sh
 # on the source (or remotely, with --url):
-agentclaw export kitchen-helper -o kitchen.agentclaw
+agentclaw save kitchen-helper -o kitchen.agentclaw
 
 # copy the file over (scp, tailscale file cp, USB stick — it's just a file)
 
 # on the target:
-agentclaw import kitchen.agentclaw
+agentclaw load kitchen.agentclaw
 ```
 
-The web app can do the same: **Export** on the agent card, **Import** in the
+The web app can do the same: **Save** on the agent card, **Load** in the
 header.
 
 ## Rules of the road

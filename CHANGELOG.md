@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.15.0] — 2026-08-22
+
+### Changed
+- **Renamed the transfer tools for clarity**, ahead of a new share-a-copy feature:
+  - **Export / Import → Save / Load** — a complete private copy of an agent (bot
+    token, members, memory) to a file and back. `POST /v1/agents/:id/save`,
+    `POST /v1/agents/load`; CLI `agentclaw save` / `load`.
+  - **Move / Migrate → Rehost** — the one-step server-to-server transfer
+    (dgx → GCE). `POST /v1/agents/:id/rehost`; CLI `agentclaw rehost` (`migrate`
+    kept as an alias). No behaviour change — same mechanics, clearer names.
+  - This frees **Export / Import** for the upcoming *shareable template* feature.
+
 ## [0.14.0] — 2026-08-21
 
 ### Added

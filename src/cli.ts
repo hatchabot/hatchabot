@@ -4,8 +4,8 @@
  * HTTP API. Exists for the things a browser is clumsy at: scripting, remote
  * management, and above all moving agents between machines:
  *
- *   laptop$  agentclaw export kitchen-helper -o kitchen.agentclaw
- *   desktop$ agentclaw import kitchen.agentclaw
+ *   laptop$  agentclaw save kitchen-helper -o kitchen.agentclaw
+ *   desktop$ agentclaw load kitchen.agentclaw
  *
  * Config: AGENTCLAW_URL (default http://localhost:8080) and
  * AGENTCLAW_PASSWORD, or --url/--password flags.
@@ -66,11 +66,11 @@ Commands:
                                is empty.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
-  export <agent> [-o <file>]   Download an agent as a portable .agentclaw file
-                               (contains its bot token — treat as a secret;
-                               the agent is left STOPPED on the source)
-  import <file> [--profile <aiProfileId>] [--host <id>]
-                               Import an exported agent and boot it
+  save <agent> [-o <file>]     Save an agent to a portable .agentclaw file — a
+                               complete private copy (contains its bot token —
+                               treat as a secret; the agent is left STOPPED)
+  load <file> [--profile <aiProfileId>] [--host <id>]
+                               Load a saved agent and boot it
   start|stop|rebuild <agent>   Lifecycle controls
   retry <agent>                Retry a FAILED agent's provisioning
   rename <agent> <new name>    Change the display name
@@ -92,7 +92,7 @@ Commands:
   servers add <name> <url> <token>
                                Register one (token from that server's
                                ⚙ Settings → Access)
-  migrate <agent> <server>     Move an agent there: preflight, transfer, verify.
+  rehost <agent> <server>      Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
@@ -797,14 +797,15 @@ async function main() {
       for (const p of peers) console.log(`${p.id}  ${p.name.padEnd(20)} ${p.url}`);
       return;
     }
-    case 'migrate': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw migrate <agent> <server>'));
+    case 'rehost':
+    case 'migrate': { // 'migrate' kept as an alias for the old name
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw rehost <agent> <server>'));
       const ref = rest[1] ?? fail('give the destination server (see: agentclaw servers)');
       const peers: any[] = await (await api(ctx, '/v1/peers')).json() as any[];
       const peer = peers.find((p) => p.id === ref || p.name === ref);
       if (!peer) fail(`no server matches "${ref}"`);
-      console.log(`moving "${a.name}" to ${peer.name}…`);
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/migrate`, { peerId: peer.id })).json();
+      console.log(`rehosting "${a.name}" to ${peer.name}…`);
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, { peerId: peer.id })).json();
       console.log(`done — now running on ${res.movedTo} as ${res.remoteAgentId}`);
       console.log(`"${a.name}" here is ${res.sourceState} and was NOT deleted.`);
       console.log(`Keep it that way: two copies polling one bot token fight over messages.`);
@@ -868,30 +869,30 @@ async function main() {
       }
       return;
     }
-    case 'export': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw export <agent> [-o file]'));
-      const res = await api(ctx, `/v1/agents/${a.id}/export`);
+    case 'save': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw save <agent> [-o file]'));
+      const res = await api(ctx, `/v1/agents/${a.id}/save`);
       const out = flags.get('out') ?? `${a.slug}.agentclaw`;
       await writeFile(out, Buffer.from(await res.arrayBuffer()));
-      console.log(`exported to ${out}`);
-      console.log('note: the file contains the bot token — treat it like a password.');
-      console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once imported elsewhere.`);
+      console.log(`saved to ${out}`);
+      console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
+      console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once loaded elsewhere.`);
       return;
     }
-    case 'import': {
-      const file = rest[0] ?? fail('usage: agentclaw import <file> [--profile <aiProfileId>]');
+    case 'load': {
+      const file = rest[0] ?? fail('usage: agentclaw load <file> [--profile <aiProfileId>]');
       const data = await readFile(file);
       const params = new URLSearchParams();
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
       if (flags.has('host')) params.set('hostId', flags.get('host')!);
       const q = params.size ? `?${params}` : '';
-      const res = await api(ctx, `/v1/agents/import${q}`, {
+      const res = await api(ctx, `/v1/agents/load${q}`, {
         method: 'POST',
         headers: { 'content-type': 'application/octet-stream' },
         body: data,
       });
       const agent: any = await res.json();
-      console.log(`imported "${agent.name}" (${agent.state})`);
+      console.log(`loaded "${agent.name}" (${agent.state})`);
       return;
     }
     case 'start':

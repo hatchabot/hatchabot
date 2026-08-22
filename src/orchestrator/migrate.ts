@@ -253,7 +253,7 @@ async function migrateAgentInner(
   //    nothing behind if this fails, so we only have to undo our side.
   let remote: { id: string; state: string; name: string };
   try {
-    const res = await peerFetch(deps, peer, '/v1/agents/import', {
+    const res = await peerFetch(deps, peer, '/v1/agents/load', {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: new Uint8Array(data),

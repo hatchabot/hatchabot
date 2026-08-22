@@ -64,10 +64,10 @@ and lifecycle; OpenClaw runs the agent.
   bot can read the same timeline (`list_events`).
 - **Shared or private memory.** A family agent's memory is common to everyone
   in it — and everyone is told so. A personal agent's isn't.
-- **Portability.** Move an agent to another AgentClaw server in one step — it
-  is preflight-checked, transferred with its memory, members and Telegram
-  identity, verified on arrival, and rolled back if anything fails. Or export
-  it to a single file and import it wherever you like.
+- **Portability.** **Rehost** an agent to another AgentClaw server in one step —
+  it is preflight-checked, transferred with its memory, members and Telegram
+  identity, verified on arrival, and rolled back if anything fails. Or **Save**
+  it to a single file and **Load** it wherever you like.
 - **Bring your own AI — or none at all.** An Anthropic or Google Gemini API
   key, a Claude Pro/Max subscription on a machine where you're already logged
   in, or a **local model server you run yourself** (Ollama). The local path
@@ -137,13 +137,13 @@ agentclaw logs "Kitchen Helper" -n 100
 agentclaw snapshot "Kitchen Helper" --label "before the big edit"
 agentclaw restore "Kitchen Helper" <snapshot-id>
 
-# move an agent to another AgentClaw server, in one step
+# rehost an agent to another AgentClaw server, in one step
 agentclaw servers add Desktop http://desktop:8080 <token-from-that-server>
-agentclaw migrate "Kitchen Helper" Desktop
+agentclaw rehost "Kitchen Helper" Desktop
 
 # or move it by file
-agentclaw export "Kitchen Helper" -o kitchen.agentclaw
-agentclaw --url http://desktop:8080 import kitchen.agentclaw
+agentclaw save "Kitchen Helper" -o kitchen.agentclaw
+agentclaw --url http://desktop:8080 load kitchen.agentclaw
 ```
 
 `agentclaw help` lists every command. See

@@ -204,10 +204,10 @@
     <div class="hrow">
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
       <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
-      <button id="importBtn" class="hbtn" title="Import an exported agent (.agentclaw file)" onclick="$('importFile').click()">Import</button>
+      <button id="importBtn" class="hbtn" title="Load a saved agent (.agentclaw file)" onclick="$('importFile').click()">Load</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
     </div>
-    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
+    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="loadAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
   <div id="agents"></div>
@@ -1101,20 +1101,20 @@ async function runsHere(id, name) {
   } catch (e) { toast(e.message); }
 }
 
-async function migrateAgent(id, name) {
+async function rehostAgent(id, name) {
   let peers;
   try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
   if (!peers.length) return (openAiDlg('servers'), toast('Add the destination server first', 6000));
   const list = peers.map((p, i) => `${i + 1}. ${p.name} (${p.url})`).join('\n');
-  const pick = prompt(`Move "${name}" to which server?\n\n${list}\n\nEnter a number:`);
+  const pick = prompt(`Rehost "${name}" to which server?\n\n${list}\n\nEnter a number:`);
   if (pick === null) return;
   const peer = peers[Number(pick) - 1];
   if (!peer) return toast('No such server');
-  if (!confirm(`Move "${name}" to ${peer.name}?\n\nIt stops here, transfers with its memory and members, and starts there. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
-  toast(`Moving ${name} to ${peer.name}…`, 60000);
+  if (!confirm(`Rehost "${name}" to ${peer.name}?\n\nIt stops here, transfers with its memory and members, and starts there. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
+  toast(`Rehosting ${name} to ${peer.name}…`, 60000);
   try {
-    const res = await api(`/v1/agents/${id}/migrate`, { method: 'POST', body: { peerId: peer.id } });
-    toast(`Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
+    const res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body: { peerId: peer.id } });
+    toast(`Rehosted to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
     await refresh(false);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -1275,8 +1275,8 @@ function agentCard(a) {
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
-           <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>
-           <button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')" title="Move to another AgentClaw server in one step">Move…</button>` : ''}
+           <button onclick="saveAgent('${a.id}', '${jsq(a.name)}')" title="Save this agent to a file — a complete private copy (bot token, members, memory)">Save</button>
+           <button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Rehost — move this agent to another AgentClaw server in one step">Rehost</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
@@ -2079,24 +2079,24 @@ async function openGateway(id, slug) {
   } catch (e) { toast(e.message); }
 }
 
-async function exportAgent(id, name) {
-  if (!confirm(`Export "${name}"? The download includes the agent's bot token — treat the file like a password. The agent is STOPPED here afterwards, so the copy you import elsewhere is the only one talking to Telegram.`)) return;
+async function saveAgent(id, name) {
+  if (!confirm(`Save "${name}" to a file? It's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't email it). The agent is STOPPED here afterwards, so the copy you Load elsewhere is the only one talking to Telegram.`)) return;
   // Same-origin navigation carries the session cookie; the browser downloads.
-  window.location.href = `/v1/agents/${id}/export`;
+  window.location.href = `/v1/agents/${id}/save`;
   setTimeout(() => refresh(false), 2500);
 }
 
-async function importAgentFile(file) {
+async function loadAgentFile(file) {
   if (!file) return;
   try {
-    const res = await fetch('/v1/agents/import', {
+    const res = await fetch('/v1/agents/load', {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: file,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
-    toast(`${data.name} imported — booting`);
+    if (!res.ok) throw new Error(data.error || data.message || 'Load failed');
+    toast(`${data.name} loaded — booting`);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
   finally { $('importFile').value = ''; }
