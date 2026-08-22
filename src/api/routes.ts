@@ -1473,6 +1473,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     },
   );
 
+  // Reorder a whole group section up/down in the caller's list.
+  app.post<{ Body: { group?: string; dir?: string } }>('/v1/groups/move', async (req, reply) => {
+    const { group, dir } = (req.body ?? {}) as { group?: string; dir?: string };
+    if (!group || (dir !== 'up' && dir !== 'down')) {
+      return reply.code(400).send({ error: 'group and dir ("up" | "down") are required.' });
+    }
+    store.moveGroup(ownerIdOf(req), group, dir);
+    return { ok: true };
+  });
+
   // ---- Scheduled tasks (OpenClaw crons) ----------------------------------
   // Crons live in the agent's own OpenClaw gateway store on its durable volume
   // (they survive rebuilds like MEMORY.md). We drive them through the

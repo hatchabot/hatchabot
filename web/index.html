@@ -71,8 +71,8 @@
   .movebtn { padding: 0 7px; font-size: 10px; line-height: 1.35; color: var(--dim);
              background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
   .movebtn:hover { color: var(--text); border-color: var(--accent); }
-  .group-header { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
-                  color: var(--dim); margin: 22px 2px 8px; }
+  .group-header { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700;
+                  letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin: 22px 2px 8px; }
   .group-header:first-child { margin-top: 4px; }
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
@@ -1278,6 +1278,7 @@ function agentCard(a) {
            <button onclick="exportAgent('${a.id}', '${jsq(a.name)}')" title="Download this agent as a file to import on another machine">Export</button>
            <button onclick="migrateAgent('${a.id}', '${jsq(a.name)}')" title="Move to another AgentClaw server in one step">Move…</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
+      <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
       ${cardMenu(a)}
     </div>
@@ -1297,7 +1298,6 @@ function cardMenu(a) {
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
   }
-  items.push(`<button onclick="openGroupDlg('${a.id}')">🏷 ${a.group ? esc(a.group) : 'Set group'}</button>`);
   if (a.deepLink && a.state === 'RUNNING') {
     items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
   }
@@ -2154,6 +2154,13 @@ async function moveAgent(id, dir) {
   } catch (e) { toast(e.message); }
 }
 
+async function moveGroup(name, dir) {
+  try {
+    await api('/v1/groups/move', { method: 'POST', body: { group: name, dir } });
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
 let groupAgentId = null;
 function openGroupDlg(id) {
   groupAgentId = id;
@@ -2201,7 +2208,11 @@ function renderAgents() {
   let html = '', lastGroup = null;
   for (const a of agents) {
     const g = a.group || '';
-    if (g && g !== lastGroup) html += `<div class="group-header">${esc(g)}</div>`;
+    if (g && g !== lastGroup) html += `<div class="group-header">
+      <span class="grow">${esc(g)}</span>
+      <button class="movebtn" title="Move section up" onclick="moveGroup('${jsq(g)}','up')">▲</button>
+      <button class="movebtn" title="Move section down" onclick="moveGroup('${jsq(g)}','down')">▼</button>
+    </div>`;
     lastGroup = g;
     html += agentCard(a);
   }

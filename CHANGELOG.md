@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.14.0] — 2026-08-21
+
+### Added
+- **Reorder group sections.** Each group header now has ▲▼ controls to move the
+  whole section up or down; the order is saved per account (ungrouped stays
+  first, unordered groups fall back to alphabetical). `POST /v1/groups/move`.
+
+### Changed
+- The **🏷 Group** button is back on the card's front row (out of the ⋯ menu).
+
 ## [0.13.1] — 2026-08-21
 
 ### Changed

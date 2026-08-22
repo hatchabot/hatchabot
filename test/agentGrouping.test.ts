@@ -87,6 +87,29 @@ describe('agent grouping + ordering', () => {
     expect(order(s)).toEqual(['fin1', 'fin2', 'a1']);
   });
 
+  it('moveGroup reorders whole sections; ungrouped stays first', () => {
+    const s = make();
+    add(s, 'u1', 1);
+    add(s, 'alpha1', 1, 'Alpha');
+    add(s, 'fin1', 1, 'Finance');
+    expect(order(s)).toEqual(['u1', 'alpha1', 'fin1']); // default: ungrouped, then A→Z
+    expect(s.moveGroup(OWNER, 'Finance', 'up')).toBe(true);
+    expect(order(s)).toEqual(['u1', 'fin1', 'alpha1']); // Finance now ahead of Alpha
+    expect(s.listAgents(OWNER)[0]!.id).toBe('u1'); // ungrouped still first
+    expect(s.moveGroup(OWNER, 'Finance', 'down')).toBe(true);
+    expect(order(s)).toEqual(['u1', 'alpha1', 'fin1']); // back
+  });
+
+  it('moveGroup is a no-op at the section boundary', () => {
+    const s = make();
+    add(s, 'a1', 1, 'Alpha');
+    add(s, 'b1', 1, 'Beta');
+    expect(s.moveGroup(OWNER, 'Alpha', 'up')).toBe(false);
+    expect(s.moveGroup(OWNER, 'Beta', 'down')).toBe(false);
+    expect(s.moveGroup(OWNER, 'Nope', 'up')).toBe(false); // unknown group
+    expect(order(s)).toEqual(['a1', 'b1']);
+  });
+
   it('setAgentGroup moves an agent between sections; null clears it', () => {
     const s = make();
     add(s, 'a1', 5);

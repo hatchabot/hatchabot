@@ -124,6 +124,12 @@ export class Store {
         created_at TEXT NOT NULL,
         UNIQUE(agent_id, name)
       );
+      -- Manual ordering of group SECTIONS, per viewer (each account orders its
+      -- own list). Absent groups fall back to alphabetical.
+      CREATE TABLE IF NOT EXISTS agent_group_order (
+        owner_id TEXT NOT NULL, group_name TEXT NOT NULL, sort_order INTEGER NOT NULL,
+        PRIMARY KEY (owner_id, group_name)
+      );
       CREATE INDEX IF NOT EXISTS data_sources_agent ON data_sources (agent_id);
     `);
     // Additive dev migrations for databases created before these columns
@@ -309,10 +315,61 @@ export class Store {
 
   listAgents(ownerId: string): Agent[] {
     const rows = this.db
-      // Owner's order: ungrouped first, groups alphabetically, then sort_order.
+      // Ungrouped first, then groups (order applied in JS), each by sort_order.
       .prepare(`SELECT * FROM agents WHERE owner_id = ? AND state != 'DELETED' ORDER BY group_name, sort_order, created_at`)
       .all(ownerId) as any[];
-    return rows.map(rowToAgent);
+    return this.orderByGroup(rows.map(rowToAgent), ownerId);
+  }
+
+  /** The viewer's manual section order: group_name → rank. */
+  private groupOrder(ownerId: string): Map<string, number> {
+    const rows = this.db
+      .prepare(`SELECT group_name, sort_order FROM agent_group_order WHERE owner_id = ?`)
+      .all(ownerId) as Array<{ group_name: string; sort_order: number }>;
+    return new Map(rows.map((r) => [r.group_name, r.sort_order]));
+  }
+
+  /**
+   * Stable-reorder a group_name-sorted agent list so SECTIONS follow the viewer's
+   * manual order: ungrouped first, then ranked groups, then any unranked group
+   * alphabetically. Within a group the incoming (sort_order) order is preserved.
+   */
+  private orderByGroup(agents: Agent[], ownerId: string): Agent[] {
+    const rank = this.groupOrder(ownerId);
+    const key = (a: Agent): [number, number, string] => {
+      const g = a.group ?? null;
+      if (g === null) return [0, 0, '']; // ungrouped first
+      if (rank.has(g)) return [1, rank.get(g)!, g]; // ranked
+      return [2, 0, g]; // unranked → after ranked, alphabetical
+    };
+    return agents.sort((a, b) => {
+      const ka = key(a);
+      const kb = key(b);
+      if (ka[0] !== kb[0]) return ka[0] - kb[0];
+      if (ka[1] !== kb[1]) return ka[1] - kb[1];
+      if (ka[2] !== kb[2]) return ka[2] < kb[2] ? -1 : 1;
+      return 0; // same section — keep the incoming (within-group) order
+    });
+  }
+
+  /**
+   * Move a group section one place up/down in the viewer's list, by rewriting
+   * the whole section order after the swap. Returns false at the boundary.
+   */
+  moveGroup(ownerId: string, groupName: string, dir: 'up' | 'down'): boolean {
+    const groups = [
+      ...new Set(this.listVisibleAgents(ownerId).map((a) => a.group).filter((g): g is string => !!g)),
+    ];
+    const i = groups.indexOf(groupName);
+    const j = dir === 'up' ? i - 1 : i + 1;
+    if (i < 0 || j < 0 || j >= groups.length) return false;
+    [groups[i], groups[j]] = [groups[j]!, groups[i]!];
+    const upsert = this.db.prepare(
+      `INSERT INTO agent_group_order (owner_id, group_name, sort_order) VALUES (?, ?, ?)
+       ON CONFLICT(owner_id, group_name) DO UPDATE SET sort_order = excluded.sort_order`,
+    );
+    this.db.transaction(() => groups.forEach((g, idx) => upsert.run(ownerId, g, idx)))();
+    return true;
   }
 
   /**
@@ -329,7 +386,7 @@ export class Store {
          ORDER BY a.group_name, a.sort_order, a.created_at`,
       )
       .all(userId, userId) as any[];
-    return rows.map(rowToAgent);
+    return this.orderByGroup(rows.map(rowToAgent), userId);
   }
 
   /**
