@@ -20,8 +20,10 @@ import { TransferError } from './transfer.js';
 export const TEMPLATE_FORMAT = 'agentclaw-template';
 export const TEMPLATE_VERSION = 1;
 
-/** The trained files a template carries verbatim. Memory is excluded by design. */
-const TEMPLATE_FILES = ['SOUL.md', 'AGENTS.md'];
+/** Always carried: the agent's persona and instructions. */
+const TRAINED_FILES = ['SOUL.md', 'AGENTS.md'];
+/** Files a template may seed on import (memory is carried unless excluded). */
+const SEEDABLE_FILES = ['SOUL.md', 'AGENTS.md', 'MEMORY.md'];
 
 export interface TemplateManifest {
   format: typeof TEMPLATE_FORMAT;
@@ -70,6 +72,7 @@ export interface TemplateDeps {
 export async function exportTemplate(
   deps: TemplateDeps,
   agentId: string,
+  opts: { includeMemory?: boolean } = {},
 ): Promise<{ filename: string; data: Buffer }> {
   const { store, provider } = deps;
   const agent = store.getAgent(agentId);
@@ -79,8 +82,13 @@ export async function exportTemplate(
   }
   const profile = store.getAIProfile(agent.aiProfileId);
 
+  // Persona + instructions always; MEMORY.md unless excluded (default: include,
+  // so the copy is faithful to its parent — the caller opts out when the memory
+  // is personal and headed to someone else).
+  const includeMemory = opts.includeMemory !== false;
+  const wanted = includeMemory ? [...TRAINED_FILES, 'MEMORY.md'] : TRAINED_FILES;
   const files: Record<string, string> = {};
-  for (const name of TEMPLATE_FILES) {
+  for (const name of wanted) {
     const res = await provider.execShell(
       agent.runtimeRef,
       `cat ${JSON.stringify(workspacePath(agent.slug, name))} 2>/dev/null || true`,
@@ -172,8 +180,10 @@ export function importTemplate(
     throw new TransferError(`Couldn't create "${name}" — an agent with that name may already exist here. Import under a different name.`);
   }
 
+  // Seed the trained files (and MEMORY.md if the template carried it) verbatim;
+  // anything absent falls back to the fresh generated default.
   const seed: Record<string, string> = {};
-  for (const n of TEMPLATE_FILES) {
+  for (const n of SEEDABLE_FILES) {
     if (typeof manifest.files[n] === 'string') seed[n] = manifest.files[n];
   }
   store.setAgentSeed(agent.id, seed);

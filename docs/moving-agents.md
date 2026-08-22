@@ -147,7 +147,7 @@ agentclaw save kitchen-helper -o kitchen.agentclaw
 agentclaw load kitchen.agentclaw
 ```
 
-The web app can do the same: **Save** on the agent card, **Load** in the
+The web app can do the same: **Back up** on the agent card, **Restore** in the
 header.
 
 ## Rules of the road
@@ -168,7 +168,7 @@ header.
 
 ## Share a trained copy — Export / Import (templates)
 
-Save/Load and Rehost move **the same agent** — same bot, same people, same
+Back up/Restore and Rehost move **the same agent** — same bot, same people, same
 memory. To hand someone a copy of an agent you *built and trained*, use a
 **template** instead (**Export** on the agent card's ⋯ menu; **Import** in the
 header, or `agentclaw export` / `import`).
@@ -189,5 +189,5 @@ their **own** AI source, and invites their **own** people. The trained
 what the agent still needs — any data sources or env vars the template declared —
 for the recipient to wire up in **⚙ Configuration**.
 
-Save/Load = "the same agent, elsewhere." Export/Import = "a trained copy, for
+Back up/Restore = "the same agent, elsewhere." Export/Import = "a trained copy, for
 someone else."

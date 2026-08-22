@@ -67,7 +67,7 @@ function peerResponds(handlers: { preflight?: any; import?: any; importStatus?: 
         status: 200, headers: { 'content-type': 'application/json' },
       });
     }
-    if (u.endsWith('/v1/agents/load')) {
+    if (u.endsWith('/v1/agents/restore')) {
       return new Response(JSON.stringify(handlers.import ?? { id: 'remote1', name: 'Kitchen', state: 'RUNNING' }), {
         status: handlers.importStatus ?? 201, headers: { 'content-type': 'application/json' },
       });
@@ -228,7 +228,7 @@ describe('migrateAgent', () => {
       if (u.endsWith('/preflight')) {
         return new Response(JSON.stringify({ ok: true, reasons: [] }), { status: 200 });
       }
-      if (u.endsWith('/v1/agents/load')) {
+      if (u.endsWith('/v1/agents/restore')) {
         busyDuringImport = isBusy('a1');
         return new Response(JSON.stringify({ id: 'remote1', name: 'Kitchen', state: 'RUNNING' }), {
           status: 201, headers: { 'content-type': 'application/json' },

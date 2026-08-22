@@ -191,6 +191,7 @@
       <h1>Agent<b>Claw</b></h1>
       <span class="sub" id="poolInfo"></span>
       <span class="spacer"></span>
+      <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
       <span class="sub" id="whoami"></span>
       <label class="switch" title="Light / dark theme">
         <span class="switch-ico">☀</span>
@@ -203,12 +204,11 @@
     </div>
     <div class="hrow">
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
-      <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
-      <button id="importBtn" class="hbtn" title="Load a saved agent (a full copy — .agentclaw file)" onclick="$('importFile').click()">Load</button>
+      <button id="importBtn" class="hbtn" title="Restore an agent from a backup file (a full copy — .agentclaw)" onclick="$('importFile').click()">Restore</button>
       <button id="tmplBtn" class="hbtn" title="Import a shared agent template — creates a fresh agent you give your own bot" onclick="$('tmplFile').click()">Import</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
     </div>
-    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="loadAgentFile(this.files[0])">
+    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="restoreAgentFile(this.files[0])">
     <input type="file" id="tmplFile" accept=".agentclaw" hidden onchange="importTemplateFile(this.files[0])">
   </header>
   <div id="setup"></div>
@@ -1277,7 +1277,7 @@ function agentCard(a) {
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
-           <button onclick="saveAgent('${a.id}', '${jsq(a.name)}')" title="Save this agent to a file — a complete private copy (bot token, members, memory)">Save</button>
+           <button onclick="backupAgent('${a.id}', '${jsq(a.name)}')" title="Back up this agent to a file — a complete private copy (bot token, members, memory)">Back up</button>
            <button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Rehost — move this agent to another AgentClaw server in one step">Rehost</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
@@ -1301,7 +1301,8 @@ function cardMenu(a) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
   }
   if (a.state === 'RUNNING') {
-    items.push(`<button onclick="exportTemplate('${a.id}', '${jsq(a.name)}')" title="Shareable trained copy — no bot token, members, or memory. Safe to email.">📤 Export (share)</button>`);
+    items.push(`<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>`);
+    items.push(`<button onclick="exportTemplate('${a.id}', '${jsq(a.name)}')" title="Shareable trained copy for someone else — no bot token or members. Safe to email.">📤 Export (share)</button>`);
   }
   if (a.deepLink && a.state === 'RUNNING') {
     items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
@@ -1401,7 +1402,7 @@ async function loadSnapshots() {
           <span class="grow">🕘 <b>${esc(s.label)}</b>
             <span style="color:var(--dim)">${ago(s.createdAt)} · ${s.files.length} files${s.reason === 'manual' ? ' · kept' : ''}</span>
           </span>
-          <button onclick="restoreSnapshot('${s.id}', '${jsq(s.label)}')">Restore</button>
+          <button onclick="revertSnapshot('${s.id}', '${jsq(s.label)}')">Revert</button>
         </div>`).join('')
       : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -1419,11 +1420,11 @@ async function takeSnapshot() {
   finally { $('snapBtn').disabled = false; }
 }
 
-async function restoreSnapshot(snapId, label) {
-  if (!confirm(`Restore "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in Telegram).`)) return;
+async function revertSnapshot(snapId, label) {
+  if (!confirm(`Revert to "${label}"? The agent's SOUL, AGENTS and MEMORY files go back to that point. Its current files are snapshotted first, so this is undoable. Applies to new conversations (send /new in Telegram).`)) return;
   try {
     const res = await api(`/v1/agents/${editAgentId}/snapshots/${snapId}/restore`, { method: 'POST', body: {} });
-    toast(`Restored ${res.restored.join(', ')}`);
+    toast(`Reverted ${res.restored.join(', ')}`);
     await loadEditFile();
     await loadSnapshots();
   } catch (e) { $('editErr').textContent = e.message; }
@@ -2084,24 +2085,24 @@ async function openGateway(id, slug) {
   } catch (e) { toast(e.message); }
 }
 
-async function saveAgent(id, name) {
-  if (!confirm(`Save "${name}" to a file? It's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't email it). The agent is STOPPED here afterwards, so the copy you Load elsewhere is the only one talking to Telegram.`)) return;
+async function backupAgent(id, name) {
+  if (!confirm(`Back up "${name}" to a file? It's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't email it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
   // Same-origin navigation carries the session cookie; the browser downloads.
-  window.location.href = `/v1/agents/${id}/save`;
+  window.location.href = `/v1/agents/${id}/backup`;
   setTimeout(() => refresh(false), 2500);
 }
 
-async function loadAgentFile(file) {
+async function restoreAgentFile(file) {
   if (!file) return;
   try {
-    const res = await fetch('/v1/agents/load', {
+    const res = await fetch('/v1/agents/restore', {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: file,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || data.message || 'Load failed');
-    toast(`${data.name} loaded — booting`);
+    if (!res.ok) throw new Error(data.error || data.message || 'Restore failed');
+    toast(`${data.name} restored — booting`);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -2109,7 +2110,24 @@ async function loadAgentFile(file) {
 // Template = a shareable trained copy. Export downloads it; Import stands up a
 // fresh agent (you give it its own bot) and reports what it still needs.
 function exportTemplate(id) {
-  window.location.href = `/v1/agents/${id}/export`;
+  const inclMem = confirm(
+    "Include the agent's MEMORY in the shared copy?\n\n" +
+    "OK — a faithful copy (its learned knowledge; note memory may contain personal facts).\n" +
+    'Cancel — persona & instructions only.',
+  );
+  window.location.href = `/v1/agents/${id}/export${inclMem ? '' : '?excludeMemory=1'}`;
+}
+
+// Clone = a faithful local copy (memory included — you own both), with its own
+// bot and name; only you as owner.
+async function cloneAgent(id, name) {
+  const cn = prompt(`Name for the clone of "${name}":`, `${name} (copy)`);
+  if (cn === null) return;
+  try {
+    const res = await api(`/v1/agents/${id}/clone`, { method: 'POST', body: { name: cn } });
+    toast(`Cloned as "${res.name}" — connect its Telegram bot to finish`, 30000);
+    await refresh(true);
+  } catch (e) { toast(e.message, 30000); }
 }
 
 async function importTemplateFile(file) {

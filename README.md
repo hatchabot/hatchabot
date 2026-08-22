@@ -66,8 +66,8 @@ and lifecycle; OpenClaw runs the agent.
   in it — and everyone is told so. A personal agent's isn't.
 - **Portability.** **Rehost** an agent to another AgentClaw server in one step —
   it is preflight-checked, transferred with its memory, members and Telegram
-  identity, verified on arrival, and rolled back if anything fails. Or **Save**
-  it to a single file and **Load** it wherever you like.
+  identity, verified on arrival, and rolled back if anything fails. Or **Back up**
+  it to a single file and **Restore** it wherever you like.
 - **Share a trained agent.** Built a good one? **Export** it as a template — its
   persona and instructions, with *no* bot token, members, or memory — and send
   the file (it's safe to email). **Import** stands up a fresh copy the recipient
@@ -139,15 +139,15 @@ agentclaw list                          # state, model, last activity
 agentclaw create "Kitchen Helper"       # incl. the BotFather step if needed
 agentclaw logs "Kitchen Helper" -n 100
 agentclaw snapshot "Kitchen Helper" --label "before the big edit"
-agentclaw restore "Kitchen Helper" <snapshot-id>
+agentclaw revert "Kitchen Helper" <snapshot-id>
 
 # rehost an agent to another AgentClaw server, in one step
 agentclaw servers add Desktop http://desktop:8080 <token-from-that-server>
 agentclaw rehost "Kitchen Helper" Desktop
 
 # or move it by file
-agentclaw save "Kitchen Helper" -o kitchen.agentclaw
-agentclaw --url http://desktop:8080 load kitchen.agentclaw
+agentclaw backup "Kitchen Helper" -o kitchen.agentclaw
+agentclaw --url http://desktop:8080 restore kitchen.agentclaw
 ```
 
 `agentclaw help` lists every command. See

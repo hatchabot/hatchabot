@@ -1901,7 +1901,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // The archive contains the bot token — it IS the agent's identity — so the
   // download is a credential. The export leaves the agent STOPPED here: once
   // it's imported elsewhere, two pollers on one bot would flip-flop.
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/save', async (req, reply) => {
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/backup', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // A moved-away copy's archive carries the live bot token — refuse it.
@@ -1931,7 +1931,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   app.post<{ Querystring: { aiProfileId?: string; hostId?: string } }>(
-    '/v1/agents/load',
+    '/v1/agents/restore',
     async (req, reply) => {
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {
@@ -1969,24 +1969,51 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // A trained copy with NO identity (no token, members, or memory) — safe to
   // email. Export reads the agent's SOUL.md/AGENTS.md; Import stands up a FRESH
   // agent that provisions its own bot (pool or paste), owned by the importer.
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/export', async (req, reply) => {
-    const agent = ownedAgent(req, req.params.id);
-    if (!agent) return reply.code(404).send({ error: 'Not found' });
-    if (busyNow(agent, reply)) return reply;
-    try {
-      const { filename, data } = await exportTemplate(
-        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-        agent.id,
-      );
-      return reply
-        .type('application/octet-stream')
-        .header('content-disposition', `attachment; filename="${filename}"`)
-        .send(data);
-    } catch (err) {
-      if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
-      throw err;
-    }
-  });
+  app.get<{ Params: { id: string }; Querystring: { excludeMemory?: string } }>(
+    '/v1/agents/:id/export',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
+      try {
+        const { filename, data } = await exportTemplate(
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          agent.id,
+          { includeMemory: req.query.excludeMemory === undefined },
+        );
+        return reply
+          .type('application/octet-stream')
+          .header('content-disposition', `attachment; filename="${filename}"`)
+          .send(data);
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  // Clone: a faithful local copy (memory included — you own both copies, so
+  // there's no privacy concern), with a fresh identity: new name, its own bot,
+  // and only you as owner. Export → import, in one step, on this installation.
+  app.post<{ Params: { id: string }; Body: { name?: string } }>(
+    '/v1/agents/:id/clone',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
+      const deps = { store, provider: providerFor(agent.hostId), log: trace() };
+      try {
+        const { data } = await exportTemplate(deps, agent.id, { includeMemory: true });
+        const name = (req.body as { name?: string } | null)?.name?.trim() || `${agent.name} (copy)`;
+        const { agent: clone } = importTemplate(deps, data, { ownerId: ownerIdOf(req), name });
+        kickProvision(clone.id);
+        return reply.code(201).send(publicAgent(clone));
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
 
   app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string } }>(
     '/v1/agents/import',

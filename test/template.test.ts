@@ -43,11 +43,21 @@ describe('exportTemplate', () => {
     expect(m.ai.vendor).toBe('anthropic');
     expect(m.dataNeeds).toEqual([{ kind: 'git', access: 'ro', mountName: 'defs', repoUrl: 'git@github.com:o/defs.git' }]);
     expect(m.envNeeds).toEqual(['MARKETDATA_API_KEY']);
-    // No bot token, members, Telegram IDs, sessions, or memory anywhere.
+    // Memory travels by default (a faithful copy)…
+    expect(m.files['MEMORY.md']).toContain('TRAINED');
+    // …but no bot token, members, Telegram IDs, or conversation history do.
     const raw = JSON.stringify(m);
-    for (const leak of ['botToken', 'channel', 'memberships', 'family-1', '555111', 'MEMORY.md']) {
+    for (const leak of ['botToken', 'channel', 'memberships', 'family-1', '555111']) {
       expect(raw).not.toContain(leak);
     }
+  });
+
+  it('excludeMemory leaves MEMORY.md out', async () => {
+    const { store, provider } = await world();
+    const { data } = await exportTemplate({ store, provider }, 'a1', { includeMemory: false });
+    const m = parseTemplate(data);
+    expect(m.files['SOUL.md']).toBeDefined();
+    expect(m.files['MEMORY.md']).toBeUndefined();
   });
 
   it('refuses to export a stopped agent', async () => {
@@ -73,14 +83,28 @@ describe('importTemplate', () => {
     expect(needs.envVars).toEqual(['MARKETDATA_API_KEY']);
     expect(needs.dataSources).toHaveLength(1);
 
-    // The trained files are staged to seed at first provision…
+    // The trained files (incl. memory, by default) are staged to seed at first
+    // provision — a faithful copy of the parent.
     const seed = store.getAgentSeed(agent.id);
     expect(seed['SOUL.md']).toContain('TRAINED');
-    // …and the seed overrides SOUL/AGENTS but leaves a FRESH MEMORY.md.
+    expect(seed['MEMORY.md']).toContain('TRAINED');
     const files = buildWorkspaceSeed({ agentName: agent.name, slug: agent.slug, persona: '', sharedMemory: false, seedFiles: seed });
     expect(files['SOUL.md']).toContain('TRAINED');
-    expect(files['MEMORY.md']).toMatch(/Memory/);
-    expect(files['MEMORY.md']).not.toContain('TRAINED');
+    expect(files['MEMORY.md']).toContain('TRAINED');
+  });
+
+  it('an excluded-memory template seeds a FRESH MEMORY.md', () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p', createdAt: 'now' });
+    // Hand-craft a memory-less template.
+    const { gzipSync } = require('node:zlib');
+    const manifest = { format: 'agentclaw-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Bare', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': '# SOUL', 'AGENTS.md': '# AGENTS' }, ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [] };
+    const { agent } = importTemplate({ store, provider: new MockProvider() }, gzipSync(Buffer.from(JSON.stringify(manifest))), { ownerId: 'o' });
+    const files = buildWorkspaceSeed({ agentName: agent.name, slug: agent.slug, persona: '', sharedMemory: false, seedFiles: store.getAgentSeed(agent.id) });
+    expect(files['MEMORY.md']).toMatch(/Memory/); // generated default, not carried
   });
 
   it('rejects a non-template / corrupt file', () => {

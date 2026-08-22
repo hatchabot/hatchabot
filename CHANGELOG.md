@@ -2,6 +2,29 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.17.0] — 2026-08-22
+
+### Added
+- **Clone an agent.** Duplicate an agent on the same machine — a **faithful**
+  copy (memory included; you own both, so there's no privacy concern) with its
+  own bot and a new name, owned by you. Card ⋯ menu, or `agentclaw clone`.
+  `POST /v1/agents/:id/clone`.
+
+### Changed
+- **Clearer transfer names** — the save/export/load/import pairs were near-
+  synonyms. Now four intents map to four distinct verbs: **Clone · Rehost · Back
+  up · Export.**
+  - **Save / Load → Back up / Restore** — a complete private copy of an agent to
+    a file and back. `/v1/agents/:id/backup`, `/v1/agents/restore`; CLI `backup`
+    / `restore`.
+  - The file-history snapshot **"Restore" → "Revert"** — freeing "Restore" for
+    the above, and a better word for undoing an edit. CLI `revert`.
+  - Unchanged: **Rehost** (server→server), **Export / Import** (share a template).
+- **Templates now include memory by default** — a faithful copy of the parent —
+  with an opt-out ("persona & instructions only") for when the memory is personal
+  and headed to someone else (`?excludeMemory` on the export).
+- **Install app** moved to the header's account row (it's not an agent action).
+
 ## [0.16.0] — 2026-08-22
 
 ### Added

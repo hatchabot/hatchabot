@@ -71,7 +71,7 @@ describe('busy agents answer 409 on lifecycle routes', () => {
     { method: 'POST' as const, url: '/v1/agents/a1/rebuild' },
     { method: 'POST' as const, url: '/v1/agents/a1/provision' },
     { method: 'DELETE' as const, url: '/v1/agents/a1' },
-    { method: 'GET' as const, url: '/v1/agents/a1/save' },
+    { method: 'GET' as const, url: '/v1/agents/a1/backup' },
   ]) {
     it(`${call.method} ${call.url}`, async () => {
       const { f } = await world();
@@ -108,7 +108,7 @@ describe('moved-away agents cannot be resurrected', () => {
     const { store, f } = await world();
     store.setAgentState('a1', 'STOPPED');
     store.setAgentMigratedTo('a1', 'Desktop (2026-08-06)');
-    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/save', headers: as });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/backup', headers: as });
     expect(res.statusCode).toBe(409);
     expect(res.json().error).toMatch(/moved to Desktop/);
   });

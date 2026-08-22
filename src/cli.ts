@@ -4,8 +4,8 @@
  * HTTP API. Exists for the things a browser is clumsy at: scripting, remote
  * management, and above all moving agents between machines:
  *
- *   laptop$  agentclaw save kitchen-helper -o kitchen.agentclaw
- *   desktop$ agentclaw load kitchen.agentclaw
+ *   laptop$  agentclaw backup kitchen-helper -o kitchen.agentclaw
+ *   desktop$ agentclaw restore kitchen.agentclaw
  *
  * Config: AGENTCLAW_URL (default http://localhost:8080) and
  * AGENTCLAW_PASSWORD, or --url/--password flags.
@@ -66,16 +66,18 @@ Commands:
                                is empty.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
-  save <agent> [-o <file>]     Save an agent to a portable .agentclaw file — a
+  backup <agent> [-o <file>]   Back up an agent to a portable .agentclaw file — a
                                complete private copy (contains its bot token —
                                treat as a secret; the agent is left STOPPED)
-  load <file> [--profile <aiProfileId>] [--host <id>]
-                               Load a saved agent and boot it
+  restore <file> [--profile <aiProfileId>] [--host <id>]
+                               Restore an agent from a backup file and boot it
   export <agent> [-o <file>]   Export a shareable TEMPLATE — the agent's trained
-                               SOUL/AGENTS, no bot token, members, or memory
+                               SOUL/AGENTS (+memory), no bot token or members
   import <file> [--name <n>] [--profile <aiProfileId>]
                                Import a template as a fresh agent (you give it
                                its own bot); prints what it still needs
+  clone <agent> [new name]     Duplicate an agent here — a faithful copy with its
+                               own bot and name
   start|stop|rebuild <agent>   Lifecycle controls
   retry <agent>                Retry a FAILED agent's provisioning
   rename <agent> <new name>    Change the display name
@@ -107,7 +109,7 @@ Commands:
   snapshot <agent> [--label <text>]
                                Save a restore point of SOUL/AGENTS/MEMORY
   snapshots <agent>            List restore points
-  restore <agent> <snapshotId> Roll those files back (current state is saved first)
+  revert <agent> <snapshotId>  Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
   health <agent>               Live gateway health — is it actually answering
@@ -874,30 +876,30 @@ async function main() {
       }
       return;
     }
-    case 'save': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw save <agent> [-o file]'));
-      const res = await api(ctx, `/v1/agents/${a.id}/save`);
+    case 'backup': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw backup <agent> [-o file]'));
+      const res = await api(ctx, `/v1/agents/${a.id}/backup`);
       const out = flags.get('out') ?? `${a.slug}.agentclaw`;
       await writeFile(out, Buffer.from(await res.arrayBuffer()));
-      console.log(`saved to ${out}`);
+      console.log(`backed up to ${out}`);
       console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
-      console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once loaded elsewhere.`);
+      console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once restored elsewhere.`);
       return;
     }
-    case 'load': {
-      const file = rest[0] ?? fail('usage: agentclaw load <file> [--profile <aiProfileId>]');
+    case 'restore': {
+      const file = rest[0] ?? fail('usage: agentclaw restore <file> [--profile <aiProfileId>]');
       const data = await readFile(file);
       const params = new URLSearchParams();
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
       if (flags.has('host')) params.set('hostId', flags.get('host')!);
       const q = params.size ? `?${params}` : '';
-      const res = await api(ctx, `/v1/agents/load${q}`, {
+      const res = await api(ctx, `/v1/agents/restore${q}`, {
         method: 'POST',
         headers: { 'content-type': 'application/octet-stream' },
         body: data,
       });
       const agent: any = await res.json();
-      console.log(`loaded "${agent.name}" (${agent.state})`);
+      console.log(`restored "${agent.name}" (${agent.state})`);
       return;
     }
     case 'export': { // template — a shareable trained copy (no identity)
@@ -931,6 +933,13 @@ async function main() {
       }
       return;
     }
+    case 'clone': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw clone <agent> [new name]'));
+      const name = rest.slice(1).join(' ').trim() || `${a.name} (copy)`;
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/clone`, { name })).json();
+      console.log(`cloned "${a.name}" → "${res.name}" (${res.state}) — connect its Telegram bot to finish.`);
+      return;
+    }
     case 'start':
     case 'stop':
     case 'rebuild': {
@@ -959,12 +968,12 @@ async function main() {
       }
       return;
     }
-    case 'restore': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw restore <agent> <snapshotId>'));
+    case 'revert': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw revert <agent> <snapshotId>'));
       const snapId = rest[1] ?? fail('give the snapshot id (see: agentclaw snapshots)');
       const res: any = await (await jsonPost(`/v1/agents/${a.id}/snapshots/${snapId}/restore`, {})).json();
-      console.log(`restored ${res.restored.join(', ')}`);
-      if (res.safetySnapshotId) console.log(`undo with: agentclaw restore "${a.name}" ${res.safetySnapshotId}`);
+      console.log(`reverted ${res.restored.join(', ')}`);
+      if (res.safetySnapshotId) console.log(`undo with: agentclaw revert "${a.name}" ${res.safetySnapshotId}`);
       console.log('applies to new conversations — send /new in Telegram');
       return;
     }
