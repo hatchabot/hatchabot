@@ -9,6 +9,14 @@ import {
   disableOpenclawBot,
   quiesceOpenclawBots,
 } from '../src/orchestrator/openclawImport.js';
+import type { SecretStore } from '../src/secrets/secretStore.js';
+
+class MemSecrets implements SecretStore {
+  private m = new Map<string, string>();
+  async put(ref: string, val: string) { this.m.set(ref, val); }
+  async get(ref: string) { const v = this.m.get(ref); if (v === undefined) throw new Error(`no secret ${ref}`); return v; }
+  async delete(ref: string) { this.m.delete(ref); }
+}
 
 const root = mkdtempSync(join(tmpdir(), 'acl-oc-'));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -37,8 +45,8 @@ function writeConfig(path: string) {
       channels: {
         telegram: {
           accounts: {
-            a1bot: { botToken: 'tok-a1', enabled: true, allowFrom: ['123', 'not-a-number'] },
-            adoptedbot: { botToken: 'tok-adopted', enabled: true },
+            a1bot: { botToken: '111:aaa', enabled: true, allowFrom: ['123', 'not-a-number'] },
+            adoptedbot: { botToken: '222:bbb', enabled: true },
           },
         },
       },
@@ -46,20 +54,26 @@ function writeConfig(path: string) {
   );
 }
 
-function storeWithAdopted() {
+async function storeWithAdopted() {
   const store = new Store(new Database(':memory:'));
+  const secrets = new MemSecrets();
   store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
   store.insertAgent({ id: 'x1', ownerId: 'o', name: 'Already Here', slug: 'already-here', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
-  store.insertChannel({ id: 'c1', agentId: 'x1', kind: 'telegram', accountId: 'adoptedbot', secretRef: 'chan/x1', deepLink: 'https://t.me/adoptedbot', createdAt: 'now' });
-  return store;
+  // The channel's account_id is the REAL @username, deliberately different from
+  // OpenClaw's config key "adoptedbot" — but the token has the same bot-id (222),
+  // which is what discovery must match on.
+  store.insertChannel({ id: 'c1', agentId: 'x1', kind: 'telegram', accountId: 'RealAdoptedName', secretRef: 'chan/x1', deepLink: 'https://t.me/RealAdoptedName', createdAt: 'now' });
+  await secrets.put('chan/x1', '222:zzz');
+  return { store, secrets };
 }
 
 describe('discoverOpenclawAgents', () => {
-  it('lists agents with bot, adoption status, and a missing-folder flag', () => {
+  it('lists agents, and matches an already-imported one by bot-id even when relabelled', async () => {
     const cfg = join(root, 'discover.json');
     writeConfig(cfg);
-    const agents = discoverOpenclawAgents({ store: storeWithAdopted() }, cfg);
+    const { store, secrets } = await storeWithAdopted();
+    const agents = await discoverOpenclawAgents({ store, secrets }, cfg);
     const by = Object.fromEntries(agents.map((a) => [a.id, a]));
 
     expect(by['tech-advisor']).toMatchObject({
@@ -73,12 +87,14 @@ describe('discoverOpenclawAgents', () => {
     expect(by['ghost']!.bot).toBeUndefined();
     expect(by['ghost']!.problem).toMatch(/missing/);
 
-    // already brought into AgentClaw on that bot
+    // config key "adoptedbot" ≠ stored @username "RealAdoptedName", but the
+    // bot-id (222) matches → still recognised as already imported
     expect(by['stock-advisor']!.alreadyAdoptedAs).toBe('Already Here');
   });
 
-  it('returns [] when the config is unreadable', () => {
-    expect(discoverOpenclawAgents({ store: storeWithAdopted() }, join(root, 'nope.json'))).toEqual([]);
+  it('returns [] when the config is unreadable', async () => {
+    const { store, secrets } = await storeWithAdopted();
+    expect(await discoverOpenclawAgents({ store, secrets }, join(root, 'nope.json'))).toEqual([]);
   });
 });
 
@@ -108,9 +124,9 @@ describe('quiesceOpenclawBots', () => {
   it('disables each bot, restarts once, and reports which went quiet', async () => {
     const cfg = join(root, 'quiesce.json');
     writeConfig(cfg);
-    // getUpdates stub: a1's token is quiet, adopted's token stays busy (409).
+    // getUpdates stub: a1's token (111) is quiet, adopted's (222) stays busy.
     const fetchImpl = (async (url: string | URL) => {
-      const busy = String(url).includes('tok-adopted');
+      const busy = String(url).includes('bot222:');
       return busy
         ? { status: 409, json: async () => ({ error_code: 409 }) }
         : { status: 200, json: async () => ({ ok: true }) };

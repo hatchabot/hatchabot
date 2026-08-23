@@ -1846,7 +1846,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    *  owner can bring them in without hunting down workspace paths. */
   app.get('/v1/openclaw/agents', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    return { agents: discoverOpenclawAgents({ store }) };
+    return { agents: await discoverOpenclawAgents({ store, secrets }) };
   });
 
   /** Disable the named bots in OpenClaw and restart its gateway once, so their

@@ -10,6 +10,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { botPollState } from './adopt.js';
+import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 
 /** Same default location adopt uses; overridable for tests and odd installs. */
@@ -64,11 +65,38 @@ function friendlyName(id: string, workspace: string): string {
   return base.replace(/\b\w/g, (c) => c.toUpperCase()) || id;
 }
 
+/** The stable identity of a Telegram bot is the number before the ':' in its
+ *  token, not its username — and definitely not the label a config gives the
+ *  account. Match on that so an already-imported agent is recognised even when
+ *  OpenClaw's account key differs from the real @username AgentClaw stored. */
+function botIdOf(token: string | undefined): string | undefined {
+  const id = token?.split(':')[0]?.trim();
+  return id || undefined;
+}
+
 /** Every OpenClaw agent in the config, annotated with its bot and whether it's
- *  already been brought into AgentClaw. */
-export function discoverOpenclawAgents(deps: { store: Store }, configPath = openclawConfigPath()): OpenclawAgent[] {
+ *  already been brought into AgentClaw (matched by bot-token id, so a relabelled
+ *  account still resolves). */
+export async function discoverOpenclawAgents(
+  deps: { store: Store; secrets: SecretStore },
+  configPath = openclawConfigPath(),
+): Promise<OpenclawAgent[]> {
   const cfg = readCfg(configPath);
   if (!cfg) return [];
+
+  // Map every AgentClaw Telegram bot's token-id to the agent using it.
+  const adoptedByBotId = new Map<string, string>();
+  for (const ag of deps.store.listAllActiveAgents()) {
+    const ch = deps.store.getChannelForAgent(ag.id);
+    if (!ch || ch.kind !== 'telegram') continue;
+    try {
+      const id = botIdOf(await deps.secrets.get(ch.secretRef));
+      if (id) adoptedByBotId.set(id, ag.name);
+    } catch {
+      /* token unreadable — just can't match this one */
+    }
+  }
+
   const out: OpenclawAgent[] = [];
   for (const a of cfg.agents?.list ?? []) {
     const workspace = a.workspace ?? a.agentDir;
@@ -86,13 +114,13 @@ export function discoverOpenclawAgents(deps: { store: Store }, configPath = open
             allowFrom: (account.allowFrom ?? []).filter((id) => /^\d{1,32}$/.test(id)),
           }
         : undefined;
-    const adopted = bot ? deps.store.findAgentUsingAccount(bot.accountId) : undefined;
+    const botId = botIdOf(account?.botToken);
     out.push({
       id: a.id,
       workspace: ws,
       name: friendlyName(a.id, ws),
       bot,
-      alreadyAdoptedAs: adopted?.name,
+      alreadyAdoptedAs: botId ? adoptedByBotId.get(botId) : undefined,
       problem: existsSync(ws) ? undefined : 'workspace folder is missing',
     });
   }

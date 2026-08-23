@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.22.1] — 2026-08-23
+
+### Fixed
+- **Discovery now recognises an already-imported OpenClaw agent even when its
+  bot was relabelled.** It matched on the OpenClaw config's account key, but that
+  key is a user-chosen label — the real Telegram @username (what AgentClaw stores)
+  can differ (e.g. `lgfgghllbot` vs `LgFgGhIlBot`). It now matches on the bot
+  token's id, the bot's true identity, so a brought-in agent is correctly shown
+  as already in AgentClaw regardless of labels.
+
 ## [0.22.0] — 2026-08-23
 
 ### Added
