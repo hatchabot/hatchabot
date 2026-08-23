@@ -880,6 +880,24 @@ async function main() {
       // status columns line up no matter how long a bot handle is.
       const allBots = hosts.flatMap((h: any) => (h.error ? [] : h.bots));
       const uw = Math.max(10, ...allBots.map((b: any) => `@${b.username ?? '?'}`.length));
+
+      // Same handle in more than one place = a bot that moved between agents or
+      // hosts (a rehost/adopt leftover). Map every occurrence so each such line
+      // can point at the others.
+      const places = new Map<string, Array<{ host: string; agent: string; state: string }>>();
+      for (const h of hosts) {
+        if (h.error) continue;
+        for (const b of h.bots) {
+          if (!b.username) continue;
+          const at = { host: h.host, agent: b.agentName ?? b.source, state: b.state ?? '?' };
+          const cur = places.get(b.username);
+          if (cur) cur.push(at);
+          else places.set(b.username, [at]);
+        }
+      }
+      const movedCount = [...places.values()].filter((v) => v.length > 1).length;
+
+      let idx = 0;
       let total = 0;
       let reclaim = 0;
       let dead = 0;
@@ -897,12 +915,20 @@ async function main() {
               (b.polling && b.polling !== 'unknown' ? `,${b.polling === 'busy' ? 'polled' : 'idle'}` : '')
             : '';
           const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
+          const others = (places.get(b.username) ?? []).filter(
+            (o) => !(o.host === h.host && o.agent === (b.agentName ?? b.source)),
+          );
+          const moved = others.length
+            ? `  ⇄ also ${others.map((o) => `${o.host}:${o.agent}[${o.state}]`).join(', ')}`
+            : '';
           const uname = `@${b.username ?? '?'}`.padEnd(uw);
-          console.log(`  ${uname}  ${tag.padEnd(11)}${live ? `  ${live_.padEnd(13)}` : '  '}${who}`);
+          const n = `${String(++idx)}.`.padStart(4);
+          console.log(`${n} ${uname}  ${tag.padEnd(11)}${live ? `  ${live_.padEnd(13)}` : '  '}${who}${moved}`);
         }
-        if (h.mgmtBotConfigured) console.log(`  ${'(mgmt bot)'.padEnd(uw)}  ${'in use'.padEnd(11)}${live ? '  ' + ''.padEnd(13) : '  '}management bot — token stored outside the registry`);
+        if (h.mgmtBotConfigured)
+          console.log(`${`${String(++idx)}.`.padStart(4)} ${'(mgmt bot)'.padEnd(uw)}  ${'in use'.padEnd(11)}${live ? '  ' + ''.padEnd(13) : '  '}management bot — token stored outside the registry`);
       }
-      console.log(`\n${total} bot(s) known · ${reclaim} reclaimable · ${dead} dead`);
+      console.log(`\n${idx} line(s) · ${reclaim} reclaimable · ${dead} dead${movedCount ? ` · ${movedCount} bot(s) shared across agents/hosts (⇄)` : ''}`);
       console.log(`Telegram won't list your bots — open @BotFather → /mybots and /deletebot any not shown above.`);
       console.log(`Not counted here: OpenClaw's own bots — check with:  openclaw config get channels.telegram.accounts`);
       return;

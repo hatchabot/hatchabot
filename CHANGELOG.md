@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.21.2] — 2026-08-23
+
+### Added
+- **`agentclaw bots` now numbers each line and flags shared bots.** A handle that
+  appears in more than one place — the same bot on two hosts, or reused by a
+  different agent — gets a `⇄ also …` marker pointing at the other occurrences,
+  which surfaces rehost/adopt leftovers (e.g. an agent left STOPPED on the old
+  host still bound to a bot the new host now polls). The summary counts them.
+
 ## [0.21.1] — 2026-08-23
 
 ### Fixed
