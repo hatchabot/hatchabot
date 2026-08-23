@@ -60,6 +60,15 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     return row.n;
   }
 
+  /** Every pool bot with its lease state and token ref — for the bot audit. */
+  list(): Array<{ username: string; secretRef: string; leasedTo?: string }> {
+    return (
+      this.db
+        .prepare(`SELECT username, secret_ref, leased_to FROM telegram_pool ORDER BY username`)
+        .all() as Array<{ username: string; secret_ref: string; leased_to: string | null }>
+    ).map((r) => ({ username: r.username, secretRef: r.secret_ref, leasedTo: r.leased_to ?? undefined }));
+  }
+
   async provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel> {
     // Idempotent: a retry after a partial failure finds the existing lease.
     const existing = this.db

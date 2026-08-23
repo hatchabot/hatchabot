@@ -35,6 +35,7 @@ import {
   RestoreError,
   startBackup,
 } from '../orchestrator/backups.js';
+import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
@@ -609,6 +610,42 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.get('/v1/pool', async () => {
     return { availableBots: deps.channel.pool.availableCount() };
+  });
+
+  // A Telegram-bot census: this install's bots (and, with ?consolidated=1, each
+  // registered peer's) so the owner can spot idle slots. ?live=1 adds a Telegram
+  // getMe/poll check per bot — slower, and it touches the network.
+  app.get<{ Querystring: { live?: string; consolidated?: string } }>('/v1/bots', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const ownerId = ownerIdOf(req);
+    const live = req.query.live === '1' || req.query.live === 'true';
+    const hostName = store.listHosts(ownerId).find((h) => h.kind === 'local')?.name ?? 'this server';
+    const local = await auditBots({ store, secrets, pool: deps.channel.pool, hostName }, ownerId, { live });
+    const hosts: HostBots[] = [local];
+
+    if (req.query.consolidated === '1' || req.query.consolidated === 'true') {
+      for (const peer of store.listPeers(ownerId)) {
+        try {
+          const token = await secrets.get(peer.secretRef);
+          // NOT consolidated — the peer returns only its own install, so a ring
+          // of peers can't recurse or double-count.
+          const res = await fetch(`${peer.url.replace(/\/$/, '')}/v1/bots?live=${live ? 1 : 0}`, {
+            headers: { authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!res.ok) {
+            hosts.push({ host: peer.name, bots: [], mgmtBotConfigured: false, error: `answered ${res.status}` });
+            continue;
+          }
+          const body = (await res.json()) as { hosts?: HostBots[] };
+          const peerLocal = body.hosts?.[0];
+          hosts.push(peerLocal ? { ...peerLocal, host: peer.name } : { host: peer.name, bots: [], mgmtBotConfigured: false, error: 'no data' });
+        } catch (err) {
+          hosts.push({ host: peer.name, bots: [], mgmtBotConfigured: false, error: `unreachable (${String((err as Error)?.message ?? err).slice(0, 60)})` });
+        }
+      }
+    }
+    return { hosts };
   });
 
   app.post('/v1/ai-profiles', async (req, reply) => {
@@ -1746,11 +1783,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get('/v1/backups', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     // Match each backed-up volume to a live agent so the panel can offer a
-    // per-agent Restore (and show its real name). A tarball with no matching
-    // agent — one that's since been deleted — carries no agentId and gets no
-    // Restore button.
-    const mine = store.listVisibleAgents(ownerIdOf(req));
-    const byArchive = new Map(mine.filter((a) => a.runtimeRef).map((a) => [agentArchiveName(a.runtimeRef!), a]));
+    // per-agent Restore (and show its real name). Backups are machine-level (the
+    // nightly script captures EVERY volume, across all owners) and this route is
+    // already gated to the machine owner — so match against every active agent,
+    // not just the caller's. Scoping to the caller made a family host's other
+    // owners' agents all show up as "deleted".
+    const all = store.listAllActiveAgents();
+    const byArchive = new Map(all.filter((a) => a.runtimeRef).map((a) => [agentArchiveName(a.runtimeRef!), a]));
     const backups = listBackups().map((set) => ({
       ...set,
       volumes: set.volumes.map((v) => {
@@ -1784,8 +1823,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     const { agentId, date } = (req.body as { agentId?: string; date?: string } | null) ?? {};
     if (!agentId || !date) return reply.code(400).send({ error: 'agentId and date are required.' });
-    const agent = ownedAgent(req, agentId);
-    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    // Machine-level, like the panel above: the host owner can restore any agent
+    // on this box, not only ones they personally own.
+    const agent = store.getAgent(agentId);
+    if (!agent || agent.state === 'DELETED') return reply.code(404).send({ error: 'Not found' });
     if (busyNow(agent, reply)) return reply;
     try {
       return await whileBusy(agent.id, () =>

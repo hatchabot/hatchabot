@@ -59,6 +59,9 @@ Commands:
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
   list                         Agents with state, model, and last activity
+  bots [--check]               Every Telegram bot this + your registered servers
+                               use, flagging reclaimable/dead slots. --check adds
+                               a live Telegram probe per bot.
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
          [--private] [--bot-token <tok>]
                                Create an agent and wait for it to boot.
@@ -232,7 +235,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -863,6 +866,41 @@ async function main() {
       const userId = rest[1] ?? fail('give the member userId (see: agentclaw members)');
       await api(ctx, `/v1/agents/${a.id}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });
       console.log('member revoked');
+      return;
+    }
+    case 'bots': {
+      // Consolidated across registered servers, so you see every slot in one
+      // place. --check adds a live Telegram getMe/poll probe per bot.
+      const live = flags.has('check');
+      const { hosts } = (await (
+        await api(ctx, `/v1/bots?consolidated=1&live=${live ? 1 : 0}`)
+      ).json()) as { hosts: any[] };
+      const order: Record<string, number> = { 'in-use': 0, reclaimable: 1, dead: 2 };
+      let total = 0;
+      let reclaim = 0;
+      let dead = 0;
+      for (const h of hosts) {
+        console.log(`\n${h.host}${h.error ? `  — ${h.error}` : ''}`);
+        if (h.error) continue;
+        if (!h.bots.length) console.log('  (no Telegram bots)');
+        for (const b of [...h.bots].sort((x, y) => (order[x.cls] ?? 9) - (order[y.cls] ?? 9))) {
+          total++;
+          if (b.cls === 'reclaimable') reclaim++;
+          if (b.cls === 'dead') dead++;
+          const tag = b.cls === 'in-use' ? 'in use' : b.cls === 'dead' ? 'DEAD' : 'reclaimable';
+          const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
+          const liveBits = live
+            ? `  ${b.valid === false ? 'token invalid' : 'valid'}${
+                b.polling && b.polling !== 'unknown' ? `, ${b.polling === 'busy' ? 'being polled' : 'idle'}` : ''
+              }`
+            : '';
+          console.log(`  @${String(b.username ?? '?').padEnd(22)} ${tag.padEnd(12)} ${who}${liveBits}`);
+        }
+        if (h.mgmtBotConfigured) console.log('  + a management bot (token stored outside the registry)');
+      }
+      console.log(`\n${total} bot(s) known · ${reclaim} reclaimable · ${dead} dead`);
+      console.log(`Telegram won't list your bots — open @BotFather → /mybots and /deletebot any not shown above.`);
+      console.log(`Not counted here: OpenClaw's own bots — check with:  openclaw config get channels.telegram.accounts`);
       return;
     }
     case 'list': {

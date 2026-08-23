@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.21.0] — 2026-08-23
+
+### Added
+- **`agentclaw bots` — a Telegram-bot census** to find slots you can reclaim.
+  Telegram has no API to list the bots an account owns, so the tool enumerates
+  every bot this install (and, consolidated, each registered peer server) uses,
+  classified **in-use** (a RUNNING agent) / **reclaimable** (a stopped/failed
+  agent, or an unleased pool bot) / **dead** (`--check` asks Telegram and the
+  token is invalid). `--check` adds a live `getMe`/poll probe — and never
+  poll-probes a RUNNING agent's bot, so a live poller is undisturbed. Prints a
+  reminder that OpenClaw's own bots and `@BotFather → /mybots` are outside its
+  view. New `GET /v1/bots` (machine-owner-gated, with `?live` / `?consolidated`).
+
+### Fixed
+- **Backups panel showed every agent as "deleted" with no Restore**, on a host
+  with agents across more than one owner (e.g. a family fleet). The panel is
+  machine-owner-gated and backups are machine-level — every volume, all owners —
+  but the volume→agent match was scoped to the *caller's* agents, so anyone
+  else's showed unmatched. Match against all active agents now; restore likewise
+  lets the host owner restore any agent on the box, not only ones they own.
+- **"Back up now" moved to the top** of the Backups panel, above the list.
+
 ## [0.20.0] — 2026-08-23
 
 ### Added
