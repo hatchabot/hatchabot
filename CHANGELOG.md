@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.21.4] — 2026-08-23
+
+### Fixed
+- **Multi-line command blocks (`.invite-link`) collapsed onto one line.** The
+  hand-over steps in the adopt dialog put the two `openclaw`/`systemctl` commands
+  on separate lines, but the element's default `white-space` folded the newline
+  into a space — so they ran together and couldn't be pasted as-is. Added
+  `white-space: pre-wrap`; single-line uses (tokens, invite URLs) are unchanged.
+
 ## [0.21.3] — 2026-08-23
 
 ### Fixed
