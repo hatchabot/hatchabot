@@ -1273,12 +1273,18 @@ function agentCard(a) {
         <button onclick="openDefinition('${a.id}', '${jsq(a.name)}')" title="Name, persona & memory">📖 Definition</button>
         <button onclick="openConfiguration('${a.id}', '${jsq(a.name)}')" title="AI, data, secrets, bot">⚙ Configuration</button>
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
+      <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
+      ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
+      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
+        ? `<button onclick="downloadAgent('${a.id}', '${jsq(a.name)}')" title="Download a complete private copy (bot token, members, memory) — for your own keeping, don't share it">Download</button>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
+      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
+        ? `<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another AgentClaw server in one step">Rehost</button>` : ''}
+      <!-- lifecycle -->
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>
-           <button onclick="backupAgent('${a.id}', '${jsq(a.name)}')" title="Back up this agent to a file — a complete private copy (bot token, members, memory)">Back up</button>
-           <button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Rehost — move this agent to another AgentClaw server in one step">Rehost</button>` : ''}
+        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
@@ -1299,10 +1305,6 @@ function cardMenu(a) {
   }
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
-  }
-  if (a.state === 'RUNNING') {
-    items.push(`<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>`);
-    items.push(`<button onclick="exportTemplate('${a.id}', '${jsq(a.name)}')" title="Shareable trained copy for someone else — no bot token or members. Safe to email.">📤 Export (share)</button>`);
   }
   if (a.deepLink && a.state === 'RUNNING') {
     items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
@@ -2085,8 +2087,8 @@ async function openGateway(id, slug) {
   } catch (e) { toast(e.message); }
 }
 
-async function backupAgent(id, name) {
-  if (!confirm(`Back up "${name}" to a file? It's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't email it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
+async function downloadAgent(id, name) {
+  if (!confirm(`Download "${name}"? It's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
   // Same-origin navigation carries the session cookie; the browser downloads.
   window.location.href = `/v1/agents/${id}/backup`;
   setTimeout(() => refresh(false), 2500);
@@ -2107,9 +2109,9 @@ async function restoreAgentFile(file) {
   } catch (e) { toast(e.message, 30000); }
 }
 
-// Template = a shareable trained copy. Export downloads it; Import stands up a
-// fresh agent (you give it its own bot) and reports what it still needs.
-function exportTemplate(id) {
+// Share = a trained copy for someone else. It downloads a file (you send it);
+// the recipient's Import stands up a fresh agent with its own bot.
+function shareTemplate(id) {
   const inclMem = confirm(
     "Include the agent's MEMORY in the shared copy?\n\n" +
     "OK — a faithful copy (its learned knowledge; note memory may contain personal facts).\n" +

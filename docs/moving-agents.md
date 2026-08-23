@@ -112,9 +112,9 @@ What happens, in order:
 1. **Preflight** — the destination is asked whether it *would* accept: is the
    agent id free, is that bot already wired to something there, does it have a
    host and an AI source. Nothing has changed yet, so a refusal costs nothing.
-2. **Export** — the agent is snapshotted and **stopped** here. From this moment
-   nothing is polling its bot.
-3. **Import** — the destination provisions and starts it. It is now the only
+2. **Package & stop** — the agent is snapshotted and **stopped** here. From this
+   moment nothing is polling its bot.
+3. **Provision** — the destination brings it up and starts it. It is now the only
    copy running.
 4. **Verify** — if it did not come up there, the move is undone.
 
@@ -139,22 +139,22 @@ Then, from anywhere:
 
 ```sh
 # on the source (or remotely, with --url):
-agentclaw save kitchen-helper -o kitchen.agentclaw
+agentclaw download kitchen-helper -o kitchen.agentclaw
 
 # copy the file over (scp, tailscale file cp, USB stick — it's just a file)
 
 # on the target:
-agentclaw load kitchen.agentclaw
+agentclaw restore kitchen.agentclaw
 ```
 
-The web app can do the same: **Back up** on the agent card, **Restore** in the
+The web app can do the same: **Download** on the agent card, **Restore** in the
 header.
 
 ## Rules of the road
 
 - **The file is a credential.** It contains the agent's Telegram bot token.
   Treat it like a password; delete it after a successful import.
-- **One poller per bot.** Export leaves the source agent STOPPED. Keep it
+- **One poller per bot.** Download leaves the source agent STOPPED. Keep it
   that way (or delete it) once the import is live — two copies polling the
   same bot flip-flop messages between them. Telegram needs no changes:
   bots connect outbound from wherever they run.
@@ -166,28 +166,32 @@ header.
 - Importing where a same-slug agent already *lives* is refused; a previously
   deleted agent's tombstone doesn't block a re-import.
 
-## Share a trained copy — Export / Import (templates)
+## Share a trained copy — Share / Import (templates)
 
-Back up/Restore and Rehost move **the same agent** — same bot, same people, same
+Download/Restore and Rehost move **the same agent** — same bot, same people, same
 memory. To hand someone a copy of an agent you *built and trained*, use a
-**template** instead (**Export** on the agent card's ⋯ menu; **Import** in the
-header, or `agentclaw export` / `import`).
+**template** instead (**Share** on the agent card's ⋯ menu; **Import** in the
+header, or `agentclaw share` / `import`).
 
 A template is deliberately **stripped of identity**, so it's safe to email:
 
 | Carried | Left out |
 |---|---|
 | the trained **`SOUL.md` + `AGENTS.md`** | the **bot token** |
-| the AI **vendor** preference | all **members** and their Telegram IDs |
-| a checklist of **data sources & env-var names** it expects | conversation history |
-| — | **memory** (`MEMORY.md`) — excluded by default |
+| the agent's **`MEMORY.md`** (a faithful copy — opt out for "instructions only") | all **members** and their Telegram IDs |
+| the AI **vendor** preference | conversation history |
+| a checklist of **data sources & env-var names** it expects | — |
 
 **Import stands up a fresh agent.** The importer owns it, gives it its **own**
 bot (a pool bot or a pasted BotFather token — the normal create flow), binds
-their **own** AI source, and invites their **own** people. The trained
-`SOUL.md`/`AGENTS.md` seed the new agent at first provision. Import then prints
-what the agent still needs — any data sources or env vars the template declared —
-for the recipient to wire up in **⚙ Configuration**.
+their **own** AI source, and invites their **own** people. The trained files
+seed the new agent at first provision. Import then prints what the agent still
+needs — any data sources or env vars the template declared — for the recipient
+to wire up in **⚙ Configuration**.
 
-Back up/Restore = "the same agent, elsewhere." Export/Import = "a trained copy, for
+*Note on memory:* it's included by default so the copy is faithful. If the
+memory holds personal facts (or, on a shared-memory agent, `source:<telegram_id>`
+tags), choose "instructions only" when Sharing, or curate `MEMORY.md` first.
+
+Download/Restore = "the same agent, elsewhere." Share/Import = "a trained copy, for
 someone else."

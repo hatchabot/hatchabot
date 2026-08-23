@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.17.1] — 2026-08-23
+
+### Changed
+- **Clearer labels for the two file tools**, by audience: **Back up → Download**
+  ("a copy of this agent, for me") and **Export → Share** ("a copy of its
+  training, for someone else"). CLI gains `download` / `share` (with `backup` /
+  `export` kept as aliases); endpoints unchanged. Final set of verbs:
+  **Clone · Rehost · Download/Restore · Share/Import**.
+- **The copy/move actions are grouped on the card's front row**, in order —
+  **Clone · Download · Share · Rehost** — instead of being split between the row
+  and the ⋯ menu. The ⋯ menu now holds only observability (Usage, Health, Logs,
+  OpenClaw, Telegram Web).
+
 ## [0.17.0] — 2026-08-22
 
 ### Added

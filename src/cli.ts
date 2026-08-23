@@ -66,13 +66,13 @@ Commands:
                                is empty.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
-  backup <agent> [-o <file>]   Back up an agent to a portable .agentclaw file — a
-                               complete private copy (contains its bot token —
-                               treat as a secret; the agent is left STOPPED)
+  download <agent> [-o <file>] Download a complete private copy (.agentclaw) — for
+                               your own keeping (contains its bot token, so treat
+                               as a secret; the agent is left STOPPED)
   restore <file> [--profile <aiProfileId>] [--host <id>]
-                               Restore an agent from a backup file and boot it
-  export <agent> [-o <file>]   Export a shareable TEMPLATE — the agent's trained
-                               SOUL/AGENTS (+memory), no bot token or members
+                               Restore an agent from a downloaded copy and boot it
+  share <agent> [-o <file>]    Share a TEMPLATE for someone else — the agent's
+                               trained SOUL/AGENTS (+memory), no bot token/members
   import <file> [--name <n>] [--profile <aiProfileId>]
                                Import a template as a fresh agent (you give it
                                its own bot); prints what it still needs
@@ -876,8 +876,9 @@ async function main() {
       }
       return;
     }
-    case 'backup': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw backup <agent> [-o file]'));
+    case 'download':
+    case 'backup': { // 'backup' kept as an alias
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw download <agent> [-o file]'));
       const res = await api(ctx, `/v1/agents/${a.id}/backup`);
       const out = flags.get('out') ?? `${a.slug}.agentclaw`;
       await writeFile(out, Buffer.from(await res.arrayBuffer()));
@@ -902,8 +903,9 @@ async function main() {
       console.log(`restored "${agent.name}" (${agent.state})`);
       return;
     }
-    case 'export': { // template — a shareable trained copy (no identity)
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw export <agent> [-o file]'));
+    case 'share':
+    case 'export': { // template — a trained copy for someone else. ('export' alias)
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw share <agent> [-o file]'));
       const res = await api(ctx, `/v1/agents/${a.id}/export`);
       const out = flags.get('out') ?? `${a.slug}.template.agentclaw`;
       await writeFile(out, Buffer.from(await res.arrayBuffer()));

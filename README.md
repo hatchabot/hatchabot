@@ -66,10 +66,10 @@ and lifecycle; OpenClaw runs the agent.
   in it — and everyone is told so. A personal agent's isn't.
 - **Portability.** **Rehost** an agent to another AgentClaw server in one step —
   it is preflight-checked, transferred with its memory, members and Telegram
-  identity, verified on arrival, and rolled back if anything fails. Or **Back up**
-  it to a single file and **Restore** it wherever you like.
-- **Share a trained agent.** Built a good one? **Export** it as a template — its
-  persona and instructions, with *no* bot token, members, or memory — and send
+  identity, verified on arrival, and rolled back if anything fails. Or **Download** a copy
+  to a single file and **Restore** it wherever you like.
+- **Share a trained agent.** Built a good one? **Share** it as a template — its
+  persona, instructions and memory, with *no* bot token or members — and send
   the file (it's safe to email). **Import** stands up a fresh copy the recipient
   runs with their *own* bot and their *own* people.
 - **Bring your own AI — or none at all.** An Anthropic or Google Gemini API
@@ -146,7 +146,7 @@ agentclaw servers add Desktop http://desktop:8080 <token-from-that-server>
 agentclaw rehost "Kitchen Helper" Desktop
 
 # or move it by file
-agentclaw backup "Kitchen Helper" -o kitchen.agentclaw
+agentclaw download "Kitchen Helper" -o kitchen.agentclaw
 agentclaw --url http://desktop:8080 restore kitchen.agentclaw
 ```
 
