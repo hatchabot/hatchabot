@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.21.3] — 2026-08-23
+
+### Fixed
+- **Web adopt gave a dead-end error when the workspace's bot was still live.**
+  Disabling a bot in OpenClaw's config doesn't stop its gateway from polling
+  until the gateway restarts, so the poll probe saw it busy and hid "Take over
+  its bot" — then "Bring it in" failed with a generic "needs a bot". It now names
+  the bot and the exact two-step fix (disable AND restart the gateway, then
+  Inspect again).
+
 ## [0.21.2] — 2026-08-23
 
 ### Added

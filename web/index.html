@@ -1494,8 +1494,18 @@ async function runAdopt() {
         set('Connecting the bot…');
         await api(`/v1/agents/${a.id}/channel-token`, { method: 'POST', body: { token } });
         a = await pollAgent(a.id);
+      } else if (bot) {
+        // The workspace HAS a bot but reuse wasn't offered — it's still live in
+        // OpenClaw. Disabling it in the config isn't enough; the gateway keeps
+        // polling until it restarts. Name the exact fix instead of a dead end.
+        throw new Error(
+          `@${bot.accountId} is still being polled by OpenClaw, so it can't be taken over yet. ` +
+          `Disable it there AND restart the gateway (openclaw config set ` +
+          `channels.telegram.accounts.${bot.accountId}.enabled false ; systemctl --user restart ` +
+          `openclaw-gateway), then click Inspect again. Or paste a different BotFather token.`,
+        );
       } else {
-        throw new Error('This agent needs a bot: reuse the workspace bot, paste a BotFather token, or set up a bot pool.');
+        throw new Error('This agent needs a bot: paste a BotFather token, or set up a bot pool.');
       }
     }
     if (a.state === 'FAILED') throw new Error(`Could not start: ${a.stateReason ?? 'unknown'}`);
