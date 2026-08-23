@@ -161,6 +161,9 @@ export class Store {
       // Owner-defined organization: an optional group label and a manual order.
       `ALTER TABLE agents ADD COLUMN group_name TEXT`,
       `ALTER TABLE agents ADD COLUMN sort_order INTEGER`,
+      // Bind an adopted agent's folder at its original host path, so existing
+      // absolute-path references resolve unchanged.
+      `ALTER TABLE data_sources ADD COLUMN mount_at_host_path INTEGER NOT NULL DEFAULT 0`,
     ]) {
       try {
         this.db.exec(alter);
@@ -986,6 +989,7 @@ export class Store {
       access: r.access,
       mountName: r.mount_name,
       hostPath: r.host_path ?? undefined,
+      mountAtHostPath: !!r.mount_at_host_path,
       repoUrl: r.repo_url ?? undefined,
       secretRef: r.secret_ref ?? undefined,
       pubKey: r.pub_key ?? undefined,
@@ -1000,8 +1004,8 @@ export class Store {
   insertDataSource(d: DataSource): void {
     this.db
       .prepare(
-        `INSERT INTO data_sources (id, agent_id, kind, access, mount_name, host_path, repo_url, secret_ref, pub_key, created_at)
-         VALUES (@id, @agentId, @kind, @access, @mountName, @hostPath, @repoUrl, @secretRef, @pubKey, @createdAt)`,
+        `INSERT INTO data_sources (id, agent_id, kind, access, mount_name, host_path, mount_at_host_path, repo_url, secret_ref, pub_key, created_at)
+         VALUES (@id, @agentId, @kind, @access, @mountName, @hostPath, @mountAtHostPath, @repoUrl, @secretRef, @pubKey, @createdAt)`,
       )
       .run({
         hostPath: null,
@@ -1009,6 +1013,7 @@ export class Store {
         secretRef: null,
         pubKey: null,
         ...d,
+        mountAtHostPath: d.mountAtHostPath ? 1 : 0,
       });
   }
 

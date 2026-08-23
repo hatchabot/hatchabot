@@ -153,6 +153,10 @@ export interface DataSource {
   /** Where the agent sees it: `/data/<mountName>`. Unique per agent. */
   mountName: string;
   hostPath?: string;
+  /** Bind at the ORIGINAL host path inside the container instead of
+   *  `/data/<mountName>`. Set when adopting an OpenClaw agent, so its existing
+   *  references to absolute paths (in prompts, memory, and crons) still resolve. */
+  mountAtHostPath?: boolean;
   repoUrl?: string;
   secretRef?: string;
   pubKey?: string;

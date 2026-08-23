@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.23.0] — 2026-08-23
+
+### Added
+- **Adopt offers to share the data folders an OpenClaw agent depends on.**
+  OpenClaw agents can read the whole filesystem; AgentClaw agents are boxed in a
+  container. After an adopt (single or batch), the workspace is scanned for
+  absolute host paths it references that exist and sit outside the workspace
+  (e.g. `/home/you/taxes/2026/reports`), and you're offered to share them
+  read-only. Crucially they bind at their **original host path** inside the
+  container — via a new "mount at host path" option on folder shares — so the
+  agent's existing references (in prompts, memory, and crons) resolve unchanged
+  instead of breaking on a `/data/<name>` remap.
+  - New `POST /v1/workspaces/scan-paths` (host-owner-gated); `data_sources`
+    gains a `mount_at_host_path` flag; `POST …/data-sources` accepts `atHostPath`.
+  - The scan is conservative: it skips the OS, `.openclaw`'s own state, the
+    agent's own workspace, missing paths, and trims trailing prose punctuation,
+    then collapses nested hits and files-to-their-folder.
+
 ## [0.22.1] — 2026-08-23
 
 ### Fixed

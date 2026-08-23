@@ -37,6 +37,7 @@ import {
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
+import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
@@ -365,6 +366,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       access: d.access,
       mountName: d.mountName,
       hostPath: d.hostPath,
+      mountAtHostPath: d.mountAtHostPath,
       repoUrl: d.repoUrl,
       // Public half of the deploy key — safe to show, and the owner needs it to
       // grant the repo access (as a read, or write for rw, deploy key).
@@ -1344,7 +1346,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // clone happens on the next rebuild. Both apply on rebuild.
   app.post<{
     Params: { id: string };
-    Body: { kind?: string; access?: string; path?: string; repoUrl?: string };
+    Body: { kind?: string; access?: string; path?: string; repoUrl?: string; atHostPath?: boolean };
   }>('/v1/agents/:id/data-sources', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
@@ -1354,6 +1356,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         access: z.enum(['ro', 'rw']),
         path: z.string().min(1).max(512).optional(),
         repoUrl: z.string().min(1).max(512).optional(),
+        /** Adopted agents: bind at the original host path, not /data/<name>. */
+        atHostPath: z.boolean().optional(),
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1373,13 +1377,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const problem = sharePathProblem(p);
       if (problem) return reply.code(400).send({ error: problem });
       if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
-      const mountName = basename(p.replace(/\/+$/, ''));
+      const atHostPath = parsed.data.atHostPath === true;
+      // Host-path mounts key their unique name off the full path (two folders
+      // can share a basename); /data mounts key off the basename as before.
+      const mountName = atHostPath
+        ? p.replace(/^\/+|\/+$/g, '').replace(/[^\w.-]+/g, '-')
+        : basename(p.replace(/\/+$/, ''));
       if (clashes(mountName)) {
-        return reply.code(409).send({ error: `Another source already lives at /data/${mountName}. Rename or remove it first.` });
+        return reply.code(409).send({
+          error: atHostPath
+            ? `${p} is already shared with this agent.`
+            : `Another source already lives at /data/${mountName}. Rename or remove it first.`,
+        });
       }
       store.insertDataSource({
         id: randomUUID(), agentId: agent.id, kind: 'folder', access, mountName,
-        hostPath: p, createdAt: new Date().toISOString(),
+        hostPath: p, mountAtHostPath: atHostPath, createdAt: new Date().toISOString(),
       });
       return publicAgent(store.getAgent(agent.id)!);
     }
@@ -1864,6 +1877,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     } catch (err) {
       return reply.code(400).send({ error: String((err as Error)?.message ?? err) });
     }
+  });
+
+  /** External host folders an adopted workspace references — candidates to
+   *  share so the agent isn't blind to its data. Host-owner only (reads paths). */
+  app.post<{ Body: { path?: string } }>('/v1/workspaces/scan-paths', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const path = (req.body as { path?: string } | null)?.path;
+    if (!path) return reply.code(400).send({ error: 'path required' });
+    return { candidates: scanWorkspacePaths(path) };
   });
 
   /** Look before you leap: what would be adopted from this folder? */

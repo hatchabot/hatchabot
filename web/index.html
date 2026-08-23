@@ -1461,16 +1461,19 @@ async function bringInSelected() {
 
   // 2. Bring each in, one at a time (each takes over its own bot + copies files).
   let ok = 0;
+  const adopted = [];
   for (const a of picks) {
     const i = idxOf(a);
     if (a.bot && stillBusy.includes(a.bot.accountId)) { rowSay(i, '✗ bot still polled by OpenClaw — try again', 'var(--warn)'); continue; }
     try {
-      await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
+      const { agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
       rowSay(i, '✓ brought in', 'var(--ok)'); ok++;
+      adopted.push({ agentId, name: a.name, workspace: a.workspace });
     } catch (e) { rowSay(i, `✗ ${e.message}`, 'var(--warn)'); }
   }
   await refresh(true);
   toast(`Brought in ${ok} of ${picks.length} agent(s).`, 15000);
+  await offerFolders(adopted); // one prompt covering every agent's external data
   await loadOpenclawAgents(); // adopted ones now show as already-in-AgentClaw
   $('adoptBatchBtn').disabled = false;
 }
@@ -1598,12 +1601,39 @@ async function doAdopt({ path, name, reuse, token, bot, onStatus }) {
     }
     if (a.state === 'FAILED') throw new Error(`Could not start: ${a.stateReason ?? 'unknown'}`);
     say('Copying the workspace…');
-    return await api(`/v1/agents/${a.id}/adopt-workspace`, { method: 'POST', body: { path } });
+    const res = await api(`/v1/agents/${a.id}/adopt-workspace`, { method: 'POST', body: { path } });
+    return { res, agentId: a.id, name, workspace: path };
   } catch (e) {
     // A half-made agent holds the name, so a retry would collide — clean it up.
     if (created) { try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); } catch {} }
     throw e;
   }
+}
+
+// After adopting, an agent may reference data folders that live outside its
+// workspace — invisible inside the container. Detect them and offer to share
+// them read-only, bound at their original path so existing references resolve.
+async function offerFolders(items) {
+  const finds = [];
+  for (const it of items) {
+    try {
+      const { candidates } = await api('/v1/workspaces/scan-paths', { method: 'POST', body: { path: it.workspace } });
+      for (const p of (candidates || [])) finds.push({ agentId: it.agentId, name: it.name, path: p });
+    } catch { /* scan is best-effort */ }
+  }
+  if (!finds.length) return;
+  const lines = finds.map(f => `  • ${f.path}  →  ${f.name}`).join('\n');
+  if (!confirm(`These agents read folders outside their workspace:\n\n${lines}\n\nShare them read-only (mounted at their original path) so the agents can still reach them? You can change this in ⚙ Configuration later.`)) return;
+  const toRebuild = new Set();
+  for (const f of finds) {
+    try {
+      await api(`/v1/agents/${f.agentId}/data-sources`, { method: 'POST', body: { kind: 'folder', access: 'ro', path: f.path, atHostPath: true } });
+      toRebuild.add(f.agentId);
+    } catch (e) { toast(`Couldn't share ${f.path}: ${e.message}`, 12000); }
+  }
+  for (const id of toRebuild) { try { await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} }); } catch { /* surfaced on card */ } }
+  toast(`Shared ${finds.length} folder(s); rebuilding ${toRebuild.size} agent(s) to mount them.`, 15000);
+  await refresh(true);
 }
 
 async function runAdopt() {
@@ -1614,7 +1644,7 @@ async function runAdopt() {
   $('adoptBtn').disabled = true;
   const set = m => { $('adoptErr').style.color = 'var(--dim)'; $('adoptErr').textContent = m; };
   try {
-    const res = await doAdopt({
+    const { res, agentId, workspace } = await doAdopt({
       path: adoptInspected.path,
       name,
       reuse: !!$('adoptReuse')?.checked,
@@ -1625,6 +1655,7 @@ async function runAdopt() {
     adoptDlg.close();
     toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”. The original is untouched — retire it when you're happy.`, 45000);
     await refresh(true);
+    await offerFolders([{ agentId, name, workspace }]);
   } catch (e) {
     await refresh(false);
     $('adoptErr').style.color = '';
@@ -1985,7 +2016,9 @@ function renderDataList(sources) {
     ? '<span style="color:var(--accent);font-weight:600">writable</span>'
     : '<span style="color:var(--dim)">read-only</span>';
   const icon = d => d.kind === 'git' ? '🔧' : (d.access === 'rw' ? '✏️' : '📁');
-  const where = d => d.kind === 'git' ? `→ cloned in workspace · ${badge(d)}` : `→ /data/${esc(d.mountName)} · ${badge(d)}`;
+  const where = d => d.kind === 'git'
+    ? `→ cloned in workspace · ${badge(d)}`
+    : `→ ${d.mountAtHostPath ? esc(d.hostPath) + ' (same path)' : '/data/' + esc(d.mountName)} · ${badge(d)}`;
   $('dataList').innerHTML = editData.length
     ? editData.map(d => `<div class="pair"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
         <span class="sub">${where(d)}</span></span>

@@ -353,7 +353,9 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         .filter((d) => d.kind === 'folder' && d.hostPath)
         .map((d) => ({
           source: d.hostPath!,
-          target: `/data/${d.mountName}`,
+          // Adopted agents bind at the original host path so their existing
+          // absolute references resolve; everything else uses /data/<name>.
+          target: d.mountAtHostPath ? d.hostPath! : `/data/${d.mountName}`,
           readonly: d.access === 'ro',
         })),
     ],
