@@ -876,6 +876,10 @@ async function main() {
         await api(ctx, `/v1/bots?consolidated=1&live=${live ? 1 : 0}`)
       ).json()) as { hosts: any[] };
       const order: Record<string, number> = { 'in-use': 0, reclaimable: 1, dead: 2 };
+      // Size the username column to the widest bot across every host, so the
+      // status columns line up no matter how long a bot handle is.
+      const allBots = hosts.flatMap((h: any) => (h.error ? [] : h.bots));
+      const uw = Math.max(10, ...allBots.map((b: any) => `@${b.username ?? '?'}`.length));
       let total = 0;
       let reclaim = 0;
       let dead = 0;
@@ -888,15 +892,15 @@ async function main() {
           if (b.cls === 'reclaimable') reclaim++;
           if (b.cls === 'dead') dead++;
           const tag = b.cls === 'in-use' ? 'in use' : b.cls === 'dead' ? 'DEAD' : 'reclaimable';
-          const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
-          const liveBits = live
-            ? `  ${b.valid === false ? 'token invalid' : 'valid'}${
-                b.polling && b.polling !== 'unknown' ? `, ${b.polling === 'busy' ? 'being polled' : 'idle'}` : ''
-              }`
+          const live_ = live
+            ? (b.valid === false ? 'invalid' : 'valid') +
+              (b.polling && b.polling !== 'unknown' ? `,${b.polling === 'busy' ? 'polled' : 'idle'}` : '')
             : '';
-          console.log(`  @${String(b.username ?? '?').padEnd(22)} ${tag.padEnd(12)} ${who}${liveBits}`);
+          const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
+          const uname = `@${b.username ?? '?'}`.padEnd(uw);
+          console.log(`  ${uname}  ${tag.padEnd(11)}${live ? `  ${live_.padEnd(13)}` : '  '}${who}`);
         }
-        if (h.mgmtBotConfigured) console.log('  + a management bot (token stored outside the registry)');
+        if (h.mgmtBotConfigured) console.log(`  ${'(mgmt bot)'.padEnd(uw)}  ${'in use'.padEnd(11)}${live ? '  ' + ''.padEnd(13) : '  '}management bot — token stored outside the registry`);
       }
       console.log(`\n${total} bot(s) known · ${reclaim} reclaimable · ${dead} dead`);
       console.log(`Telegram won't list your bots — open @BotFather → /mybots and /deletebot any not shown above.`);

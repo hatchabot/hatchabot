@@ -2,6 +2,14 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.21.1] — 2026-08-23
+
+### Fixed
+- **`agentclaw bots` columns now align.** The username column was a fixed width,
+  so a handle longer than it pushed the status columns out of line. It's sized to
+  the widest bot across all hosts now, with the live `--check` verdict in its own
+  aligned column.
+
 ## [0.21.0] — 2026-08-23
 
 ### Added
