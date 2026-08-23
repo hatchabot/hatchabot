@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.22.0] — 2026-08-23
+
+### Added
+- **Discover and batch-import your OpenClaw agents.** The adopt dialog now lists
+  every OpenClaw agent installed for the user this server runs as (read from
+  `~/.openclaw/openclaw.json`), each annotated with its bot and whether it's
+  already in AgentClaw. Tick the ones you want and **Bring in selected** copies
+  them all — no hunting down workspace paths.
+  - **Automatic bot hand-over.** For a selected agent whose bot is still live in
+    OpenClaw, the tool disables it in the config (backing the file up first) and
+    restarts the gateway **once** for the whole batch, verifies each bot went
+    quiet, then takes it over — the manual "disable AND restart" step is gone.
+  - New `GET /v1/openclaw/agents` (discovery) and `POST /v1/openclaw/quiesce`
+    (disable + one gateway restart + verify), both host-owner-gated. Every config
+    write leaves a `.agentclaw-bak` beside the original. The gateway unit is
+    `openclaw-gateway` (override with `AGENTCLAW_OPENCLAW_GATEWAY_UNIT`).
+  - The single manual-path adopt is unchanged, tucked under "Or point at a
+    workspace folder manually"; both flows share one core.
+
 ## [0.21.4] — 2026-08-23
 
 ### Fixed

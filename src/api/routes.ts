@@ -36,6 +36,7 @@ import {
   startBackup,
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
+import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
@@ -1840,6 +1841,30 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   // ---- adopting an existing OpenClaw agent ---------------------------------
+
+  /** Every OpenClaw agent installed for the user this server runs as, so the
+   *  owner can bring them in without hunting down workspace paths. */
+  app.get('/v1/openclaw/agents', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    return { agents: discoverOpenclawAgents({ store }) };
+  });
+
+  /** Disable the named bots in OpenClaw and restart its gateway once, so their
+   *  pollers actually stop before AgentClaw takes them over. Host-owner only —
+   *  it edits the config file and runs the gateway's systemd unit. */
+  app.post<{ Body: { accountIds?: string[] } }>('/v1/openclaw/quiesce', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const ids = (req.body as { accountIds?: string[] } | null)?.accountIds;
+    if (!Array.isArray(ids) || ids.some((x) => typeof x !== 'string')) {
+      return reply.code(400).send({ error: 'accountIds (string[]) required.' });
+    }
+    if (!ids.length) return { quiet: [], stillBusy: [] };
+    try {
+      return await quiesceOpenclawBots(ids);
+    } catch (err) {
+      return reply.code(400).send({ error: String((err as Error)?.message ?? err) });
+    }
+  });
 
   /** Look before you leap: what would be adopted from this folder? */
   app.post<{ Body: { path?: string } }>('/v1/workspaces/inspect', async (req, reply) => {

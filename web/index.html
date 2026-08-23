@@ -277,36 +277,50 @@
   </div>
 </dialog>
 
-<dialog id="adoptDlg" style="width:min(600px,94vw)">
-  <h3 style="margin:0 0 4px">Bring in an OpenClaw agent</h3>
+<dialog id="adoptDlg" style="width:min(640px,94vw)">
+  <h3 style="margin:0 0 4px">Bring in your OpenClaw agents</h3>
   <div class="sub">
-    Point at the workspace folder of an agent you already run in OpenClaw. Its
-    whole workspace is copied into a fresh managed agent — the original is only
-    read and keeps working until you retire it.
+    Agents you already run in OpenClaw on this machine. Pick any to copy into
+    managed agents — the originals are only read and keep working until you
+    retire them. For a bot that's still live in OpenClaw, this disables it there
+    and restarts the gateway once so the hand-over is clean.
   </div>
 
-  <label>Workspace folder <span style="color:var(--dim)">(an absolute path on this machine)</span></label>
-  <div style="display:flex;gap:8px">
-    <input type="text" id="adoptPath" placeholder="/home/you/.openclaw/workspace-tech-advisor" style="flex:1"
-           onkeydown="if(event.key==='Enter'){event.preventDefault();adoptInspect()}">
-    <button id="adoptInspectBtn" onclick="adoptInspect()" style="width:auto">Inspect</button>
+  <div id="adoptProfileRow" style="display:none;margin-top:12px">
+    <label>AI source for imported agents</label>
+    <select id="adoptProfile"></select>
   </div>
-  <div id="adoptPreview" style="margin-top:10px"></div>
 
-  <div id="adoptForm" hidden>
-    <label>Name for the managed agent</label>
-    <input type="text" id="adoptName" placeholder="Tech Advisor" maxlength="64">
-    <div id="adoptProfileRow" style="display:none">
-      <label>AI source</label>
-      <select id="adoptProfile"></select>
+  <div id="adoptDiscover" style="margin-top:12px">Looking for OpenClaw agents…</div>
+  <div class="actions" style="justify-content:space-between;align-items:center;margin-top:10px">
+    <span id="adoptSelCount" class="sub"></span>
+    <button class="primary" id="adoptBatchBtn" onclick="bringInSelected()" disabled>Bring in selected</button>
+  </div>
+
+  <details style="margin-top:14px">
+    <summary class="sub" style="cursor:pointer">Or point at a workspace folder manually</summary>
+    <div style="margin-top:8px">
+      <label>Workspace folder <span style="color:var(--dim)">(an absolute path on this machine)</span></label>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="adoptPath" placeholder="/home/you/.openclaw/workspace-tech-advisor" style="flex:1"
+               onkeydown="if(event.key==='Enter'){event.preventDefault();adoptInspect()}">
+        <button id="adoptInspectBtn" onclick="adoptInspect()" style="width:auto">Inspect</button>
+      </div>
+      <div id="adoptPreview" style="margin-top:10px"></div>
+      <div id="adoptForm" hidden>
+        <label>Name for the managed agent</label>
+        <input type="text" id="adoptName" placeholder="Tech Advisor" maxlength="64">
+        <div id="adoptBotArea" style="margin-top:12px"></div>
+        <div class="actions" style="justify-content:flex-end;margin-top:8px">
+          <button class="primary" id="adoptBtn" onclick="runAdopt()" disabled>Bring it in</button>
+        </div>
+      </div>
     </div>
-    <div id="adoptBotArea" style="margin-top:12px"></div>
-  </div>
+  </details>
 
   <div class="err" id="adoptErr"></div>
   <div class="actions" style="justify-content:flex-end">
-    <button onclick="adoptDlg.close()">Cancel</button>
-    <button class="primary" id="adoptBtn" onclick="runAdopt()" disabled>Bring it in</button>
+    <button onclick="adoptDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -1363,18 +1377,102 @@ async function createAgent() {
 // ---- adopt an existing OpenClaw agent --------------------------------------
 
 let adoptInspected = null; // last inspect result: { path, existingBot }
+let ocAgents = [];         // discovered OpenClaw agents
 
 function openAdoptDlg() {
   adoptInspected = null;
+  ocAgents = [];
   $('adoptPath').value = ''; $('adoptName').value = '';
   $('adoptPreview').innerHTML = ''; $('adoptBotArea').innerHTML = '';
   $('adoptErr').textContent = '';
   $('adoptForm').hidden = true;
   $('adoptBtn').disabled = true;
+  $('adoptBatchBtn').disabled = true;
+  $('adoptSelCount').textContent = '';
+  $('adoptDiscover').textContent = 'Looking for OpenClaw agents…';
   $('adoptProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   $('adoptProfile').innerHTML = profiles.map(p => `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('');
   adoptDlg.showModal();
-  $('adoptPath').focus();
+  loadOpenclawAgents();
+}
+
+async function loadOpenclawAgents() {
+  try {
+    const { agents } = await api('/v1/openclaw/agents');
+    ocAgents = agents || [];
+    renderDiscovery();
+  } catch (e) {
+    $('adoptDiscover').innerHTML = `<div class="sub">Couldn't read OpenClaw agents (${esc(e.message)}). Use the manual path below.</div>`;
+  }
+}
+
+function renderDiscovery() {
+  const el = $('adoptDiscover');
+  if (!ocAgents.length) {
+    el.innerHTML = `<div class="sub">No OpenClaw agents found on this machine. Use the manual path below.</div>`;
+    return;
+  }
+  el.innerHTML = ocAgents.map((a, i) => {
+    const blocked = a.alreadyAdoptedAs || a.problem || !a.bot;
+    let status;
+    if (a.alreadyAdoptedAs) status = `already in AgentClaw as “${esc(a.alreadyAdoptedAs)}”`;
+    else if (a.problem) status = esc(a.problem);
+    else if (a.bot && a.bot.enabledInSource) status = `takes over @${esc(a.bot.accountId)} — disabled in OpenClaw for you`;
+    else if (a.bot) status = `@${esc(a.bot.accountId)} · already off in OpenClaw`;
+    else status = 'no bot of its own — bring in via the manual path with a token';
+    return `<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-top:1px solid var(--line)${blocked ? ';opacity:.55' : ''}">
+      <input type="checkbox" data-oc="${i}" ${blocked ? 'disabled' : ''} style="width:auto;margin-top:3px" onchange="updateSelCount()">
+      <span style="flex:1"><b>${esc(a.name)}</b> <span class="sub">— ${status}</span>
+        <span id="ocrow-${i}" class="sub" style="display:block;margin-top:2px"></span></span>
+    </label>`;
+  }).join('');
+  updateSelCount();
+}
+
+function updateSelCount() {
+  const n = document.querySelectorAll('#adoptDiscover input[data-oc]:checked').length;
+  $('adoptSelCount').textContent = n ? `${n} selected` : '';
+  $('adoptBatchBtn').disabled = !n;
+  $('adoptBatchBtn').textContent = n ? `Bring in selected (${n})` : 'Bring in selected';
+}
+
+async function bringInSelected() {
+  const picks = [...document.querySelectorAll('#adoptDiscover input[data-oc]:checked')].map(el => ocAgents[+el.dataset.oc]);
+  if (!picks.length) return;
+  $('adoptBatchBtn').disabled = true;
+  $('adoptErr').textContent = '';
+  const rowSay = (i, m, color) => { const el = $(`ocrow-${i}`); if (el) { el.textContent = m; el.style.color = color || 'var(--dim)'; } };
+  const idxOf = a => ocAgents.indexOf(a);
+
+  // 1. Hand over bots still live in OpenClaw — disable each and restart the
+  // gateway ONCE for the whole batch, then verify each went quiet.
+  const toQuiesce = picks.filter(a => a.bot && a.bot.enabledInSource).map(a => a.bot.accountId);
+  let stillBusy = [];
+  if (toQuiesce.length) {
+    for (const a of picks) if (a.bot && a.bot.enabledInSource) rowSay(idxOf(a), 'waiting for OpenClaw hand-over…');
+    try {
+      const r = await api('/v1/openclaw/quiesce', { method: 'POST', body: { accountIds: toQuiesce } });
+      stillBusy = r.stillBusy || [];
+    } catch (e) {
+      $('adoptErr').style.color = ''; $('adoptErr').textContent = `Bot hand-over failed: ${e.message}`;
+      $('adoptBatchBtn').disabled = false; return;
+    }
+  }
+
+  // 2. Bring each in, one at a time (each takes over its own bot + copies files).
+  let ok = 0;
+  for (const a of picks) {
+    const i = idxOf(a);
+    if (a.bot && stillBusy.includes(a.bot.accountId)) { rowSay(i, '✗ bot still polled by OpenClaw — try again', 'var(--warn)'); continue; }
+    try {
+      await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
+      rowSay(i, '✓ brought in', 'var(--ok)'); ok++;
+    } catch (e) { rowSay(i, `✗ ${e.message}`, 'var(--warn)'); }
+  }
+  await refresh(true);
+  toast(`Brought in ${ok} of ${picks.length} agent(s).`, 15000);
+  await loadOpenclawAgents(); // adopted ones now show as already-in-AgentClaw
+  $('adoptBatchBtn').disabled = false;
 }
 
 async function adoptInspect() {
@@ -1458,24 +1556,17 @@ async function pollAgent(id, tries = 40) {
   throw new Error('Timed out waiting for the agent to come up.');
 }
 
-async function runAdopt() {
-  if (!adoptInspected) { $('adoptErr').textContent = 'Inspect a workspace first.'; return; }
-  const path = adoptInspected.path;
-  const name = $('adoptName').value.trim();
-  if (!name) { $('adoptErr').textContent = 'Give the agent a name.'; return; }
-  const bot = adoptInspected.existingBot;
-  const reuse = !!$('adoptReuse')?.checked;
-  const token = $('adoptToken')?.value.trim() || '';
+// Shared core: create the agent, resolve its bot (reuse / token / pool), copy
+// the workspace in, and clean up the half-made agent on any failure — exactly
+// as the CLI does. Used by both the single (manual) and batch flows.
+async function doAdopt({ path, name, reuse, token, bot, onStatus }) {
+  const say = onStatus || (() => {});
   const localHost = hosts.find(h => h.kind === 'local') ?? hosts[0];
-  if (!localHost) { $('adoptErr').textContent = 'No host is configured on this server.'; return; }
-  if (!profiles[0]) { $('adoptErr').textContent = 'Add an AI source first: ⚙ Settings → AI sources.'; return; }
-
-  $('adoptErr').textContent = '';
-  $('adoptBtn').disabled = true;
-  const set = m => { $('adoptErr').style.color = 'var(--dim)'; $('adoptErr').textContent = m; };
+  if (!localHost) throw new Error('No host is configured on this server.');
+  if (!profiles[0]) throw new Error('Add an AI source first: ⚙ Settings → AI sources.');
   let created = null;
   try {
-    set('Creating the agent…');
+    say('Creating the agent…');
     created = await api('/v1/agents', { method: 'POST', body: {
       name,
       aiProfileId: (profiles.length > 1 && $('adoptProfile').value) || profiles[0].id,
@@ -1484,41 +1575,58 @@ async function runAdopt() {
       ...(reuse && bot?.allowFrom?.length ? { seedMembers: bot.allowFrom } : {}),
     }});
     let a = await pollAgent(created.id);
-    // Resolve the bot the same way the CLI does: reuse the workspace's, or
-    // paste a token, or lean on a pool bot the create step already assigned.
     if (a.pendingAction?.type === 'bot_token') {
       if (reuse) {
-        set(`Taking over @${bot.accountId}…`);
+        say(`Taking over @${bot.accountId}…`);
         await api(`/v1/agents/${a.id}/channel-token`, { method: 'POST', body: { fromWorkspace: path } });
         a = await pollAgent(a.id);
       } else if (token) {
-        set('Connecting the bot…');
+        say('Connecting the bot…');
         await api(`/v1/agents/${a.id}/channel-token`, { method: 'POST', body: { token } });
         a = await pollAgent(a.id);
       } else if (bot) {
-        // The workspace HAS a bot but reuse wasn't offered — it's still live in
-        // OpenClaw. Disabling it in the config isn't enough; the gateway keeps
-        // polling until it restarts. Name the exact fix instead of a dead end.
+        // Has a bot but reuse wasn't offered — it's still live in OpenClaw.
         throw new Error(
           `@${bot.accountId} is still being polled by OpenClaw, so it can't be taken over yet. ` +
           `Disable it there AND restart the gateway (openclaw config set ` +
           `channels.telegram.accounts.${bot.accountId}.enabled false ; systemctl --user restart ` +
-          `openclaw-gateway), then click Inspect again. Or paste a different BotFather token.`,
+          `openclaw-gateway), then try again. Or paste a different BotFather token.`,
         );
       } else {
         throw new Error('This agent needs a bot: paste a BotFather token, or set up a bot pool.');
       }
     }
     if (a.state === 'FAILED') throw new Error(`Could not start: ${a.stateReason ?? 'unknown'}`);
-    set('Copying the workspace…');
-    const res = await api(`/v1/agents/${a.id}/adopt-workspace`, { method: 'POST', body: { path } });
+    say('Copying the workspace…');
+    return await api(`/v1/agents/${a.id}/adopt-workspace`, { method: 'POST', body: { path } });
+  } catch (e) {
+    // A half-made agent holds the name, so a retry would collide — clean it up.
+    if (created) { try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); } catch {} }
+    throw e;
+  }
+}
+
+async function runAdopt() {
+  if (!adoptInspected) { $('adoptErr').textContent = 'Inspect a workspace first.'; return; }
+  const name = $('adoptName').value.trim();
+  if (!name) { $('adoptErr').textContent = 'Give the agent a name.'; return; }
+  $('adoptErr').textContent = '';
+  $('adoptBtn').disabled = true;
+  const set = m => { $('adoptErr').style.color = 'var(--dim)'; $('adoptErr').textContent = m; };
+  try {
+    const res = await doAdopt({
+      path: adoptInspected.path,
+      name,
+      reuse: !!$('adoptReuse')?.checked,
+      token: $('adoptToken')?.value.trim() || '',
+      bot: adoptInspected.existingBot,
+      onStatus: set,
+    });
     adoptDlg.close();
     toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”. The original is untouched — retire it when you're happy.`, 45000);
     await refresh(true);
   } catch (e) {
-    // A half-made agent holds the name, so a retry would collide — clean it up,
-    // exactly like the CLI does.
-    if (created) { try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); } catch {} await refresh(false); }
+    await refresh(false);
     $('adoptErr').style.color = '';
     $('adoptErr').textContent = e.message;
   } finally { $('adoptBtn').disabled = false; }
