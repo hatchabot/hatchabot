@@ -401,6 +401,7 @@
     <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
     <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Servers</button>
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
+    <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
   </div>
 
@@ -476,6 +477,22 @@
       runs as its own process, so set it up from a terminal on the server:
     </div>
     <div class="invite-link" style="margin-top:8px">agentclaw mgmt-bot setup</div>
+  </section>
+
+  <section id="paneBackups" role="tabpanel" hidden>
+    <div class="sub">
+      A nightly job saves each agent's memory, the control-plane registry, and
+      the key to decrypt it — one dated set per run, kept <b id="bkKeep">14</b>
+      days. To restore one, follow <code>scripts/backup-volumes.sh</code>. Each
+      set holds bot tokens and the decryption key in the clear, so it lives in
+      <code id="bkDir" style="word-break:break-all"></code> at <code>0700</code>
+      and is never downloadable from here.
+    </div>
+    <div id="bkRun" class="sub" style="margin:8px 0" hidden></div>
+    <div id="bkList" style="margin-top:12px">Loading…</div>
+    <div class="actions" style="justify-content:flex-start;margin-top:12px">
+      <button class="primary" id="bkRunBtn" onclick="runBackupNow()">Back up now</button>
+    </div>
   </section>
 
   <section id="paneRuntime" role="tabpanel" hidden>
@@ -832,7 +849,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', servers: 'paneServers', access: 'paneAccess', runtime: 'paneRuntime' };
+const TABS = { ai: 'paneAi', servers: 'paneServers', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -841,7 +858,78 @@ function showTab(name) {
     $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
   }
   if (name === 'access') refreshMgmtBotStatus();
+  if (name === 'backups') loadBackups();
   if (name === 'runtime') loadRuntime();
+}
+
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+
+let bkPollTimer = null;
+
+async function loadBackups() {
+  const el = $('bkList');
+  try {
+    const r = await api('/v1/backups');
+    $('bkDir').textContent = r.dir;
+    $('bkKeep').textContent = r.keepDays;
+    renderBackupRun(r.run);
+    if (!r.backups.length) {
+      el.innerHTML = `<div class="sub">No backups yet. The nightly job runs at 03:30, or use <b>Back up now</b>.</div>`;
+      return;
+    }
+    el.innerHTML = r.backups.map(b => {
+      const warn = !b.hasDb ? `<span style="color:var(--warn)"> · ⚠ no registry</span>`
+        : !b.hasKey ? `<span style="color:var(--warn)"> · ⚠ no key (can't decrypt)</span>` : '';
+      const names = b.volumes.map(v => esc(v.name)).join(', ');
+      return `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line)">
+        <div>
+          <div><b>${esc(b.date)}</b> · ${fmtBytes(b.sizeBytes)} · ${b.volumes.length} agent${b.volumes.length === 1 ? '' : 's'}${warn}</div>
+          ${names ? `<div class="sub" style="margin-top:2px">${names}</div>` : ''}
+        </div>
+        <button class="hbtn" onclick="pruneBackup('${esc(b.date)}')">Delete</button>
+      </div>`;
+    }).join('');
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+function renderBackupRun(run) {
+  const el = $('bkRun');
+  const btn = $('bkRunBtn');
+  if (bkPollTimer) { clearTimeout(bkPollTimer); bkPollTimer = null; }
+  if (!run || run.status === 'idle') { el.hidden = true; btn.disabled = false; btn.textContent = 'Back up now'; return; }
+  el.hidden = false;
+  if (run.status === 'running') {
+    btn.disabled = true; btn.textContent = 'Backing up…';
+    el.style.color = 'var(--dim)';
+    el.textContent = 'Backing up… this can take a few minutes on large agents.';
+    // Only keep polling while the Backups tab is the visible one.
+    bkPollTimer = setTimeout(() => { if (!$('paneBackups').hidden) loadBackups(); }, 3000);
+  } else {
+    btn.disabled = false; btn.textContent = 'Back up now';
+    el.style.color = run.status === 'ok' ? 'var(--ok)' : 'var(--warn)';
+    el.textContent = (run.status === 'ok' ? '✓ ' : '✗ ') + (run.summary || '').split('\n').slice(-1)[0];
+  }
+}
+
+async function runBackupNow() {
+  try {
+    const r = await api('/v1/backups/run', { method: 'POST' });
+    renderBackupRun(r.run);
+  } catch (e) { toast(e.message, 20000); }
+}
+
+async function pruneBackup(date) {
+  if (!confirm(`Delete the backup from ${date}? This can't be undone.`)) return;
+  try {
+    await api(`/v1/backups/${date}`, { method: 'DELETE' });
+    toast(`Deleted backup ${date}`);
+    await loadBackups();
+  } catch (e) { toast(e.message, 20000); }
 }
 
 async function loadRuntime() {

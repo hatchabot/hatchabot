@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.18.0] — 2026-08-23
+
+### Added
+- **A Backups panel** (⚙ Settings → Backups). The nightly `backup-volumes.sh`
+  job has always written dated backup sets to disk, but there was no way to see
+  them in-app. The panel lists every set newest-first — date, total size, how
+  many agents it holds, and a warning when a set is missing the registry or the
+  decryption key — and lets the machine's owner **Back up now** or delete an old
+  set. "Back up now" runs the script in the background and the panel polls for
+  the result, so a multi-minute run never hangs the request.
+  - New `GET /v1/backups`, `POST /v1/backups/run`, `DELETE /v1/backups/:date`,
+    all gated to the local-host owner. They return only metadata — dates, sizes,
+    what's present — and **never serve the backup files**, which hold bot tokens
+    and the decryption key in the clear. Prune refuses any name that isn't a
+    `YYYY-MM-DD` directory directly under the backups dir (no path traversal).
+
 ## [0.17.2] — 2026-08-23
 
 ### Fixed

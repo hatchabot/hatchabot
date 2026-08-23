@@ -24,6 +24,14 @@ import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
+import {
+  backupRunState,
+  backupsDir,
+  keepDays,
+  listBackups,
+  pruneBackup,
+  startBackup,
+} from '../orchestrator/backups.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
@@ -1726,6 +1734,31 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       npmExtendedStable: extendedStable,
       upgradeAvailable: !!(imageVersion && latest && imageVersion !== latest),
     };
+  });
+
+  // ---- scheduled backups (Settings → Backups) -----------------------------
+  // These sets hold the whole fleet's data plus the decryption key in the
+  // clear, so every route is gated to the machine's owner and returns only
+  // metadata — never the backup files themselves.
+  app.get('/v1/backups', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    return { dir: backupsDir(), keepDays: keepDays(), run: backupRunState(), backups: listBackups() };
+  });
+
+  app.post('/v1/backups/run', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    return { run: startBackup(Date.now()) };
+  });
+
+  app.delete<{ Params: { date: string } }>('/v1/backups/:date', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    try {
+      const removed = pruneBackup(req.params.date);
+      if (!removed) return reply.code(404).send({ error: 'No backup for that date.' });
+      return { ok: true };
+    } catch (err) {
+      return reply.code(400).send({ error: String((err as Error)?.message ?? err) });
+    }
   });
 
   // ---- adopting an existing OpenClaw agent ---------------------------------
