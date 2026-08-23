@@ -9,15 +9,18 @@ laptop to an API-key server and keep its mind.
 ## Adopting an agent you built by hand
 
 If you already run OpenClaw agents outside AgentClaw, you can bring one in
-without retyping anything:
+without retyping anything. In the web app, open **New agent → "Already built one
+in OpenClaw? Bring it in →"**, point it at the workspace folder, and it shows a
+preview (what will copy, what's skipped, the bot it already owns) before you
+confirm. Or from the command line:
 
 ```sh
 agentclaw adopt ~/.openclaw/workspace-tech-advisor "Tech Advisor"
 ```
 
-It prints what it found, creates a managed agent (asking for a BotFather
-token if the pool is empty), and copies the **entire** workspace — not just
-SOUL/AGENTS/MEMORY, but IDENTITY.md, USER.md, TOOLS.md and whatever domain
+Either way it shows what it found, creates a managed agent (asking for a
+BotFather token if the pool is empty), and copies the **entire** workspace — not
+just SOUL/AGENTS/MEMORY, but IDENTITY.md, USER.md, TOOLS.md and whatever domain
 files the agent has accumulated, because that is usually where its real
 knowledge lives.
 
@@ -54,7 +57,8 @@ agentclaw adopt ~/.openclaw/workspace-conf-advisor "Conference Advisor" --reuse-
 takes that bot over. It costs no new slot, and everyone who already messages
 `@CnfAdvBot` keeps the same conversation instead of being handed a stranger.
 The people on its allowlist come across as members too, so nobody — including
-you — has to pair with an agent they were already talking to.
+you — has to pair with an agent they were already talking to. (In the web
+adopt flow this is the **"Take over its bot @…"** checkbox, on by default.)
 
 Because a Telegram bot may only be polled by one process, adopt refuses while
 the old instance still has that bot switched on, and tells you how to hand it

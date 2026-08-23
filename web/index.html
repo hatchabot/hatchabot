@@ -266,9 +266,46 @@
     everyone you invite reads and writes one common memory
   </label>
   <div class="err" id="createErr"></div>
+  <div class="actions" style="justify-content:space-between;align-items:center">
+    <a href="#" id="adoptLink" onclick="event.preventDefault(); createDlg.close(); openAdoptDlg()"
+       class="sub" style="text-decoration:underline">Already built one in OpenClaw? Bring it in →</a>
+    <div style="display:flex;gap:8px">
+      <button onclick="createDlg.close()">Cancel</button>
+      <button class="primary" id="createBtn" onclick="createAgent()">Create</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="adoptDlg" style="width:min(600px,94vw)">
+  <h3 style="margin:0 0 4px">Bring in an OpenClaw agent</h3>
+  <div class="sub">
+    Point at the workspace folder of an agent you already run in OpenClaw. Its
+    whole workspace is copied into a fresh managed agent — the original is only
+    read and keeps working until you retire it.
+  </div>
+
+  <label>Workspace folder <span style="color:var(--dim)">(an absolute path on this machine)</span></label>
+  <div style="display:flex;gap:8px">
+    <input type="text" id="adoptPath" placeholder="/home/you/.openclaw/workspace-tech-advisor" style="flex:1"
+           onkeydown="if(event.key==='Enter'){event.preventDefault();adoptInspect()}">
+    <button id="adoptInspectBtn" onclick="adoptInspect()" style="width:auto">Inspect</button>
+  </div>
+  <div id="adoptPreview" style="margin-top:10px"></div>
+
+  <div id="adoptForm" hidden>
+    <label>Name for the managed agent</label>
+    <input type="text" id="adoptName" placeholder="Tech Advisor" maxlength="64">
+    <div id="adoptProfileRow" style="display:none">
+      <label>AI source</label>
+      <select id="adoptProfile"></select>
+    </div>
+    <div id="adoptBotArea" style="margin-top:12px"></div>
+  </div>
+
+  <div class="err" id="adoptErr"></div>
   <div class="actions" style="justify-content:flex-end">
-    <button onclick="createDlg.close()">Cancel</button>
-    <button class="primary" id="createBtn" onclick="createAgent()">Create</button>
+    <button onclick="adoptDlg.close()">Cancel</button>
+    <button class="primary" id="adoptBtn" onclick="runAdopt()" disabled>Bring it in</button>
   </div>
 </dialog>
 
@@ -1320,6 +1357,160 @@ async function createAgent() {
     await refresh(false);
   } catch (e) { $('createErr').textContent = e.message; }
   finally { $('createBtn').disabled = false; }
+}
+
+// ---- adopt an existing OpenClaw agent --------------------------------------
+
+let adoptInspected = null; // last inspect result: { path, existingBot }
+
+function openAdoptDlg() {
+  adoptInspected = null;
+  $('adoptPath').value = ''; $('adoptName').value = '';
+  $('adoptPreview').innerHTML = ''; $('adoptBotArea').innerHTML = '';
+  $('adoptErr').textContent = '';
+  $('adoptForm').hidden = true;
+  $('adoptBtn').disabled = true;
+  $('adoptProfileRow').style.display = profiles.length > 1 ? '' : 'none';
+  $('adoptProfile').innerHTML = profiles.map(p => `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('');
+  adoptDlg.showModal();
+  $('adoptPath').focus();
+}
+
+async function adoptInspect() {
+  const path = $('adoptPath').value.trim();
+  if (!path) { $('adoptErr').textContent = 'Enter the workspace folder path.'; return; }
+  $('adoptErr').textContent = '';
+  $('adoptInspectBtn').disabled = true;
+  try {
+    const p = await api('/v1/workspaces/inspect', { method: 'POST', body: { path } });
+    adoptInspected = { path: p.path, existingBot: p.existingBot };
+    const md = p.markdownFiles || [];
+    const shown = md.slice(0, 8).join(', ') + (md.length > 8 ? `, +${md.length - 8} more` : '');
+    const skip = p.skipped?.length
+      ? `<div class="sub" style="margin-top:4px">Skipping ${esc(p.skipped.join(', '))} — built for this machine; the agent rebuilds them.</div>` : '';
+    $('adoptPreview').innerHTML =
+      `<div style="border:1px solid var(--line);border-radius:8px;padding:10px">
+        <div><b>${esc(p.path)}</b></div>
+        <div class="sub" style="margin-top:2px">${p.files.length} files · ${(p.bytes / 1e6).toFixed(1)} MB · ${md.length} markdown${md.length ? `: ${esc(shown)}` : ''}</div>
+        ${skip}
+      </div>`;
+    // Suggest a name from the folder: "…/workspace-tech-advisor" → "Tech Advisor".
+    if (!$('adoptName').value) {
+      const base = (p.path.split('/').pop() || '').replace(/^workspace-/, '').replace(/[-_]+/g, ' ').trim();
+      if (base) $('adoptName').value = base.replace(/\b\w/g, c => c.toUpperCase());
+    }
+    renderAdoptBot(p.existingBot);
+    $('adoptForm').hidden = false;
+    $('adoptBtn').disabled = false;
+  } catch (e) {
+    adoptInspected = null;
+    $('adoptPreview').innerHTML = '';
+    $('adoptForm').hidden = true;
+    $('adoptBtn').disabled = true;
+    $('adoptErr').textContent = e.message;
+  } finally { $('adoptInspectBtn').disabled = false; }
+}
+
+function renderAdoptBot(bot) {
+  const el = $('adoptBotArea');
+  if (bot) {
+    const busy = bot.enabledInSource || bot.polling === 'busy';
+    if (busy) {
+      // The old instance is still polling this bot — two pollers on one token
+      // silently lose messages. Block reuse and show the hand-over steps.
+      el.innerHTML =
+        `<div style="border:1px solid var(--warn);border-radius:8px;padding:10px">
+          <div>⚠ <b>@${esc(bot.accountId)}</b> is still live for “${esc(bot.sourceAgentId)}” in your hand-built instance.</div>
+          <div class="sub" style="margin-top:4px">Hand the bot over first (two pollers on one token lose messages), then Inspect again:</div>
+          <div class="invite-link" style="margin-top:6px">openclaw config set channels.telegram.accounts.${esc(bot.accountId)}.enabled false
+systemctl --user restart openclaw-gateway</div>
+        </div>
+        <div class="sub" style="margin-top:8px">Or give this agent a different bot below.</div>
+        ${adoptTokenField()}`;
+    } else {
+      const n = (bot.allowFrom || []).length;
+      el.innerHTML =
+        `<label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+          <input type="checkbox" id="adoptReuse" checked style="width:auto;margin-top:3px" onchange="$('adoptTokenRow').style.display=this.checked?'none':''">
+          <span>Take over its bot <b>@${esc(bot.accountId)}</b> <span class="sub">(recommended — no new bot slot; ${n ? `${n} approved member${n === 1 ? '' : 's'} carried, no re-pairing` : 'same conversations kept'})</span></span>
+        </label>
+        <div id="adoptTokenRow" style="display:none;margin-top:8px">${adoptTokenField(true)}</div>`;
+    }
+  } else {
+    el.innerHTML =
+      `<div class="sub">This workspace has no bot of its own. The new agent gets one from your pool, or paste a BotFather token:</div>
+       ${adoptTokenField()}`;
+  }
+}
+
+function adoptTokenField(inner) {
+  const field = `<input type="password" id="adoptToken" autocomplete="off" placeholder="BotFather token (optional if you have a pool bot)">`;
+  return inner ? field : `<div style="margin-top:6px">${field}</div>`;
+}
+
+async function pollAgent(id, tries = 40) {
+  for (let i = 0; i < tries; i++) {
+    const a = await api(`/v1/agents/${id}`);
+    if (a.state === 'RUNNING' || a.state === 'FAILED' || a.pendingAction) return a;
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error('Timed out waiting for the agent to come up.');
+}
+
+async function runAdopt() {
+  if (!adoptInspected) { $('adoptErr').textContent = 'Inspect a workspace first.'; return; }
+  const path = adoptInspected.path;
+  const name = $('adoptName').value.trim();
+  if (!name) { $('adoptErr').textContent = 'Give the agent a name.'; return; }
+  const bot = adoptInspected.existingBot;
+  const reuse = !!$('adoptReuse')?.checked;
+  const token = $('adoptToken')?.value.trim() || '';
+  const localHost = hosts.find(h => h.kind === 'local') ?? hosts[0];
+  if (!localHost) { $('adoptErr').textContent = 'No host is configured on this server.'; return; }
+  if (!profiles[0]) { $('adoptErr').textContent = 'Add an AI source first: ⚙ Settings → AI sources.'; return; }
+
+  $('adoptErr').textContent = '';
+  $('adoptBtn').disabled = true;
+  const set = m => { $('adoptErr').style.color = 'var(--dim)'; $('adoptErr').textContent = m; };
+  let created = null;
+  try {
+    set('Creating the agent…');
+    created = await api('/v1/agents', { method: 'POST', body: {
+      name,
+      aiProfileId: (profiles.length > 1 && $('adoptProfile').value) || profiles[0].id,
+      hostId: localHost.id,
+      sharedMemory: false,
+      ...(reuse && bot?.allowFrom?.length ? { seedMembers: bot.allowFrom } : {}),
+    }});
+    let a = await pollAgent(created.id);
+    // Resolve the bot the same way the CLI does: reuse the workspace's, or
+    // paste a token, or lean on a pool bot the create step already assigned.
+    if (a.pendingAction?.type === 'bot_token') {
+      if (reuse) {
+        set(`Taking over @${bot.accountId}…`);
+        await api(`/v1/agents/${a.id}/channel-token`, { method: 'POST', body: { fromWorkspace: path } });
+        a = await pollAgent(a.id);
+      } else if (token) {
+        set('Connecting the bot…');
+        await api(`/v1/agents/${a.id}/channel-token`, { method: 'POST', body: { token } });
+        a = await pollAgent(a.id);
+      } else {
+        throw new Error('This agent needs a bot: reuse the workspace bot, paste a BotFather token, or set up a bot pool.');
+      }
+    }
+    if (a.state === 'FAILED') throw new Error(`Could not start: ${a.stateReason ?? 'unknown'}`);
+    set('Copying the workspace…');
+    const res = await api(`/v1/agents/${a.id}/adopt-workspace`, { method: 'POST', body: { path } });
+    adoptDlg.close();
+    toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”. The original is untouched — retire it when you're happy.`, 45000);
+    await refresh(true);
+  } catch (e) {
+    // A half-made agent holds the name, so a retry would collide — clean it up,
+    // exactly like the CLI does.
+    if (created) { try { await api(`/v1/agents/${created.id}`, { method: 'DELETE' }); } catch {} await refresh(false); }
+    $('adoptErr').style.color = '';
+    $('adoptErr').textContent = e.message;
+  } finally { $('adoptBtn').disabled = false; }
 }
 
 // ---- agent cards ------------------------------------------------------------

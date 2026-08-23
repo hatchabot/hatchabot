@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.20.0] — 2026-08-23
+
+### Added
+- **Adopt an existing OpenClaw agent from the web app.** The `adopt` flow that
+  brought Tech Advisor and Stock Advisor in was CLI-only; now it's the front
+  door for anyone migrating. **New agent → "Already built one in OpenClaw? Bring
+  it in →"** points at a workspace folder, shows a preview (files/size, what's
+  skipped, the bot it already owns and whether taking it over is safe right
+  now), then creates the managed agent and copies the whole workspace.
+  - Mirrors the CLI exactly: reuse the workspace's bot (a checkbox, on by
+    default, carrying its approved members so nobody re-pairs), paste a BotFather
+    token, or lean on a pool bot; a still-live bot is blocked with the hand-over
+    steps; and a failure part-way deletes the half-made agent so a retry doesn't
+    collide on the name. Built entirely on the existing `/v1/workspaces/inspect`
+    and `/v1/agents/:id/adopt-workspace` endpoints — no new backend.
+
 ## [0.19.0] — 2026-08-23
 
 ### Added
