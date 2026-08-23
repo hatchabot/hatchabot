@@ -2,6 +2,27 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.17.2] — 2026-08-23
+
+### Fixed
+- **The `agentclaw` CLI printed nothing and exited 0 for every command.** The
+  "run only when invoked directly" guard compared `process.argv[1]` against this
+  module's path, but the installed `agentclaw` bin is a symlink — the paths never
+  matched, so `main()` never ran. The guard now resolves both sides through
+  `realpath`. (Regression since ~v0.10.0, when the guard was added to make
+  `cli.ts` importable by tests.)
+
+### Changed
+- **One Import button instead of two.** The header had separate **Restore** (full
+  backup) and **Import** (shared template) buttons doing near-identical uploads.
+  Now a single **Import** takes any `.agentclaw` file: the server sniffs the
+  archive's `format` tag and routes it — a full copy is restored as the *same*
+  agent, a template stands up a *fresh* one. `POST /v1/agents/import` auto-detects
+  and returns a `kind` so the app toasts the right thing; `/v1/agents/restore`
+  stays for the CLI's explicit `restore` verb. The format sniff (`peekFormat`) is
+  bounded like the real import, so an unreadable or oversized file safely falls
+  through to the validating restore path.
+
 ## [0.17.1] — 2026-08-23
 
 ### Changed

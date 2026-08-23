@@ -11,7 +11,7 @@
  * AGENTCLAW_PASSWORD, or --url/--password flags.
  */
 import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1066,7 +1066,16 @@ async function main() {
 }
 
 // Run only when invoked as the CLI, not when a test imports this module for its
-// exported helpers (runFolders, …).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// exported helpers (runFolders, …). realpath BOTH sides: the `agentclaw` bin is
+// a symlink, so a raw path compare left main() unrun and every command silent.
+function invokedAsCli(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+if (invokedAsCli()) {
   main().catch((err) => fail(String(err?.message ?? err)));
 }

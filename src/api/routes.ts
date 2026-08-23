@@ -24,12 +24,12 @@ import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
-import { exportTemplate, importTemplate } from '../orchestrator/template.js';
+import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
-import { exportAgent, importAgent, TransferError } from '../orchestrator/transfer.js';
+import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import {
   AdoptError,
@@ -2015,12 +2015,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     },
   );
 
+  // Import: one entry point for any .agentclaw file. It sniffs the archive's
+  // format and does the right thing — a template becomes a fresh agent, a full
+  // copy (a Download) is restored as the same agent. The /restore route above
+  // stays for the CLI's explicit `restore` verb.
   app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string } }>(
     '/v1/agents/import',
     async (req, reply) => {
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {
-        return reply.code(400).send({ error: 'Send the template file as the request body.' });
+        return reply.code(400).send({ error: 'Send the .agentclaw file as the request body.' });
       }
       const ownerId = ownerIdOf(req);
       const hosts = store.listHosts(ownerId);
@@ -2035,14 +2039,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         }
       }
       try {
-        const { agent, needs } = importTemplate(
-          { store, provider: providerFor(host.id), log: trace() },
+        // One button, two file kinds. A template stands up a FRESH agent (own
+        // bot, importer as sole owner); anything else is a full copy (a Download)
+        // that restores the SAME agent, carrying its bot token and members.
+        if (peekFormat(body) === TEMPLATE_FORMAT) {
+          const { agent, needs } = importTemplate(
+            { store, provider: providerFor(host.id), log: trace() },
+            body,
+            { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name },
+          );
+          // Fresh agent → provision its own bot the normal way (pool or paste).
+          kickProvision(agent.id);
+          return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });
+        }
+        const agent = await importAgent(
+          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace() },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
         );
-        // Fresh agent → provision its own bot the normal way (pool or paste).
-        kickProvision(agent.id);
-        return reply.code(201).send({ ...publicAgent(agent), needs });
+        return reply.code(201).send({ ...publicAgent(agent), kind: 'agent' });
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;

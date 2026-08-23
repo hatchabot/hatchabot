@@ -147,8 +147,9 @@ agentclaw download kitchen-helper -o kitchen.agentclaw
 agentclaw restore kitchen.agentclaw
 ```
 
-The web app can do the same: **Download** on the agent card, **Restore** in the
-header.
+The web app can do the same: **Download** on the agent card, then **Import** in
+the header — the one Import button takes any `.agentclaw` file, restoring a full
+backup as the same agent or standing a shared template up as a fresh one.
 
 ## Rules of the road
 
@@ -170,8 +171,8 @@ header.
 
 Download/Restore and Rehost move **the same agent** — same bot, same people, same
 memory. To hand someone a copy of an agent you *built and trained*, use a
-**template** instead (**Share** on the agent card's ⋯ menu; **Import** in the
-header, or `agentclaw share` / `import`).
+**template** instead (**Share** on the agent card's ⋯ menu; the same **Import**
+button in the header takes it, or `agentclaw share` / `import`).
 
 A template is deliberately **stripped of identity**, so it's safe to email:
 

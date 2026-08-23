@@ -28,6 +28,20 @@ import { clearBusy, markBusy } from './busy.js';
 export const EXPORT_FORMAT = 'agentclaw-export';
 export const EXPORT_VERSION = 1;
 
+/** Best-effort read of an archive's `format` tag (no full validation), so one
+ *  Import path can route a Download (full agent) vs a Share (template) file.
+ *  Bounded like the real import — a bomb (or anything unreadable) yields
+ *  `undefined`, which the caller treats as a full restore that re-validates. */
+export function peekFormat(data: Buffer): string | undefined {
+  try {
+    const json = gunzipSync(data, { maxOutputLength: MAX_STATE_BYTES }).toString('utf8');
+    const o = JSON.parse(json) as { format?: unknown };
+    return typeof o?.format === 'string' ? o.format : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface ExportManifest {
   format: typeof EXPORT_FORMAT;
   version: number;

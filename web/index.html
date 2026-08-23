@@ -204,12 +204,10 @@
     </div>
     <div class="hrow">
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
-      <button id="importBtn" class="hbtn" title="Restore an agent from a backup file (a full copy — .agentclaw)" onclick="$('importFile').click()">Restore</button>
-      <button id="tmplBtn" class="hbtn" title="Import a shared agent template — creates a fresh agent you give your own bot" onclick="$('tmplFile').click()">Import</button>
+      <button id="importBtn" class="hbtn" title="Open a .agentclaw file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
     </div>
-    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="restoreAgentFile(this.files[0])">
-    <input type="file" id="tmplFile" accept=".agentclaw" hidden onchange="importTemplateFile(this.files[0])">
+    <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
   <div id="agents"></div>
@@ -2094,19 +2092,31 @@ async function downloadAgent(id, name) {
   setTimeout(() => refresh(false), 2500);
 }
 
-async function restoreAgentFile(file) {
+// Import = open any .agentclaw file. The server sniffs it: a full backup is
+// restored as the SAME agent (its bot and members ride along); a shared
+// template stands up a FRESH agent that you give your own bot.
+async function importAgentFile(file) {
   if (!file) return;
   try {
-    const res = await fetch('/v1/agents/restore', {
+    const res = await fetch('/v1/agents/import', {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: file,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || data.message || 'Restore failed');
-    toast(`${data.name} restored — booting`);
+    if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
+    if (data.kind === 'template') {
+      const needs = [];
+      for (const d of (data.needs?.dataSources ?? [])) needs.push(`${d.kind} “${d.mountName}”`);
+      for (const n of (data.needs?.envVars ?? [])) needs.push(`env ${n}`);
+      const tail = needs.length ? ` — set up in ⚙ Configuration: ${needs.join(', ')}` : '';
+      toast(`Imported “${data.name}” — connect its Telegram bot, then it's yours${tail}`, 45000);
+    } else {
+      toast(`${data.name} restored — booting`);
+    }
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
+  finally { $('importFile').value = ''; }
 }
 
 // Share = a trained copy for someone else. It downloads a file (you send it);
@@ -2130,28 +2140,6 @@ async function cloneAgent(id, name) {
     toast(`Cloned as "${res.name}" — connect its Telegram bot to finish`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
-}
-
-async function importTemplateFile(file) {
-  if (!file) return;
-  try {
-    const res = await fetch('/v1/agents/import', {
-      method: 'POST',
-      headers: { 'content-type': 'application/octet-stream' },
-      body: file,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
-    const needs = [];
-    for (const d of (data.needs?.dataSources ?? [])) needs.push(`${d.kind} “${d.mountName}”`);
-    for (const n of (data.needs?.envVars ?? [])) needs.push(`env ${n}`);
-    const tail = needs.length
-      ? ` — set up in ⚙ Configuration: ${needs.join(', ')}`
-      : '';
-    toast(`Imported “${data.name}” — connect its Telegram bot, then it's yours${tail}`, 45000);
-    await refresh(true);
-  } catch (e) { toast(e.message, 30000); }
-  finally { $('importFile').value = ''; }
 }
 
 async function toggleSharedFromEdit() {

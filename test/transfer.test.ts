@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { exportAgent, importAgent, TransferError } from '../src/orchestrator/transfer.js';
+import { exportAgent, importAgent, peekFormat, TransferError } from '../src/orchestrator/transfer.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
@@ -267,5 +267,22 @@ describe('agent export/import', () => {
     await expect(
       importAgent(dst.deps, Buffer.from('not an archive'), { ownerId: 'o' }),
     ).rejects.toBeInstanceOf(TransferError);
+  });
+});
+
+describe('peekFormat — the one-Import router', () => {
+  it('reads the format tag off a full export so it routes to a restore', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    expect(peekFormat(data)).toBe('agentclaw-export');
+  });
+
+  it('returns undefined for anything it cannot read, so a template/garbage never restores', () => {
+    expect(peekFormat(Buffer.from('not an archive'))).toBeUndefined();
+    expect(peekFormat(gzipSync(Buffer.from('{}')))).toBeUndefined();
+    expect(peekFormat(gzipSync(Buffer.from(JSON.stringify({ format: 'agentclaw-template' }))))).toBe(
+      'agentclaw-template',
+    );
   });
 });
