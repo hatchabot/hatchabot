@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.19.0] — 2026-08-23
+
+### Added
+- **Restore an agent from a backup**, per-agent, from the Backups panel. Where a
+  snapshot only reverts the three definition files (SOUL/AGENTS/MEMORY), this
+  replaces an agent's **entire volume** with the copy from a chosen backup set —
+  the complete-state recovery the snapshot can't do. The nightly tarball format
+  is exactly what the provider's `importState` consumes, so it's a clean
+  stop → import → start swap.
+  - Hard-gated: `POST /v1/backups/restore` is owner-only and holds the busy
+    guard like a snapshot restore; the UI makes you type the agent's name to
+    confirm, since it overwrites live memory. A safety copy of the current
+    volume is taken first and rolled back if the extract fails, so a broken
+    archive can't corrupt a working agent. The agent is stopped for the swap and
+    restarted only if it was running before.
+  - The panel now matches each backed-up volume to a live agent, showing a
+    Restore button per agent (and its real name); a tarball whose agent has been
+    deleted is shown greyed with no Restore.
+
 ## [0.18.0] — 2026-08-23
 
 ### Added

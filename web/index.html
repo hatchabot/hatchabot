@@ -481,10 +481,13 @@
 
   <section id="paneBackups" role="tabpanel" hidden>
     <div class="sub">
-      A nightly job saves each agent's memory, the control-plane registry, and
-      the key to decrypt it — one dated set per run, kept <b id="bkKeep">14</b>
-      days. To restore one, follow <code>scripts/backup-volumes.sh</code>. Each
-      set holds bot tokens and the decryption key in the clear, so it lives in
+      A nightly job saves each agent's <b>entire</b> memory, the control-plane
+      registry, and the key to decrypt it — one dated set per run, kept
+      <b id="bkKeep">14</b> days. <b>Restore</b> rolls a single agent's whole
+      volume back to that night (more than a snapshot, which only reverts
+      SOUL/AGENTS/MEMORY) — it overwrites live memory, so the agent is stopped
+      for the swap and restarted after. Each set holds bot tokens and the
+      decryption key in the clear, so it lives in
       <code id="bkDir" style="word-break:break-all"></code> at <code>0700</code>
       and is never downloadable from here.
     </div>
@@ -885,13 +888,24 @@ async function loadBackups() {
     el.innerHTML = r.backups.map(b => {
       const warn = !b.hasDb ? `<span style="color:var(--warn)"> · ⚠ no registry</span>`
         : !b.hasKey ? `<span style="color:var(--warn)"> · ⚠ no key (can't decrypt)</span>` : '';
-      const names = b.volumes.map(v => esc(v.name)).join(', ');
-      return `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line)">
-        <div>
+      // Each agent in the set gets a Restore, but only when it maps to an agent
+      // that still exists (the server attaches agentId then). Others are shown
+      // greyed — there's no live agent to restore into.
+      const rows = b.volumes.map(v => {
+        const btn = v.agentId
+          ? `<button class="hbtn" onclick="restoreFromBackup('${esc(v.agentId)}','${esc(b.date)}','${jsq(v.name)}')">Restore</button>`
+          : `<span class="sub" title="No current agent matches this backup">deleted</span>`;
+        return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:3px 0">
+          <span${v.agentId ? '' : ' style="color:var(--dim)"'}>${esc(v.name)} <span class="sub">· ${fmtBytes(v.sizeBytes)}</span></span>
+          ${btn}
+        </div>`;
+      }).join('');
+      return `<div style="padding:8px 0;border-top:1px solid var(--line)">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
           <div><b>${esc(b.date)}</b> · ${fmtBytes(b.sizeBytes)} · ${b.volumes.length} agent${b.volumes.length === 1 ? '' : 's'}${warn}</div>
-          ${names ? `<div class="sub" style="margin-top:2px">${names}</div>` : ''}
+          <button class="hbtn" onclick="pruneBackup('${esc(b.date)}')">Delete set</button>
         </div>
-        <button class="hbtn" onclick="pruneBackup('${esc(b.date)}')">Delete</button>
+        ${rows ? `<div style="margin-top:6px">${rows}</div>` : ''}
       </div>`;
     }).join('');
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -930,6 +944,26 @@ async function pruneBackup(date) {
     toast(`Deleted backup ${date}`);
     await loadBackups();
   } catch (e) { toast(e.message, 20000); }
+}
+
+// Hard gate: restoring overwrites the agent's ENTIRE memory with the backup and
+// discards everything since. Make the owner type the name to mean it.
+async function restoreFromBackup(agentId, date, name) {
+  const typed = prompt(
+    `Restore “${name}” from the ${date} backup?\n\n` +
+    `This REPLACES the agent's entire memory with that night's copy and ` +
+    `DISCARDS everything it has learned since. The agent is stopped for the ` +
+    `swap and restarted after.\n\n` +
+    `Type the agent's name to confirm:`,
+    '',
+  );
+  if (typed === null) return;
+  if (typed.trim() !== name) { toast('Name did not match — restore cancelled.', 8000); return; }
+  try {
+    const r = await api('/v1/backups/restore', { method: 'POST', body: { agentId, date } });
+    toast(`Restored “${name}” from ${date}${r.running ? ' — restarting' : ''}`, 12000);
+    await refresh(true);
+  } catch (e) { toast(e.message, 30000); }
 }
 
 async function loadRuntime() {

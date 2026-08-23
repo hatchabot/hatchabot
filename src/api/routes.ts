@@ -25,11 +25,14 @@ import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrat
 import { agentUsage } from '../orchestrator/usage.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
+  agentArchiveName,
   backupRunState,
   backupsDir,
   keepDays,
   listBackups,
   pruneBackup,
+  restoreAgentFromBackup,
+  RestoreError,
   startBackup,
 } from '../orchestrator/backups.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
@@ -1742,7 +1745,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // metadata — never the backup files themselves.
   app.get('/v1/backups', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    return { dir: backupsDir(), keepDays: keepDays(), run: backupRunState(), backups: listBackups() };
+    // Match each backed-up volume to a live agent so the panel can offer a
+    // per-agent Restore (and show its real name). A tarball with no matching
+    // agent — one that's since been deleted — carries no agentId and gets no
+    // Restore button.
+    const mine = store.listVisibleAgents(ownerIdOf(req));
+    const byArchive = new Map(mine.filter((a) => a.runtimeRef).map((a) => [agentArchiveName(a.runtimeRef!), a]));
+    const backups = listBackups().map((set) => ({
+      ...set,
+      volumes: set.volumes.map((v) => {
+        const a = byArchive.get(v.file);
+        return a ? { ...v, agentId: a.id, name: a.name } : v;
+      }),
+    }));
+    return { dir: backupsDir(), keepDays: keepDays(), run: backupRunState(), backups };
   });
 
   app.post('/v1/backups/run', async (req, reply) => {
@@ -1758,6 +1774,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       return { ok: true };
     } catch (err) {
       return reply.code(400).send({ error: String((err as Error)?.message ?? err) });
+    }
+  });
+
+  // Restore ONE agent's whole volume from a backup set. Destructive and
+  // owner-only; it overwrites live memory, so it holds the busy guard for the
+  // stop → import → start swap the same way a snapshot restore does.
+  app.post<{ Body: { agentId?: string; date?: string } }>('/v1/backups/restore', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const { agentId, date } = (req.body as { agentId?: string; date?: string } | null) ?? {};
+    if (!agentId || !date) return reply.code(400).send({ error: 'agentId and date are required.' });
+    const agent = ownedAgent(req, agentId);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
+    try {
+      return await whileBusy(agent.id, () =>
+        restoreAgentFromBackup(snapshotDeps(agent), agent.id, date),
+      );
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      if (err instanceof RestoreError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
     }
   });
 
