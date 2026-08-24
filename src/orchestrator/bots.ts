@@ -42,13 +42,18 @@ export interface HostBots {
 async function getMe(
   token: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ ok: boolean; username?: string }> {
+): Promise<{ verdict: 'valid' | 'invalid' | 'unknown'; username?: string }> {
   try {
-    const res = await fetchImpl(`https://api.telegram.org/bot${token}/getMe`);
+    const res = await fetchImpl(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(5000) });
     const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { username?: string } };
-    return body?.ok ? { ok: true, username: body.result?.username } : { ok: false };
+    if (body?.ok) return { verdict: 'valid', username: body.result?.username };
+    // Only a definitive rejection (bad/revoked token) means "dead". A 5xx, a
+    // rate-limit, or malformed JSON is inconclusive — never flag a live agent's
+    // bot dead on a transient blip.
+    if (res.status === 401 || res.status === 404) return { verdict: 'invalid' };
+    return { verdict: 'unknown' };
   } catch {
-    return { ok: false };
+    return { verdict: 'unknown' }; // network error / timeout — inconclusive
   }
 }
 
@@ -119,16 +124,19 @@ export async function auditBots(
       /* token unreadable — treat as unknown validity below */
     }
     if (!token) {
-      row.valid = false;
-      row.cls = 'dead';
+      // Can't read the token — inconclusive, not proof the bot is gone. Leave
+      // an in-use row as-is; only an idle row's validity is left unknown.
       return;
     }
     const me = await getMe(token, fetchImpl);
-    row.valid = me.ok;
-    if (!me.ok) {
-      row.cls = 'dead';
+    if (me.verdict === 'valid') row.valid = true;
+    else if (me.verdict === 'invalid') {
+      row.valid = false;
+      row.cls = 'dead'; // a definitively rejected token really is a freed slot
       return;
     }
+    // 'unknown' (network/5xx/timeout): leave valid undefined and DON'T downgrade
+    // — a live agent's bot must never be shown DEAD on a transient blip.
     // Only probe idle bots — never risk a transient 409 on a live poller.
     if (row.cls !== 'in-use') row.polling = await botPollState(token, fetchImpl);
   }

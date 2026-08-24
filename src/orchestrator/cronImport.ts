@@ -74,14 +74,17 @@ export function selfPathReplacements(entry: OpenclawAgentEntry, containerSlug: s
   const to = WORKSPACE_DIR_TEMPLATE.replace('{slug}', containerSlug);
   const froms = [entry.agentDir, entry.workspace]
     .filter((p): p is string => !!p)
-    .map((p) => p.replace(/\/+$/, ''));
+    .map((p) => p.replace(/\/+$/, ''))
+    // Drop anything that reduced to empty (e.g. a pathological "/") — an empty
+    // `from` in split().join() would insert `to` between every character.
+    .filter((p) => p.length > 0);
   return [...new Set(froms)].sort((a, b) => b.length - a.length).map((from) => [from, to] as [string, string]);
 }
 
 export function applyReplacements(text: string | undefined, pairs: Array<[string, string]>): string | undefined {
   if (!text) return text;
   let out = text;
-  for (const [from, to] of pairs) out = out.split(from).join(to);
+  for (const [from, to] of pairs) if (from) out = out.split(from).join(to);
   return out;
 }
 
@@ -92,7 +95,7 @@ const REWRITE_SCRIPT =
   'const fs=require("fs"),path=require("path");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;' +
   'function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);' +
   'if(e.isDirectory())walk(p);else if(/\\.(md|txt|json)$/i.test(e.name)){' +
-  'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs)o=o.split(x[0]).join(x[1]);' +
+  'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs){if(!x[0])continue;o=o.split(x[0]).join(x[1])}' +
   'if(o!==t)try{fs.writeFileSync(p,o)}catch(_){}}}}' +
   'try{walk(root)}catch(e){process.exit(2)}';
 

@@ -331,6 +331,7 @@ export async function botPollState(
   try {
     const res = await fetchImpl(
       `https://api.telegram.org/bot${botToken}/getUpdates?offset=-1&limit=1&timeout=0`,
+      { signal: AbortSignal.timeout(5000) },
     );
     if (res.status === 409) return 'busy';
     const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error_code?: number };

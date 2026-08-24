@@ -328,10 +328,13 @@ export class LocalDockerProvider implements RuntimeProvider {
       // root-owned and every import failed with EACCES on openclaw.json.
       // So: refuse the archive's ownership, then set the correct one, and
       // strip setuid/setgid while KEEPING modes (credentials rely on 0600).
+      // Clear the volume FIRST so this is a true replace, not an overlay — a
+      // restore/rollback must not leave behind files created since the snapshot
+      // (and on import it discards the provisioned seed skeleton).
       const child = spawn(this.docker, [
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
-        'tar xz --no-same-owner -C /vol && chown -R 1000:1000 /vol && chmod -R a-s /vol',
+        'find /vol -mindepth 1 -delete && tar xz --no-same-owner -C /vol && chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]);
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));

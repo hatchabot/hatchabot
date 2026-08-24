@@ -167,8 +167,10 @@ export class Store {
     ]) {
       try {
         this.db.exec(alter);
-      } catch {
-        /* column exists */
+      } catch (e) {
+        // Swallow only "column already exists" — a genuinely malformed ALTER
+        // (typo, missing table) must surface, not run against a broken schema.
+        if (!/duplicate column name/i.test(String((e as Error)?.message ?? e))) throw e;
       }
     }
     // Backfill order for agents created before sort_order existed: rowid is the
@@ -459,8 +461,10 @@ export class Store {
         .prepare(`SELECT MAX(gateway_port) AS p FROM agents`)
         .get() as { p: number | null };
       // Base is configurable so a second installation on the same host uses a
-      // different range (docker publishes these on the shared loopback).
-      const base = Number(process.env.AGENTCLAW_GATEWAY_PORT_BASE ?? 19100);
+      // different range (docker publishes these on the shared loopback). A
+      // non-numeric override would poison Math.max with NaN, so validate it.
+      const envBase = Number(process.env.AGENTCLAW_GATEWAY_PORT_BASE);
+      const base = Number.isInteger(envBase) && envBase > 0 && envBase < 65536 ? envBase : 19100;
       const port = Math.max(base - 1, row.p ?? 0) + 1;
       const token = randomBytes(16).toString('hex');
       this.db
@@ -510,8 +514,11 @@ export class Store {
   findAgentUsingAccount(accountId: string): Agent | undefined {
     const row = this.db
       .prepare(
+        // Telegram usernames are case-insensitive — match that way so this
+        // two-poller guard can't be evaded by a differently-cased accountId
+        // (e.g. one read verbatim from a hand-edited OpenClaw config).
         `SELECT a.id FROM channels c JOIN agents a ON a.id = c.agent_id
-         WHERE c.account_id = ? AND a.state != 'DELETED' LIMIT 1`,
+         WHERE c.account_id = ? COLLATE NOCASE AND a.state != 'DELETED' LIMIT 1`,
       )
       .get(accountId) as { id: string } | undefined;
     return row ? this.getAgent(row.id) : undefined;

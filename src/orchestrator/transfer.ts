@@ -276,6 +276,20 @@ async function importAgentInner(
     throw new TransferError('That export has an unusable agent id.');
   }
 
+  // Cap the state on import the way export already caps it (transfer.ts:187) —
+  // the import side had no bound at all, so an oversized/crafted `.agentclaw`
+  // went straight into `tar xz` on the shared volume. This rejects anything past
+  // the ~190 MB gzipped ceiling before it can fill the host disk. (A tighter
+  // extracted-size quota is tracked as a follow-up; decompressing here would
+  // either spike control-plane RAM or reject legit large agents.)
+  const stateBuf = Buffer.from(manifest.state, 'base64');
+  if (stateBuf.length > MAX_RAW_STATE_BYTES) {
+    throw new TransferError(
+      `This archive's state is ~${(stateBuf.length / 1e6).toFixed(0)} MB — too large to import ` +
+        `(the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB).`,
+    );
+  }
+
   if (store.listAllActiveAgents().some((a) => a.slug === manifest.agent.slug)) {
     throw new TransferError(`An agent with slug "${manifest.agent.slug}" already lives here.`);
   }
@@ -393,7 +407,7 @@ async function importAgentInner(
     const spec = await buildRuntimeSpec(deps, agent.id);
     ({ runtimeRef } = await provider.provision(spec));
     store.setAgentRuntimeRef(agent.id, runtimeRef);
-    await provider.importState(runtimeRef, Buffer.from(manifest.state, 'base64'));
+    await provider.importState(runtimeRef, stateBuf);
     const respec = await buildRuntimeSpec(deps, agent.id);
     await provider.provision(respec);
     recordApplied(store, agent.id);

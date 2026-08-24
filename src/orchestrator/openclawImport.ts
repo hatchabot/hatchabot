@@ -193,16 +193,39 @@ export async function quiesceOpenclawBots(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const restart = opts.restart ?? restartOpenclawGateway;
 
-  for (const id of accountIds) disableOpenclawBot(id, configPath);
+  const cfg = readCfg(configPath);
+  if (!cfg) throw new Error('OpenClaw config not found or unreadable.');
+  const accounts = cfg.channels?.telegram?.accounts ?? {};
+
+  // Validate EVERY id before writing anything: a bad id partway through must
+  // not leave earlier bots disabled-in-config with no gateway restart — the
+  // silent split-poll state this whole module exists to prevent.
+  for (const id of accountIds) {
+    if (!accounts[id]) throw new Error(`No Telegram account "${id}" in the OpenClaw config.`);
+  }
+
+  // One backup, one atomic write for the whole batch.
+  let changed = false;
+  for (const id of accountIds) {
+    if (accounts[id]!.enabled !== false) {
+      accounts[id]!.enabled = false;
+      changed = true;
+    }
+  }
+  if (changed) {
+    copyFileSync(configPath, `${configPath}.agentclaw-bak`);
+    writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`);
+  }
+
+  // Restart unconditionally so the disables take effect AND any lingering
+  // poller (a bot disabled earlier but never reloaded) actually stops.
   await restart();
-  // Give the freshly-started gateway a moment to settle before probing.
   await sleep(opts.settleMs ?? 1500);
 
-  const cfg = readCfg(configPath);
   const quiet: string[] = [];
   const stillBusy: string[] = [];
   for (const id of accountIds) {
-    const token = cfg?.channels?.telegram?.accounts?.[id]?.botToken;
+    const token = accounts[id]?.botToken;
     if (!token) {
       stillBusy.push(id);
       continue;

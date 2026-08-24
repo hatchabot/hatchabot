@@ -47,7 +47,9 @@ const TemplateSchema = z.object({
     persona: z.string().max(8000),
     sharedMemory: z.boolean(),
   }),
-  files: z.record(z.string().max(200), z.string().max(200_000)),
+  files: z
+    .record(z.string().max(200), z.string().max(200_000))
+    .refine((r) => Object.keys(r).length <= 200, { message: 'too many files in template' }),
   ai: z.object({ vendor: z.string().max(32) }),
   dataNeeds: z
     .array(
@@ -118,10 +120,15 @@ export async function exportTemplate(
   };
 }
 
+// A template is trained text files; 64 MB decompressed is already generous and
+// bounds a decompression bomb even if a future caller reaches parseTemplate
+// without the peekFormat gate in front of it.
+const MAX_TEMPLATE_BYTES = 64 * 1024 * 1024;
+
 export function parseTemplate(data: Buffer): TemplateManifest {
   let json: unknown;
   try {
-    json = JSON.parse(gunzipSync(data).toString('utf8'));
+    json = JSON.parse(gunzipSync(data, { maxOutputLength: MAX_TEMPLATE_BYTES }).toString('utf8'));
   } catch {
     throw new TransferError('That file is not a readable AgentClaw template.');
   }

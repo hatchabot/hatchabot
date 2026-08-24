@@ -75,7 +75,10 @@ export function scanWorkspacePaths(workspaceDir: string): string[] {
       continue;
     }
     if (p === ws || p.startsWith(`${ws}/`)) continue; // the agent's own files
-    if (/(^|\/)\.openclaw(\/|$)/.test(p)) continue; // OpenClaw's own runtime state
+    // Any hidden segment: OpenClaw state (.openclaw) and, importantly, credential
+    // dirs (.ssh, .aws, .gnupg, .kube, .docker, .config) the share-blocklist
+    // doesn't all cover. Real data folders are not dot-directories.
+    if (p.split('/').some((seg) => seg.startsWith('.'))) continue;
     if (SYSTEM_PREFIXES.some((s) => p === s || p.startsWith(`${s}/`))) continue;
     // Skip trivially-shallow roots ("/", "/home", "/home/user", "/mnt").
     if (p.split('/').filter(Boolean).length < 2) continue;

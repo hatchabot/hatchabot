@@ -41,6 +41,7 @@ import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import {
   migrateCrons,
   openclawAgentEntryForWorkspace,
+  readOpenclawCrons,
   rewriteWorkspaceFiles,
   selfPathReplacements,
 } from '../orchestrator/cronImport.js';
@@ -1183,16 +1184,26 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         // nothing reconciles them (rebuild never overwrites an existing AGENTS.md).
         const provider = providerFor(agent.hostId);
         const path = workspacePath(agent.slug, 'AGENTS.md');
-        const read = await provider.execShell(
-          agent.runtimeRef,
-          `cat ${JSON.stringify(path)} 2>/dev/null || true`,
-        );
-        const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared!));
-        const b64 = Buffer.from(next, 'utf8').toString('base64');
-        const write = await provider.execShell(
-          agent.runtimeRef,
-          `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-        );
+        // Hold the busy guard for the read-modify-write so it can't interleave a
+        // volume tar (export/migrate/restore) mid-rewrite.
+        let write;
+        try {
+          write = await whileBusy(agent.id, async () => {
+            const read = await provider.execShell(
+              agent.runtimeRef!,
+              `cat ${JSON.stringify(path)} 2>/dev/null || true`,
+            );
+            const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared!));
+            const b64 = Buffer.from(next, 'utf8').toString('base64');
+            return provider.execShell(
+              agent.runtimeRef!,
+              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
+            );
+          });
+        } catch (err) {
+          if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+          throw err;
+        }
         if (write.code !== 0) {
           app.log.warn({ agentId: agent.id, stderr: write.stderr }, 'memory policy rewrite failed');
           return reply.code(502).send({
@@ -1246,18 +1257,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to edit its files.' });
       }
-      // Version the files BEFORE overwriting them — the whole point of the
-      // history is that a bad save is recoverable.
-      await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-edit');
+      // Hold the busy guard for the write: an export/migrate/restore that tars
+      // or replaces this same volume must not interleave a torn edit.
+      if (busyNow(agent, reply)) return reply;
       // base64 through the shell so arbitrary content can't break quoting.
       const b64 = Buffer.from(content, 'utf8').toString('base64');
       const path = workspacePath(agent.slug, req.params.name);
-      const res = await providerFor(agent.hostId).execShell(
-        agent.runtimeRef,
-        `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-      );
-      if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
-      return { saved: true };
+      try {
+        const res = await whileBusy(agent.id, async () => {
+          // Version the files BEFORE overwriting — a bad save must be recoverable.
+          await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-edit');
+          return providerFor(agent.hostId).execShell(
+            agent.runtimeRef!,
+            `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
+          );
+        });
+        if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
+        return { saved: true };
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
     },
   );
 
@@ -1946,32 +1966,46 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         );
         // Repoint the agent's OWN absolute paths (its old workspace/agentDir) at
         // the container copy, in both its files and its crons, so references
-        // resolve. Best-effort — neither ever fails the adopt itself.
+        // resolve. Best-effort — neither ever fails the adopt itself. Held under
+        // the busy guard (the long cron migration must not race a rebuild/delete)
+        // and only attempted when the agent is actually RUNNING — against a
+        // STOPPED container the cron gateway never answers, so it would hang the
+        // readiness probe and then mislabel every cron "failed".
         const freshAgent = store.getAgent(agent.id)!;
+        let crons: { total: number; carried: number; failed: number; deferred?: number } = { total: 0, carried: 0, failed: 0 };
         const selfEntry = openclawAgentEntryForWorkspace(path);
-        if (selfEntry && freshAgent.runtimeRef) {
-          try {
-            await rewriteWorkspaceFiles(
-              { provider: providerFor(agent.hostId), log: trace(agent.id) },
-              freshAgent.runtimeRef,
-              freshAgent.slug,
-              selfPathReplacements(selfEntry, freshAgent.slug),
-            );
-          } catch (err) {
-            trace(agent.id)('adopt.path_rewrite_skipped', { error: String(err).slice(0, 200) });
-          }
-        }
-        // Carry the source agent's scheduled tasks (disabled for review, paths
-        // rewritten). They live in OpenClaw's own DB, not the workspace copy.
-        let crons = { total: 0, carried: 0, failed: 0 };
-        try {
-          crons = await migrateCrons(
-            { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-            agent.id,
-            path,
-          );
-        } catch (err) {
-          trace(agent.id)('cron.migrate_skipped', { error: String(err).slice(0, 200) });
+        if (freshAgent.runtimeRef && freshAgent.state === 'RUNNING') {
+          await whileBusy(agent.id, async () => {
+            if (selfEntry) {
+              try {
+                await rewriteWorkspaceFiles(
+                  { provider: providerFor(agent.hostId), log: trace(agent.id) },
+                  freshAgent.runtimeRef!,
+                  freshAgent.slug,
+                  selfPathReplacements(selfEntry, freshAgent.slug),
+                );
+              } catch (err) {
+                trace(agent.id)('adopt.path_rewrite_skipped', { error: String(err).slice(0, 200) });
+              }
+            }
+            try {
+              crons = await migrateCrons(
+                { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+                agent.id,
+                path,
+              );
+            } catch (err) {
+              trace(agent.id)('cron.migrate_skipped', { error: String(err).slice(0, 200) });
+            }
+          }).catch((err) => {
+            // A concurrent op holds the flag — repointing is deferred, not fatal.
+            trace(agent.id)('adopt.repoint_busy', { error: String(err).slice(0, 120) });
+          });
+        } else if (selfEntry) {
+          // Agent isn't running (adopted into a STOPPED agent): defer the crons
+          // rather than attempt them against a down gateway. Report honestly.
+          const pending = readOpenclawCrons(selfEntry.id).length;
+          if (pending > 0) crons = { total: pending, carried: 0, failed: 0, deferred: pending };
         }
         return { ...res, crons };
       } catch (err) {

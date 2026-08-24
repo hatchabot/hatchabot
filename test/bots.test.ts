@@ -12,12 +12,15 @@ class MemSecrets implements SecretStore {
   async delete(ref: string) { this.m.delete(ref); }
 }
 
-// getMe says a token is invalid iff it contains "dead"; getUpdates is quiet.
+// getMe: a "dead-token" is rejected with 401 (definitively invalid); a
+// "flaky-token" gets a 500 (inconclusive); everything else is valid. getUpdates
+// is quiet.
 const fetchStub = (async (url: string | URL) => {
   const u = String(url);
   if (u.includes('/getMe')) {
-    const ok = !u.includes('dead-token');
-    return { status: 200, json: async () => ({ ok, result: ok ? { username: 'x' } : undefined }) };
+    if (u.includes('dead-token')) return { status: 401, json: async () => ({ ok: false }) };
+    if (u.includes('flaky-token')) return { status: 500, json: async () => ({ ok: false }) };
+    return { status: 200, json: async () => ({ ok: true, result: { username: 'x' } }) };
   }
   return { status: 200, json: async () => ({ ok: true }) }; // getUpdates → quiet
 }) as unknown as typeof fetch;
@@ -40,8 +43,10 @@ async function fixture() {
   };
   mkAgent('run', 'RUNNING', 'runbot', 'chan/run');
   mkAgent('stopped', 'STOPPED', 'stopbot', 'chan/stopped');
+  mkAgent('flaky', 'RUNNING', 'flakybot', 'chan/flaky');
   await secrets.put('chan/run', 'run-token');
-  await secrets.put('chan/stopped', 'dead-token'); // getMe will say invalid
+  await secrets.put('chan/stopped', 'dead-token'); // getMe 401 → invalid
+  await secrets.put('chan/flaky', 'flaky-token'); // getMe 500 → inconclusive
   await pool.addToPool('poolbot', 'pool-token'); // free, never leased
 
   return { store, secrets, pool };
@@ -71,5 +76,9 @@ describe('auditBots', () => {
     expect(by.stopbot).toMatchObject({ cls: 'dead', valid: false });
     // free pool bot: valid and probed (idle) → quiet
     expect(by.poolbot).toMatchObject({ cls: 'reclaimable', valid: true, polling: 'quiet' });
+    // a transient Telegram failure (500) must NOT flag a running agent dead:
+    // it stays in-use with validity left unknown.
+    expect(by.flakybot!.cls).toBe('in-use');
+    expect(by.flakybot!.valid).toBeUndefined();
   });
 });

@@ -2,6 +2,39 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.26.0] — 2026-08-24
+
+### Fixed
+Fourth deep audit (5 parallel agents over the 0.18→0.25 delta: transfer/backups,
+adopt/OpenClaw import, API auth, store/provision/bots, web/CLI). No critical,
+high, or XSS found — the auth model and escaping are sound. Fixed findings:
+
+- **`agentclaw bots --check` no longer flags a live agent's bot `DEAD` on a
+  transient Telegram blip.** `getMe` is now status-aware (only 401/404 = invalid;
+  5xx/network/timeout = unknown), never downgrades an in-use bot, and both census
+  probes carry a 5s timeout so one hung endpoint can't stall the whole census.
+- **Adopting into a STOPPED agent** no longer hangs ~30s probing a down gateway
+  and mislabeling every cron "failed" — it reports them `deferred` instead.
+- **`quiesce` is now atomic**: it validates every account id before writing, so a
+  bad id can't leave bots disabled-in-config yet still polled (a silent
+  split-poll), and writes one backup + one config write for the batch.
+- **Batch adopt quiesces every selected bot**, not only ones still enabled — a
+  "disabled but never gateway-restarted" bot no longer gets taken over while
+  OpenClaw still polls it.
+- **Restore/rollback now truly replaces the volume** instead of overlaying —
+  files created after a backup are removed, so "restore to a known-good state"
+  holds (`importState` clears the volume before extracting).
+- **Import caps the archive state** the way export already does, and
+  `parseTemplate` gunzips under a bound with a file-count cap.
+- **Busy-guards added** to the two volume-writing routes that lacked them
+  (`PUT …/files/:name`, memory-policy `PATCH`), and the adopt path-rewrite + cron
+  migration now run inside the busy guard.
+- Hardening: schema migrations rethrow anything but "duplicate column"; the
+  gateway-port env is validated (no `NaN`); `findAgentUsingAccount` matches
+  account ids case-insensitively (`COLLATE NOCASE`); the data-folder scan skips
+  hidden/credential dirs (`.ssh`, `.aws`, …); a pathological `/` path can no
+  longer corrupt a cron/file rewrite; backup buttons escape args with `jsq`.
+
 ## [0.25.1] — 2026-08-24
 
 ### Fixed

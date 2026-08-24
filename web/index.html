@@ -945,7 +945,7 @@ async function loadBackups() {
       // greyed — there's no live agent to restore into.
       const rows = b.volumes.map(v => {
         const btn = v.agentId
-          ? `<button class="hbtn" onclick="restoreFromBackup('${esc(v.agentId)}','${esc(b.date)}','${jsq(v.name)}')">Restore</button>`
+          ? `<button class="hbtn" onclick="restoreFromBackup('${jsq(v.agentId)}','${jsq(b.date)}','${jsq(v.name)}')">Restore</button>`
           : `<span class="sub" title="No current agent matches this backup">deleted</span>`;
         return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:3px 0">
           <span${v.agentId ? '' : ' style="color:var(--dim)"'}>${esc(v.name)} <span class="sub">· ${fmtBytes(v.sizeBytes)}</span></span>
@@ -955,7 +955,7 @@ async function loadBackups() {
       return `<div style="padding:8px 0;border-top:1px solid var(--line)">
         <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
           <div><b>${esc(b.date)}</b> · ${fmtBytes(b.sizeBytes)} · ${b.volumes.length} agent${b.volumes.length === 1 ? '' : 's'}${warn}</div>
-          <button class="hbtn" onclick="pruneBackup('${esc(b.date)}')">Delete set</button>
+          <button class="hbtn" onclick="pruneBackup('${jsq(b.date)}')">Delete set</button>
         </div>
         ${rows ? `<div style="margin-top:6px">${rows}</div>` : ''}
       </div>`;
@@ -1444,12 +1444,14 @@ async function bringInSelected() {
   const rowSay = (i, m, color) => { const el = $(`ocrow-${i}`); if (el) { el.textContent = m; el.style.color = color || 'var(--dim)'; } };
   const idxOf = a => ocAgents.indexOf(a);
 
-  // 1. Hand over bots still live in OpenClaw — disable each and restart the
-  // gateway ONCE for the whole batch, then verify each went quiet.
-  const toQuiesce = picks.filter(a => a.bot && a.bot.enabledInSource).map(a => a.bot.accountId);
+  // 1. Hand over EVERY selected bot — disable each and restart the gateway ONCE,
+  // then verify each went quiet. We quiesce even bots already marked disabled in
+  // the config: "disabled but the gateway was never restarted" still polls, and
+  // discovery can't see that, so the restart is what actually stops the poller.
+  const toQuiesce = picks.filter(a => a.bot).map(a => a.bot.accountId);
   let stillBusy = [];
   if (toQuiesce.length) {
-    for (const a of picks) if (a.bot && a.bot.enabledInSource) rowSay(idxOf(a), 'waiting for OpenClaw hand-over…');
+    for (const a of picks) if (a.bot) rowSay(idxOf(a), 'waiting for OpenClaw hand-over…');
     try {
       const r = await api('/v1/openclaw/quiesce', { method: 'POST', body: { accountIds: toQuiesce } });
       stillBusy = r.stillBusy || [];

@@ -150,4 +150,18 @@ describe('quiesceOpenclawBots', () => {
     expect(after.channels.telegram.accounts.a1bot.enabled).toBe(false);
     expect(after.channels.telegram.accounts.adoptedbot.enabled).toBe(false);
   });
+
+  it('validates ALL ids before writing — a bad id leaves the config untouched and never restarts', async () => {
+    const cfg = join(root, 'quiesce-atomic.json');
+    writeConfig(cfg);
+    let restarts = 0;
+    await expect(
+      quiesceOpenclawBots(['a1bot', 'does-not-exist'], { configPath: cfg, settleMs: 0, restart: async () => { restarts++; } }),
+    ).rejects.toThrow(/No Telegram account/);
+    // a1bot must NOT have been disabled (no partial write), and no restart ran —
+    // otherwise a bot would be disabled-in-config yet still polled.
+    const after = JSON.parse(readFileSync(cfg, 'utf8'));
+    expect(after.channels.telegram.accounts.a1bot.enabled).toBe(true);
+    expect(restarts).toBe(0);
+  });
 });
