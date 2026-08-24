@@ -331,10 +331,13 @@
 </dialog>
 
 <dialog id="editDlg" style="width:min(640px,94vw)">
-  <h3 style="margin:0 0 10px">Edit <span id="editAgent"></span></h3>
+  <h3 style="margin:0 0 10px"><span id="editAgent"></span> — settings</h3>
   <div class="tabs" role="tablist">
     <button class="tab" id="tabDef" role="tab" aria-selected="true" onclick="showEditTab('def')">📖 Definition</button>
-    <button class="tab" id="tabCfg" role="tab" aria-selected="false" onclick="showEditTab('cfg')">⚙ Configuration</button>
+    <button class="tab" id="tabEditAi" role="tab" aria-selected="false" onclick="showEditTab('ai')">AI</button>
+    <button class="tab" id="tabEditData" role="tab" aria-selected="false" onclick="showEditTab('data')">Data</button>
+    <button class="tab" id="tabEditTg" role="tab" aria-selected="false" onclick="showEditTab('tg')">Telegram</button>
+    <button class="tab" id="tabEditEnv" role="tab" aria-selected="false" onclick="showEditTab('env')">Environment</button>
   </div>
 
   <section id="paneDef" role="tabpanel">
@@ -377,10 +380,9 @@
     <div id="snapList" style="max-height:150px;overflow:auto"></div>
   </section>
 
-  <section id="paneCfg" role="tabpanel" hidden>
+  <section id="paneEditAi" role="tabpanel" hidden>
     <div class="sub" style="margin-bottom:10px">
-      How this agent runs — its AI, the data it can read, its secrets, and its bot.
-      Changes here apply on the agent's next <b>Rebuild</b>.
+      The AI behind this agent. Changes apply on the agent's next <b>Rebuild</b>.
     </div>
     <label>AI source <span style="color:var(--dim)">— the AI account behind this agent</span></label>
     <div style="display:flex;gap:8px;align-items:center">
@@ -398,6 +400,13 @@
         Pick per agent from the source's models, or follow its default.
         (Local sources always run their one model, so there's no choice.)
       </div>
+    </div>
+  </section>
+
+  <section id="paneEditData" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      What this agent can read beyond its own workspace — folders on this
+      machine and git repos. Changes apply on the next <b>Rebuild</b>.
     </div>
     <label>Data this agent can access <span style="color:var(--dim)">— folders &amp; git repos</span></label>
     <div id="dataList"></div>
@@ -428,6 +437,28 @@
       (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild.
     </div>
     <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+  </section>
+
+  <section id="paneEditTg" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      The Telegram bot is this agent's identity — members reach it there, and
+      the token below <i>is</i> that identity. Reveal it only to recycle the bot
+      into a future agent or to move this one by hand; treat it like a password.
+    </div>
+    <label>Bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
+      <button id="botTokenBtn" onclick="showBotToken()">Show</button>
+    </div>
+  </section>
+
+  <section id="paneEditEnv" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      Extra credentials for the agent's <i>own</i> tools — not its AI. When an
+      agent's scripts or scheduled tasks call an outside service (a market-data
+      API, a home-automation hub, a webhook), the key they read lands here.
+      Most agents need none of these.
+    </div>
     <label>Environment variables <span style="color:var(--dim)">— secrets &amp; config the agent's own tools need</span></label>
     <div id="envList"></div>
     <div style="display:flex;gap:8px;align-items:center">
@@ -436,14 +467,9 @@
       <button id="envAddBtn" onclick="addEnvVar()">Add</button>
     </div>
     <div class="sub">
-      Injected as environment variables (e.g. an API key a script needs). Values are
+      Injected as environment variables on the next <b>Rebuild</b>. Values are
       <b>write-only</b> — stored encrypted, never shown again; you can only replace or remove
       them. Provider/proxy/loader names are reserved for safety.
-    </div>
-    <label>Telegram bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
-    <div style="display:flex;gap:8px;align-items:center">
-      <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
-      <button id="botTokenBtn" onclick="showBotToken()">Show</button>
     </div>
   </section>
 
@@ -1947,8 +1973,7 @@ function agentCard(a) {
       ${a.deepLink && a.state === 'RUNNING'
         ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
-        <button onclick="openDefinition('${a.id}', '${jsq(a.name)}')" title="Name, persona & memory">📖 Definition</button>
-        <button onclick="openConfiguration('${a.id}', '${jsq(a.name)}')" title="AI, data, secrets, bot">⚙ Configuration</button>
+        <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
@@ -2038,16 +2063,22 @@ function ago(iso) {
 
 let editAgentId = null, logsAgentId = null;
 
-const EDIT_TABS = { def: 'paneDef', cfg: 'paneCfg' };
+// Tab-button ids are explicit (tabEdit*) — the Settings dialog already owns
+// ids like tabAi, and duplicate DOM ids break both dialogs silently.
+const EDIT_TABS = {
+  def: { btn: 'tabDef', pane: 'paneDef' },
+  ai: { btn: 'tabEditAi', pane: 'paneEditAi' },
+  data: { btn: 'tabEditData', pane: 'paneEditData' },
+  tg: { btn: 'tabEditTg', pane: 'paneEditTg' },
+  env: { btn: 'tabEditEnv', pane: 'paneEditEnv' },
+};
 function showEditTab(name) {
-  for (const [key, pane] of Object.entries(EDIT_TABS)) {
+  for (const [key, t] of Object.entries(EDIT_TABS)) {
     const on = key === name;
-    $(pane).hidden = !on;
-    $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
+    $(t.pane).hidden = !on;
+    $(t.btn).setAttribute('aria-selected', String(on));
   }
 }
-function openDefinition(id, name) { return openEdit(id, name, 'def'); }
-function openConfiguration(id, name) { return openEdit(id, name, 'cfg'); }
 
 async function openEdit(id, name, tab = 'def') {
   editAgentId = id;

@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.31.0] — 2026-08-24
+
+### Changed
+- **One ⚙ Settings button per agent, five focused tabs.** The card's separate
+  📖 Definition and ⚙ Configuration buttons collapsed into a single
+  **⚙ Settings**, and the old Configuration junk-drawer split into its own
+  tabs: **Definition** (name, persona, memory, snapshots), **AI** (source +
+  model), **Data** (folders & git repos), **Telegram** (the bot token,
+  with copy explaining it *is* the agent's identity), and **Environment**
+  (per-agent env vars, with copy explaining what they're for: credentials the
+  agent's *own* tools read — a market-data key a script calls, not the AI
+  credential — and that most agents need none).
+
 ## [0.30.2] — 2026-08-24
 
 ### Changed
