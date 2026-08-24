@@ -167,6 +167,11 @@ export class LocalDockerProvider implements RuntimeProvider {
         '{slug}',
         spec.workspace.configPatch.agentId,
       );
+      // Where the one-shot reads its seed payload. Locally it's bind-mounted at
+      // /seed (mount point pre-exists). Remotely it's streamed in as a tar and
+      // must be extracted somewhere the NON-ROOT runtime user can create — /seed
+      // is at the root fs (root-owned), so use a world-writable tmp path.
+      const seedBase = this.remote ? '/tmp/agentclaw-seed' : '/seed';
       // The seed must be idempotent: rebuilds re-run it against a volume that
       // already holds a live workspace. Config sets are naturally re-runnable
       // (and SHOULD re-run — they re-apply current tokens/allowlists), but
@@ -185,7 +190,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       script.push(`mkdir -p ${shq(workspaceDir)}`);
       for (const name of Object.keys(spec.workspace.files)) {
         const dest = `${workspaceDir}/${name}`;
-        script.push(`[ -f ${shq(dest)} ] || cp ${shq(`/seed/workspace/${name}`)} ${shq(dest)}`);
+        script.push(`[ -f ${shq(dest)} ] || cp ${shq(`${seedBase}/workspace/${name}`)} ${shq(dest)}`);
       }
 
       await writeFile(join(seedDir, 'seed.sh'), script.join('\n') + '\n', { mode: 0o700 });
@@ -205,7 +210,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         });
         res = await this.#runStdin(
           ['run', '--rm', '-i', '-v', `${volume}:/home/node/.openclaw`, this.image,
-            'bash', '-c', 'mkdir -p /seed && tar xz -C /seed && bash /seed/seed.sh'],
+            'bash', '-c', `mkdir -p ${seedBase} && tar xz -C ${seedBase} && bash ${seedBase}/seed.sh`],
           tar.stdout as Buffer,
         );
       } else {

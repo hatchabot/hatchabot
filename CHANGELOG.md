@@ -2,6 +2,29 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.30.0] — 2026-08-24
+
+### Added
+- **Move to host — relocate an agent within the cluster.** A new **Move**
+  button on the agent card (shown when more than one host exists) moves an
+  agent between hosts on this server: local → runner, runner → local, or
+  runner → runner. Same agent record, same bot, same members — the flow
+  quiesces the agent, snapshots its volume through the source daemon,
+  recreates and restores it on the target, starts it there, then retires the
+  source runtime. Any failure before the target is healthy rolls the agent
+  back onto its original host. Unlike Rehost (the Mesh move to another
+  AgentClaw *server*), there is no tombstone and no second-poller risk.
+  New `POST /v1/agents/:id/move-host` + `src/orchestrator/moveHost.ts`;
+  guards: Max machine-login profiles can't move to a runner (setup-token ones
+  can), and two host rows pointing at one Docker endpoint are refused. Tests
+  cover the cross-daemon copy, stopped-agent moves, rollback, and the guards.
+
+### Changed
+- **Agent cards always name their host.** The status line now reads
+  `model · on <host> · active …` for every agent — "on this machine" locally,
+  the runner's name in Cluster mode — instead of only mentioning non-local
+  hosts.
+
 ## [0.29.0] — 2026-08-24
 
 ### Changed

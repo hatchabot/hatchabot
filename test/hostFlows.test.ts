@@ -61,6 +61,26 @@ describe('Runner hosts — DELETE /v1/hosts/:id', () => {
   });
 });
 
+describe('Ping — GET /v1/hosts/:id/ping', () => {
+  it('returns the UI shape {reachable, serverVersion, error}, not pingRunner raw {ok, version}', async () => {
+    const w = await makeWorld();
+    const runner = (await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'R', dockerHost: RUNNER } })).json();
+
+    const res = await w.f.inject({ method: 'GET', url: `/v1/hosts/${runner.id}/ping`, headers: as() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // The UI reads `reachable`; the raw pingRunner `ok` field would render every
+    // probe — success included — as "unreachable — no response". Regression guard.
+    expect(body).toHaveProperty('reachable');
+    expect(body.ok).toBeUndefined();
+    expect(body.reachable).toBe(false); // tcp://127.0.0.1:1 refuses fast
+
+    // The local host answers with the sentinel the UI expects.
+    const local = (await w.f.inject({ method: 'GET', url: '/v1/hosts/h1/ping', headers: as() })).json();
+    expect(local).toMatchObject({ reachable: true, serverVersion: 'local' });
+  });
+});
+
 describe('Create — Claude Max on a runner', () => {
   it('refuses a machine-login subscription but allows a setup-token one', async () => {
     const w = await makeWorld();
@@ -78,6 +98,59 @@ describe('Create — Claude Max on a runner', () => {
     w.store.insertAIProfile({ id: 'sub-tok', ownerId: w.owner, name: 'Max (token)', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/tok', createdAt: 'now' });
     const tok = await w.f.inject({ method: 'POST', url: '/v1/agents', headers: as(), payload: { name: 'tok', aiProfileId: 'sub-tok', hostId: runner.id } });
     expect(tok.statusCode).toBe(202);
+  });
+});
+
+describe('Move — POST /v1/agents/:id/move-host', () => {
+  // A second mock-backed host so the move stays on the MockProvider (a real
+  // remote-docker host would make the route dial an actual daemon). Same
+  // provider instance on both sides = the same-daemon path: no source retire.
+  const addMockHost = (w: Awaited<ReturnType<typeof makeWorld>>) =>
+    w.store.insertHost({
+      id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Runner Two',
+      settings: {}, createdAt: 'now',
+    });
+
+  it('moves an agent to another host and back', async () => {
+    const w = await makeWorld();
+    addMockHost(w);
+    const id = await seedRunningAgent(w);
+
+    const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ hostId: 'h2', state: 'RUNNING' });
+
+    const back = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h1' } });
+    expect(back.statusCode).toBe(200);
+    expect(w.store.getAgent(id)!.hostId).toBe('h1');
+  });
+
+  it('refuses the current host, an unknown host, and a non-owner', async () => {
+    const w = await makeWorld();
+    addMockHost(w);
+    const id = await seedRunningAgent(w);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h1' } })).statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'nope' } })).statusCode).toBe(400);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as('intruder'), payload: { hostId: 'h2' } })).statusCode).toBe(404);
+  });
+
+  it('refuses a machine-login Max agent onto a non-local host; allows setup-token', async () => {
+    const w = await makeWorld();
+    addMockHost(w);
+    const id = await seedRunningAgent(w);
+
+    w.store.insertAIProfile({ id: 'sub-ml', ownerId: w.owner, name: 'Max login', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: undefined, createdAt: 'now' });
+    (w.store as any).db.prepare(`UPDATE agents SET ai_profile_id = 'sub-ml' WHERE id = ?`).run(id);
+    const ml = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    expect(ml.statusCode).toBe(400);
+    expect(ml.json().error).toMatch(/setup-token/);
+
+    w.store.insertAIProfile({ id: 'sub-tok', ownerId: w.owner, name: 'Max token', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/tok', createdAt: 'now' });
+    await w.secrets.put('ai/tok', 'sk-tok');
+    (w.store as any).db.prepare(`UPDATE agents SET ai_profile_id = 'sub-tok' WHERE id = ?`).run(id);
+    const tok = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    expect(tok.statusCode).toBe(200);
+    expect(tok.json().hostId).toBe('h2');
   });
 });
 

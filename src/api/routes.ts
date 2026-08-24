@@ -53,6 +53,7 @@ import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestra
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
+import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import {
   AdoptError,
   applyWorkspace,
@@ -611,7 +612,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!host) return reply.code(404).send({ error: 'Not found' });
     const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
     if (!dockerHost) return { reachable: true, serverVersion: 'local' }; // the local daemon
-    return pingRunner(dockerHost);
+    // Adapt pingRunner's {ok, version, error} to the shape the UI reads
+    // ({reachable, serverVersion, error}) — the same mapping the add path does.
+    // Without this a *successful* probe renders as "unreachable — no response".
+    const ping = await pingRunner(dockerHost);
+    return { reachable: ping.ok, serverVersion: ping.version, error: ping.error };
   });
 
   // Register a runner host (Cluster mode): a remote Docker endpoint that the
@@ -2191,6 +2196,50 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       return preflight(store, ownerIdOf(req), parsed.data);
+    },
+  );
+
+  // Move an agent to another host on THIS server (local ⇄ runner). Same agent
+  // record, same bot, same members — only the Docker daemon changes. Distinct
+  // from Rehost below, which ships the agent to another AgentClaw server (a
+  // Mesh peer) and tombstones the copy here.
+  app.post<{ Params: { id: string }; Body: { hostId?: string } }>(
+    '/v1/agents/:id/move-host',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (movedAway(agent, reply)) return reply;
+      const targetId = (req.body as { hostId?: string } | null)?.hostId;
+      const host = targetId ? store.getHost(targetId) : undefined;
+      if (!host || (host.ownerId !== ownerIdOf(req) && host.kind !== 'local')) {
+        return reply.code(400).send({ error: 'Unknown host' });
+      }
+      if (host.id === agent.hostId) {
+        return reply.code(400).send({ error: 'The agent is already on that host.' });
+      }
+      // Same split as create: a machine-login Max profile mounts THIS box's
+      // ~/.claude, which can't reach a runner; a setup-token one travels.
+      const profile = store.getAIProfile(agent.aiProfileId);
+      if (profile?.kind === 'subscription' && host.kind !== 'local' && !profile.secretRef) {
+        return reply.code(400).send({
+          error:
+            "This agent's Claude Max source uses this machine's login, which can't reach a runner. " +
+            'Switch it to a setup-token Max source or an API key first, then move it.',
+        });
+      }
+      try {
+        const moved = await moveAgentToHost(
+          { store, secrets, channel: deps.channel, log: trace(agent.id),
+            source: providerFor(agent.hostId), target: providerFor(host.id) },
+          agent.id,
+          host.id,
+        );
+        return publicAgent(moved);
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
     },
   );
 

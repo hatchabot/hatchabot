@@ -485,6 +485,15 @@ export class Store {
       .run(runtimeRef, new Date().toISOString(), id);
   }
 
+  /** Reassign which host runs the agent — the Move-to-host flow only. The
+   *  caller (moveHost.ts) owns the invariant that the runtime actually follows:
+   *  flip, provision there, and on failure flip back. */
+  setAgentHost(id: string, hostId: string): void {
+    this.db
+      .prepare(`UPDATE agents SET host_id = ?, updated_at = ? WHERE id = ?`)
+      .run(hostId, new Date().toISOString(), id);
+  }
+
   // ---- Channels ----------------------------------------------------------
 
   insertChannel(c: Channel): void {

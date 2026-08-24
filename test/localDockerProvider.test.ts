@@ -227,7 +227,11 @@ describe('remote (fleet) provider — points docker at a remote daemon', () => {
     const log = rargv();
     // remote seed is streamed in, not bind-mounted
     expect(log).not.toContain(':/seed:ro');
-    expect(log).toContain('mkdir -p /seed && tar xz -C /seed');
+    // …and extracted to a world-writable path: the runtime runs as a NON-ROOT
+    // user and can't `mkdir /seed` at the root fs — that was a real "Setting up
+    // the agent workspace failed" on a live runner.
+    expect(log).toContain('mkdir -p /tmp/agentclaw-seed && tar xz -C /tmp/agentclaw-seed');
+    expect(log).not.toContain('mkdir -p /seed');
     // the control-plane host path is NOT mounted into the remote container
     expect(log).not.toContain('/home/me/docs:/home/me/docs');
     // and everything still targeted the remote daemon

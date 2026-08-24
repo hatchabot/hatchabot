@@ -510,7 +510,9 @@
       endpoint, one AgentClaw, many machines) to run agents elsewhere; a runner
       agent uses an <b>API-key</b> source or a <b>Claude Max setup-token</b>
       (<code>claude setup-token</code>) — the machine-login Max source is
-      desktop-only. Move agents between hosts with <b>Rehost</b> on the card.
+      desktop-only. Move an agent between hosts on this server with <b>Move</b>
+      on its card; <b>Rehost</b> sends it to another AgentClaw <i>server</i> (a
+      Mesh peer).
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
@@ -1397,6 +1399,27 @@ async function runsHere(id, name) {
   } catch (e) { toast(e.message); }
 }
 
+/** Move within THIS server: local ⇄ runner. Same agent, same bot, same
+ *  members — only the Docker daemon changes. (Rehost, below, is the Mesh
+ *  move: to a whole other AgentClaw server.) */
+async function moveHostAgent(id, name) {
+  const a = agents.find(x => x.id === id);
+  const others = hosts.filter(h => h.id !== a?.hostId);
+  if (!others.length) return toast('There is no other host to move to — add a runner in ⚙ Settings → Hosts.', 8000);
+  const list = others.map((h, i) => `${i + 1}. ${h.name}${h.kind === 'local' ? ' (this machine)' : ''}`).join('\n');
+  const pick = prompt(`Move "${name}" to which host?\n\n${list}\n\nEnter a number:`);
+  if (pick === null) return;
+  const host = others[Number(pick) - 1];
+  if (!host) return toast('No such host');
+  if (!confirm(`Move "${name}" to ${host.name}?\n\nIt stops, its memory is copied over, and it starts there. Same bot, same members — nothing else changes. If anything fails it stays where it is.`)) return;
+  toast(`Moving ${name} to ${host.name}…`, 120000);
+  try {
+    await api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id } });
+    toast(`${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
+    await refresh(false);
+  } catch (e) { toast(`Move failed: ${e.message}`, 20000); }
+}
+
 async function rehostAgent(id, name) {
   let peers;
   try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
@@ -1861,7 +1884,9 @@ function agentMeta(a) {
   const host = hosts.find(h => h.id === a.hostId);
   const bits = [];
   if (a.model) bits.push(esc(a.model));
-  if (host && host.kind !== 'local') bits.push(`on ${esc(host.name)}`); // Cluster: runner name
+  // Always name where it runs — "this machine" locally, the runner's name in
+  // Cluster mode — so cards read the same whether or not runners exist.
+  if (host) bits.push(`on ${host.kind === 'local' ? 'this machine' : esc(host.name)}`);
   if (a.lastActiveAt) bits.push(`active ${ago(a.lastActiveAt)}`);
   if (a.modelWarm === false) bits.push('warming up');
   if (a.dataSummary) bits.push(esc(a.dataSummary));
@@ -1924,6 +1949,8 @@ function agentCard(a) {
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="downloadAgent('${a.id}', '${jsq(a.name)}')" title="Download a complete private copy (bot token, members, memory) — for your own keeping, don't share it">Download</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
+      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
+        ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another host on this server — same bot, same members, only the machine changes">Move</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another AgentClaw server in one step">Rehost</button>` : ''}
       <!-- lifecycle -->

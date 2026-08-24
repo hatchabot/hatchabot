@@ -32,7 +32,15 @@ host (local or a remote runner).
   remote Docker endpoint; the control plane stays sqlite-on-one-box until it
   needs to scale horizontally (then, and only then, Postgres).
 - **You see:** one dashboard for everything.
-- **Status:** in progress (M2). Step 1 — the remote-capable provider — is done.
+- **Moving within the cluster:** **Move** on the agent card
+  (`POST /v1/agents/:id/move-host`, `src/orchestrator/moveHost.ts`) relocates an
+  agent between hosts on the same control plane — quiesce, snapshot the volume,
+  recreate on the target, retire the source. Same agent record, same bot, same
+  members; no tombstone (that's Rehost, the Mesh move). Fleet ops: per-runner
+  reachability ping, **Drain** (stop everything on a host), then Move the
+  stragglers off before removing it.
+- **Status:** working end to end — remote provider, placement, fleet ops, and
+  intra-cluster Move; first validated live against a laptop runner 2026-08-24.
 - **Good for:** a multi-user **hosted** product. Higher complexity: placement,
   remote lifecycle, fleet health, tenant isolation.
 
