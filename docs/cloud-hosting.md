@@ -1,10 +1,17 @@
-# Cloud hosting milestone — two modes, one login
+# Cloud hosting milestone — Cluster mode
 
-This is the engineering plan for the hosted AgentClaw service: a user signs in,
-creates agents, and runs them on **our** cloud infrastructure — while keeping
-their **Claude Max** running on their own desktop. It builds on the single-VM
-guide (`deploy-gce.md`), the shipped per-user identity (`identity.md`), and the
-GCP plan agreed 2026-07-30.
+This is the engineering plan for the hosted AgentClaw service — the **Cluster**
+topology (`topologies.md`): one control plane placing agents across a fleet of
+runner hosts. A user signs in, creates agents, and runs them on **our** cloud
+infrastructure, while keeping their **Claude Max** on their own desktop host. It
+builds on the single-VM guide (`deploy-gce.md`), the shipped per-user identity
+(`identity.md`), the remote-capable provider (M2 step 1), and the GCP plan agreed
+2026-07-30.
+
+> Terminology: **Cluster** = one control plane + runner hosts (this doc).
+> **Mesh** = independent control planes peered via Rehost (shipped; see
+> `topologies.md`). They compose — a Cluster's control plane can also be a Mesh
+> peer.
 
 ## The core idea: Max on the desktop, API in the cloud — coexisting
 
