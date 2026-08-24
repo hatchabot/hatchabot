@@ -8,9 +8,10 @@ single-tenant** deployment. It is **not** the multi-tenant fleet — there's no
 HA. Plan backups (below) accordingly.
 
 Set these expectations first:
-- **AI credentials → API keys.** A subscription profile is gated to local hosts
-  and is a personal-use gray area on a server; the clean cloud path is an
-  Anthropic (or Google) **API key**. See `docs/ai-profiles.md`.
+- **AI credentials → API keys** (or a Max **setup-token**). A *machine-login*
+  subscription is gated to local hosts; a `claude setup-token` subscription can
+  run on a runner, but on a rented VM that's a personal-use gray area. The clean
+  cloud path is an Anthropic (or Google) **API key**. See `docs/ai-profiles.md`.
 - **No GPU → no local models.** Use a GPU instance only if you actually want the
   Ollama path; otherwise a small general VM is fine.
 - **TLS is mandatory once it's reachable.** The app serves plaintext by default;

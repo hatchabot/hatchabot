@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.29.0] — 2026-08-24
+
+### Changed
+- **Claude Max can run on a runner — via a setup-token.** A subscription profile
+  is no longer refused on every non-local host; the gate now distinguishes the
+  two credential flavours. A **machine-login** subscription (this box's
+  `~/.claude`) stays local, because that mount can't reach a remote daemon. A
+  **setup-token** subscription (`claude setup-token`, stored) is injected as
+  `CLAUDE_CODE_OAUTH_TOKEN` and now provisions on a **runner** too — so a laptop
+  driven by another box's control plane can serve agents on your own Max login.
+  Guard updated at both the create API and provision (`routes.ts`,
+  `provision.ts`); the create dialog's "Runs on" hint and the Hosts panel now
+  say Max-setup-token is allowed on a runner (the machine-login source stays
+  desktop-only). Docs updated (`ai-profiles`, `cloud-hosting`, `topologies`,
+  `deploy-gce`). New tests cover both flavours at the route and provision layers.
+
 ## [0.28.0] — 2026-08-24
 
 ### Added

@@ -53,9 +53,12 @@ actual goal.
 Topology (Mesh/Cluster) is *how boxes relate*. It is independent of **which AI
 credential an agent uses**, which is decided per host kind:
 
-- **Claude Max** (`subscription` profile) runs only on **local/desktop hosts** —
-  its auth is desktop-bound (`~/.claude` / `claude setup-token`), and provision
-  refuses it on a non-local host (`provision.ts`, `test/provision.test.ts`).
+- **Claude Max — machine login** (`subscription`, no stored token) runs only on
+  **local/desktop hosts**: it reuses this box's `~/.claude` via a host mount a
+  remote daemon can't see, so provision refuses it on a non-local host.
+- **Claude Max — setup-token** (`subscription` + a stored `claude setup-token`)
+  runs **anywhere, including a runner** — the token is injected as
+  `CLAUDE_CODE_OAUTH_TOKEN`, no mount (`provision.ts`, `test/provision.test.ts`).
 - **API key** (`api_key` profile) runs anywhere, including **cloud** runners.
 
 Both topologies carry both: Max agents on local/desktop hosts, API-key agents on

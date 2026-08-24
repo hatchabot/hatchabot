@@ -19,14 +19,19 @@ An agent's AI comes from its **AI profile**, and a profile is one of three kinds
 
 | Profile kind | Auth | Runs on |
 |---|---|---|
-| `subscription` (Claude Max) | `~/.claude` login or `claude setup-token` | **local/desktop hosts only** |
+| `subscription` (Claude Max) — **machine login** | this box's `~/.claude` | **local/desktop hosts only** |
+| `subscription` (Claude Max) — **setup-token** | a stored `claude setup-token` | any host, incl. a **runner** |
 | `api_key` (Anthropic/Google) | a stored API key | any host, incl. **cloud** |
 | `local` (Ollama) | none | any host with a model server |
 
-The runtime already **enforces** this: provisioning a `subscription` profile on a
-non-local host fails and rolls back (`provision.ts:260`, `test/provision.test.ts`).
-Max auth is interactive OAuth bound to the user's machine — it cannot be hosted
-on a headless VM (Anthropic guidance) — so this guard is correct, not a gap.
+The split is about *where the credential lives*. A **machine-login** subscription
+reuses this box's `~/.claude` in place — a host mount that a remote daemon can't
+see — so it stays local. A **setup-token** (`claude setup-token`) is a portable
+credential injected as `CLAUDE_CODE_OAUTH_TOKEN`, so it rides to a runner. The
+runtime **enforces** this: provisioning a machine-login subscription on a non-local
+host fails and rolls back (`provision.ts`, `test/provision.test.ts`); a setup-token
+one is allowed. Minting a setup-token under your own Max account and running it on
+your own runner is within the personal-use bounds of the subscription.
 
 So "two modes" is not a fork we have to build; it's the **host + profile pairing
 that already exists**. The cloud milestone doesn't replace Max — it adds

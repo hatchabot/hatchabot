@@ -258,10 +258,18 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
   // "your data never leaves the machine" is literally true.
   const local = profile.vendor === 'local';
   const subscription = !local && profile.kind === 'subscription';
-  if (subscription && host.kind !== 'local') {
+  // A subscription (Claude Max) profile authenticates one of two ways, and only
+  // one of them travels. A `claude setup-token` (profile.secretRef present) is
+  // injected as CLAUDE_CODE_OAUTH_TOKEN — pure data, so it rides to any host, a
+  // runner included. The machine-login flavour instead bind-mounts the CONTROL
+  // PLANE'S ~/.claude, which a remote daemon can't see; that one stays local.
+  if (subscription && host.kind !== 'local' && !profile.secretRef) {
     // Enforced at the API too; belt and suspenders here because this is the
     // last gate before a credential decision. See docs/ai-profiles.md.
-    throw new Error('Subscription AI profiles can only run on local hosts');
+    throw new Error(
+      "This Claude Max profile uses this machine's login, which only reaches agents on this " +
+        'machine. To run Max on a runner, add a setup-token profile (`claude setup-token`).',
+    );
   }
   const modelKey =
     subscription || local ? undefined : await secrets.get(requireRef(profile.secretRef));

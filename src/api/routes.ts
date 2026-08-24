@@ -987,11 +987,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!host || (host.ownerId !== ownerId && host.kind !== 'local')) {
       return reply.code(400).send({ error: 'Unknown host' });
     }
-    if (profile.kind === 'subscription' && host.kind !== 'local') {
+    // A Claude Max profile reaches a runner only as a setup-token (secretRef
+    // present) — that credential is injected as data. The machine-login flavour
+    // mounts this box's ~/.claude, which a remote runner can't see.
+    if (profile.kind === 'subscription' && host.kind !== 'local' && !profile.secretRef) {
       return reply.code(400).send({
         error:
-          'A subscription profile can only power agents on your own machine. ' +
-          'Pick a local host, or use an API-key profile for cloud hosting.',
+          "This Claude Max profile uses this machine's login, which can't reach a runner. " +
+          'Run `claude setup-token` and add it as a setup-token AI source, or use an API-key profile.',
       });
     }
 

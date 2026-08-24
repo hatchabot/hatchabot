@@ -32,10 +32,16 @@ the Keychain on macOS). Two consequences:
    they can judge. For AgentClaw hosting agents on their behalf it becomes our
    reliability problem, with no per-agent attribution.
 
-So: the subscription is cheaper, and it should absolutely be usable — but the
-supported shape is **`kind: 'subscription'` + `host.kind: 'local'`**. The agent
-runs on the machine where the login already exists and reuses the credential
-in place; AgentClaw never holds or copies the token.
+So: the subscription is cheaper, and it should absolutely be usable. There are two
+supported shapes:
+
+- **`kind: 'subscription'` machine login + `host.kind: 'local'`** — the agent runs
+  on the machine where the login already exists and reuses `~/.claude` in place;
+  AgentClaw never holds or copies it. This is the local-only shape.
+- **`kind: 'subscription'` + a stored `claude setup-token`** — this rides to **any
+  host, a runner included**, because the token is injected as
+  `CLAUDE_CODE_OAUTH_TOKEN` rather than mounted. This is how Claude Max runs on a
+  runner (e.g. a laptop driven by a control plane on another box).
 
 ### macOS hosts: the setup-token path
 

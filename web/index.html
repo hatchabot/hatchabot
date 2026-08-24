@@ -260,7 +260,7 @@
   <textarea id="agentPersona" placeholder="You help plan meals and keep the pantry list current."></textarea>
   <div id="agentProfileRow" style="display:none">
     <label>AI source</label>
-    <select id="agentProfile"></select>
+    <select id="agentProfile" onchange="onHostPicked()"></select>
   </div>
   <div id="agentHostRow" style="display:none">
     <label>Runs on</label>
@@ -507,9 +507,10 @@
     <div class="sub">
       Where agents run. <b>This machine</b> is a host from day one — agents here
       can use your <b>Claude Max</b> login. Add a <b>runner</b> (a remote Docker
-      endpoint, one AgentClaw, many machines) to run agents in the cloud; cloud
-      agents use an <b>API-key</b> AI source (Max is desktop-only). Move agents
-      between hosts with <b>Rehost</b> on the card.
+      endpoint, one AgentClaw, many machines) to run agents elsewhere; a runner
+      agent uses an <b>API-key</b> source or a <b>Claude Max setup-token</b>
+      (<code>claude setup-token</code>) — the machine-login Max source is
+      desktop-only. Move agents between hosts with <b>Rehost</b> on the card.
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
@@ -976,7 +977,7 @@ async function loadHosts() {
     el.innerHTML = hosts.map(h => {
       const local = h.kind === 'local';
       const where = local ? 'this machine · Claude Max or API key'
-        : `${esc(h.settings?.dockerHost || '')} · API key only`;
+        : `${esc(h.settings?.dockerHost || '')} · API key or Max setup-token`;
       const check = local ? '' : `<button class="hbtn" onclick="pingHost('${jsq(h.id)}')">Check</button>`;
       const drain = !local && h.agentCount ? `<button class="hbtn" onclick="drainHost('${jsq(h.id)}','${jsq(h.name)}')">Drain</button>` : '';
       const del = local || h.agentCount ? '' : `<button class="hbtn" onclick="deleteHost('${jsq(h.id)}','${jsq(h.name)}')">Remove</button>`;
@@ -1498,14 +1499,21 @@ function pickedHostId() {
   return v;
 }
 
-// A cloud host can't use a Claude Max (subscription) source — the server
-// enforces this; surface it up front so it isn't a submit-time surprise.
+// On a runner, a Claude Max source works only as a `claude setup-token` (that
+// credential is injected as data); the machine-login Max source mounts this
+// box's ~/.claude and can't reach a runner. Surface the mismatch up front so it
+// isn't a submit-time surprise — the server enforces it either way.
 function onHostPicked() {
   const id = $('agentHost').value;
   const isCloud = id === 'auto' || hosts.find(h => h.id === id)?.kind !== 'local';
-  $('agentHostHint').textContent = isCloud
-    ? 'Cloud runners use an API-key AI source (Claude Max is desktop-only).'
-    : '';
+  const sel = profiles.find(p => p.id === ($('agentProfile').value || (profiles[0] && profiles[0].id)));
+  let hint = '';
+  if (isCloud) {
+    hint = sel && sel.kind === 'subscription' && sel.credential === 'machine-login'
+      ? "⚠ This Claude Max source is desktop-only — on a runner it can't reach the agent. Use an API key or a `claude setup-token` source."
+      : 'On a runner: API-key and Claude Max setup-token sources both work; the machine-login Max source is desktop-only.';
+  }
+  $('agentHostHint').textContent = hint;
 }
 
 async function createAgent() {

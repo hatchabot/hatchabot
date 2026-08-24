@@ -291,11 +291,23 @@ describe('buildRuntimeSpec', () => {
     expect(spec.workspace.configPatch.baseUrl).toBe('http://172.17.0.1:11434/v1');
   });
 
-  it('refuses a subscription profile on a non-local host (provision fails + rolls back)', async () => {
+  it('refuses a machine-login subscription profile on a non-local host (provision fails + rolls back)', async () => {
     const w = await world({ hostKind: 'gce', profile: { kind: 'subscription', secretRef: undefined } });
     const { agent } = await provisionAgent(w.deps, INPUT);
     expect(agent.state).toBe('FAILED');
     expect(w.channel.released).toEqual(['stubbot']); // lease not kept
+  });
+
+  it('allows a setup-token subscription on a runner: token injected, no mount', async () => {
+    // A `claude setup-token` (secretRef present) is pure data — it rides to any
+    // host, so Claude Max works on a runner where the machine login can't reach.
+    const w = await world({ hostKind: 'cloud', profile: { kind: 'subscription', secretRef: 'ai/p1' } });
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    expect(agent.state).not.toBe('FAILED');
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.env.CLAUDE_CODE_OAUTH_TOKEN).toBe('sk-test');
+    expect(spec.hostMounts).toEqual([]); // no ~/.claude mount to leave behind
+    expect(spec.workspace.configPatch.setupToken).toBe('sk-test');
   });
 
   it('data-source folders mount with per-source ro/rw access', async () => {

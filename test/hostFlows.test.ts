@@ -61,6 +61,26 @@ describe('Runner hosts — DELETE /v1/hosts/:id', () => {
   });
 });
 
+describe('Create — Claude Max on a runner', () => {
+  it('refuses a machine-login subscription but allows a setup-token one', async () => {
+    const w = await makeWorld();
+    const runner = (await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'R', dockerHost: RUNNER } })).json();
+
+    // Machine-login subscription (no secretRef) mounts THIS box's ~/.claude,
+    // which a remote runner can't see — refused up front, not at provision.
+    w.store.insertAIProfile({ id: 'sub-ml', ownerId: w.owner, name: 'Max (login)', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: undefined, createdAt: 'now' });
+    const ml = await w.f.inject({ method: 'POST', url: '/v1/agents', headers: as(), payload: { name: 'ml', aiProfileId: 'sub-ml', hostId: runner.id } });
+    expect(ml.statusCode).toBe(400);
+    expect(ml.json().error).toMatch(/setup-token/);
+
+    // Setup-token subscription (secretRef present) is injected as data — it
+    // rides to any host, so Claude Max is allowed on the runner.
+    w.store.insertAIProfile({ id: 'sub-tok', ownerId: w.owner, name: 'Max (token)', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/tok', createdAt: 'now' });
+    const tok = await w.f.inject({ method: 'POST', url: '/v1/agents', headers: as(), payload: { name: 'tok', aiProfileId: 'sub-tok', hostId: runner.id } });
+    expect(tok.statusCode).toBe(202);
+  });
+});
+
 describe('Drain — POST /v1/hosts/:id/drain', () => {
   it('stops every running agent on a host', async () => {
     const w = await makeWorld(); // h1 uses the mock provider
