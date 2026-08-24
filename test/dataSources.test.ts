@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -82,6 +82,29 @@ describe('POST /v1/agents/:id/data-sources', () => {
     // A different dir whose basename collides would map to the same mount.
     const res = await addSource(f, { kind: 'folder', access: 'ro', path: a });
     expect(res.statusCode).toBe(409);
+  });
+
+  it('atHostPath: stores mount-at-host-path and keeps distinct paths that share a basename', async () => {
+    const { store, f } = await world();
+    const p1 = tmp(); mkdirSync(join(p1, 'docs'));
+    const p2 = tmp(); mkdirSync(join(p2, 'docs'));
+    // Same basename "docs" — would clash at /data/docs, but host-path mounts key
+    // off the full path, so both are accepted.
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(p1, 'docs'), atHostPath: true })).statusCode).toBe(200);
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: join(p2, 'docs'), atHostPath: true })).statusCode).toBe(200);
+    const sources = store.listDataSources('a1');
+    expect(sources).toHaveLength(2);
+    expect(sources.every((s) => s.mountAtHostPath === true)).toBe(true);
+    expect(sources[0]!.hostPath).toBe(join(p1, 'docs'));
+  });
+
+  it('atHostPath: refuses sharing the exact same path twice', async () => {
+    const { f } = await world();
+    const dir = tmp();
+    expect((await addSource(f, { kind: 'folder', access: 'ro', path: dir, atHostPath: true })).statusCode).toBe(200);
+    const res = await addSource(f, { kind: 'folder', access: 'ro', path: dir, atHostPath: true });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/already shared/i);
   });
 
   it('rejects git for now (Slice B)', async () => {

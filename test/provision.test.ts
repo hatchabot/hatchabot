@@ -309,6 +309,17 @@ describe('buildRuntimeSpec', () => {
     expect(mounts).toContainEqual({ source: '/srv/work', target: '/data/work', readonly: false });
   });
 
+  it('a mount-at-host-path folder binds at its ORIGINAL path (adopted agents)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertDataSource({ id: 'd1', agentId: agent.id, kind: 'folder', access: 'ro', mountName: 'srv-data', hostPath: '/srv/data', mountAtHostPath: true, createdAt: 'now' });
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    // bound at the source path so the agent's existing references resolve…
+    expect(spec.hostMounts).toContainEqual({ source: '/srv/data', target: '/srv/data', readonly: true });
+    // …and NOT remapped under /data/<name>
+    expect((spec.hostMounts ?? []).some((m) => m.target === '/data/srv-data')).toBe(false);
+  });
+
   it('allocates a stable gateway port/token across calls', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);

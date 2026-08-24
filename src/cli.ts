@@ -448,6 +448,65 @@ function fmtTok(n: unknown): string {
 }
 
 /** `agentclaw health <agent>` output — a live gateway probe, mirroring ❤️ Health. */
+/**
+ * Render the consolidated bot census as aligned, numbered lines. Pure so the
+ * column alignment and the ⇄ "same bot elsewhere" markers are testable. `hosts`
+ * is the `/v1/bots` response's host list.
+ */
+export function fmtBots(hosts: any[], live: boolean): string[] {
+  const out: string[] = [];
+  const order: Record<string, number> = { 'in-use': 0, reclaimable: 1, dead: 2 };
+  // Size the username column to the widest bot across every host.
+  const allBots = hosts.flatMap((h: any) => (h.error ? [] : h.bots));
+  const uw = Math.max(10, ...allBots.map((b: any) => `@${b.username ?? '?'}`.length));
+
+  // Same handle in more than one place = a bot that moved between agents/hosts.
+  const places = new Map<string, Array<{ host: string; agent: string; state: string }>>();
+  for (const h of hosts) {
+    if (h.error) continue;
+    for (const b of h.bots) {
+      if (!b.username) continue;
+      const at = { host: h.host, agent: b.agentName ?? b.source, state: b.state ?? '?' };
+      (places.get(b.username) ?? places.set(b.username, []).get(b.username)!).push(at);
+    }
+  }
+  const movedCount = [...places.values()].filter((v) => v.length > 1).length;
+
+  let idx = 0;
+  let reclaim = 0;
+  let dead = 0;
+  for (const h of hosts) {
+    out.push(`\n${h.host}${h.error ? `  — ${h.error}` : ''}`);
+    if (h.error) continue;
+    if (!h.bots.length) out.push('  (no Telegram bots)');
+    for (const b of [...h.bots].sort((x, y) => (order[x.cls] ?? 9) - (order[y.cls] ?? 9))) {
+      if (b.cls === 'reclaimable') reclaim++;
+      if (b.cls === 'dead') dead++;
+      const tag = b.cls === 'in-use' ? 'in use' : b.cls === 'dead' ? 'DEAD' : 'reclaimable';
+      const live_ = live
+        ? (b.valid === false ? 'invalid' : 'valid') +
+          (b.polling && b.polling !== 'unknown' ? `,${b.polling === 'busy' ? 'polled' : 'idle'}` : '')
+        : '';
+      const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
+      const others = (places.get(b.username) ?? []).filter(
+        (o) => !(o.host === h.host && o.agent === (b.agentName ?? b.source)),
+      );
+      const moved = others.length
+        ? `  ⇄ also ${others.map((o) => `${o.host}:${o.agent}[${o.state}]`).join(', ')}`
+        : '';
+      const uname = `@${b.username ?? '?'}`.padEnd(uw);
+      const n = `${String(++idx)}.`.padStart(4);
+      out.push(`${n} ${uname}  ${tag.padEnd(11)}${live ? `  ${live_.padEnd(13)}` : '  '}${who}${moved}`);
+    }
+    if (h.mgmtBotConfigured)
+      out.push(`${`${String(++idx)}.`.padStart(4)} ${'(mgmt bot)'.padEnd(uw)}  ${'in use'.padEnd(11)}${live ? '  ' + ''.padEnd(13) : '  '}management bot — token stored outside the registry`);
+  }
+  out.push(`\n${idx} line(s) · ${reclaim} reclaimable · ${dead} dead${movedCount ? ` · ${movedCount} bot(s) shared across agents/hosts (⇄)` : ''}`);
+  out.push(`Telegram won't list your bots — open @BotFather → /mybots and /deletebot any not shown above.`);
+  out.push(`Not counted here: OpenClaw's own bots — check with:  openclaw config get channels.telegram.accounts`);
+  return out;
+}
+
 export function fmtHealth(name: string, h: any): string {
   const label =
     { healthy: 'responding', degraded: 'degraded', unreachable: 'not answering' }[
@@ -875,62 +934,7 @@ async function main() {
       const { hosts } = (await (
         await api(ctx, `/v1/bots?consolidated=1&live=${live ? 1 : 0}`)
       ).json()) as { hosts: any[] };
-      const order: Record<string, number> = { 'in-use': 0, reclaimable: 1, dead: 2 };
-      // Size the username column to the widest bot across every host, so the
-      // status columns line up no matter how long a bot handle is.
-      const allBots = hosts.flatMap((h: any) => (h.error ? [] : h.bots));
-      const uw = Math.max(10, ...allBots.map((b: any) => `@${b.username ?? '?'}`.length));
-
-      // Same handle in more than one place = a bot that moved between agents or
-      // hosts (a rehost/adopt leftover). Map every occurrence so each such line
-      // can point at the others.
-      const places = new Map<string, Array<{ host: string; agent: string; state: string }>>();
-      for (const h of hosts) {
-        if (h.error) continue;
-        for (const b of h.bots) {
-          if (!b.username) continue;
-          const at = { host: h.host, agent: b.agentName ?? b.source, state: b.state ?? '?' };
-          const cur = places.get(b.username);
-          if (cur) cur.push(at);
-          else places.set(b.username, [at]);
-        }
-      }
-      const movedCount = [...places.values()].filter((v) => v.length > 1).length;
-
-      let idx = 0;
-      let total = 0;
-      let reclaim = 0;
-      let dead = 0;
-      for (const h of hosts) {
-        console.log(`\n${h.host}${h.error ? `  — ${h.error}` : ''}`);
-        if (h.error) continue;
-        if (!h.bots.length) console.log('  (no Telegram bots)');
-        for (const b of [...h.bots].sort((x, y) => (order[x.cls] ?? 9) - (order[y.cls] ?? 9))) {
-          total++;
-          if (b.cls === 'reclaimable') reclaim++;
-          if (b.cls === 'dead') dead++;
-          const tag = b.cls === 'in-use' ? 'in use' : b.cls === 'dead' ? 'DEAD' : 'reclaimable';
-          const live_ = live
-            ? (b.valid === false ? 'invalid' : 'valid') +
-              (b.polling && b.polling !== 'unknown' ? `,${b.polling === 'busy' ? 'polled' : 'idle'}` : '')
-            : '';
-          const who = b.source === 'pool' ? 'pool bot (unleased)' : `${b.agentName} [${b.state}]`;
-          const others = (places.get(b.username) ?? []).filter(
-            (o) => !(o.host === h.host && o.agent === (b.agentName ?? b.source)),
-          );
-          const moved = others.length
-            ? `  ⇄ also ${others.map((o) => `${o.host}:${o.agent}[${o.state}]`).join(', ')}`
-            : '';
-          const uname = `@${b.username ?? '?'}`.padEnd(uw);
-          const n = `${String(++idx)}.`.padStart(4);
-          console.log(`${n} ${uname}  ${tag.padEnd(11)}${live ? `  ${live_.padEnd(13)}` : '  '}${who}${moved}`);
-        }
-        if (h.mgmtBotConfigured)
-          console.log(`${`${String(++idx)}.`.padStart(4)} ${'(mgmt bot)'.padEnd(uw)}  ${'in use'.padEnd(11)}${live ? '  ' + ''.padEnd(13) : '  '}management bot — token stored outside the registry`);
-      }
-      console.log(`\n${idx} line(s) · ${reclaim} reclaimable · ${dead} dead${movedCount ? ` · ${movedCount} bot(s) shared across agents/hosts (⇄)` : ''}`);
-      console.log(`Telegram won't list your bots — open @BotFather → /mybots and /deletebot any not shown above.`);
-      console.log(`Not counted here: OpenClaw's own bots — check with:  openclaw config get channels.telegram.accounts`);
+      for (const line of fmtBots(hosts, live)) console.log(line);
       return;
     }
     case 'list': {
