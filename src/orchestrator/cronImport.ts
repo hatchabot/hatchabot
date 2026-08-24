@@ -126,7 +126,7 @@ export async function migrateCrons(
   deps: { store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void },
   agentId: string,
   workspaceDir: string,
-  opts: { configPath?: string; dbPath?: string } = {},
+  opts: { configPath?: string; dbPath?: string; readyTries?: number; readyGapMs?: number } = {},
 ): Promise<CronMigrateResult> {
   const log = deps.log ?? (() => {});
   const agent = deps.store.getAgent(agentId);
@@ -136,6 +136,30 @@ export async function migrateCrons(
   if (!sourceId) return { total: 0, carried: 0, failed: 0 };
 
   const crons = readOpenclawCrons(sourceId, opts.dbPath);
+  if (!crons.length) return { total: 0, carried: 0, failed: 0 };
+
+  // applyWorkspace restarts the container but doesn't wait for the in-container
+  // gateway; `cron add` needs it up. Poll a harmless `cron list` until it
+  // answers (or give up) so adds don't race the boot.
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+  let ready = false;
+  for (let i = 0; i < (opts.readyTries ?? 15); i++) {
+    try {
+      const probe = await deps.provider.exec(agent.runtimeRef, ['cron', 'list', '--agent', agent.slug, '--json']);
+      if (probe.code === 0) {
+        ready = true;
+        break;
+      }
+    } catch {
+      /* not up yet */
+    }
+    await sleep(opts.readyGapMs ?? 2000);
+  }
+  if (!ready) {
+    log('cron.migrate_gateway_not_ready', { agentId });
+    return { total: crons.length, carried: 0, failed: crons.length };
+  }
+
   let carried = 0;
   let failed = 0;
   for (const c of crons) {

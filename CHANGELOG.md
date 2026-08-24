@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.24.1] — 2026-08-23
+
+### Fixed
+- **Cron migration waits for the container's gateway before adding jobs.**
+  `applyWorkspace` restarts the container but doesn't wait for OpenClaw inside it
+  to come up, so `cron add` could race the boot and silently drop jobs. Migration
+  now polls a harmless `cron list` until the gateway answers, then adds — and
+  reports the jobs as failed (not lost) if it never becomes ready.
+
 ## [0.24.0] — 2026-08-23
 
 ### Added

@@ -3,7 +3,9 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cronAddArgs, readOpenclawCrons, openclawAgentIdForWorkspace } from '../src/orchestrator/cronImport.js';
+import { cronAddArgs, readOpenclawCrons, openclawAgentIdForWorkspace, migrateCrons } from '../src/orchestrator/cronImport.js';
+import { Store } from '../src/store/store.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
 
 describe('cronAddArgs', () => {
   it('maps a cron-schedule agentTurn job to a disabled `cron add`', () => {
@@ -71,5 +73,27 @@ describe('readOpenclawCrons + workspace resolution', () => {
 
   it('returns [] for a missing DB', () => {
     expect(readOpenclawCrons('tech-advisor', join(root, 'nope.sqlite'))).toEqual([]);
+  });
+
+  it('migrateCrons recreates each cron in the container, disabled', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Tech', slug: 'tech', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: 'x', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'tech', workspace: { files: {}, configPatch: { agentId: 'tech', authMode: 'api-key' } }, env: {} });
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await provider.start(runtimeRef);
+    store.setAgentState('a1', 'RUNNING');
+
+    const res = await migrateCrons({ store, provider }, 'a1', join(root, 'ws-tech'), { configPath: cfg, dbPath: db, readyGapMs: 0 });
+    expect(res).toEqual({ total: 1, carried: 1, failed: 0 });
+    // the actual `cron add` was issued for the container's slug, disabled
+    const add = provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add');
+    expect(add).toContain('--agent');
+    expect(add).toContain('tech');
+    expect(add).toContain('--disabled');
+    expect(add).toContain('--cron');
+    expect(add).toContain('0 8 * * *');
   });
 });
