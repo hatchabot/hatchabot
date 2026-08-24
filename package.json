@@ -19,7 +19,8 @@
     "typecheck": "tsc --noEmit",
     "check:web": "node scripts/check-web.mjs",
     "test": "npm run check:web && vitest run",
-    "e2e:docker": "tsx scripts/e2e-docker.ts"
+    "e2e:docker": "tsx scripts/e2e-docker.ts",
+    "smoke:adopt": "bash scripts/smoke-adopt.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.119.0",
