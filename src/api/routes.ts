@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
+import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError } from '../channels/telegramManual.js';
 import {
@@ -446,12 +447,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return !!local && local.ownerId === ownerId;
   };
 
+  // Remote runner providers (Cluster mode) are built per host from its stored
+  // Docker endpoint and kept for the process — this cache is that store.
+  const remoteProviderCache = new Map<string, RuntimeProvider>();
   const providerFor = (hostId: string): RuntimeProvider => {
     const host = store.getHost(hostId);
     if (!host) throw new Error(`No such host: ${hostId}`);
-    const provider = deps.providers.get(host.provider);
-    if (!provider) throw new Error(`No provider registered for "${host.provider}"`);
-    return provider;
+    return resolveProvider(host, deps.providers, remoteProviderCache, {
+      image: process.env.AGENTCLAW_IMAGE,
+      prefix: process.env.AGENTCLAW_PREFIX,
+    });
   };
 
   // ---- background provisioning ------------------------------------------
@@ -591,6 +596,55 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.get('/v1/hosts', async (req) => {
     return store.listHosts(ownerIdOf(req));
+  });
+
+  // Register a runner host (Cluster mode): a remote Docker endpoint that the
+  // control plane places agents on. Host-owner only — it adds fleet capacity.
+  // The endpoint is reachability-checked best-effort so a typo fails here.
+  app.post<{ Body: { name?: string; dockerHost?: string } }>('/v1/hosts', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const parsed = z
+      .object({
+        name: z.string().trim().min(1).max(64),
+        // ssh://user@host is the simplest secure transport; tcp:// needs TLS set
+        // up out of band. Reject anything that isn't one of those schemes.
+        dockerHost: z.string().trim().regex(/^(ssh|tcp):\/\/\S+$/, 'Use ssh://user@host or tcp://host:port'),
+      })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const { name, dockerHost } = parsed.data;
+
+    const ping = await pingRunner(dockerHost);
+    const host = {
+      id: randomUUID(),
+      ownerId: ownerIdOf(req),
+      kind: 'cloud' as const,
+      provider: 'remote-docker',
+      name,
+      settings: { dockerHost },
+      createdAt: new Date().toISOString(),
+    };
+    store.insertHost(host);
+    // Saved regardless — a runner that's briefly unreachable now may be up at
+    // provision time — but surface the probe so the owner sees a bad endpoint.
+    return reply.code(201).send({ ...host, reachable: ping.ok, serverVersion: ping.version, pingError: ping.error });
+  });
+
+  app.delete<{ Params: { id: string } }>('/v1/hosts/:id', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const host = store.getHost(req.params.id);
+    if (!host) return reply.code(404).send({ error: 'Not found' });
+    if (host.kind === 'local') {
+      return reply.code(400).send({ error: 'The local host is this machine — it cannot be removed.' });
+    }
+    const still = store.listAllActiveAgents().filter((a) => a.hostId === host.id);
+    if (still.length) {
+      return reply.code(409).send({
+        error: `${still.length} agent${still.length === 1 ? '' : 's'} still run on this host — move or delete them first.`,
+      });
+    }
+    store.deleteHost(host.id);
+    return { ok: true };
   });
 
   /**

@@ -264,6 +264,10 @@ export class Store {
     return rows.map((r) => this.getHost(r.id)!).filter(Boolean);
   }
 
+  deleteHost(id: string): void {
+    this.db.prepare(`DELETE FROM hosts WHERE id = ?`).run(id);
+  }
+
   getHost(id: string): Host | undefined {
     const r = this.db.prepare(`SELECT * FROM hosts WHERE id = ?`).get(id) as any;
     if (!r) return undefined;
