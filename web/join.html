@@ -99,7 +99,7 @@ async function setupSignIn() {
       },
     });
     google.accounts.id.renderButton(document.getElementById('gsi'),
-      { theme: 'filled_black', size: 'large', text: 'signin_with' });
+      { theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'filled_black' : 'outline', size: 'large', text: 'signin_with' });
   };
   document.head.appendChild(s);
 }

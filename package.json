@@ -1,6 +1,6 @@
 {
   "name": "agentclaw",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
@@ -21,7 +21,8 @@
     "test": "npm run check:web && vitest run",
     "e2e:docker": "tsx scripts/e2e-docker.ts",
     "smoke:adopt": "bash scripts/smoke-adopt.sh",
-    "smoke:adopt:full": "tsx scripts/smoke-adopt-full.ts"
+    "smoke:adopt:full": "tsx scripts/smoke-adopt-full.ts",
+    "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.119.0",

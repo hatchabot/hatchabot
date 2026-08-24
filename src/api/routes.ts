@@ -646,6 +646,31 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return reply.code(201).send({ ...host, reachable: ping.ok, serverVersion: ping.version, pingError: ping.error });
   });
 
+  // Drain a host: stop every running agent on it (take it out of service before
+  // decommissioning). Best-effort per agent; a busy one is skipped and reported.
+  app.post<{ Params: { id: string } }>('/v1/hosts/:id/drain', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const host = store.getHost(req.params.id);
+    if (!host) return reply.code(404).send({ error: 'Not found' });
+    const running = store
+      .listAllActiveAgents()
+      .filter((a) => a.hostId === host.id && a.state === 'RUNNING' && a.runtimeRef);
+    let stopped = 0;
+    const skipped: string[] = [];
+    for (const a of running) {
+      if (isBusy(a.id)) { skipped.push(a.name); continue; }
+      try {
+        await providerFor(host.id).stop(a.runtimeRef!);
+        store.setAgentState(a.id, 'STOPPED');
+        stopped++;
+      } catch (err) {
+        skipped.push(a.name);
+        trace(a.id)('host.drain_stop_failed', { error: String(err).slice(0, 200) });
+      }
+    }
+    return { stopped, skipped };
+  });
+
   app.delete<{ Params: { id: string } }>('/v1/hosts/:id', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     const host = store.getHost(req.params.id);

@@ -5,7 +5,7 @@
  * quickly with reachable:false without stalling the test.
  */
 import { describe, expect, it } from 'vitest';
-import { makeWorld, as } from './support/world.js';
+import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 const RUNNER = 'tcp://127.0.0.1:1';
 
@@ -58,5 +58,23 @@ describe('Runner hosts — DELETE /v1/hosts/:id', () => {
     const w = await makeWorld();
     const runner = (await w.f.inject({ method: 'POST', url: '/v1/hosts', headers: as(), payload: { name: 'R', dockerHost: RUNNER } })).json();
     expect((await w.f.inject({ method: 'DELETE', url: `/v1/hosts/${runner.id}`, headers: as('intruder') })).statusCode).toBe(403);
+  });
+});
+
+describe('Drain — POST /v1/hosts/:id/drain', () => {
+  it('stops every running agent on a host', async () => {
+    const w = await makeWorld(); // h1 uses the mock provider
+    await seedRunningAgent(w, { id: 'a1', slug: 'one', accountId: 'onebot' });
+    await seedRunningAgent(w, { id: 'a2', slug: 'two', accountId: 'twobot' });
+    const res = await w.f.inject({ method: 'POST', url: '/v1/hosts/h1/drain', headers: as(), payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ stopped: 2, skipped: [] });
+    expect(w.store.getAgent('a1')!.state).toBe('STOPPED');
+    expect(w.store.getAgent('a2')!.state).toBe('STOPPED');
+  });
+
+  it('is refused to a non-host-owner (403)', async () => {
+    const w = await makeWorld();
+    expect((await w.f.inject({ method: 'POST', url: '/v1/hosts/h1/drain', headers: as('intruder'), payload: {} })).statusCode).toBe(403);
   });
 });

@@ -2,6 +2,27 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.28.0] — 2026-08-24
+
+### Added
+- **Fleet ops for Cluster mode.** The Hosts tab and the Fleet Health dashboard
+  now show each runner's live reachability, and a runner with agents has a
+  **Drain** button that stops every running agent on it (take it out of service
+  before decommissioning). New `POST /v1/hosts/:id/drain` and
+  `GET /v1/hosts/:id/ping`; the hosts list reports `agentCount`.
+- **One-command smoke test:** `npm run smoke` (or `./scripts/smoke.sh`) runs the
+  full isolated adopt smoke, auto-loading `.env.smoke`.
+
+### Fixed
+- **Google sign-in ignored your theme.** The button was hardcoded to the dark
+  (`filled_black`) style, so a light install got a black button — it now follows
+  the app theme (and `prefers-color-scheme` on the join page).
+- **The agent card status line is consistent again.** It crammed container name,
+  model, OpenClaw version, shared-memory, activity, warm/cold, and data into one
+  ragged chain whose order shifted per card. It's now a fixed-order line of only
+  the true facts (model · runner · active · warming · data · shared memory), with
+  the container name / OpenClaw version moved to the hover tooltip.
+
 ## [0.27.0] — 2026-08-24
 
 ### Added

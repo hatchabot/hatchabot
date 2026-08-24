@@ -791,7 +791,9 @@ function loadGoogleButton() {
   s.async = true;
   s.onload = () => {
     google.accounts.id.initialize({ client_id: cid, callback: onGoogleCredential });
-    google.accounts.id.renderButton($('gsiBtn'), { theme: 'filled_black', size: 'large', text: 'signin_with' });
+    // Match the app theme (was hardcoded dark) — a light install got a black button.
+    const gTheme = document.documentElement.dataset.theme === 'dark' ? 'filled_black' : 'outline';
+    google.accounts.id.renderButton($('gsiBtn'), { theme: gTheme, size: 'large', text: 'signin_with' });
   };
   document.head.appendChild(s);
 }
@@ -975,16 +977,15 @@ async function loadHosts() {
       const local = h.kind === 'local';
       const where = local ? 'this machine · Claude Max or API key'
         : `${esc(h.settings?.dockerHost || '')} · API key only`;
-      const del = local || h.agentCount
-        ? ''
-        : `<button class="hbtn" onclick="deleteHost('${jsq(h.id)}','${jsq(h.name)}')">Remove</button>`;
       const check = local ? '' : `<button class="hbtn" onclick="pingHost('${jsq(h.id)}')">Check</button>`;
+      const drain = !local && h.agentCount ? `<button class="hbtn" onclick="drainHost('${jsq(h.id)}','${jsq(h.name)}')">Drain</button>` : '';
+      const del = local || h.agentCount ? '' : `<button class="hbtn" onclick="deleteHost('${jsq(h.id)}','${jsq(h.name)}')">Remove</button>`;
       return `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
         <span class="grow">${local ? '🖥️' : '☁️'} <b>${esc(h.name)}</b>
           <span class="sub">· ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'}</span>
           <div class="sub">${where}</div>
           <div class="sub" id="hostping-${esc(h.id)}"></div></span>
-        <span style="display:flex;gap:6px">${check}${del}</span>
+        <span style="display:flex;gap:6px">${check}${drain}${del}</span>
       </div>`;
     }).join('');
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -1015,6 +1016,17 @@ async function addHost() {
     toast(h.reachable ? `Runner "${name}" added — Docker ${h.serverVersion} reachable` : `Runner "${name}" added, but it didn't answer yet (${h.pingError || 'unreachable'})`, 20000);
   } catch (e) { $('hostErr').textContent = e.message; }
   finally { $('hostAddBtn').disabled = false; }
+}
+
+async function drainHost(id, name) {
+  if (!confirm(`Drain "${name}"? Every running agent on it is stopped (take the runner out of service). You can delete or move them afterward.`)) return;
+  try {
+    const r = await api(`/v1/hosts/${id}/drain`, { method: 'POST', body: {} });
+    await loadHosts();
+    const tail = r.skipped?.length ? ` — ${r.skipped.length} skipped (busy): ${r.skipped.join(', ')}` : '';
+    toast(`Stopped ${r.stopped} agent${r.stopped === 1 ? '' : 's'} on "${name}"${tail}`, 15000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 20000); }
 }
 
 async function deleteHost(id, name) {
@@ -1833,6 +1845,23 @@ function memberCard(a) {
   </div>`;
 }
 
+// The card's status line: one row, always the same order, only the facts that
+// are true — so cards line up instead of each showing a different ragged subset.
+// Debug detail (container name, OpenClaw version) moves to the hover tooltip.
+function agentMeta(a) {
+  if (!a.runtimeRef) return '';
+  const host = hosts.find(h => h.id === a.hostId);
+  const bits = [];
+  if (a.model) bits.push(esc(a.model));
+  if (host && host.kind !== 'local') bits.push(`on ${esc(host.name)}`); // Cluster: runner name
+  if (a.lastActiveAt) bits.push(`active ${ago(a.lastActiveAt)}`);
+  if (a.modelWarm === false) bits.push('warming up');
+  if (a.dataSummary) bits.push(esc(a.dataSummary));
+  if (a.sharedMemory) bits.push('shared memory');
+  const debug = esc(a.runtimeRef.replace('docker://', '')) + (a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : '');
+  return `<div class="runtime" title="${debug}">${bits.join(' · ') || '—'}</div>`;
+}
+
 function agentCard(a) {
   // Members (role 'user') get a chat-only card: no lifecycle, no files, no
   // members list. The server enforces this too — this just hides what would
@@ -1853,7 +1882,7 @@ function agentCard(a) {
       </div>
       <span class="chip ${a.state}">${a.state}</span>
     </div>
-    ${a.runtimeRef ? `<div class="runtime" title="Docker container">${esc(a.runtimeRef.replace('docker://', ''))}${a.model ? ` · ${esc(a.model)}` : ''}${a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : ''}${a.sharedMemory ? ' · shared memory' : ''}${a.lastActiveAt ? ` · active ${ago(a.lastActiveAt)}` : ''}${a.modelWarm === false ? ' · model cold (first reply ~10s)' : a.modelWarm === true ? ' · model warm' : ''}${a.dataSummary ? ` · ${esc(a.dataSummary)}` : ''}</div>` : ''}
+    ${agentMeta(a)}
     ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
@@ -2501,6 +2530,24 @@ function renderFleet() {
 async function renderFleetOps() {
   const ops = $('fleetOps');
   ops.innerHTML = '';
+  // Hosts tile: this machine + any runners, with live reachability for runners.
+  try {
+    const hs = await api('/v1/hosts');
+    const runners = hs.filter(h => h.kind !== 'local');
+    const rows = hs.map(h => {
+      const local = h.kind === 'local';
+      const id = `fleethost-${h.id}`;
+      return `<div class="sub">${local ? '🖥️' : '☁️'} ${esc(h.name)} · ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'}${local ? '' : ` <span id="${id}" style="color:var(--dim)">· checking…</span>`}</div>`;
+    }).join('');
+    ops.innerHTML += `<div><b class="sub">Hosts</b>${rows}</div>`;
+    // Ping each runner in the background and paint its dot.
+    for (const h of runners) {
+      api(`/v1/hosts/${h.id}/ping`).then(r => {
+        const el = $(`fleethost-${h.id}`);
+        if (el) { el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)'; el.textContent = r.reachable ? '· ✓ reachable' : `· ⚠ unreachable`; }
+      }).catch(() => {});
+    }
+  } catch { /* not the host owner */ }
   try {
     const b = await api('/v1/backups');
     const latest = b.backups?.[0];
