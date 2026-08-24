@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.27.0] — 2026-08-24
+
+### Added
+- **Fleet health dashboard** (📊 Health in the header). One glance at the whole
+  fleet: counts (running / stopped / failed / working), a **"needs attention"**
+  list (failed agents with their reason, agents waiting for a bot, and running
+  agents idle >14 days), and a per-agent status line with state, model, and last
+  activity. For the host owner it also shows **backup health** (latest set + age,
+  warns when >2 days old or missing the decryption key) and **runtime** (image
+  version / upgrade available). A **Run health checks** button probes each
+  running agent's in-container gateway on demand and paints a live dot. Built
+  entirely over existing endpoints — no new server surface.
+
 ## [0.26.0] — 2026-08-24
 
 ### Fixed
