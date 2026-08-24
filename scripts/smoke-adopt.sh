@@ -14,6 +14,10 @@
 # agent is deleted at the end; it still exists at BotFather for the next run.
 set -uo pipefail
 
+# Load a git-ignored .env.smoke (0600) if present, so the token lives in one
+# file instead of your shell history. A real env var still wins.
+if [ -f .env.smoke ]; then set -a; . ./.env.smoke; set +a; fi
+
 NAME="aclaw-smoke-$(date +%s)"
 WS="$(mktemp -d)"
 FAILED=0

@@ -21,11 +21,20 @@
  * model usable; a dummy still boots the container), AGENTCLAW_SMOKE_PORT.
  */
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import Database from 'better-sqlite3';
+
+// Convenience: load a git-ignored .env.smoke (KEY=VALUE lines) if present, so
+// you only fill one 0600 file and run the npm script. A real env var wins.
+if (existsSync('.env.smoke')) {
+  for (const line of readFileSync('.env.smoke', 'utf8').split('\n')) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  }
+}
 
 const TOKEN = process.env.AGENTCLAW_SMOKE_BOT_TOKEN;
 const AI_KEY = process.env.AGENTCLAW_SMOKE_AI_KEY || 'sk-smoke-dummy-key';
@@ -204,6 +213,18 @@ async function cleanup() {
   rmSync(work, { recursive: true, force: true });
   rmSync(extRoot, { recursive: true, force: true });
   ok('deleted the agent, killed the server, removed all temp files and aclawsmoke-* containers/volumes');
+}
+
+// A Ctrl-C or kill mid-run must still tear everything down.
+let tearingDown = false;
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, async () => {
+    if (tearingDown) return;
+    tearingDown = true;
+    console.log(`\n(received ${sig})`);
+    await cleanup().catch(() => {});
+    process.exit(130);
+  });
 }
 
 run()
