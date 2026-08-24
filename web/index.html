@@ -1461,18 +1461,21 @@ async function bringInSelected() {
 
   // 2. Bring each in, one at a time (each takes over its own bot + copies files).
   let ok = 0;
+  let crons = 0;
   const adopted = [];
   for (const a of picks) {
     const i = idxOf(a);
     if (a.bot && stillBusy.includes(a.bot.accountId)) { rowSay(i, '✗ bot still polled by OpenClaw — try again', 'var(--warn)'); continue; }
     try {
-      const { agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
-      rowSay(i, '✓ brought in', 'var(--ok)'); ok++;
+      const { res, agentId } = await doAdopt({ path: a.workspace, name: a.name, reuse: !!a.bot, token: '', bot: a.bot, onStatus: m => rowSay(i, m) });
+      const c = res.crons?.carried || 0;
+      crons += c;
+      rowSay(i, `✓ brought in${c ? ` · ${c} task${c > 1 ? 's' : ''} carried (disabled)` : ''}`, 'var(--ok)'); ok++;
       adopted.push({ agentId, name: a.name, workspace: a.workspace });
     } catch (e) { rowSay(i, `✗ ${e.message}`, 'var(--warn)'); }
   }
   await refresh(true);
-  toast(`Brought in ${ok} of ${picks.length} agent(s).`, 15000);
+  toast(`Brought in ${ok} of ${picks.length} agent(s)${crons ? ` · ${crons} scheduled task(s) carried, disabled for review` : ''}.`, 15000);
   await offerFolders(adopted); // one prompt covering every agent's external data
   await loadOpenclawAgents(); // adopted ones now show as already-in-AgentClaw
   $('adoptBatchBtn').disabled = false;
@@ -1653,7 +1656,8 @@ async function runAdopt() {
       onStatus: set,
     });
     adoptDlg.close();
-    toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”. The original is untouched — retire it when you're happy.`, 45000);
+    const cronNote = res.crons?.carried ? ` Carried ${res.crons.carried} scheduled task${res.crons.carried > 1 ? 's' : ''} (disabled — review and enable in its Tasks).` : '';
+    toast(`Adopted ${res.files} files (${(res.bytes / 1e6).toFixed(1)} MB) into “${name}”.${cronNote} The original is untouched — retire it when you're happy.`, 45000);
     await refresh(true);
     await offerFolders([{ agentId, name, workspace }]);
   } catch (e) {

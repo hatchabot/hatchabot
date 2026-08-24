@@ -38,6 +38,7 @@ import {
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
+import { migrateCrons } from '../orchestrator/cronImport.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
@@ -1932,12 +1933,26 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-adopt');
       }
       try {
-        return await applyWorkspace(
+        const res = await applyWorkspace(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
             log: trace(agent.id) },
           agent.id,
           path,
         );
+        // Carry the source agent's scheduled tasks (disabled for review). The
+        // workspace copy leaves them behind — they live in OpenClaw's own DB.
+        // Best-effort: a cron hiccup never fails the adopt itself.
+        let crons = { total: 0, carried: 0, failed: 0 };
+        try {
+          crons = await migrateCrons(
+            { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+            agent.id,
+            path,
+          );
+        } catch (err) {
+          trace(agent.id)('cron.migrate_skipped', { error: String(err).slice(0, 200) });
+        }
+        return { ...res, crons };
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof AdoptError) return reply.code(400).send({ error: err.userMessage });

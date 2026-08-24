@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.24.0] — 2026-08-23
+
+### Added
+- **Adopt carries the agent's scheduled tasks (crons).** OpenClaw keeps crons in
+  its global gateway DB, not the workspace, so the file copy left them behind.
+  Adopt now reads the source agent's jobs straight from that DB and recreates
+  each inside the new container via the same in-container `openclaw cron` CLI —
+  brought in **disabled**, so you review (and fix any stale paths/delivery)
+  before they fire. Best-effort: a cron hiccup never fails the adopt. The count
+  is reported in the adopt toast and per-row in a batch.
+  - Reads `~/.openclaw/state/openclaw.sqlite` (override `OPENCLAW_STATE_DB`),
+    resolving the source agent from the workspace path. `adopt-workspace` returns
+    a `crons` summary. All 18 of a real fleet's jobs are cron-schedule +
+    agent-message, which map cleanly; `every`/`at`/`command` are handled too.
+
 ## [0.23.0] — 2026-08-23
 
 ### Added
