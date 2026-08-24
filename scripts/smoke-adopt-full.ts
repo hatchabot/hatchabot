@@ -43,7 +43,7 @@ const AI_KEY = process.env.AGENTCLAW_SMOKE_AI_KEY || 'sk-smoke-dummy-key';
 const PORT = Number(process.env.AGENTCLAW_SMOKE_PORT || 18099);
 const PREFIX = 'aclawsmoke';
 const BASE = `http://127.0.0.1:${PORT}`;
-const H: Record<string, string> = { 'x-agentclaw-owner': 'dev-owner', 'content-type': 'application/json' };
+const OWNER_HEADER: Record<string, string> = { 'x-agentclaw-owner': 'dev-owner' };
 
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
@@ -75,7 +75,10 @@ let server: ChildProcess | undefined;
 let agentId: string | undefined;
 
 function api(method: string, path: string, body?: unknown): Promise<{ status: number; json: any }> {
-  return fetch(`${BASE}${path}`, { method, headers: H, body: body === undefined ? undefined : JSON.stringify(body) })
+  // Only claim a JSON body when there is one — Fastify 400s an empty body that
+  // still carries content-type (e.g. a body-less DELETE).
+  const headers = body === undefined ? OWNER_HEADER : { ...OWNER_HEADER, 'content-type': 'application/json' };
+  return fetch(`${BASE}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
     .then(async (r) => ({ status: r.status, json: await r.json().catch(() => ({})) }));
 }
 async function poll<T>(fn: () => Promise<T | undefined>, tries = 45, gap = 2000): Promise<T> {
@@ -118,6 +121,9 @@ async function startServer() {
     AGENTCLAW_DB: join(dataDir, 'agentclaw.sqlite'),
     AGENTCLAW_SECRET_KEY: randomBytes(32).toString('hex'),
     AGENTCLAW_PREFIX: PREFIX,
+    // Offset gateway ports well clear of the real server's range (19100+), so a
+    // throwaway container can't collide with a live agent's published port.
+    AGENTCLAW_GATEWAY_PORT_BASE: process.env.AGENTCLAW_SMOKE_GATEWAY_BASE || '29100',
     AGENTCLAW_ALLOW_OWNER_HEADER: '1',
     OPENCLAW_CONFIG: ocConfig,
     OPENCLAW_STATE_DB: ocStateDb,
