@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.30.1] — 2026-08-24
+
+### Changed
+- **Card cleanup: Download and Rehost moved into the ⋯ menu.** Both are
+  occasional actions now — server-side Backups cover routine safety copies,
+  and intra-cluster **Move** is the everyday relocation path — so the main
+  button row keeps only the frequent verbs. They live on as "Download copy"
+  and "Rehost to another server" in the card's overflow menu.
+
 ## [0.30.0] — 2026-08-24
 
 ### Added

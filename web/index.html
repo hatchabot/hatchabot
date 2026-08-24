@@ -1946,13 +1946,9 @@ function agentCard(a) {
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
-      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="downloadAgent('${a.id}', '${jsq(a.name)}')" title="Download a complete private copy (bot token, members, memory) — for your own keeping, don't share it">Download</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
         ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another host on this server — same bot, same members, only the machine changes">Move</button>` : ''}
-      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another AgentClaw server in one step">Rehost</button>` : ''}
       <!-- lifecycle -->
       ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
@@ -1981,6 +1977,14 @@ function cardMenu(a) {
   }
   if (a.deepLink && a.state === 'RUNNING') {
     items.push(`<a href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>`);
+  }
+  // Occasional copy/move actions, off the main row: Download (an off-machine
+  // private copy — server-side Backups cover the routine case) and Rehost (the
+  // Mesh move to a whole other AgentClaw server; within this server, Move on
+  // the card is the everyday path).
+  if ((a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef) {
+    items.push(`<button onclick="downloadAgent('${a.id}', '${jsq(a.name)}')" title="Download a complete private copy (bot token, members, memory) — for your own keeping, don't share it">Download copy</button>`);
+    items.push(`<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to a different AgentClaw server (a Mesh peer)">Rehost to another server</button>`);
   }
   if (!items.length) return '';
   return `<details class="menu"><summary>⋯</summary><div class="menu-items" onclick="this.parentElement.open=false">${items.join('')}</div></details>`;
