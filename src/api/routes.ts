@@ -595,7 +595,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   app.get('/v1/hosts', async (req) => {
-    return store.listHosts(ownerIdOf(req));
+    // Annotate each host with how many agents run on it — the load signal for
+    // placement and the "can I delete this?" check in the UI.
+    const active = store.listAllActiveAgents();
+    return store.listHosts(ownerIdOf(req)).map((h) => ({
+      ...h,
+      agentCount: active.filter((a) => a.hostId === h.id).length,
+    }));
+  });
+
+  /** On-demand reachability check for a runner host's Docker endpoint. */
+  app.get<{ Params: { id: string } }>('/v1/hosts/:id/ping', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const host = store.getHost(req.params.id);
+    if (!host) return reply.code(404).send({ error: 'Not found' });
+    const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
+    if (!dockerHost) return { reachable: true, serverVersion: 'local' }; // the local daemon
+    return pingRunner(dockerHost);
   });
 
   // Register a runner host (Cluster mode): a remote Docker endpoint that the

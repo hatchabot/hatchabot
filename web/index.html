@@ -262,6 +262,11 @@
     <label>AI source</label>
     <select id="agentProfile"></select>
   </div>
+  <div id="agentHostRow" style="display:none">
+    <label>Runs on</label>
+    <select id="agentHost" onchange="onHostPicked()"></select>
+    <div class="sub" id="agentHostHint"></div>
+  </div>
   <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
     <input type="checkbox" id="agentPrivate" style="width:auto">
     Keep memory private — just for you. Leave off for a family/group agent:
@@ -452,6 +457,7 @@
   <h3 style="margin:0 0 10px">Settings</h3>
   <div class="tabs" role="tablist">
     <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
+    <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Hosts</button>
     <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Servers</button>
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
@@ -494,6 +500,28 @@
     <div class="err" id="aiErr"></div>
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="aiAddBtn" onclick="addAiProfile()">Add source</button>
+    </div>
+  </section>
+
+  <section id="paneHosts" role="tabpanel" hidden>
+    <div class="sub">
+      Where agents run. <b>This machine</b> is a host from day one — agents here
+      can use your <b>Claude Max</b> login. Add a <b>runner</b> (a remote Docker
+      endpoint, one AgentClaw, many machines) to run agents in the cloud; cloud
+      agents use an <b>API-key</b> AI source (Max is desktop-only). Move agents
+      between hosts with <b>Rehost</b> on the card.
+    </div>
+    <div id="hostList" style="margin-top:10px">Loading…</div>
+    <h4 style="margin:16px 0 4px">Add a runner</h4>
+    <input type="text" id="hostName" placeholder="Name (e.g. Cloud VM)" maxlength="64">
+    <input type="text" id="hostEndpoint" placeholder="ssh://runner@10.0.0.9  (or tcp://host:2376)">
+    <div class="sub">
+      <code>ssh://user@host</code> is simplest — the control plane must be able to
+      SSH to it and the runtime image must be built there.
+    </div>
+    <div class="err" id="hostErr"></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" id="hostAddBtn" onclick="addHost()">Add runner</button>
     </div>
   </section>
 
@@ -923,7 +951,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', servers: 'paneServers', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
+const TABS = { ai: 'paneAi', hosts: 'paneHosts', servers: 'paneServers', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -932,8 +960,70 @@ function showTab(name) {
     $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
   }
   if (name === 'access') refreshMgmtBotStatus();
+  if (name === 'hosts') loadHosts();
   if (name === 'backups') loadBackups();
   if (name === 'runtime') loadRuntime();
+}
+
+// ---- hosts (Cluster mode) ---------------------------------------------------
+
+async function loadHosts() {
+  const el = $('hostList');
+  try {
+    hosts = await api('/v1/hosts');
+    el.innerHTML = hosts.map(h => {
+      const local = h.kind === 'local';
+      const where = local ? 'this machine · Claude Max or API key'
+        : `${esc(h.settings?.dockerHost || '')} · API key only`;
+      const del = local || h.agentCount
+        ? ''
+        : `<button class="hbtn" onclick="deleteHost('${jsq(h.id)}','${jsq(h.name)}')">Remove</button>`;
+      const check = local ? '' : `<button class="hbtn" onclick="pingHost('${jsq(h.id)}')">Check</button>`;
+      return `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
+        <span class="grow">${local ? '🖥️' : '☁️'} <b>${esc(h.name)}</b>
+          <span class="sub">· ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'}</span>
+          <div class="sub">${where}</div>
+          <div class="sub" id="hostping-${esc(h.id)}"></div></span>
+        <span style="display:flex;gap:6px">${check}${del}</span>
+      </div>`;
+    }).join('');
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+async function pingHost(id) {
+  const el = $(`hostping-${id}`);
+  if (el) { el.textContent = 'checking…'; el.style.color = 'var(--dim)'; }
+  try {
+    const r = await api(`/v1/hosts/${id}/ping`);
+    if (el) {
+      el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)';
+      el.textContent = r.reachable ? `✓ reachable · Docker ${esc(r.serverVersion || '')}` : `⚠ unreachable — ${esc(r.error || 'no response')}`;
+    }
+  } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = esc(e.message); } }
+}
+
+async function addHost() {
+  const name = $('hostName').value.trim();
+  const dockerHost = $('hostEndpoint').value.trim();
+  $('hostErr').textContent = '';
+  if (!name || !dockerHost) { $('hostErr').textContent = 'Give it a name and an endpoint.'; return; }
+  $('hostAddBtn').disabled = true;
+  try {
+    const h = await api('/v1/hosts', { method: 'POST', body: { name, dockerHost } });
+    $('hostName').value = ''; $('hostEndpoint').value = '';
+    await loadHosts();
+    toast(h.reachable ? `Runner "${name}" added — Docker ${h.serverVersion} reachable` : `Runner "${name}" added, but it didn't answer yet (${h.pingError || 'unreachable'})`, 20000);
+  } catch (e) { $('hostErr').textContent = e.message; }
+  finally { $('hostAddBtn').disabled = false; }
+}
+
+async function deleteHost(id, name) {
+  if (!confirm(`Remove runner "${name}"? Agents can no longer be placed there.`)) return;
+  try {
+    await api(`/v1/hosts/${id}`, { method: 'DELETE' });
+    await loadHosts();
+    toast(`Removed "${name}"`);
+  } catch (e) { toast(e.message, 20000); }
 }
 
 function fmtBytes(n) {
@@ -1369,22 +1459,55 @@ $('fabBtn').onclick = () => {
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   $('agentProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('');
+  // Host picker only when there's somewhere to choose (a runner exists). "Auto"
+  // lands on the least-loaded runner.
+  const runners = hosts.filter(h => h.kind !== 'local');
+  $('agentHostRow').style.display = runners.length ? '' : 'none';
+  if (runners.length) {
+    const local = hosts.find(h => h.kind === 'local');
+    $('agentHost').innerHTML =
+      (local ? `<option value="${local.id}">🖥️ This machine (Max or API key)</option>` : '') +
+      `<option value="auto">☁️ Auto — least-loaded runner</option>` +
+      runners.map(h => `<option value="${h.id}">☁️ ${esc(h.name)} (${h.agentCount})</option>`).join('');
+    onHostPicked();
+  }
   createDlg.showModal();
   $('agentName').focus();
 };
 
+// Resolve the picker to a concrete host id ("auto" → least-loaded runner).
+function pickedHostId() {
+  const v = $('agentHostRow').style.display === 'none' ? null : $('agentHost').value;
+  if (!v || v === 'auto') {
+    const runners = hosts.filter(h => h.kind !== 'local');
+    if (v === 'auto' && runners.length) return runners.slice().sort((a, b) => a.agentCount - b.agentCount)[0].id;
+    return (hosts.find(h => h.kind === 'local') ?? hosts[0])?.id;
+  }
+  return v;
+}
+
+// A cloud host can't use a Claude Max (subscription) source — the server
+// enforces this; surface it up front so it isn't a submit-time surprise.
+function onHostPicked() {
+  const id = $('agentHost').value;
+  const isCloud = id === 'auto' || hosts.find(h => h.id === id)?.kind !== 'local';
+  $('agentHostHint').textContent = isCloud
+    ? 'Cloud runners use an API-key AI source (Claude Max is desktop-only).'
+    : '';
+}
+
 async function createAgent() {
   const name = $('agentName').value.trim();
   if (!name) { $('createErr').textContent = 'Give it a name.'; return; }
-  const localHost = hosts.find(h => h.kind === 'local') ?? hosts[0];
+  const hostId = pickedHostId();
   if (!profiles[0]) { $('createErr').textContent = 'Add an AI source first: ⚙ Settings → AI sources.'; return; }
-  if (!localHost) { $('createErr').textContent = 'No host is configured on this server.'; return; }
+  if (!hostId) { $('createErr').textContent = 'No host is configured on this server.'; return; }
   $('createBtn').disabled = true;
   try {
     await api('/v1/agents', { method: 'POST', body: {
       name, persona: $('agentPersona').value.trim() || undefined,
       aiProfileId: (profiles.length > 1 && $('agentProfile').value) || profiles[0].id,
-      hostId: localHost.id,
+      hostId,
       sharedMemory: !$('agentPrivate').checked,
     }});
     createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentPrivate').checked = false;
