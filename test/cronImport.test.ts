@@ -3,7 +3,15 @@ import Database from 'better-sqlite3';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cronAddArgs, readOpenclawCrons, openclawAgentIdForWorkspace, migrateCrons } from '../src/orchestrator/cronImport.js';
+import {
+  cronAddArgs,
+  readOpenclawCrons,
+  openclawAgentIdForWorkspace,
+  migrateCrons,
+  selfPathReplacements,
+  applyReplacements,
+  rewriteWorkspaceFiles,
+} from '../src/orchestrator/cronImport.js';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 
@@ -36,6 +44,47 @@ describe('cronAddArgs', () => {
     ]);
     expect(cronAddArgs({ scheduleKind: 'every', everyMs: 90_000, payloadKind: 'agentTurn', payloadMessage: 'hi' }, 'a')).toContain('90s');
     expect(cronAddArgs({ scheduleKind: 'cron', payloadKind: 'agentTurn' }, 'a')).toBeNull(); // no expr
+  });
+});
+
+describe('self-path rewriting', () => {
+  const entry = {
+    id: 'tech',
+    workspace: '/home/u/.openclaw/workspace-tech',
+    agentDir: '/home/u/.openclaw/agents/tech/agent',
+  };
+  const container = '/home/node/.openclaw/agents/tech-2/agent';
+
+  it('maps both source paths to the container, longest first', () => {
+    const pairs = selfPathReplacements(entry, 'tech-2');
+    // agentDir is longer than workspace → rewritten first, so a nested match
+    // never gets half-rewritten by the parent.
+    expect(pairs[0]).toEqual([entry.agentDir, container]);
+    expect(pairs).toContainEqual([entry.workspace, container]);
+  });
+
+  it('applyReplacements rewrites references in text, leaving the rest alone', () => {
+    const pairs = selfPathReplacements(entry, 'tech-2');
+    const msg = `Read ${entry.workspace}/memory/today.md and keep /home/u/taxes untouched.`;
+    expect(applyReplacements(msg, pairs)).toBe(
+      `Read ${container}/memory/today.md and keep /home/u/taxes untouched.`,
+    );
+    expect(applyReplacements(undefined, pairs)).toBeUndefined();
+  });
+
+  it('rewriteWorkspaceFiles runs a container node pass with the pairs, and no-ops on empty', async () => {
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'tech-2', workspace: { files: {}, configPatch: { agentId: 'tech-2', authMode: 'api-key' } }, env: {} });
+    const pairs = selfPathReplacements(entry, 'tech-2');
+    const r = await rewriteWorkspaceFiles({ provider }, runtimeRef, 'tech-2', pairs);
+    expect(r.rewrote).toBe(true);
+    const shell = provider.execLog.map((a) => a.join(' ')).find((s) => s.includes('node -e'));
+    expect(shell).toContain('/home/node/.openclaw/agents/tech-2/agent'); // WSDIR
+    expect(shell).toContain(entry.agentDir); // pair present in PAIRS json
+    // empty pairs → nothing issued
+    provider.execLog.length = 0;
+    expect((await rewriteWorkspaceFiles({ provider }, runtimeRef, 'tech-2', [])).rewrote).toBe(false);
+    expect(provider.execLog.length).toBe(0);
   });
 });
 

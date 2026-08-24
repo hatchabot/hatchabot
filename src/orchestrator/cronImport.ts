@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 
@@ -32,8 +33,17 @@ export interface SourceCron {
   payloadMessage?: string;
 }
 
-/** Resolve a workspace folder to the OpenClaw agent id that owns it. */
-export function openclawAgentIdForWorkspace(workspaceDir: string, cfgPath = configPath()): string | undefined {
+export interface OpenclawAgentEntry {
+  id: string;
+  workspace?: string;
+  agentDir?: string;
+}
+
+/** Resolve a workspace folder to the OpenClaw agent entry (id + its paths). */
+export function openclawAgentEntryForWorkspace(
+  workspaceDir: string,
+  cfgPath = configPath(),
+): OpenclawAgentEntry | undefined {
   let cfg: { agents?: { list?: Array<{ id?: string; workspace?: string; agentDir?: string }> } };
   try {
     cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
@@ -41,9 +51,81 @@ export function openclawAgentIdForWorkspace(workspaceDir: string, cfgPath = conf
     return undefined;
   }
   const want = resolve(workspaceDir);
-  return (cfg.agents?.list ?? []).find(
-    (a) => (a.workspace && resolve(a.workspace) === want) || (a.agentDir && resolve(a.agentDir) === want),
-  )?.id;
+  const a = (cfg.agents?.list ?? []).find(
+    (x) => (x.workspace && resolve(x.workspace) === want) || (x.agentDir && resolve(x.agentDir) === want),
+  );
+  return a?.id ? { id: a.id, workspace: a.workspace, agentDir: a.agentDir } : undefined;
+}
+
+/** Resolve a workspace folder to the OpenClaw agent id that owns it. */
+export function openclawAgentIdForWorkspace(workspaceDir: string, cfgPath = configPath()): string | undefined {
+  return openclawAgentEntryForWorkspace(workspaceDir, cfgPath)?.id;
+}
+
+/**
+ * Repoint an OpenClaw agent's own paths at the container. Its files and crons
+ * reference the hand-built install's absolute workspace/agentDir; inside the
+ * adopted container that same content lives at WORKSPACE_DIR_TEMPLATE. Fixed
+ * string replacement (no regex), longest path first so an agentDir nested under
+ * a workspace rewrites before its parent. Returns pairs so callers can reuse
+ * the exact mapping (crons here, files in the container).
+ */
+export function selfPathReplacements(entry: OpenclawAgentEntry, containerSlug: string): Array<[string, string]> {
+  const to = WORKSPACE_DIR_TEMPLATE.replace('{slug}', containerSlug);
+  const froms = [entry.agentDir, entry.workspace]
+    .filter((p): p is string => !!p)
+    .map((p) => p.replace(/\/+$/, ''));
+  return [...new Set(froms)].sort((a, b) => b.length - a.length).map((from) => [from, to] as [string, string]);
+}
+
+export function applyReplacements(text: string | undefined, pairs: Array<[string, string]>): string | undefined {
+  if (!text) return text;
+  let out = text;
+  for (const [from, to] of pairs) out = out.split(from).join(to);
+  return out;
+}
+
+// Runs INSIDE the container: fixed-string replace each pair across the
+// workspace's text files. Double-quoted only, so it survives the single-quoted
+// `-e` wrapper below. Best-effort; a bad file is skipped, not fatal.
+const REWRITE_SCRIPT =
+  'const fs=require("fs"),path=require("path");const pairs=JSON.parse(process.env.PAIRS);const root=process.env.WSDIR;' +
+  'function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);' +
+  'if(e.isDirectory())walk(p);else if(/\\.(md|txt|json)$/i.test(e.name)){' +
+  'let t;try{t=fs.readFileSync(p,"utf8")}catch(_){continue}let o=t;for(const x of pairs)o=o.split(x[0]).join(x[1]);' +
+  'if(o!==t)try{fs.writeFileSync(p,o)}catch(_){}}}}' +
+  'try{walk(root)}catch(e){process.exit(2)}';
+
+/**
+ * Repoint the adopted workspace's OWN files (SOUL/AGENTS/MEMORY, memory/*.md, …)
+ * from the hand-built install's absolute paths to the container's, so the agent
+ * reads them at the right place. Runs `node` in the container over the workspace
+ * dir. Best-effort — a shell-hostile path (a single quote) skips it rather than
+ * risk a broken command.
+ */
+export async function rewriteWorkspaceFiles(
+  deps: { provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void },
+  runtimeRef: string,
+  slug: string,
+  pairs: Array<[string, string]>,
+): Promise<{ rewrote: boolean }> {
+  const log = deps.log ?? (() => {});
+  if (!pairs.length) return { rewrote: false };
+  const wsdir = WORKSPACE_DIR_TEMPLATE.replace('{slug}', slug);
+  const json = JSON.stringify(pairs);
+  if ([json, wsdir, REWRITE_SCRIPT].some((s) => s.includes("'"))) {
+    log('adopt.path_rewrite_skipped', { reason: 'quote in path' });
+    return { rewrote: false };
+  }
+  const cmd = `PAIRS='${json}' WSDIR='${wsdir}' node -e '${REWRITE_SCRIPT}'`;
+  try {
+    const res = await deps.provider.execShell(runtimeRef, cmd);
+    if (res.code !== 0) log('adopt.path_rewrite_failed', { stderr: (res.stderr ?? '').slice(0, 200) });
+    return { rewrote: res.code === 0 };
+  } catch (err) {
+    log('adopt.path_rewrite_error', { error: String(err).slice(0, 200) });
+    return { rewrote: false };
+  }
 }
 
 /** The crons OpenClaw has for one agent id. Empty if the DB is unreadable. */
@@ -132,11 +214,14 @@ export async function migrateCrons(
   const agent = deps.store.getAgent(agentId);
   if (!agent?.runtimeRef) return { total: 0, carried: 0, failed: 0 };
 
-  const sourceId = openclawAgentIdForWorkspace(workspaceDir, opts.configPath);
-  if (!sourceId) return { total: 0, carried: 0, failed: 0 };
+  const entry = openclawAgentEntryForWorkspace(workspaceDir, opts.configPath);
+  if (!entry) return { total: 0, carried: 0, failed: 0 };
 
-  const crons = readOpenclawCrons(sourceId, opts.dbPath);
+  const crons = readOpenclawCrons(entry.id, opts.dbPath);
   if (!crons.length) return { total: 0, carried: 0, failed: 0 };
+
+  // Repoint the source's own workspace/agentDir paths at the container copy.
+  const pairs = selfPathReplacements(entry, agent.slug);
 
   // applyWorkspace restarts the container but doesn't wait for the in-container
   // gateway; `cron add` needs it up. Poll a harmless `cron list` until it
@@ -163,7 +248,12 @@ export async function migrateCrons(
   let carried = 0;
   let failed = 0;
   for (const c of crons) {
-    const args = cronAddArgs(c, agent.slug);
+    const rewritten: SourceCron = {
+      ...c,
+      payloadMessage: applyReplacements(c.payloadMessage, pairs),
+      description: applyReplacements(c.description, pairs),
+    };
+    const args = cronAddArgs(rewritten, agent.slug);
     if (!args) {
       failed++;
       log('cron.migrate_unmappable', { name: c.name ?? '(unnamed)', kind: c.scheduleKind });

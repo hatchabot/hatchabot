@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.25.0] — 2026-08-23
+
+### Added
+- **Adopt rewrites the agent's own paths to the container.** An OpenClaw agent's
+  files and crons reference its hand-built workspace/agentDir by absolute path
+  (`/home/you/.openclaw/workspace-x/…`); inside the container that content lives
+  at `/home/node/.openclaw/agents/<slug>/agent`. Adopt now repoints those
+  references — a fixed-string pass over the copied workspace files (run via
+  `node` in the container) and over each migrated cron's message — so schedules
+  and prompts resolve instead of pointing at a path that isn't there. Longest
+  path first (agentDir before its parent workspace); external data paths are
+  untouched (those are handled by folder shares). Best-effort — never fails the
+  adopt; skipped only for a shell-hostile path.
+
 ## [0.24.1] — 2026-08-23
 
 ### Fixed

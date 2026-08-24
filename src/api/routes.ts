@@ -38,7 +38,12 @@ import {
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
-import { migrateCrons } from '../orchestrator/cronImport.js';
+import {
+  migrateCrons,
+  openclawAgentEntryForWorkspace,
+  rewriteWorkspaceFiles,
+  selfPathReplacements,
+} from '../orchestrator/cronImport.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
@@ -1939,9 +1944,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           agent.id,
           path,
         );
-        // Carry the source agent's scheduled tasks (disabled for review). The
-        // workspace copy leaves them behind — they live in OpenClaw's own DB.
-        // Best-effort: a cron hiccup never fails the adopt itself.
+        // Repoint the agent's OWN absolute paths (its old workspace/agentDir) at
+        // the container copy, in both its files and its crons, so references
+        // resolve. Best-effort — neither ever fails the adopt itself.
+        const freshAgent = store.getAgent(agent.id)!;
+        const selfEntry = openclawAgentEntryForWorkspace(path);
+        if (selfEntry && freshAgent.runtimeRef) {
+          try {
+            await rewriteWorkspaceFiles(
+              { provider: providerFor(agent.hostId), log: trace(agent.id) },
+              freshAgent.runtimeRef,
+              freshAgent.slug,
+              selfPathReplacements(selfEntry, freshAgent.slug),
+            );
+          } catch (err) {
+            trace(agent.id)('adopt.path_rewrite_skipped', { error: String(err).slice(0, 200) });
+          }
+        }
+        // Carry the source agent's scheduled tasks (disabled for review, paths
+        // rewritten). They live in OpenClaw's own DB, not the workspace copy.
         let crons = { total: 0, carried: 0, failed: 0 };
         try {
           crons = await migrateCrons(
