@@ -21,6 +21,16 @@ export interface LocalDockerOptions {
   /** Container name prefix. */
   prefix?: string;
   docker?: string;
+  /**
+   * A remote Docker endpoint (a `DOCKER_HOST` value — `ssh://user@vm` is the
+   * simplest secure transport, or `tcp://ip:2376` with TLS set up out of band).
+   * When set, every docker command targets that daemon via `-H`, the workspace
+   * seed is streamed in over stdin instead of bind-mounted (the seed dir is on
+   * THIS box, not the remote), and host-path bind mounts are skipped (they name
+   * the control plane's filesystem, which the remote daemon can't see). This is
+   * what turns the local provider into a fleet runner.
+   */
+  host?: string;
 }
 
 /**
@@ -38,15 +48,27 @@ export interface LocalDockerOptions {
  * every operation here is coarse enough that process spawn cost is noise.
  */
 export class LocalDockerProvider implements RuntimeProvider {
-  readonly key = 'local-docker';
+  readonly key: string;
   readonly image: string;
   readonly prefix: string;
   readonly docker: string;
+  /** True when pointed at a remote daemon (opts.host set). */
+  readonly remote: boolean;
+  /** Connection args prepended to every docker invocation (`-H <host>` or none). */
+  readonly #conn: string[];
 
   constructor(opts: LocalDockerOptions = {}) {
     this.image = opts.image ?? 'agentclaw-runtime:latest';
     this.prefix = opts.prefix ?? 'agentclaw';
     this.docker = opts.docker ?? 'docker';
+    this.remote = !!opts.host;
+    this.#conn = opts.host ? ['-H', opts.host] : [];
+    this.key = this.remote ? 'remote-docker' : 'local-docker';
+  }
+
+  /** Full argv for a docker call: connection args first, then the command. */
+  #argv(args: string[]): string[] {
+    return [...this.#conn, ...args];
   }
 
   /**
@@ -111,8 +133,14 @@ export class LocalDockerProvider implements RuntimeProvider {
       '-v',
       `${volume}:/home/node/.openclaw`,
     ];
-    for (const m of spec.hostMounts ?? []) {
-      args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
+    // Host-path bind mounts (shared folders, ~/.claude) name the CONTROL
+    // PLANE's filesystem; a remote daemon can't see them, so they're skipped
+    // there. Cloud agents use API keys (no ~/.claude) and git/volume data, not
+    // local folders — provision.ts already refuses Max on a non-local host.
+    if (!this.remote) {
+      for (const m of spec.hostMounts ?? []) {
+        args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
+      }
     }
     for (const p of spec.ports ?? []) {
       // Loopback only: the agent's Control UI is a debug door for whoever is
@@ -167,17 +195,25 @@ export class LocalDockerProvider implements RuntimeProvider {
         await writeFile(path, contents);
       }
 
-      const res = await this.#docker([
-        'run',
-        '--rm',
-        '-v',
-        `${volume}:/home/node/.openclaw`,
-        '-v',
-        `${seedDir}:/seed:ro`,
-        this.image,
-        'bash',
-        '/seed/seed.sh',
-      ]);
+      let res: ExecResult;
+      if (this.remote) {
+        // The seed dir is on THIS box; a remote daemon can't bind-mount it, so
+        // stream it in as a tar over stdin and extract inside the one-shot.
+        const tar = await execFileP('tar', ['cz', '-C', seedDir, '.'], {
+          encoding: 'buffer',
+          maxBuffer: 256 * 1024 * 1024,
+        });
+        res = await this.#runStdin(
+          ['run', '--rm', '-i', '-v', `${volume}:/home/node/.openclaw`, this.image,
+            'bash', '-c', 'mkdir -p /seed && tar xz -C /seed && bash /seed/seed.sh'],
+          tar.stdout as Buffer,
+        );
+      } else {
+        res = await this.#docker([
+          'run', '--rm', '-v', `${volume}:/home/node/.openclaw`, '-v', `${seedDir}:/seed:ro`,
+          this.image, 'bash', '/seed/seed.sh',
+        ]);
+      }
       if (res.code !== 0) {
         throw new ProviderError(
           `seed failed: ${res.stderr.slice(-2000) || res.stdout.slice(-2000)}`,
@@ -306,7 +342,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     try {
       const { stdout } = await execFileP(
         this.docker,
-        ['run', '--rm', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.'],
+        this.#argv(['run', '--rm', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.']),
         { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 },
       );
       return stdout as Buffer;
@@ -331,11 +367,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Clear the volume FIRST so this is a true replace, not an overlay — a
       // restore/rollback must not leave behind files created since the snapshot
       // (and on import it discards the provisioned seed skeleton).
-      const child = spawn(this.docker, [
+      const child = spawn(this.docker, this.#argv([
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
         'find /vol -mindepth 1 -delete && tar xz --no-same-owner -C /vol && chown -R 1000:1000 /vol && chmod -R a-s /vol',
-      ]);
+      ]));
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));
       child.on('error', reject);
@@ -357,14 +393,14 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { volume } = this.#names(runtimeRef);
     const dir = `/vol/agents/${slug}/agent`;
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(this.docker, [
+      const child = spawn(this.docker, this.#argv([
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
         // Same untrusted-input rules as importState: refuse the archive's
         // ownership, then set the one the runtime actually needs.
         `mkdir -p ${dir} && tar xz --no-same-owner -C ${dir} && ` +
           `chown -R 1000:1000 /vol/agents && chmod -R a-s /vol/agents`,
-      ]);
+      ]));
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));
       child.on('error', reject);
@@ -393,9 +429,27 @@ export class LocalDockerProvider implements RuntimeProvider {
     return res;
   }
 
+  /** Run a docker command, piping `data` to its stdin (for tar-over-stdin on a
+   *  remote daemon, where bind mounts of this box's paths aren't possible). */
+  async #runStdin(args: string[], data: Buffer): Promise<ExecResult> {
+    return new Promise<ExecResult>((resolve, reject) => {
+      const child = spawn(this.docker, this.#argv(args));
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (c) => (stdout += c));
+      child.stderr.on('data', (c) => (stderr += c));
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      // If the child exits without draining stdin, the write races to EPIPE —
+      // swallow it (the close handler above is the real result).
+      child.stdin.on('error', () => {});
+      child.stdin.end(data);
+    });
+  }
+
   async #docker(args: string[]): Promise<ExecResult> {
     try {
-      const { stdout, stderr } = await execFileP(this.docker, args, {
+      const { stdout, stderr } = await execFileP(this.docker, this.#argv(args), {
         maxBuffer: 8 * 1024 * 1024,
         // A hung daemon must fail this call, not freeze the control plane.
         timeout: Number(process.env.AGENTCLAW_DOCKER_TIMEOUT_MS ?? 60_000),

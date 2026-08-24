@@ -195,3 +195,42 @@ describe('a stalled daemon is not a missing container', () => {
     }
   });
 });
+
+describe('remote (fleet) provider — points docker at a remote daemon', () => {
+  const rdir = mkdtempSync(join(tmpdir(), 'acl-rdocker-'));
+  const RLOG = join(rdir, 'argv.log');
+  const rstub = join(rdir, 'docker');
+  writeFileSync(rstub, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(RLOG)}\nexit 0\n`, { mode: 0o755 });
+  chmodSync(rstub, 0o755);
+  const HOST = 'ssh://runner@10.0.0.9';
+  const remote = new LocalDockerProvider({ docker: rstub, image: 'test-image:latest', host: HOST });
+  const rargv = () => (existsSync(RLOG) ? readFileSync(RLOG, 'utf8') : '');
+
+  beforeEach(() => writeFileSync(RLOG, ''));
+
+  it('advertises itself as remote-docker', () => {
+    expect(remote.key).toBe('remote-docker');
+    expect(remote.remote).toBe(true);
+  });
+
+  it('prepends -H <host> to every docker command', async () => {
+    await remote.stop('docker://agentclaw-kitchen-helper-df918a55');
+    for (const line of rargv().split('\n').filter(Boolean)) {
+      expect(line.startsWith(`-H ${HOST} `), line).toBe(true);
+    }
+  });
+
+  it('seeds over stdin (no bind-mount of this box\'s seed dir) and skips host mounts', async () => {
+    await remote.provision(spec({
+      hostMounts: [{ source: '/home/me/docs', target: '/home/me/docs', readonly: true }],
+    }) as any);
+    const log = rargv();
+    // remote seed is streamed in, not bind-mounted
+    expect(log).not.toContain(':/seed:ro');
+    expect(log).toContain('mkdir -p /seed && tar xz -C /seed');
+    // the control-plane host path is NOT mounted into the remote container
+    expect(log).not.toContain('/home/me/docs:/home/me/docs');
+    // and everything still targeted the remote daemon
+    expect(log.split('\n').filter(Boolean).every((l) => l.startsWith(`-H ${HOST} `))).toBe(true);
+  });
+});
