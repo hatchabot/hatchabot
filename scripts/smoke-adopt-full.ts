@@ -32,7 +32,9 @@ import Database from 'better-sqlite3';
 if (existsSync('.env.smoke')) {
   for (const line of readFileSync('.env.smoke', 'utf8').split('\n')) {
     const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    if (!m) continue;
+    const [, k, v] = m;
+    if (k && process.env[k] === undefined) process.env[k] = (v ?? '').replace(/^["']|["']$/g, '');
   }
 }
 
