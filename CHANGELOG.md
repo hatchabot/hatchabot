@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.30.2] — 2026-08-24
+
+### Changed
+- **Terminology pass — the UI now speaks Cluster/Mesh consistently.** "Host",
+  "server", and "Rehost" had drifted into ambiguity as Cluster grew:
+  - Settings **Hosts** tab → **Runners** (the machines this cluster runs
+    agents on; "this machine" is the built-in runner). Fleet Health tile
+    renamed to match.
+  - Settings **Servers** tab → **Cluster servers** (other AgentClaw control
+    planes — each its own cluster), with copy that points people wanting more
+    machines under *this* dashboard at Runners instead.
+  - **Rehost** → **"Move to another cluster"** (card ⋯ menu), with dialogs
+    reworded to say the agent is managed from that server's dashboard
+    afterwards.
+  - **Access** tab copy now names both uses of a token: the CLI, and
+    connecting two cluster servers.
+  API routes and CLI commands keep their names — no breaking changes.
+
 ## [0.30.1] — 2026-08-24
 
 ### Changed
