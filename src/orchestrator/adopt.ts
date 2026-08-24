@@ -264,7 +264,9 @@ interface OpenClawConfig {
  */
 export function findExistingBot(
   workspaceDir: string,
-  configPath = resolve(homedir(), '.openclaw/openclaw.json'),
+  // Honor OPENCLAW_CONFIG so a non-default install (and the smoke harness)
+  // resolves the same config discovery does, not a hardcoded ~/.openclaw path.
+  configPath = process.env.OPENCLAW_CONFIG || resolve(homedir(), '.openclaw/openclaw.json'),
 ): ExistingBot | undefined {
   let cfg: OpenClawConfig;
   try {

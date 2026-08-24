@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.25.1] — 2026-08-24
+
+### Fixed
+- **`findExistingBot` now honors `OPENCLAW_CONFIG`.** The reuse-bot path
+  (`channel-token` with `fromWorkspace`) read a hardcoded `~/.openclaw/openclaw.json`
+  while discovery honored the `OPENCLAW_CONFIG` env — so on an install with a
+  non-default OpenClaw config, adopt could discover an agent's bot but then fail
+  to take it over ("No existing Telegram bot is bound to …"). Both read the same
+  config now. (Surfaced by the isolated adopt smoke harness.)
+
 ## [0.25.0] — 2026-08-23
 
 ### Added

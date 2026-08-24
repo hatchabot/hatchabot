@@ -125,7 +125,14 @@ async function startServer() {
   };
   delete env.AGENTCLAW_PASSWORD;
   server = spawn('node_modules/.bin/tsx', ['src/index.ts'], { cwd: process.cwd(), env, stdio: ['ignore', 'inherit', 'inherit'] });
-  await poll(async () => ((await api('GET', '/v1/agents')).status === 200 ? true : undefined), 30, 1000);
+  let exited: { code: number | null; sig: string | null } | undefined;
+  server.on('exit', (code, sig) => { exited = { code, sig }; });
+  // Retry through startup: connection-refused is expected until it's listening.
+  await poll(async () => {
+    if (exited) throw new SmokeError(`server exited during startup (code ${exited.code}${exited.sig ? `, ${exited.sig}` : ''}) — see its output above`);
+    try { return (await api('GET', '/v1/agents')).status === 200 ? true : undefined; }
+    catch { return undefined; }
+  }, 40, 1000);
   ok('server is up and answering');
 }
 
@@ -148,20 +155,26 @@ async function run() {
 
   step('Adopt it: create → take over its bot → boot the container');
   const created = await api('POST', '/v1/agents', { name: 'aclaw-smoke', aiProfileId, hostId: 'host-local-default', sharedMemory: false });
-  assert(created.status === 201, `create failed: ${created.status} ${JSON.stringify(created.json)}`);
+  // 202 Accepted: the record exists and provisioning runs in the background.
+  assert(created.status === 201 || created.status === 202, `create failed: ${created.status} ${JSON.stringify(created.json)}`);
   agentId = created.json.id;
 
   let a = await poll(async () => {
-    const r = await api('GET', `/v1/agents/${agentId}`);
-    return r.json.pendingAction || r.json.state === 'RUNNING' || r.json.state === 'FAILED' ? r.json : undefined;
+    try {
+      const r = await api('GET', `/v1/agents/${agentId}`);
+      return r.json.pendingAction || r.json.state === 'RUNNING' || r.json.state === 'FAILED' ? r.json : undefined;
+    } catch { return undefined; }
   });
   if (a.pendingAction?.type === 'bot_token') {
     const tk = await api('POST', `/v1/agents/${agentId}/channel-token`, { fromWorkspace: ws });
     assert(tk.status < 400, `bot takeover failed: ${tk.status} ${JSON.stringify(tk.json)}`);
   }
   a = await poll(async () => {
-    const r = await api('GET', `/v1/agents/${agentId}`);
-    return r.json.state === 'RUNNING' ? r.json : r.json.state === 'FAILED' ? Promise.reject(new SmokeError('agent FAILED')) as any : undefined;
+    try {
+      const r = await api('GET', `/v1/agents/${agentId}`);
+      if (r.json.state === 'FAILED') throw new SmokeError(`agent FAILED: ${r.json.stateReason ?? 'unknown'}`);
+      return r.json.state === 'RUNNING' ? r.json : undefined;
+    } catch (e) { if (e instanceof SmokeError) throw e; return undefined; }
   });
   ok('agent reached RUNNING');
 
