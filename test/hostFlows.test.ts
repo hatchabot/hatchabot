@@ -4,10 +4,19 @@
  * (tcp://127.0.0.1:1) refuses fast, so the best-effort reachability ping returns
  * quickly with reachable:false without stalling the test.
  */
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 const RUNNER = 'tcp://127.0.0.1:1';
+
+// POST /v1/hosts now prepares the runner SSH key/config — keep that away from
+// the real ~/.ssh of whoever runs the tests.
+beforeAll(() => {
+  process.env.AGENTCLAW_SSH_DIR = mkdtempSync(join(tmpdir(), 'acl-hostflows-ssh-'));
+});
 
 describe('Runner hosts — POST /v1/hosts', () => {
   it('registers a runner and lists it (host owner)', async () => {

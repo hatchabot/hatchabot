@@ -558,12 +558,23 @@
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
-    <input type="text" id="hostName" placeholder="Name (e.g. Cloud VM)" maxlength="64">
-    <input type="text" id="hostEndpoint" placeholder="ssh://runner@10.0.0.9  (or tcp://host:2376)">
-    <div class="sub">
-      <code>ssh://user@host</code> is simplest — the control plane must be able to
-      SSH to it and the runtime image must be built there.
+    <div class="sub" style="margin-bottom:6px">
+      <b>1.</b> On the runner: install <b>Docker</b> and enable <b>SSH</b>
+      (macOS: System Settings → Sharing → Remote Login).
     </div>
+    <div class="sub" style="margin-bottom:6px">
+      <b>2.</b> Run this once on the runner — it authorizes this server's key
+      and fixes the PATH quirks
+      (<a href="#" onclick="showRunnerSetup(); return false">show the command</a>):
+    </div>
+    <div id="runnerSetupOut" style="display:none;margin:6px 0 10px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px;cursor:pointer" title="Tap to copy" onclick="copyRunnerSetup()"></div>
+    <div class="sub" style="margin-bottom:6px">
+      <b>3.</b> Add its address. Everything else — the SSH key, its config, the
+      host-key check — is handled here automatically; if the runtime image is
+      missing, an <b>Install image</b> button appears on the runner's row.
+    </div>
+    <input type="text" id="hostName" placeholder="Name (e.g. Cloud VM)" maxlength="64">
+    <input type="text" id="hostEndpoint" placeholder="ssh://user@host  (or tcp://host:2376)">
     <div class="err" id="hostErr"></div>
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="hostAddBtn" onclick="addHost()">Add runner</button>
@@ -1050,9 +1061,44 @@ async function pingHost(id) {
     const r = await api(`/v1/hosts/${id}/ping`);
     if (el) {
       el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)';
-      el.textContent = r.reachable ? `✓ reachable · Docker ${esc(r.serverVersion || '')}` : `⚠ unreachable — ${esc(r.error || 'no response')}`;
+      if (!r.reachable) { el.textContent = `⚠ unreachable — ${esc(r.error || 'no response')}`; return; }
+      // Reachable but missing the runtime image = provision will fail — offer
+      // the fix right here instead of letting the first create explain it.
+      el.innerHTML = `✓ reachable · Docker ${esc(r.serverVersion || '')}` +
+        (r.hasImage === false
+          ? ` · <span style="color:var(--warn)">runtime image missing</span> <button class="hbtn" onclick="installImage('${jsq(id)}')">Install image</button>`
+          : '');
     }
   } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = esc(e.message); } }
+}
+
+/** Copy this server's runtime image to the runner — a multi-GB stream, so it
+ *  runs for minutes; the toast + button state carry the progress. */
+async function installImage(id) {
+  const h = hosts.find(x => x.id === id);
+  if (!confirm(`Copy the runtime image to "${h?.name ?? 'this runner'}"?\n\nIt's large (often over a gigabyte), so this can take several minutes depending on the connection.`)) return;
+  toast(`Copying the runtime image to ${h?.name ?? 'the runner'}… this can take several minutes.`, 900000, 'progress');
+  const el = $(`hostping-${id}`);
+  if (el) { el.style.color = 'var(--dim)'; el.textContent = 'installing image…'; }
+  try {
+    await api(`/v1/hosts/${id}/install-image`, { method: 'POST', body: {} });
+    toast(`✅ Runtime image installed on ${h?.name ?? 'the runner'}.`, 10000);
+  } catch (e) { toast(`Image install failed: ${e.message}`, 20000); }
+  pingHost(id);
+}
+
+let runnerSnippet = '';
+async function showRunnerSetup() {
+  try {
+    const r = await api('/v1/runner-setup');
+    runnerSnippet = r.snippet;
+    const el = $('runnerSetupOut');
+    el.textContent = r.snippet;
+    el.style.display = 'block';
+  } catch (e) { toast(e.message, 10000); }
+}
+function copyRunnerSetup() {
+  navigator.clipboard?.writeText(runnerSnippet).then(() => toast('Copied — paste it in a terminal on the runner.'), () => {});
 }
 
 async function addHost() {
@@ -1065,7 +1111,10 @@ async function addHost() {
     const h = await api('/v1/hosts', { method: 'POST', body: { name, dockerHost } });
     $('hostName').value = ''; $('hostEndpoint').value = '';
     await loadHosts();
-    toast(h.reachable ? `Runner "${name}" added — Docker ${h.serverVersion} reachable` : `Runner "${name}" added, but it didn't answer yet (${h.pingError || 'unreachable'})`, 20000);
+    toast(h.reachable
+      ? `Runner "${name}" added — Docker ${h.serverVersion} reachable${h.hasImage === false ? '. The runtime image is missing — use Install image on its row.' : '.'}`
+      : `Runner "${name}" added, but it didn't answer yet (${h.pingError || 'unreachable'}) — check step 2, then Check its row.`, 20000);
+    if (h.reachable) pingHost(h.id);
   } catch (e) { $('hostErr').textContent = e.message; }
   finally { $('hostAddBtn').disabled = false; }
 }

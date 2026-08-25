@@ -12,6 +12,10 @@ It's a control plane for [OpenClaw](https://docs.openclaw.ai) agent runtimes:
 AgentClaw handles provisioning, messaging identity, memory safety, membership,
 and lifecycle; OpenClaw runs the agent.
 
+**New here or catching up?** [docs/features.md](docs/features.md) is a
+task-first tour of everything the app does today — creating, training, moving,
+adopting, backing up, and operating a fleet of agents.
+
 ```
    You (web app / CLI)          Family (Telegram)
             │                          │

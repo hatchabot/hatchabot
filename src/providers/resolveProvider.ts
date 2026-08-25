@@ -14,8 +14,8 @@ const execFileP = promisify(execFile);
  */
 export async function pingRunner(
   dockerHost: string,
-  opts: { docker?: string; timeoutMs?: number } = {},
-): Promise<{ ok: boolean; version?: string; error?: string }> {
+  opts: { docker?: string; timeoutMs?: number; image?: string } = {},
+): Promise<{ ok: boolean; version?: string; hasImage?: boolean; error?: string }> {
   try {
     const { stdout } = await execFileP(
       opts.docker ?? 'docker',
@@ -23,7 +23,24 @@ export async function pingRunner(
       { timeout: opts.timeoutMs ?? 8000, killSignal: 'SIGKILL' },
     );
     const version = stdout.trim();
-    return version ? { ok: true, version } : { ok: false, error: 'no server version reported' };
+    if (!version) return { ok: false, error: 'no server version reported' };
+    // Reachable is half the story: provision needs the runtime image on THAT
+    // daemon, and a missing image otherwise only fails at first create. Probe
+    // it here so the UI can offer "Install image" up front. Best-effort — an
+    // inspect error just reports the image missing.
+    let hasImage = false;
+    try {
+      await execFileP(
+        opts.docker ?? 'docker',
+        ['-H', dockerHost, 'image', 'inspect', opts.image ?? 'agentclaw-runtime:latest',
+          '--format', 'ok'],
+        { timeout: opts.timeoutMs ?? 8000, killSignal: 'SIGKILL' },
+      );
+      hasImage = true;
+    } catch {
+      /* image absent (or uninspectable) — reported as missing */
+    }
+    return { ok: true, version, hasImage };
   } catch (err) {
     return { ok: false, error: String((err as Error)?.message ?? err).slice(0, 200) };
   }

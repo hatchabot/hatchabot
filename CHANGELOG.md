@@ -2,6 +2,30 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.32.0] — 2026-08-24
+
+### Added
+- **Adding a runner is now a guided, mostly-automatic flow.** The form used to
+  ask for an SSH address while silently assuming seven hand-done steps (key
+  generation, key install, ssh-config, known-hosts, PATH fix, runtime image).
+  Now: the control plane generates and manages a **dedicated runner key**
+  (`~/.ssh/agentclaw_runner`, passphrase-less, pinned per host in
+  `~/.ssh/config` with `IdentitiesOnly` + `accept-new` so the headless
+  service authenticates deterministically); the Runners tab shows a
+  **paste-once snippet** for the runner side (authorizes the key, fixes the
+  macOS non-interactive PATH quirk, self-checks docker); and reachability
+  pings also check for the **runtime image**, with an **Install image**
+  button that streams this box's image over (`docker save | docker -H load`).
+  New `GET /v1/runner-setup` and `POST /v1/hosts/:id/install-image`;
+  `src/orchestrator/runnerSetup.ts` with tests. Deep-dive doc:
+  `docs/runner-setup.md` (includes the troubleshooting table learned on the
+  first live runner).
+- **`docs/features.md` — a consolidated feature tour.** One task-first page
+  covering create/talk, training & memory, copy & move, adopting OpenClaw
+  agents, data & secrets, members & invites, fleet operations, backups, AI
+  sources, the bots census, CLI + management bot, and the smoke test — with
+  links into the deeper docs. Linked from the README.
+
 ## [0.31.2] — 2026-08-24
 
 ### Changed

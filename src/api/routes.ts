@@ -55,6 +55,12 @@ import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestr
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import {
+  ensureRunnerKey,
+  ensureSshConfigBlock,
+  installRuntimeImage,
+  runnerSetupSnippet,
+} from '../orchestrator/runnerSetup.js';
+import {
   AdoptError,
   applyWorkspace,
   findExistingBot,
@@ -620,7 +626,38 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // ({reachable, serverVersion, error}) — the same mapping the add path does.
     // Without this a *successful* probe renders as "unreachable — no response".
     const ping = await pingRunner(dockerHost);
-    return { reachable: ping.ok, serverVersion: ping.version, error: ping.error };
+    return { reachable: ping.ok, serverVersion: ping.version, hasImage: ping.hasImage, error: ping.error };
+  });
+
+  // The control plane's dedicated runner key (created on first ask) plus the
+  // paste-on-the-runner setup snippet — the two halves of "add a runner
+  // without an SSH treasure hunt". Host-owner only: the snippet authorizes
+  // THIS box onto another machine.
+  app.get('/v1/runner-setup', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    try {
+      const pubKey = await ensureRunnerKey();
+      return { pubKey, snippet: runnerSetupSnippet(pubKey) };
+    } catch (err) {
+      return reply.code(500).send({
+        error: `Couldn't prepare the runner key (is ssh-keygen installed?): ${String(
+          err instanceof Error ? err.message : err,
+        ).slice(0, 200)}`,
+      });
+    }
+  });
+
+  // Copy this box's runtime image onto a runner (docker save | docker -H load).
+  // Slow — minutes for a multi-GB image — so the UI treats it as a long job.
+  app.post<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const host = store.getHost(req.params.id);
+    if (!host) return reply.code(404).send({ error: 'Not found' });
+    const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
+    if (!dockerHost) return reply.code(400).send({ error: 'The local host already has the image.' });
+    const res = await installRuntimeImage(dockerHost, { image: process.env.AGENTCLAW_IMAGE });
+    if (!res.ok) return reply.code(502).send({ error: `Image install failed: ${res.error}` });
+    return { installed: true };
   });
 
   // Register a runner host (Cluster mode): a remote Docker endpoint that the
@@ -639,6 +676,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const { name, dockerHost } = parsed.data;
 
+    // For ssh:// endpoints, pin our dedicated key + accept-new in ~/.ssh/config
+    // BEFORE the first probe — this is what makes the headless service (no
+    // ssh-agent) authenticate deterministically. Best-effort: a config we
+    // can't write just means the ping reports whatever ssh can do without it.
+    try {
+      await ensureRunnerKey();
+      await ensureSshConfigBlock(dockerHost);
+    } catch {
+      /* surfaced by the ping below if it actually matters */
+    }
     const ping = await pingRunner(dockerHost);
     const host = {
       id: randomUUID(),
@@ -652,7 +699,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     store.insertHost(host);
     // Saved regardless — a runner that's briefly unreachable now may be up at
     // provision time — but surface the probe so the owner sees a bad endpoint.
-    return reply.code(201).send({ ...host, reachable: ping.ok, serverVersion: ping.version, pingError: ping.error });
+    return reply.code(201).send({
+      ...host,
+      reachable: ping.ok,
+      serverVersion: ping.version,
+      hasImage: ping.hasImage,
+      pingError: ping.error,
+    });
   });
 
   // Drain a host: stop every running agent on it (take it out of service before
