@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.31.2] — 2026-08-24
+
+### Changed
+- **A moving agent now LOOKS like it's moving.** A Move takes about a minute,
+  during which the card used to sit at STOPPED — easy to read as "it broke".
+  The API now reports a `busy` flag whenever an agent is mid-operation (move,
+  backup, export, adopt…), the status chip shows a pulsing **WORKING…** for
+  the duration, the app fast-polls (2.5s) while any agent is busy, and the
+  Move / move-to-cluster toasts got a louder ⏳ progress style that says the
+  card will show WORKING until it's done.
+
 ## [0.31.1] — 2026-08-24
 
 ### Changed

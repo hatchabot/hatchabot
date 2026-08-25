@@ -82,8 +82,8 @@
     padding: 3px 9px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
   }
   .chip.RUNNING { color: var(--ok); border-color: var(--ok); }
-  .chip.PROVISIONING, .chip.REBUILDING { color: var(--warn); border-color: var(--warn); }
-  .chip.PROVISIONING::after, .chip.REBUILDING::after { content: "…"; animation: pulse 1.2s infinite; }
+  .chip.PROVISIONING, .chip.REBUILDING, .chip.WORKING { color: var(--warn); border-color: var(--warn); }
+  .chip.PROVISIONING::after, .chip.REBUILDING::after, .chip.WORKING::after { content: "…"; animation: pulse 1.2s infinite; }
   .chip.FAILED { color: var(--bad); border-color: var(--bad); }
   .chip.STOPPED, .chip.DELETING { color: var(--off); border-color: var(--off); }
   @keyframes pulse { 50% { opacity: 0.3; } }
@@ -183,6 +183,13 @@
   }
   .toast.show { pointer-events: auto; cursor: pointer; }
   .toast.show { opacity: 1; }
+  /* Long-running operations (a Move takes ~a minute): loud enough that the
+     owner knows work is happening, not that something silently died. */
+  .toast.progress {
+    font-size: 15px; padding: 14px 22px; border-color: var(--accent);
+    box-shadow: 0 6px 28px rgba(0,0,0,0.45);
+  }
+  .toast.progress::before { content: "⏳ "; }
 </style>
 </head>
 <body>
@@ -947,9 +954,10 @@ document.addEventListener('keydown', (e) => {
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
 
 let toastTimer;
-function toast(msg, ms) {
+function toast(msg, ms, cls) {
   const t = $('toast');
-  t.textContent = msg; t.classList.add('show');
+  t.textContent = msg;
+  t.className = 'toast show' + (cls ? ` ${cls}` : '');
   clearTimeout(toastTimer);
   // Long messages (errors, mostly) get reading time; a tap dismisses early.
   toastTimer = setTimeout(() => t.classList.remove('show'), ms ?? Math.max(2600, msg.length * 60));
@@ -1453,12 +1461,13 @@ async function moveHostAgent(id, name) {
   const host = others[Number(pick) - 1];
   if (!host) return toast('No such host');
   if (!confirm(`Move "${name}" to ${host.name}?\n\nIt stops, its memory is copied over, and it starts there. Same bot, same members — nothing else changes. If anything fails it stays where it is.`)) return;
-  toast(`Moving ${name} to ${host.name}…`, 120000);
+  toast(`Moving ${name} to ${host.name}… this takes a minute — the card shows WORKING until it's done.`, 180000, 'progress');
+  setTimeout(() => refresh(false), 800); // by then the POST is in flight — show WORKING without waiting for the next poll
   try {
     await api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id } });
-    toast(`${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
-    await refresh(false);
+    toast(`✅ ${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
   } catch (e) { toast(`Move failed: ${e.message}`, 20000); }
+  await refresh(false);
 }
 
 async function rehostAgent(id, name) {
@@ -1471,10 +1480,11 @@ async function rehostAgent(id, name) {
   const peer = peers[Number(pick) - 1];
   if (!peer) return toast('No such server');
   if (!confirm(`Move "${name}" to the cluster at ${peer.name}?\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
-  toast(`Moving ${name} to ${peer.name}…`, 60000);
+  toast(`Moving ${name} to ${peer.name}… this can take a minute — the card shows WORKING until it's done.`, 180000, 'progress');
+  setTimeout(() => refresh(false), 800); // by then the POST is in flight — show WORKING without waiting for the next poll
   try {
     const res = await api(`/v1/agents/${id}/rehost`, { method: 'POST', body: { peerId: peer.id } });
-    toast(`Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
+    toast(`✅ Moved to ${res.movedTo}. This copy is ${res.sourceState} — leave it that way.`, 30000);
     await refresh(false);
   } catch (e) { toast(e.message, 30000); }
 }
@@ -1905,7 +1915,7 @@ function memberCard(a) {
         <span class="name">${esc(a.name)}</span>
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
       </div>
-      <span class="chip ${a.state}">${a.state}</span>
+      <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
     </div>
     <div class="sub" style="margin-top:8px">
       You're a member of this agent${a.sharedMemory ? ' — its memory is shared with everyone who uses it' : ''}.
@@ -1954,7 +1964,7 @@ function agentCard(a) {
         <span class="name">${esc(a.name)}</span>
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
       </div>
-      <span class="chip ${a.state}">${a.state}</span>
+      <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
     </div>
     ${agentMeta(a)}
     ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
@@ -2606,7 +2616,7 @@ function renderFleet() {
     const badge = HEALTH_BADGE[hb?.status];
     const dot = hb ? ` <span style="color:${badge?.[0] || 'var(--dim)'}" title="${esc(badge?.[1] || hb.status)}">●</span>` : '';
     return `<div class="pair" style="padding:4px 0"><span class="grow">
-      <span class="chip ${a.state}">${a.state}</span>${dot} <b>${esc(a.name)}</b>
+      <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>${dot} <b>${esc(a.name)}</b>
       <span class="sub">${a.model ? esc(a.model) + ' · ' : ''}active ${a.lastActiveAt ? ago(a.lastActiveAt) : 'never'}</span>
     </span></div>`;
   }).join('') || '<div class="sub">No agents yet.</div>';
@@ -3137,7 +3147,7 @@ async function refresh(withMeta) {
     }
     renderSetup(); renderAgents();
   } catch (e) { console.error(e); }
-  const busy = agents.some(a => a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
+  const busy = agents.some(a => a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
   pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
 }

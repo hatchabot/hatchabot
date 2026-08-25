@@ -355,6 +355,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       /** Per-agent environment variables — names only; the secret values are
        *  write-only and never leave the SecretStore. */
       envVars: store.listAgentEnv(agent.id).map((e) => ({ id: e.id, name: e.name, createdAt: e.createdAt })),
+      /** Mid-operation (move, backup, export, adopt…): the state alone reads
+       *  as a lie — a move shows STOPPED for a minute — so the app can show
+       *  "working" instead of leaving the owner to think nothing is happening. */
+      busy: isBusy(agent.id),
       ...extra,
     };
   };
