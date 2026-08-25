@@ -59,6 +59,15 @@ describe('batchConfigCommands', () => {
   });
 });
 
+describe('web search provider', () => {
+  it('enables the keyless DuckDuckGo provider for every agent', () => {
+    // Stock-but-disabled DDG meant web_search told every agent "search is not
+    // available" while answers quietly degraded to model knowledge.
+    const cmds = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
+    expect(cmds.some((c) => c.argv.join(' ') === 'plugins enable duckduckgo')).toBe(true);
+  });
+});
+
 describe('buildConfigCommands multi-model', () => {
   it('registers every model on claude-cli, primary first and deduped', () => {
     const cmds = buildConfigCommands({

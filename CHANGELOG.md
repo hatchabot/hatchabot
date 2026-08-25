@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.35.1] — 2026-08-25
+
+### Fixed
+- **"Web search is not available" — real web search enabled for every agent.**
+  OpenClaw's stock DuckDuckGo search provider ships disabled, so the
+  `web_search` tool honestly reported "not available" while agents quietly
+  answered from model knowledge (plus `web_fetch`, which needs no provider) —
+  convincing, but ungrounded for anything recent. Provisioning now runs
+  `plugins enable duckduckgo` (free, keyless) for every agent, and the whole
+  running fleet was enabled + restarted in place. Owners wanting
+  higher-quality search can add a `BRAVE_API_KEY` in the agent's Environment
+  tab and enable the Brave provider — a keyed provider outranks the DDG
+  fallback.
+
 ## [0.35.0] — 2026-08-24
 
 ### Added

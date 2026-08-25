@@ -126,6 +126,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // gateway binds 0.0.0.0 behind token auth so the host can publish its port
   // (the per-agent Control UI debug button). Without one: loopback-only + no
   // auth, which is fine because nothing else lives in the container's netns.
+  // Web search: the stock DuckDuckGo provider is disabled by default, so the
+  // web_search tool tells every agent "search is not available" and answers
+  // quietly degrade to model knowledge. DDG is free and keyless — enable it
+  // for every agent. (Owners wanting better results can enable Brave with a
+  // BRAVE_API_KEY via the agent's Environment tab; a keyed provider outranks
+  // the DDG fallback in OpenClaw's auto-detection.) Naturally re-runnable.
+  // FIRST in the list: the `config set` runs below batch into one invocation
+  // only while they stay consecutive.
+  cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
+
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
   if (patch.gatewayToken) {
     cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'token'] });
