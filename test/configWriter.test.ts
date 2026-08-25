@@ -66,6 +66,12 @@ describe('web search provider', () => {
     const cmds = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
     expect(cmds.some((c) => c.argv.join(' ') === 'plugins enable duckduckgo')).toBe(true);
   });
+
+  it('points memory search at the keyless local embedding model', () => {
+    // The OpenAI default made semantic memory recall silently dead fleet-wide.
+    const cmds = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
+    expect(argFor(cmds, 'agents.defaults.memorySearch.provider')).toBe('local');
+  });
 });
 
 describe('buildConfigCommands multi-model', () => {

@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.36.1] — 2026-08-25
+
+### Fixed
+- **Memory search was silently dead fleet-wide — now on the keyless local
+  model.** The doctor-lint sweep's first real catch: OpenClaw's memory-search
+  default points at OpenAI embeddings, which no AgentClaw agent has a key
+  for, so semantic recall over MEMORY.md never worked. Provisioning now sets
+  `agents.defaults.memorySearch.provider local` (bundled embedding model, no
+  key, no network at query time), and the whole running fleet was switched
+  in place (no restarts needed).
+
 ## [0.36.0] — 2026-08-25
 
 ### Added

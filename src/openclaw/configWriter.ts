@@ -137,6 +137,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
 
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
+  // Memory search: OpenClaw's default points at OpenAI embeddings, which no
+  // AgentClaw agent has a key for — so semantic recall over MEMORY.md was
+  // silently dead fleet-wide (doctor flagged it once the lint sweep landed).
+  // The bundled local embedding model needs no key and no network at query
+  // time; keyed remote embeddings stay a per-agent choice via config.
+  cmds.push({ argv: ['config', 'set', 'agents.defaults.memorySearch.provider', 'local'] });
   if (patch.gatewayToken) {
     cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'token'] });
     cmds.push({
