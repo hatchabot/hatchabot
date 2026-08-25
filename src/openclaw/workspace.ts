@@ -1,4 +1,5 @@
 import type { WorkspaceSeed } from '../providers/provider.js';
+import { GOG_SKILL_MD } from './skills.js';
 
 export interface WorkspaceInput {
   agentName: string;
@@ -82,6 +83,10 @@ Durable facts about the person this agent serves.
     'SOUL.md': soul,
     'AGENTS.md': agents,
     'MEMORY.md': memory,
+    // Seeded skills (the seed never overwrites, so an agent's edits stick).
+    // gog: the Google-connections tool — binary ships in the image, and this
+    // card teaches the chat-based connect flow (docs/connections-design.md).
+    'skills/gog/SKILL.md': GOG_SKILL_MD,
     ...(input.seedFiles ?? {}),
   };
 }

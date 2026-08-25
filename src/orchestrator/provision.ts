@@ -359,6 +359,10 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
       // Orientation, not configuration: the human name of the machine this
       // agent runs on, refreshed by every rebuild/move.
       AGENTCLAW_HOST_NAME: hostLabel,
+      // Google-connection credentials (gog) live ON THE VOLUME: they refresh
+      // in place and ride Move/backup/export with the agent, while Share
+      // templates never include them. See docs/connections-design.md.
+      GOG_HOME: '/home/node/.openclaw/connections/gog',
       ...(modelKey
         ? envForProfile(profile.vendor, modelKey)
         : oauthToken

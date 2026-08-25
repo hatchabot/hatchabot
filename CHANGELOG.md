@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.35.0] — 2026-08-24
+
+### Added
+- **Connections, phase 1: Google Workspace via `gog`** (per
+  `docs/connections-design.md`). The runtime image now ships the `gog` CLI
+  (one static binary); every agent workspace seeds a `skills/gog/SKILL.md`
+  teaching the **chat-based connect flow** (`gog auth add --remote` —
+  the agent prints Google's consent URL, the owner approves on their phone
+  and pastes the code back; no browser on the server). `GOG_HOME` points at
+  the agent's own volume, so credentials refresh in place and ride Move,
+  backups, and Download — and Share templates never include them. The skill
+  bakes in the guardrails: owner-only setup, purpose-bound accounts,
+  minimal `--services`, confirm-before-send. Seed script now handles nested
+  seed files (`skills/…`) with the overwrite guard intact. Image rebuilt,
+  e2e-smoked, and promoted; existing agents pick it up on Rebuild.
+
 ## [0.34.1] — 2026-08-24
 
 ### Changed

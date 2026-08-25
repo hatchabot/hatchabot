@@ -71,6 +71,21 @@ describe('seed script — the guards that protect an agent’s memory', () => {
     expect(seed()).toMatch(/if \[ ! -d .* \]; then openclaw 'agents' 'add'/);
   });
 
+  it('creates directories for nested seed files (skills/…), still overwrite-safe', async () => {
+    await provider.provision(
+      spec({
+        workspace: {
+          files: { 'SOUL.md': '# soul', 'skills/gog/SKILL.md': '# gog' },
+          configPatch: { agentId: 'kitchen-helper', authMode: 'api-key' },
+        },
+      }) as any,
+    );
+    const script = seed();
+    expect(script).toMatch(/mkdir -p '[^']*\/skills\/gog'/);
+    const line = script.split('\n').find((l) => l.includes("skills/gog/SKILL.md'") && l.includes('cp '));
+    expect(line).toMatch(/\[ -f .* \] \|\| cp /); // the guard still protects edits
+  });
+
   it('produces a syntactically valid script even with hostile values', async () => {
     await provider.provision(
       spec({

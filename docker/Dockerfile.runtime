@@ -34,6 +34,17 @@ RUN apt-get update \
 RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm cache clean --force
 
+# gog: Google Workspace CLI (gmail/calendar/drive/sheets/docs) — the
+# "connections" tool for advanced agents (docs/connections-design.md). One
+# static Go binary; credentials NEVER live in the image — GOG_HOME points at
+# the agent's volume, and auth happens per agent (chat-based --remote flow).
+ARG GOG_VERSION=0.22.0
+RUN ARCH="$(dpkg --print-architecture)" \
+ && curl -fsSL "https://github.com/steipete/gogcli/releases/download/v${GOG_VERSION}/gogcli_${GOG_VERSION}_linux_${ARCH}.tar.gz" \
+    | tar -xz -C /usr/local/bin gog \
+ && chmod +x /usr/local/bin/gog \
+ && gog --version
+
 # Python 3 + pip are in the base so agents whose workspaces carry scripts can
 # run them (`python3 script.py`, as their cron jobs do). The base stays lean:
 # it ships NO third-party packages. An agent that needs libraries installs them

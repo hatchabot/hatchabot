@@ -193,6 +193,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       script.push(`mkdir -p ${shq(workspaceDir)}`);
       for (const name of Object.keys(spec.workspace.files)) {
         const dest = `${workspaceDir}/${name}`;
+        // Nested seeds (skills/gog/SKILL.md) need their directory first; the
+        // guard below only checks the FILE, so this stays overwrite-safe.
+        if (name.includes('/')) {
+          script.push(`mkdir -p ${shq(dest.slice(0, dest.lastIndexOf('/')))}`);
+        }
         script.push(`[ -f ${shq(dest)} ] || cp ${shq(`${seedBase}/workspace/${name}`)} ${shq(dest)}`);
       }
 

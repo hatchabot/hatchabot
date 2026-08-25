@@ -201,6 +201,19 @@ can check — its container hostname is `<agent>.<host>` and
 `AGENTCLAW_HOST_NAME` carries the host's name, both refreshed on every
 rebuild and Move.
 
+## Google connections (Gmail, Drive, Calendar, …)
+
+Advanced agents can connect to Google Workspace via the bundled `gog` CLI
+(seeded as a skill in every agent). Setup happens **in the Telegram chat**:
+ask the agent to connect an account and it walks the owner through Google's
+consent flow (`--remote` paste-back — no browser needed on the server).
+Credentials land on the agent's own volume (`GOG_HOME`), so they refresh in
+place and travel with Move, backups, and Download — while Share templates
+never include them. Recommend a **purpose-bound Google account** (scoped to
+the agent's job) and minimal services: everyone who can message the agent
+can act as the connected account. Design and phases:
+[connections-design.md](connections-design.md).
+
 ## Backups & recovery
 
 Three layers, smallest to largest:

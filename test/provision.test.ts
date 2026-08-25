@@ -285,8 +285,12 @@ describe('buildRuntimeSpec', () => {
       .run('http://172.17.0.1:11434/v1', 'qwen3.6:27b-q8_0', 'p1');
     const { agent } = await provisionAgent(w.deps, INPUT);
     const spec = await buildRuntimeSpec(w.deps, agent.id);
-    // Nothing credential-like to inject — only the host-orientation var.
-    expect(spec.env).toEqual({ AGENTCLAW_HOST_NAME: expect.any(String) });
+    // Nothing credential-like to inject — only orientation (host name) and
+    // the volume-resident gog home (a PATH, not a credential).
+    expect(spec.env).toEqual({
+      AGENTCLAW_HOST_NAME: expect.any(String),
+      GOG_HOME: '/home/node/.openclaw/connections/gog',
+    });
     expect(spec.hostMounts).toEqual([]); // no ~/.claude
     expect(spec.workspace.configPatch.provider).toBe('ollama');
     expect(spec.workspace.configPatch.baseUrl).toBe('http://172.17.0.1:11434/v1');
@@ -307,6 +311,14 @@ describe('buildRuntimeSpec', () => {
     const spec = await buildRuntimeSpec(w.deps, agent.id);
     expect(spec.env.AGENTCLAW_HOST_NAME).toBe('box');
     expect(spec.hostname).toBe(`${agent.slug}.box`);
+  });
+
+  it('seeds the gog skill so every agent can teach its owner the connect flow', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.files['skills/gog/SKILL.md']).toContain('--remote --step 1');
+    expect(spec.env.GOG_HOME).toBe('/home/node/.openclaw/connections/gog');
   });
 
   it('allows a setup-token subscription on a runner: token injected, no mount', async () => {
