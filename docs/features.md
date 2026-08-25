@@ -8,8 +8,8 @@ thing; where a deeper doc exists, it's linked instead of duplicated.
 AgentClaw turns a machine you own into a home for AI agents. Each agent is an
 OpenClaw runtime in its own Docker container with its own durable volume
 (memory, config, sessions), fronted by a Telegram bot — so agents are
-ephemeral problem-solvers you create, use, and delete, while the bots that
-front them are pooled and recycled. You manage the fleet from a web app
+ephemeral problem-solvers you create, use, and delete, while the Telegram
+bots that front them outlive any one agent and can be recycled into the next. You manage the fleet from a web app
 (installable as a phone PWA), the `agentclaw` CLI, or an optional Telegram
 management bot.
 
@@ -20,11 +20,21 @@ To create an agent, tap **+** in the web app: name it, optionally answer
 when more than one host exists — pick where it runs ("Runs on"). A "Keep
 memory private" checkbox decides shared vs private memory at birth.
 
-Every agent needs a Telegram bot. Telegram has no API to mint bots, so
-AgentClaw **leases them from a pool** (`scripts/pool-add.ts` stocks it); if
-the pool is empty you're walked through creating one at
-[@BotFather](https://t.me/botfather) and pasting the token (~60 seconds).
-Deleting an agent returns a pool bot for reuse.
+Every agent needs a Telegram bot — its identity on Telegram. Telegram has no
+API to mint bots, so normally you're walked through creating one at
+[@BotFather](https://t.me/botfather) and pasting its token (~60 seconds).
+When you delete the agent, the bot still exists on Telegram's side — reveal
+its token first (⚙ Settings → Telegram) if you want to recycle it into a
+future agent, because AgentClaw forgets it on delete.
+
+Optionally, an admin can **pre-stock a bot pool**: mint a few spare bots at
+BotFather once and add them with
+`AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token> [<token>…]`
+on the server. Creation then
+grabs one instantly (the header shows "N instant bots ready"), no BotFather
+trip per agent — and deleting a pool-leased agent returns its bot to the pool
+automatically. If you've never run the script, the pool is empty and you'll
+only ever see the paste-a-token flow.
 
 Tap **Telegram App** on the card and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth
