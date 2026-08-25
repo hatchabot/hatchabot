@@ -97,21 +97,21 @@ describe('skipPool — the "use a pool bot" checkbox, unchecked', () => {
   });
 });
 
-describe('delete-time recycle — DELETE /v1/agents/:id?recycleBot=1', () => {
-  it('parks a hand-pasted bot (token included) in the pool on delete', async () => {
+describe('delete-time recycle — parking the bot is the DEFAULT', () => {
+  it('a plain delete parks the hand-pasted bot (token included) in the pool', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w, { accountId: 'kitchenbot', botToken: 'the-live-token' });
-    const res = await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}?recycleBot=1`, headers: as() });
+    const res = await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}`, headers: as() });
     expect(res.statusCode).toBe(200);
     expect(w.channel.pool.entries).toEqual([
       expect.objectContaining({ username: 'kitchenbot', token: 'the-live-token' }),
     ]);
   });
 
-  it('without the flag, the bot is forgotten (the old behavior)', async () => {
+  it('?recycleBot=0 opts out — the token is forgotten', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w, { accountId: 'kitchenbot' });
-    await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}`, headers: as() });
+    await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}?recycleBot=0`, headers: as() });
     expect(w.channel.pool.entries).toEqual([]);
   });
 

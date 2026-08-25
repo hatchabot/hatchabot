@@ -2823,14 +2823,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Releasing it back into THIS pool would let a new local agent lease it
       // and fight the peer for the same token — release only when it stays ours.
       if (!agent.migratedTo) {
-        // ?recycleBot=1: a PASTED bot's token would otherwise be forgotten
-        // here — copy it into the pool first so the next agent can lease it
-        // instantly. (Pool-leased bots already return via release() below.)
-        // Best-effort: a failed recycle must never block the delete.
-        if (req.query.recycleBot === '1' && !deps.channel.pool.owns(channel.accountId)) {
+        // A PASTED bot's token is parked in the pool BY DEFAULT — bots are the
+        // scarce resource (Telegram's per-account ceiling), and the Bot pool
+        // tab is where a token gets discarded on purpose. ?recycleBot=0 opts
+        // out. (Pool-leased bots already return via release() below.)
+        // Best-effort END TO END: recycling is a bonus, so no failure in it —
+        // not even a pool without the newer methods — may block the delete.
+        if (req.query.recycleBot !== '0') {
           try {
-            const token = await secrets.get(channel.secretRef);
-            await deps.channel.pool.addToPool(channel.accountId, token);
+            if (!deps.channel.pool.owns(channel.accountId)) {
+              const token = await secrets.get(channel.secretRef);
+              await deps.channel.pool.addToPool(channel.accountId, token);
+            }
           } catch (err) {
             app.log.warn({ agentId: agent.id, err: String(err) }, 'bot recycle into pool failed');
           }

@@ -27,14 +27,16 @@ When you delete the agent, the bot still exists on Telegram's side — reveal
 its token first (⚙ Settings → Telegram) if you want to recycle it into a
 future agent, because AgentClaw forgets it on delete.
 
-Better: **stock the bot pool** (⚙ Settings → Bot pool). Mint a few spare bots
-at BotFather once and paste their tokens there — creation then grabs one
-instantly (the header shows "N instant bots ready"), no BotFather trip per
-agent, and deleting a pool-leased agent returns its bot automatically.
-Deleting an agent whose bot you pasted by hand *offers* to park the bot in
-the pool instead of forgetting it — with Telegram's ~20-bots-per-account
-ceiling, recycled slots are worth keeping. (The pool can also be stocked from
-the server: `AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
+Bots outlive agents by default: **deleting an agent parks its bot in the
+Bot pool** (⚙ Settings → Bot pool) — pool-leased and hand-pasted alike — and
+when the pool leases it to the next agent, the bot's display name updates to
+that agent's name automatically. With Telegram's ~20-bots-per-account
+ceiling, every recycled slot counts; remove a bot from the pool tab if you
+truly want its token gone. You can also pre-stock the pool there (paste
+BotFather tokens; verified before storing), after which creation grabs a bot
+instantly — the header shows "N instant bots ready" and the create dialog
+lets you opt out per agent for a bespoke @handle. (Server-side stocking:
+`AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
 Tap **Telegram App** on the card and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth

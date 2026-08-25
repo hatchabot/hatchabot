@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.34.1] — 2026-08-24
+
+### Changed
+- **Deleting an agent parks its bot in the pool by default** — no extra
+  question. Bots are the scarce resource (Telegram's per-account ceiling), so
+  every delete keeps the token: the confirm dialog says where the bot goes,
+  the toast confirms it, and ⚙ Settings → Bot pool is where a token gets
+  discarded on purpose. API: `DELETE /v1/agents/:id` recycles unless
+  `?recycleBot=0`; recycling is best-effort end to end and can never block a
+  delete.
+
 ## [0.34.0] — 2026-08-24
 
 ### Added
