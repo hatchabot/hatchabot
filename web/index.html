@@ -279,6 +279,12 @@
     Keep memory private — just for you. Leave off for a family/group agent:
     everyone you invite reads and writes one common memory
   </label>
+  <label id="agentPoolRow" style="display:none;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+    <input type="checkbox" id="agentUsePool" checked style="width:auto">
+    <span>Use a ready bot from the pool <span class="sub" id="agentPoolCount"></span>
+      <div class="sub" style="margin-top:2px">Instant — no BotFather trip. Uncheck to
+        mint a bespoke @handle for this agent instead.</div></span>
+  </label>
   <div class="err" id="createErr"></div>
   <div class="actions" style="justify-content:space-between;align-items:center">
     <a href="#" id="adoptLink" onclick="event.preventDefault(); createDlg.close(); openAdoptDlg()"
@@ -824,6 +830,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
+let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let availableModels = {}; // profile id -> string[] of models the source offers (cached while the dialog is open)
 
 const api = async (path, opts = {}) => {
@@ -1669,6 +1676,11 @@ $('fabBtn').onclick = () => {
       runners.map(h => `<option value="${h.id}">☁️ ${esc(h.name)} (${h.agentCount})</option>`).join('');
     onHostPicked();
   }
+  // Pool choice: shown only when the pool actually has bots; default = use
+  // one (instant). With an empty pool there is no choice — BotFather it is.
+  $('agentPoolRow').style.display = poolAvail > 0 ? 'flex' : 'none';
+  $('agentUsePool').checked = true;
+  $('agentPoolCount').textContent = poolAvail > 0 ? `(${poolAvail} ready)` : '';
   createDlg.showModal();
   $('agentName').focus();
 };
@@ -1714,6 +1726,8 @@ async function createAgent() {
       aiProfileId: (profiles.length > 1 && $('agentProfile').value) || profiles[0].id,
       hostId,
       sharedMemory: !$('agentPrivate').checked,
+      // Only meaningful when the pool row was offered and declined.
+      skipPool: ($('agentPoolRow').style.display !== 'none' && !$('agentUsePool').checked) || undefined,
     }});
     createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentPrivate').checked = false;
     await refresh(false);
@@ -3249,6 +3263,7 @@ async function refresh(withMeta) {
     if (withMeta || !profiles.length || !hosts.length) {
       [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
       api('/v1/pool').then(p => {
+        poolAvail = p.availableBots;
         $('poolInfo').textContent = p.availableBots > 0 ? `${p.availableBots} instant bot${p.availableBots === 1 ? '' : 's'} ready` : '';
       }).catch(() => {});
     }

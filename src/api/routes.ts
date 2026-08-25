@@ -16,6 +16,7 @@ import {
   sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
+  skipPoolOnce,
   slugify,
 } from '../orchestrator/provision.js';
 import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js';
@@ -169,6 +170,9 @@ const CreateAgent = z.object({
   /** Telegram user ids to admit without pairing — carried from an adopted
    *  agent, so the people already talking to it are not made to knock. */
   seedMembers: z.array(z.string().regex(/^\d{1,32}$/)).max(32).optional(),
+  /** Owner unchecked "use a pool bot": walk BotFather even if the pool has
+   *  bots (they want a bespoke @handle for this agent). */
+  skipPool: z.boolean().optional(),
 });
 
 /**
@@ -1136,8 +1140,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       });
     }
 
-    const { seedMembers, ...create } = parsed.data;
+    const { seedMembers, skipPool, ...create } = parsed.data;
     const agent = createAgentRecord(store, { ownerId, ...create });
+    // One-shot preference for the provision that's about to run: skip the
+    // pool and walk BotFather. After the manual flow parks the agent with a
+    // pendingAction, that persisted state drives every retry — the flag only
+    // needs to survive until the first channel.provision call.
+    if (skipPool) skipPoolOnce.add(agent.id);
     // Must land before provisioning renders the config: allowFrom is seeded
     // onto the fresh volume there, and a member added afterwards would have to
     // pair like a stranger.

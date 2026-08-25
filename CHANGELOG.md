@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.33.1] — 2026-08-24
+
+### Added
+- **Choose pool-or-bespoke at creation.** When the bot pool has bots, the
+  create dialog shows a checked-by-default "Use a ready bot from the pool
+  (N ready)" checkbox — uncheck it to walk BotFather and mint a bespoke
+  @handle for this agent instead. With an empty pool there's no choice to
+  offer, so the row is hidden. (`skipPool` on `POST /v1/agents`, honored by
+  the channel provisioner before the pool is ever consulted.)
+- Both Settings dialogs widened for their grown tab bars.
+
 ## [0.33.0] — 2026-08-24
 
 ### Added

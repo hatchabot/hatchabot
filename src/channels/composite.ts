@@ -27,6 +27,11 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
   ) {}
 
   async provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel> {
+    // The owner can decline a pool bot for this agent ("I want a bespoke
+    // @handle") — respect it before the pool ever sees the request.
+    if (req.skipPool) {
+      return this.manual.provision(req); // throws ChannelSetupRequired if no token yet
+    }
     try {
       return await this.pool.provision(req);
     } catch (err) {

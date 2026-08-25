@@ -5,6 +5,7 @@
  * recycled slot count).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
 
 /** verifyBotToken hits api.telegram.org — fake Telegram's getMe. */
@@ -76,6 +77,23 @@ describe('DELETE /v1/pool/:username', () => {
     expect(w.channel.pool.owns('sparebot')).toBe(false);
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/pool/busybot', headers: as() })).statusCode).toBe(409);
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/pool/ghost', headers: as() })).statusCode).toBe(409);
+  });
+});
+
+describe('skipPool — the "use a pool bot" checkbox, unchecked', () => {
+  it('routes provisioning straight to the manual path even when the pool has bots', async () => {
+    const chan = { accountId: 'x', secretRef: 's', deepLink: 'd' };
+    const pool = { provision: vi.fn().mockResolvedValue({ ...chan, accountId: 'poolbot' }) } as any;
+    const manual = { provision: vi.fn().mockResolvedValue({ ...chan, accountId: 'mintedbot' }) } as any;
+    const c = new CompositeTelegramProvisioner(pool, manual);
+    const req = { agentId: 'a1', agentName: 'A', slug: 'a' };
+
+    // Default: pool first.
+    expect((await c.provision(req)).accountId).toBe('poolbot');
+    // Owner declined the pool: manual, and the pool is never consulted.
+    pool.provision.mockClear();
+    expect((await c.provision({ ...req, skipPool: true })).accountId).toBe('mintedbot');
+    expect(pool.provision).not.toHaveBeenCalled();
   });
 });
 

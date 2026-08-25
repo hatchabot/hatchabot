@@ -104,6 +104,14 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
  * idempotent, and on hard failure everything created in this run is rolled
  * back so nothing keeps billing or stays leased (§11.3).
  */
+/**
+ * Agents whose NEXT channel provision must skip the bot pool — the owner
+ * unchecked "use a pool bot" at creation. In-memory and one-shot on purpose:
+ * once the manual flow parks the agent (pendingAction), that persisted state
+ * drives every retry, so the flag never needs to outlive the first attempt.
+ */
+export const skipPoolOnce = new Set<string>();
+
 export async function runProvisionSteps(
   deps: ProvisionDeps,
   agentId: string,
@@ -140,6 +148,9 @@ async function runProvisionStepsInner(
         agentId,
         agentName: agent.name,
         slug: agent.slug,
+        // One-shot: consumed here so a later Retry (after the manual flow has
+        // parked the agent) follows the persisted pendingAction, not the flag.
+        skipPool: skipPoolOnce.delete(agentId) || undefined,
       });
       // A Telegram bot token may only ever be polled by ONE runtime: two
       // copies flip-flop every message between them. The API checks this when
