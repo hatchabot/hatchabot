@@ -62,6 +62,7 @@ import {
   installRuntimeImage,
   runnerSetupSnippet,
 } from '../orchestrator/runnerSetup.js';
+import { probeImageCapabilities } from '../orchestrator/runtimeCaps.js';
 import {
   AdoptError,
   applyWorkspace,
@@ -2047,6 +2048,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // is read-only — it tells you *whether* to upgrade, not a button that does it.
   const getDistTags = deps.openclawDistTags ?? (() => fetchOpenclawDistTags());
   let distTagsCache: { at: number; tags: OpenclawDistTags } | undefined;
+  // What the runtime image can do — probed from the image itself (cached per
+  // tag), so the Settings list can't drift from reality. Host-owner only:
+  // it spins a one-shot container on first ask.
+  app.get('/v1/runtime/capabilities', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    try {
+      return await probeImageCapabilities(process.env.AGENTCLAW_IMAGE ?? 'agentclaw-runtime:latest');
+    } catch (err) {
+      return reply.code(502).send({
+        error: `Couldn't probe the runtime image: ${String(err instanceof Error ? err.message : err).slice(0, 200)}`,
+      });
+    }
+  });
+
   app.get('/v1/runtime', async (req) => {
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
     let imageVersion: string | undefined;

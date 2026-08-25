@@ -690,6 +690,9 @@
       the version fleet-wide, so it's a deliberate command-line step — not a button.
     </div>
     <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
+    <h4 style="margin:18px 0 4px">What agents can do</h4>
+    <div class="sub">Probed live from the image — this list can't drift from reality.</div>
+    <div id="runtimeCaps" style="margin-top:8px">Loading…</div>
   </section>
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
@@ -1355,7 +1358,41 @@ async function restoreFromBackup(agentId, date, name) {
   } catch (e) { toast(e.message, 30000); }
 }
 
+/** The Runtime tab's capability list: probed tool versions from the image,
+ *  paired with what each one means for agents — plus the honest "not
+ *  included" line and the server-side capabilities that ride config. */
+async function loadRuntimeCaps() {
+  const el = $('runtimeCaps');
+  try {
+    const [c, mk] = await Promise.all([
+      api('/v1/runtime/capabilities'),
+      api('/v1/media-key').catch(() => ({ set: false })),
+    ]);
+    const t = c.tools || {};
+    const row = (name, detail, version) => `<div class="pair" style="padding:3px 0">
+      <span class="grow"><span style="color:var(--ok)">●</span> <b>${esc(name)}</b> <span class="sub">— ${detail}</span></span>
+      ${version ? `<span class="sub" style="font-family:ui-monospace,monospace">${esc(version)}</span>` : ''}</div>`;
+    const rows = [];
+    if (t.openclaw) rows.push(row('Agent runtime', 'conversations, memory, Telegram gateway, scheduled tasks', t.openclaw));
+    if (t['claude-code']) rows.push(row('Claude Code', 'the Anthropic model runtime agents think with', t['claude-code']));
+    rows.push(row('Web search', 'DuckDuckGo, enabled per agent (keyless)'));
+    rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings, keyless'));
+    rows.push(`<div class="pair" style="padding:3px 0"><span class="grow">
+      <span style="color:${mk.set ? 'var(--ok)' : 'var(--warn)'}">●</span> <b>Voice notes</b>
+      <span class="sub">— ${mk.set ? 'transcribed via the Gemini media key' : 'needs the Gemini media key (AI sources tab)'}</span></span></div>`);
+    if (t.gog) rows.push(row('Google Workspace', 'Gmail / Drive / Calendar / Sheets / Docs via <code>gog</code> — each agent connects its own account in chat', t.gog));
+    if (t.python) rows.push(row('Python', 'agents run scripts; libraries install per agent (<code>pip install --target ~/.openclaw/pylibs</code>)', t.python));
+    if (t.git) rows.push(row('Git + SSH', 'repo data sources with generated deploy keys', t.git));
+    if (t.node) rows.push(row('Node.js', 'the runtime base', t.node));
+    const missing = (c.missing || []).length
+      ? `<div class="sub" style="margin-top:8px">Not included (by design, to keep the image lean): ${c.missing.map(esc).join(', ')} — so no local audio/video processing or browser automation. Agents can still fetch web pages and read PDFs/images via the model.</div>`
+      : '';
+    el.innerHTML = rows.join('') + missing;
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
 async function loadRuntime() {
+  loadRuntimeCaps();
   const el = $('runtimeStatus');
   try {
     const r = await api('/v1/runtime');

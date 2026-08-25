@@ -70,6 +70,13 @@ describe('Runner hosts — DELETE /v1/hosts/:id', () => {
   });
 });
 
+describe('Runtime capabilities — GET /v1/runtime/capabilities', () => {
+  it('is host-owner only (the probe spins a container)', async () => {
+    const w = await makeWorld();
+    expect((await w.f.inject({ method: 'GET', url: '/v1/runtime/capabilities', headers: as('intruder') })).statusCode).toBe(403);
+  });
+});
+
 describe('Ping — GET /v1/hosts/:id/ping', () => {
   it('returns the UI shape {reachable, serverVersion, error}, not pingRunner raw {ok, version}', async () => {
     const w = await makeWorld();

@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.37.1] — 2026-08-25
+
+### Added
+- **The Runtime tab lists what agents can do.** A "What agents can do"
+  section shows the base image's key capabilities — agent runtime, Claude
+  Code, web search (DDG), memory search (local), voice notes (live status of
+  the Gemini media key), Google Workspace via gog, Python, Git+SSH — each
+  with its probed version, plus an honest "not included" line (ffmpeg /
+  whisper / chromium: no local audio processing or browser automation, by
+  design). Tool versions are **probed live from the image** (one-shot
+  container, cached per tag; `GET /v1/runtime/capabilities`, host-owner
+  only) so the list can't drift from reality.
+
 ## [0.37.0] — 2026-08-25
 
 ### Added
