@@ -553,8 +553,8 @@
       every agent can <b>transcribe Telegram voice notes</b> — audio is sent to
       Gemini for transcription, then answered by the agent's own AI as usual.
       Applies to each agent on its next <b>Rebuild</b>.
-      <span id="mediaKeyStatus" style="color:var(--dim)"></span>
     </div>
+    <div id="mediaKeyStatus" style="margin-top:8px;font-size:14px"></div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
       <input type="password" id="mediaKey" placeholder="Gemini API key" autocomplete="off" style="flex:1;min-width:0">
       <button id="mediaKeySaveBtn" onclick="saveMediaKey()">Save</button>
@@ -1077,7 +1077,16 @@ function showTab(name) {
 async function loadMediaKey() {
   try {
     const r = await api('/v1/media-key');
-    $('mediaKeyStatus').textContent = r.set ? ' Currently: a key is set (write-only).' : ' Currently: no key — voice notes are not transcribed.';
+    const el = $('mediaKeyStatus');
+    if (r.set) {
+      el.style.color = 'var(--ok)';
+      el.innerHTML = '✓ <b>Gemini media key set</b> — voice notes are transcribed. <span class="sub">(Write-only: the key is never shown again. Paste a new one to replace it.)</span>';
+      $('mediaKey').placeholder = 'Replace key…';
+    } else {
+      el.style.color = 'var(--warn)';
+      el.innerHTML = '⚠ No key — voice notes are <b>not</b> transcribed.';
+      $('mediaKey').placeholder = 'Gemini API key';
+    }
     $('mediaKeyDelBtn').style.display = r.set ? '' : 'none';
   } catch { /* not the host owner — leave the section inert */ }
 }
