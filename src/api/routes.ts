@@ -18,6 +18,7 @@ import {
   runProvisionSteps,
   skipPoolOnce,
   slugify,
+  MEDIA_KEY_REF,
 } from '../orchestrator/provision.js';
 import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
@@ -792,6 +793,31 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           }
         : {}),
     };
+  });
+
+  // ---- media key -----------------------------------------------------------
+  // One fleet-wide Gemini key powering voice-note transcription (OpenClaw's
+  // audio understanding sends audio to an audio-capable model). Injected into
+  // agents at provision — the Environment tab reserves GEMINI_* on purpose,
+  // so this is the managed path. Write-only, like every credential.
+  app.get('/v1/media-key', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const set = await secrets.get(MEDIA_KEY_REF).then(() => true, () => false);
+    return { set };
+  });
+
+  app.put<{ Body: { key?: string } }>('/v1/media-key', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const key = (req.body as { key?: string } | null)?.key?.trim();
+    if (!key) return reply.code(400).send({ error: 'Paste a Gemini API key.' });
+    await secrets.put(MEDIA_KEY_REF, key);
+    return { set: true };
+  });
+
+  app.delete('/v1/media-key', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    await secrets.delete(MEDIA_KEY_REF).catch(() => {});
+    return { set: false };
   });
 
   // Stock the pool from the app: verify the token against Telegram, then store

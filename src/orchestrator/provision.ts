@@ -112,6 +112,10 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
  */
 export const skipPoolOnce = new Set<string>();
 
+/** SecretStore ref for the fleet-wide media-understanding key (Gemini) —
+ *  voice-note transcription for every agent. See buildRuntimeSpec. */
+export const MEDIA_KEY_REF = 'media/gemini-api-key';
+
 export async function runProvisionSteps(
   deps: ProvisionDeps,
   agentId: string,
@@ -293,6 +297,14 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
 
   const modelKey =
     subscription || local ? undefined : await secrets.get(requireRef(profile.secretRef));
+
+  // Voice & media understanding: OpenClaw transcribes inbound voice notes by
+  // sending audio to an audio-capable model (Gemini). One server-level key —
+  // set in Settings → AI sources, stored like any credential — lights this up
+  // for every agent. Injected HERE (not the Environment tab: GEMINI_* is
+  // reserved there on purpose) and only when the profile doesn't already
+  // provide it (a google-vendor profile's own key wins via spread order).
+  const mediaKey = await secrets.get(MEDIA_KEY_REF).catch(() => undefined);
   // Subscription with a stored secret = a `claude setup-token` token (macOS
   // hosts, where the login lives in the Keychain and can't be file-mounted).
   // Claude Code reads it from CLAUDE_CODE_OAUTH_TOKEN; no ~/.claude mount.
@@ -355,6 +367,7 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
     },
     hostname: containerHostname,
     env: {
+      ...(mediaKey ? { GEMINI_API_KEY: mediaKey } : {}),
       ...perAgentEnv,
       // Orientation, not configuration: the human name of the machine this
       // agent runs on, refreshed by every rebuild/move.

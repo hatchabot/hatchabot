@@ -2,6 +2,23 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.37.0] — 2026-08-25
+
+### Added
+- **Voice notes work again — fleet media key.** On the manual OpenClaw
+  install, voice worked because the gateway loaded a `GEMINI_API_KEY`
+  (OpenClaw transcribes inbound audio by sending it to an audio-capable
+  model); containers never got that key, so AgentClaw agents were deaf. New
+  **Voice & media understanding** section in ⚙ Settings → AI sources: paste
+  one Gemini API key (free tier available) and every agent gains voice-note
+  transcription on its next Rebuild. The key is stored write-only
+  (`GET/PUT/DELETE /v1/media-key`) and injected by provisioning itself —
+  the Environment tab deliberately reserves `GEMINI_*`, so this is the
+  managed path; a google-vendor AI profile's own key still wins per agent.
+- Follow-up recorded (docs/connections-design.md): **runtime image
+  variants/marketplace** — per-agent images (base / media / data / browser)
+  instead of one kitchen-sink image.
+
 ## [0.36.1] — 2026-08-25
 
 ### Fixed

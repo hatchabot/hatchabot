@@ -313,6 +313,21 @@ describe('buildRuntimeSpec', () => {
     expect(spec.hostname).toBe(`${agent.slug}.box`);
   });
 
+  it('injects the fleet media key (voice transcription) unless the profile supplies its own', async () => {
+    const w = await world();
+    await w.secrets.put('media/gemini-api-key', 'gm-fleet');
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.env.GEMINI_API_KEY).toBe('gm-fleet');
+
+    // A google-vendor profile's own key must win over the fleet media key.
+    const w2 = await world({ profile: { vendor: 'google' } });
+    await w2.secrets.put('media/gemini-api-key', 'gm-fleet');
+    const r2 = await provisionAgent(w2.deps, INPUT);
+    const spec2 = await buildRuntimeSpec(w2.deps, r2.agent.id);
+    expect(spec2.env.GEMINI_API_KEY).toBe('sk-test'); // the profile's key
+  });
+
   it('seeds the gog skill so every agent can teach its owner the connect flow', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);

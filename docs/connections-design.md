@@ -119,6 +119,30 @@ Keep the cost model honest in the UI: Brave free tier ~2k queries/mo,
 Gemini metered — a chatty fleet can burn a shared key quickly, which argues
 for per-agent keys over one fleet key.
 
+## Follow-up: runtime image variants / marketplace (recorded 2026-08-25)
+
+Chris's framing: no single image suits all agents, and a kitchen-sink image
+bloats every agent to serve a few. The natural evolution is **multiple
+runtime images, selected per agent** — a small curated set first, a
+marketplace shape later:
+
+- `agentclaw-runtime:base` — today's image (openclaw + claude-code + python
+  + gog);
+- `…:media` — + ffmpeg / local whisper (offline voice transcription — the
+  alternative to the Gemini media key for the privacy-first path);
+- `…:data` — + pandas/numpy-class libraries pre-baked (vs today's
+  per-volume `pip install --target pylibs`);
+- `…:browser` — + playwright/chromium for browsing agents.
+
+Plumbing notes for when this happens: `agent.image` (nullable → fleet
+default) chosen at create/Settings; provision passes it through
+(RuntimeSpec already flows an image via provider opts — needs to become
+per-spec); Docker layer sharing keeps variants cheap if they share the base;
+**Move must ensure the target runner has the agent's image** (generalize the
+Install-image button/flow to arbitrary tags); update-available detection
+becomes per-image. Keep the default experience single-image — variants are
+an advanced pick, like everything else in this doc.
+
 ## Adopt implications (the condo adviser's path in)
 
 Adopting an agent that uses host-side gog today means its tokens live in the

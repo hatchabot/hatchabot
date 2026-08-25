@@ -80,6 +80,19 @@ describe('DELETE /v1/pool/:username', () => {
   });
 });
 
+describe('media key — GET/PUT/DELETE /v1/media-key', () => {
+  it('is write-only, host-owner-gated, and round-trips set/unset', async () => {
+    const w = await makeWorld();
+    expect((await w.f.inject({ method: 'GET', url: '/v1/media-key', headers: as() })).json()).toEqual({ set: false });
+    expect((await w.f.inject({ method: 'PUT', url: '/v1/media-key', headers: as(), payload: { key: 'gm-1' } })).statusCode).toBe(200);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/media-key', headers: as() })).json()).toEqual({ set: true });
+    expect(w.secrets.map.get('media/gemini-api-key')).toBe('gm-1');
+    expect((await w.f.inject({ method: 'DELETE', url: '/v1/media-key', headers: as() })).statusCode).toBe(200);
+    expect(w.secrets.map.has('media/gemini-api-key')).toBe(false);
+    expect((await w.f.inject({ method: 'GET', url: '/v1/media-key', headers: as('intruder') })).statusCode).toBe(403);
+  });
+});
+
 describe('skipPool — the "use a pool bot" checkbox, unchecked', () => {
   it('routes provisioning straight to the manual path even when the pool has bots', async () => {
     const chan = { accountId: 'x', secretRef: 's', deepLink: 'd' };
