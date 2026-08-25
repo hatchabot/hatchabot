@@ -2144,6 +2144,8 @@ function agentMeta(a) {
   const host = hosts.find(h => h.id === a.hostId);
   const bits = [];
   if (a.model) bits.push(esc(a.model));
+  // The bot IS the agent's identity — name it right after the model.
+  if (a.botUsername) bits.push(`@${esc(a.botUsername)}`);
   // Always name where it runs — "this machine" locally, the runner's name in
   // Cluster mode — so cards read the same whether or not runners exist.
   if (host) bits.push(`on ${host.kind === 'local' ? 'this machine' : esc(host.name)}`);
