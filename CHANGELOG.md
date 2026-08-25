@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.37.2] — 2026-08-25
+
+### Added
+- **`agentclaw list --all` — the host owner's admin view.** Lists every
+  user's agents with their owner id (`GET /v1/agents?all=1`, host-owner
+  only), so leftovers from another login — an old test Google account's
+  agents holding bots and containers — are findable. Metadata only:
+  memory, files, and conversations stay behind per-agent ownership as
+  always.
+
 ## [0.37.1] — 2026-08-25
 
 ### Added

@@ -70,6 +70,27 @@ describe('Runner hosts — DELETE /v1/hosts/:id', () => {
   });
 });
 
+describe('Admin listing — GET /v1/agents?all=1', () => {
+  it('shows the host owner every user\'s agents with ownerId; others get 403', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a-mine', slug: 'mine', accountId: 'minebot' });
+    await seedRunningAgent(w, { id: 'a-theirs', slug: 'theirs', owner: 'someone-else', accountId: 'theirbot' });
+
+    // Plain list: ownership-scoped, as ever.
+    const mine = (await w.f.inject({ method: 'GET', url: '/v1/agents', headers: as() })).json();
+    expect(mine.map((a: any) => a.id)).toEqual(['a-mine']);
+
+    // ?all=1 for the host owner: both, each naming its owner.
+    const all = (await w.f.inject({ method: 'GET', url: '/v1/agents?all=1', headers: as() })).json();
+    expect(all.map((a: any) => [a.id, a.ownerId]).sort()).toEqual([
+      ['a-mine', w.owner], ['a-theirs', 'someone-else'],
+    ]);
+
+    // Not the host owner: refused outright.
+    expect((await w.f.inject({ method: 'GET', url: '/v1/agents?all=1', headers: as('someone-else') })).statusCode).toBe(403);
+  });
+});
+
 describe('Runtime capabilities — GET /v1/runtime/capabilities', () => {
   it('is host-owner only (the probe spins a container)', async () => {
     const w = await makeWorld();

@@ -1224,8 +1224,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return value;
   };
 
-  app.get('/v1/agents', async (req) => {
-    const agents = store.listVisibleAgents(ownerIdOf(req));
+  app.get<{ Querystring: { all?: string } }>('/v1/agents', async (req, reply) => {
+    // ?all=1: the HOST OWNER's admin view — every user's agents, with their
+    // ownerId, so orphans from other logins (an old test account's leftovers)
+    // are findable and cleanable. Listing metadata only: memory, files, and
+    // conversations stay behind the per-agent ownership checks as always.
+    const all = req.query.all === '1';
+    if (all && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const agents = all ? store.listAllActiveAgents() : store.listVisibleAgents(ownerIdOf(req));
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;

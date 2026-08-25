@@ -58,7 +58,9 @@ Commands:
   login [--token <tok>]        Save an access token from the app (⚙ Settings → Access).
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
-  list                         Agents with state, model, and last activity
+  list [--all]                 Agents with state, model, and last activity.
+                               --all (host owner): every user's agents, with
+                               the owner id — find another login's leftovers.
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
@@ -235,7 +237,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -938,12 +940,17 @@ async function main() {
       return;
     }
     case 'list': {
-      const list = await agents(ctx);
+      // --all (host owner): every user's agents, with the owner id — the
+      // admin view for finding another login's leftovers.
+      const all = flags.has('all');
+      const res = await api(ctx, `/v1/agents${all ? '?all=1' : ''}`);
+      const list = (await res.json()) as any[];
       if (!list.length) return console.log('no agents');
       const w = Math.max(...list.map((a) => a.name.length));
       for (const a of list) {
+        const owner = all ? `  ${String(a.ownerId ?? '-').padEnd(34)}` : '';
         console.log(
-          `${a.name.padEnd(w)}  ${String(a.state).padEnd(12)} ${(a.model ?? '-').padEnd(20)} active ${ago(a.lastActiveAt)}`,
+          `${a.name.padEnd(w)}  ${String(a.state).padEnd(12)} ${(a.model ?? '-').padEnd(20)}${owner} active ${ago(a.lastActiveAt)}`,
         );
       }
       return;
