@@ -16,6 +16,10 @@ export interface RuntimeSpec {
   workspace: WorkspaceSeed;
   /** Environment injected at boot — resolved secrets live here, briefly. */
   env: Record<string, string>;
+  /** Container hostname (`<agent>.<host>`), so "where am I running?" asked of
+   *  the agent has a true, always-current answer. Optional: providers without
+   *  a hostname concept ignore it. */
+  hostname?: string;
   /**
    * Set when this spec re-provisions an existing runtime (rebuild, retry).
    * The provider MUST keep using the same underlying storage so the agent's

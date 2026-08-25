@@ -130,6 +130,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--log-opt', 'max-file=3',
       '--memory', process.env.AGENTCLAW_AGENT_MEMORY ?? '2g',
       '--pids-limit', process.env.AGENTCLAW_AGENT_PIDS ?? '512',
+      // `hostname` inside the container answers "<agent>.<host>" — the moving
+      // agent's compass (see provision.ts, which derives it per host).
+      ...(spec.hostname ? ['--hostname', spec.hostname] : []),
       '-v',
       `${volume}:/home/node/.openclaw`,
     ];

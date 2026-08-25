@@ -26,14 +26,32 @@ export const OWNER = 'user-owner';
 /** Auth header for a given principal (defaults to the local-host owner). */
 export const as = (owner: string = OWNER) => ({ 'x-agentclaw-owner': owner });
 
-// Enough of the channel surface for the routes that touch it (pool status +
-// ownership checks). Provisioning a fresh bot is the background path we don't
-// assert on; the transfer flows carry their own bot token.
+// Enough of the channel surface for the routes that touch it (pool CRUD +
+// ownership checks + release on delete). Provisioning a fresh bot is the
+// background path we don't assert on; the transfer flows carry their own
+// bot token. The pool is a real little in-memory pool so the stock/recycle
+// routes are testable; `entries` is exposed for assertions.
 function channelStub(availableBots = 0) {
-  return {
-    kind: 'telegram',
-    pool: { availableCount: () => availableBots, owns: (_a: string) => false },
-  } as any;
+  const entries: Array<{ username: string; token: string; leasedTo?: string }> = [];
+  const pool = {
+    entries,
+    availableCount: () => availableBots + entries.filter((e) => !e.leasedTo).length,
+    owns: (u: string) => entries.some((e) => e.username === u),
+    list: () =>
+      entries.map((e) => ({ username: e.username, secretRef: `telegram/bot/${e.username}`, leasedTo: e.leasedTo })),
+    addToPool: async (u: string, t: string) => {
+      const ex = entries.find((e) => e.username === u);
+      if (ex) ex.token = t;
+      else entries.push({ username: u, token: t });
+    },
+    removeFromPool: async (u: string) => {
+      const e = entries.find((x) => x.username === u);
+      if (!e) throw new Error(`@${u} is not in the pool.`);
+      if (e.leasedTo) throw new Error(`@${u} is leased to an agent — delete that agent first.`);
+      entries.splice(entries.indexOf(e), 1);
+    },
+  };
+  return { kind: 'telegram', pool, release: async () => {}, discardPending: () => {} } as any;
 }
 
 export interface World {
@@ -42,6 +60,8 @@ export interface World {
   provider: MockProvider;
   f: FastifyInstance;
   owner: string;
+  /** The channel stub, including its in-memory pool (`channel.pool.entries`). */
+  channel: any;
 }
 
 /** A fresh installation whose local host + AI profile belong to `owner`. */
@@ -53,8 +73,9 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   store.insertAIProfile({ id: 'p1', ownerId: owner, name: 'Claude', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
   await secrets.put('ai/p1', 'sk-test');
   const f = Fastify();
-  await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: channelStub(availableBots) });
-  return { store, secrets, provider, f, owner };
+  const channel = channelStub(availableBots);
+  await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel });
+  return { store, secrets, provider, f, owner, channel };
 }
 
 export interface SeedOpts {

@@ -60,6 +60,21 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     return row.n;
   }
 
+  /**
+   * Remove an UNLEASED bot from the pool, scrubbing its stored token. A leased
+   * bot is refused — it is some agent's live identity; delete that agent (or
+   * let it release) first.
+   */
+  async removeFromPool(username: string): Promise<void> {
+    const row = this.db
+      .prepare(`SELECT secret_ref, leased_to FROM telegram_pool WHERE username = ?`)
+      .get(username) as { secret_ref: string; leased_to: string | null } | undefined;
+    if (!row) throw new Error(`@${username} is not in the pool.`);
+    if (row.leased_to) throw new Error(`@${username} is leased to an agent — delete that agent first.`);
+    await this.secrets.delete(row.secret_ref).catch(() => {});
+    this.db.prepare(`DELETE FROM telegram_pool WHERE username = ?`).run(username);
+  }
+
   /** Every pool bot with its lease state and token ref — for the bot audit. */
   list(): Array<{ username: string; secretRef: string; leasedTo?: string }> {
     return (

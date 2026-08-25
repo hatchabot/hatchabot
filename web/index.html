@@ -500,6 +500,7 @@
   <div class="tabs" role="tablist">
     <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
     <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Runners</button>
+    <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Bot pool</button>
     <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Cluster servers</button>
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
@@ -578,6 +579,27 @@
     <div class="err" id="hostErr"></div>
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="hostAddBtn" onclick="addHost()">Add runner</button>
+    </div>
+  </section>
+
+  <section id="panePool" role="tabpanel" hidden>
+    <div class="sub">
+      Spare Telegram bots, parked for reuse. When the pool has bots, creating
+      an agent grabs one <b>instantly</b> — no BotFather trip — and deleting
+      that agent returns it here automatically. Deleting an agent whose bot
+      you pasted by hand offers to park the bot here instead of forgetting it.
+    </div>
+    <div id="poolList" style="margin-top:10px">Loading…</div>
+    <h4 style="margin:16px 0 4px">Add a bot</h4>
+    <div class="sub">
+      Mint one at <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a>
+      (<code>/newbot</code>, ~60 seconds), then paste its token — it's verified
+      with Telegram before it's stored.
+    </div>
+    <input type="password" id="poolToken" placeholder="123456789:AA..." autocomplete="off" style="font-family:ui-monospace,monospace">
+    <div class="err" id="poolErr"></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" id="poolAddBtn" onclick="addPoolBot()">Add to pool</button>
     </div>
   </section>
 
@@ -1016,7 +1038,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', hosts: 'paneHosts', servers: 'paneServers', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
+const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -1026,8 +1048,48 @@ function showTab(name) {
   }
   if (name === 'access') refreshMgmtBotStatus();
   if (name === 'hosts') loadHosts();
+  if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
   if (name === 'runtime') loadRuntime();
+}
+
+async function loadPool() {
+  const el = $('poolList');
+  try {
+    const p = await api('/v1/pool');
+    const bots = p.bots ?? [];
+    el.innerHTML = bots.length
+      ? bots.map(b => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
+          <span class="grow">🤖 <b>@${esc(b.username)}</b>
+            <span class="sub">· ${b.leasedTo ? 'in use by an agent' : 'available'}</span></span>
+          ${b.leasedTo ? '' : `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}')">Remove</button>`}
+        </div>`).join('')
+      : '<div class="sub">Empty — add a spare bot below, or park one when deleting an agent.</div>';
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+async function addPoolBot() {
+  const token = $('poolToken').value.trim();
+  $('poolErr').textContent = '';
+  if (!token) { $('poolErr').textContent = 'Paste a bot token first.'; return; }
+  $('poolAddBtn').disabled = true;
+  try {
+    const r = await api('/v1/pool', { method: 'POST', body: { token } });
+    $('poolToken').value = '';
+    toast(`@${r.username} added — ${r.availableBots} instant bot${r.availableBots === 1 ? '' : 's'} ready.`);
+    await loadPool();
+    refresh(true); // header "N instant bots ready"
+  } catch (e) { $('poolErr').textContent = e.message; }
+  finally { $('poolAddBtn').disabled = false; }
+}
+
+async function removePoolBot(username) {
+  if (!confirm(`Remove @${username} from the pool?\n\nIts stored token is discarded (the bot itself still exists at BotFather).`)) return;
+  try {
+    await api(`/v1/pool/${encodeURIComponent(username)}`, { method: 'DELETE' });
+    await loadPool();
+    refresh(true);
+  } catch (e) { toast(e.message, 10000); }
 }
 
 // ---- hosts (Cluster mode) ---------------------------------------------------
@@ -2963,7 +3025,15 @@ async function del(id, name) {
   const typed = prompt(`This permanently erases "${name}" and everything it remembers.\n\nType the agent's name to confirm:`);
   if (typed === null) return;
   if (typed.trim() !== name) { toast('Name did not match — nothing deleted.'); return; }
-  try { await api(`/v1/agents/${id}`, { method: 'DELETE' }); await refresh(false); }
+  // A hand-pasted bot's token would be forgotten with the agent — offer to
+  // park it in the pool so the next agent can use it instantly. (Pool-leased
+  // bots return to the pool automatically, no need to ask.)
+  const a = agents.find(x => x.id === id);
+  let recycle = false;
+  if (a?.botUsername && a.botPooled === false) {
+    recycle = confirm(`Keep its Telegram bot @${a.botUsername} for future agents?\n\nOK — park the bot in the pool: the next agent you create uses it instantly.\nCancel — forget the bot (its token is discarded here; the bot itself still exists at BotFather).`);
+  }
+  try { await api(`/v1/agents/${id}${recycle ? '?recycleBot=1' : ''}`, { method: 'DELETE' }); await refresh(false); }
   catch (e) { toast(e.message); }
 }
 

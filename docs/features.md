@@ -27,14 +27,14 @@ When you delete the agent, the bot still exists on Telegram's side — reveal
 its token first (⚙ Settings → Telegram) if you want to recycle it into a
 future agent, because AgentClaw forgets it on delete.
 
-Optionally, an admin can **pre-stock a bot pool**: mint a few spare bots at
-BotFather once and add them with
-`AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token> [<token>…]`
-on the server. Creation then
-grabs one instantly (the header shows "N instant bots ready"), no BotFather
-trip per agent — and deleting a pool-leased agent returns its bot to the pool
-automatically. If you've never run the script, the pool is empty and you'll
-only ever see the paste-a-token flow.
+Better: **stock the bot pool** (⚙ Settings → Bot pool). Mint a few spare bots
+at BotFather once and paste their tokens there — creation then grabs one
+instantly (the header shows "N instant bots ready"), no BotFather trip per
+agent, and deleting a pool-leased agent returns its bot automatically.
+Deleting an agent whose bot you pasted by hand *offers* to park the bot in
+the pool instead of forgetting it — with Telegram's ~20-bots-per-account
+ceiling, recycled slots are worth keeping. (The pool can also be stocked from
+the server: `AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
 Tap **Telegram App** on the card and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth
@@ -193,6 +193,11 @@ runners); a **Mesh** is independent AgentClaw servers peered as **Cluster
 servers**, with "Move to another cluster" carrying agents between them. See
 [topologies.md](topologies.md), and [deploy-gce.md](deploy-gce.md) for
 running a node on a cloud VM.
+
+Agents know where they run: ask one in Telegram which machine it's on and it
+can check — its container hostname is `<agent>.<host>` and
+`AGENTCLAW_HOST_NAME` carries the host's name, both refreshed on every
+rebuild and Move.
 
 ## Backups & recovery
 

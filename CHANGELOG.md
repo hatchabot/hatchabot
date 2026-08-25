@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.33.0] — 2026-08-24
+
+### Added
+- **The bot pool is now a first-class feature** (⚙ Settings → Bot pool).
+  Stock it from the app: paste a BotFather token, it's verified with Telegram
+  and parked; creation grabs a pool bot instantly when one is available, and
+  the roster shows each bot as available or in use (Remove for unleased
+  ones). Deleting an agent whose bot you pasted by hand now **offers to park
+  the bot in the pool** instead of forgetting its token — with Telegram's
+  ~20-bots-per-account ceiling, every recycled slot counts. New
+  `GET/POST /v1/pool`, `DELETE /v1/pool/:username`,
+  `DELETE /v1/agents/:id?recycleBot=1`; the agent list carries
+  `botUsername`/`botPooled` so the app knows which delete flows to offer.
+- **Agents know which machine they run on.** The container hostname is now
+  `<agent>.<host>` and `AGENTCLAW_HOST_NAME` carries the host's human name —
+  both re-rendered on every rebuild and Move, so asking an agent "where are
+  you running?" in Telegram gets a true, current answer as it hops machines.
+
 ## [0.32.0] — 2026-08-24
 
 ### Added

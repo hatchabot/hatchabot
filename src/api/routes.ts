@@ -8,7 +8,7 @@ import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
-import { InvalidBotTokenError } from '../channels/telegramManual.js';
+import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
 import {
   claudeAuthDir,
   createAgentRecord,
@@ -775,8 +775,53 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return models;
   };
 
-  app.get('/v1/pool', async () => {
-    return { availableBots: deps.channel.pool.availableCount() };
+  app.get('/v1/pool', async (req) => {
+    return {
+      availableBots: deps.channel.pool.availableCount(),
+      // The roster is host-owner detail (it names bots and their leases);
+      // everyone else only needs the count for the "N instant bots" header.
+      ...(ownsLocalHost(req)
+        ? {
+            bots: deps.channel.pool
+              .list()
+              .map((b) => ({ username: b.username, leasedTo: b.leasedTo })),
+          }
+        : {}),
+    };
+  });
+
+  // Stock the pool from the app: verify the token against Telegram, then store
+  // it. Refuses a bot that is currently some agent's live identity.
+  app.post<{ Body: { token?: string } }>('/v1/pool', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const token = (req.body as { token?: string } | null)?.token?.trim();
+    if (!token) return reply.code(400).send({ error: 'Paste a bot token from @BotFather.' });
+    let username: string;
+    try {
+      username = await verifyBotToken(token);
+    } catch (err) {
+      return reply.code(400).send({
+        error: err instanceof InvalidBotTokenError ? err.message : 'Could not verify that token with Telegram.',
+      });
+    }
+    const using = store.findAgentUsingAccount(username);
+    if (using) {
+      return reply.code(409).send({
+        error: `@${username} is the live identity of agent "${using.name}" — it can't also sit in the pool.`,
+      });
+    }
+    await deps.channel.pool.addToPool(username, token);
+    return reply.code(201).send({ username, availableBots: deps.channel.pool.availableCount() });
+  });
+
+  app.delete<{ Params: { username: string } }>('/v1/pool/:username', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    try {
+      await deps.channel.pool.removeFromPool(req.params.username);
+    } catch (err) {
+      return reply.code(409).send({ error: String(err instanceof Error ? err.message : err) });
+    }
+    return { removed: true, availableBots: deps.channel.pool.availableCount() };
   });
 
   // A Telegram-bot census: this install's bots (and, with ?consolidated=1, each
@@ -1170,10 +1215,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             /* provider hiccup — omit version info rather than fail the list */
           }
         }
+        const chan = store.getChannelForAgent(a.id);
         return publicAgent(a, {
           /** What the viewer may do — drives which controls the app renders. */
           role: store.accessRole(a.id, ownerIdOf(req)),
-          deepLink: store.getChannelForAgent(a.id)?.deepLink,
+          deepLink: chan?.deepLink,
+          botUsername: chan?.accountId,
+          /** Pool-leased bots auto-recycle on delete; pasted ones are offered
+           *  a trip INTO the pool — the app needs to know which is which. */
+          botPooled: chan ? deps.channel.pool.owns(chan.accountId) : undefined,
           // Default model from the agent's AI profile. Applied config can lag
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.
@@ -2719,7 +2769,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
   });
 
-  app.delete<{ Params: { id: string } }>('/v1/agents/:id', async (req, reply) => {
+  app.delete<{ Params: { id: string }; Querystring: { recycleBot?: string } }>('/v1/agents/:id', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // Fully gone — say so. A DELETING agent, by contrast, is a delete that was
@@ -2764,6 +2814,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Releasing it back into THIS pool would let a new local agent lease it
       // and fight the peer for the same token — release only when it stays ours.
       if (!agent.migratedTo) {
+        // ?recycleBot=1: a PASTED bot's token would otherwise be forgotten
+        // here — copy it into the pool first so the next agent can lease it
+        // instantly. (Pool-leased bots already return via release() below.)
+        // Best-effort: a failed recycle must never block the delete.
+        if (req.query.recycleBot === '1' && !deps.channel.pool.owns(channel.accountId)) {
+          try {
+            const token = await secrets.get(channel.secretRef);
+            await deps.channel.pool.addToPool(channel.accountId, token);
+          } catch (err) {
+            app.log.warn({ agentId: agent.id, err: String(err) }, 'bot recycle into pool failed');
+          }
+        }
         await deps.channel.release(channel.accountId);
       }
       // An imported agent's token lives under channel/<agentId>/bot-token,

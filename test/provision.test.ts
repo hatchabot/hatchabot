@@ -285,7 +285,8 @@ describe('buildRuntimeSpec', () => {
       .run('http://172.17.0.1:11434/v1', 'qwen3.6:27b-q8_0', 'p1');
     const { agent } = await provisionAgent(w.deps, INPUT);
     const spec = await buildRuntimeSpec(w.deps, agent.id);
-    expect(spec.env).toEqual({}); // nothing to inject
+    // Nothing credential-like to inject — only the host-orientation var.
+    expect(spec.env).toEqual({ AGENTCLAW_HOST_NAME: expect.any(String) });
     expect(spec.hostMounts).toEqual([]); // no ~/.claude
     expect(spec.workspace.configPatch.provider).toBe('ollama');
     expect(spec.workspace.configPatch.baseUrl).toBe('http://172.17.0.1:11434/v1');
@@ -296,6 +297,16 @@ describe('buildRuntimeSpec', () => {
     const { agent } = await provisionAgent(w.deps, INPUT);
     expect(agent.state).toBe('FAILED');
     expect(w.channel.released).toEqual(['stubbot']); // lease not kept
+  });
+
+  it('tells the agent where it runs: container hostname + AGENTCLAW_HOST_NAME', async () => {
+    // On a non-local host the label is the host row's name; a Move re-renders
+    // the spec, so the answer stays true as the agent hops machines.
+    const w = await world({ hostKind: 'cloud' });
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.env.AGENTCLAW_HOST_NAME).toBe('box');
+    expect(spec.hostname).toBe(`${agent.slug}.box`);
   });
 
   it('allows a setup-token subscription on a runner: token injected, no mount', async () => {

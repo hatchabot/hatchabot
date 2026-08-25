@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import { homedir, hostname as osHostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
@@ -271,6 +271,15 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         'machine. To run Max on a runner, add a setup-token profile (`claude setup-token`).',
     );
   }
+  // Where-am-I orientation: agents get MOVED between machines, and "which
+  // host are you on?" asked in Telegram deserves a true answer. The container
+  // hostname becomes `<agent>.<host>` (so a plain `hostname` answers), and
+  // AGENTCLAW_HOST_NAME carries the human-readable host name for scripts.
+  // Both refresh on every rebuild/move because provision re-renders the spec.
+  const hostLabel = host.kind === 'local' ? osHostname() : host.name;
+  const hostSlug = hostLabel.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 63) || 'host';
+  const containerHostname = `${agent.slug.slice(0, 63)}.${hostSlug}`;
+
   const modelKey =
     subscription || local ? undefined : await secrets.get(requireRef(profile.secretRef));
   // Subscription with a stored secret = a `claude setup-token` token (macOS
@@ -333,8 +342,12 @@ export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Pr
         },
       },
     },
+    hostname: containerHostname,
     env: {
       ...perAgentEnv,
+      // Orientation, not configuration: the human name of the machine this
+      // agent runs on, refreshed by every rebuild/move.
+      AGENTCLAW_HOST_NAME: hostLabel,
       ...(modelKey
         ? envForProfile(profile.vendor, modelKey)
         : oauthToken

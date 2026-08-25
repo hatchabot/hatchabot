@@ -112,6 +112,12 @@ describe('container and volume shape', () => {
     expect(create).toContain('--init');
   });
 
+  it('sets the container hostname when the spec carries one (the where-am-I compass)', async () => {
+    await provider.provision(spec({ hostname: 'kitchen-helper.dgx-spark' }) as any);
+    const create = argv().split('\n').find((l) => l.startsWith('create '));
+    expect(create).toContain('--hostname kitchen-helper.dgx-spark');
+  });
+
   it('keeps the volume unless purge is explicitly requested', async () => {
     const { runtimeRef } = await provider.provision(spec() as any);
     writeFileSync(LOG, '');
