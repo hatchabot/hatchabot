@@ -23,6 +23,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   constructor(
     private readonly db: Database.Database,
     private readonly secrets: SecretStore,
+    private readonly opts: { fetchImpl?: typeof fetch } = {},
   ) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS telegram_pool (
@@ -109,7 +110,28 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       return this.provision(req);
     }
 
+    // Pool bots are OURS, serving one agent after another — on lease, point
+    // the bot's DISPLAY name at the agent it now serves so a recycled bot's
+    // chat header reads correctly (the @username can't change via API).
+    // Best-effort and bounded: a rename is cosmetic; Telegram rate-limits
+    // setMyName, and neither a limit nor an outage may block provisioning.
+    await this.#applyDisplayName(free.secret_ref, req.agentName);
+
     return this.#toChannel(free.username, free.secret_ref);
+  }
+
+  async #applyDisplayName(secretRef: string, name: string): Promise<void> {
+    try {
+      const token = await this.secrets.get(secretRef);
+      await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/setMyName`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: name.slice(0, 64) }), // Telegram's cap
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      /* cosmetic — never blocks a lease */
+    }
   }
 
   async release(accountId: string): Promise<void> {

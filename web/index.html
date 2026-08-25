@@ -3045,7 +3045,7 @@ async function del(id, name) {
   const a = agents.find(x => x.id === id);
   let recycle = false;
   if (a?.botUsername && a.botPooled === false) {
-    recycle = confirm(`Keep its Telegram bot @${a.botUsername} for future agents?\n\nOK — park the bot in the pool: the next agent you create uses it instantly.\nCancel — forget the bot (its token is discarded here; the bot itself still exists at BotFather).\n\nTip: your old conversation stays in YOUR Telegram app either way — use "Delete chat" on @${a.botUsername} there for a clean slate. (A different person getting this bot sees no history at all.)`);
+    recycle = confirm(`Keep its Telegram bot @${a.botUsername} for future agents?\n\nOK — park the bot in the pool: the next agent you create uses it instantly.\nCancel — forget the bot (its token is discarded here; the bot itself still exists at BotFather).\n\nTip: your old conversation stays in YOUR Telegram app either way — use "Delete chat" on @${a.botUsername} there for a clean slate. (A different person getting this bot sees no history at all, and the bot's display name updates automatically when the pool assigns it to its next agent.)`);
   }
   try { await api(`/v1/agents/${id}${recycle ? '?recycleBot=1' : ''}`, { method: 'DELETE' }); await refresh(false); }
   catch (e) { toast(e.message); }

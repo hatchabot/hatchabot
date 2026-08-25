@@ -7,6 +7,9 @@ import type { TelegramManualProvisioner } from '../src/channels/telegramManual.j
 import { verifyBotToken, InvalidBotTokenError } from '../src/channels/telegramManual.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
+/** Leasing renames the bot via Telegram (setMyName) — keep tests offline. */
+const stubFetch = (async () => new Response('{"ok":true}')) as unknown as typeof fetch;
+
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
   async put(ref: string, v: string) { this.map.set(ref, v); }
@@ -46,8 +49,33 @@ describe('verifyBotToken', () => {
 });
 
 describe('TelegramPoolProvisioner', () => {
+  it("renames the bot to the agent it now serves on lease (display name via setMyName)", async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    const recorder = (async (url: any, init: any) => {
+      calls.push({ url: String(url), body: String(init?.body ?? '') });
+      return new Response('{"ok":true}');
+    }) as unknown as typeof fetch;
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: recorder });
+    await pool.addToPool('recycledbot', 'tok-r');
+    await pool.provision({ agentId: 'a1', agentName: 'Art Test', slug: 'art-test' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toContain('/bottok-r/setMyName');
+    expect(JSON.parse(calls[0]!.body)).toEqual({ name: 'Art Test' });
+    // The idempotent re-lease does NOT rename again (nothing changed).
+    await pool.provision({ agentId: 'a1', agentName: 'Art Test', slug: 'art-test' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('a rename failure never blocks the lease (cosmetic, best-effort)', async () => {
+    const failing = (async () => { throw new Error('telegram down'); }) as unknown as typeof fetch;
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: failing });
+    await pool.addToPool('bot1', 'tok1');
+    const leased = await pool.provision(REQ);
+    expect(leased.accountId).toBe('bot1'); // lease succeeded despite the outage
+  });
+
   it('leases idempotently per agent and counts availability', async () => {
-    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets());
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
     await pool.addToPool('bot1', 'tok1');
     expect(pool.availableCount()).toBe(1);
     const first = await pool.provision(REQ);
@@ -59,7 +87,7 @@ describe('TelegramPoolProvisioner', () => {
 
   it('release returns the bot with its token intact for the next agent', async () => {
     const secrets = new MemSecrets();
-    const pool = new TelegramPoolProvisioner(new Database(':memory:'), secrets);
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), secrets, { fetchImpl: stubFetch });
     await pool.addToPool('bot1', 'tok1');
     const leased = await pool.provision(REQ);
     await pool.release(leased.accountId);
@@ -70,7 +98,7 @@ describe('TelegramPoolProvisioner', () => {
   });
 
   it('throws PoolExhaustedError when empty', async () => {
-    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets());
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
     await expect(pool.provision(REQ)).rejects.toBeInstanceOf(PoolExhaustedError);
   });
 });
@@ -88,14 +116,14 @@ describe('CompositeTelegramProvisioner', () => {
     }) as unknown as TelegramManualProvisioner;
 
   it('falls back to manual (ChannelSetupRequired) when the pool is dry', async () => {
-    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets());
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
     const composite = new CompositeTelegramProvisioner(pool, manualStub([]));
     await expect(composite.provision(REQ)).rejects.toBeInstanceOf(ChannelSetupRequired);
   });
 
   it('routes release by ownership: pool bots repooled, user bots to manual', async () => {
     const secrets = new MemSecrets();
-    const pool = new TelegramPoolProvisioner(new Database(':memory:'), secrets);
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), secrets, { fetchImpl: stubFetch });
     await pool.addToPool('poolbot', 'tok');
     const manualReleased: string[] = [];
     const composite = new CompositeTelegramProvisioner(pool, manualStub(manualReleased));

@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.34.0] — 2026-08-24
+
+### Added
+- **A recycled bot renames itself to its next agent.** When the pool leases a
+  bot, AgentClaw now sets the bot's Telegram display name to the new agent's
+  name (`setMyName`) — so the chat header reads "Art Test", not whatever the
+  last agent was called. Best-effort and bounded: a Telegram rate limit or
+  outage never blocks provisioning; the @username stays (Telegram doesn't
+  allow changing it via API — BotFather can, by hand). The recycle prompt's
+  tip now mentions it.
+
 ## [0.33.1] — 2026-08-24
 
 ### Added
