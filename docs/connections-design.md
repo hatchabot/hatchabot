@@ -99,6 +99,26 @@ AgentClaw's role is to make that possible and visible, not to broker OAuth:
 - No per-message permission prompts — membership stays the security
   boundary, scoped accounts the blast-radius control.
 
+## Follow-up: search-provider plumbing (recorded 2026-08-25)
+
+v0.35.1 hard-enables the keyless DuckDuckGo provider for every agent; that
+was the fix for "web search is not available", not the end state. Likely
+next: **per-agent search-provider control** —
+
+- a picker (probably on the agent's AI or a future Connections tab):
+  DuckDuckGo (free default) / Brave (needs `BRAVE_API_KEY`) / Gemini
+  (needs a Gemini key) — OpenClaw auto-detection already prefers a keyed
+  provider, so the plumbing is: enable the right plugin per agent + land the
+  key (Environment tab today; per-provider fields later);
+- surface WHICH provider is active in the ❤️ Health / doctor panel, so
+  "search works" and "search works via X" are both visible;
+- possibly a fleet default in Settings (e.g. "all agents: Brave") with
+  per-agent override.
+
+Keep the cost model honest in the UI: Brave free tier ~2k queries/mo,
+Gemini metered — a chatty fleet can burn a shared key quickly, which argues
+for per-agent keys over one fleet key.
+
 ## Adopt implications (the condo adviser's path in)
 
 Adopting an agent that uses host-side gog today means its tokens live in the
