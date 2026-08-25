@@ -334,6 +334,7 @@
   <h3 style="margin:0 0 10px"><span id="editAgent"></span> — settings</h3>
   <div class="tabs" role="tablist">
     <button class="tab" id="tabDef" role="tab" aria-selected="true" onclick="showEditTab('def')">📖 Definition</button>
+    <button class="tab" id="tabEditSnap" role="tab" aria-selected="false" onclick="showEditTab('snap')">Snapshots</button>
     <button class="tab" id="tabEditAi" role="tab" aria-selected="false" onclick="showEditTab('ai')">AI</button>
     <button class="tab" id="tabEditData" role="tab" aria-selected="false" onclick="showEditTab('data')">Data</button>
     <button class="tab" id="tabEditTg" role="tab" aria-selected="false" onclick="showEditTab('tg')">Telegram</button>
@@ -373,11 +374,19 @@
     <div class="actions" style="justify-content:flex-end;margin-top:8px">
       <button class="primary" id="editSaveBtn" onclick="saveEditFile()">Save file</button>
     </div>
-    <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
-      <label style="margin:0;flex:1">History <span style="color:var(--dim)">— snapshots of SOUL/AGENTS/MEMORY, taken automatically before edits and rebuilds</span></label>
+  </section>
+
+  <section id="paneEditSnap" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      Point-in-time copies of <b>SOUL.md</b>, <b>AGENTS.md</b>, and
+      <b>MEMORY.md</b> — taken automatically before file edits and rebuilds, or
+      on demand. Restore one to roll the agent's definition and memory back.
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="margin:0;flex:1">History</label>
       <button id="snapBtn" onclick="takeSnapshot()">Snapshot now</button>
     </div>
-    <div id="snapList" style="max-height:150px;overflow:auto"></div>
+    <div id="snapList" style="max-height:260px;overflow:auto"></div>
   </section>
 
   <section id="paneEditAi" role="tabpanel" hidden>
@@ -2067,6 +2076,7 @@ let editAgentId = null, logsAgentId = null;
 // ids like tabAi, and duplicate DOM ids break both dialogs silently.
 const EDIT_TABS = {
   def: { btn: 'tabDef', pane: 'paneDef' },
+  snap: { btn: 'tabEditSnap', pane: 'paneEditSnap' },
   ai: { btn: 'tabEditAi', pane: 'paneEditAi' },
   data: { btn: 'tabEditData', pane: 'paneEditData' },
   tg: { btn: 'tabEditTg', pane: 'paneEditTg' },

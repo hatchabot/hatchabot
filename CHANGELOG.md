@@ -2,6 +2,13 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.31.1] — 2026-08-24
+
+### Changed
+- **Snapshots get their own tab** in the agent's ⚙ Settings dialog, out of
+  Definition — with room to breathe (taller list) and copy explaining what a
+  snapshot covers and when they're taken automatically.
+
 ## [0.31.0] — 2026-08-24
 
 ### Changed
