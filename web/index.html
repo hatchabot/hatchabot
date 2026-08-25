@@ -2679,7 +2679,7 @@ async function loadHealth() {
   if (!healthAgentId) return;
   $('healthBody').innerHTML = 'Checking…';
   try {
-    const h = await api(`/v1/agents/${healthAgentId}/health`);
+    const h = await api(`/v1/agents/${healthAgentId}/health?doctor=1`);
     renderHealth(h);
   } catch (e) { $('healthBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -2740,9 +2740,15 @@ function renderFleet() {
     const hb = fleetHealth[a.id];
     const badge = HEALTH_BADGE[hb?.status];
     const dot = hb ? ` <span style="color:${badge?.[0] || 'var(--dim)'}" title="${esc(badge?.[1] || hb.status)}">●</span>` : '';
+    // Config lint (doctor): the silent-degradation catcher — a disabled search
+    // provider or missing key never trips the gateway probe, only this.
+    const df = hb?.doctor?.findings ?? [];
+    const lint = df.length
+      ? ` <span class="sub" style="color:var(--warn)" title="${esc(df.slice(0, 4).map(f => f.message).join('\n'))}">⚠ ${df.length} config warning${df.length > 1 ? 's' : ''}</span>`
+      : '';
     return `<div class="pair" style="padding:4px 0"><span class="grow">
       <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>${dot} <b>${esc(a.name)}</b>
-      <span class="sub">${a.model ? esc(a.model) + ' · ' : ''}active ${a.lastActiveAt ? ago(a.lastActiveAt) : 'never'}</span>
+      <span class="sub">${a.model ? esc(a.model) + ' · ' : ''}active ${a.lastActiveAt ? ago(a.lastActiveAt) : 'never'}</span>${lint}
     </span></div>`;
   }).join('') || '<div class="sub">No agents yet.</div>';
 }
@@ -2796,7 +2802,7 @@ async function runFleetHealthChecks() {
   // Only RUNNING agents answer a health probe; do them one at a time and paint
   // each dot as it lands (an exec per agent — keep it gentle).
   for (const a of agents.filter(x => x.state === 'RUNNING')) {
-    try { fleetHealth[a.id] = await api(`/v1/agents/${a.id}/health`); }
+    try { fleetHealth[a.id] = await api(`/v1/agents/${a.id}/health?doctor=1`); }
     catch { fleetHealth[a.id] = { status: 'unreachable' }; }
     renderFleet();
   }
@@ -2827,6 +2833,18 @@ function renderHealth(h) {
   }
   if (h.eventLoop) rows.push(healthRow('Event loop', !h.eventLoop.degraded, h.eventLoop.degraded ? (h.eventLoop.reasons.join(', ') || 'degraded') : 'nominal'));
   if (h.pluginErrors && h.pluginErrors.length) rows.push(healthRow('Plugin errors', false, h.pluginErrors.slice(0, 3).join(', ')));
+  // Config lint (doctor --lint): silent degradations the gateway probe can't
+  // see. Only present when the check was requested with ?doctor=1.
+  if (h.doctor) {
+    if (h.doctor.findings.length) {
+      rows.push(healthRow('Config warnings', false, `${h.doctor.findings.length} finding${h.doctor.findings.length > 1 ? 's' : ''}`));
+      for (const f of h.doctor.findings.slice(0, 6)) {
+        rows.push(`<div class="sub" style="margin:2px 0 2px 18px">${esc(f.severity)} · ${esc(f.checkId)}: ${esc(f.message)}</div>`);
+      }
+    } else {
+      rows.push(healthRow('Config lint', true, `${h.doctor.checksRun} checks clean${h.doctor.mutedCount ? ` (+${h.doctor.mutedCount} known)` : ''}`));
+    }
+  }
   $('healthBody').innerHTML = body + rows.join('');
 }
 

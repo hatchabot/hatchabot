@@ -7,6 +7,67 @@ import type { RuntimeProvider } from '../providers/provider.js';
  * channel actually connected, are any plugins erroring. If the gateway doesn't
  * answer at all, that itself is the signal — `reachable: false`.
  */
+/**
+ * Config lint via `openclaw doctor --lint --json`: read-only checks that catch
+ * the silent degradations a gateway "healthy" can't — a search provider
+ * disabled, a memory-search key missing, an auth profile gone stale. This is
+ * the "so it doesn't go unnoticed" surface: the fleet dashboard sweeps it.
+ *
+ * Muted checks: warnings that are true of EVERY AgentClaw agent by
+ * construction get counted but not listed — a warning on all agents forever
+ * is noise that buries the finding that matters on one.
+ */
+const MUTED_CHECKS = new Set([
+  // AgentClaw seeds gateway/bot tokens into openclaw.json on the private
+  // volume by design; doctor flags plaintext-secret config on every agent.
+  'core/doctor/security',
+]);
+
+export interface DoctorFinding {
+  checkId: string;
+  severity: string;
+  message: string;
+}
+
+export interface DoctorLint {
+  ok: boolean;
+  checksRun: number;
+  findings: DoctorFinding[];
+  /** Known-by-design warnings hidden from the list (see MUTED_CHECKS). */
+  mutedCount: number;
+}
+
+export async function doctorLint(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+): Promise<DoctorLint | undefined> {
+  try {
+    const res = await provider.exec(runtimeRef, [
+      'doctor', '--lint', '--json', '--non-interactive',
+    ]);
+    if (res.code !== 0 && !res.stdout.trim()) return undefined;
+    const d = JSON.parse(res.stdout) as {
+      ok?: boolean;
+      checksRun?: number;
+      findings?: Array<{ checkId?: string; severity?: string; message?: string }>;
+    };
+    const all = Array.isArray(d.findings) ? d.findings : [];
+    const kept = all.filter((f) => !MUTED_CHECKS.has(String(f.checkId)));
+    return {
+      ok: d.ok !== false,
+      checksRun: typeof d.checksRun === 'number' ? d.checksRun : 0,
+      findings: kept.slice(0, 20).map((f) => ({
+        checkId: String(f.checkId ?? ''),
+        severity: String(f.severity ?? 'warning'),
+        message: String(f.message ?? '').slice(0, 300),
+      })),
+      mutedCount: all.length - kept.length,
+    };
+  } catch {
+    return undefined; // lint is a bonus — never fail the health probe over it
+  }
+}
+
 export interface AgentHealth {
   reachable: boolean;
   status: 'healthy' | 'degraded' | 'unreachable';

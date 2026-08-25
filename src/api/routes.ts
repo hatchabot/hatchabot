@@ -48,7 +48,7 @@ import {
   selfPathReplacements,
 } from '../orchestrator/cronImport.js';
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
-import { agentHealth } from '../orchestrator/health.js';
+import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
@@ -1832,10 +1832,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // Live health probe of the agent's own gateway (event loop, Telegram
   // connection, plugin errors). Distinct from the tracked state: an agent can be
   // RUNNING here yet have a gateway that stopped answering.
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/health', async (req, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { doctor?: string } }>('/v1/agents/:id/health', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'check its health');
     if (!agent) return reply;
-    return agentHealth(providerFor(agent.hostId), agent.runtimeRef!);
+    const provider = providerFor(agent.hostId);
+    const health = await agentHealth(provider, agent.runtimeRef!);
+    // ?doctor=1 additionally runs `openclaw doctor --lint` — ~4s of read-only
+    // config checks that catch silent degradations (disabled search provider,
+    // missing memory-search key). The fleet sweep asks for it; the cheap
+    // gateway probe stays the default.
+    if (req.query.doctor === '1' && health.reachable) {
+      return { ...health, doctor: await doctorLint(provider, agent.runtimeRef!) };
+    }
+    return health;
   });
 
   // Enable / disable a task.

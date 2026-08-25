@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.36.0] — 2026-08-25
+
+### Added
+- **Config lint in the health system — silent degradations now surface.**
+  "Web search is not available" went unnoticed because a gateway can be
+  perfectly healthy while a capability is quietly off. The health probe can
+  now also run `openclaw doctor --lint --json` (read-only, ~4s):
+  `GET /v1/agents/:id/health?doctor=1`. The Fleet Health **Run health
+  checks** sweep requests it and shows a **⚠ N config warnings** marker per
+  agent (tooltip: the findings); the per-agent ❤️ Health dialog lists each
+  finding, or "N checks clean". Warnings true of every AgentClaw agent by
+  construction (doctor's plaintext-config-secrets family) are counted but
+  muted, so real signal isn't buried by permanent noise.
+
 ## [0.35.1] — 2026-08-25
 
 ### Fixed

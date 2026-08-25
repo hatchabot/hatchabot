@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { agentHealth } from '../src/orchestrator/health.js';
+import { agentHealth, doctorLint } from '../src/orchestrator/health.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 class MemSecrets implements SecretStore {
@@ -36,6 +36,42 @@ async function seedRuntime(p: MockProvider, slug = 'kitchen', agentId = 'a1') {
   } as any);
   return runtimeRef;
 }
+
+describe('doctorLint', () => {
+  const LINT = JSON.stringify({
+    ok: false,
+    checksRun: 24,
+    findings: [
+      { checkId: 'core/doctor/security', severity: 'warning', message: 'plaintext secrets' },
+      { checkId: 'core/doctor/security', severity: 'warning', message: 'paths: x, y' },
+      { checkId: 'core/doctor/websearch', severity: 'warning', message: 'no provider enabled' },
+    ],
+  });
+
+  it('parses findings and mutes the known-by-design security warnings', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('doctor', { code: 0, stdout: LINT, stderr: '' });
+    const d = (await doctorLint(p, ref))!;
+    expect(d.ok).toBe(false);
+    expect(d.checksRun).toBe(24);
+    // The all-agents-forever warnings are counted, not listed — noise on every
+    // agent is how the one finding that matters goes unnoticed.
+    expect(d.mutedCount).toBe(2);
+    expect(d.findings).toEqual([
+      { checkId: 'core/doctor/websearch', severity: 'warning', message: 'no provider enabled' },
+    ]);
+  });
+
+  it('returns undefined (never throws) when doctor is absent or broken', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('doctor', { code: 1, stdout: '', stderr: 'unknown command' });
+    expect(await doctorLint(p, ref)).toBeUndefined();
+    p.execResponses.set('doctor', { code: 0, stdout: 'not-json', stderr: '' });
+    expect(await doctorLint(p, ref)).toBeUndefined();
+  });
+});
 
 describe('agentHealth', () => {
   it('reports healthy when the gateway is ok and Telegram is connected', async () => {
