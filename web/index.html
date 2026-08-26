@@ -3493,8 +3493,10 @@ async function refresh(withMeta) {
       api('/v1/pool').then(p => {
         poolAvail = p.availableBots;
         const el = $('poolInfo');
-        el.hidden = !(p.availableBots > 0);
-        if (!el.hidden) el.innerHTML = `<span class="pool-dot">●</span> ${p.availableBots} instant bot${p.availableBots === 1 ? '' : 's'} ready`;
+        el.hidden = false; // always shown — "0 instant bots ready" is useful too
+        const n = p.availableBots;
+        // Green dot when there's stock, muted when the pool is empty.
+        el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
       }).catch(() => {});
     }
     agents = await api('/v1/agents');

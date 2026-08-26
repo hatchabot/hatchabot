@@ -2,6 +2,13 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.47.0] — 2026-08-26
+
+### Changed
+- **The bot-pool chip now always shows, reading "0 instant bots ready" when
+  the pool is empty** instead of disappearing. The dot goes muted (from green)
+  at zero, so an empty pool is a visible state rather than a missing one.
+
 ## [0.46.0] — 2026-08-26
 
 ### Added
