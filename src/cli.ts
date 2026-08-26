@@ -449,6 +449,22 @@ function fmtTok(n: unknown): string {
   return String(v);
 }
 
+/** A dollar amount, cents-aware for small figures: $0.05, $1.2, $47. */
+function fmtUsd(n: number): string {
+  if (n < 10) return '$' + n.toFixed(2);
+  if (n < 100) return '$' + n.toFixed(1);
+  return '$' + Math.round(n);
+}
+
+/** A cost range as one cell — collapses to a single figure when the bounds
+ *  round the same, appends "+" when some tokens went unpriced. */
+function fmtCostRange(c: { low: number; high: number; partial?: boolean }): string {
+  const lo = fmtUsd(c.low);
+  const hi = fmtUsd(c.high);
+  const body = lo === hi ? lo : `${lo}–${hi}`;
+  return body + (c.partial ? '+' : '');
+}
+
 /** `agentclaw health <agent>` output — a live gateway probe, mirroring ❤️ Health. */
 /**
  * Render the consolidated bot census as aligned, numbered lines. Pure so the
@@ -534,18 +550,31 @@ export function fmtUsage(name: string, u: any): string {
   return lines.join('\n');
 }
 
-/** `agentclaw usage` (no agent) — running agents ranked by tokens. */
+/** One agent's cost cell for the fleet table: a range for API-keyed agents,
+ *  else the reason it has no per-token cost. */
+function usageCostCell(a: any): string {
+  if (a.billing === 'local') return 'local';
+  if (a.billing === 'included') return 'incl.';
+  return a.cost ? fmtCostRange(a.cost) : '—';
+}
+
+/** `agentclaw usage` (no agent) — running agents ranked by tokens, with an
+ *  estimated API cost range (est. — OpenClaw reports combined in+out tokens). */
 export function fmtFleetUsage(f: any): string {
   const agents: any[] = f.agents ?? [];
   if (!agents.length) {
     return f.skipped ? `No running agents to measure (${f.skipped} stopped — usage is live-only).` : 'No agents yet.';
   }
   const nw = Math.max(5, ...agents.map((a) => String(a.name).length));
-  const lines = agents.map((a) => {
+  const cells = agents.map(usageCostCell);
+  const cw = Math.max(4, ...cells.map((c) => c.length), f.cost ? fmtCostRange(f.cost).length : 0);
+  const lines = agents.map((a, i) => {
     const top = a.byModel?.[0]?.model ? `  ${a.byModel[0].model}${a.byModel.length > 1 ? ` +${a.byModel.length - 1}` : ''}` : '';
-    return `  ${String(a.name).padEnd(nw)}  ${fmtTok(a.totalTokens).padStart(6)}  ${String(a.sessions).padStart(3)} sess${top}`;
+    return `  ${String(a.name).padEnd(nw)}  ${fmtTok(a.totalTokens).padStart(6)}  ${cells[i]!.padStart(cw)}  ${String(a.sessions).padStart(3)} sess${top}`;
   });
-  lines.push(`  ${'—'.repeat(nw)}  ${fmtTok(f.totalTokens).padStart(6)}  ${String(f.totalSessions).padStart(3)} sess  (${f.counted} running${f.skipped ? `, ${f.skipped} not counted — live-only` : ''})`);
+  const totalCost = f.cost ? fmtCostRange(f.cost) : '—';
+  lines.push(`  ${'—'.repeat(nw)}  ${fmtTok(f.totalTokens).padStart(6)}  ${totalCost.padStart(cw)}  ${String(f.totalSessions).padStart(3)} sess  (${f.counted} running${f.skipped ? `, ${f.skipped} not counted — live-only` : ''})`);
+  if (f.cost) lines.push(`  est. API cost across ${f.cost.agents} API-keyed agent${f.cost.agents > 1 ? 's' : ''}: ${totalCost} — range brackets in/out; subscription & local agents cost $0.`);
   return lines.join('\n');
 }
 

@@ -181,11 +181,16 @@ gateway live.
 
 **📊 Usage** (header) is the fleet rollup: every running agent ranked by
 cumulative tokens, with a bar per agent, its session count, last activity, and
-billing context (included / local / API price). Usage is read live from each
-container, so stopped agents aren't counted — they show as "N not counted
-(live-only)" rather than as zero. On the CLI, `agentclaw usage` (no agent name)
-prints the same ranked table; `agentclaw usage <agent>` still shows one agent's
-breakdown by model.
+an **estimated API cost**. Cost is honest about its limits — only API-keyed
+agents have a per-token price (subscription and local agents show
+"included" / "local", both $0), and since OpenClaw reports one combined
+input+output token counter, the figure is a *range* (low = all input, high =
+all output; the true cost sits near the low end for context-heavy agents). A
+trailing `+` means a model had no known price and was left out. Usage is read
+live from each container, so stopped agents aren't counted — they show as "N
+not counted (live-only)" rather than as zero. On the CLI, `agentclaw usage` (no
+agent name) prints the same ranked table with cost; `agentclaw usage <agent>`
+still shows one agent's breakdown by model.
 
 Per-agent, the card's ⋯ menu has **📊 Usage** (tokens by model,
 honest billing context), **❤️ Health** (is it actually answering?), and

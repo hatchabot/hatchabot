@@ -26,6 +26,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { agentUsage } from '../orchestrator/usage.js';
+import { estimateCost } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
   agentArchiveName,
@@ -1921,7 +1922,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       running.map(async (a) => {
         try {
           const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug);
-          return { id: a.id, name: a.name, ...u };
+          // Billing context drives the cost estimate: a subscription (Max) is
+          // included, a local model is free, only an API key has a per-token
+          // cost. We bracket it as a range — OpenClaw reports combined in+out
+          // tokens, so an exact figure is impossible (see pricing.ts).
+          const p = store.getAIProfile(a.aiProfileId);
+          const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
+          const cost = billing === 'api' ? estimateCost(u.byModel) : null;
+          return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost };
         } catch {
           return null; // unreachable container — treat as skipped, not zero
         }
@@ -1930,12 +1938,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agentsUsage = results
       .filter((r): r is NonNullable<typeof r> => r !== null)
       .sort((x, y) => y.totalTokens - x.totalTokens);
+    // Fleet cost = the summed range over API-keyed agents only. `partial` if any
+    // priced agent used a model with no known price.
+    const billed = agentsUsage.filter((a) => a.cost);
+    const cost = billed.length
+      ? {
+          low: billed.reduce((s, a) => s + a.cost!.low, 0),
+          high: billed.reduce((s, a) => s + a.cost!.high, 0),
+          partial: billed.some((a) => a.cost!.partial),
+          agents: billed.length,
+        }
+      : null;
     return {
       agents: agentsUsage,
       totalTokens: agentsUsage.reduce((s, a) => s + a.totalTokens, 0),
       totalSessions: agentsUsage.reduce((s, a) => s + a.sessions, 0),
       counted: agentsUsage.length,
       skipped: skipped + (results.length - agentsUsage.length),
+      cost,
     };
   });
 

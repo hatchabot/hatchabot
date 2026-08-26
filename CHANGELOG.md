@@ -2,6 +2,23 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.43.0] — 2026-08-26
+
+### Added
+- **Estimated API cost column on the fleet usage rollup.** Each agent and the
+  fleet total now carry a dollar estimate next to the token count, in both the
+  📊 Usage dialog and `agentclaw usage`. It's honest about its limits: only
+  API-keyed agents have a per-token cost (subscription/Max agents show
+  "included", local agents "local", both $0), and because OpenClaw reports one
+  combined input+output counter with no split, the figure is a **range** — the
+  low bound prices every token as input, the high bound as output (for
+  agent workloads, where reloaded context dwarfs output, the true cost sits
+  near the low end). A shared price table (`src/orchestrator/pricing.ts`, kept
+  in sync with the web app's) is the source of truth; unknown models are
+  flagged with a trailing `+` rather than silently priced at zero. The route
+  (`GET /v1/usage`) computes it server-side from each agent's per-model
+  breakdown, so the web and CLI agree.
+
 ## [0.42.0] — 2026-08-26
 
 ### Added

@@ -2743,6 +2743,19 @@ function fmtTokens(n) {
   if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
   return String(v);
 }
+function fmtUsd(n) { return '$' + (n < 10 ? n.toFixed(2) : n < 100 ? n.toFixed(1) : Math.round(n)); }
+// A cost range as one label — collapses when the bounds print the same; the
+// server sends the range because OpenClaw reports combined in+out tokens.
+function fmtCostRange(c) {
+  const lo = fmtUsd(c.low), hi = fmtUsd(c.high);
+  return (lo === hi ? lo : `${lo}–${hi}`) + (c.partial ? '+' : '');
+}
+// The per-agent cost cell: a $ range for API-keyed agents, else why it's free.
+function usageCost(a) {
+  if (a.billing === 'local') return { text: 'local', dim: true };
+  if (a.billing === 'included') return { text: 'included', dim: true };
+  return a.cost ? { text: 'est. ' + fmtCostRange(a.cost), dim: false } : { text: '', dim: true };
+}
 function billingLine(agentId, models) {
   const a = (agents ?? []).find(x => x.id === agentId);
   const p = (profiles ?? []).find(x => x.id === a?.aiProfileId);
@@ -2802,21 +2815,29 @@ function renderFleetUsage(f) {
   const max = f.agents[0].totalTokens || 1; // top agent sets the bar scale
   const rows = f.agents.map((a, i) => {
     const pct = Math.max(2, Math.round((a.totalTokens / max) * 100));
-    const bill = billingLine(a.id, (a.byModel || []).map(m => m.model));
+    const modelDesc = (a.byModel || []).map(m => esc(m.model)).join(', ') || (a.billing === 'included' ? esc(a.profileName || 'subscription') : '');
+    const cost = usageCost(a);
     return `<div class="pair" style="padding:6px 0;align-items:flex-start" title="${esc((a.byModel || []).map(m => m.model + ': ' + fmtTokens(m.tokens)).join('\n'))}">
       <span class="grow">
         <span class="sub" style="display:inline-block;width:1.4em">${i + 1}.</span> <b>${esc(a.name)}</b>
-        <span class="sub"> · ${a.sessions} session${a.sessions > 1 ? 's' : ''}${a.lastActive ? ' · ' + ago(a.lastActive) : ''}${bill ? ' · ' + bill : ''}</span>
+        <span class="sub"> · ${a.sessions} session${a.sessions > 1 ? 's' : ''}${a.lastActive ? ' · ' + ago(a.lastActive) : ''}${modelDesc ? ' · ' + modelDesc : ''}</span>
         <div style="height:5px;border-radius:3px;background:var(--accent);opacity:.85;width:${pct}%;margin-top:5px;min-width:6px"></div>
       </span>
-      <b style="white-space:nowrap;margin-left:10px">${fmtTokens(a.totalTokens)}</b>
+      <span style="text-align:right;margin-left:10px;white-space:nowrap">
+        <b>${fmtTokens(a.totalTokens)}</b>
+        ${cost.text ? `<div class="sub"${cost.dim ? '' : ' style="color:var(--warn)"'}>${cost.text}</div>` : ''}
+      </span>
     </div>`;
   }).join('');
+  const totalCost = f.cost
+    ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>`
+    : '';
   $('fleetUsageBody').innerHTML =
-    `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
-       <span><span style="font-size:22px;font-weight:700">${fmtTokens(f.totalTokens)}</span> <span class="sub">tokens · ${f.counted} running agent${f.counted > 1 ? 's' : ''}</span></span>
+    `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:8px;flex-wrap:wrap">
+       <span><span style="font-size:22px;font-weight:700">${fmtTokens(f.totalTokens)}</span> <span class="sub">tokens · ${f.counted} running agent${f.counted > 1 ? 's' : ''}</span> ${totalCost}</span>
        ${f.skipped ? `<span class="sub">${f.skipped} not counted (live-only)</span>` : ''}
      </div>
+     ${f.cost ? `<div class="sub" style="margin:-2px 0 10px">Cost is an estimate over ${f.cost.agents} API-keyed agent${f.cost.agents > 1 ? 's' : ''}: OpenClaw reports combined input + output tokens, so it's a range (low = all input, high = all output). Subscription and local agents cost $0.</div>` : ''}
      ${rows}`;
 }
 

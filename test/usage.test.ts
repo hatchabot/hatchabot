@@ -129,6 +129,19 @@ describe('GET /v1/usage (fleet rollup)', () => {
     expect(body.skipped).toBe(1); // the STOPPED agent, not shown as zero
   });
 
+  it('attaches an API cost RANGE per agent and a fleet total (api-keyed only)', async () => {
+    const { f } = await fleetWorld();
+    const body = (await f.inject({ method: 'GET', url: '/v1/usage', headers: as })).json();
+    // Den: 9000 opus-4-8 tokens @ [5,25]/1M → low $0.045, high $0.225.
+    expect(body.agents[0].billing).toBe('api');
+    expect(body.agents[0].cost.low).toBeCloseTo(0.045, 4);
+    expect(body.agents[0].cost.high).toBeCloseTo(0.225, 4);
+    expect(body.agents[0].cost.partial).toBe(false);
+    // Fleet cost sums both api agents; low = 0.045 (Den) + 0.00825 (Kitchen).
+    expect(body.cost.agents).toBe(2);
+    expect(body.cost.low).toBeCloseTo(0.05325, 4);
+  });
+
   it('drops an unreachable container to skipped rather than failing the whole list', async () => {
     const { f, provider } = await fleetWorld();
     provider.exec = (async (_ref: string, argv: string[]) => {
@@ -146,5 +159,25 @@ describe('GET /v1/usage (fleet rollup)', () => {
     const { f } = await fleetWorld();
     const res = await f.inject({ method: 'GET', url: '/v1/usage', headers: { 'x-agentclaw-owner': 'someone-else' } });
     expect(res.json()).toMatchObject({ agents: [], counted: 0, skipped: 0 });
+  });
+
+  it('does not bill subscription (included) or local agents — cost is null', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'sub', ownerId: OWNER, name: 'Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/sub', createdAt: 'now' });
+    store.insertAIProfile({ id: 'loc', ownerId: OWNER, name: 'Ollama', vendor: 'local', kind: 'api_key', model: 'gpt-oss', secretRef: 'ai/loc', createdAt: 'now' });
+    for (const [id, slug, name, prof] of [['s1', 'sub-agent', 'Maxie', 'sub'], ['l1', 'loc-agent', 'Local', 'loc']] as const) {
+      const { runtimeRef } = await provider.provision({ agentId: id, slug, workspace: { files: {}, configPatch: { agentId: slug, authMode: 'api-key' } }, env: {} } as any);
+      store.insertAgent({ id, ownerId: OWNER, name, slug, state: 'RUNNING', aiProfileId: prof, hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    }
+    provider.execResponses.set('sessions list', { code: 0, stdout: SESSIONS_JSON, stderr: '' });
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    const body = (await f.inject({ method: 'GET', url: '/v1/usage', headers: as })).json();
+    const byName = Object.fromEntries(body.agents.map((a: any) => [a.name, a]));
+    expect(byName.Maxie).toMatchObject({ billing: 'included', cost: null });
+    expect(byName.Local).toMatchObject({ billing: 'local', cost: null });
+    expect(body.cost).toBeNull(); // nothing billable → no fleet cost at all
   });
 });
