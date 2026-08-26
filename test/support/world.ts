@@ -32,17 +32,25 @@ export const as = (owner: string = OWNER) => ({ 'x-agentclaw-owner': owner });
 // bot token. The pool is a real little in-memory pool so the stock/recycle
 // routes are testable; `entries` is exposed for assertions.
 function channelStub(availableBots = 0) {
-  const entries: Array<{ username: string; token: string; leasedTo?: string }> = [];
+  const entries: Array<{ username: string; token: string; leasedTo?: string; ownerId?: string | null }> = [];
   const pool = {
     entries,
-    availableCount: () => availableBots + entries.filter((e) => !e.leasedTo).length,
+    // Mirrors the real pool's ownership scoping: own + shared (null owner).
+    availableCount: (owner?: string) =>
+      availableBots +
+      entries.filter((e) => !e.leasedTo && (owner === undefined || !e.ownerId || e.ownerId === owner)).length,
     owns: (u: string) => entries.some((e) => e.username === u),
     list: () =>
-      entries.map((e) => ({ username: e.username, secretRef: `telegram/bot/${e.username}`, leasedTo: e.leasedTo })),
-    addToPool: async (u: string, t: string) => {
+      entries.map((e) => ({
+        username: e.username,
+        secretRef: `telegram/bot/${e.username}`,
+        leasedTo: e.leasedTo,
+        ownerId: e.ownerId ?? undefined,
+      })),
+    addToPool: async (u: string, t: string, ownerId?: string | null) => {
       const ex = entries.find((e) => e.username === u);
-      if (ex) ex.token = t;
-      else entries.push({ username: u, token: t });
+      if (ex) { ex.token = t; ex.ownerId = ownerId ?? null; }
+      else entries.push({ username: u, token: t, ownerId: ownerId ?? null });
     },
     removeFromPool: async (u: string) => {
       const e = entries.find((x) => x.username === u);

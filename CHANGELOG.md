@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.38.0] — 2026-08-25
+
+### Changed
+- **The bot pool is now ownership-aware.** A bot token belongs to whoever
+  minted it at BotFather — they can rename or revoke it any time — so one
+  user's recycled bot must never silently become another user's next agent
+  identity (it did: the pool was server-scoped). Now each pool bot carries
+  an owner; leasing offers a user their *own* bots first, then **shared**
+  house bots (an explicit "Share with everyone" choice when stocking, and
+  the admin script's default). Recycle-on-delete parks the bot under the
+  deleting agent's owner; the "N instant bots ready" count is per-user; the
+  pool roster labels each bot yours / shared / another user's. Existing
+  pool rows migrate as shared.
+
 ## [0.37.2] — 2026-08-25
 
 ### Added

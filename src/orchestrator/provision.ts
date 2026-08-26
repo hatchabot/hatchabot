@@ -152,6 +152,7 @@ async function runProvisionStepsInner(
         agentId,
         agentName: agent.name,
         slug: agent.slug,
+        ownerId: agent.ownerId,
         // One-shot: consumed here so a later Retry (after the manual flow has
         // parked the agent) follows the persisted pendingAction, not the flag.
         skipPool: skipPoolOnce.delete(agentId) || undefined,

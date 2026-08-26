@@ -604,10 +604,12 @@
 
   <section id="panePool" role="tabpanel" hidden>
     <div class="sub">
-      Spare Telegram bots, parked for reuse. When the pool has bots, creating
-      an agent grabs one <b>instantly</b> — no BotFather trip — and deleting
-      that agent returns it here automatically. Deleting an agent whose bot
-      you pasted by hand offers to park the bot here instead of forgetting it.
+      Spare Telegram bots, parked for reuse. When you have bots here, creating
+      an agent grabs one <b>instantly</b> — no BotFather trip — and deleting an
+      agent parks its bot back automatically. <b>Bots are personal</b>: a token
+      belongs to whoever minted it at BotFather (they can rename or revoke it
+      any time), so each user leases only <i>their own</i> bots — plus
+      <b>shared</b> house bots explicitly donated for everyone on this server.
     </div>
     <div id="poolList" style="margin-top:10px">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a bot</h4>
@@ -617,6 +619,10 @@
       with Telegram before it's stored.
     </div>
     <input type="password" id="poolToken" placeholder="123456789:AA..." autocomplete="off" style="font-family:ui-monospace,monospace">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+      <input type="checkbox" id="poolShared" style="width:auto">
+      <span>Share with everyone on this server <span class="sub">— otherwise only you can lease it</span></span>
+    </label>
     <div class="err" id="poolErr"></div>
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="poolAddBtn" onclick="addPoolBot()">Add to pool</button>
@@ -1121,7 +1127,7 @@ async function loadPool() {
     el.innerHTML = bots.length
       ? bots.map(b => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
           <span class="grow">🤖 <b>@${esc(b.username)}</b>
-            <span class="sub">· ${b.leasedTo ? 'in use by an agent' : 'available'}</span></span>
+            <span class="sub">· ${b.shared ? 'shared' : b.mine ? 'yours' : 'another user’s'} · ${b.leasedTo ? 'in use by an agent' : 'available'}</span></span>
           ${b.leasedTo ? '' : `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}')">Remove</button>`}
         </div>`).join('')
       : '<div class="sub">Empty — add a spare bot below, or park one when deleting an agent.</div>';
@@ -1134,8 +1140,8 @@ async function addPoolBot() {
   if (!token) { $('poolErr').textContent = 'Paste a bot token first.'; return; }
   $('poolAddBtn').disabled = true;
   try {
-    const r = await api('/v1/pool', { method: 'POST', body: { token } });
-    $('poolToken').value = '';
+    const r = await api('/v1/pool', { method: 'POST', body: { token, shared: $('poolShared').checked } });
+    $('poolToken').value = ''; $('poolShared').checked = false;
     toast(`@${r.username} added — ${r.availableBots} instant bot${r.availableBots === 1 ? '' : 's'} ready.`);
     await loadPool();
     refresh(true); // header "N instant bots ready"

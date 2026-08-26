@@ -14,6 +14,9 @@ export interface ChannelProvisionRequest {
   /** Human-facing agent name, used to derive a handle where the platform allows. */
   agentName: string;
   slug: string;
+  /** The AgentClaw user creating the agent — pool leasing is scoped to their
+   *  own bots plus shared house bots (a token belongs to whoever minted it). */
+  ownerId?: string;
   /** Owner opted out of a pool bot for this agent — go straight to the manual
    *  (BotFather walkthrough) path even when the pool has bots. */
   skipPool?: boolean;

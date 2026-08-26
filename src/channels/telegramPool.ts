@@ -33,18 +33,31 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
         leased_at TEXT
       )
     `);
+    // A bot token is PERSONALLY owned: whoever minted it at BotFather can
+    // rename, revoke, or delete the bot at will — so another user's agent
+    // must never silently build on it. owner_id scopes each pool bot to one
+    // AgentClaw user; NULL = a "house bot" the admin explicitly shares.
+    try {
+      this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN owner_id TEXT`);
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err))) throw err;
+    }
   }
 
-  /** Adds a hand-minted bot to the pool. Called by an admin script, not the app. */
-  async addToPool(username: string, botToken: string): Promise<void> {
+  /**
+   * Add a hand-minted bot. `ownerId` scopes who may lease it; null/undefined
+   * = shared house bot (the admin script's default, and an explicit checkbox
+   * in the app).
+   */
+  async addToPool(username: string, botToken: string, ownerId?: string | null): Promise<void> {
     const secretRef = `telegram/bot/${username}`;
     await this.secrets.put(secretRef, botToken);
     this.db
       .prepare(
-        `INSERT INTO telegram_pool (username, secret_ref) VALUES (?, ?)
-         ON CONFLICT(username) DO UPDATE SET secret_ref = excluded.secret_ref`,
+        `INSERT INTO telegram_pool (username, secret_ref, owner_id) VALUES (?, ?, ?)
+         ON CONFLICT(username) DO UPDATE SET secret_ref = excluded.secret_ref, owner_id = excluded.owner_id`,
       )
-      .run(username, secretRef);
+      .run(username, secretRef, ownerId ?? null);
   }
 
   /** True when this username came from the pool (vs a user-supplied bot). */
@@ -54,10 +67,17 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .get(username);
   }
 
-  availableCount(): number {
-    const row = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL`)
-      .get() as { n: number };
+  /** Bots leasable BY THIS USER: their own plus shared house bots. Without an
+   *  ownerId (admin script), counts everything unleased. */
+  availableCount(ownerId?: string): number {
+    const row = (ownerId === undefined
+      ? this.db.prepare(`SELECT COUNT(*) AS n FROM telegram_pool WHERE leased_to IS NULL`).get()
+      : this.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM telegram_pool
+             WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)`,
+          )
+          .get(ownerId)) as { n: number };
     return row.n;
   }
 
@@ -77,12 +97,17 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   }
 
   /** Every pool bot with its lease state and token ref — for the bot audit. */
-  list(): Array<{ username: string; secretRef: string; leasedTo?: string }> {
+  list(): Array<{ username: string; secretRef: string; leasedTo?: string; ownerId?: string }> {
     return (
       this.db
-        .prepare(`SELECT username, secret_ref, leased_to FROM telegram_pool ORDER BY username`)
-        .all() as Array<{ username: string; secret_ref: string; leased_to: string | null }>
-    ).map((r) => ({ username: r.username, secretRef: r.secret_ref, leasedTo: r.leased_to ?? undefined }));
+        .prepare(`SELECT username, secret_ref, leased_to, owner_id FROM telegram_pool ORDER BY username`)
+        .all() as Array<{ username: string; secret_ref: string; leased_to: string | null; owner_id: string | null }>
+    ).map((r) => ({
+      username: r.username,
+      secretRef: r.secret_ref,
+      leasedTo: r.leased_to ?? undefined,
+      ownerId: r.owner_id ?? undefined,
+    }));
   }
 
   async provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel> {
@@ -92,9 +117,17 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .get(req.agentId) as { username: string; secret_ref: string } | undefined;
     if (existing) return this.#toChannel(existing.username, existing.secret_ref);
 
+    // Ownership scoping: a user leases only their OWN bots plus shared house
+    // bots (owner_id NULL). Another person's token is never touched — its
+    // minter can revoke it at BotFather any time, and only they should hold
+    // that risk. Own bots first, so house stock is preserved for newcomers.
     const free = this.db
-      .prepare(`SELECT username, secret_ref FROM telegram_pool WHERE leased_to IS NULL LIMIT 1`)
-      .get() as { username: string; secret_ref: string } | undefined;
+      .prepare(
+        `SELECT username, secret_ref FROM telegram_pool
+         WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)
+         ORDER BY (owner_id IS NULL) ASC, username LIMIT 1`,
+      )
+      .get(req.ownerId ?? '') as { username: string; secret_ref: string } | undefined;
     if (!free) {
       throw new PoolExhaustedError();
     }

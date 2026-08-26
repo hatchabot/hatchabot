@@ -783,14 +783,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.get('/v1/pool', async (req) => {
     return {
-      availableBots: deps.channel.pool.availableCount(),
+      // Per-user: YOUR bots plus shared house bots — what a create by this
+      // user could actually lease. Tokens are personally owned (their minter
+      // can revoke them at BotFather), so one user's parked bot is never
+      // another user's next lease.
+      availableBots: deps.channel.pool.availableCount(ownerIdOf(req)),
       // The roster is host-owner detail (it names bots and their leases);
       // everyone else only needs the count for the "N instant bots" header.
       ...(ownsLocalHost(req)
         ? {
             bots: deps.channel.pool
               .list()
-              .map((b) => ({ username: b.username, leasedTo: b.leasedTo })),
+              .map((b) => ({
+                username: b.username,
+                leasedTo: b.leasedTo,
+                ownerId: b.ownerId, // undefined = shared house bot
+                shared: !b.ownerId,
+                mine: b.ownerId === ownerIdOf(req),
+              })),
           }
         : {}),
     };
@@ -823,9 +833,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Stock the pool from the app: verify the token against Telegram, then store
   // it. Refuses a bot that is currently some agent's live identity.
-  app.post<{ Body: { token?: string } }>('/v1/pool', async (req, reply) => {
+  app.post<{ Body: { token?: string; shared?: boolean } }>('/v1/pool', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    const token = (req.body as { token?: string } | null)?.token?.trim();
+    const body = req.body as { token?: string; shared?: boolean } | null;
+    const token = body?.token?.trim();
     if (!token) return reply.code(400).send({ error: 'Paste a bot token from @BotFather.' });
     let username: string;
     try {
@@ -841,8 +852,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         error: `@${username} is the live identity of agent "${using.name}" — it can't also sit in the pool.`,
       });
     }
-    await deps.channel.pool.addToPool(username, token);
-    return reply.code(201).send({ username, availableBots: deps.channel.pool.availableCount() });
+    // Yours by default — a token belongs to whoever minted it. `shared: true`
+    // explicitly donates it as a house bot anyone here can lease.
+    await deps.channel.pool.addToPool(username, token, body?.shared ? null : ownerIdOf(req));
+    return reply
+      .code(201)
+      .send({ username, availableBots: deps.channel.pool.availableCount(ownerIdOf(req)) });
   });
 
   app.delete<{ Params: { username: string } }>('/v1/pool/:username', async (req, reply) => {
@@ -2888,8 +2903,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (req.query.recycleBot !== '0') {
           try {
             if (!deps.channel.pool.owns(channel.accountId)) {
+              // Parked under the AGENT'S OWNER: their token, their pool slot —
+              // never another user's next lease.
               const token = await secrets.get(channel.secretRef);
-              await deps.channel.pool.addToPool(channel.accountId, token);
+              await deps.channel.pool.addToPool(channel.accountId, token, agent.ownerId);
             }
           } catch (err) {
             app.log.warn({ agentId: agent.id, err: String(err) }, 'bot recycle into pool failed');

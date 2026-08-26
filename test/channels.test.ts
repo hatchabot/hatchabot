@@ -74,6 +74,34 @@ describe('TelegramPoolProvisioner', () => {
     expect(leased.accountId).toBe('bot1'); // lease succeeded despite the outage
   });
 
+  it('never leases another user\'s bot — own first, then shared house bots', async () => {
+    // A bot token belongs to whoever minted it at BotFather (they can revoke
+    // it any time) — so user B's create must not consume user A's parked bot.
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
+    await pool.addToPool('alices-bot', 'tok-a', 'user-alice');
+    await pool.addToPool('house-bot', 'tok-h', null); // explicitly shared
+
+    // Bob sees only the house bot — Alice's is invisible to him.
+    expect(pool.availableCount('user-bob')).toBe(1);
+    const bob = await pool.provision({ agentId: 'b1', agentName: 'B', slug: 'b', ownerId: 'user-bob' });
+    expect(bob.accountId).toBe('house-bot');
+
+    // Alice leases her own; with none left, exhaustion — never Bob's lease.
+    const alice = await pool.provision({ agentId: 'a1', agentName: 'A', slug: 'a', ownerId: 'user-alice' });
+    expect(alice.accountId).toBe('alices-bot');
+    await expect(
+      pool.provision({ agentId: 'a2', agentName: 'A2', slug: 'a2', ownerId: 'user-alice' }),
+    ).rejects.toBeInstanceOf(PoolExhaustedError);
+  });
+
+  it('prefers a user\'s own bot over shared house stock', async () => {
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
+    await pool.addToPool('house-bot', 'tok-h', null);
+    await pool.addToPool('mine-bot', 'tok-m', 'user-alice');
+    const leased = await pool.provision({ agentId: 'a1', agentName: 'A', slug: 'a', ownerId: 'user-alice' });
+    expect(leased.accountId).toBe('mine-bot'); // house stock preserved for others
+  });
+
   it('leases idempotently per agent and counts availability', async () => {
     const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
     await pool.addToPool('bot1', 'tok1');

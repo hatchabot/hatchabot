@@ -30,9 +30,12 @@ future agent, because AgentClaw forgets it on delete.
 Bots outlive agents by default: **deleting an agent parks its bot in the
 Bot pool** (⚙ Settings → Bot pool) — pool-leased and hand-pasted alike — and
 when the pool leases it to the next agent, the bot's display name updates to
-that agent's name automatically. With Telegram's ~20-bots-per-account
-ceiling, every recycled slot counts; remove a bot from the pool tab if you
-truly want its token gone. You can also pre-stock the pool there (paste
+that agent's name automatically. **Bots are personal**: a token belongs to
+whoever minted it at BotFather (they can rename or revoke it any time), so
+each user leases only their *own* parked bots plus **shared** house bots
+explicitly donated for the whole server. With Telegram's
+~20-bots-per-account ceiling, every recycled slot counts; remove a bot from
+the pool tab if you truly want its token gone. You can also pre-stock the pool there (paste
 BotFather tokens; verified before storing), after which creation grabs a bot
 instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:

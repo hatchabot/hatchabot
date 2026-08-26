@@ -30,7 +30,8 @@ describe('GET /v1/pool', () => {
     await w.channel.pool.addToPool('sparebot', 'tok-1');
     const mine = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as() })).json();
     expect(mine.availableBots).toBe(1);
-    expect(mine.bots).toEqual([{ username: 'sparebot', leasedTo: undefined }]);
+    // Stub-added with no owner → a shared house bot.
+    expect(mine.bots).toEqual([{ username: 'sparebot', shared: true, mine: false }]);
     const theirs = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as('someone-else') })).json();
     expect(theirs.availableBots).toBe(1);
     expect(theirs.bots).toBeUndefined(); // roster is host-owner detail
@@ -44,7 +45,11 @@ describe('POST /v1/pool', () => {
     const res = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as(), payload: { token: '1:AA' } });
     expect(res.statusCode).toBe(201);
     expect(res.json()).toMatchObject({ username: 'freshbot', availableBots: 1 });
-    expect(w.channel.pool.entries[0]).toMatchObject({ username: 'freshbot', token: '1:AA' });
+    // Yours by default — its minter's, not the house's.
+    expect(w.channel.pool.entries[0]).toMatchObject({ username: 'freshbot', token: '1:AA', ownerId: w.owner });
+    // …which means OTHER users can't lease (or even count) it.
+    const theirs = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as('someone-else') })).json();
+    expect(theirs.availableBots).toBe(0);
   });
 
   it('rejects a bad token (400) and a bot already wired to an agent (409)', async () => {
@@ -116,8 +121,9 @@ describe('delete-time recycle — parking the bot is the DEFAULT', () => {
     const id = await seedRunningAgent(w, { accountId: 'kitchenbot', botToken: 'the-live-token' });
     const res = await w.f.inject({ method: 'DELETE', url: `/v1/agents/${id}`, headers: as() });
     expect(res.statusCode).toBe(200);
+    // Parked under the deleting agent's OWNER — their token, their slot.
     expect(w.channel.pool.entries).toEqual([
-      expect.objectContaining({ username: 'kitchenbot', token: 'the-live-token' }),
+      expect.objectContaining({ username: 'kitchenbot', token: 'the-live-token', ownerId: w.owner }),
     ]);
   });
 
