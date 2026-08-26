@@ -172,6 +172,41 @@ describe('rebuildAgent', () => {
     expect(w.store.getAgent(agent.id)!.runtimeRef).toBe(refBefore);
   });
 
+  it('takes the pre-rebuild snapshot BEFORE stopping/replacing the container', async () => {
+    // The snapshot moved out of the route into the task; it must still run
+    // while the agent is RUNNING and before the old container is torn down —
+    // otherwise the "insurance" copy captures nothing.
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    // Make the container's core files readable so the capture actually stores.
+    (w.provider as any).execResponses.set('sh', { code: 0, stdout: '# Memory\n- soup\n', stderr: '' });
+    // Snapshot count observed at the instant the old container is stopped.
+    let snapsAtStop = -1;
+    const origStop = w.provider.stop.bind(w.provider);
+    (w.provider as any).stop = async (ref: string) => {
+      snapsAtStop = w.store.listSnapshots(agent.id).length;
+      return origStop(ref);
+    };
+
+    await rebuildAgent(w.deps, agent.id);
+
+    const snaps = w.store.listSnapshots(agent.id);
+    expect(snaps.some((s) => s.reason === 'pre-rebuild')).toBe(true);
+    expect(snapsAtStop).toBe(1); // captured before the stop, not after
+  });
+
+  it('rebuilds a STOPPED agent without trying to snapshot it', async () => {
+    // A STOPPED agent can't be read, so no snapshot is attempted — and the
+    // rebuild must still succeed rather than choke on a failed capture.
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    await w.provider.stop(w.store.getAgent(agent.id)!.runtimeRef!);
+    w.store.setAgentState(agent.id, 'STOPPED');
+    const rebuilt = await rebuildAgent(w.deps, agent.id);
+    expect(rebuilt.state).toBe('RUNNING');
+    expect(w.store.listSnapshots(agent.id)).toHaveLength(0);
+  });
+
   it('lands FAILED (not stuck REBUILDING) when the container will not start', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);

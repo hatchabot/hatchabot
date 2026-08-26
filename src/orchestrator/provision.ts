@@ -8,6 +8,7 @@ import { ProviderError } from '../providers/provider.js';
 import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
+import { autoSnapshot } from './snapshots.js';
 import { buildWorkspaceSeed } from '../openclaw/workspace.js';
 import { buildGitSyncScript } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
@@ -438,6 +439,14 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   if (!agent?.runtimeRef) throw new Error(`Agent ${agentId} has no runtime to rebuild`);
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
     throw new Error(`Cannot rebuild from state ${agent.state}`);
+  }
+  // Cheap insurance before we replace the container. This runs HERE (inside the
+  // background task) rather than in the route so the POST returns immediately —
+  // the ~1-2s docker-exec snapshot was what made "Rebuild all" sit silent. It
+  // still happens before stop/replace, and before the REBUILDING flip because
+  // captureSnapshot only reads a RUNNING agent (no-op unless RUNNING).
+  if (agent.state === 'RUNNING') {
+    await autoSnapshot({ store, provider, log }, agentId, 'pre-rebuild');
   }
   // Visible immediately: the chip must not read RUNNING while the container
   // is being replaced.

@@ -3222,6 +3222,10 @@ async function rebuildAll() {
 
   const btn = $('rebuildAllBtn'); btn.disabled = true;
   let started = 0, skipped = 0;
+  // Immediate feedback — the POSTs now return fast (the snapshot moved into the
+  // background task server-side), but say so up front so the row never sits
+  // silent, then repaint chips as they flip to REBUILDING.
+  toast(`Queuing ${list.length} rebuild${list.length === 1 ? '' : 's'}…`);
   // Fire sequentially: each call returns as soon as its rebuild is queued, so
   // this staggers the snapshots rather than hammering the box all at once.
   // Each agent keeps its own guards server-side (busy, moved-away, in-flight).

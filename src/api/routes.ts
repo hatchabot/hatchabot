@@ -2718,10 +2718,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
     }
-    // Cheap insurance before replacing the container (no-op unless RUNNING).
-    if (agent.state === 'RUNNING') {
-      await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-rebuild');
-    }
+    // The pre-rebuild snapshot now runs as the first step of the background
+    // rebuild task (see rebuildAgentInner), so this returns 202 immediately
+    // instead of blocking on a ~1-2s docker-exec snapshot per agent.
     if (inflight.has(agent.id)) {
       return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
     }

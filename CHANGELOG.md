@@ -2,7 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.44.0] — 2026-08-26
+## [0.45.0] — 2026-08-26
+
+### Changed
+- **Rebuild responds instantly instead of stalling for seconds.** The
+  pre-rebuild snapshot (a ~1–2s `docker exec` per agent) ran *synchronously in
+  the request* before `POST /rebuild` returned, so "Rebuild all" fired the
+  calls one-by-one and sat visibly silent while each agent snapshotted. Moved
+  the snapshot to be the first step of the background rebuild task: the POST
+  returns `202` immediately, the card flips to **REBUILDING** right away, and
+  the snapshot still runs while the agent is RUNNING and before the container
+  is stopped/replaced (verified by test). The web "Rebuild all" also shows an
+  immediate "Queuing N rebuilds…" toast so the row never sits blank.
 
 ### Changed
 - **Moved the "N instant bots ready" indicator** out of the cramped spot beside
