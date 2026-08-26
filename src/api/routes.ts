@@ -613,9 +613,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.get('/v1/hosts', async (req) => {
     // Annotate each host with how many agents run on it — the load signal for
-    // placement and the "can I delete this?" check in the UI.
-    const active = store.listAllActiveAgents();
-    return store.listHosts(ownerIdOf(req)).map((h) => ({
+    // placement and the "can I delete this?" check in the UI. The host owner
+    // (admin) sees the true fleet-wide count; a plain user sees only THEIR own
+    // agents' count, never a window onto others' fleet size.
+    const ownerId = ownerIdOf(req);
+    const admin = ownsLocalHost(req);
+    const active = store.listAllActiveAgents().filter((a) => admin || a.ownerId === ownerId);
+    return store.listHosts(ownerId).map((h) => ({
       ...h,
       agentCount: active.filter((a) => a.hostId === h.id).length,
     }));
@@ -728,8 +732,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     for (const a of running) {
       if (isBusy(a.id)) { skipped.push(a.name); continue; }
       try {
-        await providerFor(host.id).stop(a.runtimeRef!);
-        store.setAgentState(a.id, 'STOPPED');
+        // Hold the busy flag for the stop so an export/migrate can't start
+        // between the check and the stop and get its container killed mid-tar.
+        await whileBusy(a.id, async () => {
+          await providerFor(host.id).stop(a.runtimeRef!);
+          store.setAgentState(a.id, 'STOPPED');
+        });
         stopped++;
       } catch (err) {
         skipped.push(a.name);
@@ -822,7 +830,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   app.put<{ Body: { key?: string } }>('/v1/media-key', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    const key = (req.body as { key?: string } | null)?.key?.trim();
+    const parsed = z.object({ key: z.string().min(1).max(400) }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Paste a Gemini API key.' });
+    const key = parsed.data.key.trim();
     if (!key) return reply.code(400).send({ error: 'Paste a Gemini API key.' });
     await secrets.put(MEDIA_KEY_REF, key);
     return { set: true };
@@ -838,8 +848,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // it. Refuses a bot that is currently some agent's live identity.
   app.post<{ Body: { token?: string; shared?: boolean } }>('/v1/pool', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    const body = req.body as { token?: string; shared?: boolean } | null;
-    const token = body?.token?.trim();
+    const parsed = z
+      .object({ token: z.string().min(1).max(256), shared: z.boolean().optional() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Paste a bot token from @BotFather.' });
+    const body = parsed.data;
+    const token = body.token.trim();
     if (!token) return reply.code(400).send({ error: 'Paste a bot token from @BotFather.' });
     let username: string;
     try {
@@ -870,7 +884,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     } catch (err) {
       return reply.code(409).send({ error: String(err instanceof Error ? err.message : err) });
     }
-    return { removed: true, availableBots: deps.channel.pool.availableCount() };
+    return { removed: true, availableBots: deps.channel.pool.availableCount(ownerIdOf(req)) };
   });
 
   // A Telegram-bot census: this install's bots (and, with ?consolidated=1, each
@@ -1417,9 +1431,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
         const host = store.getHost(agent.hostId);
-        if (next.vendor !== 'local' && next.kind === 'subscription' && host?.kind !== 'local') {
+        // Same rule as create/move: a setup-token Max profile (secretRef
+        // present) rides to a runner; only the machine-login flavour is
+        // desktop-only. Without the secretRef check a runner agent couldn't be
+        // switched to a setup-token source it could have been created with.
+        if (
+          next.vendor !== 'local' &&
+          next.kind === 'subscription' &&
+          host?.kind !== 'local' &&
+          !next.secretRef
+        ) {
           return reply.code(400).send({
-            error: 'A subscription profile can only power agents on your own machine.',
+            error:
+              "This Claude Max profile uses this machine's login, which can't reach a runner. " +
+              'Use a setup-token Max source or an API key for a runner agent.',
           });
         }
         target = next;
@@ -2399,8 +2424,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       if (movedAway(agent, reply)) return reply;
-      const targetId = (req.body as { hostId?: string } | null)?.hostId;
-      const host = targetId ? store.getHost(targetId) : undefined;
+      const targetId = z.string().min(1).safeParse((req.body as { hostId?: unknown } | null)?.hostId);
+      const host = targetId.success ? store.getHost(targetId.data) : undefined;
       if (!host || (host.ownerId !== ownerIdOf(req) && host.kind !== 'local')) {
         return reply.code(400).send({ error: 'Unknown host' });
       }

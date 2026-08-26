@@ -552,7 +552,10 @@
       <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>),
       every agent can <b>transcribe Telegram voice notes</b> — audio is sent to
       Gemini for transcription, then answered by the agent's own AI as usual.
-      Applies to each agent on its next <b>Rebuild</b>.
+      Applies to each agent on its next <b>Rebuild</b>. <b>This is a shared
+      credential:</b> it's injected into every agent on the server, so anyone
+      who owns an agent here can use it (and a technical user could read it). Use
+      a key scoped to this purpose, not a personal all-services one.
     </div>
     <div id="mediaKeyStatus" style="margin-top:8px;font-size:14px"></div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
@@ -1197,7 +1200,7 @@ async function pingHost(id) {
           ? ` · <span style="color:var(--warn)">runtime image missing</span> <button class="hbtn" onclick="installImage('${jsq(id)}')">Install image</button>`
           : '');
     }
-  } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = esc(e.message); } }
+  } catch (e) { if (el) { el.style.color = 'var(--warn)'; el.textContent = e.message; } }
 }
 
 /** Copy this server's runtime image to the runner — a multi-GB stream, so it

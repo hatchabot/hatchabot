@@ -50,6 +50,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * in the app).
    */
   async addToPool(username: string, botToken: string, ownerId?: string | null): Promise<void> {
+    username = username.toLowerCase(); // Telegram @handles are case-insensitive
     const secretRef = `telegram/bot/${username}`;
     await this.secrets.put(secretRef, botToken);
     this.db
@@ -60,10 +61,13 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .run(username, secretRef, ownerId ?? null);
   }
 
-  /** True when this username came from the pool (vs a user-supplied bot). */
+  /** True when this username came from the pool (vs a user-supplied bot).
+   *  Case-insensitive: Telegram @handles are, and an adopt-sourced accountId
+   *  differing only in case must not create a second row for the same bot
+   *  (two rows → two leases → two pollers). */
   owns(username: string): boolean {
     return !!this.db
-      .prepare(`SELECT 1 FROM telegram_pool WHERE username = ?`)
+      .prepare(`SELECT 1 FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
       .get(username);
   }
 
@@ -88,12 +92,12 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    */
   async removeFromPool(username: string): Promise<void> {
     const row = this.db
-      .prepare(`SELECT secret_ref, leased_to FROM telegram_pool WHERE username = ?`)
-      .get(username) as { secret_ref: string; leased_to: string | null } | undefined;
+      .prepare(`SELECT username, secret_ref, leased_to FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+      .get(username) as { username: string; secret_ref: string; leased_to: string | null } | undefined;
     if (!row) throw new Error(`@${username} is not in the pool.`);
     if (row.leased_to) throw new Error(`@${username} is leased to an agent — delete that agent first.`);
     await this.secrets.delete(row.secret_ref).catch(() => {});
-    this.db.prepare(`DELETE FROM telegram_pool WHERE username = ?`).run(username);
+    this.db.prepare(`DELETE FROM telegram_pool WHERE username = ?`).run(row.username);
   }
 
   /** Every pool bot with its lease state and token ref — for the bot audit. */
@@ -171,7 +175,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // The bot goes back in the pool. We do NOT delete the token — the bot still
     // exists on Telegram's side and can serve the next agent.
     this.db
-      .prepare(`UPDATE telegram_pool SET leased_to = NULL, leased_at = NULL WHERE username = ?`)
+      .prepare(`UPDATE telegram_pool SET leased_to = NULL, leased_at = NULL WHERE username = ? COLLATE NOCASE`)
       .run(accountId);
   }
 

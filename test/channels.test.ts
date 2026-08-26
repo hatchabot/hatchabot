@@ -94,6 +94,18 @@ describe('TelegramPoolProvisioner', () => {
     ).rejects.toBeInstanceOf(PoolExhaustedError);
   });
 
+  it('treats usernames case-insensitively (no duplicate row for the same bot)', async () => {
+    // An adopt-sourced accountId differing only in case must not create a
+    // second pool row → two leases → two pollers on one token.
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
+    await pool.addToPool('MyBot', 'tok');
+    expect(pool.owns('mybot')).toBe(true);
+    expect(pool.owns('MYBOT')).toBe(true);
+    await pool.removeFromPool('MYBOT'); // remove by a different case
+    expect(pool.owns('mybot')).toBe(false);
+    expect(pool.availableCount()).toBe(0);
+  });
+
   it('prefers a user\'s own bot over shared house stock', async () => {
     const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: stubFetch });
     await pool.addToPool('house-bot', 'tok-h', null);

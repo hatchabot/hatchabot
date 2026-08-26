@@ -17,11 +17,24 @@ import type { RuntimeProvider } from '../providers/provider.js';
  * construction get counted but not listed — a warning on all agents forever
  * is noise that buries the finding that matters on one.
  */
-const MUTED_CHECKS = new Set([
-  // AgentClaw seeds gateway/bot tokens into openclaw.json on the private
-  // volume by design; doctor flags plaintext-secret config on every agent.
-  'core/doctor/security',
-]);
+// Mute only the ONE known-by-design warning, matched on checkId AND a message
+// pattern — muting the whole checkId would hide any NEW finding doctor's
+// security check ever reports (a world-readable creds file, an exposed port),
+// on every agent, forever: exactly the silent-degradation class this exists
+// to catch.
+const MUTED = [
+  {
+    // AgentClaw seeds gateway/bot tokens into openclaw.json on the private
+    // volume by design.
+    checkId: 'core/doctor/security',
+    pattern: /plaintext|secret-bearing|SecretRef|API keys\/tokens|gateway\.auth\.token|botToken/i,
+  },
+];
+function isMuted(f: { checkId?: unknown; message?: unknown }): boolean {
+  const id = String(f.checkId ?? '');
+  const msg = String(f.message ?? '');
+  return MUTED.some((m) => m.checkId === id && m.pattern.test(msg));
+}
 
 export interface DoctorFinding {
   checkId: string;
@@ -30,7 +43,8 @@ export interface DoctorFinding {
 }
 
 export interface DoctorLint {
-  ok: boolean;
+  /** undefined when doctor's output couldn't be trusted (no boolean `ok`). */
+  ok: boolean | undefined;
   checksRun: number;
   findings: DoctorFinding[];
   /** Known-by-design warnings hidden from the list (see MUTED_CHECKS). */
@@ -52,9 +66,12 @@ export async function doctorLint(
       findings?: Array<{ checkId?: string; severity?: string; message?: string }>;
     };
     const all = Array.isArray(d.findings) ? d.findings : [];
-    const kept = all.filter((f) => !MUTED_CHECKS.has(String(f.checkId)));
+    const kept = all.filter((f) => !isMuted(f));
     return {
-      ok: d.ok !== false,
+      // A parseable-but-empty/garbage response (e.g. `{}` or a future format
+      // change) must not paint a confident green — mirror agentHealth: only a
+      // real boolean counts, and require the run to have actually run checks.
+      ok: typeof d.ok === 'boolean' ? d.ok : undefined,
       checksRun: typeof d.checksRun === 'number' ? d.checksRun : 0,
       findings: kept.slice(0, 20).map((f) => ({
         checkId: String(f.checkId ?? ''),

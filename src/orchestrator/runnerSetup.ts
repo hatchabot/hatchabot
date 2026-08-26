@@ -58,7 +58,10 @@ export async function ensureRunnerKey(p: RunnerPaths = {}): Promise<string> {
 export function parseSshEndpoint(
   endpoint: string,
 ): { user?: string; host: string; port?: string } | undefined {
-  const m = /^ssh:\/\/(?:([^@/]+)@)?([^@:/]+)(?::(\d+))?\/?$/.exec(endpoint.trim());
+  // Exclude whitespace from user/host so the parser is safe standalone — a
+  // caller that skips the route's zod validation still can't smuggle a newline
+  // + ssh_config directive into ~/.ssh/config.
+  const m = /^ssh:\/\/(?:([^@/\s]+)@)?([^@:/\s]+)(?::(\d+))?\/?$/.exec(endpoint.trim());
   if (!m || !m[2]) return undefined;
   return { user: m[1], host: m[2], port: m[3] };
 }
@@ -79,7 +82,11 @@ export async function ensureSshConfigBlock(endpoint: string, p: RunnerPaths = {}
   const mark = `${CONFIG_MARK} ${parsed.host}`;
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const existing = existsSync(cfg) ? await readFile(cfg, 'utf8') : '';
-  if (existing.includes(mark)) return;
+  // Whole-line match: `.includes(mark)` treats `# agentclaw-runner: vm` as
+  // present inside `# agentclaw-runner: vm2`, so registering `vm` after `vm2`
+  // would silently skip writing its block (and the runner then authenticates
+  // with the wrong key).
+  if (existing.split('\n').some((l) => l.trim() === mark)) return;
   const lines = [
     '',
     mark,

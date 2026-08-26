@@ -394,11 +394,16 @@ export class LocalDockerProvider implements RuntimeProvider {
       // strip setuid/setgid while KEEPING modes (credentials rely on 0600).
       // Clear the volume FIRST so this is a true replace, not an overlay — a
       // restore/rollback must not leave behind files created since the snapshot
-      // (and on import it discards the provisioned seed skeleton).
+      // (and on import it discards the provisioned seed skeleton). But VALIDATE
+      // the archive (gzip -t on a staged copy) BEFORE deleting: a truncated or
+      // corrupt snapshot must not empty the agent's volume and then fail,
+      // leaving no state and nothing to roll back to.
       const child = spawn(this.docker, this.#argv([
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
-        'find /vol -mindepth 1 -delete && tar xz --no-same-owner -C /vol && chown -R 1000:1000 /vol && chmod -R a-s /vol',
+        'cat > /tmp/s.tgz && gzip -t /tmp/s.tgz && ' +
+          'find /vol -mindepth 1 -delete && tar xz --no-same-owner -C /vol -f /tmp/s.tgz && ' +
+          'chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]));
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));

@@ -2,6 +2,42 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.40.0] — 2026-08-25
+
+### Fixed
+Audit Wave 2 — the cheap/medium findings (Wave 1 in 0.39.0 covered the
+data-loss critical + high):
+
+- **gog binary now checksum-pinned** in the runtime image (per-arch sha256,
+  verified before extract) — a mutated upstream GitHub release can't silently
+  ship into the image every agent's Gmail/Drive creds live in.
+- **Pool usernames are case-insensitive** (`COLLATE NOCASE` + lowercase on
+  add) — an adopt-sourced bot differing only in case can no longer create a
+  duplicate pool row (which would have meant two leases → two pollers).
+- **Migrating a pool bot no longer leaks its slot** — the local pool row is
+  retired (token scrubbed, count freed) instead of lingering leased-forever,
+  and it's never freed for re-lease (which would hand the same token, now on
+  the peer, to a new local agent).
+- **The fleet media key is labeled a shared credential** in the UI — it's
+  injected into every agent, so an agent owner can read it; the copy now says
+  so and recommends a purpose-scoped key.
+- **`agentclaw list` PATCH profile-switch** now allows a setup-token Max
+  source onto a runner agent (matching create/move).
+- **Hardening**: input validation on media-key / pool / move-host bodies (bad
+  input → 400, not 500); drain holds the busy flag per agent (no stop mid-tar);
+  `GET /v1/hosts` shows a non-admin only their own agent counts; doctor-lint
+  reports `ok:undefined` from garbage output instead of a false green and mutes
+  the plaintext-secrets warning by message (not the whole security check);
+  `importState` validates the archive (`gzip -t`) before clearing the volume;
+  the SSH-config marker matches a whole line (no `vm`/`vm2` prefix collision);
+  `parseSshEndpoint` rejects whitespace standalone; a cosmetic double-escape.
+
+### Backlog (recorded, not fixed)
+`authorized_keys` command-restriction, `tcp://` TLS gating, unbounded
+remote-daemon output buffering + per-op timeouts, capability-cache staleness
+after an in-place image upgrade, probe-container sandboxing — see the audit
+backlog memory.
+
 ## [0.39.0] — 2026-08-25
 
 ### Fixed

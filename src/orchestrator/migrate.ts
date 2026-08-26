@@ -315,6 +315,21 @@ async function migrateAgentInner(
     agentId,
     `${peer.name} (${new Date().toISOString().slice(0, 10)})`,
   );
+
+  // If the moved bot was a pool bot, retire it locally: its token now lives on
+  // the peer, so the local pool row must not linger leased-forever (a slot
+  // leak) NOR be freed for re-lease (which would hand the same token to a new
+  // local agent — two pollers). Removing scrubs the local copy and frees the
+  // count. Best-effort: the migrate already succeeded; never fail it over this.
+  const pool = (deps.channel as { pool?: { owns(u: string): boolean; release(u: string): Promise<void>; removeFromPool(u: string): Promise<void> } }).pool;
+  if (pool?.owns(channel.accountId)) {
+    try {
+      await pool.release(channel.accountId); // clear the lease so remove is allowed
+      await pool.removeFromPool(channel.accountId);
+    } catch (err) {
+      log('migrate.pool_retire_failed', { agentId, accountId: channel.accountId, error: String(err) });
+    }
+  }
   log('migrate.done', { agentId, peer: peer.name, remoteAgentId: remote.id });
   return {
     movedTo: peer.name,

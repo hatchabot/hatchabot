@@ -42,25 +42,50 @@ describe('doctorLint', () => {
     ok: false,
     checksRun: 24,
     findings: [
-      { checkId: 'core/doctor/security', severity: 'warning', message: 'plaintext secrets' },
-      { checkId: 'core/doctor/security', severity: 'warning', message: 'paths: x, y' },
+      // Match the muted pattern (plaintext secret-bearing config, by design).
+      { checkId: 'core/doctor/security', severity: 'warning', message: 'openclaw.json contains plaintext secret-bearing config' },
+      { checkId: 'core/doctor/security', severity: 'warning', message: 'Paths: gateway.auth.token, botToken' },
       { checkId: 'core/doctor/websearch', severity: 'warning', message: 'no provider enabled' },
     ],
   });
 
-  it('parses findings and mutes the known-by-design security warnings', async () => {
+  it('parses findings and mutes ONLY the known-by-design security warning (by message, not whole checkId)', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     p.execResponses.set('doctor', { code: 0, stdout: LINT, stderr: '' });
     const d = (await doctorLint(p, ref))!;
     expect(d.ok).toBe(false);
     expect(d.checksRun).toBe(24);
-    // The all-agents-forever warnings are counted, not listed — noise on every
-    // agent is how the one finding that matters goes unnoticed.
+    // The all-agents-forever plaintext-secrets warnings are counted, not listed.
     expect(d.mutedCount).toBe(2);
     expect(d.findings).toEqual([
       { checkId: 'core/doctor/websearch', severity: 'warning', message: 'no provider enabled' },
     ]);
+  });
+
+  it('does NOT mute a NEW security-check finding under the same checkId', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('doctor', {
+      code: 0,
+      stdout: JSON.stringify({
+        ok: false, checksRun: 24,
+        findings: [{ checkId: 'core/doctor/security', severity: 'critical', message: 'credentials file is world-readable (0644)' }],
+      }),
+      stderr: '',
+    });
+    const d = (await doctorLint(p, ref))!;
+    expect(d.mutedCount).toBe(0);
+    expect(d.findings).toHaveLength(1);
+  });
+
+  it('reports ok:undefined (not a confident green) from empty/garbage JSON', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('doctor', { code: 0, stdout: '{}', stderr: '' });
+    const d = (await doctorLint(p, ref))!;
+    expect(d.ok).toBeUndefined();
+    expect(d.findings).toEqual([]);
   });
 
   it('returns undefined (never throws) when doctor is absent or broken', async () => {
