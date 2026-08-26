@@ -173,6 +173,14 @@ export interface RuntimeProvider {
    */
   currentImageInfo(): Promise<RuntimeInfo>;
 
+  /** Stable identity of the DAEMON this provider talks to. Two providers with
+   *  equal daemonId() point at the same Docker daemon even if their endpoint
+   *  strings differ (ssh://h vs ssh://h:22, IP vs hostname, local vs a runner
+   *  aliasing localhost). Move uses this to never purge a volume it just
+   *  moved onto the same daemon. Throws if the daemon can't be reached — the
+   *  caller must treat "can't verify" as "don't do the destructive thing". */
+  daemonId(): Promise<string>;
+
   /** Recent runtime output for the observability card. */
   logs(runtimeRef: string, lines: number): Promise<string>;
 

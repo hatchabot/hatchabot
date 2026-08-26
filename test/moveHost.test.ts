@@ -20,6 +20,10 @@ async function crossDaemonWorld(): Promise<{ w: World; target: MockProvider; dep
     settings: {}, createdAt: 'now',
   });
   const target = new MockProvider();
+  // Pin distinct daemon identities: the guard is daemon-id based now, so two
+  // genuinely-separate daemons must report different ids for a move to run.
+  w.provider.daemonId = async () => 'daemon-source';
+  target.daemonId = async () => 'daemon-target';
   const deps = {
     store: w.store, secrets: w.secrets, channel: channelStub,
     source: w.provider, target, sleep: async () => {},
@@ -76,15 +80,40 @@ describe('moveAgentToHost — across two daemons', () => {
     expect((await w.provider.status(agent.runtimeRef!)).phase).toBe('running');
   });
 
-  it('refuses two host rows that point at the same Docker endpoint', async () => {
-    const { w, deps } = await crossDaemonWorld();
-    // Both "hosts" claim the same daemon — the retire step would eat the move.
-    (w.store as any).db
-      .prepare(`UPDATE hosts SET settings = ? WHERE id IN ('h1','h2')`)
-      .run(JSON.stringify({ dockerHost: 'ssh://user@samebox' }));
-    const id = await seedRunningAgent(w);
-    await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(/same Docker endpoint/);
+  it('refuses two host rows that are the SAME daemon (aliased endpoints), volume untouched', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    // The endpoints differ as strings (ssh://h vs ssh://h:22) but resolve to
+    // one daemon — the trap that string-equality missed and that would purge
+    // the moved volume. Both providers now report the same daemon id.
+    target.daemonId = async () => 'daemon-source';
+    const id = await seedRunningAgent(w, { memory: 'do-not-lose-me' });
+    const oldRef = w.store.getAgent(id)!.runtimeRef!;
+    await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(/same Docker daemon/);
+    // Nothing was touched — still on the source, still running, memory intact.
     expect(w.store.getAgent(id)!.hostId).toBe('h1');
+    expect((await w.provider.status(oldRef)).phase).toBe('running');
+    expect(w.provider.stateStore.get(oldRef)?.toString()).toBe('do-not-lose-me');
+  });
+
+  it('refuses (without touching the agent) when a daemon can\'t be reached', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    target.daemonId = async () => { throw new Error('daemon down'); };
+    const id = await seedRunningAgent(w);
+    await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(/didn't answer/);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING'); // never quiesced
+  });
+
+  it('rollback leaves the agent STOPPED (not dual-polling) when the target can\'t be cleaned up', async () => {
+    const { w, target, deps } = await crossDaemonWorld();
+    const id = await seedRunningAgent(w);
+    // Target boots but never becomes healthy → waitForHealthy throws; then the
+    // rollback destroy also fails and the container is still running (phase
+    // running), so restarting the source would dual-poll.
+    target.status = async () => ({ phase: 'running', healthy: false });
+    target.destroy = async () => { throw new Error('daemon hung'); };
+    await expect(moveAgentToHost(deps, id, 'h2')).rejects.toThrow(/STOPPED to avoid two bots/);
+    // Source NOT restarted — left stopped so an operator resolves the orphan.
+    expect(w.store.getAgent(id)!.state).toBe('STOPPED');
   });
 
   it('refuses states that are not RUNNING/STOPPED', async () => {

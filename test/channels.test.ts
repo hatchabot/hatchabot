@@ -141,6 +141,7 @@ describe('CompositeTelegramProvisioner', () => {
       },
       async release(accountId: string) { released.push(accountId); },
       async submitToken() { return { username: 'userbot' }; },
+      hasPending() { return false; },
     }) as unknown as TelegramManualProvisioner;
 
   it('falls back to manual (ChannelSetupRequired) when the pool is dry', async () => {

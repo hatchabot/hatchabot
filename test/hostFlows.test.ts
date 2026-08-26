@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { makeWorld, seedRunningAgent, as } from './support/world.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
 
 const RUNNER = 'tcp://127.0.0.1:1';
 
@@ -139,14 +140,16 @@ describe('Create — Claude Max on a runner', () => {
 });
 
 describe('Move — POST /v1/agents/:id/move-host', () => {
-  // A second mock-backed host so the move stays on the MockProvider (a real
-  // remote-docker host would make the route dial an actual daemon). Same
-  // provider instance on both sides = the same-daemon path: no source retire.
-  const addMockHost = (w: Awaited<ReturnType<typeof makeWorld>>) =>
+  // A second mock-backed host on a DISTINCT provider instance, so it reads as
+  // a genuinely different daemon (the move's daemon-id guard refuses a move
+  // between two rows that resolve to the same daemon).
+  const addMockHost = (w: Awaited<ReturnType<typeof makeWorld>>) => {
+    w.providers.set('mock2', new MockProvider());
     w.store.insertHost({
-      id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock', name: 'Runner Two',
+      id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Runner Two',
       settings: {}, createdAt: 'now',
     });
+  };
 
   it('moves an agent to another host and back', async () => {
     const w = await makeWorld();

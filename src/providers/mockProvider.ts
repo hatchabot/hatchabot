@@ -30,8 +30,18 @@ export class MockProvider implements RuntimeProvider {
       failOn?: 'provision' | 'start';
       /** Number of status() calls before the runtime reports healthy. */
       healthyAfter?: number;
+      /** Daemon identity — two instances sharing a value model one daemon
+       *  reached two ways (the move aliased-daemon case). Defaults unique. */
+      daemonId?: string;
     } = {},
   ) {}
+
+  #daemonId?: string;
+  async daemonId(): Promise<string> {
+    // Unique per instance unless the test pins one (the same-daemon case).
+    return (this.#daemonId ??=
+      this.opts.daemonId ?? `mock-daemon-${Math.random().toString(36).slice(2)}`);
+  }
 
   #healthChecks = 0;
 

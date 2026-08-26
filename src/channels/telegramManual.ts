@@ -34,6 +34,13 @@ export class TelegramManualProvisioner implements ChannelProvisioner {
    * against Telegram's getMe so we fail here — where the user can fix it —
    * rather than three steps later inside a container.
    */
+  /** True once the user has pasted a token for this agent (awaiting the next
+   *  provision to consume it). Lets the composite give a chosen bot precedence
+   *  over an available pool bot. */
+  hasPending(agentId: string): boolean {
+    return this.#pending.has(agentId);
+  }
+
   async submitToken(agentId: string, botToken: string): Promise<{ username: string }> {
     const username = await verifyBotToken(botToken);
     this.#pending.set(agentId, { username, token: botToken });

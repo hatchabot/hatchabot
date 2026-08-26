@@ -27,9 +27,12 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
   ) {}
 
   async provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel> {
-    // The owner can decline a pool bot for this agent ("I want a bespoke
-    // @handle") — respect it before the pool ever sees the request.
-    if (req.skipPool) {
+    // A token the user already pasted (skipPool flow, or a pool-exhausted
+    // agent that has since been re-stocked) MUST win over an available pool
+    // bot — otherwise resume silently binds the agent to a pool identity the
+    // user declined and strands their bespoke token. skipPool is one-shot so
+    // it's gone by resume; hasPending is the durable signal.
+    if (req.skipPool || this.manual.hasPending(req.agentId)) {
       return this.manual.provision(req); // throws ChannelSetupRequired if no token yet
     }
     try {

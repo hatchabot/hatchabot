@@ -98,19 +98,31 @@ describe('media key — GET/PUT/DELETE /v1/media-key', () => {
   });
 });
 
-describe('skipPool — the "use a pool bot" checkbox, unchecked', () => {
-  it('routes provisioning straight to the manual path even when the pool has bots', async () => {
+describe('skipPool / pending token — the manual choice wins over the pool', () => {
+  it('routes to manual when skipPool is set, and when a token is already pending', async () => {
     const chan = { accountId: 'x', secretRef: 's', deepLink: 'd' };
     const pool = { provision: vi.fn().mockResolvedValue({ ...chan, accountId: 'poolbot' }) } as any;
-    const manual = { provision: vi.fn().mockResolvedValue({ ...chan, accountId: 'mintedbot' }) } as any;
+    let pending = false;
+    const manual = {
+      provision: vi.fn().mockResolvedValue({ ...chan, accountId: 'mintedbot' }),
+      hasPending: () => pending,
+    } as any;
     const c = new CompositeTelegramProvisioner(pool, manual);
     const req = { agentId: 'a1', agentName: 'A', slug: 'a' };
 
     // Default: pool first.
     expect((await c.provision(req)).accountId).toBe('poolbot');
-    // Owner declined the pool: manual, and the pool is never consulted.
+
+    // Owner declined the pool (skipPool): manual, pool untouched.
     pool.provision.mockClear();
     expect((await c.provision({ ...req, skipPool: true })).accountId).toBe('mintedbot');
+    expect(pool.provision).not.toHaveBeenCalled();
+
+    // Resume with a pasted token pending (skipPool one-shot is gone): the
+    // pending token must still win over an available pool bot. This is H1.
+    pending = true;
+    pool.provision.mockClear();
+    expect((await c.provision(req)).accountId).toBe('mintedbot');
     expect(pool.provision).not.toHaveBeenCalled();
   });
 });

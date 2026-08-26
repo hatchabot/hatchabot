@@ -2,6 +2,37 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.39.0] — 2026-08-25
+
+### Fixed
+Security/robustness audit (v0.26→v0.38 delta, 5 parallel reviewers). No
+cross-user leak, XSS, or injection found; the auth model and escaping are
+sound. Wave 1 — the data-loss / data-integrity findings:
+
+- **Move-to-host could destroy the agent it just moved.** The "don't purge
+  the source" guard compared endpoint *strings*, so two host rows for one
+  daemon under different endpoints (`ssh://h` vs `ssh://h:22`, IP vs
+  hostname, a runner aliasing localhost) — or a local↔runner-same-box move —
+  slipped past and `docker volume rm -f`'d the live volume. Now the move
+  compares real **daemon identity** (`docker info` ID) and refuses if they
+  match (or if a daemon can't be reached — "can't verify" never green-lights
+  a purge). `RuntimeProvider.daemonId()` added.
+- **Move rollback could leave two pollers on one bot.** A correlated failure
+  (hung remote daemon fails both the health check and the cleanup) left the
+  target container running while the source restarted. Rollback now confirms
+  the target is actually gone before restarting the source; if it can't, it
+  leaves the agent STOPPED with a clear message instead of dual-polling.
+- **Move wasn't crash-safe.** `hostId` was persisted to the target before the
+  volume data landed, so a crash mid-move made Retry seed a fresh empty agent
+  on the target while the real memory sat orphaned on the source. The hostId
+  flip now happens only after `importState` succeeds (`buildRuntimeSpec` takes
+  a host override so the target spec builds without a premature store write).
+- **Pool/manual resume hijack.** An agent that opted out of the pool (or hit
+  an empty pool) and parked awaiting a pasted BotFather token could, on
+  resume, be bound to a *pool* bot instead — silently reversing the user's
+  choice and stranding their token. The composite now gives a pending pasted
+  token precedence over an available pool bot.
+
 ## [0.38.0] — 2026-08-25
 
 ### Changed

@@ -58,15 +58,28 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
   if (sourceHost.id === targetHost.id) {
     throw new TransferError('The agent is already on that host.');
   }
-  // Two host rows pointing at one Docker daemon: identical names mean the
-  // final "retire the source" would purge the runtime we just moved. Refuse
-  // the trap we can detect (endpoint string equality) before touching anything.
-  const endpoint = (h: typeof sourceHost) =>
-    typeof h.settings?.dockerHost === 'string' ? h.settings.dockerHost.trim() : '';
-  if (endpoint(sourceHost) && endpoint(sourceHost) === endpoint(targetHost)) {
+  // Two host rows pointing at one Docker daemon are the move's cardinal
+  // hazard: container/volume names derive from the agentId, so the target ref
+  // EQUALS the source ref, and "retire the source" (step 4) would purge the
+  // volume we just moved onto — total, unrecoverable memory loss. Endpoint-
+  // string equality can't catch this (ssh://h vs ssh://h:22, IP vs hostname,
+  // a runner aliasing localhost, tcp vs ssh). The daemon's own ID can. Probe
+  // both BEFORE touching anything; a daemon we can't reach → refuse, because
+  // "can't verify they differ" must never green-light a destructive purge.
+  let sourceDaemon: string;
+  let targetDaemon: string;
+  try {
+    [sourceDaemon, targetDaemon] = await Promise.all([source.daemonId(), target.daemonId()]);
+  } catch (err) {
     throw new TransferError(
-      'Both hosts point at the same Docker endpoint — the agent already runs there. ' +
-        'Remove the duplicate host entry instead.',
+      `Couldn't verify the two hosts are different machines, so the move was cancelled ` +
+        `(a Docker daemon didn't answer). (${String(err instanceof Error ? err.message : err).slice(0, 200)})`,
+    );
+  }
+  if (sourceDaemon === targetDaemon) {
+    throw new TransferError(
+      `${sourceHost.name} and ${targetHost.name} are the same Docker daemon — the agent already ` +
+        `runs there. Remove the duplicate host entry instead of moving.`,
     );
   }
 
@@ -104,19 +117,25 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
     );
   }
 
-  // 3. Recreate on the target. hostId flips first because buildRuntimeSpec
-  //    reads it — the Max-credential/host pairing is re-checked there, and
-  //    host-folder mounts resolve against the NEW host (a remote daemon skips
-  //    them). Same double-provision as import: provision seeds, the snapshot
-  //    then overwrites the volume, and the second provision re-applies this
-  //    installation's current config over the imported openclaw.json.
-  store.setAgentHost(agentId, targetHostId);
+  // 3. Recreate on the target. hostId is NOT flipped yet — a crash between
+  //    the flip and importState would leave the record pointing at a host
+  //    with no data, and Retry would seed a fresh empty volume there while
+  //    the real memory sits orphaned on the source. So we build the target
+  //    spec against a host OVERRIDE (Max/host pairing re-checked there,
+  //    host-folder mounts resolve against the target), and flip the store's
+  //    hostId only once the snapshot has actually landed. Same double-
+  //    provision as import: provision seeds, the snapshot overwrites, the
+  //    second provision re-applies this install's config over openclaw.json.
   let newRef: string | undefined;
+  let hostFlipped = false;
   try {
     const tdeps: ProvisionDeps = { ...deps, provider: target };
-    const spec = await buildRuntimeSpec(tdeps, agentId);
+    const spec = await buildRuntimeSpec(tdeps, agentId, targetHost);
     ({ runtimeRef: newRef } = await target.provision(spec));
     await target.importState(newRef, state);
+    // Data is on the target now — safe to point the record there.
+    store.setAgentHost(agentId, targetHostId);
+    hostFlipped = true;
     const respec = await buildRuntimeSpec(tdeps, agentId);
     await target.provision(respec);
     store.setAgentRuntimeRef(agentId, newRef);
@@ -128,13 +147,37 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       store.setAgentState(agentId, 'RUNNING');
     }
   } catch (err) {
-    // Roll back onto the source host. Purge the half-made target runtime only
-    // when the daemons differ — on a shared daemon that storage IS the source's.
-    if (newRef && source !== target) {
-      await target.destroy(newRef, { purge: true }).catch(() => {});
+    // Roll back onto the source host. Daemons are confirmed distinct (the
+    // daemonId guard above), so purging the target runtime never touches the
+    // source's storage.
+    let targetOrphaned = false;
+    if (newRef) {
+      try {
+        await target.destroy(newRef, { purge: true });
+      } catch {
+        // The destroy failed — and the failure that landed us here (a hung
+        // remote daemon) is exactly what makes destroy fail too. If the target
+        // container is still up it has --restart unless-stopped and will poll
+        // the bot; restarting the source too = two pollers on one token, the
+        // one thing worse than downtime. Verify before deciding.
+        const alive = await target.status(newRef).then((s) => s.phase === 'running').catch(() => true);
+        if (alive) targetOrphaned = true;
+      }
     }
-    store.setAgentHost(agentId, sourceHost.id);
-    store.setAgentRuntimeRef(agentId, oldRef);
+    if (hostFlipped) {
+      store.setAgentHost(agentId, sourceHost.id);
+      store.setAgentRuntimeRef(agentId, oldRef);
+    }
+    if (targetOrphaned) {
+      // Do NOT restart the source — leave it stopped and shout, so an operator
+      // resolves the orphan instead of a silent flip-flop.
+      log('move.rollback_orphan', { agentId, target: targetHostId, ref: newRef });
+      throw new TransferError(
+        `Move failed and the copy on ${targetHost.name} couldn't be cleaned up — "${agent.name}" ` +
+          `is left STOPPED to avoid two bots polling at once. Check ${targetHost.name} and remove ` +
+          `the leftover container, then Start the agent.`,
+      );
+    }
     await restartSource();
     log('move.rolled_back', { agentId, to: targetHostId, error: String(err) });
     throw new TransferError(
@@ -146,9 +189,9 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
 
   // 4. Retire the source runtime, volume included. Best-effort: the agent is
   //    already live on the target, so a failure here is an orphan to clean up,
-  //    never a reason to unwind the move. Skipped when both hosts share one
-  //    provider instance — there is no separate source runtime to retire.
-  if (source !== target) {
+  //    never a reason to unwind the move. Daemons are distinct (guard above),
+  //    so this can't touch the moved volume.
+  {
     try {
       await source.destroy(oldRef, { purge: true });
     } catch (err) {

@@ -66,6 +66,9 @@ export interface World {
   store: Store;
   secrets: MemSecrets;
   provider: MockProvider;
+  /** The name→provider map the routes resolve against. Register a second mock
+   *  (e.g. for a runner host) to exercise genuine cross-daemon flows. */
+  providers: Map<string, MockProvider>;
   f: FastifyInstance;
   owner: string;
   /** The channel stub, including its in-memory pool (`channel.pool.entries`). */
@@ -82,8 +85,9 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   await secrets.put('ai/p1', 'sk-test');
   const f = Fastify();
   const channel = channelStub(availableBots);
-  await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel });
-  return { store, secrets, provider, f, owner, channel };
+  const providers = new Map<string, MockProvider>([['mock', provider]]);
+  await registerRoutes(f, { store, secrets, providers, channel });
+  return { store, secrets, provider, providers, f, owner, channel };
 }
 
 export interface SeedOpts {

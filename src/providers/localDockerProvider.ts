@@ -329,6 +329,21 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { imageId, openclawVersion: openclawVersion || undefined };
   }
 
+  #daemonId?: string;
+  async daemonId(): Promise<string> {
+    // The daemon's own ID is stable for the life of the daemon — cache it.
+    if (this.#daemonId) return this.#daemonId;
+    const res = await this.#docker(['info', '--format', '{{.ID}}']);
+    const id = res.stdout.trim();
+    if (res.code !== 0 || !id) {
+      throw new ProviderError(
+        `docker info failed on ${this.remote ? this.#conn.join(' ') : 'the local daemon'}: ${res.stderr.slice(-200)}`,
+        "Couldn't reach that host's Docker daemon.",
+      );
+    }
+    return (this.#daemonId = id);
+  }
+
   async currentImageInfo(): Promise<RuntimeInfo> {
     const res = await this.#docker([
       'image',

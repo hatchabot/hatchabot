@@ -10,7 +10,7 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { buildWorkspaceSeed } from '../openclaw/workspace.js';
 import { buildGitSyncScript } from './gitSource.js';
-import type { Agent } from '../domain/types.js';
+import type { Agent, Host } from '../domain/types.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -259,12 +259,19 @@ async function runProvisionStepsInner(
  * Used by fresh provisioning, retry, and rebuild — secrets are resolved as
  * late as possible and only ever live in the spec handed to the provider.
  */
-export async function buildRuntimeSpec(deps: ProvisionDeps, agentId: string): Promise<RuntimeSpec> {
+export async function buildRuntimeSpec(
+  deps: ProvisionDeps,
+  agentId: string,
+  // Move builds the target spec BEFORE flipping the store's hostId (so a crash
+  // mid-move can't strand the record on a host that has no data yet) — this
+  // overrides which host the spec resolves against, without a store mutation.
+  hostOverride?: Host,
+): Promise<RuntimeSpec> {
   const { store, secrets } = deps;
   const agent = store.getAgent(agentId);
   if (!agent) throw new Error(`No such agent: ${agentId}`);
   const profile = store.getAIProfile(agent.aiProfileId)!;
-  const host = store.getHost(agent.hostId)!;
+  const host = hostOverride ?? store.getHost(agent.hostId)!;
   const channelRow = store.getChannelForAgent(agentId);
   if (!channelRow) throw new Error(`Agent ${agentId} has no channel yet`);
 
