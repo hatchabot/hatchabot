@@ -38,6 +38,26 @@ describe('cronAddArgs', () => {
     ]);
   });
 
+  it('carries the source delivery route (isolated + announce → the same telegram chat)', () => {
+    // Without this, adopt dropped delivery and the cron announced to "last"
+    // (no route → fail-closed, or the isolated agent's reply leaking to Chris).
+    const args = cronAddArgs(
+      {
+        name: 'TSCC 2405 check', scheduleKind: 'cron', scheduleExpr: '0 9 * * *',
+        payloadKind: 'agentTurn', payloadMessage: 'scan',
+        sessionTarget: 'isolated', deliveryMode: 'announce',
+        deliveryChannel: 'telegram', deliveryTo: 'telegram:1000000001',
+      },
+      'condo-adviser',
+    );
+    expect(args).toContain('--session'); expect(args).toContain('isolated');
+    expect(args).toContain('--announce');
+    expect(args).toContain('--channel'); expect(args).toContain('telegram');
+    // The telegram: prefix is stripped — --to wants the bare chat id.
+    expect(args).toContain('--to'); expect(args).toContain('1000000001');
+    expect(args).not.toContain('telegram:1000000001');
+  });
+
   it('maps every/command and returns null for an unrepresentable schedule', () => {
     expect(cronAddArgs({ scheduleKind: 'every', everyMs: 3_600_000, payloadKind: 'command', payloadMessage: 'backup.sh' }, 'a')).toEqual([
       'cron', 'add', '--agent', 'a', '--disabled', '--every', '1h', '--command', 'backup.sh',

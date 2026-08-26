@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.41.0] — 2026-08-26
+
+### Fixed
+- **Adopt now carries a cron's delivery route — no more "no route" failures
+  or leaked isolated replies.** Migrated crons dropped the source's delivery
+  target (`session_target` / `delivery_mode` / `delivery_channel` /
+  `delivery_to`), so OpenClaw fell back to `announce → last`: an isolated cron
+  fail-closes ("Refusing implicit isolated cron delivery… set delivery.channel
+  and delivery.to explicitly"), and when it *does* route, the agent's chatty
+  final reply ("the message tool isn't available here…") lands in whatever
+  chat you talked to last. `readOpenclawCrons` now reads the delivery columns
+  (when present) and `cronAddArgs` emits `--session/--announce/--channel/--to`,
+  so an adopted cron reaches the same chat it did before. The live fleet's
+  affected crons (condo + gf advisers) were repointed to explicit Telegram
+  delivery in place.
+
 ## [0.40.0] — 2026-08-25
 
 ### Fixed

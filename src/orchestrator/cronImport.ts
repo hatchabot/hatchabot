@@ -31,6 +31,16 @@ export interface SourceCron {
   at?: string;
   payloadKind?: string;
   payloadMessage?: string;
+  /** Where the job's output goes. Without these, adopt dropped delivery
+   *  entirely and OpenClaw defaulted to `announce → last` — which fail-closes
+   *  ("no route") and, when it does route, delivers the isolated agent's chatty
+   *  final reply. Carrying them makes an adopted cron reach the same chat it
+   *  did before. */
+  sessionTarget?: string; // main | isolated
+  deliveryMode?: string; // announce | none
+  deliveryChannel?: string; // telegram | last | …
+  deliveryTo?: string; // Telegram chatId / E.164
+  deliveryAccountId?: string;
 }
 
 export interface OpenclawAgentEntry {
@@ -139,11 +149,20 @@ export function readOpenclawCrons(sourceAgentId: string, dbPath = stateDbPath())
   } catch {
     return [];
   }
+  // Delivery columns are newer; select them only if present so an older
+  // source DB still imports (just without the delivery target).
+  const cols = new Set(
+    (db.prepare(`PRAGMA table_info(cron_jobs)`).all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  const has = (c: string) => cols.has(c);
+  const deliveryCols = [
+    'session_target', 'delivery_mode', 'delivery_channel', 'delivery_to', 'delivery_account_id',
+  ].filter(has);
   try {
     const rows = db
       .prepare(
         `SELECT name, description, schedule_kind, schedule_expr, schedule_tz, every_ms, at,
-                payload_kind, payload_message
+                payload_kind, payload_message${deliveryCols.length ? ', ' + deliveryCols.join(', ') : ''}
            FROM cron_jobs WHERE agent_id = ? ORDER BY sort_order, created_at_ms`,
       )
       .all(sourceAgentId) as Array<Record<string, unknown>>;
@@ -157,6 +176,11 @@ export function readOpenclawCrons(sourceAgentId: string, dbPath = stateDbPath())
       at: (r.at as string) ?? undefined,
       payloadKind: (r.payload_kind as string) ?? undefined,
       payloadMessage: (r.payload_message as string) ?? undefined,
+      sessionTarget: (r.session_target as string) ?? undefined,
+      deliveryMode: (r.delivery_mode as string) ?? undefined,
+      deliveryChannel: (r.delivery_channel as string) ?? undefined,
+      deliveryTo: (r.delivery_to as string) ?? undefined,
+      deliveryAccountId: (r.delivery_account_id as string) ?? undefined,
     }));
   } catch {
     return [];
@@ -193,6 +217,22 @@ export function cronAddArgs(c: SourceCron, slug: string): string[] | null {
 
   if (c.payloadKind === 'command') args.push('--command', c.payloadMessage ?? '');
   else args.push('--message', c.payloadMessage ?? '');
+
+  // Delivery: carry the source's route so the adopted cron reaches the same
+  // chat instead of falling back to `announce → last` (no route → fail-closed,
+  // or the isolated agent's chatty reply leaking to whoever chatted last).
+  if (c.sessionTarget) args.push('--session', c.sessionTarget);
+  if (c.deliveryMode === 'announce') {
+    args.push('--announce');
+    // A telegram destination is stored either bare (1000000001) or channel-
+    // qualified (telegram:1000000001); `--to` wants the bare id.
+    const to = c.deliveryTo?.replace(/^telegram:/i, '');
+    if (c.deliveryChannel && c.deliveryChannel !== 'last') args.push('--channel', c.deliveryChannel);
+    if (to) args.push('--to', to);
+    if (c.deliveryAccountId) args.push('--account', c.deliveryAccountId);
+  } else if (c.deliveryMode === 'none') {
+    args.push('--no-deliver');
+  }
   return args;
 }
 
