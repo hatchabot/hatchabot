@@ -2,6 +2,14 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.44.0] — 2026-08-26
+
+### Changed
+- **Moved the "N instant bots ready" indicator** out of the cramped spot beside
+  the AgentClaw logo into the actions row (right-aligned), styled as a quiet
+  capacity chip with a green dot. It now hides entirely when the pool is empty
+  instead of leaving a gap, and its tooltip points to ⚙ Settings → Bot pool.
+
 ## [0.43.0] — 2026-08-26
 
 ### Added

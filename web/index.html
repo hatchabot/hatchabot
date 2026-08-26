@@ -63,6 +63,11 @@
   .switch-ico { font-size: 13px; color: var(--dim); }
   h1 b { color: var(--accent); font-weight: 700; }
   .sub { color: var(--dim); font-size: 13px; }
+  /* Pool-ready status, right-aligned in the actions row — a quiet capacity chip. */
+  .pool-ready { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+    border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
+  .pool-ready[hidden] { display: none; }
+  .pool-dot { color: var(--ok); font-size: 10px; line-height: 1; }
   .card {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
@@ -197,7 +202,6 @@
   <header>
     <div class="hrow">
       <h1>Agent<b>Claw</b></h1>
-      <span class="sub" id="poolInfo"></span>
       <span class="spacer"></span>
       <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
       <span class="sub" id="whoami"></span>
@@ -216,6 +220,8 @@
       <button id="fleetUsageBtn" class="hbtn" title="Fleet usage — every running agent ranked by tokens" onclick="openFleetUsage()">📊 Usage</button>
       <button id="importBtn" class="hbtn" title="Open a .agentclaw file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
+      <span class="spacer"></span>
+      <span class="sub pool-ready" id="poolInfo" hidden title="Bots parked in the pool — a new agent grabs one instantly, no BotFather trip. Manage them in ⚙ Settings → Bot pool."></span>
     </div>
     <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
@@ -3464,7 +3470,9 @@ async function refresh(withMeta) {
       [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
       api('/v1/pool').then(p => {
         poolAvail = p.availableBots;
-        $('poolInfo').textContent = p.availableBots > 0 ? `${p.availableBots} instant bot${p.availableBots === 1 ? '' : 's'} ready` : '';
+        const el = $('poolInfo');
+        el.hidden = !(p.availableBots > 0);
+        if (!el.hidden) el.innerHTML = `<span class="pool-dot">●</span> ${p.availableBots} instant bot${p.availableBots === 1 ? '' : 's'} ready`;
       }).catch(() => {});
     }
     agents = await api('/v1/agents');
