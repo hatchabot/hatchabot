@@ -144,6 +144,40 @@ describe('PATCH /v1/agents/:id model override', () => {
   });
 });
 
+describe('PATCH /v1/agents/:id description (persona)', () => {
+  it('edits the card description, trimmed, and returns it', async () => {
+    const { store, f } = await world();
+    const res = await patch(f, { persona: '  Advises on condo bylaws  ' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().persona).toBe('Advises on condo bylaws');
+    expect(store.getAgent('a1')!.persona).toBe('Advises on condo bylaws');
+  });
+
+  it('an empty string clears it (not a "nothing to update" error)', async () => {
+    const { store, f } = await world();
+    await patch(f, { persona: 'temporary' });
+    const res = await patch(f, { persona: '' });
+    expect(res.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.persona).toBe('');
+  });
+
+  it("does not touch the agent's files or require a rebuild (cosmetic)", async () => {
+    const { store, f } = await world();
+    const before = store.getAgent('a1')!;
+    await patch(f, { persona: 'new blurb' });
+    const after = store.getAgent('a1')!;
+    // State/runtime untouched — this is a metadata-only edit.
+    expect(after.state).toBe(before.state);
+    expect(after.appliedModel).toBe(before.appliedModel);
+  });
+
+  it('404s for an agent the caller does not own', async () => {
+    const { f } = await world();
+    const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: { 'x-agentclaw-owner': 'someone-else' }, payload: { persona: 'x' } });
+    expect(res.statusCode).toBe(404);
+  });
+});
+
 describe('editing a source menu sweeps orphaned per-agent pins', () => {
   const patchProfile = (f: any, body: unknown) =>
     f.inject({ method: 'PATCH', url: '/v1/ai-profiles/p1', headers: as, payload: body });

@@ -2,7 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.45.0] — 2026-08-26
+## [0.46.0] — 2026-08-26
+
+### Added
+- **Edit an agent's description after creation.** The description entered at
+  create (the card's one-liner, stored as the agent's persona) had no edit
+  field afterward — Settings → Definition only exposed the name, memory policy,
+  and the raw SOUL/AGENTS/MEMORY files. Added a **Description** field to the
+  Definition tab: it PATCHes the stored persona, applies immediately (it's the
+  card label, no rebuild), and an empty value clears it. Clearly marked
+  cosmetic — to change how the agent behaves you still edit SOUL.md, which sits
+  right below it. `PATCH /v1/agents/:id` now accepts `persona`; new
+  `store.setAgentPersona`.
 
 ### Changed
 - **Rebuild responds instantly instead of stalling for seconds.** The

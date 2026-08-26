@@ -978,6 +978,14 @@ export class Store {
       .run(name, new Date().toISOString(), id);
   }
 
+  /** The one-line description shown on the agent's card (its stored persona
+   *  summary). Cosmetic — does not touch the running SOUL.md. */
+  setAgentPersona(id: string, persona: string): void {
+    this.db
+      .prepare(`UPDATE agents SET persona = ?, updated_at = ? WHERE id = ?`)
+      .run(persona, new Date().toISOString(), id);
+  }
+
   /**
    * Record what the runtime was last actually configured with. The agent row
    * carries the *desired* profile; this is the *applied* one, and the gap

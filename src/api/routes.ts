@@ -1349,6 +1349,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const parsed = z
         .object({
           name: z.string().trim().min(1).max(64).optional(),
+          /** The card's one-line description (stored persona). Cosmetic and
+           *  immediate — it does NOT touch the running SOUL.md, which is edited
+           *  as a file in the Definition tab. Empty string clears it. */
+          persona: z.string().max(4000).optional(),
           sharedMemory: z.boolean().optional(),
           /** Switch which AI drives this agent — applied on the next rebuild. */
           aiProfileId: z.string().min(1).optional(),
@@ -1367,9 +1371,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      const { name, sharedMemory: shared, aiProfileId, model, runsHere, group } = parsed.data;
+      const { name, persona, sharedMemory: shared, aiProfileId, model, runsHere, group } = parsed.data;
       if (
         name === undefined &&
+        persona === undefined &&
         shared === undefined &&
         aiProfileId === undefined &&
         model === undefined &&
@@ -1379,6 +1384,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
+
+      if (persona !== undefined) store.setAgentPersona(agent.id, persona.trim());
 
       if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
 

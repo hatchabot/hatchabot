@@ -372,6 +372,12 @@
       <input type="text" id="editName" maxlength="64" style="flex:1;min-width:0">
       <button id="renameBtn" onclick="renameAgent()">Rename</button>
     </div>
+    <label>Description <span style="color:var(--dim)">— the one line shown on this agent's card</span></label>
+    <div style="display:flex;gap:8px;align-items:flex-start">
+      <textarea id="editDesc" maxlength="4000" rows="2" placeholder="What is this agent for?" style="flex:1;min-width:0;resize:vertical"></textarea>
+      <button id="descBtn" onclick="saveDescription()">Save</button>
+    </div>
+    <div class="sub" style="margin:-4px 0 4px">Cosmetic — this is the card label only. To change how the agent actually behaves, edit <b>SOUL.md</b> below.</div>
     <label>Shared memory <span style="color:var(--dim)">— who this agent's MEMORY.md belongs to</span></label>
     <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
       <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;margin-top:3px;flex:none">
@@ -2351,6 +2357,7 @@ async function openEdit(id, name, tab = 'def') {
   editAgentId = id;
   $('editAgent').textContent = name;
   $('editName').value = name;
+  $('editDesc').value = agents.find(x => x.id === id)?.persona ?? '';
   $('gitKeyOut').style.display = 'none';
   showEditTab(tab);
   const cur = agents.find(x => x.id === id);
@@ -3059,6 +3066,17 @@ async function renameAgent() {
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('renameBtn').disabled = false; }
+}
+
+async function saveDescription() {
+  const persona = $('editDesc').value.trim();
+  $('descBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { persona } });
+    toast(persona ? 'Description saved' : 'Description cleared');
+    await refresh(false); // repaint the card's one-liner
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('descBtn').disabled = false; }
 }
 
 async function loadEditFile() {
