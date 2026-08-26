@@ -177,7 +177,17 @@ agents waiting for a bot, running agents idle over 14 days), and a per-agent
 line with state, model, and last activity. The host owner also sees **backup
 health** (latest set and its age) and **runtime** (image version, upgrade
 available). **Run health checks** probes each running agent's in-container
-gateway live. Per-agent, the card's ⋯ menu has **📊 Usage** (tokens by model,
+gateway live.
+
+**📊 Usage** (header) is the fleet rollup: every running agent ranked by
+cumulative tokens, with a bar per agent, its session count, last activity, and
+billing context (included / local / API price). Usage is read live from each
+container, so stopped agents aren't counted — they show as "N not counted
+(live-only)" rather than as zero. On the CLI, `agentclaw usage` (no agent name)
+prints the same ranked table; `agentclaw usage <agent>` still shows one agent's
+breakdown by model.
+
+Per-agent, the card's ⋯ menu has **📊 Usage** (tokens by model,
 honest billing context), **❤️ Health** (is it actually answering?), and
 **Logs**.
 

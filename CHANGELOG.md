@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.42.0] — 2026-08-26
+
+### Added
+- **Fleet usage rollup — see which agents burn the most tokens at a glance.**
+  A new **📊 Usage** button in the header opens a dialog that ranks every
+  running agent by cumulative tokens (input + output), with a bar, session
+  count, last activity, and billing context (included / local / API price) per
+  agent. On the CLI, `agentclaw usage` with no agent name prints the same
+  ranked table (`agentclaw usage <agent>` still gives one agent's by-model
+  breakdown). Backed by `GET /v1/usage`, which fans out `agentUsage()` across
+  the caller's visible running agents and sorts by tokens. **Live-only:** usage
+  is read from each live container, so stopped agents aren't counted — they're
+  reported as "N not counted (live-only)" rather than shown as zero. One
+  unreachable container drops to the skipped count instead of sinking the whole
+  list. Scoped to the caller's own agents like every other list.
+
 ## [0.41.0] — 2026-08-26
 
 ### Fixed

@@ -118,7 +118,7 @@ Commands:
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
   health <agent>               Live gateway health — is it actually answering
-  usage <agent>                Token usage by model
+  usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
   runtime                      Runtime image's OpenClaw version vs the npm latest
   upgrade-image [--version <X>] [--candidate]
                                Rebuild the shared runtime image to a new OpenClaw
@@ -534,6 +534,21 @@ export function fmtUsage(name: string, u: any): string {
   return lines.join('\n');
 }
 
+/** `agentclaw usage` (no agent) — running agents ranked by tokens. */
+export function fmtFleetUsage(f: any): string {
+  const agents: any[] = f.agents ?? [];
+  if (!agents.length) {
+    return f.skipped ? `No running agents to measure (${f.skipped} stopped — usage is live-only).` : 'No agents yet.';
+  }
+  const nw = Math.max(5, ...agents.map((a) => String(a.name).length));
+  const lines = agents.map((a) => {
+    const top = a.byModel?.[0]?.model ? `  ${a.byModel[0].model}${a.byModel.length > 1 ? ` +${a.byModel.length - 1}` : ''}` : '';
+    return `  ${String(a.name).padEnd(nw)}  ${fmtTok(a.totalTokens).padStart(6)}  ${String(a.sessions).padStart(3)} sess${top}`;
+  });
+  lines.push(`  ${'—'.repeat(nw)}  ${fmtTok(f.totalTokens).padStart(6)}  ${String(f.totalSessions).padStart(3)} sess  (${f.counted} running${f.skipped ? `, ${f.skipped} not counted — live-only` : ''})`);
+  return lines.join('\n');
+}
+
 async function main() {
   const { flags, positional } = parseArgs(process.argv.slice(2));
   const [cmd, ...rest] = positional;
@@ -811,7 +826,13 @@ async function main() {
       return;
     }
     case 'usage': {
-      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw usage <agent>'));
+      // No agent named → the fleet rollup, agents ranked by tokens.
+      if (!rest[0]) {
+        const f: any = await (await api(ctx, '/v1/usage')).json();
+        console.log(fmtFleetUsage(f));
+        return;
+      }
+      const a = await resolveAgent(ctx, rest[0]);
       const u: any = await (await api(ctx, `/v1/agents/${a.id}/usage`)).json();
       console.log(fmtUsage(a.name, u));
       return;

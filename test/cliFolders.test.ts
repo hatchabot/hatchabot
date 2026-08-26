@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runFolders, fmtHealth, fmtUsage, type FoldersIo } from '../src/cli.js';
+import { runFolders, fmtHealth, fmtUsage, fmtFleetUsage, type FoldersIo } from '../src/cli.js';
 
 /**
  * The `folders` command's real logic — especially the rm branch that must route
@@ -119,5 +119,21 @@ describe('fmtHealth / fmtUsage (CLI parity output)', () => {
     expect(out).toMatch(/1\.5M tokens · 3 sessions/);
     expect(out).toMatch(/claude-opus-4-8\s+1\.5M/);
     expect(fmtUsage('Bare', { sessions: 0, byModel: [] })).toMatch(/no sessions yet/);
+  });
+
+  it('renders the fleet rollup ranked, with a total and a live-only note', () => {
+    const out = fmtFleetUsage({
+      agents: [
+        { name: 'Den', totalTokens: 9000, sessions: 1, byModel: [{ model: 'claude-opus-4-8' }] },
+        { name: 'Kitchen', totalTokens: 1750, sessions: 3, byModel: [{ model: 'claude-opus-4-8' }, { model: 'claude-sonnet-5' }] },
+      ],
+      totalTokens: 10750, totalSessions: 4, counted: 2, skipped: 1,
+    });
+    const lines = out.split('\n');
+    expect(lines[0]).toMatch(/Den/); // top consumer first
+    expect(lines[1]).toMatch(/Kitchen/);
+    expect(out).toMatch(/claude-opus-4-8 \+1/); // "+N other models" hint
+    expect(out).toMatch(/2 running, 1 not counted — live-only/);
+    expect(fmtFleetUsage({ agents: [], skipped: 2 })).toMatch(/2 stopped — usage is live-only/);
   });
 });

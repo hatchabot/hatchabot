@@ -1905,6 +1905,40 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
   });
 
+  // Fleet usage rollup: every RUNNING agent the caller can see, ranked by
+  // tokens. Live-only — usage is read from each agent's live container, so
+  // STOPPED agents have no session data to report and are counted as `skipped`
+  // rather than shown as zero. One flaky container never sinks the list: its
+  // read is caught and it drops to `skipped` too.
+  app.get('/v1/usage', async (req) => {
+    const running = store
+      .listVisibleAgents(ownerIdOf(req))
+      .filter((a) => a.state === 'RUNNING' && a.runtimeRef);
+    const skipped = store
+      .listVisibleAgents(ownerIdOf(req))
+      .filter((a) => a.state !== 'RUNNING' || !a.runtimeRef).length;
+    const results = await Promise.all(
+      running.map(async (a) => {
+        try {
+          const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug);
+          return { id: a.id, name: a.name, ...u };
+        } catch {
+          return null; // unreachable container — treat as skipped, not zero
+        }
+      }),
+    );
+    const agentsUsage = results
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .sort((x, y) => y.totalTokens - x.totalTokens);
+    return {
+      agents: agentsUsage,
+      totalTokens: agentsUsage.reduce((s, a) => s + a.totalTokens, 0),
+      totalSessions: agentsUsage.reduce((s, a) => s + a.sessions, 0),
+      counted: agentsUsage.length,
+      skipped: skipped + (results.length - agentsUsage.length),
+    };
+  });
+
   // Live health probe of the agent's own gateway (event loop, Telegram
   // connection, plugin errors). Distinct from the tracked state: an agent can be
   // RUNNING here yet have a gateway that stopped answering.

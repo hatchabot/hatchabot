@@ -213,6 +213,7 @@
     <div class="hrow">
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
       <button id="fleetBtn" class="hbtn" title="Fleet health — states, activity, backups, and runtime at a glance" onclick="openFleetHealth()">📊 Health</button>
+      <button id="fleetUsageBtn" class="hbtn" title="Fleet usage — every running agent ranked by tokens" onclick="openFleetUsage()">📊 Usage</button>
       <button id="importBtn" class="hbtn" title="Open a .agentclaw file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
     </div>
@@ -784,6 +785,22 @@
   <div class="actions" style="justify-content:flex-end">
     <button onclick="loadUsage()">Refresh</button>
     <button class="primary" onclick="usageDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="fleetUsageDlg" style="width:min(640px,96vw)">
+  <div style="display:flex;justify-content:space-between;align-items:baseline">
+    <h3 style="margin:0">Fleet usage</h3>
+    <button class="hbtn" onclick="loadFleetUsage()">Refresh</button>
+  </div>
+  <div class="sub" style="margin:4px 0 0">
+    Running agents ranked by cumulative tokens (input + output), from their OpenClaw
+    sessions. Usage, not a bill — subscription and local agents have no per-token cost.
+    Stopped agents aren't counted: usage is read live from each container.
+  </div>
+  <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
+  <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+    <button class="primary" onclick="fleetUsageDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -2758,6 +2775,48 @@ function renderUsage(u) {
   $('usageBody').innerHTML =
     `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens</div>
      <div class="sub" style="margin:2px 0 12px">${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(usageAgentId, models)}</div>
+     ${rows}`;
+}
+
+function openFleetUsage() {
+  fleetUsageDlg.showModal();
+  loadFleetUsage();
+}
+async function loadFleetUsage() {
+  $('fleetUsageBody').innerHTML = 'Loading…';
+  try {
+    // Keep agents/profiles fresh so billingLine() resolves each row.
+    try { agents = await api('/v1/agents'); } catch { /* keep last-known */ }
+    renderFleetUsage(await api('/v1/usage'));
+  } catch (e) {
+    $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
+  }
+}
+function renderFleetUsage(f) {
+  if (!f.agents.length) {
+    $('fleetUsageBody').innerHTML = `<div class="sub">${f.skipped
+      ? `No running agents to measure — ${f.skipped} stopped (usage is read live, so stopped agents aren't counted).`
+      : 'No agents yet.'}</div>`;
+    return;
+  }
+  const max = f.agents[0].totalTokens || 1; // top agent sets the bar scale
+  const rows = f.agents.map((a, i) => {
+    const pct = Math.max(2, Math.round((a.totalTokens / max) * 100));
+    const bill = billingLine(a.id, (a.byModel || []).map(m => m.model));
+    return `<div class="pair" style="padding:6px 0;align-items:flex-start" title="${esc((a.byModel || []).map(m => m.model + ': ' + fmtTokens(m.tokens)).join('\n'))}">
+      <span class="grow">
+        <span class="sub" style="display:inline-block;width:1.4em">${i + 1}.</span> <b>${esc(a.name)}</b>
+        <span class="sub"> · ${a.sessions} session${a.sessions > 1 ? 's' : ''}${a.lastActive ? ' · ' + ago(a.lastActive) : ''}${bill ? ' · ' + bill : ''}</span>
+        <div style="height:5px;border-radius:3px;background:var(--accent);opacity:.85;width:${pct}%;margin-top:5px;min-width:6px"></div>
+      </span>
+      <b style="white-space:nowrap;margin-left:10px">${fmtTokens(a.totalTokens)}</b>
+    </div>`;
+  }).join('');
+  $('fleetUsageBody').innerHTML =
+    `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+       <span><span style="font-size:22px;font-weight:700">${fmtTokens(f.totalTokens)}</span> <span class="sub">tokens · ${f.counted} running agent${f.counted > 1 ? 's' : ''}</span></span>
+       ${f.skipped ? `<span class="sub">${f.skipped} not counted (live-only)</span>` : ''}
+     </div>
      ${rows}`;
 }
 

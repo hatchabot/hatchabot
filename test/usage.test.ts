@@ -91,3 +91,60 @@ describe('GET /v1/agents/:id/usage', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('GET /v1/usage (fleet rollup)', () => {
+  async function fleetWorld() {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    // Two RUNNING agents (different totals so ranking is observable), one STOPPED.
+    for (const [id, slug, name, state] of [
+      ['a1', 'kitchen', 'Kitchen', 'RUNNING'],
+      ['a2', 'den', 'Den', 'RUNNING'],
+      ['a3', 'attic', 'Attic', 'STOPPED'],
+    ] as const) {
+      const { runtimeRef } = await provider.provision({ agentId: id, slug, workspace: { files: {}, configPatch: { agentId: slug, authMode: 'api-key' } }, env: {} } as any);
+      store.insertAgent({ id, ownerId: OWNER, name, slug, state, aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    }
+    // Den out-uses Kitchen — it should rank first.
+    provider.execResponses.set('sessions list --agent kitchen', { code: 0, stdout: SESSIONS_JSON, stderr: '' }); // 1750
+    provider.execResponses.set('sessions list --agent den', {
+      code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: 9000, model: 'claude-opus-4-8', updatedAt: 5000 }] }), stderr: '',
+    });
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    return { f, provider };
+  }
+
+  it('ranks RUNNING agents by tokens and counts stopped ones as skipped (live-only)', async () => {
+    const { f } = await fleetWorld();
+    const res = await f.inject({ method: 'GET', url: '/v1/usage', headers: as });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.agents.map((a: any) => a.name)).toEqual(['Den', 'Kitchen']); // desc by tokens
+    expect(body.agents[0]).toMatchObject({ name: 'Den', totalTokens: 9000 });
+    expect(body.totalTokens).toBe(10750);
+    expect(body.counted).toBe(2);
+    expect(body.skipped).toBe(1); // the STOPPED agent, not shown as zero
+  });
+
+  it('drops an unreachable container to skipped rather than failing the whole list', async () => {
+    const { f, provider } = await fleetWorld();
+    provider.exec = (async (_ref: string, argv: string[]) => {
+      if (argv.includes('den')) throw new Error('container gone');
+      return { code: 0, stdout: SESSIONS_JSON, stderr: '' };
+    }) as any;
+    const res = await f.inject({ method: 'GET', url: '/v1/usage', headers: as });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.agents.map((a: any) => a.name)).toEqual(['Kitchen']); // Den dropped
+    expect(body.skipped).toBe(2); // the STOPPED agent + the unreachable one
+  });
+
+  it('scopes to the caller — another user sees none of these agents', async () => {
+    const { f } = await fleetWorld();
+    const res = await f.inject({ method: 'GET', url: '/v1/usage', headers: { 'x-agentclaw-owner': 'someone-else' } });
+    expect(res.json()).toMatchObject({ agents: [], counted: 0, skipped: 0 });
+  });
+});
