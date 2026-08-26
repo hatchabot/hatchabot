@@ -208,7 +208,7 @@
         <span class="switch-ico">🌙</span>
       </label>
       <button id="logoutBtn" class="hbtn" onclick="signOut()"
-              title="Sign out of this browser. Tabs share one login — for two accounts at once, use a private window or another browser profile.">Sign out</button>
+              title="Sign out — then sign in as anyone: the Google chooser offers 'Use another account'. Tabs share one login; for two accounts AT ONCE, use another browser profile or a private window.">Sign out / switch</button>
     </div>
     <div class="hrow">
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
@@ -953,6 +953,10 @@ async function signOut() {
   // Best-effort server side; the reload lands on the login dialog either way.
   try { await api('/v1/logout', { method: 'POST' }); } catch { /* already out */ }
   localStorage.removeItem('agentclaw_email');
+  // Forget Google's remembered pick, so the next sign-in shows the account
+  // chooser (with "Use another account") instead of silently re-selecting
+  // the same email — this is what makes account SWITCHING actually work.
+  try { google.accounts.id.disableAutoSelect(); } catch { /* GSI not loaded */ }
   location.reload();
 }
 
