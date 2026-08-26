@@ -1127,7 +1127,7 @@ async function loadPool() {
     el.innerHTML = bots.length
       ? bots.map(b => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
           <span class="grow">🤖 <b>@${esc(b.username)}</b>
-            <span class="sub">· ${b.shared ? 'shared' : b.mine ? 'yours' : 'another user’s'} · ${b.leasedTo ? 'in use by an agent' : 'available'}</span></span>
+            <span class="sub">· ${b.shared ? 'shared' : b.mine ? 'yours' : 'another user’s'} · ${b.leasedTo ? `in use by <b>${esc(b.leasedToName || 'an agent')}</b>` : 'available'}</span></span>
           ${b.leasedTo ? '' : `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}')">Remove</button>`}
         </div>`).join('')
       : '<div class="sub">Empty — add a spare bot below, or park one when deleting an agent.</div>';

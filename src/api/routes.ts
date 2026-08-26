@@ -797,6 +797,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
               .map((b) => ({
                 username: b.username,
                 leasedTo: b.leasedTo,
+                // Which agent wears this bot right now — names beat ids in
+                // a roster meant for humans.
+                leasedToName: b.leasedTo ? store.getAgent(b.leasedTo)?.name : undefined,
                 ownerId: b.ownerId, // undefined = shared house bot
                 shared: !b.ownerId,
                 mine: b.ownerId === ownerIdOf(req),
