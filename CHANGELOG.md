@@ -2,7 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.51.1] — 2026-08-26
+## [0.52.0] — 2026-08-26
+
+### Changed
+- **The agent legend is now a permanent table of contents, not a button-toggled
+  menu.** On screens ≥1200px it's pinned to the upper-left and always visible —
+  the page reserves a gutter for it, so it never covers a card, and being
+  `position: fixed` it stays put while you scroll the cards. The 📑 Jump button
+  is now only a fallback on narrow screens (where there's no room for a gutter),
+  which keep the on-demand overlay that closes itself after a jump.
 
 ### Fixed
 - **Copy buttons now work over plain HTTP** (e.g. `http://<tailscale-host>:8080`).

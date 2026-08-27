@@ -68,15 +68,24 @@
     border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
   .pool-ready[hidden] { display: none; }
   .pool-dot { color: var(--ok); font-size: 10px; line-height: 1; }
-  /* Jump-to legend, fixed in the left margin. Toggled from the header (📑 Jump);
-     opens by default on wide screens where it clears the centered column, and
-     overlays on demand when narrower. */
-  #toc { position: fixed; left: 16px; top: 92px; width: 216px;
-    max-height: calc(100vh - 116px); display: none; flex-direction: column;
+  /* Jump-to legend: fixed in the left margin, so it stays put while the cards
+     scroll. Wide screens PIN it open permanently and the page reserves a gutter
+     (body.has-toc padding) so it never covers a card. Narrow screens have no
+     room for a gutter, so there it stays an on-demand overlay from 📑 Jump. */
+  #toc { position: fixed; left: 16px; top: 16px; width: 216px;
+    max-height: calc(100vh - 32px); display: none; flex-direction: column;
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 10px 8px 8px; z-index: 40;
     font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.18); }
   #toc.open { display: flex; }
+  @media (min-width: 1200px) {
+    body.has-toc { padding-left: 244px; }   /* reserve the gutter, no overlap */
+    body.has-toc #toc { display: flex; }    /* always there, never toggled */
+    body.has-toc #toc .toc-toggle { display: none; } /* pinned: nothing to close */
+    /* Pinned it's part of the layout, not a floating overlay — drop the lift. */
+    body.has-toc #toc { box-shadow: none; }
+    #tocBtn { display: none !important; }   /* the button is a narrow-screen fallback */
+  }
   .toc-head { display: flex; align-items: center; gap: 6px; padding: 0 4px 6px;
     border-bottom: 1px solid var(--line); margin-bottom: 4px; }
   .toc-head b { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
@@ -3642,7 +3651,10 @@ function renderAgents() {
 
 // ---- jump-to legend (table of contents) ---------------------------------------
 
-let tocOpen = null; // null = undecided; set from viewport width on first render
+/** Above this width the legend is PINNED open and the page reserves a gutter
+ *  for it (see the matching CSS media query); below it, it's an overlay the
+ *  📑 Jump button toggles. Keep the two in sync. */
+const TOC_PIN_PX = 1200;
 function tocDotColor(a) {
   if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') return 'var(--warn)';
   return { RUNNING: 'var(--ok)', STOPPED: 'var(--dim)', FAILED: 'var(--bad)' }[a.state] || 'var(--off)';
@@ -3650,13 +3662,11 @@ function tocDotColor(a) {
 function renderToc() {
   const nav = $('toc');
   const enough = agents && agents.length >= 2; // not worth the chrome for 0–1
+  // `has-toc` both shows the pinned legend and reserves its gutter, so the two
+  // can never disagree (a gutter with no legend, or a legend over the cards).
+  document.body.classList.toggle('has-toc', enough);
   $('tocBtn').hidden = !enough;
   if (!enough) { nav.classList.remove('open'); return; }
-  // First time we have a list: open by default only where it clears the
-  // centered column, so it doesn't cover cards unasked. The button toggles it
-  // at any width thereafter.
-  if (tocOpen === null) tocOpen = window.innerWidth >= 1600;
-  nav.classList.toggle('open', tocOpen);
   $('tocCount').textContent = agents.length;
   // Mirror the main list's order and group headers exactly.
   let html = '', lastGroup = null;
@@ -3677,12 +3687,12 @@ function jumpToCard(id) {
   // Restart the flash even if the same card is clicked twice.
   card.classList.remove('toc-flash'); void card.offsetWidth; card.classList.add('toc-flash');
   setTimeout(() => card.classList.remove('toc-flash'), 1300);
-  // On a narrow screen the legend overlays the cards — get out of the way once
-  // the jump is made.
-  if (window.innerWidth < 1600) closeToc();
+  // Only in overlay mode does the legend cover the cards — there, get out of the
+  // way once the jump is made. Pinned, it just stays.
+  if (window.innerWidth < TOC_PIN_PX) closeToc();
 }
-function toggleToc() { tocOpen = !$('toc').classList.contains('open'); $('toc').classList.toggle('open', tocOpen); }
-function closeToc() { tocOpen = false; $('toc').classList.remove('open'); }
+function toggleToc() { $('toc').classList.toggle('open'); }
+function closeToc() { $('toc').classList.remove('open'); }
 
 // ---- polling ------------------------------------------------------------------
 
