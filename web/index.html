@@ -68,9 +68,36 @@
     border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
   .pool-ready[hidden] { display: none; }
   .pool-dot { color: var(--ok); font-size: 10px; line-height: 1; }
+  /* Jump-to legend, fixed in the left margin. Toggled from the header (📑 Jump);
+     opens by default on wide screens where it clears the centered column, and
+     overlays on demand when narrower. */
+  #toc { position: fixed; left: 16px; top: 92px; width: 216px;
+    max-height: calc(100vh - 116px); display: none; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 10px 8px 8px; z-index: 40;
+    font-size: 13px; box-shadow: 0 4px 18px rgba(0,0,0,.18); }
+  #toc.open { display: flex; }
+  .toc-head { display: flex; align-items: center; gap: 6px; padding: 0 4px 6px;
+    border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .toc-head b { font-size: 12px; letter-spacing: .04em; text-transform: uppercase; color: var(--dim); }
+  .toc-toggle { margin-left: auto; background: none; border: 0; color: var(--dim);
+    cursor: pointer; font-size: 13px; padding: 2px 4px; line-height: 1; }
+  #tocList { overflow-y: auto; overflow-x: hidden; }
+  .toc-group { font-weight: 600; color: var(--dim); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .04em; margin: 8px 4px 2px; }
+  .toc-item { display: flex; align-items: center; gap: 7px; padding: 3px 6px;
+    border-radius: 6px; color: var(--text); text-decoration: none; cursor: pointer;
+    white-space: nowrap; overflow: hidden; }
+  .toc-item:hover { background: var(--panel-2); }
+  .toc-item .toc-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+  .toc-item .toc-name { overflow: hidden; text-overflow: ellipsis; }
+  /* Brief highlight on the card you jumped to. */
+  @keyframes tocFlash { from { box-shadow: 0 0 0 2px var(--accent); } to { box-shadow: 0 0 0 2px transparent; } }
+  .card.toc-flash { animation: tocFlash 1.2s ease-out; }
   .card {
     background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+    scroll-margin-top: 16px;
   }
   .movecol { display: flex; flex-direction: column; gap: 2px; }
   .movebtn { padding: 0 7px; font-size: 10px; line-height: 1.35; color: var(--dim);
@@ -198,6 +225,13 @@
 </style>
 </head>
 <body>
+<nav id="toc" aria-label="Jump to agent">
+  <div class="toc-head">
+    <b>Agents</b><span class="sub" id="tocCount"></span>
+    <button class="toc-toggle" title="Close" onclick="closeToc()">✕</button>
+  </div>
+  <div id="tocList"></div>
+</nav>
 <div class="wrap">
   <header>
     <div class="hrow">
@@ -215,6 +249,7 @@
               title="Sign out — then sign in as anyone: the Google chooser offers 'Use another account'. Tabs share one login; for two accounts AT ONCE, use another browser profile or a private window.">Sign out / switch</button>
     </div>
     <div class="hrow">
+      <button id="tocBtn" class="hbtn" title="Jump to an agent — a clickable table of contents" onclick="toggleToc()" hidden>📑 Jump</button>
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
       <button id="fleetBtn" class="hbtn" title="Fleet health — states, activity, backups, and runtime at a glance" onclick="openFleetHealth()">📊 Health</button>
       <button id="fleetUsageBtn" class="hbtn" title="Fleet usage — every running agent ranked by tokens" onclick="openFleetUsage()">📊 Usage</button>
@@ -3534,6 +3569,7 @@ function renderAgents() {
   const el = $('agents');
   // Show "Rebuild all" only when there's more than one agent to rebuild.
   $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
+  renderToc(); // keep the jump-to legend in sync with the list
   if (profiles.length && agents.length === 0) {
     el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
     return;
@@ -3567,6 +3603,50 @@ function renderAgents() {
     if (i) { i.focus(); if (caret != null) try { i.setSelectionRange(caret, caret); } catch {} }
   }
 }
+
+// ---- jump-to legend (table of contents) ---------------------------------------
+
+let tocOpen = null; // null = undecided; set from viewport width on first render
+function tocDotColor(a) {
+  if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') return 'var(--warn)';
+  return { RUNNING: 'var(--ok)', STOPPED: 'var(--dim)', FAILED: 'var(--bad)' }[a.state] || 'var(--off)';
+}
+function renderToc() {
+  const nav = $('toc');
+  const enough = agents && agents.length >= 2; // not worth the chrome for 0–1
+  $('tocBtn').hidden = !enough;
+  if (!enough) { nav.classList.remove('open'); return; }
+  // First time we have a list: open by default only where it clears the
+  // centered column, so it doesn't cover cards unasked. The button toggles it
+  // at any width thereafter.
+  if (tocOpen === null) tocOpen = window.innerWidth >= 1600;
+  nav.classList.toggle('open', tocOpen);
+  $('tocCount').textContent = agents.length;
+  // Mirror the main list's order and group headers exactly.
+  let html = '', lastGroup = null;
+  for (const a of agents) {
+    const g = a.group || '';
+    if (g && g !== lastGroup) html += `<div class="toc-group">${esc(g)}</div>`;
+    lastGroup = g;
+    html += `<a class="toc-item" onclick="jumpToCard('${a.id}')" title="${esc(a.name)}">
+      <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
+      <span class="toc-name">${esc(a.name)}</span></a>`;
+  }
+  $('tocList').innerHTML = html;
+}
+function jumpToCard(id) {
+  const card = document.getElementById('card-' + id);
+  if (!card) return;
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  // Restart the flash even if the same card is clicked twice.
+  card.classList.remove('toc-flash'); void card.offsetWidth; card.classList.add('toc-flash');
+  setTimeout(() => card.classList.remove('toc-flash'), 1300);
+  // On a narrow screen the legend overlays the cards — get out of the way once
+  // the jump is made.
+  if (window.innerWidth < 1600) closeToc();
+}
+function toggleToc() { tocOpen = !$('toc').classList.contains('open'); $('toc').classList.toggle('open', tocOpen); }
+function closeToc() { tocOpen = false; $('toc').classList.remove('open'); }
 
 // ---- polling ------------------------------------------------------------------
 

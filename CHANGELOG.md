@@ -2,7 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.49.0] — 2026-08-26
+## [0.50.0] — 2026-08-26
+
+### Added
+- **Jump-to legend (table of contents) for the agent list.** A new **📑 Jump**
+  button in the header (shown once you have 2+ agents) toggles a fixed
+  upper-left panel listing every agent — grouped and ordered exactly like the
+  main list, each with a state dot (running / stopped / failed / working).
+  Clicking a name smooth-scrolls to that agent's card and briefly highlights it.
+  Opens by default on wide screens (where it clears the centered content
+  column); on narrower windows it opens on demand as an overlay and closes
+  itself after you jump.
 
 ### Changed
 - **The "switch agents to <model>" dialog now names the source it's scoped to.**
