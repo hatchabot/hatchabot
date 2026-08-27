@@ -2687,9 +2687,16 @@ function renderDataList(sources) {
   const where = d => d.kind === 'git'
     ? `→ cloned in workspace · ${badge(d)}`
     : `→ ${d.mountAtHostPath ? esc(d.hostPath) + ' (same path)' : '/data/' + esc(d.mountName)} · ${badge(d)}`;
+  // Legacy shared folders have no data-source row to update — they're managed
+  // through sharedPaths, so they get no toggle.
+  const toggle = d => d.legacy ? '' :
+    `<button onclick="setDataAccess('${jsq(d.id)}','${d.access === 'rw' ? 'ro' : 'rw'}')"
+             title="${d.access === 'rw' ? 'Make read-only' : 'Allow this agent to write here'} — applies on the next rebuild">
+       ${d.access === 'rw' ? '→ read-only' : '→ writable'}</button>`;
   $('dataList').innerHTML = editData.length
     ? editData.map(d => `<div class="pair"><span class="grow">${icon(d)} <code>${esc(d.hostPath || d.repoUrl || d.mountName)}</code>
         <span class="sub">${where(d)}</span></span>
+        ${toggle(d)}
         ${d.kind === 'git' && d.pubKey ? `<button onclick="showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to the repo on GitHub">🔑 Deploy key</button>` : ''}
         <button class="danger" onclick="removeDataSource('${jsq(d.id)}')">×</button></div>`).join('')
     : '<div class="sub">None — this agent can only see its own workspace.</div>';
@@ -2746,6 +2753,22 @@ async function addDataSource() {
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('pathAddBtn').disabled = false; }
+}
+
+async function setDataAccess(id, access) {
+  const src = editData.find(d => d.id === id);
+  if (!src) return;
+  // Be straight about what each kind's flag actually controls.
+  if (src.kind === 'git' && access === 'rw' &&
+      !confirm(`Mark "${src.mountName}" writable?\n\nThis tells the agent it may change and commit in that checkout. Whether a PUSH is accepted is set by the deploy key's permission on the repo host — grant the key write access there too.`)) return;
+  if (src.kind === 'folder' && access === 'rw' &&
+      !confirm(`Let this agent WRITE to ${src.hostPath}?\n\nIt runs without permission prompts and is reachable by everyone in it, so one bad instruction could change or delete files here.`)) return;
+  try {
+    const updated = await api(`/v1/agents/${editAgentId}/data-sources/${id}`, { method: 'PATCH', body: { access } });
+    renderDataList(updated.dataSources);
+    toast(`Now ${access === 'rw' ? 'writable' : 'read-only'} — Rebuild to apply it`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
 }
 
 async function removeDataSource(id) {

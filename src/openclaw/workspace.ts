@@ -32,16 +32,67 @@ ${
 }
 
 /**
- * Swaps the "## Memory policy" section of an AGENTS.md for `section`, leaving
- * everything else (including any sections the user added after it) untouched.
+ * Swaps one `## Heading` section of a markdown file for `section`, leaving
+ * everything else (including sections the user added after it) untouched.
  * Appends the section when the heading is missing.
  */
-export function replaceMemoryPolicy(content: string, section: string): string {
-  const start = content.indexOf('## Memory policy');
+export function replaceSection(content: string, heading: string, section: string): string {
+  const start = content.indexOf(heading);
   if (start === -1) return `${content.trimEnd()}\n\n${section}\n`;
   const rest = content.indexOf('\n## ', start + 1);
   const tail = rest === -1 ? '\n' : content.slice(rest);
   return `${content.slice(0, start)}${section}${tail}`;
+}
+
+export function replaceMemoryPolicy(content: string, section: string): string {
+  return replaceSection(content, '## Memory policy', section);
+}
+
+/** In-container location of a data source — where the agent actually finds it. */
+export function dataSourcePath(d: {
+  kind: string;
+  mountName: string;
+  hostPath?: string;
+  mountAtHostPath?: boolean;
+}): string {
+  if (d.kind === 'git') return `/home/node/.openclaw/${d.mountName}`;
+  return d.mountAtHostPath && d.hostPath ? d.hostPath : `/data/${d.mountName}`;
+}
+
+export const DATA_SOURCES_HEADING = '## Data sources';
+
+/**
+ * The AGENTS.md section owned by the agent's data sources. AgentClaw keeps this
+ * one section in sync (on every provision and rebuild) so the agent always knows
+ * WHERE its repos and folders actually are — without it, adding a repo left the
+ * files on disk and the agent unaware they existed. Everything else in the file
+ * stays the user's.
+ */
+export function dataSourcesSection(
+  sources: Array<{
+    kind: string;
+    access: string;
+    mountName: string;
+    hostPath?: string;
+    mountAtHostPath?: boolean;
+    repoUrl?: string;
+  }>,
+): string {
+  if (!sources.length) {
+    return `${DATA_SOURCES_HEADING}
+- None. You can only see your own workspace.`;
+  }
+  const lines = sources.map((d) => {
+    const what = d.kind === 'git' ? `git repo${d.repoUrl ? ` ${d.repoUrl}` : ''}` : 'folder';
+    // For git, "writable" describes the checkout: the agent may edit and commit
+    // locally either way — whether a push is accepted is the deploy key's
+    // permission on the host, which AgentClaw doesn't control.
+    const how = d.access === 'rw' ? 'you may read and write' : 'read-only — do not modify';
+    return `- \`${dataSourcePath(d)}\` — ${what} (${how})`;
+  });
+  return `${DATA_SOURCES_HEADING}
+These are mounted or checked out for you. Use these exact paths.
+${lines.join('\n')}`;
 }
 
 /**

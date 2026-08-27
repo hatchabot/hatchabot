@@ -9,6 +9,10 @@ import {
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
@@ -510,5 +514,62 @@ describe('per-agent env injection', () => {
     const spec = await buildRuntimeSpec(w.deps, agent.id);
     expect(spec.env.MARKETDATA_API_KEY).toBe('mk-123');
     expect(spec.env.ANTHROPIC_API_KEY).toBe('sk-test'); // profile creds, not HIJACK
+  });
+});
+
+describe('AGENTS.md "## Data sources" stays in step with reality', () => {
+  /** The MOST RECENT doc-sync script in the exec log — provision emits one too
+   *  (before the source existed), so the rebuild's is the one we want. */
+  const docScript = (p: MockProvider) =>
+    p.execLog.filter((a) => a[0] === 'sh').map((a) => a[1]!).filter((s) => s.includes('Data sources')).at(-1);
+
+  it('is written on provision, naming each source and its real path', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertDataSource({
+      id: 'ds1', agentId: agent.id, kind: 'git', access: 'rw', mountName: 'notes',
+      repoUrl: 'git@github.com:me/notes.git', createdAt: 'now',
+    });
+    // Rebuild re-runs the sync, which is how a source added later reaches the agent.
+    await rebuildAgent(w.deps, agent.id);
+    const script = docScript(w.provider as MockProvider);
+    expect(script).toBeDefined();
+    expect(script).toContain('AGENTS.md');
+  });
+
+  // Shell + embedded-JS quoting is exactly where this breaks, so run the REAL
+  // emitted script against a REAL file rather than trusting it by inspection.
+  it('the emitted script rewrites only its own section, and is idempotent', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertDataSource({
+      id: 'ds1', agentId: agent.id, kind: 'git', access: 'rw', mountName: 'notes',
+      repoUrl: 'git@github.com:me/notes.git', createdAt: 'now',
+    });
+    await rebuildAgent(w.deps, agent.id);
+    const script = docScript(w.provider as MockProvider)!;
+
+    const dir = mkdtempSync(join(tmpdir(), 'acl-docs-'));
+    try {
+      const file = join(dir, 'AGENTS.md');
+      writeFileSync(file, '# Kitchen\n\n## Memory policy\n- shared\n\n## House rules\n- be kind\n');
+      // Point the script at our file instead of the container path.
+      const patched = script.replace(/^F=.*$/m, `F=${JSON.stringify(file)}`);
+
+      execFileSync('sh', ['-c', patched], { encoding: 'utf8' });
+      const once = readFileSync(file, 'utf8');
+      expect(once).toContain('/home/node/.openclaw/notes');       // the real path
+      expect(once).toContain('you may read and write');            // its access
+      expect(once).toContain('## House rules\n- be kind');         // user's text kept
+      expect(once).toContain('## Memory policy');                  // other managed section kept
+
+      // Running it again changes nothing (no duplicate section, no churn).
+      execFileSync('sh', ['-c', patched], { encoding: 'utf8' });
+      const twice = readFileSync(file, 'utf8');
+      expect(twice).toBe(once);
+      expect(twice.match(/## Data sources/g)).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

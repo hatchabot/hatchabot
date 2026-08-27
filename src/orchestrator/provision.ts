@@ -9,7 +9,7 @@ import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
-import { buildWorkspaceSeed } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import { buildGitSyncScript } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
@@ -216,8 +216,10 @@ async function runProvisionStepsInner(
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.healthy', { agentId, runtimeRef });
 
-    // Step 7.5: clone/refresh git data sources onto the volume.
+    // Step 7.5: clone/refresh git data sources onto the volume, then tell the
+    // agent where they landed (AGENTS.md "## Data sources").
     await syncGitDataSources(deps, agentId, runtimeRef, log);
+    await syncDataSourceDocs(deps, agentId, runtimeRef, log);
 
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');
@@ -470,6 +472,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // been used the most.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     await syncGitDataSources(deps, agentId, runtimeRef, log);
+    await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
     return store.setAgentState(agentId, 'RUNNING');
   } catch (err) {
@@ -556,6 +559,70 @@ async function syncGitDataSources(
     } catch (e) {
       log('datasource.git_sync_error', { agentId, mountName: d.mountName, error: String((e as Error).message ?? e) });
     }
+  }
+}
+
+/**
+ * Keep AGENTS.md's "## Data sources" section in step with what the agent
+ * actually has mounted/checked out. Without this, adding a repo dropped the
+ * files on the volume and left the agent with no idea they existed — the owner
+ * had to describe the paths by hand. Only that one section is rewritten; the
+ * rest of the file is the user's. Best-effort: a failure here must never fail a
+ * provision or rebuild.
+ */
+async function syncDataSourceDocs(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  // Legacy shared folders are read-only mounts and belong in the list too.
+  const sources = [
+    ...(agent.sharedPaths ?? []).map((p) => ({
+      kind: 'folder',
+      access: 'ro',
+      mountName: basename(p.replace(/\/+$/, '')),
+      hostPath: p,
+    })),
+    ...store.listDataSources(agentId),
+  ];
+  const section = dataSourcesSection(sources);
+  const path = `/home/node/.openclaw/agents/${agent.slug}/agent/AGENTS.md`;
+  const b64 = Buffer.from(section, 'utf8').toString('base64');
+  // Read-modify-write in one shell so the file is only rewritten when the
+  // section actually changed (keeps rebuilds from churning the user's file).
+  const script = [
+    'set -e',
+    `F=${JSON.stringify(path)}`,
+    '[ -f "$F" ] || exit 0',
+    `SECTION=$(echo ${JSON.stringify(b64)} | base64 -d)`,
+    `node -e '
+      const fs = require("fs");
+      const [file, section] = [process.argv[1], process.argv[2]];
+      const cur = fs.readFileSync(file, "utf8");
+      const H = ${JSON.stringify(DATA_SOURCES_HEADING)};
+      const start = cur.indexOf(H);
+      let next;
+      if (start === -1) next = cur.trimEnd() + "\\n\\n" + section + "\\n";
+      else {
+        const rest = cur.indexOf("\\n## ", start + 1);
+        next = cur.slice(0, start) + section + (rest === -1 ? "\\n" : cur.slice(rest));
+      }
+      if (next !== cur) fs.writeFileSync(file, next);
+    ' "$F" "$SECTION"`,
+  ].join('\n');
+  try {
+    const res = await provider.execShell(runtimeRef, script);
+    if (res.code !== 0) {
+      log('datasource.docs_failed', { agentId, stderr: res.stderr.slice(0, 300) });
+    } else {
+      log('datasource.docs_synced', { agentId, sources: sources.length });
+    }
+  } catch (e) {
+    log('datasource.docs_error', { agentId, error: String((e as Error).message ?? e) });
   }
 }
 

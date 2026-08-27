@@ -196,3 +196,59 @@ describe('DELETE /v1/agents/:id/data-sources/:dsId', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('PATCH /v1/agents/:id/data-sources/:dsId (change access)', () => {
+  const patch = (f: any, id: string, body: unknown, owner = OWNER) =>
+    f.inject({ method: 'PATCH', url: `/v1/agents/a1/data-sources/${id}`, headers: { 'x-agentclaw-owner': owner }, payload: body });
+
+  it('flips a folder read-only → writable and back, without re-adding it', async () => {
+    const { store, f } = await world();
+    const added = (await addSource(f, { kind: 'folder', access: 'ro', path: tmp() })).json();
+    const id = added.dataSources[0].id;
+
+    expect((await patch(f, id, { access: 'rw' })).statusCode).toBe(200);
+    expect(store.getDataSource('a1', id)!.access).toBe('rw');
+    // ...and back, so it's a real toggle, not a one-way upgrade.
+    expect((await patch(f, id, { access: 'ro' })).statusCode).toBe(200);
+    expect(store.getDataSource('a1', id)!.access).toBe('ro');
+  });
+
+  it('flips a git source, keeping its clone and deploy key intact', async () => {
+    const { store, secrets, f } = await world();
+    const added = (await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@github.com:me/notes.git' })).json();
+    const src = added.dataSources[0];
+    const keyBefore = await secrets.get(store.getDataSource('a1', src.id)!.secretRef!);
+
+    expect((await patch(f, src.id, { access: 'rw' })).statusCode).toBe(200);
+    const after = store.getDataSource('a1', src.id)!;
+    expect(after.access).toBe('rw');
+    // The whole point of PATCH over remove+re-add: same repo row, same key, so
+    // nothing has to be re-pasted on GitHub and nothing is re-cloned.
+    expect(after.mountName).toBe(src.mountName);
+    expect(after.pubKey).toBe(src.pubKey);
+    expect(await secrets.get(after.secretRef!)).toBe(keyBefore);
+  });
+
+  it('only the machine owner may grant write to a HOST FOLDER', async () => {
+    // Agent owner is not the machine owner here.
+    const { store, f } = await world('someone-else');
+    store.insertDataSource({
+      id: 'ds1', agentId: 'a1', kind: 'folder', access: 'ro', mountName: 'notes',
+      hostPath: '/home/me/notes', createdAt: 'now',
+    });
+    expect((await patch(f, 'ds1', { access: 'rw' })).statusCode).toBe(403);
+    expect(store.getDataSource('a1', 'ds1')!.access).toBe('ro');
+    // Going back to read-only is always allowed — it only ever removes access.
+    store.setDataSourceAccess('a1', 'ds1', 'rw');
+    expect((await patch(f, 'ds1', { access: 'ro' })).statusCode).toBe(200);
+  });
+
+  it('rejects a bad access value, an unknown id, and another owner', async () => {
+    const { f } = await world();
+    const added = (await addSource(f, { kind: 'folder', access: 'ro', path: tmp() })).json();
+    const id = added.dataSources[0].id;
+    expect((await patch(f, id, { access: 'sideways' })).statusCode).toBe(400);
+    expect((await patch(f, 'nope', { access: 'rw' })).statusCode).toBe(404);
+    expect((await patch(f, id, { access: 'rw' }, 'other-user')).statusCode).toBe(404);
+  });
+});

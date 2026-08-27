@@ -2,6 +2,36 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.55.0] — 2026-08-27
+
+### Added
+- **Change a data source between read-only and writable, in place.** There was
+  no way to flip access after adding a source — the only route was remove and
+  re-add, which for a git repo meant a fresh clone **and a new deploy key to
+  paste on GitHub**. Each source now has a one-click toggle
+  (`PATCH /v1/agents/:id/data-sources/:dsId`), keeping the same row, clone, and
+  key. Applies on the next rebuild, since a container's bind mounts are fixed
+  once it's running. Granting write to a *host folder* stays the machine
+  owner's privilege (same gate as creating one); going back to read-only is
+  always allowed.
+- **Agents are now told where their data actually is.** AgentClaw maintains a
+  `## Data sources` section in each agent's `AGENTS.md`, listing every repo and
+  folder with its **real in-container path** and whether it may be written —
+  refreshed on every provision and rebuild. Adding a repo used to drop the files
+  on the volume and leave the agent with no idea they existed; you had to
+  describe the paths by hand. Only that one section is managed; the rest of the
+  file stays yours (same technique as the memory-policy section), and the
+  rewrite is idempotent.
+
+  For reference, git repos are checked out at `/home/node/.openclaw/<repo>` and
+  folders mount at `/data/<name>` (adopted agents keep their original host path).
+
+### Note
+- For a **git** source, read-only vs writable is a statement of intent the agent
+  is told about — the repo is cloned onto its own volume, so whether a *push* is
+  accepted is governed by the deploy key's permission on the repo host, which
+  AgentClaw doesn't control. For a **folder** it's enforced by the bind mount.
+
 ## [0.54.0] — 2026-08-27
 
 ### Added

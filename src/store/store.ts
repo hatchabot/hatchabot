@@ -1045,6 +1045,16 @@ export class Store {
       });
   }
 
+  /** Flip a source between read-only and writable. Applies on the next rebuild
+   *  (a folder's bind mount is fixed for the life of the container). */
+  setDataSourceAccess(agentId: string, id: string, access: 'ro' | 'rw'): boolean {
+    return (
+      this.db
+        .prepare(`UPDATE data_sources SET access = ? WHERE agent_id = ? AND id = ?`)
+        .run(access, agentId, id).changes > 0
+    );
+  }
+
   deleteDataSource(agentId: string, id: string): boolean {
     return (
       this.db.prepare(`DELETE FROM data_sources WHERE agent_id = ? AND id = ?`).run(agentId, id)

@@ -1865,6 +1865,31 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return publicAgent(store.getAgent(agent.id)!);
   });
 
+  // Flip a source between read-only and writable, without the remove-and-re-add
+  // dance (which for a git repo meant a fresh clone AND a new deploy key).
+  // Applies on the next rebuild: a container's bind mounts are fixed once it's
+  // running. For git this is a documented intent, not an enforcement — the repo
+  // is cloned onto the volume, so what a push is actually allowed to do is the
+  // deploy key's permission on the host.
+  app.patch<{ Params: { id: string; dsId: string }; Body: { access?: string } }>(
+    '/v1/agents/:id/data-sources/:dsId',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const src = store.getDataSource(agent.id, req.params.dsId);
+      if (!src) return reply.code(404).send({ error: 'No such data source.' });
+      const parsed = z.object({ access: z.enum(['ro', 'rw']) }).safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      // Same gate as creating a writable folder: granting write to a host folder
+      // is the machine owner's call, not any agent owner's.
+      if (src.kind === 'folder' && parsed.data.access === 'rw' && !ownsLocalHost(req)) {
+        return reply.code(403).send({ error: HOST_PATH_DENIED });
+      }
+      store.setDataSourceAccess(agent.id, src.id, parsed.data.access);
+      return publicAgent(store.getAgent(agent.id)!);
+    },
+  );
+
   app.delete<{ Params: { id: string; dsId: string } }>(
     '/v1/agents/:id/data-sources/:dsId',
     async (req, reply) => {
