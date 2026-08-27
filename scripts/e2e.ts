@@ -42,7 +42,7 @@ const profileId = randomUUID();
 await secrets.put(`ai-profile/${profileId}`, 'sk-ant-fake-key-for-local-testing');
 store.insertAIProfile({
   id: profileId,
-  ownerId: 'chris',
+  ownerId: 'test-owner',
   name: 'My Claude',
   vendor: 'anthropic',
   kind: 'api_key',
@@ -54,10 +54,10 @@ store.insertAIProfile({
 const hostId = randomUUID();
 store.insertHost({
   id: hostId,
-  ownerId: 'chris',
+  ownerId: 'test-owner',
   kind: 'cloud',
   provider: 'mock',
-  name: "Chris's GCP",
+  name: "Example GCP",
   settings: {},
   createdAt: new Date().toISOString(),
 });
@@ -70,7 +70,7 @@ const started = Date.now();
 const result = await provisionAgent(
   { store, secrets, provider, channel, sleep: async () => {}, log },
   {
-    ownerId: 'chris',
+    ownerId: 'test-owner',
     name: 'Kitchen Helper',
     persona: 'You help plan meals and keep the pantry list current.',
     aiProfileId: profileId,
@@ -109,7 +109,7 @@ const before = channel.availableCount();
 const failing = new MockProvider({ failOn: 'provision' });
 const failed = await provisionAgent(
   { store, secrets, provider: failing, channel, sleep: async () => {}, log },
-  { ownerId: 'chris', name: 'Doomed Agent', aiProfileId: profileId, hostId },
+  { ownerId: 'test-owner', name: 'Doomed Agent', aiProfileId: profileId, hostId },
 );
 
 console.log(`\n  state:  ${failed.agent.state}`);

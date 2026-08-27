@@ -10,11 +10,11 @@ describe('parsePairingList', () => {
     const out = JSON.stringify({
       version: 1,
       requests: [
-        { id: '1000000001', code: '4KXAEP9W', createdAt: 'x', meta: { username: 'chris' } },
+        { id: '1000000001', code: '4KXAEP9W', createdAt: 'x', meta: { username: 'owner' } },
       ],
     });
     expect(parsePairingList(out)).toEqual([
-      { id: '1000000001', code: '4KXAEP9W', meta: { username: 'chris' } },
+      { id: '1000000001', code: '4KXAEP9W', meta: { username: 'owner' } },
     ]);
   });
 

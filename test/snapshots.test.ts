@@ -43,7 +43,7 @@ function fileWorld(initial: Record<string, string>) {
 const SEED = {
   'SOUL.md': '# Kitchen\nA helpful cook.\n',
   'AGENTS.md': '# Kitchen\n\n## Memory policy\n- shared\n',
-  'MEMORY.md': '# Memory\n- Chris likes soup\n',
+  'MEMORY.md': '# Memory\n- The owner likes soup\n',
 };
 
 describe('captureSnapshot', () => {

@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.56.1] — 2026-08-27
+
+### Changed
+- **Scrubbed personal identifiers from the source, docs, and tests** — the repo
+  should carry no one's real details. Replaced a real Google account in
+  `docs/connections-design.md` with `building-adviser@example.com`, the owner's
+  real Telegram user id (in 7 files) with the obviously-synthetic
+  `1000000001`, a real Tailscale hostname in a `routes.ts` doc comment with
+  `my-host.example.ts.net`, and first-name references in comments, fixtures and
+  e2e scripts (`ownerId: 'chris'` → `'test-owner'`) with generic equivalents.
+  Placeholder mail is now `@example.com` throughout. Audited alongside it: no
+  real credentials, bot tokens, or API keys are committed — every key-shaped
+  string in the tree is an obvious fixture. The `LICENSE` copyright line is
+  intentionally unchanged.
+
+  Note this cleans the **working tree**; the previous values remain in git
+  history (the repository is private).
+
 ## [0.56.0] — 2026-08-27
 
 ### Added

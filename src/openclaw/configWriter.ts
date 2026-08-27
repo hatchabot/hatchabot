@@ -1,8 +1,8 @@
 import type { OpenClawConfigPatch } from '../providers/provider.js';
 
 /**
- * openclaw.json is volatile — its schema moves between releases, and Chris's
- * own file already carries a dozen keys we have no business owning. So we do
+ * openclaw.json is volatile — its schema moves between releases, and a
+ * user's own file already carries a dozen keys we have no business owning. So we do
  * NOT template the whole file. Instead we emit the smallest possible set of
  * `openclaw` CLI commands touching only the paths AgentClaw is responsible for:
  *

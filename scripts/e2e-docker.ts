@@ -83,7 +83,7 @@ const channel = new TelegramManualProvisioner(secrets);
 const profileId = randomUUID();
 store.insertAIProfile({
   id: profileId,
-  ownerId: 'chris',
+  ownerId: 'test-owner',
   name: 'My Claude (Max)',
   vendor: 'anthropic',
   kind: 'subscription',
@@ -93,7 +93,7 @@ store.insertAIProfile({
 const hostId = randomUUID();
 store.insertHost({
   id: hostId,
-  ownerId: 'chris',
+  ownerId: 'test-owner',
   kind: 'local',
   provider: 'local-docker',
   name: 'this box',
@@ -118,7 +118,7 @@ const wrapped = {
 
 const result = await provisionAgent(
   { store, secrets, provider, channel: wrapped, log },
-  { ownerId: 'chris', name: agentName, persona: 'You are a friendly smoke test.', aiProfileId: profileId, hostId },
+  { ownerId: 'test-owner', name: agentName, persona: 'You are a friendly smoke test.', aiProfileId: profileId, hostId },
 );
 
 console.log(`\n  state:     ${result.agent.state}`);
@@ -135,7 +135,7 @@ const claimed = await claimFirstContact(
     agentId: result.agent.id,
     runtimeRef: result.agent.runtimeRef!,
     accountId: username,
-    forUserId: 'chris',
+    forUserId: 'test-owner',
     timeoutMs: 5 * 60_000,
   },
 );

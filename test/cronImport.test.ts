@@ -40,7 +40,7 @@ describe('cronAddArgs', () => {
 
   it('carries the source delivery route (isolated + announce → the same telegram chat)', () => {
     // Without this, adopt dropped delivery and the cron announced to "last"
-    // (no route → fail-closed, or the isolated agent's reply leaking to Chris).
+    // (no route → fail-closed, or the isolated agent's reply leaking to the owner).
     const args = cronAddArgs(
       {
         name: 'TSCC 2405 check', scheduleKind: 'cron', scheduleExpr: '0 9 * * *',

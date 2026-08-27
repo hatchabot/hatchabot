@@ -18,10 +18,10 @@ those, grounded in the real condo-adviser setup.
 | Google OAuth credential | file-based token store (`gog auth`), needs periodic refresh, granted per service (gmail, drive, …) | **the hard part** |
 | Mail-fetch crons, workspace files | already handled by adopt | done |
 
-A load-bearing observation from the live setup: the adviser authenticates as
-**`building-adviser@example.com`** — a purpose-bound Google account, not a personal
-one. That instinct should become the documented recommendation: an agent's
-connection should be to an account scoped to the agent's job, because
+A load-bearing observation from a live setup: the adviser authenticates as a
+**purpose-bound Google account** (e.g. `building-adviser@example.com`), not a
+personal one. That instinct should become the documented recommendation: an
+agent's connection should be to an account scoped to the agent's job, because
 **every member of the agent can act as that account**.
 
 ## Why OAuth credentials are the hard part
@@ -121,7 +121,7 @@ for per-agent keys over one fleet key.
 
 ## Follow-up: runtime image variants / marketplace (recorded 2026-08-25)
 
-Chris's framing: no single image suits all agents, and a kitchen-sink image
+The framing: no single image suits all agents, and a kitchen-sink image
 bloats every agent to serve a few. The natural evolution is **multiple
 runtime images, selected per agent** — a small curated set first, a
 marketplace shape later:

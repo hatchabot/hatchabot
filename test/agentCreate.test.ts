@@ -181,7 +181,7 @@ describe('adopting carries the people already allowed to talk', () => {
     // The genuine other member is still seeded.
     expect(members.some((m) => m.role === 'user' && m.channelUserId === '222333')).toBe(true);
     // Access is intact: both ids reach the allowlist (deduped).
-    expect(store.listAllowedChannelUserIds(id).sort()).toEqual(['222333', '1000000001']);
+    expect(store.listAllowedChannelUserIds(id).sort()).toEqual(['1000000001', '222333']);
   });
 
   it('dedupes repeated ids within seedMembers', async () => {
