@@ -150,16 +150,26 @@ describe('the model picker offers only what the runtime can actually serve', () 
     expect(body.models).not.toContain('claude-opus-5'); // the whole point
   });
 
-  it('never erases a model the profile already uses, even if unlisted', async () => {
+  it('reports listed-but-unserved models as stale instead of offering them', async () => {
     const { f, provider } = await world();
-    // Runtime reports only opus-4-8; the profile's menu also has sonnet-5/haiku.
+    // Runtime serves only opus-4-8; the profile still lists sonnet-5 + haiku-4-5.
     provider.execResponses.set('models list', {
       code: 0, stdout: JSON.stringify({ models: [{ key: 'anthropic/claude-opus-4-8', name: 'Claude Opus 4.8' }] }), stderr: '',
     });
     const body = (await f.inject({ method: 'GET', url: '/v1/ai-profiles/p1/available-models', headers: as })).json();
-    // In-use models are appended so the picker can't silently drop a working choice.
-    expect(body.models).toContain('claude-opus-4-8');
-    expect(body.models).toContain('claude-sonnet-5');
+    expect(body.models).toEqual(['claude-opus-4-8']);          // only what's served
+    // Junk is surfaced separately so the app can strip it from the menu —
+    // blending it in is what kept claude-opus-5 pickable.
+    expect(body.stale.sort()).toEqual(['claude-haiku-4-5', 'claude-sonnet-5']);
+  });
+
+  it('flags an unserved DEFAULT as stale too (so the app can warn, not silently switch)', async () => {
+    const { store, f, provider } = await world();
+    store.setAIProfileModel('p1', 'claude-opus-5'); // the outage shape
+    provider.execResponses.set('models list', { code: 0, stdout: CATALOG, stderr: '' });
+    const body = (await f.inject({ method: 'GET', url: '/v1/ai-profiles/p1/available-models', headers: as })).json();
+    expect(body.models).not.toContain('claude-opus-5');
+    expect(body.stale).toContain('claude-opus-5');
   });
 
   it('falls back to the curated list when no live agent can be asked — and that list has no opus-5', async () => {

@@ -1207,12 +1207,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const usable = found.filter((m) => m.catalogued).map((m) => m.id);
       // Only trust a non-empty answer; an old CLI without --all returns nothing.
       if (usable.length) {
-        // Never drop what this profile already uses, even if the runtime stopped
-        // listing it — the picker must not silently erase a working choice.
-        const inUse = [profile.model, ...(profile.models ?? [])].filter(
-          (m) => m && !usable.includes(m),
-        );
-        return { models: [...usable, ...inUse], source: 'runtime' as const };
+        // Anything this profile still lists that the runtime does NOT serve is
+        // junk (claude-opus-5 was exactly this). Report it separately instead of
+        // blending it into the offered list, so the app can strip it from the
+        // menu rather than keep presenting a model that breaks on compaction.
+        const listed = [profile.model, ...(profile.models ?? [])].filter(Boolean) as string[];
+        const stale = [...new Set(listed.filter((m) => !usable.includes(m)))];
+        return { models: usable, stale, source: 'runtime' as const };
       }
     }
     // Fallback: a curated current list (no live agent to ask yet, e.g. the

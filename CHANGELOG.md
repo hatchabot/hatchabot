@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.58.0] — 2026-08-27
+
+### Added
+- **Model lists refresh every time you open ⚙ Settings → AI, and obsolete models
+  clean themselves out.** The list was fetched once per page load and cached, so
+  a model the runtime had stopped serving stayed pickable until you reloaded.
+  It's now refetched on every open, and any model a source still lists that its
+  runtime does not serve (`claude-opus-5` being the case that broke compaction
+  fleet-wide) is **removed from that source's switchable list automatically**,
+  with a toast naming what went.
+
+  The cleanup only ever acts on a confident live answer from the runtime — never
+  on the offline curated fallback — so a momentary hiccup can't prune a working
+  menu. `available-models` now returns `{ models, stale, source }`: `models` is
+  what the runtime genuinely serves, `stale` is what the profile still lists but
+  the runtime won't. Previously the two were blended, which is precisely how an
+  unservable model stayed on offer.
+
+  If the source's **default** model is the unservable one, it is flagged in red
+  rather than silently switched — changing the default changes what every agent
+  following it runs, so that stays your call.
+
 ## [0.57.0] — 2026-08-27
 
 ### Fixed

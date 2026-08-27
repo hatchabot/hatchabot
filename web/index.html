@@ -964,7 +964,8 @@
 const $ = (id) => document.getElementById(id);
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
-let availableModels = {}; // profile id -> string[] of models the source offers (cached while the dialog is open)
+let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
+let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
@@ -1562,12 +1563,32 @@ async function openAiDlg(tab) {
   loadMediaKey();
   renderPeers();
   // Fetch what each of your sources offers, then re-render so the model fields
-  // become dropdowns instead of text boxes.
+  // become dropdowns instead of text boxes. Refetched EVERY time this opens (no
+  // cache): the runtime's catalog is the source of truth and it can change under
+  // us — a stale list is how an unservable model stays pickable.
+  const cleaned = [];
   await Promise.all(profiles.filter(p => p.mine !== false).map(async p => {
-    if (availableModels[p.id]) return;
-    try { availableModels[p.id] = (await api(`/v1/ai-profiles/${p.id}/available-models`)).models ?? []; }
-    catch { availableModels[p.id] = []; }
+    try {
+      const r = await api(`/v1/ai-profiles/${p.id}/available-models`);
+      availableModels[p.id] = r.models ?? [];
+      staleModels[p.id] = r.stale ?? [];
+      // Auto-clean: drop models this source lists that its runtime does not
+      // serve. Only ever acts on a confident live answer ('runtime'), never on
+      // the offline curated fallback, so a hiccup can't prune a working menu.
+      const junk = (r.source === 'runtime' ? (r.stale ?? []) : []).filter(m => m !== p.model);
+      if (junk.length) {
+        const keep = [p.model, ...(p.models ?? [])].filter(m => m && !junk.includes(m));
+        try {
+          await api(`/v1/ai-profiles/${p.id}`, { method: 'PATCH', body: { models: [...new Set(keep)] } });
+          cleaned.push(`${p.name}: removed ${junk.join(', ')}`);
+        } catch { /* leave the menu alone if the write fails */ }
+      }
+    } catch { availableModels[p.id] = []; staleModels[p.id] = []; }
   }));
+  if (cleaned.length) {
+    try { profiles = await api('/v1/ai-profiles'); } catch { /* keep last-known */ }
+    toast(`Cleaned models no longer served — ${cleaned.join(' · ')}`, 9000);
+  }
   if (aiDlg.open) renderAiList();
 }
 
@@ -1618,6 +1639,9 @@ function renderAiList() {
         <label class="sub" style="min-width:104px">Default model</label>
         ${defaultModelControl(p)}
       </div>
+      ${(staleModels[p.id] ?? []).includes(p.model) ? `<div class="sub" style="width:100%;color:var(--bad)">
+        ⚠ <b>${esc(p.model)}</b> isn't served by this source's runtime — agents on it will fail when a
+        conversation fills up (compaction can't resolve the model). Pick another default above and Save.</div>` : ''}
       <div style="display:flex;gap:10px;width:100%">
         <label class="sub" style="min-width:104px;padding-top:5px">Also switchable</label>
         <div id="aiExtras-${p.id}" style="flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:30px"></div>
