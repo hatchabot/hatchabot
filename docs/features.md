@@ -270,6 +270,14 @@ additionally pin any **model** from that source's list (or follow its
 default) — one Claude source can drive a cheap model for simple agents and a
 top model for demanding ones. Applies on the next Rebuild.
 
+**Changing a source's default model** on a source that has agents opens a
+"which agents adopt it" dialog rather than silently switching everyone: tick
+the agents that should move to the new model (and rebuild them now, or on their
+next rebuild), and every un-ticked agent is **pinned to the model it runs
+today** so it never drifts. Agents that already pin their own model start
+un-ticked and protected. (Local sources run one model for the whole GPU, so
+they set-and-rebuild without the picker.)
+
 A profile's **Shared** toggle lets every account on this server use it for
 their agents. That is a credential hand-off, not a metered proxy — share only
 with people you trust with the underlying key. Full detail:

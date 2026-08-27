@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.48.0] — 2026-08-26
+
+### Added
+- **Choose which agents adopt a new default model — "select agents, hold the
+  rest".** Changing a cloud source's default model used to silently queue every
+  following agent to switch on its next rebuild. Now, when you change the
+  default on a source that has agents, a dialog lists them: ticked agents switch
+  to the new model (and optionally rebuild now), and **every un-ticked agent is
+  pinned to the model it runs today** so it never silently drifts. Agents that
+  have their own chosen model start **un-ticked and protected** — they only
+  switch if you explicitly tick them. Backed by a new atomic endpoint
+  `POST /v1/ai-profiles/:id/apply-default-model` that sets the default, clears
+  the override on selected agents, pins the rest (keeping their models on the
+  source menu so the pins stay valid), and kicks background rebuilds for the
+  selected ones. Only your own agents are touched — a shared source never
+  reaches into another user's agents. Local sources (one model per GPU) keep the
+  plain set-default-and-rebuild flow.
+
+### Changed
+- Factored the background rebuild kick into one `kickRebuild` helper, now shared
+  by the per-agent rebuild route and the model-apply fan-out.
+
 ## [0.47.0] — 2026-08-26
 
 ### Changed

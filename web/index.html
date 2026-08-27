@@ -816,6 +816,28 @@
   </div>
 </dialog>
 
+<dialog id="applyModelDlg" style="width:min(600px,96vw)">
+  <h3 style="margin:0 0 4px">Switch agents to <span id="applyModelName"></span></h3>
+  <div class="sub" style="margin-bottom:10px">
+    Ticked agents switch to this model (memory kept); un-ticked agents stay on
+    the model they run today and won't change. Agents that have their own chosen
+    model start un-ticked, so they're never switched unless you tick them.
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+    <label class="sub" style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
+      <input type="checkbox" id="applyModelAll" onchange="toggleApplyAll(this.checked)" style="width:auto;flex:none"> Select all
+    </label>
+    <span class="sub" id="applyModelCount"></span>
+  </div>
+  <div id="applyModelList" style="max-height:320px;overflow:auto;border-top:1px solid var(--line);padding-top:4px"></div>
+  <div class="sub" id="applyModelErr" style="color:var(--bad);margin-top:8px"></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
+    <button onclick="applyModelDlg.close()">Cancel</button>
+    <button onclick="applyModelToSelected(false)" title="Ticked agents adopt this model on their next rebuild; un-ticked agents are held. No rebuild now.">Set, rebuild later</button>
+    <button class="primary" id="applyModelBtn" onclick="applyModelToSelected(true)">Apply &amp; rebuild</button>
+  </div>
+</dialog>
+
 <dialog id="healthDlg" style="width:min(560px,94vw)">
   <h3 style="margin:0 0 4px">Health — <span id="healthAgent"></span></h3>
   <div class="sub">
@@ -1638,11 +1660,71 @@ async function saveAiProfile(id) {
   const model = $(`aiModel-${id}`).value.trim();
   if (!model) { $('aiErr').textContent = 'Default model is required.'; return; }
   const extra = $(`aiModels-${id}`).value.split(',').map(s => s.trim()).filter(Boolean);
+  const p = (profiles ?? []).find(x => x.id === id);
+  // A default-model change on a cloud source that has agents → let the owner
+  // choose who adopts it (and hold the rest), rather than silently queueing
+  // every follower. Menu-only edits, local sources, and unused sources save flat.
+  const onProfile = (agents ?? []).filter(a => a.aiProfileId === id && (a.role === undefined || a.role === 'owner'));
+  if (p && model !== p.model && p.vendor !== 'local' && onProfile.length) {
+    openApplyModel(id, model, extra, onProfile);
+    return;
+  }
   try {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { model, models: [model, ...extra] } });
-    toast('Saved — agents apply it on their next Rebuild');
+    toast(p?.vendor === 'local' && onProfile.length ? 'Saved — Rebuild agents to apply' : 'Saved');
     await refresh(true); renderAiList();
   } catch (e) { $('aiErr').textContent = e.message; }
+}
+
+let applyModelState = null;
+function openApplyModel(profileId, model, extras, onProfile) {
+  applyModelState = { profileId, model, extras };
+  $('applyModelName').textContent = model;
+  $('applyModelErr').textContent = '';
+  $('applyModelList').innerHTML = onProfile.map(a => {
+    const hasOwn = !!a.modelOverride;      // it picked its own model — protect it
+    const now = a.model || a.modelOverride || '';
+    return `<label class="pair" style="padding:5px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
+      <input type="checkbox" class="applyModelCb" data-id="${esc(a.id)}" ${hasOwn ? '' : 'checked'} onchange="refreshApplyCount()" style="width:auto;flex:none">
+      <span class="grow"><b>${esc(a.name)}</b>
+        <span class="sub">${hasOwn
+          ? `· its own: ${esc(now)} — keep unless ticked`
+          : (now && now !== model ? `· ${esc(now)} → ${esc(model)}` : `· ${esc(now)}`)}</span></span>
+    </label>`;
+  }).join('') || '<div class="sub">No agents use this source yet.</div>';
+  refreshApplyCount();
+  applyModelDlg.showModal();
+}
+function toggleApplyAll(on) {
+  document.querySelectorAll('.applyModelCb').forEach(cb => { cb.checked = on; });
+  refreshApplyCount();
+}
+function refreshApplyCount() {
+  const cbs = [...document.querySelectorAll('.applyModelCb')];
+  const n = cbs.filter(cb => cb.checked).length;
+  $('applyModelCount').textContent = `${n} of ${cbs.length} selected`;
+  $('applyModelAll').checked = n > 0 && n === cbs.length;
+  $('applyModelBtn').disabled = n === 0;
+  $('applyModelBtn').textContent = n ? `Apply & rebuild ${n}` : 'Apply & rebuild';
+}
+async function applyModelToSelected(rebuild) {
+  if (!applyModelState) return;
+  const apply = [...document.querySelectorAll('.applyModelCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
+  const { profileId, model, extras } = applyModelState;
+  $('applyModelBtn').disabled = true;
+  try {
+    const r = await api(`/v1/ai-profiles/${profileId}/apply-default-model`, {
+      method: 'POST', body: { model, models: [model, ...extras], apply, rebuild },
+    });
+    const bits = [];
+    if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding}`);
+    else if (apply.length) bits.push(`${apply.length} will switch on next rebuild`);
+    if (r.held) bits.push(`${r.held} held on its current model`);
+    toast(`Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`);
+    applyModelDlg.close();
+    await refresh(true); renderAiList();
+  } catch (e) { $('applyModelErr').textContent = e.message; }
+  finally { $('applyModelBtn').disabled = false; }
 }
 
 async function delAiProfile(id, name) {

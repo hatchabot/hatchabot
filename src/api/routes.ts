@@ -524,6 +524,29 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     );
   };
 
+  /**
+   * Start a rebuild in the background (the snapshot runs as its first step, so
+   * this returns at once). Returns false if the agent is already changing or
+   * has no runtime — callers turn that into a 409 or just skip it in a batch.
+   */
+  const kickRebuild = (agentId: string): boolean => {
+    if (inflight.has(agentId)) return false;
+    const agent = store.getAgent(agentId);
+    if (!agent?.runtimeRef) return false;
+    const task = rebuildAgent(
+      { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agentId) },
+      agentId,
+    );
+    inflight.set(
+      agentId,
+      task
+        .then(() => undefined)
+        .catch((err) => app.log.error({ err, agentId }, 'rebuild task failed'))
+        .finally(() => inflight.delete(agentId)),
+    );
+    return true;
+  };
+
   // ---- app ----------------------------------------------------------------
 
   if (deps.webIndexPath) {
@@ -1031,6 +1054,92 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const updated = store.getAIProfile(profile.id)!;
       const { secretRef: _s, ...safe } = updated;
       return safe;
+    },
+  );
+
+  // Change the default model with EXPLICIT control over which of the caller's
+  // existing agents adopt it (the "select agents, hold the rest" apply). The
+  // plain PATCH above lets followers drift to the new default on their next
+  // rebuild; this instead:
+  //   • sets the new default,
+  //   • clears the override on every SELECTED agent so it follows the new
+  //     default (and optionally rebuilds it now), and
+  //   • PINS every other agent of yours on this source to the model it runs
+  //     today, so it never silently switches — the pinned models are kept on
+  //     the menu so the pins stay valid.
+  // Only your own agents are touched; a shared source's other users keep theirs.
+  // Local sources run one model for the whole GPU, so they can't hold
+  // individuals — they use the plain PATCH instead.
+  app.post<{ Params: { id: string }; Body: { model?: string; models?: string[]; apply?: string[]; rebuild?: boolean } }>(
+    '/v1/ai-profiles/:id/apply-default-model',
+    async (req, reply) => {
+      const profile = store.getAIProfile(req.params.id);
+      if (!profile || profile.ownerId !== ownerIdOf(req)) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      if (profile.vendor === 'local') {
+        return reply.code(400).send({
+          error: 'Local sources run one model for every agent — set the default and rebuild.',
+        });
+      }
+      const parsed = z
+        .object({
+          model: z.string().trim().min(1),
+          /** The owner's "also switchable" extras; the final menu adds held
+           *  models on top so their pins stay valid. */
+          models: z.array(z.string().min(1)).max(16).optional(),
+          /** Agent ids that should switch TO the new default. Everything else
+           *  of yours on this source is held on its current model. */
+          apply: z.array(z.string()).max(500).optional(),
+          /** Rebuild the switched agents now (else they show "rebuild to apply"). */
+          rebuild: z.boolean().optional(),
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      const newDefault = parsed.data.model;
+      const applyIds = new Set(parsed.data.apply ?? []);
+      const oldDefault = profile.model;
+
+      const mine = store.listAgents(ownerIdOf(req)).filter((a) => a.aiProfileId === profile.id);
+
+      // First pin/clear each agent, collecting the models the held ones must
+      // keep. Held = "runs today": its override, or the OLD default if it was a
+      // follower. Selected = clear the override so it follows the new default.
+      const heldModels = new Set<string>();
+      let held = 0;
+      for (const a of mine) {
+        if (applyIds.has(a.id)) {
+          if (a.model) store.setAgentModel(a.id, null);
+        } else {
+          const current = a.model ?? oldDefault;
+          store.setAgentModel(a.id, current); // pin (no-op if already this override)
+          heldModels.add(current);
+          held++;
+        }
+      }
+
+      // Menu must contain the new default, the owner's extras, AND every held
+      // model — otherwise effectiveModel treats a held pin as stale and the
+      // agent drifts to the new default, defeating the hold.
+      const extras = parsed.data.models ?? (profile.models ?? []);
+      const menu = [...new Set([newDefault, ...extras, ...heldModels])];
+      store.setAIProfileModel(profile.id, newDefault);
+      store.setAIProfileModels(profile.id, menu);
+      store.clearStaleAgentModels(profile.id, menu); // safe: all our pins are in `menu`
+
+      let rebuilding = 0;
+      if (parsed.data.rebuild) {
+        for (const a of mine) {
+          if (!applyIds.has(a.id)) continue;
+          const fresh = store.getAgent(a.id);
+          if (!fresh?.runtimeRef || fresh.migratedTo) continue; // moved-away copy: never rebuild
+          if (fresh.state !== 'RUNNING' && fresh.state !== 'STOPPED') continue;
+          if (kickRebuild(a.id)) rebuilding++;
+        }
+      }
+
+      const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
+      return { profile: safe, applied: applyIds.size, held, rebuilding };
     },
   );
 
@@ -2728,22 +2837,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // The pre-rebuild snapshot now runs as the first step of the background
     // rebuild task (see rebuildAgentInner), so this returns 202 immediately
     // instead of blocking on a ~1-2s docker-exec snapshot per agent.
-    if (inflight.has(agent.id)) {
+    if (!kickRebuild(agent.id)) {
       return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
-    }
-    {
-      const task = rebuildAgent(
-        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-          log: trace(agent.id) },
-        agent.id,
-      );
-      inflight.set(
-        agent.id,
-        task
-          .then(() => undefined)
-          .catch((err) => app.log.error({ err, agentId: agent.id }, 'rebuild task failed'))
-          .finally(() => inflight.delete(agent.id)),
-      );
     }
     return reply.code(202).send({ rebuilding: true });
   });
