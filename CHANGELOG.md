@@ -2,7 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.52.0] — 2026-08-26
+## [0.53.0] — 2026-08-26
+
+### Added
+- **"Someone's waiting" badge in the table of contents.** An agent with a
+  pending join request now shows a softly-pulsing 👤 badge (with a count when
+  more than one) next to its name in the legend, so you can see at a glance
+  which agent needs you without scrolling the cards. Clicking jumps straight to
+  that card's "wants to talk" prompt. It's driven by the same live pairing poll
+  the cards use, so it clears itself as soon as the request is approved. Honors
+  `prefers-reduced-motion`.
 
 ### Changed
 - **The agent legend is now a permanent table of contents, not a button-toggled
