@@ -1319,7 +1319,7 @@ async function showRunnerSetup() {
   } catch (e) { toast(e.message, 10000); }
 }
 function copyRunnerSetup() {
-  navigator.clipboard?.writeText(runnerSnippet).then(() => toast('Copied — paste it in a terminal on the runner.'), () => {});
+  copyText(runnerSnippet).then((ok) => toast(ok ? 'Copied — paste it in a terminal on the runner.' : 'Select the snippet and copy it manually.'));
 }
 
 async function addHost() {
@@ -1872,7 +1872,7 @@ async function newCliToken() {
     out.style.display = '';
     out.textContent = t.token;
     toast('Copy it now — it is not shown again', 20000);
-    try { await navigator.clipboard.writeText(t.token); toast('Token copied — run: agentclaw login', 20000); } catch {}
+    if (await copyText(t.token)) toast('Token copied — run: agentclaw login', 20000);
   } catch (e) { $('aiErr').textContent = e.message; }
 }
 
@@ -3165,8 +3165,7 @@ function renderHealth(h) {
 async function showBotToken() {
   const btn = $('botTokenBtn'), input = $('editBotToken');
   if (input.value) {
-    try { await navigator.clipboard.writeText(input.value); toast('Token copied'); }
-    catch { toast('Select and copy manually'); }
+    toast(await copyText(input.value) ? 'Token copied' : 'Select and copy manually');
     return;
   }
   try {
@@ -3338,15 +3337,38 @@ async function invite(id, name) {
   } catch (e) { toast(e.message); }
 }
 
+// Robust clipboard copy. navigator.clipboard exists ONLY in a secure context
+// (https or localhost); over plain http — e.g. http://<tailscale-host>:8080 —
+// it's undefined, so we fall back to a hidden-textarea execCommand copy that
+// works there too. Returns whether the copy succeeded.
+async function copyText(text) {
+  if (!text) return false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch { return false; }
+}
+
 async function copyInvite() {
-  try { await navigator.clipboard.writeText($('invLink').textContent); toast('Web link copied'); }
-  catch { toast('Select and copy the link manually'); }
+  const ok = await copyText($('invLink').textContent);
+  toast(ok ? 'Web link copied' : 'Select the link and copy it manually');
 }
 
 async function copyInviteTg() {
   if (!invShare?.message) { toast('This agent has no Telegram bot yet'); return; }
-  try { await navigator.clipboard.writeText(invShare.message); toast('Telegram invite copied — paste it to them'); }
-  catch { toast('Select and copy the link manually'); }
+  const ok = await copyText(invShare.message);
+  toast(ok ? 'Telegram invite copied — paste it to them' : 'Select the link and copy it manually');
 }
 
 async function shareInviteTg() {

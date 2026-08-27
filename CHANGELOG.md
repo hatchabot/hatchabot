@@ -2,7 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.51.0] — 2026-08-26
+## [0.51.1] — 2026-08-26
+
+### Fixed
+- **Copy buttons now work over plain HTTP** (e.g. `http://<tailscale-host>:8080`).
+  `navigator.clipboard` only exists in a secure context (https / localhost), so
+  every Copy button — the new "Copy Telegram invite", plus web link, CLI token,
+  bot token, and runner-setup snippet — silently did nothing over a plain-HTTP
+  tailnet URL. Added a shared `copyText()` helper with a hidden-textarea
+  `execCommand` fallback and routed all copy actions through it; each now
+  reports success or tells you to select-and-copy when even the fallback is
+  blocked.
 
 ### Added
 - **Invite people through Telegram — no Tailscale needed.** The web `/join`
