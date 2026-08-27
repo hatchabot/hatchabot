@@ -160,6 +160,11 @@ export interface DataSource {
   repoUrl?: string;
   secretRef?: string;
   pubKey?: string;
+  /** git only: why the last clone/refresh failed (usually the deploy key isn't
+   *  on the repo host yet). Cleared on the next successful sync. */
+  syncError?: string;
+  /** git only: when the last clone/refresh was attempted. */
+  syncedAt?: string;
   createdAt: string;
 }
 

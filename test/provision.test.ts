@@ -573,3 +573,42 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     }
   });
 });
+
+describe('a git source that will not clone is visible, not just logged', () => {
+  const addRepo = (w: any, agentId: string) => w.store.insertDataSource({
+    id: 'ds1', agentId, kind: 'git', access: 'ro', mountName: 'agentclaw-ai',
+    repoUrl: 'git@github.com:me/agentclaw-ai.git', secretRef: 'ds/ds1', createdAt: 'now',
+  });
+
+  it('records WHY on the source, in the owner\'s terms — and clears it on success', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    await w.secrets.put('ds/ds1', 'PRIVATE-KEY');
+    addRepo(w, agent.id);
+
+    // The real-world failure: the deploy key isn't on the repo yet.
+    (w.provider as MockProvider).execResponses.set('sh', {
+      code: 128, stdout: '',
+      stderr: "Cloning into '/home/node/.openclaw/agentclaw-ai'...\ngit@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n",
+    });
+    await rebuildAgent(w.deps, agent.id);
+    const failed = w.store.getDataSource(agent.id, 'ds1')!;
+    expect(failed.syncError).toMatch(/deploy key/i);
+    expect(failed.syncedAt).toBeTruthy();
+
+    // Once the key is added, the next rebuild clears the warning.
+    (w.provider as MockProvider).execResponses.delete('sh');
+    await rebuildAgent(w.deps, agent.id);
+    expect(w.store.getDataSource(agent.id, 'ds1')!.syncError).toBeUndefined();
+  });
+
+  it('surfaces the failure through the API so the card can show it', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    await w.secrets.put('ds/ds1', 'PRIVATE-KEY');
+    addRepo(w, agent.id);
+    (w.provider as MockProvider).execResponses.set('sh', { code: 128, stdout: '', stderr: 'ERROR: Repository not found.' });
+    await rebuildAgent(w.deps, agent.id);
+    expect(w.store.getDataSource(agent.id, 'ds1')!.syncError).toMatch(/wasn't found/i);
+  });
+});

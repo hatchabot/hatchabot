@@ -70,6 +70,29 @@ export interface GitSyncSource {
 }
 
 /**
+ * Turn raw git/ssh stderr into one line the owner can act on. Nearly every real
+ * failure here is "the deploy key isn't on the repo yet", which the raw text
+ * ("Permission denied (publickey)") states in git's terms, not the user's.
+ */
+export function gitSyncReason(stderr: string): string {
+  const s = (stderr || '').trim();
+  if (/permission denied \(publickey\)/i.test(s)) {
+    return "The repo rejected this agent's deploy key — add it to the repository (Settings → Deploy keys), then rebuild.";
+  }
+  if (/repository not found/i.test(s)) {
+    return "The repo wasn't found — check the URL, or add this agent's deploy key if it's private.";
+  }
+  if (/host key verification failed|no matching host key/i.test(s)) {
+    return "Couldn't verify the git host's SSH key.";
+  }
+  if (/could not resolve hostname|network is unreachable|connection timed out/i.test(s)) {
+    return "Couldn't reach the git host from this agent — network or DNS.";
+  }
+  // Unrecognised: keep git's own words, trimmed to something renderable.
+  return s.split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 200) || 'Clone failed.';
+}
+
+/**
  * The idempotent script that clones (or refreshes) one git source inside the
  * container. Safe to re-run every provision/rebuild: it rewrites the key and
  * ssh config, clones only when absent, and never touches the working tree

@@ -397,6 +397,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Public half of the deploy key — safe to show, and the owner needs it to
       // grant the repo access (as a read, or write for rw, deploy key).
       pubKey: d.pubKey,
+      /** Why the last clone failed, so the card can say which repo is stuck
+       *  instead of the owner digging through the audit log. */
+      syncError: d.syncError,
       legacy: false,
     })),
   ];

@@ -2366,6 +2366,11 @@ function agentCard(a) {
     ${a.pendingModel ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+    ${(a.dataSources ?? []).filter(d => d.syncError).map(d => `
+      <div class="pair">
+        <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
+        ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
+      </div>`).join('')}
     ${pending ? tokenForm(a) : ''}
     ${pairs.map(p => `
       <div class="pair">

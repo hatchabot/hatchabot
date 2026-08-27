@@ -10,7 +10,7 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { buildWorkspaceSeed, dataSourcesSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
-import { buildGitSyncScript } from './gitSource.js';
+import { buildGitSyncScript, gitSyncReason } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
 export interface CreateAgentInput {
@@ -552,12 +552,19 @@ async function syncGitDataSources(
       );
       const res = await provider.execShell(runtimeRef, script);
       if (res.code !== 0) {
+        // Persist the reason on the source, not just in the audit log — a repo
+        // that never cloned (nearly always: its deploy key isn't on the host
+        // yet) has to be visible on the card, or it hides among the successes.
+        store.setDataSourceSync(agentId, d.id, gitSyncReason(res.stderr));
         log('datasource.git_sync_failed', { agentId, mountName: d.mountName, stderr: res.stderr.slice(0, 300) });
       } else {
+        store.setDataSourceSync(agentId, d.id); // success clears any old failure
         log('datasource.git_synced', { agentId, mountName: d.mountName });
       }
     } catch (e) {
-      log('datasource.git_sync_error', { agentId, mountName: d.mountName, error: String((e as Error).message ?? e) });
+      const msg = String((e as Error).message ?? e);
+      store.setDataSourceSync(agentId, d.id, msg.slice(0, 300));
+      log('datasource.git_sync_error', { agentId, mountName: d.mountName, error: msg });
     }
   }
 }

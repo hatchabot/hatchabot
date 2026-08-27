@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.56.0] — 2026-08-27
+
+### Added
+- **A repo that won't clone now says so on the agent's card.** A failed git
+  sync was only a line in the audit log — `datasource git sync failed`, with the
+  repo name and reason buried in the event detail — so it hid among the
+  successes and you had to dig to learn *which* repo broke and why. The failure
+  is now recorded on the data source itself (`syncError`, cleared on the next
+  successful sync) and shown on the card:
+  **⚠ agentclaw-ai didn't sync — The repo rejected this agent's deploy key…**
+  with a **🔑 Deploy key** button that opens the Data tab and, for GitHub, links
+  straight to that repo's *Add deploy key* page.
+- Raw git/ssh stderr is translated into the actual fix (`gitSyncReason`):
+  "Permission denied (publickey)" becomes "The repo rejected this agent's deploy
+  key — add it to the repository (Settings → Deploy keys), then rebuild."
+  Repo-not-found, host-key, and network failures get their own wording;
+  anything unrecognised keeps git's own words, bounded.
+
 ## [0.55.0] — 2026-08-27
 
 ### Added

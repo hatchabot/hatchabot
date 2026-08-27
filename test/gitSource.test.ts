@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildGitSyncScript, normalizeGitUrl } from '../src/orchestrator/gitSource.js';
+import { buildGitSyncScript, normalizeGitUrl, gitSyncReason } from '../src/orchestrator/gitSource.js';
 
 describe('normalizeGitUrl', () => {
   it('normalizes ssh, ssh://, and https forms to the ssh clone URL', () => {
@@ -58,5 +58,31 @@ describe('buildGitSyncScript', () => {
 
   it('shell-quotes the commit name so spaces are safe', () => {
     expect(script).toContain("user.name 'Stock Advisor'");
+  });
+});
+
+describe('gitSyncReason', () => {
+  it('turns the common publickey failure into the actual fix', () => {
+    // The real stderr AgentClaw saw in the field.
+    const out = gitSyncReason(
+      "Cloning into '/home/node/.openclaw/agentclaw-ai'...\n" +
+      'git@github.com: Permission denied (publickey).\r\n' +
+      'fatal: Could not read from remote repository.\n',
+    );
+    expect(out).toMatch(/deploy key/i);
+    expect(out).toMatch(/rebuild/i);
+    expect(out).not.toMatch(/publickey/); // git's words replaced by the user's
+  });
+
+  it('distinguishes the other failures an owner can act on', () => {
+    expect(gitSyncReason('ERROR: Repository not found.')).toMatch(/wasn't found/i);
+    expect(gitSyncReason('Host key verification failed.')).toMatch(/SSH key/i);
+    expect(gitSyncReason('ssh: Could not resolve hostname github.com')).toMatch(/network or DNS/i);
+  });
+
+  it('keeps git\'s own words for anything unrecognised, bounded', () => {
+    expect(gitSyncReason('fatal: something odd happened')).toContain('something odd happened');
+    expect(gitSyncReason('')).toBe('Clone failed.');
+    expect(gitSyncReason('x'.repeat(500)).length).toBeLessThanOrEqual(200);
   });
 });

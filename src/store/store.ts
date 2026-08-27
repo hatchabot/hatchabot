@@ -164,6 +164,11 @@ export class Store {
       // Bind an adopted agent's folder at its original host path, so existing
       // absolute-path references resolve unchanged.
       `ALTER TABLE data_sources ADD COLUMN mount_at_host_path INTEGER NOT NULL DEFAULT 0`,
+      // Last git clone/refresh result, so a repo that never cloned (usually its
+      // deploy key isn't on the host yet) is visible on the card instead of
+      // only in the audit log.
+      `ALTER TABLE data_sources ADD COLUMN sync_error TEXT`,
+      `ALTER TABLE data_sources ADD COLUMN synced_at TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -1021,6 +1026,8 @@ export class Store {
       repoUrl: r.repo_url ?? undefined,
       secretRef: r.secret_ref ?? undefined,
       pubKey: r.pub_key ?? undefined,
+      syncError: r.sync_error ?? undefined,
+      syncedAt: r.synced_at ?? undefined,
       createdAt: r.created_at,
     }));
   }
@@ -1043,6 +1050,14 @@ export class Store {
         ...d,
         mountAtHostPath: d.mountAtHostPath ? 1 : 0,
       });
+  }
+
+  /** Record the outcome of a git clone/refresh. `error` undefined = success,
+   *  which also clears any previous failure. */
+  setDataSourceSync(agentId: string, id: string, error?: string): void {
+    this.db
+      .prepare(`UPDATE data_sources SET sync_error = ?, synced_at = ? WHERE agent_id = ? AND id = ?`)
+      .run(error ?? null, new Date().toISOString(), agentId, id);
   }
 
   /** Flip a source between read-only and writable. Applies on the next rebuild
