@@ -819,9 +819,11 @@
 <dialog id="applyModelDlg" style="width:min(600px,96vw)">
   <h3 style="margin:0 0 4px">Switch agents to <span id="applyModelName"></span></h3>
   <div class="sub" style="margin-bottom:10px">
-    Ticked agents switch to this model (memory kept); un-ticked agents stay on
-    the model they run today and won't change. Agents that have their own chosen
-    model start un-ticked, so they're never switched unless you tick them.
+    Only your agents on <b id="applyModelSource"></b> are listed — agents on your
+    other AI sources aren't affected. Ticked agents switch to this model (memory
+    kept); un-ticked agents stay on the model they run today. Agents that have
+    their own chosen model start un-ticked, so they're never switched unless you
+    tick them.
   </div>
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
     <label class="sub" style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
@@ -1666,7 +1668,7 @@ async function saveAiProfile(id) {
   // every follower. Menu-only edits, local sources, and unused sources save flat.
   const onProfile = (agents ?? []).filter(a => a.aiProfileId === id && (a.role === undefined || a.role === 'owner'));
   if (p && model !== p.model && p.vendor !== 'local' && onProfile.length) {
-    openApplyModel(id, model, extra, onProfile);
+    openApplyModel(id, model, extra, onProfile, p.name);
     return;
   }
   try {
@@ -1677,9 +1679,10 @@ async function saveAiProfile(id) {
 }
 
 let applyModelState = null;
-function openApplyModel(profileId, model, extras, onProfile) {
+function openApplyModel(profileId, model, extras, onProfile, sourceName) {
   applyModelState = { profileId, model, extras };
   $('applyModelName').textContent = model;
+  $('applyModelSource').textContent = sourceName || 'this source';
   $('applyModelErr').textContent = '';
   $('applyModelList').innerHTML = onProfile.map(a => {
     const hasOwn = !!a.modelOverride;      // it picked its own model — protect it

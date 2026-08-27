@@ -2,7 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [0.48.0] — 2026-08-26
+## [0.49.0] — 2026-08-26
+
+### Changed
+- **The "switch agents to <model>" dialog now names the source it's scoped to.**
+  It only ever lists your agents on the one AI source whose default you changed,
+  but the wording didn't say so — an agent on a *different* source (e.g. one on
+  a separate API-key source while the rest are on your Max subscription) looked
+  like it was missing. The dialog now says "Only your agents on **<source>** are
+  listed — agents on your other AI sources aren't affected."
 
 ### Added
 - **Choose which agents adopt a new default model — "select agents, hold the
