@@ -36,6 +36,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   the cards use, so it clears itself as soon as the request is approved. Honors
   `prefers-reduced-motion`.
 
+## [0.52.0] — 2026-08-26
+
 ### Changed
 - **The agent legend is now a permanent table of contents, not a button-toggled
   menu.** On screens ≥1200px it's pinned to the upper-left and always visible —
@@ -43,6 +45,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   `position: fixed` it stays put while you scroll the cards. The 📑 Jump button
   is now only a fallback on narrow screens (where there's no room for a gutter),
   which keep the on-demand overlay that closes itself after a jump.
+
+## [0.51.1] — 2026-08-26
 
 ### Fixed
 - **Copy buttons now work over plain HTTP** (e.g. `http://<tailscale-host>:8080`).
@@ -53,6 +57,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   `execCommand` fallback and routed all copy actions through it; each now
   reports success or tells you to select-and-copy when even the fallback is
   blocked.
+
+## [0.51.0] — 2026-08-26
 
 ### Added
 - **Invite people through Telegram — no Tailscale needed.** The web `/join`
@@ -90,6 +96,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   column); on narrower windows it opens on demand as an overlay and closes
   itself after you jump.
 
+## [0.49.0] — 2026-08-26
+
 ### Changed
 - **The "switch agents to <model>" dialog now names the source it's scoped to.**
   It only ever lists your agents on the one AI source whose default you changed,
@@ -97,6 +105,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   a separate API-key source while the rest are on your Max subscription) looked
   like it was missing. The dialog now says "Only your agents on **<source>** are
   listed — agents on your other AI sources aren't affected."
+
+## [0.48.0] — 2026-08-26
 
 ### Added
 - **Choose which agents adopt a new default model — "select agents, hold the
@@ -138,6 +148,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   right below it. `PATCH /v1/agents/:id` now accepts `persona`; new
   `store.setAgentPersona`.
 
+## [0.45.0] — 2026-08-26
+
 ### Changed
 - **Rebuild responds instantly instead of stalling for seconds.** The
   pre-rebuild snapshot (a ~1–2s `docker exec` per agent) ran *synchronously in
@@ -148,6 +160,8 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   the snapshot still runs while the agent is RUNNING and before the container
   is stopped/replaced (verified by test). The web "Rebuild all" also shows an
   immediate "Queuing N rebuilds…" toast so the row never sits blank.
+
+## [0.44.0] — 2026-08-26
 
 ### Changed
 - **Moved the "N instant bots ready" indicator** out of the cramped spot beside
