@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createPairingNotifier, joinerLabel, APPROVE_PREFIX, DISMISS_PREFIX } from '../src/mgmt/notifier.js';
-import type { BotTransport, InlineButton, PendingJoin } from '../src/mgmt/broker.js';
+import { createPairingNotifier, joinerLabel, APPROVE_PREFIX, DENY_PREFIX } from '../src/mgmt/notifier.js';
+import type { BotTransport, InlineButton } from '../src/mgmt/bot.js';
+import type { PendingJoin } from '../src/mgmt/broker.js';
 
 class FakeTx implements BotTransport {
   sent: Array<{ chatId: number; text: string; buttons?: InlineButton[][] }> = [];
@@ -50,9 +51,9 @@ describe('createPairingNotifier', () => {
     const forReq = tx.sent.filter((m) => m.text.includes('Condo Adviser'));
     expect(forReq.map((m) => m.chatId).sort()).toEqual([555, 556]);
     expect(forReq[0]!.text).toMatch(/Maria \(@maria_k\) wants to join "Condo Adviser"/);
-    const [approve, dismiss] = forReq[0]!.buttons![0]!;
+    const [approve, deny] = forReq[0]!.buttons![0]!;
     expect(approve!.data).toBe(`${APPROVE_PREFIX}:a1:AB12CD`);
-    expect(dismiss!.data).toBe(`${DISMISS_PREFIX}:a1:AB12CD`);
+    expect(deny!.data).toBe(`${DENY_PREFIX}:a1:AB12CD`);
   });
 
   it('does not re-notify a request already seen', async () => {

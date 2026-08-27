@@ -58,6 +58,9 @@ class FakeApi implements ApiClient {
   async approvePairing(id: string, code: string) {
     this.calls.push(`approve:${id}:${code}`);
   }
+  async denyPairing(id: string, code: string) {
+    this.calls.push(`deny:${id}:${code}`);
+  }
   async removeMember(id: string, userId: string) {
     this.calls.push(`remove:${id}:${userId}`);
   }
@@ -283,11 +286,12 @@ describe('ManagementBot dispatch', () => {
     expect(tx.edits.at(-1)!.text).toMatch(/Let in/);
   });
 
-  it('the Dismiss button closes the card without approving', async () => {
-    const { b, tx, api } = bot();
-    await b.onCallback(100, 555, 'cbid', 'apx:11111111-2222-3333-4444-555555555555:AB12CD', 7);
-    expect(api.calls).toEqual([]);
-    expect(tx.edits.at(-1)!.text).toMatch(/Dismissed/);
+  it('the "Not now" button actually turns the request away (and says it is not a ban)', async () => {
+    const { b, tx, api } = bot(false);
+    await b.onCallback(100, 555, 'cbid', 'apd:11111111-2222-3333-4444-555555555555:AB12CD', 7);
+    expect(api.calls).toEqual(['deny:11111111-2222-3333-4444-555555555555:AB12CD']);
+    expect(tx.answers.at(-1)).toBe('Turned away');
+    expect(tx.edits.at(-1)!.text).toMatch(/Not a ban/);
   });
 
   it('a non-allowlisted user cannot approve via the push button', async () => {
@@ -313,5 +317,14 @@ describe('broker.approveJoin (one-tap approval push)', () => {
     broker.resume();
     expect(await broker.approveJoin('a1', 'bad code!', WHO)).toMatchObject({ ok: false });
     expect(api.calls).toEqual([]); // neither reached the API
+  });
+
+  it('denyJoin turns the request away, under the same gates', async () => {
+    const { broker, api } = make(); // read-only: still allowed, it's per-person
+    expect(await broker.denyJoin('a1', 'AB12CD', WHO)).toEqual({ ok: true });
+    expect(api.calls).toEqual(['deny:a1:AB12CD']);
+    broker.pause();
+    expect(await broker.denyJoin('a1', 'AB12CD', WHO)).toMatchObject({ ok: false });
+    expect(api.calls).toHaveLength(1); // the paused one never reached the API
   });
 });

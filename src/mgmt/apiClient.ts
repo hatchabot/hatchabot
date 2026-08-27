@@ -110,6 +110,9 @@ export class HttpApiClient implements ApiClient {
   async approvePairing(id: string, code: string): Promise<void> {
     await this.#req('POST', `/v1/agents/${id}/pairing/approve`, { code });
   }
+  async denyPairing(id: string, code: string): Promise<void> {
+    await this.#req('POST', `/v1/agents/${id}/pairing/deny`, { code });
+  }
   async removeMember(id: string, userId: string): Promise<void> {
     await this.#req('DELETE', `/v1/agents/${id}/members/${encodeURIComponent(userId)}`);
   }

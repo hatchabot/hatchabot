@@ -52,7 +52,7 @@ import {
 import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { admitMember, AdmitError, revokeMember, RevokeError } from '../orchestrator/members.js';
+import { admitMember, AdmitError, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
@@ -3030,6 +3030,30 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           },
         );
         return { approved: true, member: admitted };
+      } catch (err) {
+        if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  // Turn a pending request away. OpenClaw has no deny verb, so this is a file
+  // surgery on the pairing store (see denyPairing) — and it's "not now", not a
+  // ban: they can ask again by messaging the bot.
+  app.post<{ Params: { id: string }; Body: { code?: string } }>(
+    '/v1/agents/:id/pairing/deny',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      const channel = agent && store.getChannelForAgent(agent.id);
+      const code = (req.body as { code?: string } | null)?.code;
+      if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
+      if (!code) return reply.code(400).send({ error: 'code required' });
+      try {
+        const out = await denyPairing(
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          { agentId: agent.id, runtimeRef: agent.runtimeRef, code },
+        );
+        return out;
       } catch (err) {
         if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
         throw err;

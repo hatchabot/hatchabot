@@ -149,6 +149,58 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   return { userId, displayName, channelUserId: req.id, alreadyMember: false };
 }
 
+export interface DenyOptions {
+  agentId: string;
+  runtimeRef: string;
+  /** OpenClaw pairing code of the pending request being turned away. */
+  code: string;
+}
+
+/**
+ * Turn a pending pairing request away. OpenClaw's CLI has approve/list but NO
+ * deny verb (verified against 2026.7.1), so — exactly like revokeMember's
+ * allowlist scrub — this is a small atomic surgery on the pairing store that
+ * lives on the agent's volume (credentials/telegram-pairing.json), run in a
+ * one-shot container so it works on a stopped agent too.
+ *
+ * This drops the pending REQUEST; it is not a ban. If they message the bot
+ * again OpenClaw records a fresh request — which is the honest behaviour for a
+ * "not now", and callers word it that way.
+ */
+export async function denyPairing(
+  deps: RevokeDeps,
+  opts: DenyOptions,
+): Promise<{ denied: boolean }> {
+  const { provider } = deps;
+  const log = deps.log ?? (() => {});
+  // Defence in depth: the code is embedded via JSON.stringify below, but never
+  // let anything but a plain pairing code near the script in the first place.
+  if (!/^[A-Za-z0-9]{4,16}$/.test(opts.code)) {
+    throw new AdmitError('That pairing code looks wrong.');
+  }
+  const script = `node -e '
+    const fs = require("fs");
+    const f = "/home/node/.openclaw/credentials/telegram-pairing.json";
+    if (!fs.existsSync(f)) { console.log("0"); process.exit(0); }
+    const d = JSON.parse(fs.readFileSync(f, "utf8"));
+    const before = Array.isArray(d.requests) ? d.requests.length : 0;
+    d.requests = (Array.isArray(d.requests) ? d.requests : [])
+      .filter((r) => String(r && r.code) !== ${JSON.stringify(opts.code)});
+    if (d.requests.length !== before) {
+      const tmp = f + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(d, null, 2), { mode: 0o600 }); // credentials stay 0600
+      fs.renameSync(tmp, f);                                             // atomic swap
+    }
+    console.log(String(before - d.requests.length));'`;
+  const res = await provider.execShellOnVolume(opts.runtimeRef, script);
+  if (res.code !== 0) {
+    throw new AdmitError('Turning that request away failed — try again in a moment.');
+  }
+  const denied = Number(res.stdout.trim()) > 0;
+  log('pairing.denied', { agentId: opts.agentId, code: opts.code, denied });
+  return { denied };
+}
+
 export async function revokeMember(
   deps: RevokeDeps,
   agentId: string,

@@ -86,6 +86,7 @@ export interface ApiClient {
   rebuildAgent(id: string): Promise<void>;
   setModel(id: string, model: string): Promise<void>;
   approvePairing(id: string, code: string): Promise<void>;
+  denyPairing(id: string, code: string): Promise<void>;
   removeMember(id: string, userId: string): Promise<void>;
 }
 
@@ -226,12 +227,33 @@ export class Broker {
     code: string,
     who: Proposer,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
+    return this.#join('approve', agentId, code, who);
+  }
+
+  /** The other half of the one-tap prompt: turn the request away. Same
+   *  reasoning as approveJoin — deliberate, per-person, and reversible (they
+   *  can ask again), so it needs no read-write arming. */
+  async denyJoin(
+    agentId: string,
+    code: string,
+    who: Proposer,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    return this.#join('deny', agentId, code, who);
+  }
+
+  async #join(
+    verb: 'approve' | 'deny',
+    agentId: string,
+    code: string,
+    who: Proposer,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
     if (this.#paused) return { ok: false, message: 'Management is paused.' };
-    if (!/^[A-Za-z0-9]{4,12}$/.test(code)) return { ok: false, message: 'Invalid pairing code.' };
+    if (!/^[A-Za-z0-9]{4,16}$/.test(code)) return { ok: false, message: 'Invalid pairing code.' };
     try {
       this.#rateGate();
-      await this.api.approvePairing(agentId, code);
-      this.#audit('mgmt.join_approved', { agentId, code, ...who });
+      if (verb === 'approve') await this.api.approvePairing(agentId, code);
+      else await this.api.denyPairing(agentId, code);
+      this.#audit(verb === 'approve' ? 'mgmt.join_approved' : 'mgmt.join_denied', { agentId, code, ...who });
       return { ok: true };
     } catch (e) {
       if (e instanceof BrokerError) return { ok: false, message: e.message };

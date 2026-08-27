@@ -2,6 +2,29 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.54.0] — 2026-08-27
+
+### Added
+- **Turn a join request away ("Not now").** Until now the only answer to
+  "someone wants to talk to this agent" was **Let them in** — ignoring it left
+  the request (and its 👤 badge) pending until OpenClaw expired it. Added a
+  **Not now** button on the card and a **🚫 Not now** button on the management
+  bot's approval push, backed by `POST /v1/agents/:id/pairing/deny`.
+
+  OpenClaw's CLI has `approve`/`list` but **no deny verb** (verified against
+  2026.7.1), so this is an atomic surgery on the on-volume pairing store
+  (`credentials/telegram-pairing.json`, kept 0600) — the same technique
+  `revokeMember` already uses for the allowlist, and it works on a stopped agent
+  too. A test runs the real emitted script against a real file to prove it
+  removes exactly the named request and leaves the rest of the store intact.
+
+  It is deliberately **"not now", not a ban**: the person can ask again by
+  messaging the bot, and every surface says so.
+
+### Changed
+- The approval push's second button is now a real **🚫 Not now** (it previously
+  only dismissed the notification without answering the request).
+
 ## [0.53.0] — 2026-08-26
 
 ### Added

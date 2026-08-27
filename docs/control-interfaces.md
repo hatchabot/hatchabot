@@ -38,7 +38,9 @@ Grouped for reference (full list in `src/api/routes.ts`):
 - **Observe:** `GET /v1/agents/:id/logs`, `GET /v1/events`, `GET /v1/pool`
 - **Members & pairing:** `GET /v1/agents/:id/members`,
   `DELETE /v1/agents/:id/members/:userId`, `GET /v1/agents/:id/pairing`,
-  `POST /v1/agents/:id/pairing/approve`
+  `POST /v1/agents/:id/pairing/approve`, `POST /v1/agents/:id/pairing/deny`
+  (OpenClaw has no deny verb, so this is an atomic edit of the on-volume
+  pairing store — a "not now", not a ban: they can ask again)
 - **AI sources:** `GET/POST /v1/ai-profiles`, `PATCH /v1/ai-profiles/:id`,
   `GET /v1/ai-profiles/:id/available-models`, `DELETE /v1/ai-profiles/:id`
 - **Chat bridge:** `GET /v1/agents/:id/gateway` → `{ port, token }`

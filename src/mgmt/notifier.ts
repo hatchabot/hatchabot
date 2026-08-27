@@ -29,7 +29,8 @@ export function joinerLabel(p: PendingJoin): string {
 }
 
 export const APPROVE_PREFIX = 'apr';
-export const DISMISS_PREFIX = 'apx';
+/** Turns the request away for real (not just closing the card) — see denyPairing. */
+export const DENY_PREFIX = 'apd';
 
 /**
  * Start polling. Sends each newly-seen request once to every allowlisted admin
@@ -63,7 +64,7 @@ export function createPairingNotifier(
         const text = `👤 ${joinerLabel(p)} wants to join "${p.agentName}".\nLet them in?`;
         const buttons = [[
           { text: '✅ Approve', data: `${APPROVE_PREFIX}:${p.agentId}:${p.code}` },
-          { text: '✕ Dismiss', data: `${DISMISS_PREFIX}:${p.agentId}:${p.code}` },
+          { text: '🚫 Not now', data: `${DENY_PREFIX}:${p.agentId}:${p.code}` },
         ]];
         for (const uid of allowlist) {
           try {

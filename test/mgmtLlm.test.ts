@@ -59,6 +59,7 @@ class FakeApi implements ApiClient {
     this.calls.push(`model:${id}:${m}`);
   }
   async approvePairing() {}
+  async denyPairing() {}
   async removeMember() {}
 }
 

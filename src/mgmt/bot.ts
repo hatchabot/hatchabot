@@ -172,23 +172,28 @@ export class ManagementBot {
       await this.tx.answerCallback(callbackId, 'Not authorized');
       return;
     }
-    // Approval-push buttons: one tap to admit (or dismiss) a pending joiner the
-    // notifier surfaced. `apr:<agentId>:<code>` / `apx:<agentId>:<code>`.
-    const join = /^(apr|apx):([0-9a-f-]{16,40}):([A-Za-z0-9]{4,12})$/.exec(data);
+    // Approval-push buttons: one tap to admit or turn away a pending joiner the
+    // notifier surfaced. `apr:<agentId>:<code>` / `apd:<agentId>:<code>`.
+    const join = /^(apr|apd):([0-9a-f-]{16,40}):([A-Za-z0-9]{4,16})$/.exec(data);
     if (join) {
       const [, kind, agentId, code] = join;
-      if (kind === 'apx') {
-        await this.tx.answerCallback(callbackId, 'Dismissed');
-        await this.tx.editMessage(chatId, messageId, 'Dismissed — approve later with /pending then /approve.');
-        return;
-      }
-      const out = await this.broker.approveJoin(agentId!, code!, this.#who(chatId, fromUserId));
+      const approving = kind === 'apr';
+      const who = this.#who(chatId, fromUserId);
+      const out = approving
+        ? await this.broker.approveJoin(agentId!, code!, who)
+        : await this.broker.denyJoin(agentId!, code!, who);
       if (!out.ok) {
         await this.tx.answerCallback(callbackId, out.message.slice(0, 190));
         return;
       }
-      await this.tx.answerCallback(callbackId, 'Approved');
-      await this.tx.editMessage(chatId, messageId, '✅ Let in — they can chat with the agent now.');
+      await this.tx.answerCallback(callbackId, approving ? 'Approved' : 'Turned away');
+      await this.tx.editMessage(
+        chatId,
+        messageId,
+        approving
+          ? '✅ Let in — they can chat with the agent now.'
+          : '🚫 Turned away. Not a ban — they can ask again by messaging the bot.',
+      );
       return;
     }
     const m = /^cfm:([A-Za-z0-9_-]+):(y|n)$/.exec(data);

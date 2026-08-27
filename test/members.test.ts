@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { admitMember, AdmitError, revokeMember, RevokeError } from '../src/orchestrator/members.js';
+import { admitMember, AdmitError, denyPairing, revokeMember, RevokeError } from '../src/orchestrator/members.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 
@@ -203,5 +207,85 @@ describe('revokeMember', () => {
     store.insertMembership({ id: 'm3', agentId: 'a1', userId: 'u3', role: 'user', status: 'active' });
     await revokeMember({ store, provider }, 'a1', 'u3');
     expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(false);
+  });
+});
+
+describe('denyPairing', () => {
+  const PAIRING_PATH = '/home/node/.openclaw/credentials/telegram-pairing.json';
+
+  it('reports denied when the surgery removed a request, on the volume', async () => {
+    const { store, provider, opts } = await setup();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: '1\n', stderr: '' });
+    const out = await denyPairing({ store, provider }, { agentId: 'a1', runtimeRef: opts.runtimeRef, code: 'CODE1' });
+    expect(out).toEqual({ denied: true });
+    // Volume surgery (works on a stopped agent), against the pairing store.
+    const sh = provider.execLog.find((a) => a[0] === 'sh-volume')!;
+    expect(sh[1]).toContain('telegram-pairing.json');
+    expect(sh[1]).toContain('CODE1');
+  });
+
+  it('reports denied:false when the request was already gone', async () => {
+    const { store, provider, opts } = await setup();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: '0\n', stderr: '' });
+    expect(await denyPairing({ store, provider }, { agentId: 'a1', runtimeRef: opts.runtimeRef, code: 'CODE1' }))
+      .toEqual({ denied: false });
+  });
+
+  it('throws (retryable) when the surgery fails', async () => {
+    const { store, provider, opts } = await setup();
+    provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'boom' });
+    await expect(denyPairing({ store, provider }, { agentId: 'a1', runtimeRef: opts.runtimeRef, code: 'CODE1' }))
+      .rejects.toBeInstanceOf(AdmitError);
+  });
+
+  it('refuses a malformed code without touching the volume', async () => {
+    const { store, provider, opts } = await setup();
+    await expect(denyPairing({ store, provider }, { agentId: 'a1', runtimeRef: opts.runtimeRef, code: 'nope; rm -rf /' }))
+      .rejects.toBeInstanceOf(AdmitError);
+    expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(false);
+  });
+
+  // The script is the whole feature — OpenClaw has no deny verb — so run the
+  // REAL emitted script against a real file and prove it edits it correctly.
+  it('the emitted script removes exactly the named request and leaves the rest', async () => {
+    const { store, provider, opts } = await setup();
+    await denyPairing({ store, provider }, { agentId: 'a1', runtimeRef: opts.runtimeRef, code: 'CODE1' });
+    const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
+
+    const dir = mkdtempSync(join(tmpdir(), 'acl-deny-'));
+    try {
+      mkdirSync(join(dir, 'creds'));
+      const file = join(dir, 'creds', 'telegram-pairing.json');
+      writeFileSync(file, JSON.stringify({
+        version: 1,
+        requests: [
+          { id: '111', code: 'CODE1', meta: { username: 'gran' } },
+          { id: '222', code: 'KEEPME', meta: { username: 'other' } },
+        ],
+      }, null, 2));
+
+      const out = execFileSync('sh', ['-c', script.replaceAll(PAIRING_PATH, file)], { encoding: 'utf8' });
+      expect(out.trim()).toBe('1'); // one request removed
+
+      const after = JSON.parse(readFileSync(file, 'utf8'));
+      expect(after.requests.map((r: any) => r.code)).toEqual(['KEEPME']); // only the target went
+      expect(after.version).toBe(1);                                     // rest of the file intact
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the emitted script is a no-op when the pairing file does not exist', async () => {
+    const { store, provider, opts } = await setup();
+    await denyPairing({ store, provider }, { agentId: 'a1', runtimeRef: opts.runtimeRef, code: 'CODE1' });
+    const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
+    const dir = mkdtempSync(join(tmpdir(), 'acl-deny-'));
+    try {
+      const missing = join(dir, 'nope.json');
+      const out = execFileSync('sh', ['-c', script.replaceAll(PAIRING_PATH, missing)], { encoding: 'utf8' });
+      expect(out.trim()).toBe('0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

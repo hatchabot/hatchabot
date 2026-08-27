@@ -64,6 +64,26 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
     expect(res.json()).toEqual([]);
   });
 
+  it('POST /pairing/deny turns a request away, owner-scoped', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: '1\n', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/deny', headers: as, payload: { code: 'CODEA' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ denied: true });
+
+    // Another owner can't deny on someone else's agent, and a missing code 400s.
+    const notMine = await f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/deny', headers: { 'x-agentclaw-owner': 'someone-else' }, payload: { code: 'CODEA' } });
+    expect(notMine.statusCode).toBe(404);
+    const noCode = await f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/deny', headers: as, payload: {} });
+    expect(noCode.statusCode).toBe(400);
+  });
+
+  it('POST /pairing/deny rejects a malformed code with a 400, not a 500', async () => {
+    const { f } = await world();
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/deny', headers: as, payload: { code: 'nope; rm -rf /' } });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('one unreachable agent does not sink the whole list', async () => {
     const { provider, f } = await world();
     provider.execResponses.set('pairing list telegram --account bot_a1', {

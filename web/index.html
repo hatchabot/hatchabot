@@ -2370,6 +2370,8 @@ function agentCard(a) {
     ${pairs.map(p => `
       <div class="pair">
         <span class="grow">🔑 <b>${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
+        <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
+                title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
         <button class="primary" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
       </div>`).join('')}
     ${(members[a.id] ?? []).length > 1 ? `
@@ -3557,6 +3559,17 @@ async function approve(id, code) {
       ? `${res.member.displayName} is already a member — access restored`
       : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
     pairTick = 0; // refetch members on next poll
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function denyPair(id, code, who) {
+  // "Not now", not a ban — say so, so nobody assumes this blocks them for good.
+  if (!confirm(`Turn away ${who}'s request to talk to this agent?\n\nThey are not blocked — they can ask again by messaging the bot.`)) return;
+  try {
+    const r = await api(`/v1/agents/${id}/pairing/deny`, { method: 'POST', body: { code } });
+    toast(r.denied ? `${who}'s request was turned away` : 'That request is no longer pending');
+    pairTick = 0; // refetch pairing on the next poll so the card/badge clears
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
