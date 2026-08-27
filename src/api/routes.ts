@@ -26,6 +26,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { agentUsage } from '../orchestrator/usage.js';
+import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { estimateCost } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
@@ -1110,8 +1111,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // follower. Selected = clear the override so it follows the new default.
       const heldModels = new Set<string>();
       let held = 0;
+      let applied = 0; // agents actually changed — NOT the ids the caller sent
       for (const a of mine) {
         if (applyIds.has(a.id)) {
+          applied++;
           if (a.model) store.setAgentModel(a.id, null);
         } else {
           const current = a.model ?? oldDefault;
@@ -1142,7 +1145,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
 
       const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
-      return { profile: safe, applied: applyIds.size, held, rebuilding };
+      // `applied` counts agents this call actually touched. It previously
+      // echoed applyIds.size, which over-reported when the caller passed ids
+      // that aren't theirs (a shared profile's other users) — they're filtered
+      // out of `mine`, so nothing happened to them.
+      return { profile: safe, applied, held, rebuilding };
     },
   );
 
@@ -1188,17 +1195,36 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         return { models: [] };
       }
     }
-    // Anthropic: a curated current list (subscription profiles hold no API
-    // key to query the Models API, and a static list is offline-safe). Update
-    // here when the family changes.
+    // Anthropic. Prefer asking a LIVE agent on this profile what its runtime
+    // actually serves: a static list once offered claude-opus-5, which the
+    // claude-cli (Max) runtime has no catalog entry for — it became a fleet
+    // default and every conversation broke on compaction. See runtimeModels.
+    const live = store
+      .listAgents(ownerIdOf(req))
+      .find((a) => a.aiProfileId === profile.id && a.state === 'RUNNING' && a.runtimeRef);
+    if (live) {
+      const found = await runtimeModels(providerFor(live.hostId), live.runtimeRef!, 'anthropic');
+      const usable = found.filter((m) => m.catalogued).map((m) => m.id);
+      // Only trust a non-empty answer; an old CLI without --all returns nothing.
+      if (usable.length) {
+        // Never drop what this profile already uses, even if the runtime stopped
+        // listing it — the picker must not silently erase a working choice.
+        const inUse = [profile.model, ...(profile.models ?? [])].filter(
+          (m) => m && !usable.includes(m),
+        );
+        return { models: [...usable, ...inUse], source: 'runtime' as const };
+      }
+    }
+    // Fallback: a curated current list (no live agent to ask yet, e.g. the
+    // profile's first agent hasn't been created). Offline-safe.
     return {
       models: [
-        'claude-opus-5',
+        'claude-opus-4-8',
         'claude-sonnet-5',
         'claude-haiku-4-5',
-        'claude-opus-4-8',
         'claude-fable-5',
       ],
+      source: 'curated' as const,
     };
   });
 

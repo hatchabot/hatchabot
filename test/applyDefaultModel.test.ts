@@ -130,3 +130,57 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     expect(store.getAgent('x1')!.model).toBeUndefined();
   });
 });
+
+describe('the model picker offers only what the runtime can actually serve', () => {
+  // Same live shape that produced the fleet-wide compaction outage.
+  const CATALOG = JSON.stringify({ models: [
+    { key: 'anthropic/claude-opus-4-8', name: 'Claude Opus 4.8', input: 'text+image', contextWindow: 1048576 },
+    { key: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5', input: 'text+image', contextWindow: 1000000 },
+    { key: 'anthropic/claude-opus-5',   name: 'claude-opus-5',   input: 'text',       contextWindow: 200000 },
+  ]});
+
+  it('excludes the stub model a live agent proves is unserved', async () => {
+    const { f, provider } = await world();
+    provider.execResponses.set('models list', { code: 0, stdout: CATALOG, stderr: '' });
+    const res = await f.inject({ method: 'GET', url: '/v1/ai-profiles/p1/available-models', headers: as });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.source).toBe('runtime');
+    expect(body.models).toContain('claude-opus-4-8');
+    expect(body.models).not.toContain('claude-opus-5'); // the whole point
+  });
+
+  it('never erases a model the profile already uses, even if unlisted', async () => {
+    const { f, provider } = await world();
+    // Runtime reports only opus-4-8; the profile's menu also has sonnet-5/haiku.
+    provider.execResponses.set('models list', {
+      code: 0, stdout: JSON.stringify({ models: [{ key: 'anthropic/claude-opus-4-8', name: 'Claude Opus 4.8' }] }), stderr: '',
+    });
+    const body = (await f.inject({ method: 'GET', url: '/v1/ai-profiles/p1/available-models', headers: as })).json();
+    // In-use models are appended so the picker can't silently drop a working choice.
+    expect(body.models).toContain('claude-opus-4-8');
+    expect(body.models).toContain('claude-sonnet-5');
+  });
+
+  it('falls back to the curated list when no live agent can be asked — and that list has no opus-5', async () => {
+    const { f, provider } = await world();
+    provider.execResponses.set('models list', { code: 1, stdout: '', stderr: 'unknown option --all' });
+    const body = (await f.inject({ method: 'GET', url: '/v1/ai-profiles/p1/available-models', headers: as })).json();
+    expect(body.source).toBe('curated');
+    expect(body.models).not.toContain('claude-opus-5');
+    expect(body.models).toContain('claude-opus-4-8');
+  });
+});
+
+describe('apply-default-model reports what it actually changed', () => {
+  it('counts only the caller\'s own agents, not every id passed in', async () => {
+    const { store, f } = await world({ shared: true });
+    // Another account's agent on the same SHARED profile — passing its id must
+    // not be counted as applied (it is filtered out of `mine` and untouched).
+    store.insertAgent({ id: 'x1', ownerId: 'other', name: 'Theirs', slug: 'theirs', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://x1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: ['a1', 'x1'], rebuild: false });
+    // a1 is mine, x1 is not → applied must be 1, not the 2 ids sent.
+    expect(res.json().applied).toBe(1);
+    expect(store.getAgent('x1')!.model).toBeUndefined(); // genuinely untouched
+  });
+});

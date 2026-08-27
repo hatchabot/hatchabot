@@ -2,6 +2,33 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.57.0] — 2026-08-27
+
+### Fixed
+- **The model picker no longer offers models the runtime can't actually serve.**
+  The Anthropic model list was hardcoded and included `claude-opus-5`. OpenClaw's
+  `claude-cli` (Claude Max) runtime has **no catalog entry** for it, so an agent
+  set to it looked fine — ordinary messages passed through — but **compaction**,
+  which resolves the model strictly, failed the moment a conversation filled up:
+  *"Unknown model: anthropic/claude-opus-5 … registering it there will not make
+  it usable."* Because it was a profile **default**, it had propagated to 26
+  agents fleet-wide.
+
+  The picker now asks a live agent on that profile what its runtime really
+  serves (`openclaw models list --provider … --all --json`) and offers only
+  genuinely catalogued models. Mere presence in that list isn't enough — it also
+  reports models AgentClaw itself configured — so entries are validated by their
+  metadata: a real model has a display name ("Claude Opus 4.8"), while an
+  unservable one is echoed back with its raw id as the name and placeholder
+  specs. Models the profile already uses are never dropped from the list, and
+  with no live agent to ask it falls back to a curated list — from which
+  `claude-opus-5` has been removed.
+
+- **`apply-default-model` now reports what it actually changed.** `applied`
+  echoed the number of ids passed in, so a shared profile whose request included
+  another account's agents over-reported (those are correctly filtered out and
+  left untouched). It now counts only agents this call really touched.
+
 ## [0.56.1] — 2026-08-27
 
 ### Changed

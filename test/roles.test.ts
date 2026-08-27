@@ -238,8 +238,12 @@ describe('cross-owner isolation (audit regressions)', () => {
     });
     expect(res.statusCode).toBe(200);
     const models = res.json().models as string[];
-    expect(models).toContain('claude-opus-5');
+    expect(models).toContain('claude-opus-4-8');
     expect(models.length).toBeGreaterThan(2);
+    // Never offer claude-opus-5 from the curated fallback: the claude-cli
+    // runtime has no catalog entry for it, so picking it broke compaction on
+    // every agent that adopted it. Only a live runtime may vouch for a model.
+    expect(models).not.toContain('claude-opus-5');
 
     // A stranger (no ownership, not shared) can't enumerate it.
     expect((await f.inject({
