@@ -923,19 +923,21 @@
   <div class="invite-link" id="invLink"></div>
   <div class="sub">They'll see a note that this agent's memory is shared.</div>
   <div class="sub" style="margin-top:10px">
-    <b>Not on your Tailscale network?</b> Send them the agent's Telegram link
-    instead — or let them scan the code. When they message it, a "wants to
-    talk" card appears here and <b>Let them in</b> makes them a member.
+    <b>Invite via Telegram — no Tailscale needed.</b> Send them the agent's
+    Telegram link (or let them scan the code). When they message it, you get a
+    <b>“wants to join”</b> prompt — in your management bot if it's set up, or as a
+    card here — and one tap lets them in.
   </div>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="invite-link" id="invTgLink" style="flex:1;min-width:0"></div>
     <img id="invTgQr" alt="Telegram link QR code" width="112" height="112"
          style="display:none;border-radius:8px;background:#fff;padding:4px">
   </div>
-  <div class="actions" style="justify-content:flex-end">
+  <div class="actions" style="justify-content:flex-end;flex-wrap:wrap">
     <button onclick="inviteDlg.close()">Done</button>
-    <button onclick="copyInviteTg()">Copy Telegram link</button>
-    <button class="primary" onclick="copyInvite()">Copy link</button>
+    <button onclick="copyInvite()" title="The web /join link — needs Tailscale, but lets them log into this UI too">Copy web link</button>
+    <button onclick="shareInviteTg()" id="invShareBtn" title="Share the ready-to-send Telegram invite">Share…</button>
+    <button class="primary" onclick="copyInviteTg()">Copy Telegram invite</button>
   </div>
 </dialog>
 
@@ -3317,28 +3319,40 @@ async function deleteCron(jobId, name) {
 const tgWebLink = (username) =>
   `https://web.telegram.org/k/#?tgaddr=${encodeURIComponent(`tg://resolve?domain=${username}`)}`;
 
+let invShare = null; // { name, link, message } for the current invite dialog
 async function invite(id, name) {
   try {
     const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: {} });
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
     const a = agents.find(x => x.id === id);
-    $('invTgLink').textContent = a?.deepLink ?? '';
+    const link = a?.deepLink ?? '';
+    $('invTgLink').textContent = link;
     const qr = $('invTgQr');
-    qr.style.display = a?.deepLink ? '' : 'none';
-    if (a?.deepLink) qr.src = `/v1/agents/${id}/qr.svg`;
+    qr.style.display = link ? '' : 'none';
+    if (link) qr.src = `/v1/agents/${id}/qr.svg`;
+    // A ready-to-send message, not just the bare URL.
+    invShare = { name, link, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
+    $('invShareBtn').style.display = (link && navigator.share) ? '' : 'none';
     inviteDlg.showModal();
   } catch (e) { toast(e.message); }
 }
 
 async function copyInvite() {
-  try { await navigator.clipboard.writeText($('invLink').textContent); toast('Link copied'); }
+  try { await navigator.clipboard.writeText($('invLink').textContent); toast('Web link copied'); }
   catch { toast('Select and copy the link manually'); }
 }
 
 async function copyInviteTg() {
-  try { await navigator.clipboard.writeText($('invTgLink').textContent); toast('Telegram link copied'); }
+  if (!invShare?.message) { toast('This agent has no Telegram bot yet'); return; }
+  try { await navigator.clipboard.writeText(invShare.message); toast('Telegram invite copied — paste it to them'); }
   catch { toast('Select and copy the link manually'); }
+}
+
+async function shareInviteTg() {
+  if (!invShare?.link) return;
+  try { await navigator.share({ title: `Chat with ${invShare.name}`, text: invShare.message, url: invShare.link }); }
+  catch { /* user cancelled the share sheet, or it's unavailable — no-op */ }
 }
 
 async function rebuild(id) {

@@ -2,6 +2,32 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.51.0] — 2026-08-26
+
+### Added
+- **Invite people through Telegram — no Tailscale needed.** The web `/join`
+  link requires the invitee to reach the control plane over your tailnet. That
+  was never actually necessary for chat access: an invitee can just message the
+  agent's bot and be admitted. This makes that path first-class:
+  - **Invite dialog** now leads with the Telegram invite — a ready-to-send
+    message ("Chat with <agent> on Telegram: <link>"), a native **Share…**
+    button, and the QR — with the web link demoted to a secondary "needs
+    Tailscale, but grants web login" option.
+  - **Approval push (management bot):** when an invitee messages one of your
+    agents' bots, your management bot now DMs you a one-tap **✅ Approve /
+    ✕ Dismiss** card the moment it happens — no more watching the web UI for a
+    "wants to join" card. Approving admits them (allowlists their Telegram id,
+    binds the membership, sends the welcome). The one-tap approve is a
+    deliberate, per-person action, so it works even in read-only mode; it still
+    respects `/pause` and the change rate limit.
+  - New `GET /v1/pending` (all pending join requests across your RUNNING agents,
+    owner-scoped), a background poller in the mgmt bot (`notifier.ts`), and a
+    shared `kickRebuild`-style one-tap `broker.approveJoin`.
+
+  Fully automatic "click link → joined" still isn't possible — OpenClaw's
+  pairing metadata exposes the sender's name/username but not a `/start`
+  payload — so approval stays a one-tap step.
+
 ## [0.50.0] — 2026-08-26
 
 ### Added

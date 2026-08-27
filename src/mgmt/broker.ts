@@ -33,6 +33,18 @@ export interface PairingRequest {
   meta?: { firstName?: string; lastName?: string; username?: string };
 }
 
+/** A pending "wants to join" request, already attributed to its agent — the
+ *  flattened shape the notifier polls and the approval push is built from. */
+export interface PendingJoin {
+  agentId: string;
+  agentName: string;
+  code: string;
+  telegramId?: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
 export interface EventRow {
   agentId: string;
   agentName?: string;
@@ -63,6 +75,7 @@ export interface ApiClient {
   getLogs(id: string, lines: number): Promise<string>;
   listMembers(id: string): Promise<Member[]>;
   listPairing(id: string): Promise<PairingRequest[]>;
+  listAllPending(): Promise<PendingJoin[]>;
   getPool(): Promise<{ availableBots: number }>;
   listEvents(agentId: string | undefined, limit: number): Promise<EventRow[]>;
   getHealth(id: string): Promise<HealthResult>;
@@ -197,6 +210,32 @@ export class Broker {
       const msg = String((e as Error).message ?? e);
       this.#audit('mgmt.failed', { tool: rec.tool, confirmId: id, error: msg });
       return { ok: true, done: true, text: `⚠ Failed — ${rec.summary}: ${msg}`, rec };
+    }
+  }
+
+  /**
+   * Approve a pending join straight from the notification's one-tap button. The
+   * owner tapped "Approve" next to a named person the system surfaced, so this
+   * is already a deliberate, per-person, additive action — it doesn't go through
+   * the propose→confirm dance or require read-write mode. It still respects
+   * /pause and the mutate rate limit. `agentId` is trusted (it came from our own
+   * notification payload, not from a prompt).
+   */
+  async approveJoin(
+    agentId: string,
+    code: string,
+    who: Proposer,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    if (this.#paused) return { ok: false, message: 'Management is paused.' };
+    if (!/^[A-Za-z0-9]{4,12}$/.test(code)) return { ok: false, message: 'Invalid pairing code.' };
+    try {
+      this.#rateGate();
+      await this.api.approvePairing(agentId, code);
+      this.#audit('mgmt.join_approved', { agentId, code, ...who });
+      return { ok: true };
+    } catch (e) {
+      if (e instanceof BrokerError) return { ok: false, message: e.message };
+      return { ok: false, message: String((e as Error).message ?? e) };
     }
   }
 

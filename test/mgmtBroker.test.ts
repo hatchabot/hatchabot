@@ -22,6 +22,9 @@ class FakeApi implements ApiClient {
   async listPairing() {
     return [];
   }
+  async listAllPending() {
+    return [];
+  }
   async getPool() {
     return { availableBots: 3 };
   }
@@ -270,5 +273,45 @@ describe('ManagementBot dispatch', () => {
     await b.onCallback(100, 999, 'cbid', 'cfm:c_1:y', tx.sent[0]!.messageId);
     expect(tx.answers.at(-1)).toMatch(/Not authorized/);
     expect(api.calls).toEqual([]);
+  });
+
+  it('the approval-push Approve button admits in one tap (no read-write needed)', async () => {
+    const { b, tx, api } = bot(false); // read-ONLY: approval push still works
+    await b.onCallback(100, 555, 'cbid', 'apr:11111111-2222-3333-4444-555555555555:AB12CD', 7);
+    expect(api.calls).toEqual(['approve:11111111-2222-3333-4444-555555555555:AB12CD']);
+    expect(tx.answers.at(-1)).toBe('Approved');
+    expect(tx.edits.at(-1)!.text).toMatch(/Let in/);
+  });
+
+  it('the Dismiss button closes the card without approving', async () => {
+    const { b, tx, api } = bot();
+    await b.onCallback(100, 555, 'cbid', 'apx:11111111-2222-3333-4444-555555555555:AB12CD', 7);
+    expect(api.calls).toEqual([]);
+    expect(tx.edits.at(-1)!.text).toMatch(/Dismissed/);
+  });
+
+  it('a non-allowlisted user cannot approve via the push button', async () => {
+    const { b, tx, api } = bot();
+    await b.onCallback(100, 999, 'cbid', 'apr:11111111-2222-3333-4444-555555555555:AB12CD', 7);
+    expect(tx.answers.at(-1)).toMatch(/Not authorized/);
+    expect(api.calls).toEqual([]);
+  });
+});
+
+describe('broker.approveJoin (one-tap approval push)', () => {
+  it('approves directly, bypassing propose→confirm and read-write mode', async () => {
+    const { broker, api } = make(); // read-only by default
+    const out = await broker.approveJoin('a1', 'AB12CD', WHO);
+    expect(out).toEqual({ ok: true });
+    expect(api.calls).toEqual(['approve:a1:AB12CD']);
+  });
+
+  it('refuses while paused, and refuses an invalid code', async () => {
+    const { broker, api } = make();
+    broker.pause();
+    expect(await broker.approveJoin('a1', 'AB12CD', WHO)).toMatchObject({ ok: false });
+    broker.resume();
+    expect(await broker.approveJoin('a1', 'bad code!', WHO)).toMatchObject({ ok: false });
+    expect(api.calls).toEqual([]); // neither reached the API
   });
 });

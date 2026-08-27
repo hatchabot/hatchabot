@@ -2980,6 +2980,35 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return listPairingRequests(providerFor(agent.hostId), agent.runtimeRef, channel.accountId);
   });
 
+  // Every pending "wants to join" request across the caller's RUNNING agents,
+  // flattened — one cheap call for the management bot to poll and push an
+  // approval prompt, so the owner never has to open the web UI to notice one.
+  app.get('/v1/pending', async (req) => {
+    const mine = store
+      .listAgents(ownerIdOf(req))
+      .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.getChannelForAgent(a.id));
+    const perAgent = await Promise.all(
+      mine.map(async (a) => {
+        try {
+          const channel = store.getChannelForAgent(a.id)!;
+          const reqs = await listPairingRequests(providerFor(a.hostId), a.runtimeRef!, channel.accountId);
+          return reqs.map((r) => ({
+            agentId: a.id,
+            agentName: a.name,
+            code: r.code,
+            telegramId: r.id,
+            username: r.meta?.username,
+            firstName: r.meta?.firstName,
+            lastName: r.meta?.lastName,
+          }));
+        } catch {
+          return []; // an unreachable agent shouldn't sink the whole list
+        }
+      }),
+    );
+    return perAgent.flat();
+  });
+
   app.post<{ Params: { id: string }; Body: { code?: string } }>(
     '/v1/agents/:id/pairing/approve',
     async (req, reply) => {

@@ -1,0 +1,80 @@
+import { describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
+import Fastify from 'fastify';
+import { Store } from '../src/store/store.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
+import { registerRoutes } from '../src/api/routes.js';
+import type { SecretStore } from '../src/secrets/secretStore.js';
+
+class MemSecrets implements SecretStore {
+  map = new Map<string, string>();
+  async put(r: string, v: string) { this.map.set(r, v); }
+  async get(r: string) { const v = this.map.get(r); if (v === undefined) throw new Error('missing'); return v; }
+  async delete(r: string) { this.map.delete(r); }
+}
+
+const OWNER = 'user-owner';
+const as = { 'x-agentclaw-owner': OWNER };
+
+async function world() {
+  const store = new Store(new Database(':memory:'));
+  const provider = new MockProvider();
+  store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+  store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+  async function seed(id: string, slug: string, name: string, state: string, ownerId = OWNER) {
+    const { runtimeRef } = await provider.provision({ agentId: id, slug, workspace: { files: {}, configPatch: { agentId: slug, authMode: 'api-key' } }, env: {} } as any);
+    store.insertAgent({ id, ownerId, name, slug, state: state as any, aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    store.insertChannel({ id: `c-${id}`, agentId: id, kind: 'telegram', accountId: `bot_${id}`, secretRef: `chan/${id}`, deepLink: `https://t.me/bot_${id}`, createdAt: 'now' });
+  }
+  await seed('a1', 'fam', 'Family', 'RUNNING');
+  await seed('a2', 'condo', 'Condo', 'RUNNING');
+  await seed('a3', 'stop', 'Stopped', 'STOPPED');       // not RUNNING → skipped
+  await seed('x9', 'theirs', 'Theirs', 'RUNNING', 'other'); // another owner → invisible
+  const f = Fastify();
+  await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+  return { store, provider, f };
+}
+
+describe('GET /v1/pending (fleet-wide join requests)', () => {
+  it('flattens pending pairings across the owner\'s RUNNING agents, attributed to each', async () => {
+    const { provider, f } = await world();
+    // Per-agent pairing lists (keyed by the --account slug in the argv).
+    provider.execResponses.set('pairing list telegram --account bot_a1', {
+      code: 0, stdout: JSON.stringify({ requests: [{ id: '555', code: 'CODEA', meta: { username: 'maria_k', firstName: 'Maria' } }] }), stderr: '',
+    });
+    provider.execResponses.set('pairing list telegram --account bot_a2', {
+      code: 0, stdout: JSON.stringify({ requests: [{ id: '777', code: 'CODEB', meta: { firstName: 'Jon' } }] }), stderr: '',
+    });
+    const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toHaveLength(2);
+    const byAgent = Object.fromEntries(body.map((r: any) => [r.agentName, r]));
+    expect(byAgent.Family).toMatchObject({ agentId: 'a1', code: 'CODEA', username: 'maria_k', firstName: 'Maria', telegramId: '555' });
+    expect(byAgent.Condo).toMatchObject({ agentId: 'a2', code: 'CODEB', firstName: 'Jon' });
+  });
+
+  it('skips stopped agents and never includes another owner\'s agents', async () => {
+    const { provider, f } = await world();
+    // Only the other owner's agent has a request — must not surface to us.
+    provider.execResponses.set('pairing list telegram --account bot_x9', {
+      code: 0, stdout: JSON.stringify({ requests: [{ id: '999', code: 'SECRET', meta: {} }] }), stderr: '',
+    });
+    const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
+    expect(res.json()).toEqual([]);
+  });
+
+  it('one unreachable agent does not sink the whole list', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('pairing list telegram --account bot_a1', {
+      code: 0, stdout: JSON.stringify({ requests: [{ id: '555', code: 'CODEA', meta: {} }] }), stderr: '',
+    });
+    const realExec = provider.exec.bind(provider);
+    provider.exec = (async (ref: string, argv: string[]) => {
+      if (argv.includes('bot_a2')) throw new Error('container gone');
+      return realExec(ref, argv);
+    }) as any;
+    const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
+    expect(res.json()).toHaveLength(1); // a1 survived; a2 dropped
+  });
+});

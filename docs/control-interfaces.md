@@ -43,6 +43,9 @@ Grouped for reference (full list in `src/api/routes.ts`):
   `GET /v1/ai-profiles/:id/available-models`, `DELETE /v1/ai-profiles/:id`
 - **Chat bridge:** `GET /v1/agents/:id/gateway` → `{ port, token }`
 - **Invites:** `POST /v1/agents/:id/invites`, `GET /v1/invites/:code`, `POST /v1/join`
+- **Fleet-wide pending joins:** `GET /v1/pending` — every pending pairing across
+  the caller's RUNNING agents, flattened and attributed, so the management bot
+  can poll once and push an approval prompt (no web UI / tailnet needed)
 
 ### Small server-side additions both clients want
 Prioritized; each is self-contained and reuses what exists.

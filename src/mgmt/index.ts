@@ -21,6 +21,7 @@ import { Broker } from './broker.js';
 import { PendingStore } from './pendingStore.js';
 import { ManagementBot } from './bot.js';
 import { GrammyTransport } from './telegram.js';
+import { createPairingNotifier } from './notifier.js';
 import { LlmAgent } from './llm.js';
 import { AnthropicChatModel } from './anthropicModel.js';
 
@@ -82,7 +83,16 @@ const llm = anthropicKey
   : undefined;
 
 const bot = new Bot(botToken);
-const mgmt = new ManagementBot(broker, new GrammyTransport(bot.api), { ownerId, allowlist, llm });
+const transport = new GrammyTransport(bot.api);
+const mgmt = new ManagementBot(broker, transport, { ownerId, allowlist, llm });
+
+// Approval push: DM the owner a one-tap Approve card whenever an invitee
+// messages one of their agents' bots, so a Telegram-only invite needs no web UI.
+const pairingNotifier = createPairingNotifier(api, transport, allowlist, {
+  intervalMs: Number(process.env.AGENTCLAW_MGMT_PAIRING_POLL_MS) || 20_000,
+  log: (event, detail) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...detail })),
+});
+void pairingNotifier.tick(); // catch anyone already waiting at boot
 
 bot.on('message:text', async (ctx) => {
   if (!ctx.from) return;

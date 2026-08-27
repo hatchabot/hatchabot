@@ -28,6 +28,9 @@ class FakeApi implements ApiClient {
   async listPairing() {
     return [];
   }
+  async listAllPending() {
+    return [];
+  }
   async getPool() {
     return { availableBots: 3 };
   }

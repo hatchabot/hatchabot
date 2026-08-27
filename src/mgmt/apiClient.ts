@@ -1,4 +1,4 @@
-import type { ApiClient, AgentSummary, Member, PairingRequest, EventRow, HealthResult, UsageResult } from './broker.js';
+import type { ApiClient, AgentSummary, Member, PairingRequest, PendingJoin, EventRow, HealthResult, UsageResult } from './broker.js';
 
 /**
  * The concrete owner-scoped /v1 client the broker drives. One bearer token (a
@@ -70,6 +70,10 @@ export class HttpApiClient implements ApiClient {
       | PairingRequest[]
       | { requests?: PairingRequest[] };
     return Array.isArray(r) ? r : (r.requests ?? []);
+  }
+  async listAllPending(): Promise<PendingJoin[]> {
+    const r = (await this.#req('GET', '/v1/pending')) as PendingJoin[];
+    return Array.isArray(r) ? r : [];
   }
   async getPool(): Promise<{ availableBots: number }> {
     return (await this.#req('GET', '/v1/pool')) as { availableBots: number };
