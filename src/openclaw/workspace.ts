@@ -35,13 +35,36 @@ ${
  * Swaps one `## Heading` section of a markdown file for `section`, leaving
  * everything else (including sections the user added after it) untouched.
  * Appends the section when the heading is missing.
+ *
+ * The heading match is ANCHORED to a line start: an unanchored indexOf also
+ * matched `### Data sources`, a mention in prose, and the same words inside a
+ * fenced code block — rewriting the wrong place and deleting the text between
+ * it and the next heading.
  */
 export function replaceSection(content: string, heading: string, section: string): string {
-  const start = content.indexOf(heading);
+  const lines = content.split('\n');
+  // Track fenced code blocks: a ``` region can legitimately CONTAIN the heading
+  // text (docs showing an example AGENTS.md), and rewriting there both mangles
+  // the fence and orphans the real section.
+  const inFence: boolean[] = [];
+  let fence = false;
+  for (const l of lines) {
+    if (/^\s*(```|~~~)/.test(l)) { inFence.push(fence); fence = !fence; continue; }
+    inFence.push(fence);
+  }
+  const isHeading = (i: number) => !inFence[i] && /^#{1,6} /.test(lines[i]!);
+  const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
   if (start === -1) return `${content.trimEnd()}\n\n${section}\n`;
-  const rest = content.indexOf('\n## ', start + 1);
-  const tail = rest === -1 ? '\n' : content.slice(rest);
-  return `${content.slice(0, start)}${section}${tail}`;
+  // Our section runs to the next heading of ANY level, so a following `###`
+  // (or `#`) ends it rather than being swallowed.
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (isHeading(i)) { end = i; break; }
+  }
+  const out = [...lines.slice(0, start), ...section.split('\n'), ...lines.slice(end)].join('\n');
+  // Preserve the file's trailing newline: when our section is last, slicing
+  // consumed the empty final element that represented it.
+  return content.endsWith('\n') && !out.endsWith('\n') ? `${out}\n` : out;
 }
 
 export function replaceMemoryPolicy(content: string, section: string): string {

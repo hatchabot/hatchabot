@@ -9,7 +9,7 @@ import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
-import { buildWorkspaceSeed, dataSourcesSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, replaceSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import { buildGitSyncScript, gitSyncReason } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
@@ -394,7 +394,14 @@ export async function buildRuntimeSpec(
           : {}),
     },
     hostMounts: [
-      ...(subscription && !oauthToken
+      // A machine-login Max profile is THIS MACHINE OWNER'S ~/.claude — OAuth
+      // refresh token, every Claude Code transcript, and settings.json (whose
+      // hooks execute as them). It may only ever be mounted into an agent owned
+      // by the same person. A `shared` profile lets another account select it,
+      // which without this check handed them that directory read-write; the
+      // route layer refuses it too, and this is the backstop that makes the
+      // mount itself impossible to reach cross-owner.
+      ...(subscription && !oauthToken && profile.ownerId === agent.ownerId
         ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
         : []),
       // Legacy owner-chosen folders, always read-only. An agent runs with
@@ -598,36 +605,23 @@ async function syncDataSourceDocs(
   ];
   const section = dataSourcesSection(sources);
   const path = `/home/node/.openclaw/agents/${agent.slug}/agent/AGENTS.md`;
-  const b64 = Buffer.from(section, 'utf8').toString('base64');
-  // Read-modify-write in one shell so the file is only rewritten when the
-  // section actually changed (keeps rebuilds from churning the user's file).
-  const script = [
-    'set -e',
-    `F=${JSON.stringify(path)}`,
-    '[ -f "$F" ] || exit 0',
-    `SECTION=$(echo ${JSON.stringify(b64)} | base64 -d)`,
-    `node -e '
-      const fs = require("fs");
-      const [file, section] = [process.argv[1], process.argv[2]];
-      const cur = fs.readFileSync(file, "utf8");
-      const H = ${JSON.stringify(DATA_SOURCES_HEADING)};
-      const start = cur.indexOf(H);
-      let next;
-      if (start === -1) next = cur.trimEnd() + "\\n\\n" + section + "\\n";
-      else {
-        const rest = cur.indexOf("\\n## ", start + 1);
-        next = cur.slice(0, start) + section + (rest === -1 ? "\\n" : cur.slice(rest));
-      }
-      if (next !== cur) fs.writeFileSync(file, next);
-    ' "$F" "$SECTION"`,
-  ].join('\n');
+  const q = JSON.stringify(path);
   try {
-    const res = await provider.execShell(runtimeRef, script);
-    if (res.code !== 0) {
-      log('datasource.docs_failed', { agentId, stderr: res.stderr.slice(0, 300) });
-    } else {
-      log('datasource.docs_synced', { agentId, sources: sources.length });
-    }
+    // Read → compute HERE → write. The rewrite logic used to be duplicated as
+    // an embedded `node -e` script, which drifted from replaceSection and is
+    // the harder half to test; now there is one implementation.
+    const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
+    if (read.code !== 0 || !read.stdout.trim()) return; // no file yet — seed owns it
+    const next = replaceSection(read.stdout, DATA_SOURCES_HEADING, section);
+    if (next === read.stdout) return; // already current: never churn the user's file
+    const b64 = Buffer.from(next, 'utf8').toString('base64');
+    // tmp+mv so a failure can't leave AGENTS.md truncated.
+    const res = await provider.execShell(
+      runtimeRef,
+      `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`,
+    );
+    if (res.code !== 0) log('datasource.docs_failed', { agentId, stderr: res.stderr.slice(0, 300) });
+    else log('datasource.docs_synced', { agentId, sources: sources.length });
   } catch (e) {
     log('datasource.docs_error', { agentId, error: String((e as Error).message ?? e) });
   }

@@ -129,6 +129,24 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     // Our own were held; the other owner's agent is left entirely alone.
     expect(store.getAgent('x1')!.model).toBeUndefined();
   });
+
+  it('does NOT clear another owner\'s explicit pin when our menu drops it', async () => {
+    // The earlier test only covered an agent with no pin — the one shape the
+    // stale-sweep could never touch. A real pin was being nulled across owners,
+    // moving their agent onto OUR new default at its next rebuild.
+    const { store, f } = await world({ shared: true });
+    store.insertAgent({ id: 'x1', ownerId: 'other', name: 'Theirs', slug: 'theirs', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://x1', model: 'claude-opus-4-8', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    // Our call rewrites the menu to exclude claude-opus-4-8 entirely.
+    await apply(f, 'p1', { model: 'claude-sonnet-5', models: [], apply: ['a1'], rebuild: false });
+    expect(store.getAgent('x1')!.model).toBe('claude-opus-4-8'); // their pin survives
+  });
+
+  it('a PATCH that trims the menu also leaves another owner\'s pin alone', async () => {
+    const { store, f } = await world({ shared: true });
+    store.insertAgent({ id: 'x1', ownerId: 'other', name: 'Theirs', slug: 'theirs', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://x1', model: 'claude-haiku-4-5', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/p1', headers: as, payload: { model: 'claude-sonnet-5', models: [] } });
+    expect(store.getAgent('x1')!.model).toBe('claude-haiku-4-5');
+  });
 });
 
 describe('the model picker offers only what the runtime can actually serve', () => {

@@ -106,7 +106,10 @@ const ManifestSchema = z.object({
   channel: z.object({
     kind: z.literal('telegram'),
     accountId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_]+$/),
-    deepLink: z.string().max(256),
+    // Must be a real Telegram link. Unvalidated, this string reached an
+    // href="" in the app, so an imported archive could carry a `javascript:`
+    // URI and run script in the app's origin when the owner clicked it.
+    deepLink: z.string().max(256).startsWith('https://t.me/'),
     botToken: z.string().min(1).max(256),
   }),
   memberships: z
@@ -396,7 +399,9 @@ async function importAgentInner(
       kind: manifest.channel.kind,
       accountId: manifest.channel.accountId,
       secretRef,
-      deepLink: manifest.channel.deepLink,
+      // Derived, not imported: accountId is regex-validated, so this cannot be
+      // anything but a t.me link no matter what the archive claimed.
+      deepLink: `https://t.me/${manifest.channel.accountId}`,
       createdAt: now,
     });
 

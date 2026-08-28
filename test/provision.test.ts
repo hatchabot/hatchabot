@@ -518,59 +518,56 @@ describe('per-agent env injection', () => {
 });
 
 describe('AGENTS.md "## Data sources" stays in step with reality', () => {
-  /** The MOST RECENT doc-sync script in the exec log — provision emits one too
-   *  (before the source existed), so the rebuild's is the one we want. */
-  const docScript = (p: MockProvider) =>
-    p.execLog.filter((a) => a[0] === 'sh').map((a) => a[1]!).filter((s) => s.includes('Data sources')).at(-1);
+  /** The base64 payload the write step pipes back, decoded. */
+  const written = (p: MockProvider) => {
+    const w = p.execLog.filter((a) => a[0] === 'sh').map((a) => a[1]!).filter((x) => x.includes('base64 -d')).at(-1);
+    const m = w && /echo "([A-Za-z0-9+/=]+)"/.exec(w);
+    return m ? Buffer.from(m[1]!, 'base64').toString('utf8') : undefined;
+  };
 
-  it('is written on provision, naming each source and its real path', async () => {
+  async function withRepo(doc: string) {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);
     w.store.insertDataSource({
       id: 'ds1', agentId: agent.id, kind: 'git', access: 'rw', mountName: 'notes',
       repoUrl: 'git@github.com:me/notes.git', createdAt: 'now',
     });
-    // Rebuild re-runs the sync, which is how a source added later reaches the agent.
+    // Every execShell (the read AND the write) returns this doc; the read is
+    // what matters, and a code-0 write is what the sync expects.
+    (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: doc, stderr: '' });
     await rebuildAgent(w.deps, agent.id);
-    const script = docScript(w.provider as MockProvider);
-    expect(script).toBeDefined();
-    expect(script).toContain('AGENTS.md');
+    return w;
+  }
+
+  it('writes the section back with each source at its real in-container path', async () => {
+    const w = await withRepo('# Kitchen\n\n## Memory policy\n- shared\n');
+    const out = written(w.provider as MockProvider)!;
+    expect(out).toBeDefined();
+    expect(out).toContain('/home/node/.openclaw/notes');   // the real path
+    expect(out).toContain('you may read and write');        // its access
+    expect(out).toContain('## Memory policy');              // user's file preserved
   });
 
-  // Shell + embedded-JS quoting is exactly where this breaks, so run the REAL
-  // emitted script against a REAL file rather than trusting it by inspection.
-  it('the emitted script rewrites only its own section, and is idempotent', async () => {
+  it("does not truncate content the user added below the section", async () => {
+    // The bug this guards: the tail was dropped whenever no `## ` followed.
+    const doc = '# K\n\n## Data sources\n- stale\n\nMy rules:\n- always CC me\n\n### Escalation\nCall me.\n';
+    const w = await withRepo(doc);
+    const out = written(w.provider as MockProvider)!;
+    expect(out).toContain('### Escalation');
+    expect(out).toContain('Call me.');
+    expect(out).toContain('/home/node/.openclaw/notes');
+    expect(out).not.toContain('- stale');
+  });
+
+  it('writes nothing when the section is already current (no churn on rebuild)', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);
-    w.store.insertDataSource({
-      id: 'ds1', agentId: agent.id, kind: 'git', access: 'rw', mountName: 'notes',
-      repoUrl: 'git@github.com:me/notes.git', createdAt: 'now',
-    });
+    // No data sources → the section reads "None"; hand back a doc already saying so.
+    const current = '# K\n\n## Data sources\n- None. You can only see your own workspace.\n';
+    (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: current, stderr: '' });
+    (w.provider as MockProvider).execLog.length = 0;
     await rebuildAgent(w.deps, agent.id);
-    const script = docScript(w.provider as MockProvider)!;
-
-    const dir = mkdtempSync(join(tmpdir(), 'acl-docs-'));
-    try {
-      const file = join(dir, 'AGENTS.md');
-      writeFileSync(file, '# Kitchen\n\n## Memory policy\n- shared\n\n## House rules\n- be kind\n');
-      // Point the script at our file instead of the container path.
-      const patched = script.replace(/^F=.*$/m, `F=${JSON.stringify(file)}`);
-
-      execFileSync('sh', ['-c', patched], { encoding: 'utf8' });
-      const once = readFileSync(file, 'utf8');
-      expect(once).toContain('/home/node/.openclaw/notes');       // the real path
-      expect(once).toContain('you may read and write');            // its access
-      expect(once).toContain('## House rules\n- be kind');         // user's text kept
-      expect(once).toContain('## Memory policy');                  // other managed section kept
-
-      // Running it again changes nothing (no duplicate section, no churn).
-      execFileSync('sh', ['-c', patched], { encoding: 'utf8' });
-      const twice = readFileSync(file, 'utf8');
-      expect(twice).toBe(once);
-      expect(twice.match(/## Data sources/g)).toHaveLength(1);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    expect(written(w.provider as MockProvider)).toBeUndefined(); // read, then stop
   });
 });
 

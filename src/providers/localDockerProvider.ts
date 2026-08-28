@@ -250,8 +250,22 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async destroy(runtimeRef: string, opts?: { purge?: boolean }): Promise<void> {
     const { container, volume } = this.#names(runtimeRef);
-    await this.#docker(['rm', '-f', container]);
-    if (opts?.purge) await this.#docker(['volume', 'rm', '-f', volume]);
+    // #docker turns every non-zero exit (including an unreachable daemon) into
+    // a RESULT, so ignoring it made destroy() unable to fail — and callers that
+    // branch on failure (moveHost's orphan check, delete's "runtime may have
+    // survived" guard) became dead code: a move whose cleanup failed restarted
+    // the source while the target still ran, putting two pollers on one bot.
+    // Already-gone is still success — delete must stay idempotent.
+    const gone = /no such (container|volume)|not found/i;
+    const check = (r: { code: number; stderr: string }, what: string) => {
+      if (r.code === 0 || gone.test(r.stderr)) return;
+      throw new ProviderError(
+        `docker ${what} failed (${r.code}): ${r.stderr.slice(-300)}`,
+        "Couldn't remove the agent's runtime.",
+      );
+    };
+    check(await this.#docker(['rm', '-f', container]), 'rm');
+    if (opts?.purge) check(await this.#docker(['volume', 'rm', '-f', volume]), 'volume rm');
   }
 
   async status(runtimeRef: string): Promise<RuntimeStatus> {
@@ -418,6 +432,11 @@ export class LocalDockerProvider implements RuntimeProvider {
             ),
           );
       });
+      // Same EPIPE race as #runStdin: if the child exits before draining stdin
+      // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
+      // write emits an unhandled stream error and takes the PROCESS down. The
+      // real failure is already reported by the close handler above.
+      child.stdin.on('error', () => {});
       child.stdin.end(data);
     });
   }
@@ -447,6 +466,11 @@ export class LocalDockerProvider implements RuntimeProvider {
               ),
             ),
       );
+      // Same EPIPE race as #runStdin: if the child exits before draining stdin
+      // (a corrupt archive fails `gzip -t` early, docker refuses to start), the
+      // write emits an unhandled stream error and takes the PROCESS down. The
+      // real failure is already reported by the close handler above.
+      child.stdin.on('error', () => {});
       child.stdin.end(data);
     });
   }

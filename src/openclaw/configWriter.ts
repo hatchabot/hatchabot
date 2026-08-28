@@ -349,6 +349,13 @@ export function describeConfigCommands(cmds: ConfigCommand[]): string[] {
       argv[batchAt + 1] = '<redacted>';
       return `openclaw ${argv.join(' ')}`;
     }
-    return `openclaw ${[...c.argv.slice(0, -1), '<redacted>'].join(' ')}`;
+    // Redact the VALUE slot, not the last argument: `config set <path> <value>`
+    // may be followed by flags (e.g. --replace), and masking argv.at(-1) then
+    // hid the flag while leaving the secret in plain sight.
+    const setAt = c.argv.indexOf('set');
+    const valueAt = setAt !== -1 && c.argv.length > setAt + 2 ? setAt + 2 : c.argv.length - 1;
+    const argv = [...c.argv];
+    argv[valueAt] = '<redacted>';
+    return `openclaw ${argv.join(' ')}`;
   });
 }

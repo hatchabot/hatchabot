@@ -2,6 +2,70 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.59.0] — 2026-08-27
+
+### Fixed (security audit — 6 parallel reviewers over the whole codebase)
+
+- **CRITICAL — a shared Claude Max "machine login" source mounted the owner's
+  `~/.claude` read-write into another account's container.** `buildRuntimeSpec`
+  mounted `claudeAuthDir()` for any subscription profile with no owner check and
+  no `readonly`, while create/switch accepted a `shared` profile from any
+  account on the shared local host. A second account's agent therefore received
+  the profile owner's OAuth refresh token, every Claude Code transcript under
+  `~/.claude/projects/`, and **write** access to `settings.json` (whose hooks
+  execute as that owner). Confirmed live on this installation. The mount is now
+  gated on `profile.ownerId === agent.ownerId`, and both create and
+  profile-switch refuse a machine-login source belonging to someone else,
+  pointing at setup-token sources instead.
+- **HIGH — a malformed backup could crash the control plane.** `importState` and
+  `importWorkspace` wrote the archive to a `docker run` stdin with no `error`
+  handler; a corrupt archive fails `gzip -t`, the child exits, and the write
+  raised EPIPE as an *unhandled stream error* — an uncaught exception that takes
+  the process down. `#runStdin` already guarded this exact race; the guard is now
+  on all three.
+- **HIGH — `destroy()` could not fail, so three "the runtime may have survived"
+  guards were dead code.** Every non-zero docker exit became a returned result,
+  so a move whose cleanup failed restarted the source while the target still ran
+  (two pollers on one bot token), and delete tombstoned agents whose runtime was
+  still alive. It now throws on a real failure while staying idempotent for
+  already-gone containers.
+- **HIGH — `syncDataSourceDocs` could delete the user's AGENTS.md content.** The
+  heading match was an unanchored `indexOf`, so `### Data sources`, a mention in
+  prose, or the phrase inside a fenced code block was rewritten instead of the
+  real section; and with no `## ` heading following, everything below was
+  discarded. `replaceSection` is now line-anchored, fence-aware, ends at the next
+  heading of any level, and preserves the trailing newline. The duplicated
+  embedded-JS copy of this logic is gone — the sync now reads, computes in one
+  place, and writes atomically via tmp+mv.
+- **MEDIUM — stored XSS via an imported archive.** `deepLink` was the one
+  manifest field with no validation (siblings all have strict regexes) and
+  landed in an `href`; `esc()` blocks attribute breakout but not a `javascript:`
+  scheme. It is now schema-checked *and* re-derived from the verified
+  `accountId`, so the archive's value is never trusted.
+- **MEDIUM — `agentclaw share` shipped MEMORY.md while promising it hadn't.**
+  The CLI called `/export` with no query string, and the route includes memory
+  unless asked not to — then printed "no bot token, members, or memory. Safe to
+  send to someone." It now excludes memory by default, with `--include-memory`
+  to opt in (and a blunt warning when you do).
+- **MEDIUM — cross-owner model pins were cleared on a shared source.**
+  `clearStaleAgentModels` was scoped by profile only, so editing a shared
+  profile nulled other accounts' per-agent pins and drifted their agents onto
+  your default. Now owner-scoped, with regression tests for both the PATCH and
+  apply-default-model paths.
+- **MEDIUM — `agentclaw download` wrote a bot-token-bearing archive 0644.** Now
+  0600, matching every other credential file in the project.
+- **LOW — the secret-redaction helper masked the wrong argv slot**, leaving the
+  value visible for `config set <path> <secret> --replace`. It now redacts by
+  position rather than `argv.at(-1)`.
+
+### Audited and found sound
+
+No command/shell/argument injection anywhere (every docker/ssh/git call uses
+argv arrays or `shq()`); no IDOR on child objects; no membership escalation; the
+state-transition table admits nothing illegal; `npm audit` clean; the runtime
+image runs non-root with a sha256-pinned `gog`; secrets are AES-256-GCM at rest,
+CLI tokens hashed, and no secret is returned by any route or written to any log.
+
 ## [0.58.0] — 2026-08-27
 
 ### Added

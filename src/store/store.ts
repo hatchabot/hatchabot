@@ -1199,7 +1199,9 @@ export class Store {
    * `effectiveModel` already refuses to run a stale pin; this keeps the row
    * honest too. Returns how many agents were cleared.
    */
-  clearStaleAgentModels(profileId: string, validModels: string[]): number {
+  /** `ownerId` scopes the sweep to one account's agents — required on a SHARED
+   *  profile, where another owner's valid pin is not ours to clear. */
+  clearStaleAgentModels(profileId: string, validModels: string[], ownerId?: string): number {
     // NULL out where model IS NOT NULL and NOT in the valid set. Build the IN
     // list with placeholders — validModels is a small, owner-controlled menu.
     const placeholders = validModels.map(() => '?').join(',');
@@ -1207,9 +1209,15 @@ export class Store {
     return this.db
       .prepare(
         `UPDATE agents SET model = NULL, updated_at = ?
-         WHERE ai_profile_id = ? AND model IS NOT NULL ${notInMenu}`,
+         WHERE ai_profile_id = ? ${ownerId ? 'AND owner_id = ?' : ''}
+           AND model IS NOT NULL ${notInMenu}`,
       )
-      .run(new Date().toISOString(), profileId, ...validModels).changes;
+      .run(
+        new Date().toISOString(),
+        profileId,
+        ...(ownerId ? [ownerId] : []),
+        ...validModels,
+      ).changes;
   }
 
   setAgentSharedMemory(id: string, shared: boolean): void {

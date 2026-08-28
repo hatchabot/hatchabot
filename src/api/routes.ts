@@ -1053,7 +1053,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // stored state so the app doesn't misreport what an agent runs.
       if (parsed.data.model !== undefined || 'models' in ((req.body ?? {}) as object)) {
         const fresh = store.getAIProfile(profile.id)!;
-        store.clearStaleAgentModels(fresh.id, [fresh.model, ...(fresh.models ?? [])]);
+        // Owner-scoped: on a SHARED profile another account's pin may be
+        // perfectly valid for them, and clearing it silently moved their agent
+        // onto our new default at its next rebuild.
+        store.clearStaleAgentModels(fresh.id, [fresh.model, ...(fresh.models ?? [])], ownerIdOf(req));
       }
       const updated = store.getAIProfile(profile.id)!;
       const { secretRef: _s, ...safe } = updated;
@@ -1131,7 +1134,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const menu = [...new Set([newDefault, ...extras, ...heldModels])];
       store.setAIProfileModel(profile.id, newDefault);
       store.setAIProfileModels(profile.id, menu);
-      store.clearStaleAgentModels(profile.id, menu); // safe: all our pins are in `menu`
+      // `menu` is built from OUR held models only, so scope the sweep to us —
+      // another owner's pin isn't ours to clear.
+      store.clearStaleAgentModels(profile.id, menu, ownerIdOf(req));
 
       let rebuilding = 0;
       if (parsed.data.rebuild) {
@@ -1300,6 +1305,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // A Claude Max profile reaches a runner only as a setup-token (secretRef
     // present) — that credential is injected as data. The machine-login flavour
     // mounts this box's ~/.claude, which a remote runner can't see.
+    // A machine-login Max profile (subscription, no stored credential) IS the
+    // profile owner's ~/.claude on this box. Sharing it must not hand another
+    // account that directory — refuse rather than provision a credential-less
+    // agent. A setup-token Max source (secretRef) is data and shares fine.
+    if (
+      profile.kind === 'subscription' &&
+      !profile.secretRef &&
+      profile.ownerId !== ownerId
+    ) {
+      return reply.code(400).send({
+        error:
+          "That Claude Max source uses its owner's login on this machine, so it can't be used by " +
+          'another account. Ask them for a setup-token source (`claude setup-token`), or use your own API key.',
+      });
+    }
     if (profile.kind === 'subscription' && host.kind !== 'local' && !profile.secretRef) {
       return reply.code(400).send({
         error:
@@ -1576,6 +1596,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         const next = store.getAIProfile(aiProfileId);
         if (!next || (next.ownerId !== ownerIdOf(req) && !next.shared)) {
           return reply.code(400).send({ error: 'Unknown AI profile' });
+        }
+        // Same reason as create: a machine-login Max source is its owner's
+        // ~/.claude, which must never be mounted into another account's agent.
+        if (next.kind === 'subscription' && !next.secretRef && next.ownerId !== ownerIdOf(req)) {
+          return reply.code(400).send({
+            error:
+              "That Claude Max source uses its owner's login on this machine, so it can't be used by " +
+              'another account. Ask them for a setup-token source, or use your own API key.',
+          });
         }
         const host = store.getHost(agent.hostId);
         // Same rule as create/move: a setup-token Max profile (secretRef

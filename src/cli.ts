@@ -1010,7 +1010,9 @@ async function main() {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw download <agent> [-o file]'));
       const res = await api(ctx, `/v1/agents/${a.id}/backup`);
       const out = flags.get('out') ?? `${a.slug}.agentclaw`;
-      await writeFile(out, Buffer.from(await res.arrayBuffer()));
+      // 0600: this archive embeds the live bot token, so it must not be
+      // readable by other accounts on the machine (the note below says as much).
+      await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
       console.log(`backed up to ${out}`);
       console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
       console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once restored elsewhere.`);
@@ -1035,11 +1037,17 @@ async function main() {
     case 'share':
     case 'export': { // template — a trained copy for someone else. ('export' alias)
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw share <agent> [-o file]'));
-      const res = await api(ctx, `/v1/agents/${a.id}/export`);
+      // MEMORY.md is what the agent was TOLD — often personal. The export route
+      // includes it unless asked not to, so a bare call shipped memory while the
+      // line below promised it hadn't. Default to excluding it; opt in loudly.
+      const withMemory = flags.has('include-memory');
+      const res = await api(ctx, `/v1/agents/${a.id}/export${withMemory ? '' : '?excludeMemory=1'}`);
       const out = flags.get('out') ?? `${a.slug}.template.agentclaw`;
-      await writeFile(out, Buffer.from(await res.arrayBuffer()));
+      await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
       console.log(`exported template to ${out}`);
-      console.log('a shareable copy — no bot token, members, or memory. Safe to send to someone.');
+      console.log(withMemory
+        ? 'a trained copy INCLUDING MEMORY.md — it may hold personal facts the agent was told. Share only with someone you trust.'
+        : 'a shareable copy — no bot token, members, or memory. Safe to send to someone.');
       return;
     }
     case 'import': { // template

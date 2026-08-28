@@ -203,6 +203,22 @@ describe('agent export/import', () => {
       return gzipSync(Buffer.from(JSON.stringify(m), 'utf8'));
     }
 
+    it('rejects a deepLink that is not a Telegram link (javascript: XSS)', async () => {
+      // It reaches an href="" in the app; esc() stops attribute breakout but
+      // not the SCHEME, so an imported archive could run script on click.
+      const data = await archiveWith((m) => { m.channel.deepLink = "javascript:alert(document.domain)"; });
+      const dst = await installation();
+      await expect(importAgent(dst.deps, data, { ownerId: 'o' })).rejects.toBeInstanceOf(TransferError);
+    });
+
+    it('derives the deepLink from the verified accountId, ignoring the archive', async () => {
+      // Even a well-formed t.me link is not trusted verbatim.
+      const data = await archiveWith((m) => { m.channel.deepLink = 'https://t.me/someone-elses-bot'; });
+      const dst = await installation();
+      const agent = await importAgent(dst.deps, data, { ownerId: 'o' });
+      expect(dst.store.getChannelForAgent(agent.id)!.deepLink).toBe('https://t.me/kitchenbot');
+    });
+
     it('rejects a slug carrying shell metacharacters', async () => {
       const data = await archiveWith((m) => { m.agent.slug = 'kitchen$(touch /tmp/pwned)'; });
       const dst = await installation();

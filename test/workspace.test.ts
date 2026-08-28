@@ -83,3 +83,44 @@ describe('dataSourcesSection', () => {
     expect(twice.match(/## Data sources/g)).toHaveLength(1);   // never duplicated
   });
 });
+
+describe('replaceSection must not eat the user\'s file', () => {
+  const SEC = '## Data sources\n- `/data/new` — folder';
+
+  it('keeps everything after the section when no `## ` follows it', () => {
+    // The old indexOf('\n## ') returned -1 here and truncated the tail.
+    const doc = '## Data sources\n- old\n\nMy own rules:\n- always CC me\n\n### Escalation\nCall the owner.\n';
+    const out = replaceSection(doc, DATA_SOURCES_HEADING, SEC);
+    expect(out).toContain('### Escalation');
+    expect(out).toContain('Call the owner.');
+    expect(out).toContain('/data/new');
+    expect(out).not.toContain('- old');
+  });
+
+  it('does not match a deeper heading that merely starts with the same words', () => {
+    const doc = '# A\n\n### Data sources (mine)\n- keep me\n';
+    const out = replaceSection(doc, DATA_SOURCES_HEADING, SEC);
+    // No real section existed, so ours is APPENDED and the h3 survives intact.
+    expect(out).toContain('### Data sources (mine)');
+    expect(out).toContain('- keep me');
+    expect(out.match(/## Data sources$/gm)).toHaveLength(1);
+  });
+
+  it('ignores the heading text inside a fenced code block', () => {
+    const doc = '# A\n\n## Notes\nExample:\n```\n## Data sources\n```\nafter fence\n';
+    const out = replaceSection(doc, DATA_SOURCES_HEADING, SEC);
+    // The fence body is not a heading line, so it must survive untouched...
+    expect(out).toContain('```\n## Data sources\n```');
+    expect(out).toContain('after fence');
+    // ...and our real section is appended once.
+    expect(out.trimEnd().endsWith('- `/data/new` — folder')).toBe(true);
+  });
+
+  it('is idempotent — re-running changes nothing', () => {
+    const doc = '# A\n\n## Data sources\n- old\n\n## Tail\nkeep\n';
+    const once = replaceSection(doc, DATA_SOURCES_HEADING, SEC);
+    expect(replaceSection(once, DATA_SOURCES_HEADING, SEC)).toBe(once);
+    expect(once).toContain('## Tail');
+    expect(once).toContain('keep');
+  });
+});
