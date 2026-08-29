@@ -165,3 +165,67 @@ describe('boot reconcile: parked agents', () => {
     expect(a.stateReason).toMatch(/interrupted/i);
   });
 });
+
+describe('a sweep judges the row as it is NOW, not as it was listed', () => {
+  /**
+   * The live failure: an agent created at 22:34:58 reported healthy at
+   * 22:35:14 and was marked "Setup was interrupted" at 22:35:35. A sweep is
+   * one docker call per agent, so on a 30-agent fleet the listing is a minute
+   * stale by the time the loop reaches the end — and the agent it listed as
+   * "PROVISIONING, no runtime yet" had since finished. The busy flag was no
+   * help: it had been correctly cleared when provisioning completed.
+   */
+  const fleet = async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    const provider = new MockProvider();
+    // 'slow' is listed first and stands in for the 29 agents ahead of the new
+    // one; the new agent finishes provisioning during its docker call.
+    const { runtimeRef } = await provider.provision({
+      agentId: 'slow', slug: 'slow',
+      workspace: { files: {}, configPatch: { agentId: 'slow', authMode: 'api-key' } },
+      env: {},
+    });
+    await provider.start(runtimeRef);
+    store.insertAgent({ id: 'slow', ownerId: 'o', name: 'Slow', slug: 'slow', state: 'PROVISIONING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentRuntimeRef('slow', runtimeRef);
+    store.setAgentState('slow', 'RUNNING');
+    store.insertAgent({ id: 'new', ownerId: 'o', name: 'New', slug: 'new', state: 'PROVISIONING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    return { store, provider };
+  };
+
+  it('does not fail an agent that finished setting up mid-sweep', async () => {
+    const { store, provider } = await fleet();
+    // Delegate to the real provider, intercepting only status(). A spread
+    // wouldn't work: MockProvider's methods live on its prototype.
+    const slowProvider: RuntimeProvider = Object.create(provider, {
+      status: { value: async (ref: string) => {
+        // Provisioning completes while the sweep is busy with the agent ahead.
+        if (!store.getAgent('new')!.runtimeRef) {
+          const r = await provider.provision({
+            agentId: 'new', slug: 'new',
+            workspace: { files: {}, configPatch: { agentId: 'new', authMode: 'api-key' } },
+            env: {},
+          });
+          await provider.start(r.runtimeRef);
+          store.setAgentRuntimeRef('new', r.runtimeRef);
+          store.setAgentState('new', 'RUNNING');
+        }
+        return provider.status(ref);
+      } },
+    }) as RuntimeProvider;
+
+    await reconcileAgents(store, new Map([['mock', slowProvider]]), () => {});
+    const after = store.getAgent('new')!;
+    expect(after.state).toBe('RUNNING'); // was FAILED: "Setup was interrupted"
+    expect(after.stateReason ?? '').not.toMatch(/interrupted/i);
+  });
+
+  it('still fails an agent that genuinely never got a runtime', async () => {
+    // The guard must not blunt the check it protects.
+    const { store, provider } = await fleet();
+    await reconcileAgents(store, new Map([['mock', provider]]), () => {});
+    expect(store.getAgent('new')!.state).toBe('FAILED');
+    expect(store.getAgent('new')!.stateReason).toMatch(/interrupted/i);
+  });
+});

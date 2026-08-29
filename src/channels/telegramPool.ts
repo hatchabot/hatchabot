@@ -24,7 +24,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   constructor(
     private readonly db: Database.Database,
     private readonly secrets: SecretStore,
-    private readonly opts: { fetchImpl?: typeof fetch } = {},
+    private readonly opts: {
+      fetchImpl?: typeof fetch;
+      /** Rename outcomes go here — see #applyDisplayName for why. */
+      log?: (event: string, detail: Record<string, unknown>) => void;
+    } = {},
   ) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS telegram_pool (
@@ -153,7 +157,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // chat header reads correctly (the @username can't change via API).
     // Best-effort and bounded: a rename is cosmetic; Telegram rate-limits
     // setMyName, and neither a limit nor an outage may block provisioning.
-    await this.#applyDisplayName(free.secret_ref, req.agentName);
+    await this.#applyDisplayName(free.secret_ref, free.username, req.agentName);
     // A recycled bot may still be sitting in someone's Telegram list with the
     // previous agent's conversation above. We can't clear that (a bot can only
     // delete its own recent messages, and chats are per-user), so mark the seam
@@ -163,13 +167,34 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     return this.#toChannel(free.username, free.secret_ref);
   }
 
-  async #applyDisplayName(secretRef: string, name: string): Promise<void> {
+  /**
+   * Point the bot's display name at `name`, and SAY WHAT HAPPENED. This was
+   * silent, and the day a lease left a bot still calling itself
+   * "AgentClaw (unassigned)" there was nothing in the log to say whether the
+   * call had failed or never been made. Still never throws: a rename is
+   * cosmetic and must not cost anyone their agent.
+   */
+  async #applyDisplayName(secretRef: string, username: string, name: string): Promise<void> {
     try {
       const token = await this.secrets.get(secretRef);
-      await setTelegramDisplayName(token, name, this.opts.fetchImpl ?? fetch);
-    } catch {
-      /* cosmetic — never blocks a lease */
+      const res = await setTelegramDisplayName(token, name, this.opts.fetchImpl ?? fetch);
+      this.opts.log?.('channel.named', { username, name, ...res });
+    } catch (err) {
+      this.opts.log?.('channel.named', { username, name, ok: false, error: String(err) });
     }
+  }
+
+  /**
+   * Re-apply the agent's name to a bot we already lease. Runs on rebuild, so a
+   * rename that lost a race with Telegram's limiter heals itself instead of
+   * leaving the bot mislabelled until the agent is deleted.
+   */
+  async syncDisplayName(accountId: string, agentName: string): Promise<void> {
+    const row = this.db
+      .prepare(`SELECT username, secret_ref FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+      .get(accountId) as { username: string; secret_ref: string } | undefined;
+    if (!row) return; // not ours — a hand-minted bot is the owner's to name
+    await this.#applyDisplayName(row.secret_ref, row.username, agentName);
   }
 
   /**
@@ -229,7 +254,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     if (row.leased_to) await this.#farewell(row.secret_ref, row.leased_to);
     // Then drop the old identity, so a bot sitting in the pool doesn't advertise
     // a deleted agent (a free bot was still calling itself "Julio & Mich").
-    await this.#applyDisplayName(row.secret_ref, TelegramPoolProvisioner.IDLE_NAME);
+    await this.#applyDisplayName(row.secret_ref, accountId, TelegramPoolProvisioner.IDLE_NAME);
   }
 
   /** Final message to the departing agent's members. Best-effort by design. */

@@ -187,7 +187,7 @@ describe('setTelegramDisplayName', () => {
       calls.push({ url: String(url), body: String(init?.body ?? '') });
       return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
     }) as unknown as typeof fetch;
-    expect(await setTelegramDisplayName('tok', '  Condo Adviser  ', rec)).toBe(true);
+    expect(await setTelegramDisplayName('tok', '  Condo Adviser  ', rec)).toEqual({ ok: true });
     expect(calls[0]!.url).toContain('/bottok/setMyName');
     expect(JSON.parse(calls[0]!.body)).toEqual({ name: 'Condo Adviser' });
     await setTelegramDisplayName('tok', 'x'.repeat(200), rec);
@@ -198,12 +198,42 @@ describe('setTelegramDisplayName', () => {
     // Telegram rate-limits setMyName, so a refusal is expected traffic.
     const limited = (async () => new Response('{"ok":false,"description":"Too Many Requests"}',
       { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
-    expect(await setTelegramDisplayName('tok', 'New', limited)).toBe(false);
+    // The description matters: a silent false is what made the live failure
+    // undiagnosable, so the caller gets Telegram's own words to log.
+    expect(await setTelegramDisplayName('tok', 'New', limited))
+      .toEqual({ ok: false, error: 'Too Many Requests', retryAfter: undefined });
     const down = (async () => { throw new Error('network'); }) as unknown as typeof fetch;
-    expect(await setTelegramDisplayName('tok', 'New', down)).toBe(false);
+    expect((await setTelegramDisplayName('tok', 'New', down)).ok).toBe(false);
     const html = (async () => new Response('<html>502</html>', { headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch;
-    expect(await setTelegramDisplayName('tok', 'New', html)).toBe(false);
-    expect(await setTelegramDisplayName('tok', '   ')).toBe(false); // empty → no call
+    expect((await setTelegramDisplayName('tok', 'New', html)).ok).toBe(false);
+    expect((await setTelegramDisplayName('tok', '   ')).ok).toBe(false); // empty → no call
+  });
+
+  it('waits out a SHORT rate limit and renames on the second try', async () => {
+    // The case that plausibly cost the live bot its name: a lease renaming a
+    // bot moments after the release that renamed it.
+    let n = 0;
+    const limiter = (async () => {
+      n++;
+      return n === 1
+        ? new Response('{"ok":false,"description":"Too Many Requests","parameters":{"retry_after":1}}',
+            { headers: { 'content-type': 'application/json' } })
+        : new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    expect(await setTelegramDisplayName('tok', 'New', limiter)).toEqual({ ok: true });
+    expect(n).toBe(2);
+  });
+
+  it('gives up on a LONG rate limit rather than blocking a lease', async () => {
+    let n = 0;
+    const hourLong = (async () => {
+      n++;
+      return new Response('{"ok":false,"description":"Too Many Requests","parameters":{"retry_after":3600}}',
+        { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const res = await setTelegramDisplayName('tok', 'New', hourLong);
+    expect(res).toEqual({ ok: false, error: 'Too Many Requests', retryAfter: 3600 });
+    expect(n).toBe(1); // provisioning must not sit on an hour-long wait
   });
 });
 
@@ -270,5 +300,32 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     await pool.provision({ agentId: 'a1', agentName: 'First', slug: 'first' });
     expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(0); // nothing stale to disown
     expect(calls.filter((c) => c.method === 'setMyName').at(-1)!.body.name).toBe('First');
+  });
+});
+
+describe('a mislabelled bot heals on rebuild', () => {
+  it('re-applies the agent name to a pool bot, and leaves a user bot alone', async () => {
+    const calls: any[] = [];
+    const fetchImpl = (async (url: any, init: any) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) });
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const db = new Database(':memory:');
+    const secrets = new MemSecrets();
+    const pool = new TelegramPoolProvisioner(db, secrets, { fetchImpl });
+    await pool.addToPool('poolbot', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'Wrong Name', slug: 'a1' });
+    calls.length = 0;
+
+    // Rebuild: the lease-time rename may have lost a race with Telegram's
+    // limiter, so this is the second chance.
+    const composite = new CompositeTelegramProvisioner(pool, { release: async () => {} } as any);
+    await composite.syncDisplayName('poolbot', 'Right Name');
+    expect(calls.map((c) => c.body.name)).toEqual(['Right Name']);
+
+    // A hand-minted bot belongs to whoever created it — never renamed here.
+    calls.length = 0;
+    await composite.syncDisplayName('someusersbot', 'Right Name');
+    expect(calls).toHaveLength(0);
   });
 });

@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.66.0] — 2026-08-29
+
+### Fixed
+- **A working agent could be marked "Setup was interrupted — tap Retry".** The
+  reconcile sweep makes one docker call per agent, so on a 30-agent fleet the
+  agent list it started from is a minute stale by the time it reaches the end.
+  An agent that was mid-setup when the sweep began — no runtime yet, state
+  PROVISIONING — had since finished, and reconcile judged it on the old copy:
+  live, it marked an agent FAILED 21 seconds after that agent reported healthy.
+  The busy flag was no defence, because it had been correctly *cleared* when
+  provisioning finished — the data aged, not the lock. Every agent is now
+  re-read immediately before it is judged, and again after the docker call
+  (which is its own staleness window).
+- **A pool bot's rename is no longer silent.** Renaming a leased bot is
+  best-effort, and one that failed left the bot advertising "AgentClaw
+  (unassigned)" with nothing in the log to say whether the call had failed or
+  never happened. The outcome is now logged with Telegram's own words, a short
+  rate limit (≤10s) is waited out and retried once, and Rebuild/Retry re-apply
+  the name — so a bot that lost that race heals instead of staying mislabelled
+  for the life of the agent. A hand-minted bot is still never renamed here: it
+  belongs to whoever created it.
+
 ## [0.65.0] — 2026-08-29
 
 ### Changed

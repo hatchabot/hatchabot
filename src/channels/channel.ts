@@ -60,6 +60,15 @@ export interface ChannelProvisioner {
   discardPending?(agentId: string): void;
 
   /**
+   * Re-apply the agent's name to a bot we manage, if this provisioner manages
+   * it. Renaming is best-effort at lease time (Telegram limits it), so the
+   * rebuild path calls this to heal a bot left wearing the wrong name.
+   * Implementations must ignore identities they don't own — a hand-minted bot
+   * belongs to the person who created it.
+   */
+  syncDisplayName?(accountId: string, agentName: string): Promise<void>;
+
+  /**
    * Push the member allowlist to the platform where the platform itself can
    * enforce it. For Telegram this is a no-op — enforcement lives in the agent's
    * config (§12.4) — but WhatsApp/Signal may differ.

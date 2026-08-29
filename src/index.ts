@@ -39,7 +39,12 @@ db.pragma('wal_autocheckpoint = 256');
 
 const store = new Store(db);
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());
-const pool = new TelegramPoolProvisioner(db, secrets);
+// The log callback is deferred on purpose: `app` is built further down, and
+// nothing here logs before then. Rename outcomes are worth having — a lease
+// that silently failed to rename its bot was undiagnosable without them.
+const pool = new TelegramPoolProvisioner(db, secrets, {
+  log: (event, detail) => app.log.info(detail, event),
+});
 const manual = new TelegramManualProvisioner(secrets);
 const channel = new CompositeTelegramProvisioner(pool, manual);
 

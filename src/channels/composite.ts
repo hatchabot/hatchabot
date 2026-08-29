@@ -51,6 +51,11 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
     this.manual.discardPending(agentId);
   }
 
+  /** Only pool bots are ours to rename; a user's own bot is left alone. */
+  async syncDisplayName(accountId: string, agentName: string): Promise<void> {
+    if (this.pool.owns(accountId)) await this.pool.syncDisplayName(accountId, agentName);
+  }
+
   async release(accountId: string): Promise<void> {
     if (this.pool.owns(accountId)) {
       await this.pool.release(accountId);

@@ -45,7 +45,17 @@ export async function reconcileAgents(
   providers: Map<string, RuntimeProvider>,
   log: (event: string, detail: Record<string, unknown>) => void,
 ): Promise<void> {
-  for (const agent of store.listAllActiveAgents()) {
+  for (const listed of store.listAllActiveAgents()) {
+    // RE-READ, never trust the listing. A sweep is one docker call per agent
+    // and takes tens of seconds on a real fleet, so by the time we reach agent
+    // #30 the row we listed can be a minute old. An agent that was mid-setup
+    // when the sweep started — no runtime_ref yet, state PROVISIONING — has
+    // since finished and gone RUNNING, and judging it on the stale copy marked
+    // a working agent "Setup was interrupted" 21 seconds after it reported
+    // healthy. The busy flag doesn't save us here: it was correctly cleared
+    // when provisioning finished. It's the DATA that aged, not the lock.
+    const agent = store.getAgent(listed.id);
+    if (!agent || agent.state === 'DELETED') continue;
     // An agent mid-provision/rebuild/import looks broken to docker by
     // definition. Judging it here is how a healthy import got marked FAILED.
     if (isBusy(agent.id)) continue;
@@ -64,6 +74,19 @@ export async function reconcileAgents(
       }
 
       const status = await provider.status(agent.runtimeRef);
+      // The docker call above is its own staleness window — a Start, Rebuild or
+      // Delete can begin and finish inside it. Anything that moved underneath
+      // us is judged on the NEXT sweep, with a status that matches the row.
+      const now = store.getAgent(agent.id);
+      if (
+        !now ||
+        isBusy(agent.id) ||
+        now.state !== agent.state ||
+        now.runtimeRef !== agent.runtimeRef ||
+        !!now.pendingAction !== !!agent.pendingAction
+      ) {
+        continue;
+      }
       const s = agent.state;
 
       // Docker unreachable: leave every agent exactly as it is. Guessing here

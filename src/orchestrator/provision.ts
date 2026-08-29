@@ -190,6 +190,13 @@ async function runProvisionStepsInner(
       store.insertChannel(provisioned);
       store.setAgentPendingAction(agentId, null); // any parked human step is done
       log('channel.provisioned', { agentId, accountId: provisioned.accountId });
+    } else {
+      // Already has its identity — but the rename at lease time is best-effort
+      // (Telegram limits how often a bot may be renamed), and one that lost
+      // that race left a recycled bot advertising "AgentClaw (unassigned)"
+      // with no way back. Retry and Rebuild both land here, so the bot heals
+      // itself instead of staying mislabelled for the life of the agent.
+      await channel.syncDisplayName?.(provisioned.accountId, agent.name).catch(() => {});
     }
 
     // Step 5: render config + workspace.

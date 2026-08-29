@@ -1700,7 +1700,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           void secrets
             .get(chan.secretRef)
             .then((tok) => setTelegramDisplayName(tok, name))
-            .then((ok) => trace(agent.id)('channel.renamed', { name, ok }))
+            .then((res) => trace(agent.id)('channel.renamed', { name, ...res }))
             .catch(() => {});
         }
       }
