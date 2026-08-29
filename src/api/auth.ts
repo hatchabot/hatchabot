@@ -73,6 +73,27 @@ export function authModeFromEnv(env = process.env): AuthMode {
  * The page itself (GET /) and /healthz stay open; every /v1/* call except
  * login requires the cookie. The app shows a password screen on 401.
  */
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Resolve a principal from a raw Cookie header — for a WebSocket upgrade,
+     *  which Fastify never sees and so has no `request.principal`. Returns
+     *  undefined when the caller is not authenticated. Same session logic as
+     *  the onRequest hooks; deliberately the ONLY seam, so the two can't drift. */
+    principalFromCookieHeader?: (cookieHeader: string | undefined) => Principal | undefined;
+  }
+}
+
+/** Pull one cookie's value out of a raw `Cookie:` header. */
+function cookieValue(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return undefined;
+}
+
 export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
   await app.register(fastifyCookie);
 
@@ -146,6 +167,13 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   app.post('/v1/logout', async (_req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
     return { ok: true };
+  });
+
+  app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
+    if (!opts.password) return { ownerId: LOCAL_OWNER, via: 'password' };
+    return validSession(cookieValue(header, COOKIE))
+      ? { ownerId: LOCAL_OWNER, via: 'password' }
+      : undefined;
   });
 
   app.addHook('onRequest', async (req, reply) => {
@@ -240,6 +268,13 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   app.post('/v1/logout', async (_req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
     return { ok: true };
+  });
+
+  app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
+    const session = readSession(cookieValue(header, COOKIE));
+    return session
+      ? { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub }
+      : undefined;
   });
 
   app.addHook('onRequest', async (req, reply) => {

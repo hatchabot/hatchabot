@@ -1901,14 +1901,63 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return reply.code(upstream.status).send(upstream.body);
   });
 
-  // NOTE: the Control UI also opens a WebSocket for live updates, which is NOT
-  // proxied yet. Fastify never sees an upgrade, so it would have to be handled
-  // on the raw server — and authorizing it means re-deriving the principal from
-  // raw headers, duplicating the session logic in auth.ts across both password
-  // and identity modes. A faked principal falls through to LOCAL_OWNER, which
-  // on a password-mode install would forward an UNAUTHENTICATED upgrade. Until
-  // auth.ts exposes a header-level resolver, the page loads and its HTTP calls
-  // work; live updates need the follow-up.
+  // The Control UI opens a WebSocket for live updates; without it the page
+  // loads but never comes alive ("Could not connect"). Fastify never sees an
+  // upgrade, so hook the raw server and splice the sockets together.
+  //
+  // Authorization goes through auth.ts's own resolver rather than a re-implementation:
+  // deriving the principal here by hand would duplicate session logic across
+  // password and identity modes, and anything that silently fell back to
+  // LOCAL_OWNER would forward an UNAUTHENTICATED upgrade on a password-mode
+  // install. No resolver (or no session) means the socket is destroyed.
+  app.server.on('upgrade', (rawReq, socket, head) => {
+    const url = rawReq.url ?? '';
+    const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
+    if (!m) return; // not ours — leave it alone
+    const deny = () => socket.destroy();
+    const resolve = app.principalFromCookieHeader;
+    if (!resolve) return deny();
+    const principal = resolve(rawReq.headers.cookie);
+    if (!principal) return deny();
+
+    // Same ownership rule as every other agent route, against the real caller.
+    const agent = store.getAgent(m[1]!);
+    if (
+      !agent ||
+      agent.ownerId !== principal.ownerId ||
+      agent.state !== 'RUNNING' ||
+      !agent.gatewayPort
+    ) {
+      return deny();
+    }
+
+    const qs = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+    const up = httpRequest({
+      host: '127.0.0.1',
+      port: agent.gatewayPort,
+      path: `/${m[2] ?? ''}${qs}`,
+      method: 'GET',
+      headers: { ...rawReq.headers, host: `127.0.0.1:${agent.gatewayPort}` },
+    });
+    up.on('upgrade', (upRes, upSocket, upHead) => {
+      socket.write(
+        [
+          `HTTP/1.1 ${upRes.statusCode} ${upRes.statusMessage}`,
+          ...Object.entries(upRes.headers).flatMap(([k, v]) =>
+            Array.isArray(v) ? v.map((x) => `${k}: ${x}`) : v !== undefined ? [`${k}: ${v}`] : [],
+          ),
+          '',
+          '',
+        ].join('\r\n'),
+      );
+      if (upHead?.length) upSocket.unshift(upHead);
+      upSocket.on('error', () => socket.destroy());
+      socket.on('error', () => upSocket.destroy());
+      upSocket.pipe(socket).pipe(upSocket);
+    });
+    up.on('error', deny);
+    up.end(head?.length ? head : undefined);
+  });
 
   // Add a data source. Folders are host mounts (ro/rw), gated to the machine
   // owner + blocklist. Git repos are cloned onto the agent's own volume with a

@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.1] — 2026-08-28
+
+### Fixed
+- **The proxied Control UI now connects.** v0.63.0 proxied the page but not its
+  WebSocket, so it loaded and then reported *"Could not connect."* The upgrade
+  is now proxied too — and authorized properly: `auth.ts` exposes a single
+  `principalFromCookieHeader` resolver (implemented once per auth mode) that the
+  raw-server upgrade handler shares with the HTTP hook, so the two cannot drift.
+  An upgrade with no session, or for an agent the caller doesn't own, has its
+  socket destroyed rather than forwarded — verified. This is why the WebSocket
+  wasn't shipped in 0.63.0: deriving the principal by hand there would have
+  fallen back to `LOCAL_OWNER` and forwarded unauthenticated upgrades on a
+  password-mode install.
+
 ## [0.63.0] — 2026-08-28
 
 ### Fixed
