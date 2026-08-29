@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.6] — 2026-08-29
+
+### Fixed
+- **"OpenClaw (debug)": stopped sending the parameter that was blocking it.**
+  0.63.2 added an explicit `gatewayUrl` on the theory the UI couldn't find its
+  gateway. Reading further showed the opposite: the Control UI already derives
+  it from the page it was served from — `ws(s)://<host><pathname>` — which is
+  exactly this proxy. Handing it an address instead marks it *pending* until the
+  user approves a "Change Gateway URL" prompt, and while pending the UI
+  withholds the token as well, producing the "Could not connect" it was meant to
+  cure. Now only the token is passed, and the UI connects to the proxy on its
+  own. Verified: the upgrade returns `101` at both paths the UI can derive
+  (with and without the trailing slash).
+
 ## [0.63.5] — 2026-08-29
 
 ### Added

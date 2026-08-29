@@ -3541,24 +3541,15 @@ async function openGateway(id, slug) {
     // path 404s on current OpenClaw); the token rides as a URL fragment.
     // Same-origin, through the control plane. The gateway port stays bound to
     // the host's loopback (it grants full control of the agent), so pointing a
-    // browser straight at it only ever worked from the machine itself — from a
-    // tailnet browser the tab just hung.
+    // browser straight at it only ever worked from the machine itself.
     //
-    // The Control UI does NOT infer its WebSocket from the page location: it
-    // reads an explicit `gatewayUrl` (query or hash) and otherwise falls back
-    // to a default that isn't reachable here — which is why the page loaded but
-    // reported "Could not connect". Point it at the proxy, matching the page's
-    // scheme so an https deployment gets wss. Both values ride in the FRAGMENT,
-    // which browsers never send to a server, so the token stays client-side.
-    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/agents/${id}/ui/`;
-    const frag = `token=${encodeURIComponent(g.token)}&gatewayUrl=${encodeURIComponent(wsUrl)}`;
-    window.open(`/v1/agents/${id}/ui/#${frag}`, '_blank', 'noopener');
-    // OpenClaw deliberately confirms before pointing its Control UI at a gateway
-    // URL it was handed — sensible, since that URL grants control of an agent.
-    // It shows "Change Gateway URL", and until it's approved the token isn't
-    // applied either, so the tab reports "Could not connect". It's once per
-    // browser (the choice is stored), so say so rather than let it look broken.
-    toast('In the new tab, approve "Change Gateway URL" once — OpenClaw asks before trusting a gateway address.', 12000);
+    // Pass ONLY the token. The Control UI derives its gateway from the page it
+    // was served from — `ws(s)://<host><pathname>` — which is already this
+    // proxy. Supplying `gatewayUrl` explicitly made things worse, not better:
+    // the UI treats a handed-in address as *pending* until the user approves a
+    // "Change Gateway URL" prompt, and while that's pending it withholds the
+    // token too, so the tab reported "Could not connect".
+    window.open(`/v1/agents/${id}/ui/#token=${encodeURIComponent(g.token)}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }
 
