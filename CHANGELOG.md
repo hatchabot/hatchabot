@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.62.1] — 2026-08-28
+
+### Fixed
+Two defects in the home-as-volume change, both caught by migrating a single
+low-stakes agent before touching the fleet. No data was lost — the named volume
+was correct throughout; only the runtime view of it was wrong.
+
+- **The image declared `VOLUME ["/home/node/.openclaw"]`.** With the home volume
+  mounted at the parent, Docker auto-created an **anonymous** volume at that
+  path, which shadowed the real workspace with an empty directory — the gateway
+  started with no config and never came online. Removed the declaration and
+  rebuilt the runtime image.
+- **The migration created `.openclaw` as root.** It runs in a one-shot container
+  as uid 0, but the agent runs as uid 1000, so the gateway couldn't open
+  `openclaw.json.lock` (EACCES). The migration now chowns the volume root and
+  the new directory to 1000:1000; moved content already carried correct
+  ownership.
+
+Verified end to end on a real agent: all seven workspace files byte-identical
+across the migration, a single volume mounted at `/home/node`, `~/.local/bin` on
+PATH — and a file written to `~/.config/` **survived a full rebuild**.
+
 ## [0.62.0] — 2026-08-28
 
 ### Changed

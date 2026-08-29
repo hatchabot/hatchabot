@@ -191,6 +191,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Already migrated, or a brand-new empty volume → nothing to do.
       'if [ -f /vol/.openclaw/.agentclaw-home-v2 ]; then exit 0; fi; ' +
       'mkdir -p /vol/.openclaw; ' +
+      // This one-shot runs as ROOT, so anything it creates is root-owned — and
+      // the agent runs as uid 1000. Without this the gateway can't even open
+      // openclaw.json.lock (EACCES) and never comes online. The MOVED content
+      // already carries the right ownership; it's the new dir and the volume
+      // root (now $HOME) that need it.
+      'chown 1000:1000 /vol /vol/.openclaw; ' +
       // Move every root entry except .openclaw itself into it.
       'find /vol -mindepth 1 -maxdepth 1 ! -name .openclaw -exec mv -t /vol/.openclaw {} + ; ' +
       // Marker LAST: a run that dies midway simply finishes next time.

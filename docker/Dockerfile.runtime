@@ -76,9 +76,12 @@ RUN chmod +x /usr/local/bin/agentclaw-entrypoint \
 USER node
 ENV HOME=/home/node
 
-# Gateway state and workspace live on the mounted volume. Declared after the
-# chown so a fresh named volume inherits node-ownership on first mount.
-VOLUME ["/home/node/.openclaw"]
+# NO `VOLUME` declaration. The agent's whole HOME is the mounted volume, and a
+# declared VOLUME at ~/.openclaw makes Docker auto-create an ANONYMOUS volume
+# there whenever the home volume is mounted at the parent — which shadows the
+# real workspace with an empty directory and the gateway starts with no state.
+# Ownership still comes out right: the home volume is seeded from the image's
+# /home/node (already chown'd to node above) on first use.
 
 ENTRYPOINT ["agentclaw-entrypoint"]
 CMD ["openclaw", "gateway"]
