@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.3] — 2026-08-29
+
+### Changed
+- **The Control UI needs one approval the first time — the app now says so.**
+  With a real browser session the proxy is provably working end to end (page
+  `200`, upgrade `101`, and the gateway's `connect.challenge` arriving), so the
+  remaining "Could not connect" was not a proxy fault: OpenClaw deliberately
+  refuses to point its Control UI at a gateway address it was handed until the
+  user approves a **"Change Gateway URL"** prompt — and while that approval is
+  pending it doesn't apply the token either, so the tab reports a connection
+  failure. Opening the debug UI now explains this. It's once per browser; the
+  choice is stored.
+
 ## [0.63.2] — 2026-08-28
 
 ### Fixed

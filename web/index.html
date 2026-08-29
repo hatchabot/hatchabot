@@ -3546,6 +3546,12 @@ async function openGateway(id, slug) {
     const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/agents/${id}/ui/`;
     const frag = `token=${encodeURIComponent(g.token)}&gatewayUrl=${encodeURIComponent(wsUrl)}`;
     window.open(`/v1/agents/${id}/ui/#${frag}`, '_blank', 'noopener');
+    // OpenClaw deliberately confirms before pointing its Control UI at a gateway
+    // URL it was handed — sensible, since that URL grants control of an agent.
+    // It shows "Change Gateway URL", and until it's approved the token isn't
+    // applied either, so the tab reports "Could not connect". It's once per
+    // browser (the choice is stored), so say so rather than let it look broken.
+    toast('In the new tab, approve "Change Gateway URL" once — OpenClaw asks before trusting a gateway address.', 12000);
   } catch (e) { toast(e.message); }
 }
 
