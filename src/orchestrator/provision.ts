@@ -394,14 +394,18 @@ export async function buildRuntimeSpec(
           : {}),
     },
     hostMounts: [
-      // A machine-login Max profile is THIS MACHINE OWNER'S ~/.claude — OAuth
-      // refresh token, every Claude Code transcript, and settings.json (whose
-      // hooks execute as them). It may only ever be mounted into an agent owned
-      // by the same person. A `shared` profile lets another account select it,
-      // which without this check handed them that directory read-write; the
-      // route layer refuses it too, and this is the backstop that makes the
-      // mount itself impossible to reach cross-owner.
-      ...(subscription && !oauthToken && profile.ownerId === agent.ownerId
+      // ⚠ ACCEPTED RISK — see docs/pre-production.md ("Shared machine-login
+      // Claude Max"). A machine-login Max profile is the PROFILE OWNER'S
+      // ~/.claude: OAuth refresh token, every Claude Code transcript, and
+      // settings.json (whose hooks execute as them). Sharing such a profile
+      // therefore hands another account that directory READ-WRITE.
+      //
+      // The owner of this single-household installation trusts every account on
+      // it and asked to keep sharing working, so the guard
+      // (`profile.ownerId === agent.ownerId`) is deliberately NOT applied here.
+      // Restore it — plus the two route checks that were removed alongside —
+      // before this serves anyone the operator does not fully trust.
+      ...(subscription && !oauthToken
         ? [{ source: claudeAuthDir(), target: '/home/node/.claude' }]
         : []),
       // Legacy owner-chosen folders, always read-only. An agent runs with

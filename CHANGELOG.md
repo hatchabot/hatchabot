@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.60.0] — 2026-08-28
+
+### Changed
+- **Sharing a machine-login Claude Max source works again — deliberately, and
+  documented as a pre-production blocker.** v0.59.0 closed the cross-owner
+  `~/.claude` mount; on this single-household installation every account is
+  trusted and household sharing is wanted, so the three checks are relaxed
+  again. They are not silently reverted: each site carries a `⚠ ACCEPTED RISK`
+  comment naming the exact check that belongs there, and the reasoning lives in
+  the new **`docs/pre-production.md`**.
+
+### Added
+- **`docs/pre-production.md`** — what must change before AgentClaw serves anyone
+  the operator doesn't personally trust. Covers the accepted `~/.claude` risk,
+  un-sharing not revoking, the fleet media key reaching every account,
+  first-sign-in claiming the installation, missing container capability drops,
+  member over-disclosure, and the operational gaps (busy-flag rebuild drops, no
+  `DELETING` reconcile, runners skipped by reconcile and backups).
+
 ## [0.59.0] — 2026-08-27
 
 ### Fixed (security audit — 6 parallel reviewers over the whole codebase)

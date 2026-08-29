@@ -1305,21 +1305,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // A Claude Max profile reaches a runner only as a setup-token (secretRef
     // present) — that credential is injected as data. The machine-login flavour
     // mounts this box's ~/.claude, which a remote runner can't see.
-    // A machine-login Max profile (subscription, no stored credential) IS the
-    // profile owner's ~/.claude on this box. Sharing it must not hand another
-    // account that directory — refuse rather than provision a credential-less
-    // agent. A setup-token Max source (secretRef) is data and shares fine.
-    if (
-      profile.kind === 'subscription' &&
-      !profile.secretRef &&
-      profile.ownerId !== ownerId
-    ) {
-      return reply.code(400).send({
-        error:
-          "That Claude Max source uses its owner's login on this machine, so it can't be used by " +
-          'another account. Ask them for a setup-token source (`claude setup-token`), or use your own API key.',
-      });
-    }
+    // ⚠ ACCEPTED RISK — see docs/pre-production.md. A machine-login Max source
+    // is its owner's ~/.claude; letting another account select it mounts that
+    // directory into their container. Deliberately permitted on this trusted
+    // single-household installation. Re-add the owner check here (and in the
+    // profile-switch path below, and in buildRuntimeSpec) before production.
     if (profile.kind === 'subscription' && host.kind !== 'local' && !profile.secretRef) {
       return reply.code(400).send({
         error:
@@ -1597,15 +1587,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (!next || (next.ownerId !== ownerIdOf(req) && !next.shared)) {
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
-        // Same reason as create: a machine-login Max source is its owner's
-        // ~/.claude, which must never be mounted into another account's agent.
-        if (next.kind === 'subscription' && !next.secretRef && next.ownerId !== ownerIdOf(req)) {
-          return reply.code(400).send({
-            error:
-              "That Claude Max source uses its owner's login on this machine, so it can't be used by " +
-              'another account. Ask them for a setup-token source, or use your own API key.',
-          });
-        }
+        // ⚠ ACCEPTED RISK — see docs/pre-production.md; the cross-owner check
+        // that belongs here is deliberately omitted for this trusted install.
         const host = store.getHost(agent.hostId);
         // Same rule as create/move: a setup-token Max profile (secretRef
         // present) rides to a runner; only the machine-login flavour is
