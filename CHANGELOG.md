@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.60.1] — 2026-08-28
+
+### Fixed
+- **"N instant bots ready" now updates without a page reload.** The pool count
+  was only refetched on a metadata refresh, but deleting an agent parks its bot
+  back in the pool — so the header kept the old number until you reloaded. It is
+  now refreshed on every poll, which also covers the cases that never went
+  through the open tab at all: a create leasing a bot, and changes made from the
+  CLI, the management bot, or another account. The endpoint is a COUNT plus a
+  small roster, so the added cost is noise next to the agent list already
+  fetched each cycle.
+
 ## [0.60.0] — 2026-08-28
 
 ### Changed

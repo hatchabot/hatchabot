@@ -3783,15 +3783,20 @@ async function refresh(withMeta) {
   try {
     if (withMeta || !profiles.length || !hosts.length) {
       [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
-      api('/v1/pool').then(p => {
-        poolAvail = p.availableBots;
-        const el = $('poolInfo');
-        el.hidden = false; // always shown — "0 instant bots ready" is useful too
-        const n = p.availableBots;
-        // Green dot when there's stock, muted when the pool is empty.
-        el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
-      }).catch(() => {});
     }
+    // The pool count is refreshed on EVERY poll, not just a withMeta one: it
+    // changes from plenty of places that don't go through this tab — deleting
+    // an agent parks its bot back, creating one leases a bot, and the CLI, the
+    // management bot, or another account can move stock at any time. It's a
+    // COUNT plus a tiny roster, so the cost is noise next to /v1/agents.
+    api('/v1/pool').then(p => {
+      poolAvail = p.availableBots;
+      const el = $('poolInfo');
+      el.hidden = false; // always shown — "0 instant bots ready" is useful too
+      const n = p.availableBots;
+      // Green dot when there's stock, muted when the pool is empty.
+      el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
+    }).catch(() => {});
     agents = await api('/v1/agents');
     loadActivity();
     // Pairing checks hit docker exec — do them on a slower cadence.
