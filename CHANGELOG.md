@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.5] — 2026-08-29
+
+### Added
+- **The running version is shown beside the AgentClaw title** — a small `v0.63.5`
+  chip in the header. A console line was easy to miss, and "which build is this
+  browser actually running?" turned out to be the question behind several
+  rounds of a fix appearing not to work. Now it's answerable at a glance: if the
+  chip lags the server after a reload, something is serving a cached page.
+
+### Fixed
+- **Bumped the service-worker cache** (`agentclaw-shell-v1` → `v2`). An
+  installed PWA could still hold a shell cached before the app was served
+  `no-store`; `activate` deletes every cache that isn't the current name, so
+  the stale copy is now evicted.
+
 ## [0.63.4] — 2026-08-29
 
 ### Fixed

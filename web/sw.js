@@ -6,7 +6,10 @@
  *   - static shell assets (icons, manifest) are cache-first.
  * Bump CACHE to ship a new shell.
  */
-const CACHE = 'agentclaw-shell-v1';
+// Bumped to evict a shell cached before the app was served no-store: an old
+// copy of index.html made shipped fixes invisible. `activate` deletes every
+// cache whose name isn't this one.
+const CACHE = 'agentclaw-shell-v2';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

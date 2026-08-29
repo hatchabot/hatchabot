@@ -63,6 +63,9 @@
   .switch-ico { font-size: 13px; color: var(--dim); }
   h1 b { color: var(--accent); font-weight: 700; }
   .sub { color: var(--dim); font-size: 13px; }
+  /* Which build this browser actually loaded — the answer to "is my fix live?" */
+  .appver { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums;
+    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px; align-self: center; }
   /* Pool-ready status, right-aligned in the actions row — a quiet capacity chip. */
   .pool-ready { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
     border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
@@ -253,6 +256,7 @@
   <header>
     <div class="hrow">
       <h1>Agent<b>Claw</b></h1>
+      <span class="appver" id="appVer" title="The build this browser is running. If it lags the server after a reload, something is serving you a cached page."></span>
       <span class="spacer"></span>
       <button id="installBtn" class="hbtn accent" title="Install AgentClaw as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
       <span class="sub" id="whoami"></span>
@@ -962,6 +966,9 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// Stamped into the page by the server. Shown in the header so a stale tab is
+// obvious at a glance rather than something to argue about.
+try { $('appVer').textContent = 'v' + (window.AGENTCLAW_VERSION ?? '?'); } catch {}
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
