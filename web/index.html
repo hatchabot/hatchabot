@@ -3535,9 +3535,17 @@ async function openGateway(id, slug) {
     // Same-origin, through the control plane. The gateway port stays bound to
     // the host's loopback (it grants full control of the agent), so pointing a
     // browser straight at it only ever worked from the machine itself — from a
-    // tailnet browser the tab just hung. The token still rides in the FRAGMENT,
-    // which browsers never send to a server, so it stays client-side.
-    window.open(`/v1/agents/${id}/ui/#token=${g.token}`, '_blank', 'noopener');
+    // tailnet browser the tab just hung.
+    //
+    // The Control UI does NOT infer its WebSocket from the page location: it
+    // reads an explicit `gatewayUrl` (query or hash) and otherwise falls back
+    // to a default that isn't reachable here — which is why the page loaded but
+    // reported "Could not connect". Point it at the proxy, matching the page's
+    // scheme so an https deployment gets wss. Both values ride in the FRAGMENT,
+    // which browsers never send to a server, so the token stays client-side.
+    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/agents/${id}/ui/`;
+    const frag = `token=${encodeURIComponent(g.token)}&gatewayUrl=${encodeURIComponent(wsUrl)}`;
+    window.open(`/v1/agents/${id}/ui/#${frag}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }
 

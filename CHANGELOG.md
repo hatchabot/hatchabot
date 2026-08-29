@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.2] — 2026-08-28
+
+### Fixed
+- **"OpenClaw (debug)" now actually connects.** Proxying the page and its
+  WebSocket wasn't enough: the Control UI does **not** infer its gateway from
+  the page location — it reads an explicit `gatewayUrl` from the query or hash
+  and otherwise falls back to a default that isn't reachable through the proxy,
+  which is what produced *"Could not connect."* The button now passes
+  `gatewayUrl` alongside the token, matching the page's scheme so an HTTPS
+  deployment gets `wss://`. Both still ride in the URL fragment, which browsers
+  never send to a server.
+- Tests now cover the proxy end to end against a stand-in gateway: an owner's
+  upgrade is forwarded **and bytes flow both ways** (a handshake that 101s but
+  never pipes is still a dead UI), while an upgrade with no session, or for an
+  agent the caller doesn't own, has its socket destroyed.
+
 ## [0.63.1] — 2026-08-28
 
 ### Fixed
