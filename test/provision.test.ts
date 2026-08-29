@@ -329,6 +329,11 @@ describe('buildRuntimeSpec', () => {
     expect(spec.env).toEqual({
       AGENTCLAW_HOST_NAME: expect.any(String),
       GOG_HOME: '/home/node/.openclaw/connections/gog',
+      // $HOME is the persistent volume, so the user-install locations are on
+      // PATH for every process — that's what makes a tool the agent installs
+      // for itself survive a rebuild AND stay runnable by name.
+      PATH: expect.stringContaining('/home/node/.local/bin'),
+      NPM_CONFIG_PREFIX: '/home/node/.npm-global',
     });
     expect(spec.hostMounts).toEqual([]); // no ~/.claude
     expect(spec.workspace.configPatch.provider).toBe('ollama');

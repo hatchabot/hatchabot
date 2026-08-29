@@ -2,6 +2,41 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.62.0] — 2026-08-28
+
+### Changed
+- **An agent's `$HOME` is now its persistent volume, so capability it gives
+  itself survives a rebuild.** Previously only `~/.openclaw` persisted, so an
+  agent told in chat to "set up Jira" did the natural thing — wrote
+  `~/.config/atlassian/env` — and lost it on the next rebuild. Fixing that
+  per-tool (as `GOG_HOME` did for Google) doesn't scale to tools nobody has
+  thought of yet.
+
+  The boundary now matches the Unix model the agent already assumes:
+  **`/usr` is the image, replaced by a rebuild; `$HOME` is the agent's and
+  persists.** `~/.config`, `~/.local`, `~/.ssh`, and anything else in home
+  survive by default — and because the volume is what backups, Move and
+  export carry, those capabilities travel with the agent too.
+
+  Absolute paths are unchanged (the volume holds `.openclaw/`, so
+  `/home/node/.openclaw/…` still resolves). Existing volumes are reshaped
+  automatically on their next provision or rebuild: idempotent, marker-guarded,
+  written last so a half-finished run self-heals, and it runs before anything
+  writes to the volume. Archives made before this change are detected on import
+  and restored to the right place, so old backups and `.agentclaw` files
+  still work.
+
+### Added
+- **`~/.local/bin` and a home npm prefix are on `PATH` for every process**, so a
+  CLI the agent installs for itself is runnable by name next time — set in the
+  container environment rather than a login-shell profile, because Claude Code
+  spawns plain `bash -c`.
+- **An optional `~/.openclaw/on-rebuild.sh`**, run after every provision and
+  rebuild. `$HOME` persistence covers state; this covers the rest — a system
+  package or anything installed outside `$HOME` — as one script the agent
+  maintains itself rather than a framework each capability must be plumbed
+  into. Best-effort and timeout-capped: a broken hook can't fail a rebuild.
+
 ## [0.61.0] — 2026-08-28
 
 ### Fixed

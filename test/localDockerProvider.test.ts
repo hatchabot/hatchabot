@@ -133,6 +133,31 @@ describe('container and volume shape', () => {
     expect(create).toContain('--hostname kitchen-helper.dgx-spark');
   });
 
+  it('mounts the volume as the agent\'s HOME, not just ~/.openclaw', async () => {
+    // /usr is the image (replaced by a rebuild); $HOME is the agent's and
+    // persists. That single boundary is what makes a credential the agent
+    // writes to ~/.config/<tool> survive, with no per-tool plumbing.
+    await provider.provision(spec() as any);
+    const create = argv().split('\n').find((l) => l.startsWith('create '))!;
+    expect(create).toMatch(/-v \S+-vol:\/home\/node(?!\/)/);
+    expect(create).not.toContain(':/home/node/.openclaw');
+  });
+
+  it('reshapes an older volume before anything writes to it, exactly once', async () => {
+    await provider.provision(spec() as any);
+    const lines = argv().split('\n');
+    const mig = lines.findIndex((l) => l.includes('.agentclaw-home-v2'));
+    const seed = lines.findIndex((l) => l.includes('seed.sh') || l.includes('/seed'));
+    expect(mig).toBeGreaterThanOrEqual(0);
+    // Must precede the seed: the seed writes .openclaw paths, which would
+    // collide with pre-migration content still sitting at the volume root.
+    if (seed >= 0) expect(mig).toBeLessThan(seed);
+    // Marker-guarded, so a re-provision is a no-op rather than a second move.
+    expect(lines[mig]).toContain('if [ -f /vol/.openclaw/.agentclaw-home-v2 ]; then exit 0; fi');
+    // …and the marker is written LAST, so a half-finished run self-heals.
+    expect(lines[mig]!.indexOf('touch')).toBeGreaterThan(lines[mig]!.indexOf('find /vol'));
+  });
+
   it('keeps the volume unless purge is explicitly requested', async () => {
     const { runtimeRef } = await provider.provision(spec() as any);
     writeFileSync(LOG, '');

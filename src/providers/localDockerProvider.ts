@@ -107,6 +107,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     // `docker volume create` is idempotent by name — a retry reuses the volume.
     await this.#must(['volume', 'create', volume], 'Could not create the agent volume.');
 
+    // Reshape an older volume BEFORE anything writes to it: the seed below
+    // mounts it as $HOME and writes .openclaw paths, which would collide with
+    // the pre-migration content still sitting at the volume root.
+    await this.#migrateToHomeLayout(volume);
     await this.#seed(volume, spec);
 
     // Replace any existing container so a re-provision picks up new env/mounts.
@@ -134,7 +138,14 @@ export class LocalDockerProvider implements RuntimeProvider {
       // agent's compass (see provision.ts, which derives it per host).
       ...(spec.hostname ? ['--hostname', spec.hostname] : []),
       '-v',
-      `${volume}:/home/node/.openclaw`,
+      // The volume is the agent's HOME, not just ~/.openclaw. /usr is the image
+      // (base functionality, replaced by a rebuild); $HOME is the agent's and
+      // persists. That one boundary is why a credential written to
+      // ~/.config/<tool> — the natural place, and where a chat-configured Jira
+      // token landed — now survives a rebuild without per-tool plumbing.
+      // Absolute paths are unchanged: the volume contains .openclaw/, so
+      // /home/node/.openclaw/... still resolves exactly as before.
+      `${volume}:/home/node`,
     ];
     // Host-path bind mounts (shared folders, ~/.claude) name the CONTROL
     // PLANE's filesystem; a remote daemon can't see them, so they're skipped
@@ -159,6 +170,42 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { runtimeRef };
   }
 
+  /**
+   * One-time move of a pre-home-as-volume layout into its new shape.
+   *
+   * The volume used to be mounted at ~/.openclaw, so its root held `agents/`,
+   * `openclaw.json`, `credentials/`… Now the volume IS $HOME, so that content
+   * has to sit under `.openclaw/`. Absolute paths inside the container are
+   * identical afterwards — only the volume's internal shape changes.
+   *
+   * Idempotent and self-healing: the marker is written LAST, so a run that dies
+   * midway simply moves whatever is left the next time. Runs before the
+   * container is created, so it covers provision, rebuild, restore and move.
+   */
+  async #migrateToHomeLayout(volume: string): Promise<void> {
+    // One line, and an explicit `if` rather than `[ … ] && exit 0`: under
+    // `set -e` that idiom's exit status is a well-known footgun, and a
+    // multi-line script also breaks the argv-logging in tests.
+    const script =
+      'set -e; ' +
+      // Already migrated, or a brand-new empty volume → nothing to do.
+      'if [ -f /vol/.openclaw/.agentclaw-home-v2 ]; then exit 0; fi; ' +
+      'mkdir -p /vol/.openclaw; ' +
+      // Move every root entry except .openclaw itself into it.
+      'find /vol -mindepth 1 -maxdepth 1 ! -name .openclaw -exec mv -t /vol/.openclaw {} + ; ' +
+      // Marker LAST: a run that dies midway simply finishes next time.
+      'touch /vol/.openclaw/.agentclaw-home-v2';
+    const res = await this.#docker([
+      'run', '--rm', '-v', `${volume}:/vol`, 'alpine', 'sh', '-c', script,
+    ]);
+    if (res.code !== 0) {
+      throw new ProviderError(
+        `home-layout migration failed (${res.code}): ${res.stderr.slice(-300)}`,
+        "Couldn't prepare the agent's storage.",
+      );
+    }
+  }
+
   async #seed(volume: string, spec: RuntimeSpec): Promise<void> {
     // Stage the seed: config commands as a shell script, workspace files as a
     // directory, both mounted read-only into a one-shot container. The bot
@@ -181,6 +228,20 @@ export class LocalDockerProvider implements RuntimeProvider {
       // `agents add` and the workspace file copies must not touch an existing
       // agent — overwriting MEMORY.md on rebuild would lobotomize it.
       const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
+      // $HOME is the volume, so anything the agent installs or configures for
+      // itself persists. Make the conventional targets exist and be usable:
+      //  - ~/.local/bin on PATH, so a tool it installs is runnable by name
+      //  - npm's prefix in $HOME, so `npm i -g` works without root and persists
+      // Written to .profile/.bashrc-adjacent state ONLY if absent, so an agent
+      // that edits its own environment keeps the edit.
+      script.push(
+        'mkdir -p "$HOME/.local/bin" "$HOME/.config" "$HOME/.npm-global"',
+        'grep -qs agentclaw-path "$HOME/.profile" 2>/dev/null || cat >> "$HOME/.profile" <<\'EOF\'',
+        '# agentclaw-path: $HOME is a persistent volume — things you install here survive rebuilds.',
+        'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"',
+        'export NPM_CONFIG_PREFIX="$HOME/.npm-global"',
+        'EOF',
+      );
       for (const cmd of batchConfigCommands(buildConfigCommands(spec.workspace.configPatch))) {
         const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
         const line = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
@@ -217,13 +278,13 @@ export class LocalDockerProvider implements RuntimeProvider {
           maxBuffer: 256 * 1024 * 1024,
         });
         res = await this.#runStdin(
-          ['run', '--rm', '-i', '-v', `${volume}:/home/node/.openclaw`, this.image,
+          ['run', '--rm', '-i', '-v', `${volume}:/home/node`, this.image,
             'bash', '-c', `mkdir -p ${seedBase} && tar xz -C ${seedBase} && bash ${seedBase}/seed.sh`],
           tar.stdout as Buffer,
         );
       } else {
         res = await this.#docker([
-          'run', '--rm', '-v', `${volume}:/home/node/.openclaw`, '-v', `${seedDir}:/seed:ro`,
+          'run', '--rm', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
           this.image, 'bash', '/seed/seed.sh',
         ]);
       }
@@ -325,7 +386,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // The runtime image (has bash + node, runs as uid 1000 like the files on
     // the volume), mounted at the path the agent itself sees.
     return this.#docker([
-      'run', '--rm', '-v', `${volume}:/home/node/.openclaw`, this.image,
+      'run', '--rm', '-v', `${volume}:/home/node`, this.image,
       'bash', '-c', script,
     ]);
   }
@@ -415,8 +476,14 @@ export class LocalDockerProvider implements RuntimeProvider {
       const child = spawn(this.docker, this.#argv([
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
+        // Archives made before the home-as-volume change hold ~/.openclaw's
+        // CONTENTS at their root; newer ones hold the whole home (with
+        // .openclaw/ inside it). Detect which, and extract to the matching
+        // place, so old backups and .agentclaw files still restore.
         'cat > /tmp/s.tgz && gzip -t /tmp/s.tgz && ' +
-          'find /vol -mindepth 1 -delete && tar xz --no-same-owner -C /vol -f /tmp/s.tgz && ' +
+          'if tar tzf /tmp/s.tgz | grep -qE "^\\./\\.openclaw/"; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
+          'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
+          'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
           'chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]));
       let stderr = '';
@@ -443,7 +510,7 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void> {
     const { volume } = this.#names(runtimeRef);
-    const dir = `/vol/agents/${slug}/agent`;
+    const dir = `/vol/.openclaw/agents/${slug}/agent`;
     await new Promise<void>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv([
         'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
@@ -451,7 +518,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         // Same untrusted-input rules as importState: refuse the archive's
         // ownership, then set the one the runtime actually needs.
         `mkdir -p ${dir} && tar xz --no-same-owner -C ${dir} && ` +
-          `chown -R 1000:1000 /vol/agents && chmod -R a-s /vol/agents`,
+          `chown -R 1000:1000 /vol/.openclaw && chmod -R a-s /vol/.openclaw`,
       ]));
       let stderr = '';
       child.stderr.on('data', (c) => (stderr += c));

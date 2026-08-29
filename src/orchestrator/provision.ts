@@ -220,6 +220,7 @@ async function runProvisionStepsInner(
     // agent where they landed (AGENTS.md "## Data sources").
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+    await runRebuildHook(deps, agentId, runtimeRef, log);
 
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');
@@ -387,6 +388,12 @@ export async function buildRuntimeSpec(
       // in place and ride Move/backup/export with the agent, while Share
       // templates never include them. See docs/connections-design.md.
       GOG_HOME: '/home/node/.openclaw/connections/gog',
+      // $HOME is the agent's persistent volume, so put the conventional
+      // user-install locations on PATH for EVERY process (a login shell isn't
+      // guaranteed — Claude Code spawns plain `bash -c`). This is what makes a
+      // tool the agent installs for itself actually runnable next time.
+      PATH: '/home/node/.local/bin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      NPM_CONFIG_PREFIX: '/home/node/.npm-global',
       ...(modelKey
         ? envForProfile(profile.vendor, modelKey)
         : oauthToken
@@ -484,6 +491,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+    await runRebuildHook(deps, agentId, runtimeRef, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
     return store.setAgentState(agentId, 'RUNNING');
   } catch (err) {
@@ -628,6 +636,39 @@ async function syncDataSourceDocs(
     else log('datasource.docs_synced', { agentId, sources: sources.length });
   } catch (e) {
     log('datasource.docs_error', { agentId, error: String((e as Error).message ?? e) });
+  }
+}
+
+/**
+ * Run the agent's own `~/.openclaw/on-rebuild.sh`, if it wrote one.
+ *
+ * $HOME persists, so state and user-installed tools survive a rebuild by
+ * themselves. What cannot survive is anything installed OUTSIDE $HOME — an apt
+ * package, a system-wide binary — because /usr comes from the image. Rather
+ * than grow a framework for that, the agent records how to reconstitute it in
+ * one script it maintains itself, and we run it after every rebuild.
+ *
+ * Best-effort and bounded: a broken or slow hook must never fail a rebuild or
+ * hold the agent hostage, so failures are logged and the run is capped.
+ */
+async function runRebuildHook(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { provider } = deps;
+  const hook = '/home/node/.openclaw/on-rebuild.sh';
+  try {
+    const res = await provider.execShell(
+      runtimeRef,
+      `[ -x ${JSON.stringify(hook)} ] || exit 0; timeout 300 bash ${JSON.stringify(hook)} 2>&1 | tail -c 2000`,
+    );
+    if (res.code === 0 && !res.stdout.trim()) return; // absent, or silent success
+    if (res.code === 0) log('rebuild_hook.ran', { agentId, output: res.stdout.slice(-500) });
+    else log('rebuild_hook.failed', { agentId, code: res.code, output: (res.stdout || res.stderr).slice(-500) });
+  } catch (e) {
+    log('rebuild_hook.error', { agentId, error: String((e as Error).message ?? e) });
   }
 }
 
