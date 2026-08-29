@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.65.0] — 2026-08-29
+
+### Changed
+- **A new agent now appears at the TOP of its section, not the bottom.** You
+  watch the thing you just created — it provisions, it may want a bot token, it
+  may fail — and appending it meant scrolling past the whole fleet to find it.
+  Deliberately *not* applied to Settings → Section: moving an agent between
+  sections is a considered act and still drops it at the end.
+- **A recycled pool bot no longer wears the previous agent's name.** `release()`
+  renames the bot to "AgentClaw (unassigned)" as it goes back in the pool, and
+  leasing it renames it to the new agent — so a free bot stops advertising a
+  deleted one, and a re-leased bot's chat header reads correctly. (The immutable
+  `@username` still can't change; only the display name can.)
+
+### Added
+- **Telegram history gets an honest seam when a bot changes hands.** A bot can't
+  clear a chat — history is per-user and only *recent* bot messages are
+  deletable — so instead of pretending, both ends of the lease are marked: on
+  release, members get "end of this agent"; on re-lease, anyone who chatted with
+  that bot before gets "— this bot is now <name> —, anything above ... no longer
+  applies". A never-leased bot stays silent, having nothing to disown.
+
 ## [0.64.0] — 2026-08-29
 
 ### Changed

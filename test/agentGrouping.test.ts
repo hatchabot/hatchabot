@@ -62,7 +62,7 @@ describe('agent grouping + ordering', () => {
     expect(order(s)).toEqual(['a1', 'fin2', 'fin1']);
   });
 
-  it('auto-assigns strictly increasing sort_order (no ties) when none is given', () => {
+  it('puts a NEW agent at the top, with distinct orders (no ties)', () => {
     const s = make();
     const mk = (id: string) =>
       s.insertAgent({
@@ -71,9 +71,12 @@ describe('agent grouping + ordering', () => {
         createdAt: '2026-01-01', updatedAt: '2026-01-01',
       } as Agent);
     mk('a1'); mk('a2'); mk('a3');
+    // Newest first: you watch the agent you just created, so it shouldn't be
+    // parked below the whole fleet.
+    expect(order(s)).toEqual(['a3', 'a2', 'a1']);
     // Distinct orders mean the swap is real — with tied stamps this was a no-op.
-    expect(s.moveAgent('a3', 'up')).toBe(true);
-    expect(order(s)).toEqual(['a1', 'a3', 'a2']);
+    expect(s.moveAgent('a3', 'down')).toBe(true);
+    expect(order(s)).toEqual(['a2', 'a3', 'a1']);
   });
 
   it('setAgentGroup drops the agent at the END of the destination group', () => {

@@ -309,7 +309,7 @@ export class Store {
         // avoids the ties a wall-clock stamp produced when two agents were
         // created in the same millisecond — which made "move up/down" (a swap)
         // a silent no-op.
-        sortOrder: a.sortOrder ?? this.nextSortOrder(a.ownerId, a.group ?? null),
+        sortOrder: a.sortOrder ?? this.firstSortOrder(a.ownerId, a.group ?? null),
         sharedMemory: a.sharedMemory ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
@@ -1138,10 +1138,32 @@ export class Store {
 
   /** One past the current max order in an owner's section (1 if empty), so a
    *  new or freshly-regrouped agent sorts strictly last there. */
+  /** END of a section — where a DELIBERATELY MOVED agent belongs (setAgentGroup). */
   private nextSortOrder(ownerId: string, group: string | null): number {
     const row = this.db
       .prepare(
         `SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM agents
+         WHERE owner_id = ? AND state != 'DELETED'
+           AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)`,
+      )
+      .get(ownerId, group, group) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * TOP of a section — where a NEW agent belongs.
+   *
+   * You watch the thing you just made: it provisions, it may want a bot token,
+   * it may fail. Appending it meant scrolling past the whole fleet to find it.
+   * Order ascends, so "first" is one below the current minimum; negatives are
+   * fine since only relative order matters. This is deliberately NOT what
+   * setAgentGroup uses — moving an agent into a section is a considered act and
+   * still lands it at the end.
+   */
+  private firstSortOrder(ownerId: string, group: string | null): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MIN(sort_order), 0) - 1 AS n FROM agents
          WHERE owner_id = ? AND state != 'DELETED'
            AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)`,
       )

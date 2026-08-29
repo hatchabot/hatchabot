@@ -154,6 +154,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // Best-effort and bounded: a rename is cosmetic; Telegram rate-limits
     // setMyName, and neither a limit nor an outage may block provisioning.
     await this.#applyDisplayName(free.secret_ref, req.agentName);
+    // A recycled bot may still be sitting in someone's Telegram list with the
+    // previous agent's conversation above. We can't clear that (a bot can only
+    // delete its own recent messages, and chats are per-user), so mark the seam
+    // for anyone who returns to it.
+    await this.#announceReassignment(free.secret_ref, free.username, req.agentName);
 
     return this.#toChannel(free.username, free.secret_ref);
   }
@@ -167,12 +172,93 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     }
   }
 
+  /**
+   * Tell anyone who previously chatted with this bot that it now serves someone
+   * else. Only fires for a bot that has served before — a never-used one has no
+   * stale history to disown.
+   */
+  async #announceReassignment(secretRef: string, username: string, agentName: string): Promise<void> {
+    try {
+      const prior = this.db
+        .prepare(
+          `SELECT DISTINCT m.channel_user_id AS id FROM memberships m
+             JOIN channels c ON c.agent_id = m.agent_id
+            WHERE c.account_id = ? COLLATE NOCASE AND m.channel_user_id IS NOT NULL`,
+        )
+        .all(username) as Array<{ id: string }>;
+      if (!prior.length) return; // fresh bot: nothing above to explain
+      const token = await this.secrets.get(secretRef);
+      const text =
+        `— this bot is now "${agentName}" —\n\n` +
+        'It has been reassigned to a different agent. Anything above this line ' +
+        'was a previous agent and no longer applies.';
+      for (const { id } of prior) {
+        if (!/^\d{1,32}$/.test(id)) continue;
+        await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chat_id: id, text }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {});
+      }
+    } catch {
+      /* cosmetic — never blocks a lease */
+    }
+  }
+
+  /** What an unleased pool bot calls itself — never a departed agent's name. */
+  static readonly IDLE_NAME = 'AgentClaw (unassigned)';
+
   async release(accountId: string): Promise<void> {
+    const row = this.db
+      .prepare(`SELECT secret_ref, leased_to FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+      .get(accountId) as { secret_ref?: string; leased_to?: string } | undefined;
+
     // The bot goes back in the pool. We do NOT delete the token — the bot still
     // exists on Telegram's side and can serve the next agent.
     this.db
       .prepare(`UPDATE telegram_pool SET leased_to = NULL, leased_at = NULL WHERE username = ? COLLATE NOCASE`)
       .run(accountId);
+
+    if (!row?.secret_ref) return;
+    // Say goodbye BEFORE renaming, while the bot still looks like the agent the
+    // members knew. Telegram chats are per-user and a bot cannot clear history,
+    // so the honest thing is to mark the end of the conversation: anything above
+    // belongs to an agent that no longer exists, and if this bot comes back as
+    // something else, that history is not its own.
+    if (row.leased_to) await this.#farewell(row.secret_ref, row.leased_to);
+    // Then drop the old identity, so a bot sitting in the pool doesn't advertise
+    // a deleted agent (a free bot was still calling itself "Julio & Mich").
+    await this.#applyDisplayName(row.secret_ref, TelegramPoolProvisioner.IDLE_NAME);
+  }
+
+  /** Final message to the departing agent's members. Best-effort by design. */
+  async #farewell(secretRef: string, agentId: string): Promise<void> {
+    try {
+      const token = await this.secrets.get(secretRef);
+      const ids = this.db
+        .prepare(
+          `SELECT channel_user_id AS id FROM memberships
+           WHERE agent_id = ? AND status = 'active' AND channel_user_id IS NOT NULL`,
+        )
+        .all(agentId) as Array<{ id: string }>;
+      const text =
+        '— end of this agent —\n\n' +
+        'This agent has been removed, so it will not reply here any more. ' +
+        'This bot may be reassigned to a different agent later; if it starts ' +
+        'answering again, everything above belongs to the old one.';
+      for (const { id } of ids) {
+        if (!/^\d{1,32}$/.test(id)) continue;
+        await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ chat_id: id, text }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {});
+      }
+    } catch {
+      /* cosmetic — never blocks a release */
+    }
   }
 
   #toChannel(username: string, secretRef: string): ProvisionedChannel {

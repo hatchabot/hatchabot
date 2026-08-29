@@ -206,3 +206,69 @@ describe('setTelegramDisplayName', () => {
     expect(await setTelegramDisplayName('tok', '   ')).toBe(false); // empty → no call
   });
 });
+
+describe('a recycled pool bot does not keep the last agent\'s identity', () => {
+  /** Records every Telegram call so we can assert on names and messages. */
+  const recorder = () => {
+    const calls: Array<{ method: string; body: any }> = [];
+    const fetchImpl = (async (url: any, init: any) => {
+      calls.push({ method: String(url).split('/').pop()!, body: JSON.parse(String(init?.body ?? '{}')) });
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    return { calls, fetchImpl };
+  };
+
+  it('renames to an idle name on release, and says goodbye to its members first', async () => {
+    const { calls, fetchImpl } = recorder();
+    const db = new Database(':memory:');
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
+    await pool.addToPool('recycled', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'Condo Adviser', slug: 'condo' });
+    // A member who has been chatting with it.
+    db.prepare(`CREATE TABLE IF NOT EXISTS memberships (id TEXT, agent_id TEXT, user_id TEXT, role TEXT, channel_user_id TEXT, status TEXT)`).run();
+    db.prepare(`INSERT INTO memberships VALUES ('m1','a1','u1','user','555','active')`).run();
+    calls.length = 0;
+
+    await pool.release('recycled');
+
+    const sends = calls.filter((c) => c.method === 'sendMessage');
+    expect(sends).toHaveLength(1);
+    expect(sends[0]!.body.chat_id).toBe('555');
+    expect(sends[0]!.body.text).toMatch(/no longer applies|belongs to the old one|removed/i);
+    // ...and the bot stops advertising the agent that just left.
+    const renames = calls.filter((c) => c.method === 'setMyName');
+    expect(renames.at(-1)!.body.name).toBe(TelegramPoolProvisioner.IDLE_NAME);
+    // Goodbye goes out BEFORE the rename, while it still looks like that agent.
+    expect(calls.findIndex((c) => c.method === 'sendMessage'))
+      .toBeLessThan(calls.findIndex((c) => c.method === 'setMyName'));
+  });
+
+  it('warns prior chatters when the bot comes back as a different agent', async () => {
+    const { calls, fetchImpl } = recorder();
+    const db = new Database(':memory:');
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
+    await pool.addToPool('recycled', 'tok');
+    // Someone chatted with this bot under a PREVIOUS agent.
+    db.prepare(`CREATE TABLE IF NOT EXISTS channels (id TEXT, agent_id TEXT, kind TEXT, account_id TEXT, secret_ref TEXT, deep_link TEXT, created_at TEXT)`).run();
+    db.prepare(`CREATE TABLE IF NOT EXISTS memberships (id TEXT, agent_id TEXT, user_id TEXT, role TEXT, channel_user_id TEXT, status TEXT)`).run();
+    db.prepare(`INSERT INTO channels VALUES ('c0','old','telegram','recycled','r','d','now')`).run();
+    db.prepare(`INSERT INTO memberships VALUES ('m0','old','u0','user','777','active')`).run();
+
+    await pool.provision({ agentId: 'a2', agentName: 'Tax Advisor', slug: 'tax' });
+
+    const notice = calls.filter((c) => c.method === 'sendMessage');
+    expect(notice).toHaveLength(1);
+    expect(notice[0]!.body.chat_id).toBe('777');
+    expect(notice[0]!.body.text).toContain('Tax Advisor');
+    expect(notice[0]!.body.text).toMatch(/above this line|no longer applies/i);
+  });
+
+  it('says nothing on a bot that has never served an agent', async () => {
+    const { calls, fetchImpl } = recorder();
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl });
+    await pool.addToPool('fresh', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'First', slug: 'first' });
+    expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(0); // nothing stale to disown
+    expect(calls.filter((c) => c.method === 'setMyName').at(-1)!.body.name).toBe('First');
+  });
+});

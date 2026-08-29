@@ -73,8 +73,9 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
     sharedMemory: input.sharedMemory ?? true,
     // Only meaningful for cloud profiles; effectiveModel() ignores it for local.
     model: profile.vendor === 'local' ? undefined : input.model || undefined,
-    // sortOrder is left to the store, which assigns the next per-owner value so
-    // a new agent sorts strictly last with no ties (see Store.nextSortOrder).
+    // sortOrder is left to the store, which lands a new agent FIRST in its
+    // section with no ties (see Store.firstSortOrder) — you watch the thing you
+    // just made, and it shouldn't be below the whole fleet.
     createdAt: now,
     updatedAt: now,
   };
