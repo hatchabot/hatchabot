@@ -297,3 +297,53 @@ deterministic commands** — it's the security-critical piece (tiers, confirms,
 allowlist), so harden and validate it *before* the LLM in Phase 2, which only
 ever *proposes* into gates that already exist. That ordering is the whole point:
 the model can grow more capable without ever growing more authority.
+
+## C. Direct OpenClaw access (owner-only today)
+
+Each agent runs OpenClaw's own **Control UI** — reachable from the agent card's
+⋯ menu as *OpenClaw (debug)*. AgentClaw reverse-proxies it at
+`/v1/agents/:id/ui/` (HTTP + WebSocket), authorized by the same session as every
+other route, so the gateway port stays bound to the host's loopback rather than
+being exposed to the LAN/tailnet.
+
+**Status: a debugging tool for the owner, deliberately not a user surface.**
+
+### Two constraints, if this is ever opened up
+
+**1. It requires a browser secure context — `https://` or `localhost`.**
+The Control UI uses WebCrypto for device identity, and browsers expose that only
+in a secure context. Tailscale encrypting the wire does *not* count: the browser
+judges by the URL scheme alone, so `http://<host>.ts.net:8080` is treated exactly
+like plain HTTP anywhere else. The symptom is a page that loads and then reports
+*"control ui requires device identity (use HTTPS or localhost secure context)"*.
+
+Ways to satisfy it, cheapest first:
+- browse on the host itself at `http://localhost:8080` (works today, no setup);
+- an SSH tunnel — `ssh -L 8080:127.0.0.1:8080 <host>` — then `http://localhost:8080`;
+- HTTPS via `tailscale serve --bg --https=443 http://127.0.0.1:8080`, which needs
+  HTTPS Certificates enabled for the tailnet. Note the certificate is published
+  in public **Certificate Transparency** logs, so the machine and tailnet names
+  become publicly discoverable (not reachable — Tailscale still gates access).
+  This is per-node: each AgentClaw server serves at its own `*.ts.net` name, so
+  two servers don't collide unless they're on the same machine, where they need
+  different HTTPS ports (a path prefix breaks the app, which uses absolute paths).
+
+**2. The bigger issue is authorization, not transport.** The Control UI is an
+admin console containing a **terminal** — whoever opens it has a shell inside the
+agent's container, and therefore its memory, its connection credentials (gog,
+Jira), and any host directory mounted into it. That is strictly more than the
+agent's own owner gets through Telegram, and far more than the `user` membership
+role is meant to grant (chat only). Handing it to members would bypass the
+membership model rather than extend it.
+
+### If the goal is "users can talk to the agent without Telegram"
+
+Build a **chat panel inside AgentClaw**, not access to OpenClaw's console:
+- it reuses the existing login and owner/member roles, so there's no new auth story;
+- it needs no secure context — it's our own page doing ordinary `fetch` — so no
+  HTTPS, no tunnel, no CT-log entry, no extra onboarding step;
+- members get exactly what Telegram gives them: conversation, nothing more.
+
+The plumbing already exists: the control plane drives the gateway server-side
+(`message send`, `sessions list`), so this is a message list, an input box, and
+two routes — not a new transport story.

@@ -3530,25 +3530,31 @@ async function kick(agentId, userId, label) {
 }
 
 async function openGateway(id, slug) {
+  // OpenClaw's own Control UI: an ADMIN console with a terminal, not a chat
+  // window — whoever opens it has shell inside the agent's container. Hence
+  // owner-only, and hence the ⋯ menu rather than the card's main row.
+  //
+  // It requires a browser SECURE CONTEXT: it uses WebCrypto for device
+  // identity, which browsers expose only over https:// or localhost. Tailscale
+  // encrypting the wire doesn't count — the browser judges by the URL scheme
+  // alone. Without it the tab loads and then reports a bare "Could not
+  // connect", which is a genuinely baffling thing to hand someone, so say it
+  // up front instead.
+  if (!window.isSecureContext) {
+    toast(
+      "OpenClaw's console needs a secure context (https:// or localhost) — it uses WebCrypto for device identity. " +
+      'Open AgentClaw at http://localhost:8080 on the host, or via an SSH tunnel, and this will work.',
+      14000,
+    );
+    return;
+  }
   try {
     const g = await api(`/v1/agents/${id}/gateway`);
-    // Fetched on click, never in the poll: the token grants full control of
-    // this agent's gateway. Loopback-published, so localhost is the host.
-    // Same host you're browsing AgentClaw on — 'localhost' broke every
-    // remote/tailnet browser. The port is published on the host's loopback,
-    // so this works from the host itself; remote browsers need a tunnel.
-    // OpenClaw's Control UI serves at the gateway root now (the old /chat/<slug>
-    // path 404s on current OpenClaw); the token rides as a URL fragment.
-    // Same-origin, through the control plane. The gateway port stays bound to
-    // the host's loopback (it grants full control of the agent), so pointing a
-    // browser straight at it only ever worked from the machine itself.
-    //
-    // Pass ONLY the token. The Control UI derives its gateway from the page it
-    // was served from — `ws(s)://<host><pathname>` — which is already this
-    // proxy. Supplying `gatewayUrl` explicitly made things worse, not better:
-    // the UI treats a handed-in address as *pending* until the user approves a
-    // "Change Gateway URL" prompt, and while that's pending it withholds the
-    // token too, so the tab reported "Could not connect".
+    // Proxied same-origin through the control plane so the gateway port can
+    // stay bound to the host's loopback. Pass ONLY the token: the Control UI
+    // derives its gateway from the page it was served from, and handing it an
+    // explicit gatewayUrl instead parks it behind a "Change Gateway URL"
+    // confirmation that also withholds the token.
     window.open(`/v1/agents/${id}/ui/#token=${encodeURIComponent(g.token)}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }

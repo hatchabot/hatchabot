@@ -2,6 +2,29 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.64.0] — 2026-08-29
+
+### Changed
+- **"OpenClaw (debug)" now explains itself instead of failing cryptically.** The
+  Control UI needs a browser *secure context* (`https://` or `localhost`) for the
+  WebCrypto it uses as device identity — Tailscale encrypting the wire doesn't
+  count, since the browser judges by URL scheme alone. Clicking it from a
+  plain-HTTP origin used to open a tab that loaded and then said "Could not
+  connect"; it now says up front what's needed and how to get it. Also trimmed
+  the comment there, which had accumulated a stale layer from each failed
+  attempt.
+
+### Added
+- **`docs/control-interfaces.md` §C — Direct OpenClaw access.** Records why this
+  stays an owner-only debugging tool: the secure-context requirement and its
+  three workarounds (localhost, SSH tunnel, `tailscale serve` — including that
+  the certificate is published in public Certificate Transparency logs), and the
+  larger point that the Control UI is an admin console **with a terminal**, so
+  granting it to members would bypass the membership model rather than extend
+  it. If the goal is "users talk to the agent without Telegram", the note
+  recommends an in-app chat panel instead — same auth, no secure context, no
+  extra onboarding.
+
 ## [0.63.6] — 2026-08-29
 
 ### Fixed
