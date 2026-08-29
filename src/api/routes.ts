@@ -26,6 +26,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
+import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
@@ -277,6 +278,15 @@ async function checkLocalServer(
   }
   return { ok: true };
 }
+
+/** The running version, stamped into the app shell so a stale tab is visible. */
+const APP_VERSION: string = (() => {
+  try {
+    return createRequire(import.meta.url)('../../package.json').version ?? 'dev';
+  } catch {
+    return 'dev';
+  }
+})();
 
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
@@ -559,7 +569,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     app.get('/', async (_req, reply) => {
       // Re-read per request: dev-friendly, and this page is tiny.
       const html = readFileSync(deps.webIndexPath!, 'utf8');
-      return reply.type('text/html; charset=utf-8').send(html);
+      // The whole app is this one file. With no cache headers the browser was
+      // free to keep an old copy, so a shipped fix could sit unused behind a
+      // stale tab — indistinguishable from "the fix doesn't work". Never store
+      // it, and stamp the running version in so what's loaded is checkable.
+      return reply
+        .type('text/html; charset=utf-8')
+        .header('cache-control', 'no-store, must-revalidate')
+        .header('x-agentclaw-version', APP_VERSION)
+        .send(html.replace('</head>', `<script>window.AGENTCLAW_VERSION=${JSON.stringify(APP_VERSION)};console.info('AgentClaw '+window.AGENTCLAW_VERSION);</script></head>`));
     });
 
     // PWA assets so the web app is installable to a phone home screen. Served

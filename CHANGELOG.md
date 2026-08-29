@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.4] — 2026-08-29
+
+### Fixed
+- **The app shell was served with no cache headers**, so a browser was free to
+  keep an old copy of `index.html` — and since the whole app is that one file,
+  a shipped fix could sit unused behind a stale tab, which is indistinguishable
+  from "the fix doesn't work". It's now `Cache-Control: no-store,
+  must-revalidate`.
+
+### Added
+- **The running version is stamped into the page** as `window.AGENTCLAW_VERSION`,
+  logged to the console on boot, and returned as an `x-agentclaw-version`
+  response header — so "which build is this browser actually running?" is a
+  question with an answer instead of a guess.
+
 ## [0.63.3] — 2026-08-29
 
 ### Changed
