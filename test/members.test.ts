@@ -24,7 +24,7 @@ async function setup(sharedMemory = true) {
     createdAt: 'now', updatedAt: 'now',
   });
   store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
-  provider.execResponses.set('pairing list', {
+  provider.execResponses.set('sh', {
     code: 0,
     stdout: JSON.stringify({
       requests: [{ id: '555', code: 'CODE1', meta: { username: 'gran', firstName: 'Grandma' } }],

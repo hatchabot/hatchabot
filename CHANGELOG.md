@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.61.0] — 2026-08-28
+
+### Fixed
+- **The app no longer goes sluggish every ~24 seconds.** Every third poll cycle
+  checked each running agent for pending "wants to join" requests by running
+  `openclaw pairing list` — booting the whole OpenClaw Node CLI inside each
+  container. Measured on a 26-agent fleet: **2.1s per agent, 7.7s of wall time,
+  and 26 concurrent `docker exec`s per sweep**, which made every other request
+  **6× slower** while it ran (a typical button press went 0.21s → 1.23s).
+
+  Pending requests are just a JSON file on the agent's volume, so
+  `listPairingRequests` now reads that file instead. Measured after:
+  **0.05s per agent, 0.16s per sweep** (49× faster), and a button press during a
+  sweep is 0.18s — indistinguishable from idle. Approving still goes through the
+  CLI, which is the part that actually mutates state and updates the allowlist.
+
 ## [0.60.1] — 2026-08-28
 
 ### Fixed

@@ -48,7 +48,7 @@ describe('claimFirstContact', () => {
     });
     store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
 
-    provider.execResponses.set('pairing list', {
+    provider.execResponses.set('sh', {
       code: 0,
       stdout: JSON.stringify({ requests: [{ id: '999', code: 'ZZZZ' }] }),
       stderr: '',
@@ -84,7 +84,7 @@ describe('claimFirstContact', () => {
     // invitee — that swap is the two-identities race.
     store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', channelUserId: '999', status: 'active' });
     store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'invitee', role: 'user', status: 'active' });
-    provider.execResponses.set('pairing list', {
+    provider.execResponses.set('sh', {
       code: 0, stdout: JSON.stringify({ requests: [{ id: '999', code: 'ZZZZ' }] }), stderr: '',
     });
     provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
@@ -113,7 +113,7 @@ describe('claimFirstContact', () => {
       createdAt: 'now', updatedAt: 'now',
     });
     store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u1', role: 'owner', status: 'active' });
-    provider.execResponses.set('pairing list', {
+    provider.execResponses.set('sh', {
       code: 0, stdout: JSON.stringify({ requests: [{ id: '777', code: 'AAAA' }] }), stderr: '',
     });
     provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });

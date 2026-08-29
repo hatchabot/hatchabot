@@ -22,7 +22,7 @@ export interface PairingRequest {
   /** Telegram user id of the requester. */
   id: string;
   code: string;
-  meta?: { username?: string; firstName?: string; lastName?: string };
+  meta?: { username?: string; firstName?: string; lastName?: string; accountId?: string };
 }
 
 export interface ClaimDeps {
@@ -44,21 +44,35 @@ export interface ClaimOptions {
   pollIntervalMs?: number;
 }
 
+/** Where OpenClaw keeps pending Telegram pairing requests, on the volume. */
+export const PAIRING_STORE = '/home/node/.openclaw/credentials/telegram-pairing.json';
+
+/**
+ * Read pending pairing requests by reading the store FILE, not by running
+ * `openclaw pairing list`.
+ *
+ * This is polled for every running agent on a timer, and booting the OpenClaw
+ * Node CLI inside a container costs ~2s each — measured 7.7s of wall time and
+ * 26 concurrent `docker exec`s per sweep on a 26-agent fleet, which made every
+ * button press in the app 6x slower while it ran. Reading the file is ~0.04s,
+ * and it is the same JSON the CLI would print (`{version, requests:[…]}`);
+ * denyPairing already edits this exact file.
+ *
+ * Approving still goes through the CLI — that mutates state and updates the
+ * allowlist, which is the CLI's job, not ours.
+ */
 export async function listPairingRequests(
   provider: RuntimeProvider,
   runtimeRef: string,
   accountId: string,
 ): Promise<PairingRequest[]> {
-  const res = await provider.exec(runtimeRef, [
-    'pairing',
-    'list',
-    'telegram',
-    '--account',
-    accountId,
-    '--json',
-  ]);
-  if (res.code !== 0) return [];
-  return parsePairingList(res.stdout);
+  const res = await provider.execShell(runtimeRef, `cat ${JSON.stringify(PAIRING_STORE)} 2>/dev/null || true`);
+  if (res.code !== 0 || !res.stdout.trim()) return [];
+  // The file holds every account's requests for this agent; the CLI filtered by
+  // --account, so keep that behaviour where the entry says which one it is.
+  return parsePairingList(res.stdout).filter(
+    (r) => !r.meta?.accountId || r.meta.accountId.toLowerCase() === accountId.toLowerCase(),
+  );
 }
 
 export async function approvePairing(

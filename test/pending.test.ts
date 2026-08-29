@@ -35,15 +35,29 @@ async function world() {
   return { store, provider, f };
 }
 
+
+/** listPairingRequests now reads the pairing FILE, so fixtures are keyed by the
+ *  agent's runtimeRef rather than by an --account argv. */
+function pairingByAgent(provider: MockProvider, store: Store, byName: Record<string, unknown[]>) {
+  const refFor = (name: string) =>
+    store.listAllActiveAgents().find((a) => a.name === name)?.runtimeRef;
+  const map = new Map<string, string>();
+  for (const [name, requests] of Object.entries(byName)) {
+    const ref = refFor(name);
+    if (ref) map.set(ref, JSON.stringify({ version: 1, requests }));
+  }
+  provider.execShell = (async (ref: string) => ({
+    code: 0, stdout: map.get(ref) ?? '', stderr: '',
+  })) as any;
+}
+
 describe('GET /v1/pending (fleet-wide join requests)', () => {
   it('flattens pending pairings across the owner\'s RUNNING agents, attributed to each', async () => {
-    const { provider, f } = await world();
+    const { store, provider, f } = await world();
     // Per-agent pairing lists (keyed by the --account slug in the argv).
-    provider.execResponses.set('pairing list telegram --account bot_a1', {
-      code: 0, stdout: JSON.stringify({ requests: [{ id: '555', code: 'CODEA', meta: { username: 'maria_k', firstName: 'Maria' } }] }), stderr: '',
-    });
-    provider.execResponses.set('pairing list telegram --account bot_a2', {
-      code: 0, stdout: JSON.stringify({ requests: [{ id: '777', code: 'CODEB', meta: { firstName: 'Jon' } }] }), stderr: '',
+    pairingByAgent(provider, store, {
+      Family: [{ id: '555', code: 'CODEA', meta: { username: 'maria_k', firstName: 'Maria' } }],
+      Condo: [{ id: '777', code: 'CODEB', meta: { firstName: 'Jon' } }],
     });
     const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
     expect(res.statusCode).toBe(200);
@@ -55,17 +69,15 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
   });
 
   it('skips stopped agents and never includes another owner\'s agents', async () => {
-    const { provider, f } = await world();
+    const { store, provider, f } = await world();
     // Only the other owner's agent has a request — must not surface to us.
-    provider.execResponses.set('pairing list telegram --account bot_x9', {
-      code: 0, stdout: JSON.stringify({ requests: [{ id: '999', code: 'SECRET', meta: {} }] }), stderr: '',
-    });
+    pairingByAgent(provider, store, { Theirs: [{ id: '999', code: 'SECRET', meta: {} }] });
     const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
     expect(res.json()).toEqual([]);
   });
 
   it('POST /pairing/deny turns a request away, owner-scoped', async () => {
-    const { provider, f } = await world();
+    const { store, provider, f } = await world();
     provider.execResponses.set('sh-volume', { code: 0, stdout: '1\n', stderr: '' });
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/pairing/deny', headers: as, payload: { code: 'CODEA' } });
     expect(res.statusCode).toBe(200);
@@ -85,14 +97,13 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
   });
 
   it('one unreachable agent does not sink the whole list', async () => {
-    const { provider, f } = await world();
-    provider.execResponses.set('pairing list telegram --account bot_a1', {
-      code: 0, stdout: JSON.stringify({ requests: [{ id: '555', code: 'CODEA', meta: {} }] }), stderr: '',
-    });
-    const realExec = provider.exec.bind(provider);
-    provider.exec = (async (ref: string, argv: string[]) => {
-      if (argv.includes('bot_a2')) throw new Error('container gone');
-      return realExec(ref, argv);
+    const { store, provider, f } = await world();
+    const a2ref = store.listAllActiveAgents().find((a) => a.name === 'Condo')!.runtimeRef!;
+    pairingByAgent(provider, store, { Family: [{ id: '555', code: 'CODEA', meta: {} }] });
+    const okShell = provider.execShell.bind(provider);
+    provider.execShell = (async (ref: string, script: string) => {
+      if (ref === a2ref) throw new Error('container gone');
+      return okShell(ref, script);
     }) as any;
     const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
     expect(res.json()).toHaveLength(1); // a1 survived; a2 dropped
