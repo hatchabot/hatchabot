@@ -2,6 +2,38 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.63.0] — 2026-08-28
+
+### Fixed
+- **Copy buttons inside dialogs did nothing.** `showModal()` puts a dialog in
+  the top layer and makes the rest of the document inert, so the clipboard
+  fallback's textarea — parented to `<body>` — could never take selection and
+  the copy silently failed. It now attaches inside the open dialog. Fixes both
+  invite copies, and the CLI-token and bot-token copies, which are also modal.
+- **"OpenClaw (debug)" opened a dead tab for anyone not sitting at the
+  machine.** The gateway port is published on the host's loopback deliberately
+  (it grants full control of that agent), so pointing a browser straight at it
+  only ever worked locally — from a tailnet browser the tab just hung. The
+  Control UI is now reverse-proxied through the control plane at
+  `/v1/agents/:id/ui/`: same-origin, authorized by the session you already
+  have, with the port still closed. The gateway's own token continues to ride
+  in the URL *fragment*, which browsers never send to a server.
+
+### Added
+- **An agent's Telegram bot is renamed when the agent is.** The bot's display
+  name (the chat header — the `@username` is immutable) was set once, when a
+  pool bot was leased, and then froze; a hand-pasted bot was never named at
+  all. Renaming an agent now updates it, best-effort.
+
+### Known gap
+- The Control UI's **WebSocket** (live updates) is not proxied yet, so the page
+  loads and its HTTP calls work but live data will not stream. Fastify never
+  sees an upgrade, and authorizing one means re-deriving the principal from raw
+  headers — duplicating `auth.ts`'s session logic across password and identity
+  modes. A faked principal falls through to `LOCAL_OWNER`, which on a
+  password-mode install would forward an *unauthenticated* upgrade, so it was
+  left undone rather than done unsafely.
+
 ## [0.62.1] — 2026-08-28
 
 ### Fixed

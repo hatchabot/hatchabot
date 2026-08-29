@@ -25,6 +25,8 @@ import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
+import { request as httpRequest } from 'node:http';
+import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { estimateCost } from '../orchestrator/pricing.js';
@@ -1668,7 +1670,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
       // All checks passed and the only failable write succeeded — apply the
       // infallible DB writes together, so nothing was half-committed on a 502.
-      if (name !== undefined && name !== agent.name) store.setAgentName(agent.id, name);
+      if (name !== undefined && name !== agent.name) {
+        store.setAgentName(agent.id, name);
+        // Keep Telegram in step: the bot's display name is what people see in
+        // the chat header, and it previously froze at whatever the agent was
+        // called when its token was first leased (or, for a hand-pasted bot,
+        // at whatever BotFather was told). Fire-and-forget — cosmetic, and
+        // Telegram rate-limits setMyName.
+        const chan = store.getChannelForAgent(agent.id);
+        if (chan?.kind === 'telegram') {
+          void secrets
+            .get(chan.secretRef)
+            .then((tok) => setTelegramDisplayName(tok, name))
+            .then((ok) => trace(agent.id)('channel.renamed', { name, ok }))
+            .catch(() => {});
+        }
+      }
       if (switchingProfile) store.setAgentAIProfile(agent.id, aiProfileId!);
       if (model !== undefined) {
         store.setAgentModel(agent.id, model);
@@ -1819,6 +1836,79 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     return { port: agent.gatewayPort, token: agent.gatewayToken };
   });
+
+  /**
+   * Reverse-proxy an agent's OpenClaw Control UI through the control plane.
+   *
+   * The gateway port is published on the HOST's loopback only — deliberately,
+   * since it grants full control of that agent and must not be reachable from
+   * the LAN/tailnet. But that also meant the "OpenClaw (debug)" button opened
+   * `http://<whatever-host-you-browse>:<port>` and simply hung: correct for
+   * someone sitting at the machine, broken for everyone else.
+   *
+   * Proxying instead keeps the port closed and reuses the session you already
+   * have. The gateway's own bearer token still rides in the URL *fragment*,
+   * which browsers never send to a server, so it stays client-side exactly as
+   * before. Relative asset paths resolve under this prefix, so the UI loads
+   * unmodified.
+   */
+  const gatewayTarget = (req: FastifyRequest, id: string): { port: number } | undefined => {
+    const agent = ownedAgent(req, id);
+    if (!agent?.gatewayPort || !agent.gatewayToken || agent.state !== 'RUNNING') return undefined;
+    return { port: agent.gatewayPort };
+  };
+
+  app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui', async (req, reply) => {
+    // The UI is a SPA served from a directory; without the trailing slash its
+    // relative asset paths would resolve one level too high.
+    return reply.redirect(`/v1/agents/${req.params.id}/ui/`);
+  });
+
+  app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', async (req, reply) => {
+    const target = gatewayTarget(req, req.params.id);
+    if (!target) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    const path = `/${req.params['*'] ?? ''}`;
+    const qs = req.raw.url?.includes('?') ? req.raw.url.slice(req.raw.url.indexOf('?')) : '';
+    const upstream = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }>(
+      (resolve, reject) => {
+        const r = httpRequest(
+          {
+            host: '127.0.0.1',
+            port: target.port,
+            path: path + qs,
+            method: req.method,
+            // Drop hop-by-hop and our own host header; keep auth/content ones.
+            headers: { ...req.headers, host: `127.0.0.1:${target.port}`, connection: 'close' },
+          },
+          (res) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c) => chunks.push(c));
+            res.on('end', () =>
+              resolve({ status: res.statusCode ?? 502, headers: res.headers, body: Buffer.concat(chunks) }),
+            );
+          },
+        );
+        r.on('error', reject);
+        if (req.body !== undefined && req.body !== null) {
+          r.end(typeof req.body === 'string' || Buffer.isBuffer(req.body) ? req.body : JSON.stringify(req.body));
+        } else r.end();
+      },
+    ).catch(() => undefined as never);
+    if (!upstream) return reply.code(502).send({ error: "The agent's gateway did not answer." });
+    for (const [k, v] of Object.entries(upstream.headers)) {
+      if (v !== undefined && !/^(transfer-encoding|connection|content-length)$/i.test(k)) reply.header(k, v);
+    }
+    return reply.code(upstream.status).send(upstream.body);
+  });
+
+  // NOTE: the Control UI also opens a WebSocket for live updates, which is NOT
+  // proxied yet. Fastify never sees an upgrade, so it would have to be handled
+  // on the raw server — and authorizing it means re-deriving the principal from
+  // raw headers, duplicating the session logic in auth.ts across both password
+  // and identity modes. A faked principal falls through to LOCAL_OWNER, which
+  // on a password-mode install would forward an UNAUTHENTICATED upgrade. Until
+  // auth.ts exposes a header-level resolver, the page loads and its HTTP calls
+  // work; live updates need the follow-up.
 
   // Add a data source. Folders are host mounts (ro/rw), gated to the machine
   // owner + blocklist. Git repos are cloned onto the agent's own volume with a

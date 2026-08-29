@@ -5,6 +5,7 @@ import { CompositeTelegramProvisioner } from '../src/channels/composite.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { TelegramManualProvisioner } from '../src/channels/telegramManual.js';
 import { verifyBotToken, InvalidBotTokenError } from '../src/channels/telegramManual.js';
+import { setTelegramDisplayName } from '../src/channels/telegramName.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /** Leasing renames the bot via Telegram (setMyName) — keep tests offline. */
@@ -176,5 +177,32 @@ describe('CompositeTelegramProvisioner', () => {
 
     await composite.release('someusersbot');
     expect(manualReleased).toEqual(['someusersbot']);
+  });
+});
+
+describe('setTelegramDisplayName', () => {
+  it('sends the trimmed name, capped at Telegram\'s 64 chars', async () => {
+    const calls: Array<{ url: string; body: string }> = [];
+    const rec = (async (url: any, init: any) => {
+      calls.push({ url: String(url), body: String(init?.body ?? '') });
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    expect(await setTelegramDisplayName('tok', '  Condo Adviser  ', rec)).toBe(true);
+    expect(calls[0]!.url).toContain('/bottok/setMyName');
+    expect(JSON.parse(calls[0]!.body)).toEqual({ name: 'Condo Adviser' });
+    await setTelegramDisplayName('tok', 'x'.repeat(200), rec);
+    expect(JSON.parse(calls[1]!.body).name).toHaveLength(64);
+  });
+
+  it('reports failure instead of throwing — a rename must never break anything', async () => {
+    // Telegram rate-limits setMyName, so a refusal is expected traffic.
+    const limited = (async () => new Response('{"ok":false,"description":"Too Many Requests"}',
+      { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+    expect(await setTelegramDisplayName('tok', 'New', limited)).toBe(false);
+    const down = (async () => { throw new Error('network'); }) as unknown as typeof fetch;
+    expect(await setTelegramDisplayName('tok', 'New', down)).toBe(false);
+    const html = (async () => new Response('<html>502</html>', { headers: { 'content-type': 'text/html' } })) as unknown as typeof fetch;
+    expect(await setTelegramDisplayName('tok', 'New', html)).toBe(false);
+    expect(await setTelegramDisplayName('tok', '   ')).toBe(false); // empty → no call
   });
 });

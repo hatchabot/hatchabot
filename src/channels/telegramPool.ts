@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { SecretStore } from '../secrets/secretStore.js';
+import { setTelegramDisplayName } from './telegramName.js';
 import type {
   ChannelProvisioner,
   ChannelProvisionRequest,
@@ -160,12 +161,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   async #applyDisplayName(secretRef: string, name: string): Promise<void> {
     try {
       const token = await this.secrets.get(secretRef);
-      await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/setMyName`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: name.slice(0, 64) }), // Telegram's cap
-        signal: AbortSignal.timeout(5000),
-      });
+      await setTelegramDisplayName(token, name, this.opts.fetchImpl ?? fetch);
     } catch {
       /* cosmetic — never blocks a lease */
     }

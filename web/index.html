@@ -3422,11 +3422,17 @@ async function copyText(text) {
     ta.value = text;
     ta.setAttribute('readonly', '');
     ta.style.cssText = 'position:fixed;top:-9999px;left:-9999px';
-    document.body.appendChild(ta);
+    // Append INSIDE the open modal, not to <body>. showModal() puts the dialog
+    // in the top layer and makes the rest of the document inert, so a textarea
+    // parented to <body> can't take selection — select() no-ops and the copy
+    // silently fails. That's why the invite dialog's buttons did nothing.
+    const dialogs = [...document.querySelectorAll('dialog[open]')];
+    const host = dialogs[dialogs.length - 1] ?? document.body;
+    host.appendChild(ta);
     ta.select();
     ta.setSelectionRange(0, text.length);
     const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
+    host.removeChild(ta);
     return ok;
   } catch { return false; }
 }
@@ -3526,7 +3532,12 @@ async function openGateway(id, slug) {
     // so this works from the host itself; remote browsers need a tunnel.
     // OpenClaw's Control UI serves at the gateway root now (the old /chat/<slug>
     // path 404s on current OpenClaw); the token rides as a URL fragment.
-    window.open(`http://${location.hostname}:${g.port}/#token=${g.token}`, '_blank', 'noopener');
+    // Same-origin, through the control plane. The gateway port stays bound to
+    // the host's loopback (it grants full control of the agent), so pointing a
+    // browser straight at it only ever worked from the machine itself — from a
+    // tailnet browser the tab just hung. The token still rides in the FRAGMENT,
+    // which browsers never send to a server, so it stays client-side.
+    window.open(`/v1/agents/${id}/ui/#token=${g.token}`, '_blank', 'noopener');
   } catch (e) { toast(e.message); }
 }
 
