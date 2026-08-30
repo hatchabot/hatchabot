@@ -126,6 +126,17 @@
   .group-header { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700;
                   letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); margin: 22px 2px 8px; }
   .group-header:first-child { margin-top: 4px; }
+  /* Archived agents are still yours, but they're not the fleet you're running.
+     A closed drawer keeps them out of the way without hiding them. */
+  .archive-drawer { margin-top: 26px; border-top: 1px solid var(--line); padding-top: 6px; }
+  .archive-drawer > summary { cursor: pointer; list-style: none; display: flex; align-items: center;
+                  gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
+                  text-transform: uppercase; color: var(--dim); padding: 8px 2px; }
+  .archive-drawer > summary::-webkit-details-marker { display: none; }
+  .archive-drawer > summary::before { content: '▸'; font-size: 11px; }
+  .archive-drawer[open] > summary::before { content: '▾'; }
+  .archive-drawer > summary:hover { color: var(--text); }
+  .archive-note { color: var(--dim); font-size: 12px; margin: 2px 2px 10px; }
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
@@ -2432,12 +2443,18 @@ function agentCard(a) {
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
         ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
       <!-- lifecycle -->
-      ${a.state === 'RUNNING' ? `<button onclick="act('${a.id}','stop')">Stop</button>` : ''}
       ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
-      ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">Restore</button>` : ''}
+      <!-- Archive sits where Stop used to. On a fleet bounded by how many bots
+           Telegram lets you own, putting away an agent you're done with matters
+           more than pausing one, and Stop keeps the bot anyway. Stop moved to
+           the ⋯ menu. The SAME slot becomes Restore once archived, so the
+           button that put an agent away is the button that brings it back. -->
+      ${a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
+        ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
+      ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
       ${cardMenu(a)}
@@ -2448,8 +2465,11 @@ function agentCard(a) {
 /** The ⋯ overflow menu: observational and occasional actions, state-gated. */
 function cardMenu(a) {
   const items = [];
-  if (a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED') {
-    items.push(`<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}')" title="Keep the agent and its memory, give its Telegram bot back for another agent to use">📥 Archive</button>`);
+  // Stop lives here now — it pauses an agent while it keeps holding its bot,
+  // which is rarely what you want when bots are the scarce thing. Archive took
+  // its place on the card.
+  if (a.state === 'RUNNING') {
+    items.push(`<button onclick="act('${a.id}','stop')" title="Pause it. Keeps its Telegram bot — use Archive to hand that back.">Stop</button>`);
   }
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
@@ -3743,6 +3763,13 @@ async function saveGroup() {
   } catch (e) { $('groupErr').textContent = e.message; }
 }
 
+/** The fleet you're actually running, and the ones parked. */
+function liveAgents() { return agents.filter(a => a.state !== 'ARCHIVED'); }
+function archivedAgents() { return agents.filter(a => a.state === 'ARCHIVED'); }
+/** Survives re-renders (see the drawer's ontoggle), not reloads — a fresh page
+ *  should open with the archive shut. */
+let archiveOpen = false;
+
 function renderAgents() {
   const el = $('agents');
   // Show "Rebuild all" only when there's more than one agent to rebuild.
@@ -3762,8 +3789,10 @@ function renderAgents() {
 
   // Agents arrive already ordered (ungrouped first, then groups A→Z, each by the
   // owner's manual order). Insert a header when a named group begins.
+  // Archived ones come out of that flow entirely — they hold no bot and do no
+  // work, so mixing them into the sections you actually run just adds noise.
   let html = '', lastGroup = null;
-  for (const a of agents) {
+  for (const a of liveAgents()) {
     const g = a.group || '';
     if (g && g !== lastGroup) html += `<div class="group-header">
       <span class="grow">${esc(g)}</span>
@@ -3772,6 +3801,19 @@ function renderAgents() {
     </div>`;
     lastGroup = g;
     html += agentCard(a);
+  }
+  const parked = archivedAgents();
+  if (parked.length) {
+    // `open` is restored from the last render: this list re-renders on every
+    // poll, and a drawer that slammed shut every few seconds while you were
+    // reading it would be unusable.
+    html += `<details class="archive-drawer" id="archiveDrawer" ${archiveOpen ? 'open' : ''}
+        ontoggle="archiveOpen = this.open">
+      <summary>Archived · ${parked.length}</summary>
+      <div class="archive-note">Kept whole — memory, members, settings — but not running, and their
+        Telegram bots went back for other agents to use. Restore gives one a new bot.</div>
+      ${parked.map(agentCard).join('')}
+    </details>`;
   }
   el.innerHTML = html;
 
@@ -3800,10 +3842,10 @@ function renderToc() {
   document.body.classList.toggle('has-toc', enough);
   $('tocBtn').hidden = !enough;
   if (!enough) { nav.classList.remove('open'); return; }
-  $('tocCount').textContent = agents.length;
+  $('tocCount').textContent = liveAgents().length;
   // Mirror the main list's order and group headers exactly.
   let html = '', lastGroup = null;
-  for (const a of agents) {
+  for (const a of liveAgents()) {
     const g = a.group || '';
     if (g && g !== lastGroup) html += `<div class="toc-group">${esc(g)}</div>`;
     lastGroup = g;
@@ -3820,11 +3862,33 @@ function renderToc() {
       <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
       <span class="toc-name">${esc(a.name)}</span>${badge}</a>`;
   }
+  // One line for the whole archive rather than an entry each: they're parked,
+  // and a legend that lists them alongside running agents defeats the drawer.
+  const parked = archivedAgents().length;
+  if (parked) {
+    html += `<a class="toc-item" onclick="jumpToArchive()" title="Archived agents — kept, but holding no bot">
+      <span class="toc-dot" style="background:var(--dim)"></span>
+      <span class="toc-name">Archived · ${parked}</span></a>`;
+  }
   $('tocList').innerHTML = html;
+}
+
+/** Open the drawer and scroll to it — a closed <details> can't be scrolled to. */
+function jumpToArchive() {
+  archiveOpen = true;
+  const d = $('archiveDrawer');
+  if (!d) return;
+  d.open = true;
+  d.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (window.innerWidth < TOC_PIN_PX) $('toc').classList.remove('open');
 }
 function jumpToCard(id) {
   const card = document.getElementById('card-' + id);
   if (!card) return;
+  // A card inside a closed <details> has no layout, so scrollIntoView would
+  // land on nothing. Open the drawer first.
+  const drawer = card.closest('.archive-drawer');
+  if (drawer && !drawer.open) { drawer.open = true; archiveOpen = true; }
   card.scrollIntoView({ behavior: 'smooth', block: 'start' });
   // Restart the flash even if the same card is clicked twice.
   card.classList.remove('toc-flash'); void card.offsetWidth; card.classList.add('toc-flash');

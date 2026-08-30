@@ -2,6 +2,35 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.68.0] — 2026-08-30
+
+### Changed
+- **Archive replaced Stop on the agent card**, and Stop moved into the ⋯ menu.
+  On a fleet bounded by how many bots Telegram lets you own, putting away an
+  agent you're done with matters more than pausing one — and Stop keeps holding
+  the bot, which is rarely the point. The same slot becomes **Restore** once the
+  agent is archived, so the button that put an agent away is the one that brings
+  it back.
+- **Archived agents collapse into their own drawer** at the bottom of the fleet,
+  closed by default, instead of sitting inline among the agents you run. It
+  stays open across the list's polling re-render, and the jump legend carries a
+  single "Archived · n" line rather than an entry each. Jumping to an archived
+  agent opens the drawer first — a card inside a closed `<details>` has no
+  layout to scroll to.
+
+### Added
+- **CLI: `agentclaw archive <agent>` and `agentclaw unarchive <agent>`.**
+  Deliberately *not* `restore`: that verb already means "restore from a
+  downloaded .agentclaw file", and quietly redefining it would have shadowed the
+  older command.
+
+### Fixed
+- **A parked "paste a bot token" step no longer follows an agent into the
+  archive.** It would have left the archived card asking for a token for an
+  agent that isn't running, and kept the fleet's needs-attention count up
+  forever. A token stashed but never committed is discarded too, so a later
+  restore doesn't silently provision onto an identity we'd given up.
+
 ## [0.67.0] — 2026-08-30
 
 ### Added

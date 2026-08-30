@@ -131,6 +131,15 @@ describe('archiving frees the bot and keeps the agent', () => {
     expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(1);
   });
 
+  it('drops a parked "paste a bot token" step instead of taking it along', async () => {
+    // Otherwise the archived card asks for a token for an agent that isn't
+    // running, and the fleet's needs-attention count never comes down.
+    const { store, deps } = await world();
+    store.setAgentPendingAction('a1', { type: 'bot_token', instructions: 'x' } as any);
+    await archiveAgent(deps as any, 'a1');
+    expect(store.getAgent('a1')!.pendingAction).toBeFalsy();
+  });
+
   it('is idempotent — a second archive is not an error', async () => {
     const { store, deps } = await world();
     await archiveAgent(deps as any, 'a1');

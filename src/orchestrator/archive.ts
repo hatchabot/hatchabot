@@ -79,6 +79,14 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
     // Any outstanding invite points at a bot this agent no longer has. Let them
     // go rather than mint a membership with nowhere to talk.
     store.expireInvitesFor(agentId, 'agent-archived');
+    // A parked human step ("paste a bot token") is meaningless now and would
+    // otherwise follow the agent into the archive — the card would sit there
+    // asking for a token for an agent that isn't running, and the fleet's
+    // needs-attention count would never come down. Restore re-parks it if the
+    // pool is still dry. Same for a token stashed but never committed: we are
+    // giving up this identity, so don't quietly provision onto it later.
+    store.setAgentPendingAction(agentId, null);
+    channel.discardPending?.(agentId);
     store.setAgentState(agentId, 'ARCHIVED');
     log('agent.archived', { agentId, accountId: row?.accountId });
   });

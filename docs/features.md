@@ -305,7 +305,15 @@ has to pair again — Telegram user ids are global rather than per-bot, so the
 allowlist rebuilds itself.
 
 Archive from RUNNING, STOPPED, or FAILED — a broken agent still sits on a token
-somebody else could use.
+somebody else could use. Archived agents collapse into a closed **Archived**
+drawer at the bottom of the fleet, out of the sections you actually run, with a
+single line in the jump legend.
+
+On the card, **Archive** sits where Stop used to; Stop moved into the ⋯ menu,
+since pausing an agent keeps its bot and that is rarely the point. The same slot
+becomes **Restore** once archived. From the CLI: `agentclaw archive <agent>` and
+`agentclaw unarchive <agent>` — *not* `restore`, which already means "restore
+from a downloaded .agentclaw file".
 
 ## Bots census
 

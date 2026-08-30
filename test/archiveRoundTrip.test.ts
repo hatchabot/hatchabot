@@ -58,8 +58,9 @@ describe('one bot, two agents, taking turns', () => {
     // B can't have one — the pool is dry, so it parks on the human step
     // rather than failing.
     const blocked = await runProvisionSteps(deps as any, 'b');
-    expect(blocked.needs?.type ?? 'bot_token').toBe('bot_token');
+    expect(blocked.setupRequired?.instructions).toMatch(/BotFather/i);
     expect(store.getChannelForAgent('b')).toBeUndefined();
+    expect(store.getAgent('b')!.pendingAction?.type).toBe('bot_token');
 
     // Archive A: the bot goes back.
     await archiveAgent(deps as any, 'a');
@@ -74,7 +75,8 @@ describe('one bot, two agents, taking turns', () => {
     // Restoring A must NOT take the bot back from B — it waits for a free one.
     store.setAgentState('a', 'PROVISIONING');
     const restoreDry = await runProvisionSteps(deps as any, 'a');
-    expect(restoreDry.needs?.type ?? 'bot_token').toBe('bot_token');
+    expect(restoreDry.setupRequired?.instructions).toMatch(/BotFather/i);
+    expect(store.getChannelForAgent('a')).toBeUndefined();      // A got nothing
     expect(store.getChannelForAgent('b')!.accountId).toBe('onlybot'); // B keeps it
 
     // Stock a second bot and A comes back on that one, memory and members intact.

@@ -71,6 +71,12 @@ Commands:
                                is empty.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
+  archive <agent> [--yes]      Park an agent and hand its Telegram bot back for
+                               another agent to use. Keeps memory, members and
+                               settings; members are told in the chat.
+  unarchive <agent>            Bring an archived agent back (the web app calls
+                               this Restore). It gets a NEW bot — send members
+                               the new link.
   download <agent> [-o <file>] Download a complete private copy (.agentclaw) — for
                                your own keeping (contains its bot token, so treat
                                as a secret; the agent is left STOPPED)
@@ -1077,6 +1083,34 @@ async function main() {
       const name = rest.slice(1).join(' ').trim() || `${a.name} (copy)`;
       const res: any = await (await jsonPost(`/v1/agents/${a.id}/clone`, { name })).json();
       console.log(`cloned "${a.name}" → "${res.name}" (${res.state}) — connect its Telegram bot to finish.`);
+      return;
+    }
+    case 'archive': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw archive <agent> [--yes]'));
+      if (!flags.has('yes')) {
+        const ok = await askLine(
+          `Archive "${a.name}"? It keeps its memory and members, stops, and hands its\n` +
+            `Telegram bot back for another agent. Members are told in the chat, and on\n` +
+            `restore it gets a DIFFERENT bot — its current link stops working. [y/N] `,
+        );
+        if (!/^y(es)?$/i.test(ok.trim())) fail('nothing archived');
+      }
+      await jsonPost(`/v1/agents/${a.id}/archive`, {});
+      console.log(`"${a.name}" archived — its bot is back in the pool.`);
+      return;
+    }
+    // NOT `restore` — that verb already means "restore from a downloaded
+    // .agentclaw file" and has since before archiving existed. The web app can
+    // call its button Restore because context makes it unambiguous; a CLI verb
+    // cannot. `unarchive` pairs with `archive` and leaves the older command's
+    // meaning (and anyone's scripts) alone.
+    case 'unarchive': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw unarchive <agent>'));
+      await jsonPost(`/v1/agents/${a.id}/restore`, {});
+      console.log(
+        `restoring "${a.name}" — watch with: agentclaw list\n` +
+          `It comes back on a NEW bot; send members the new link (agentclaw invite).`,
+      );
       return;
     }
     case 'start':
