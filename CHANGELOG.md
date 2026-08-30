@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.68.1] — 2026-08-30
+
+### Changed
+- **Agent cards name the machine they run on**, e.g. `on dgx-spark` instead of
+  `on this machine`. The phrase was ambiguous the moment a second host existed,
+  and on a phone it reads as the phone. `GET /v1/hosts` now carries the local
+  host's live `hostname` alongside its stored label, so the card stays right if
+  the box is renamed — the label is written once at first boot and never
+  revisited. Runners are still named by their label.
+
 ## [0.68.0] — 2026-08-30
 
 ### Changed

@@ -2370,9 +2370,12 @@ function agentMeta(a) {
   if (a.model) bits.push(esc(a.model));
   // The bot IS the agent's identity — name it right after the model.
   if (a.botUsername) bits.push(`@${esc(a.botUsername)}`);
-  // Always name where it runs — "this machine" locally, the runner's name in
-  // Cluster mode — so cards read the same whether or not runners exist.
-  if (host) bits.push(`on ${host.kind === 'local' ? 'this machine' : esc(host.name)}`);
+  // Always name where it runs, and name it concretely: the box's own hostname
+  // locally, the runner's name in Cluster mode. "this machine" was ambiguous
+  // the moment a second host existed — and on a phone, "this machine" reads as
+  // the phone. The local host's stored NAME is a label ("This machine
+  // (dgx-spark)"); `hostname` is the machine, served live by GET /v1/hosts.
+  if (host) bits.push(`on ${esc(host.kind === 'local' ? (host.hostname || host.name) : host.name)}`);
   if (a.lastActiveAt) bits.push(`active ${ago(a.lastActiveAt)}`);
   if (a.modelWarm === false) bits.push('warming up');
   if (a.dataSummary) bits.push(esc(a.dataSummary));

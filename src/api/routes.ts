@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { hostname as osHostname } from 'node:os';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Store } from '../store/store.js';
@@ -672,6 +673,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return store.listHosts(ownerId).map((h) => ({
       ...h,
       agentCount: active.filter((a) => a.hostId === h.id).length,
+      // The local host's stored NAME is a label ("This machine (dgx-spark)");
+      // this is the machine itself. Agent cards want the bare hostname, and
+      // reading it live also keeps it right after a box is renamed — the
+      // stored label is written once at first boot and never revisited.
+      ...(h.kind === 'local' ? { hostname: osHostname() } : {}),
     }));
   });
 
