@@ -2,6 +2,7 @@ import type {
   ChannelProvisioner,
   ChannelProvisionRequest,
   ProvisionedChannel,
+  ReleaseOptions,
 } from './channel.js';
 import { TelegramPoolProvisioner, PoolExhaustedError } from './telegramPool.js';
 import type { TelegramManualProvisioner } from './telegramManual.js';
@@ -56,11 +57,11 @@ export class CompositeTelegramProvisioner implements ChannelProvisioner {
     if (this.pool.owns(accountId)) await this.pool.syncDisplayName(accountId, agentName);
   }
 
-  async release(accountId: string): Promise<void> {
+  async release(accountId: string, opts?: ReleaseOptions): Promise<void> {
     if (this.pool.owns(accountId)) {
-      await this.pool.release(accountId);
+      await this.pool.release(accountId, opts);
     } else {
-      await this.manual.release(accountId);
+      await this.manual.release(accountId, opts);
     }
   }
 }

@@ -138,6 +138,7 @@
   .chip.PROVISIONING::after, .chip.REBUILDING::after, .chip.WORKING::after { content: "…"; animation: pulse 1.2s infinite; }
   .chip.FAILED { color: var(--bad); border-color: var(--bad); }
   .chip.STOPPED, .chip.DELETING { color: var(--off); border-color: var(--off); }
+  .chip.ARCHIVED { color: var(--dim); border-color: var(--dim); }
   @keyframes pulse { 50% { opacity: 0.3; } }
   .reason { color: var(--bad); font-size: 13px; margin-top: 8px; }
   .persona { color: var(--dim); font-size: 13px; margin-top: 4px; overflow: hidden;
@@ -2397,6 +2398,7 @@ function agentCard(a) {
     ${a.pendingModel ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+    ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
     ${(a.dataSources ?? []).filter(d => d.syncError).map(d => `
       <div class="pair">
         <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
@@ -2435,6 +2437,7 @@ function agentCard(a) {
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
         ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
       ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
+      ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">Restore</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
       ${cardMenu(a)}
@@ -2445,6 +2448,9 @@ function agentCard(a) {
 /** The ⋯ overflow menu: observational and occasional actions, state-gated. */
 function cardMenu(a) {
   const items = [];
+  if (a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED') {
+    items.push(`<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}')" title="Keep the agent and its memory, give its Telegram bot back for another agent to use">📥 Archive</button>`);
+  }
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
     items.push(`<button onclick="openHealth('${a.id}', '${jsq(a.name)}')">❤️ Health</button>`);
@@ -3111,6 +3117,7 @@ function renderFleet() {
     ${stat(agents.length, 'agents')}
     ${stat(n('RUNNING'), 'running', 'var(--ok)')}
     ${n('STOPPED') ? stat(n('STOPPED'), 'stopped', 'var(--dim)') : ''}
+    ${n('ARCHIVED') ? stat(n('ARCHIVED'), 'archived', 'var(--dim)') : ''}
     ${n('FAILED') ? stat(n('FAILED'), 'failed', 'var(--bad)') : ''}
     ${working ? stat(working, 'working') : ''}
     ${attention.length ? stat(attention.length, 'need attention', 'var(--warn)') : ''}
@@ -3672,6 +3679,30 @@ function rebuildableAgents() {
     (a.state === 'RUNNING' || a.state === 'STOPPED'));
 }
 
+/**
+ * Archive / Restore. Bot tokens are capped per Telegram account, so this is how
+ * a fleet grows past the number of bots you can own: park the agent whole and
+ * hand the bot to someone else. The confirm text leads with the part that can't
+ * be undone quietly — the chat address changes.
+ */
+async function archiveAgent(id, name) {
+  if (!confirm(`Archive "${name}"?\n\nIt keeps everything — memory, settings, members — and stops. Its Telegram bot goes back in the pool for another agent to use, and members are told in the chat.\n\nWhen you restore it, it gets a DIFFERENT bot with a new link, which you'll need to send to members. Its current link stops working.`)) return;
+  try {
+    await api(`/v1/agents/${id}/archive`, { method: 'POST' });
+    toast(`"${name}" archived — its bot is back in the pool.`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+async function restoreAgent(id, name) {
+  if (!confirm(`Restore "${name}"?\n\nIt comes back with its memory intact, on a NEW Telegram bot — send members the new link from Invite once it's running. If no pool bot is free you'll be asked for a token from @BotFather.`)) return;
+  try {
+    await api(`/v1/agents/${id}/restore`, { method: 'POST' });
+    toast(`Restoring "${name}"…`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
 async function moveAgent(id, dir) {
   try {
     await api(`/v1/agents/${id}/move`, { method: 'POST', body: { dir } });
@@ -3759,7 +3790,7 @@ function renderAgents() {
 const TOC_PIN_PX = 1200;
 function tocDotColor(a) {
   if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') return 'var(--warn)';
-  return { RUNNING: 'var(--ok)', STOPPED: 'var(--dim)', FAILED: 'var(--bad)' }[a.state] || 'var(--off)';
+  return { RUNNING: 'var(--ok)', STOPPED: 'var(--dim)', ARCHIVED: 'var(--dim)', FAILED: 'var(--bad)' }[a.state] || 'var(--off)';
 }
 function renderToc() {
   const nav = $('toc');

@@ -283,6 +283,30 @@ their agents. That is a credential hand-off, not a metered proxy — share only
 with people you trust with the underlying key. Full detail:
 [ai-profiles.md](ai-profiles.md).
 
+## Archiving — more agents than bots
+
+Telegram caps an account at roughly 20 bots, and every agent holds one whether
+it is busy or idle. **Archive** (⋯ menu on the card) breaks that ceiling: the
+agent is kept whole — container, volume, memory, members, settings — and stops,
+but its bot goes back in the pool for another agent to lease. A pasted,
+hand-minted token is parked in the pool too; it burns the same BotFather slot,
+so it is just as worth recycling.
+
+The one thing archiving does not preserve is the **chat address**. Members are
+told so in the chat, by the old bot, before it is renamed:
+
+> — archived — This agent has been put away for now. Nothing was lost… If it is
+> brought back it will be on a NEW bot — ask whoever runs it for the new link.
+
+**Restore** leases a fresh bot and boots the agent with its memory intact. It is
+a re-provision rather than a start, because the identity has to be leased again;
+the new bot has a different `t.me` link, which you send from **Invite…**. Nobody
+has to pair again — Telegram user ids are global rather than per-bot, so the
+allowlist rebuilds itself.
+
+Archive from RUNNING, STOPPED, or FAILED — a broken agent still sits on a token
+somebody else could use.
+
 ## Bots census
 
 Telegram caps an account at about 20 bots and offers no API to list them, so

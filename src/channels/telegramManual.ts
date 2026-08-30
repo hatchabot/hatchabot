@@ -4,6 +4,7 @@ import type {
   ChannelProvisioner,
   ChannelProvisionRequest,
   ProvisionedChannel,
+  ReleaseOptions,
 } from './channel.js';
 
 const BOTFATHER_STEPS = `Open Telegram and message @BotFather:
@@ -72,9 +73,12 @@ export class TelegramManualProvisioner implements ChannelProvisioner {
     };
   }
 
-  async release(accountId: string): Promise<void> {
+  async release(accountId: string, _opts?: ReleaseOptions): Promise<void> {
     // The user owns this bot. We drop our copy of the token and leave the bot
-    // itself alone — deleting someone else's bot is not ours to do.
+    // itself alone — deleting someone else's bot is not ours to do. No goodbye
+    // is sent from here: without the token there is nothing to send it with,
+    // and callers who want one park the bot in the pool first (which is also
+    // what keeps the token reusable), so the pool's release does the talking.
     await this.secrets.delete(`telegram/bot/${accountId}`).catch(() => {});
   }
 }

@@ -46,14 +46,27 @@ export class ChannelSetupRequired extends Error {
   }
 }
 
+/** Why an identity is being given up, and on whose behalf. */
+export interface ReleaseOptions {
+  reason?: 'deleted' | 'archived';
+  agentId?: string;
+}
+
 export interface ChannelProvisioner {
   readonly kind: 'telegram';
 
   /** Mint or lease a messaging identity for this agent. Idempotent per agent. */
   provision(req: ChannelProvisionRequest): Promise<ProvisionedChannel>;
 
-  /** Release the identity. Called on rollback and on agent deletion. */
-  release(accountId: string): Promise<void>;
+  /**
+   * Release the identity. Called on rollback, on agent deletion, and on
+   * archive. `opts` shapes the goodbye the departing members get: what they're
+   * told differs sharply between "this agent is gone" and "this agent is
+   * parked and may return under a different bot", and `agentId` names whose
+   * members to tell when the row isn't leased (a pasted token parked in the
+   * pool moments earlier has no lease to look up).
+   */
+  release(accountId: string, opts?: ReleaseOptions): Promise<void>;
 
   /** Forget a submitted-but-refused identity for this agent, if the
    *  implementation holds one pending. */

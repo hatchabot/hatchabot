@@ -2,6 +2,30 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.67.0] — 2026-08-30
+
+### Added
+- **Archive an agent: keep everything, give the bot back.** Telegram caps an
+  account at roughly 20 bots and every agent holds one whether it is busy or
+  idle, so the bot — not disk, not CPU — is what limits how many agents you can
+  have. Archiving parks an agent whole (container, volume, memory, members,
+  settings) and returns its Telegram bot to the pool for another agent to lease.
+  A hand-pasted token is parked in the pool too, since it burns the same
+  BotFather slot. Available from the ⋯ menu on RUNNING, STOPPED or FAILED
+  agents — a broken agent still sits on a token somebody else could use.
+- **Members are told, in the chat, before the bot changes hands.** The old bot
+  sends "— archived —" while it still looks like the agent they knew, and the
+  wording is deliberately different from a deletion: nothing was lost, and the
+  agent will return on a NEW bot whose link somebody has to hand them. This
+  also fixed a gap on the delete path, where members of an agent with a *pasted*
+  bot got no goodbye at all — the token is parked in the pool a moment before
+  release, so there was no lease left to look up.
+- **Restore** leases a fresh bot and boots the agent with its memory intact. It
+  re-enters provisioning rather than simply starting, because the identity must
+  be leased again; if the pool is dry it parks on the usual paste-a-token step
+  instead of failing. Nobody has to pair again — Telegram user ids are global
+  rather than per-bot, so the allowlist rebuilds itself from the members.
+
 ## [0.66.0] — 2026-08-29
 
 ### Fixed

@@ -5,6 +5,7 @@ import type {
   ChannelProvisioner,
   ChannelProvisionRequest,
   ProvisionedChannel,
+  ReleaseOptions,
 } from './channel.js';
 
 /**
@@ -234,10 +235,16 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   /** What an unleased pool bot calls itself — never a departed agent's name. */
   static readonly IDLE_NAME = 'AgentClaw (unassigned)';
 
-  async release(accountId: string): Promise<void> {
+  async release(accountId: string, opts: ReleaseOptions = {}): Promise<void> {
     const row = this.db
       .prepare(`SELECT secret_ref, leased_to FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
       .get(accountId) as { secret_ref?: string; leased_to?: string } | undefined;
+
+    // Whose members to say goodbye to. Usually the lease, but a PASTED bot is
+    // parked in the pool just before release (delete and archive both do this,
+    // so the token stays reusable) and has no lease to read — the caller names
+    // the agent instead. Without this those members got no goodbye at all.
+    const departing = opts.agentId ?? row?.leased_to;
 
     // The bot goes back in the pool. We do NOT delete the token — the bot still
     // exists on Telegram's side and can serve the next agent.
@@ -249,16 +256,29 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // Say goodbye BEFORE renaming, while the bot still looks like the agent the
     // members knew. Telegram chats are per-user and a bot cannot clear history,
     // so the honest thing is to mark the end of the conversation: anything above
-    // belongs to an agent that no longer exists, and if this bot comes back as
+    // belongs to an agent that no longer has this bot, and if it comes back as
     // something else, that history is not its own.
-    if (row.leased_to) await this.#farewell(row.secret_ref, row.leased_to);
+    if (departing) await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
     // Then drop the old identity, so a bot sitting in the pool doesn't advertise
-    // a deleted agent (a free bot was still calling itself "Julio & Mich").
+    // a departed agent (a free bot was still calling itself "Julio & Mich").
     await this.#applyDisplayName(row.secret_ref, accountId, TelegramPoolProvisioner.IDLE_NAME);
   }
 
-  /** Final message to the departing agent's members. Best-effort by design. */
-  async #farewell(secretRef: string, agentId: string): Promise<void> {
+  /**
+   * Final message to the departing agent's members. Best-effort by design.
+   *
+   * The two endings are genuinely different and must not be blurred. A deleted
+   * agent is gone: nothing is coming back. An ARCHIVED one is intact — memory,
+   * settings, everything — and only gave up its bot; when it returns it will
+   * be on a DIFFERENT bot, because this one may be serving someone else by
+   * then. That last part is the bit people need told, since a new bot cannot
+   * message them first: somebody has to hand them the new link.
+   */
+  async #farewell(
+    secretRef: string,
+    agentId: string,
+    reason: 'deleted' | 'archived',
+  ): Promise<void> {
     try {
       const token = await this.secrets.get(secretRef);
       const ids = this.db
@@ -268,10 +288,17 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
         )
         .all(agentId) as Array<{ id: string }>;
       const text =
-        '— end of this agent —\n\n' +
-        'This agent has been removed, so it will not reply here any more. ' +
-        'This bot may be reassigned to a different agent later; if it starts ' +
-        'answering again, everything above belongs to the old one.';
+        reason === 'archived'
+          ? '— archived —\n\n' +
+            'This agent has been put away for now. Nothing was lost: it keeps ' +
+            'everything you taught it. It just gave up this bot so another ' +
+            'agent could use it, so it will not reply here any more. If it is ' +
+            'brought back it will be on a NEW bot — ask whoever runs it for the ' +
+            'new link. This bot may start answering as a different agent.'
+          : '— end of this agent —\n\n' +
+            'This agent has been removed, so it will not reply here any more. ' +
+            'This bot may be reassigned to a different agent later; if it starts ' +
+            'answering again, everything above belongs to the old one.';
       for (const { id } of ids) {
         if (!/^\d{1,32}$/.test(id)) continue;
         await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/sendMessage`, {

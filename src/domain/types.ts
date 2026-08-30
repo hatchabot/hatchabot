@@ -12,6 +12,7 @@ export type AgentState =
   | 'RUNNING'
   | 'REBUILDING'
   | 'STOPPED'
+  | 'ARCHIVED'
   | 'DELETING'
   | 'DELETED'
   | 'FAILED';

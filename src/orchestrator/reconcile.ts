@@ -59,6 +59,10 @@ export async function reconcileAgents(
     // An agent mid-provision/rebuild/import looks broken to docker by
     // definition. Judging it here is how a healthy import got marked FAILED.
     if (isBusy(agent.id)) continue;
+    // ARCHIVED is a deliberate resting state: stopped on purpose, no bot, and
+    // possibly no container at all if the box was pruned. Every rule below
+    // would read that as damage and "mend" it into FAILED or RUNNING.
+    if (agent.state === 'ARCHIVED') continue;
     try {
       const host = store.getHost(agent.hostId);
       const provider = host && providers.get(host.provider);

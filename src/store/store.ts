@@ -914,13 +914,15 @@ export class Store {
   }
 
   /** Burn every outstanding invite for an agent (used on delete). */
-  expireInvitesFor(agentId: string): void {
+  /** `by` records WHY the link died — delete and archive both kill invites,
+   *  and "agent-deleted" on an agent that is merely archived reads as a lie. */
+  expireInvitesFor(agentId: string, by = 'agent-deleted'): void {
     this.db
       .prepare(
-        `UPDATE invites SET redeemed_at = ?, redeemed_by = 'agent-deleted'
+        `UPDATE invites SET redeemed_at = ?, redeemed_by = ?
          WHERE agent_id = ? AND redeemed_at IS NULL`,
       )
-      .run(new Date().toISOString(), agentId);
+      .run(new Date().toISOString(), by, agentId);
   }
 
   listMemberships(agentId: string): Array<{

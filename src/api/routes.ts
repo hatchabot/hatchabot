@@ -24,6 +24,8 @@ import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
+import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
+import { canTransition } from '../domain/stateMachine.js';
 import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
@@ -3307,6 +3309,56 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     await providerFor(agent.hostId).start(agent.runtimeRef);
     return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
+  });
+
+  /**
+   * Archive: keep the agent, give the bot back. See orchestrator/archive.ts —
+   * bot tokens are the capped resource, so this is how a fleet outgrows the
+   * number of bots one Telegram account may own.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/archive', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
+    if (!canTransition(agent.state, 'ARCHIVED')) {
+      return reply.code(409).send({ error: `Cannot archive while ${agent.state.toLowerCase()}.` });
+    }
+    // Wait out an in-flight provision/rebuild: releasing the bot underneath one
+    // would leave the finishing container polling a token that is back in the
+    // pool and possibly already leased to somebody else.
+    const running = inflight.get(agent.id);
+    if (running) await running.catch(() => {});
+    try {
+      await archiveAgent(
+        { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id) },
+        agent.id,
+      );
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      if (err instanceof ArchiveError) return reply.code(409).send({ error: err.userMessage });
+      app.log.error({ agentId: agent.id, err: String(err) }, 'archive failed');
+      return reply.code(502).send({ error: "Couldn't archive the agent — try again in a moment." });
+    }
+    return publicAgent(store.getAgent(agent.id)!);
+  });
+
+  /**
+   * Restore: lease a bot again and boot. This is a re-provision, not a start —
+   * the agent has no messaging identity at all while archived, and the one it
+   * gets back will be a DIFFERENT bot with a different link.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/restore', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
+    if (agent.state !== 'ARCHIVED') {
+      return reply.code(409).send({ error: 'That agent is not archived.' });
+    }
+    store.setAgentState(agent.id, 'PROVISIONING');
+    kickProvision(agent.id);
+    return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
   });
 
   app.delete<{ Params: { id: string }; Querystring: { recycleBot?: string } }>('/v1/agents/:id', async (req, reply) => {
