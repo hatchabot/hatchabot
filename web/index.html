@@ -3709,7 +3709,7 @@ function rebuildableAgents() {
  * be undone quietly — the chat address changes.
  */
 async function archiveAgent(id, name) {
-  if (!confirm(`Archive "${name}"?\n\nIt keeps everything — memory, settings, members — and stops. Its Telegram bot goes back in the pool for another agent to use, and members are told in the chat.\n\nWhen you restore it, it gets a DIFFERENT bot with a new link, which you'll need to send to members. Its current link stops working.`)) return;
+  if (!confirm(`Archive "${name}"?\n\nIt keeps what it has learned, plus its settings and members, and stops. Its Telegram bot goes back in the pool for another agent to use, and members are told in the chat.\n\nWhen you restore it, it gets a DIFFERENT bot with a new link, which you'll need to send to members. Its current link stops working.`)) return;
   try {
     await api(`/v1/agents/${id}/archive`, { method: 'POST' });
     toast(`"${name}" archived — its bot is back in the pool.`);
@@ -3718,7 +3718,12 @@ async function archiveAgent(id, name) {
 }
 
 async function restoreAgent(id, name) {
-  if (!confirm(`Restore "${name}"?\n\nIt comes back with its memory intact, on a NEW Telegram bot — send members the new link from Invite once it's running. If no pool bot is free you'll be asked for a token from @BotFather.`)) return;
+  // Deliberately says "what it has learned" rather than "its memory": the
+  // files it wrote are kept, but OpenClaw starts a fresh Telegram thread when
+  // the agent's skills changed since you last talked to it (true of Rebuild
+  // too). Promising "memory intact" and then losing the conversation is worse
+  // than saying which is which.
+  if (!confirm(`Restore "${name}"?\n\nIt keeps everything it has learned, and comes back on a NEW Telegram bot — send members the new link from Invite once it's running. If no pool bot is free you'll be asked for a token from @BotFather.\n\nThe chat thread itself may start fresh if the agent gained or lost a skill while it was away.`)) return;
   try {
     await api(`/v1/agents/${id}/restore`, { method: 'POST' });
     toast(`Restoring "${name}"…`);

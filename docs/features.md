@@ -298,11 +298,19 @@ told so in the chat, by the old bot, before it is renamed:
 > — archived — This agent has been put away for now. Nothing was lost… If it is
 > brought back it will be on a NEW bot — ask whoever runs it for the new link.
 
-**Restore** leases a fresh bot and boots the agent with its memory intact. It is
+**Restore** leases a fresh bot and boots the agent with everything it has
+learned — SOUL/AGENTS/MEMORY and the rest of its workspace — intact. It is
 a re-provision rather than a start, because the identity has to be leased again;
 the new bot has a different `t.me` link, which you send from **Invite…**. Nobody
 has to pair again — Telegram user ids are global rather than per-bot, so the
 allowlist rebuilds itself.
+
+One caveat that is **not** specific to archiving: OpenClaw starts a fresh
+conversation thread whenever an agent's skill set differs from the one the
+current thread began with, so a restore (like a rebuild) can leave the agent
+without the recent chat history even though its files are untouched. The old
+transcript is not deleted — it is kept beside the new one as
+`<session>.jsonl.reset.<timestamp>` in the agent's session store.
 
 Archive from RUNNING, STOPPED, or FAILED — a broken agent still sits on a token
 somebody else could use. Archived agents collapse into a closed **Archived**

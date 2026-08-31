@@ -29,6 +29,8 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       fetchImpl?: typeof fetch;
       /** Rename outcomes go here — see #applyDisplayName for why. */
       log?: (event: string, detail: Record<string, unknown>) => void;
+      /** Retry waits for renames; tests pass zeros. */
+      renameBackoffMs?: readonly number[];
     } = {},
   ) {
     this.db.exec(`
@@ -45,6 +47,15 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // AgentClaw user; NULL = a "house bot" the admin explicitly shares.
     try {
       this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN owner_id TEXT`);
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err))) throw err;
+    }
+    // A rename that failed leaves the bot wearing the WRONG name — the last
+    // agent's, or "unassigned" — and nothing used to remember that it should
+    // have changed, so it stayed wrong until the next rebuild. Parking the
+    // name we wanted turns that into something a timer can finish.
+    try {
+      this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN desired_name TEXT`);
     } catch (err) {
       if (!/duplicate column/i.test(String(err))) throw err;
     }
@@ -176,13 +187,41 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * cosmetic and must not cost anyone their agent.
    */
   async #applyDisplayName(secretRef: string, username: string, name: string): Promise<void> {
+    let res: { ok: boolean; error?: string };
     try {
       const token = await this.secrets.get(secretRef);
-      const res = await setTelegramDisplayName(token, name, this.opts.fetchImpl ?? fetch);
-      this.opts.log?.('channel.named', { username, name, ...res });
+      res = await setTelegramDisplayName(token, name, this.opts.fetchImpl ?? fetch, this.opts.renameBackoffMs);
     } catch (err) {
-      this.opts.log?.('channel.named', { username, name, ok: false, error: String(err) });
+      res = { ok: false, error: String(err) };
     }
+    this.opts.log?.('channel.named', { username, name, ...res });
+    // Park it on failure so retryPendingNames() can finish the job later;
+    // clear it on success so the timer has nothing to do.
+    this.db
+      .prepare(`UPDATE telegram_pool SET desired_name = ? WHERE username = ? COLLATE NOCASE`)
+      .run(res.ok ? null : name, username);
+  }
+
+  /**
+   * Finish renames that didn't land. Cheap by construction: only rows that
+   * failed carry a desired_name, so a healthy pool does no work and makes no
+   * Telegram calls. Called on a timer — the failure this exists for was a
+   * transport error during provisioning, which the in-call retries can lose
+   * if the whole window is bad.
+   */
+  async retryPendingNames(): Promise<number> {
+    const rows = this.db
+      .prepare(`SELECT username, secret_ref, desired_name FROM telegram_pool WHERE desired_name IS NOT NULL`)
+      .all() as Array<{ username: string; secret_ref: string; desired_name: string }>;
+    let fixed = 0;
+    for (const r of rows) {
+      await this.#applyDisplayName(r.secret_ref, r.username, r.desired_name);
+      const still = this.db
+        .prepare(`SELECT desired_name FROM telegram_pool WHERE username = ?`)
+        .get(r.username) as { desired_name: string | null } | undefined;
+      if (!still?.desired_name) fixed++;
+    }
+    return fixed;
   }
 
   /**

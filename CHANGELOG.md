@@ -2,6 +2,32 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.69.0] — 2026-08-30
+
+### Fixed
+- **A bot rename that never reached Telegram is now retried, and remembered if
+  it still fails.** Restoring an archived agent left its bot named "AgentClaw
+  (unassigned)": the logging added in 0.66.0 showed `setMyName` failing with a
+  bare `TypeError: fetch failed` — a transport error, 49 seconds after the same
+  call had succeeded — while the box was churning docker networking mid-restore.
+  Only rate limits were retried, so a network failure got exactly one attempt
+  and the wrong name stuck until the next rebuild. Now: transport failures are
+  retried with backoff (a refusal from Telegram still isn't — that's an answer,
+  not a network problem), the error carries `.cause` instead of an unhelpful
+  "fetch failed", and a rename that still doesn't land is parked on the pool row
+  and finished by a background sweep. The sweep costs nothing on a healthy pool,
+  since only a failed rename leaves anything to do.
+
+### Changed
+- **Archive/Restore no longer promise "memory intact".** They keep everything
+  the agent has *learned* — its workspace files are untouched — but OpenClaw
+  begins a fresh conversation thread whenever an agent's skill set differs from
+  the one the current thread started with, so a restore can arrive without the
+  recent chat history. This is not specific to archiving (a rebuild does the
+  same, and did so here on 2026-08-29, eleven seconds after `runtime.rebuilt`),
+  but the wording implied otherwise. The old transcript is kept beside the new
+  one as `<session>.jsonl.reset.<timestamp>`.
+
 ## [0.68.1] — 2026-08-30
 
 ### Changed

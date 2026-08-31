@@ -220,7 +220,7 @@ describe('setTelegramDisplayName', () => {
             { headers: { 'content-type': 'application/json' } })
         : new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
     }) as unknown as typeof fetch;
-    expect(await setTelegramDisplayName('tok', 'New', limiter)).toEqual({ ok: true });
+    expect(await setTelegramDisplayName('tok', 'New', limiter, [0, 0])).toEqual({ ok: true });
     expect(n).toBe(2);
   });
 
@@ -327,5 +327,67 @@ describe('a mislabelled bot heals on rebuild', () => {
     calls.length = 0;
     await composite.syncDisplayName('someusersbot', 'Right Name');
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('a rename that never reached Telegram is retried, then remembered', () => {
+  /** Fails the first `failures` calls at the TRANSPORT layer, then succeeds. */
+  const flaky = (failures: number) => {
+    const state = { calls: 0 };
+    const fetchImpl = (async () => {
+      state.calls++;
+      if (state.calls <= failures) {
+        // Exactly how undici surfaces a connection failure: the reason is on
+        // .cause, not the message.
+        throw Object.assign(new TypeError('fetch failed'), { cause: new Error('ECONNREFUSED') });
+      }
+      return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    return { state, fetchImpl };
+  };
+
+  it('retries a transport failure and succeeds on a later attempt', async () => {
+    const { state, fetchImpl } = flaky(2);
+    expect(await setTelegramDisplayName('tok', 'Art Advisor', fetchImpl, [0, 0])).toEqual({ ok: true });
+    expect(state.calls).toBe(3);
+  });
+
+  it('reports the CAUSE, not a bare "fetch failed"', async () => {
+    const { fetchImpl } = flaky(99);
+    const res = await setTelegramDisplayName('tok', 'Art Advisor', fetchImpl, [0, 0]);
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain('ECONNREFUSED'); // the live log said only "fetch failed"
+  });
+
+  it('does not retry a REFUSAL — that is Telegram answering, not the network', async () => {
+    let calls = 0;
+    const refuses = (async () => {
+      calls++;
+      return new Response('{"ok":false,"description":"BOT_NAME_INVALID"}', {
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    expect((await setTelegramDisplayName('tok', 'x', refuses)).ok).toBe(false);
+    expect(calls).toBe(1);
+  });
+
+  it('parks a failed rename and finishes it on the next sweep', async () => {
+    // The live failure: the bot stayed "AgentClaw (unassigned)" after a restore
+    // and nothing remembered it should have changed.
+    const { state, fetchImpl } = flaky(3); // outlasts the in-call retries
+    const db = new Database(':memory:');
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl, renameBackoffMs: [0, 0] });
+    await pool.addToPool('bot', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
+
+    // Rename lost, but not forgotten.
+    const parked = db.prepare(`SELECT desired_name FROM telegram_pool WHERE username='bot'`).get() as any;
+    expect(parked.desired_name).toBe('Art Advisor');
+
+    state.calls = 99; // network is back
+    expect(await pool.retryPendingNames()).toBe(1);
+    const after = db.prepare(`SELECT desired_name FROM telegram_pool WHERE username='bot'`).get() as any;
+    expect(after.desired_name).toBeNull(); // nothing left to do
+    expect(await pool.retryPendingNames()).toBe(0); // and a healthy pool is free
   });
 });

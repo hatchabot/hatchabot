@@ -182,6 +182,19 @@ if (bindHost !== '127.0.0.1' && !tls) {
 // stay green until someone notices.
 startReconcileLoop(store, providers, (e, d) => app.log.info(d, e));
 
+// Finish any bot rename that didn't land. Renaming happens at the worst moment
+// for network calls — mid-provision, while the box is churning docker — and a
+// failure used to leave the bot advertising the wrong agent (or "unassigned")
+// until someone rebuilt it. Nothing to do unless a rename actually failed, so
+// this is free on a healthy pool.
+const nameRepair = setInterval(() => {
+  void pool
+    .retryPendingNames()
+    .then((n) => { if (n) app.log.info({ fixed: n }, 'channel.names_repaired'); })
+    .catch((err) => app.log.warn({ err: String(err) }, 'channel.name_repair_failed'));
+}, Number(process.env.AGENTCLAW_NAME_REPAIR_MS ?? 120_000));
+nameRepair.unref();
+
 await app.listen({ port: PORT, host: bindHost });
 app.log.info(
   {

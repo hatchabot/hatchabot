@@ -19,12 +19,16 @@ export type RenameResult = {
   error?: string;
   /** Seconds Telegram asked us to wait, when it rate-limited the change. */
   retryAfter?: number;
+  /** The request never reached Telegram — worth retrying, unlike a refusal. */
+  transport?: boolean;
 };
 
 export async function setTelegramDisplayName(
   token: string,
   name: string,
   fetchImpl: typeof fetch = fetch,
+  /** Waits between retries. Injectable so tests don't sleep for real. */
+  backoffMs: readonly number[] = [1000, 3000],
 ): Promise<RenameResult> {
   const trimmed = name.trim();
   if (!trimmed) return { ok: false, error: 'empty name' };
@@ -50,17 +54,28 @@ export async function setTelegramDisplayName(
         retryAfter: body.parameters?.retry_after,
       };
     } catch (err) {
-      return { ok: false, error: String(err) };
+      // `fetch failed` on its own names nothing — the reason (DNS, refused,
+      // connect timeout) is on .cause, and dropping it is why a live failure
+      // took a second round of diagnosis.
+      const cause = (err as { cause?: unknown } | undefined)?.cause;
+      return { ok: false, error: cause ? `${String(err)} (${String(cause)})` : String(err), transport: true };
     }
   };
 
-  const first = await attempt();
-  // One retry, and only for a limit short enough to wait out inline. Telegram
-  // rate-limits name changes, and a lease that renames a bot moments after the
-  // release that renamed it is exactly the case that trips it.
-  if (!first.ok && first.retryAfter !== undefined && first.retryAfter <= 10) {
-    await new Promise((r) => setTimeout(r, (first.retryAfter! + 1) * 1000));
-    return attempt();
+  // Transport failures are retried; a REFUSAL from Telegram is not (except a
+  // short rate limit). The live case that forced this: a bot renamed during
+  // provisioning failed with a bare `TypeError: fetch failed` and stayed named
+  // "AgentClaw (unassigned)", while the same call 49 seconds earlier had
+  // succeeded — the box was churning docker networking at that moment. One
+  // attempt was never going to be enough on a machine that is also starting
+  // containers.
+  let last = await attempt();
+  for (const wait of backoffMs) {
+    if (last.ok) return last;
+    const shortLimit = last.retryAfter !== undefined && last.retryAfter <= 10;
+    if (!last.transport && !shortLimit) return last; // a real refusal — stop asking
+    await new Promise((r) => setTimeout(r, shortLimit ? (last.retryAfter! + 1) * 1000 : wait));
+    last = await attempt();
   }
-  return first;
+  return last;
 }
