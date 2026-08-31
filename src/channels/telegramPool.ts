@@ -75,6 +75,14 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     } catch (err) {
       if (!/duplicate column/i.test(String(err))) throw err;
     }
+    // When a rename actually landed. A rename can be pending for hours, so the
+    // moment it succeeds is worth reporting — otherwise the only signal is a
+    // warning quietly disappearing, which reads like it was never real.
+    try {
+      this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN renamed_at TEXT`);
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err))) throw err;
+    }
   }
 
   /**
@@ -106,6 +114,14 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .get(accountId) as { desired_name: string | null; rename_after: string | null } | undefined;
     if (!row?.desired_name) return undefined;
     return { name: row.desired_name, ...(row.rename_after ? { retryAt: row.rename_after } : {}) };
+  }
+
+  /** The most recent rename that Telegram actually accepted, if any. */
+  lastRenamed(accountId: string): { name: string; at: string } | undefined {
+    const row = this.db
+      .prepare(`SELECT renamed_at FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+      .get(accountId) as { renamed_at: string | null } | undefined;
+    return row?.renamed_at ? { name: accountId, at: row.renamed_at } : undefined;
   }
 
   /** True when this username came from the pool (vs a user-supplied bot).
@@ -258,6 +274,9 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     this.opts.log?.('channel.named', { username, name, ...res });
     if (res.ok) {
       this.#clearParked(username);
+      this.db
+        .prepare(`UPDATE telegram_pool SET renamed_at = ? WHERE username = ? COLLATE NOCASE`)
+        .run(new Date().toISOString(), username);
       return;
     }
     // Keep the name parked, and respect the deadline Telegram gave us. Without

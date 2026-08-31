@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.71.0] — 2026-08-31
+
+### Added
+- **"Sync name" on the agent's ⋯ menu.** Points the Telegram bot's display name
+  at the agent's current name on demand. The automatic paths only cover pool
+  bots; a bot you minted or adopted yourself is never renamed unasked, because
+  someone else's bot isn't ours to touch — asking is what makes it fine. It
+  answers honestly when Telegram refuses, with the time you may retry, rather
+  than appearing to work.
+- **The card reports the rename, both halves.** While it's pending: what the bot
+  will be called and how long the wait is ("in about 3 hours"), plus the note
+  that Telegram limits renames and nothing else is affected. When it lands: a
+  confirmation for half an hour, then it ages out. A wait that runs for hours
+  shouldn't end with a warning silently vanishing — that reads as though it was
+  never real.
+
 ## [0.70.1] — 2026-08-31
 
 ### Added

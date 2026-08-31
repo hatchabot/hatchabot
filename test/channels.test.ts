@@ -408,3 +408,47 @@ describe('a rename that never reached Telegram is retried, then remembered', () 
     expect(await pool.retryPendingNames()).toBe(0); // and a healthy pool is free
   });
 });
+
+describe('an on-demand rename answers honestly', () => {
+  it('reports the deadline rather than silently doing nothing', async () => {
+    // A button that appears to work while Telegram refuses is worse than no
+    // button. The quota runs to hours, so "try again later" needs a time on it.
+    let calls = 0;
+    const limited = (async (url: any) => {
+      calls++;
+      if (String(url).includes('/getMe')) {
+        return new Response('{"ok":true,"result":{"first_name":"AgentClaw (unassigned)"}}',
+          { headers: { 'content-type': 'application/json' } });
+      }
+      return new Response('{"ok":false,"description":"Too Many Requests","parameters":{"retry_after":11942}}',
+        { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const db = new Database(':memory:');
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl: limited, renameBackoffMs: [0, 0] });
+    await pool.addToPool('bot', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
+
+    const pending = pool.pendingName('bot');
+    expect(pending!.name).toBe('Art Advisor');
+    // The deadline is Telegram's own number, not a constant of ours.
+    const waitMs = Date.parse(pending!.retryAt!) - Date.now();
+    expect(waitMs).toBeGreaterThan(11_000 * 1000);
+    expect(waitMs).toBeLessThan(12_500 * 1000);
+  });
+
+  it('spends nothing when the bot already has the right name', async () => {
+    const calls: string[] = [];
+    const fetchImpl = (async (url: any) => {
+      calls.push(String(url).split('/').pop()!);
+      return new Response('{"ok":true,"result":{"first_name":"Art Advisor"}}',
+        { headers: { 'content-type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl });
+    await pool.addToPool('bot', 'tok');
+    await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
+    // getMe only — the rename quota is untouched, which is the whole point of
+    // checking first.
+    expect(calls).toEqual(['getMe']);
+    expect(pool.pendingName('bot')).toBeUndefined();
+  });
+});

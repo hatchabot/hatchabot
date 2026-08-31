@@ -1479,6 +1479,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           /** Set while Telegram is refusing a rename (its quota is hours long),
            *  so the card can explain a chat header that doesn't match. */
           botNamePending: chan ? deps.channel.pool.pendingName?.(chan.accountId) : undefined,
+          /** When a rename last LANDED — so a wait that ran for hours ends with
+           *  a confirmation rather than a warning silently vanishing. */
+          botNamedAt: chan ? deps.channel.pool.lastRenamed?.(chan.accountId)?.at : undefined,
           // Default model from the agent's AI profile. Applied config can lag
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.
@@ -3325,6 +3328,49 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * bot tokens are the capped resource, so this is how a fleet outgrows the
    * number of bots one Telegram account may own.
    */
+  /**
+   * Point this agent's bot at the agent's current name, on demand.
+   *
+   * The automatic paths cover pool bots (renamed on lease, re-applied on
+   * rebuild, retried by the sweep). Nothing covers a bot the OWNER minted or
+   * adopted — deliberately, since renaming someone's own bot unasked is not
+   * ours to do. Asking is exactly what makes it fine, which is what this is.
+   * It also answers honestly when Telegram refuses: its rename quota is hours
+   * long, and "nothing happened" is a bad answer to a button press.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/bot-name/sync', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const chan = store.getChannelForAgent(agent.id);
+    if (!chan || chan.kind !== 'telegram') {
+      return reply.code(409).send({ error: 'This agent has no Telegram bot yet.' });
+    }
+    const pooled = deps.channel.pool.owns(chan.accountId);
+    if (pooled) {
+      await deps.channel.syncDisplayName?.(chan.accountId, agent.name);
+      const pending = deps.channel.pool.pendingName?.(chan.accountId);
+      // Still parked = Telegram refused; the sweep will finish it.
+      return pending
+        ? { ok: false, name: pending.name, retryAt: pending.retryAt }
+        : { ok: true, name: agent.name };
+    }
+    // The owner's own bot: rename it directly, since nothing else ever will.
+    try {
+      const res = await setTelegramDisplayName(await secrets.get(chan.secretRef), agent.name);
+      trace(agent.id)('channel.renamed', { name: agent.name, ...res, manual: true });
+      return res.ok
+        ? { ok: true, name: agent.name }
+        : {
+            ok: false,
+            name: agent.name,
+            error: res.error,
+            ...(res.retryAfter ? { retryAt: new Date(Date.now() + res.retryAfter * 1000).toISOString() } : {}),
+          };
+    } catch (err) {
+      return reply.code(502).send({ error: `Couldn't reach Telegram: ${String(err)}` });
+    }
+  });
+
   app.post<{ Params: { id: string } }>('/v1/agents/:id/archive', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });

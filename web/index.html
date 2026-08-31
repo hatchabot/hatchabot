@@ -2363,6 +2363,37 @@ function memberCard(a) {
 // The card's status line: one row, always the same order, only the facts that
 // are true — so cards line up instead of each showing a different ragged subset.
 // Debug detail (container name, OpenClaw version) moves to the hover tooltip.
+/**
+ * The Telegram bot's display name, when it isn't simply correct.
+ *
+ * Two states worth showing. PENDING: Telegram is refusing the rename — its
+ * quota runs to hours — so say what the bot will be called and how long the
+ * wait is, since "wrong name, no explanation" is what sent someone looking for
+ * a bug. LANDED: a wait that lasted hours deserves a confirmation; a warning
+ * that merely disappears reads like it was never real. The confirmation ages
+ * out on its own.
+ */
+function botNameNote(a) {
+  if (a.botNamePending) {
+    const at = a.botNamePending.retryAt ? Date.parse(a.botNamePending.retryAt) : 0;
+    const mins = at ? Math.round((at - Date.now()) / 60000) : 0;
+    const when = mins > 90 ? `in about ${Math.round(mins / 60)} hours`
+      : mins > 1 ? `in about ${mins} minutes`
+      : 'shortly';
+    const clock = at > Date.now()
+      ? ` (around ${new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+      : '';
+    return `<div class="pair">🏷 <span class="grow">Telegram still shows this bot under its old name.
+      It becomes <b>${esc(a.botNamePending.name)}</b> ${when}${clock} — Telegram limits how often a bot
+      may be renamed. Nothing else about the agent is affected.</span></div>`;
+  }
+  // Recent success only: after this it's just the bot's name, not news.
+  if (a.botNamedAt && Date.now() - Date.parse(a.botNamedAt) < 30 * 60000) {
+    return `<div class="pair">✅ <span class="grow">Telegram bot renamed to <b>${esc(a.name)}</b> ${ago(a.botNamedAt)}.</span></div>`;
+  }
+  return '';
+}
+
 function agentMeta(a) {
   if (!a.runtimeRef) return '';
   const host = hosts.find(h => h.id === a.hostId);
@@ -2412,7 +2443,7 @@ function agentCard(a) {
     ${a.pendingModel ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
-    ${a.botNamePending ? `<div class="pair">🏷 <span class="grow">Telegram still shows this bot under its old name — it will change to <b>${esc(a.botNamePending.name)}</b> ${a.botNamePending.retryAt && Date.parse(a.botNamePending.retryAt) > Date.now() ? `around ${new Date(a.botNamePending.retryAt).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : 'shortly'}. Telegram limits how often a bot may be renamed; nothing else is affected.</span></div>` : ''}
+    ${botNameNote(a)}
     ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
     ${(a.dataSources ?? []).filter(d => d.syncError).map(d => `
       <div class="pair">
@@ -2481,6 +2512,9 @@ function cardMenu(a) {
   }
   if (a.state === 'RUNNING' || a.runtimeRef) {
     items.push(`<button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>`);
+  }
+  if (a.botUsername) {
+    items.push(`<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" title="Point the Telegram bot's display name at this agent's name">🏷 Sync name</button>`);
   }
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
@@ -3728,6 +3762,25 @@ async function restoreAgent(id, name) {
   try {
     await api(`/v1/agents/${id}/restore`, { method: 'POST' });
     toast(`Restoring "${name}"…`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+/**
+ * Ask Telegram to rename this agent's bot. Mostly for a bot you minted or
+ * adopted yourself — those are never renamed automatically, since someone
+ * else's bot isn't ours to touch unasked. Reports refusals plainly: Telegram's
+ * rename quota runs to hours, and a button that silently does nothing is worse
+ * than one that says why.
+ */
+async function syncBotName(id, name) {
+  try {
+    const r = await api(`/v1/agents/${id}/bot-name/sync`, { method: 'POST' });
+    if (r.ok) toast(`Telegram bot renamed to “${r.name}”.`);
+    else if (r.retryAt) {
+      const when = new Date(r.retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      toast(`Telegram won't accept another rename for this bot until ${when} — it's queued and will apply then.`);
+    } else toast(`Telegram refused the rename: ${r.error || 'unknown reason'}`);
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
