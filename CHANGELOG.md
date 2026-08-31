@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.70.1] — 2026-08-31
+
+### Added
+- **The pool prefers a bot it can still rename.** Telegram's `setMyName` quota
+  is per bot and measured in hours, so a bot renamed minutes ago cannot take a
+  new agent's name — and a bot serving "Tax Advisor" while Telegram still calls
+  it "Condo Adviser" is more confusing than a neutral one. Lease selection now
+  sorts rate-limited bots last. When every free bot is limited this changes
+  nothing; there is simply no better pick.
+- **The card explains a stale bot name** instead of leaving you to wonder. While
+  a rename is parked, the agent shows what the bot will be called and roughly
+  when, with the note that Telegram limits renames and nothing else is affected.
+
 ## [0.70.0] — 2026-08-31
 
 ### Fixed

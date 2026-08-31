@@ -1476,6 +1476,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           /** Pool-leased bots auto-recycle on delete; pasted ones are offered
            *  a trip INTO the pool — the app needs to know which is which. */
           botPooled: chan ? deps.channel.pool.owns(chan.accountId) : undefined,
+          /** Set while Telegram is refusing a rename (its quota is hours long),
+           *  so the card can explain a chat header that doesn't match. */
+          botNamePending: chan ? deps.channel.pool.pendingName?.(chan.accountId) : undefined,
           // Default model from the agent's AI profile. Applied config can lag
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.

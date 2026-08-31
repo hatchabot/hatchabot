@@ -94,6 +94,20 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .run(username, secretRef, ownerId ?? null);
   }
 
+  /**
+   * A rename Telegram has not accepted yet, if any — the name the bot SHOULD
+   * carry and when we may next try. Telegram's setMyName quota is measured in
+   * hours, so this window is long enough that the owner deserves to be told
+   * rather than left wondering why the chat header is wrong.
+   */
+  pendingName(accountId: string): { name: string; retryAt?: string } | undefined {
+    const row = this.db
+      .prepare(`SELECT desired_name, rename_after FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+      .get(accountId) as { desired_name: string | null; rename_after: string | null } | undefined;
+    if (!row?.desired_name) return undefined;
+    return { name: row.desired_name, ...(row.rename_after ? { retryAt: row.rename_after } : {}) };
+  }
+
   /** True when this username came from the pool (vs a user-supplied bot).
    *  Case-insensitive: Telegram @handles are, and an adopt-sourced accountId
    *  differing only in case must not create a second row for the same bot
@@ -158,13 +172,21 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // bots (owner_id NULL). Another person's token is never touched — its
     // minter can revoke it at BotFather any time, and only they should hold
     // that risk. Own bots first, so house stock is preserved for newcomers.
+    // Prefer a bot we can still RENAME. Telegram's setMyName quota is per bot
+    // and measured in hours, so a bot that was just renamed cannot take the new
+    // agent's name — and a bot serving "Tax Advisor" while Telegram still calls
+    // it "Condo Adviser" is worse than a bot with a plain name. When every free
+    // bot is rate-limited this changes nothing; there is simply no better pick.
     const free = this.db
       .prepare(
         `SELECT username, secret_ref FROM telegram_pool
          WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)
-         ORDER BY (owner_id IS NULL) ASC, username LIMIT 1`,
+         ORDER BY (rename_after IS NOT NULL AND rename_after > ?) ASC,
+                  (owner_id IS NULL) ASC, username LIMIT 1`,
       )
-      .get(req.ownerId ?? '') as { username: string; secret_ref: string } | undefined;
+      .get(req.ownerId ?? '', new Date().toISOString()) as
+      | { username: string; secret_ref: string }
+      | undefined;
     if (!free) {
       throw new PoolExhaustedError();
     }
