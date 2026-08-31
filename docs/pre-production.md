@@ -131,34 +131,45 @@ per-member, make it a visible per-agent setting, and — if per-member — route
 sender to their own session key. Until then the sharing should at minimum be
 stated where members are invited, since today nothing tells them.
 
-## 9. Agent conversations reset every night, and nothing checkpoints them
+## 9. Session resets are unexplained, and nothing checkpoints a conversation
 
-*Found 2026-08-30. The actual cause of the "archive lost its memory" report.*
+*Opened 2026-08-30 with a wrong explanation; corrected 2026-08-31.*
 
-With no `session` key in `openclaw.json` — which is what AgentClaw provisions —
-OpenClaw's reset policy resolves to **`mode: "daily"`, `atHour: 4`**
-(`dist/reset-*.js`). A session is stale if it *started* before the most recent
-4am boundary in the container's timezone, which is UTC. So every conversation
-ends at 4am UTC and the next message begins a fresh thread.
+**Retracted:** an earlier version of this entry claimed OpenClaw resets every
+conversation at 4am UTC. That is false. The default policy resolves to
+`mode: "daily", atHour: 4`, but it is plainly not enforced: 19 of 35 live
+sessions on this box have kept talking across 4am boundaries, 14 of them hold a
+gap longer than 24 hours between consecutive messages, and one holds a gap of
+**570 hours**. No idle threshold is enforced either, for the same reason. The
+"9/9 resets fit the daily rule" test that produced the wrong claim was nearly
+vacuous — any reset of a day-old session satisfies it.
 
-Both resets on Art Advisor fit exactly: a session started Aug 24 22:34Z was
-reset on the first message after the Aug 28 04:00Z boundary; its successor,
-started Aug 29 02:47Z, was reset on the first message after Aug 30 04:00Z —
-which happened to be 21 seconds after an archive/restore, and looked like the
-restore's doing. It was not. Archive never deletes a transcript; the old one is
-kept beside the new one as `<session>.jsonl.reset.<iso>`.
+**What is actually established:**
 
-Nothing moves a conversation anywhere durable before that happens. `MEMORY.md`
-is only written if the agent chooses to write it, and on Art Advisor it was
-still the 166-byte stub, so four days of conversation existed solely in threads
-that the daily rollover ended.
+- Resets are *command-driven*, not time-driven. The trigger is
+  `RESET_COMMAND_RE = /^\/(new|reset)(?:\s+([\s\S]*))?$/i` on an inbound
+  message, or the `sessions.reset` gateway RPC. There is no timer.
+- Only 9 resets exist across this installation's whole history.
+- 7 of the 9 had no AgentClaw operation on that agent within 8–29 hours.
+- The 2 on Art Advisor landed 11s and 15s after a container replacement — but
+  there have been 298 `runtime.rebuilt` events in total, so replacement plainly
+  does not reset a session as a rule.
+- Archiving never deletes a transcript. The previous one is kept beside the new
+  one as `<session>.jsonl.reset.<iso>`.
 
-**What "fixed" looks like:** a deliberate `session.reset` policy in the
-provisioned config rather than an inherited default (`mode: "idle"` with
-`idleMinutes: 0` never expires; a longer idle window or a chosen hour are the
-other options), and/or a checkpoint step that has the agent distil the live
-thread into `MEMORY.md` before an archive — measured at ~19s for one turn on a
-short conversation, so it belongs in the background, not in a button press.
+**Still unknown:** what issued the reset in those 9 cases. The open candidates
+are a `/new` or `/reset` typed in the chat, and something specific to the
+container-replacement path that fires only sometimes.
+
+**The decisive test**, not yet run: archive and restore an agent, then message it
+without typing any command, and see whether the thread survives.
+
+**Separately true regardless:** nothing moves a conversation anywhere durable.
+`MEMORY.md` is written only if the agent chooses to write it, and on Art Advisor
+it was still the 166-byte stub, so a reset — whatever causes it — takes the only
+copy of that context. OpenClaw fires a **`before_reset` hook** with the outgoing
+transcript's messages, which is the natural place to hang a checkpoint. A
+checkpoint turn measured ~19s on a short conversation.
 
 ---
 
