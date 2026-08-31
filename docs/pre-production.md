@@ -101,6 +101,65 @@ capabilities by default.
 - `openclawImport` rewrites the user's live `openclaw.json` non-atomically.
 - `tcp://` runner endpoints are accepted with no TLS enforcement.
 
+## 8. Every DM member shares one conversation thread
+
+*Found 2026-08-30 while investigating a "lost memory" report. Not yet decided.*
+
+OpenClaw keys a direct-chat session per AGENT, not per person: `agent:<slug>:main`.
+Every member who DMs the bot writes into that one transcript, and the session's
+`route`/`origin`/`lastTo` fields simply track whoever spoke most recently. Group
+chats get their own key (`agent:<slug>:telegram:group:<id>`), so the shape is one
+shared DM thread plus one per group.
+
+Verified on this installation: **Test Sophie** has three active members, one
+session file, and 223 user messages in it — 3 flagged `senderIsOwner: true`, 220
+`false`. Two people's conversations, one thread.
+
+**What this means.** Anything a member says is context for the agent's replies to
+every other member. Nobody is quoted verbatim to anyone else, but the agent
+answers each person carrying what the others told it, and a member can simply ask
+it what was discussed. For the Krueger Family Agent that is arguably the point;
+for a health, legal, or money agent shared between two people it is not what
+either would assume.
+
+The per-agent **Shared memory** toggle does NOT govern this — it only selects a
+section of `AGENTS.md` describing whether `MEMORY.md` entries are contributed by
+everyone. Session sharing happens underneath, either way.
+
+**What "fixed" looks like:** decide whether an agent's threads are shared or
+per-member, make it a visible per-agent setting, and — if per-member — route each
+sender to their own session key. Until then the sharing should at minimum be
+stated where members are invited, since today nothing tells them.
+
+## 9. Agent conversations reset every night, and nothing checkpoints them
+
+*Found 2026-08-30. The actual cause of the "archive lost its memory" report.*
+
+With no `session` key in `openclaw.json` — which is what AgentClaw provisions —
+OpenClaw's reset policy resolves to **`mode: "daily"`, `atHour: 4`**
+(`dist/reset-*.js`). A session is stale if it *started* before the most recent
+4am boundary in the container's timezone, which is UTC. So every conversation
+ends at 4am UTC and the next message begins a fresh thread.
+
+Both resets on Art Advisor fit exactly: a session started Aug 24 22:34Z was
+reset on the first message after the Aug 28 04:00Z boundary; its successor,
+started Aug 29 02:47Z, was reset on the first message after Aug 30 04:00Z —
+which happened to be 21 seconds after an archive/restore, and looked like the
+restore's doing. It was not. Archive never deletes a transcript; the old one is
+kept beside the new one as `<session>.jsonl.reset.<iso>`.
+
+Nothing moves a conversation anywhere durable before that happens. `MEMORY.md`
+is only written if the agent chooses to write it, and on Art Advisor it was
+still the 166-byte stub, so four days of conversation existed solely in threads
+that the daily rollover ended.
+
+**What "fixed" looks like:** a deliberate `session.reset` policy in the
+provisioned config rather than an inherited default (`mode: "idle"` with
+`idleMinutes: 0` never expires; a longer idle window or a chosen hour are the
+other options), and/or a checkpoint step that has the agent distil the live
+thread into `MEMORY.md` before an archive — measured at ~19s for one turn on a
+short conversation, so it belongs in the background, not in a button press.
+
 ---
 
 *Sources: the 2026-08-25 and 2026-08-27 audits. The full finding list, including

@@ -2,6 +2,26 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.69.1] — 2026-08-31
+
+### Changed
+- **Corrected the "restore lost its memory" diagnosis, and recorded it.** Two
+  earlier explanations were wrong. The transcript is never deleted by archiving,
+  and the reset is not caused by the agent's skills changing (that diff was
+  coincidental — the two prompt snapshots were 42 hours apart). OpenClaw's reset
+  policy, with no `session` key configured, resolves to `mode: "daily",
+  atHour: 4`: a session is stale if it *started* before the most recent 4am
+  boundary in the container's timezone, which is UTC. Both of Art Advisor's
+  resets fit that rule exactly, and the second one landed 21 seconds after a
+  restore purely because that was the next message. Documented as
+  `docs/pre-production.md` §9 together with the fact that nothing checkpoints a
+  conversation anywhere durable before the nightly rollover.
+- **Recorded that every DM member shares one conversation thread**
+  (`docs/pre-production.md` §8). OpenClaw keys direct sessions per agent, not per
+  person, so all members write into one transcript — verified on a three-member
+  agent with 223 messages in a single session file. The per-agent Shared memory
+  toggle does not govern this.
+
 ## [0.69.0] — 2026-08-30
 
 ### Fixed

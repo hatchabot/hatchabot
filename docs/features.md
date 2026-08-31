@@ -305,11 +305,11 @@ the new bot has a different `t.me` link, which you send from **Invite…**. Nobo
 has to pair again — Telegram user ids are global rather than per-bot, so the
 allowlist rebuilds itself.
 
-One caveat that is **not** specific to archiving: OpenClaw starts a fresh
-conversation thread whenever an agent's skill set differs from the one the
-current thread began with, so a restore (like a rebuild) can leave the agent
-without the recent chat history even though its files are untouched. The old
-transcript is not deleted — it is kept beside the new one as
+One caveat that is **not** specific to archiving: OpenClaw ends a conversation
+thread at 4am UTC daily (its default reset policy — see `docs/pre-production.md`
+§9), so the first message after a restore often starts a fresh thread and the
+agent will not recall yesterday's conversation. Archiving never deletes a
+transcript; the previous one is kept beside the new one as
 `<session>.jsonl.reset.<timestamp>` in the agent's session store.
 
 Archive from RUNNING, STOPPED, or FAILED — a broken agent still sits on a token
