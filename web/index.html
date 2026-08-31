@@ -3817,7 +3817,7 @@ function renderAgents() {
     // reading it would be unusable.
     html += `<details class="archive-drawer" id="archiveDrawer" ${archiveOpen ? 'open' : ''}
         ontoggle="archiveOpen = this.open">
-      <summary>Archived · ${parked.length}</summary>
+      <summary>Archived</summary>
       <div class="archive-note">Kept whole — memory, members, settings — but not running, and their
         Telegram bots went back for other agents to use. Restore gives one a new bot.</div>
       ${parked.map(agentCard).join('')}
@@ -3870,26 +3870,22 @@ function renderToc() {
       <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
       <span class="toc-name">${esc(a.name)}</span>${badge}</a>`;
   }
-  // One line for the whole archive rather than an entry each: they're parked,
-  // and a legend that lists them alongside running agents defeats the drawer.
-  const parked = archivedAgents().length;
-  if (parked) {
-    html += `<a class="toc-item" onclick="jumpToArchive()" title="Archived agents — kept, but holding no bot">
-      <span class="toc-dot" style="background:var(--dim)"></span>
-      <span class="toc-name">Archived · ${parked}</span></a>`;
+  // Archived agents keep their own names in the legend, under a section header
+  // like any group. Collapsing them into a single counted line meant an agent
+  // vanished from the legend the moment you archived it — which is exactly when
+  // you go looking for it. jumpToCard opens the drawer on the way.
+  const parked = archivedAgents();
+  if (parked.length) {
+    html += `<div class="toc-group">Archived</div>`;
+    for (const a of parked) {
+      html += `<a class="toc-item" onclick="jumpToCard('${a.id}')" title="${esc(a.name)} — archived">
+        <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
+        <span class="toc-name">${esc(a.name)}</span></a>`;
+    }
   }
   $('tocList').innerHTML = html;
 }
 
-/** Open the drawer and scroll to it — a closed <details> can't be scrolled to. */
-function jumpToArchive() {
-  archiveOpen = true;
-  const d = $('archiveDrawer');
-  if (!d) return;
-  d.open = true;
-  d.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (window.innerWidth < TOC_PIN_PX) $('toc').classList.remove('open');
-}
 function jumpToCard(id) {
   const card = document.getElementById('card-' + id);
   if (!card) return;

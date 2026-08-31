@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.69.3] — 2026-08-31
+
+### Changed
+- **The archived section is called "Archived"**, not "Archived · n" — it is a
+  section header, and the count was noise next to the cards it sits above.
+- **The jump legend lists archived agents by name**, under an "Archived" header,
+  the same treatment a group gets. They were previously collapsed into one
+  counted line, so an agent disappeared from the legend the moment it was
+  archived — exactly when you go looking for it. Clicking one opens the drawer
+  on the way, as before.
+
 ## [0.69.1] — 2026-08-31
 
 ### Changed
