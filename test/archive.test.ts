@@ -93,7 +93,7 @@ describe('archiving frees the bot and keeps the agent', () => {
     expect(pool.availableCount()).toBe(1); // the whole point: leasable again
   });
 
-  it('tells the members BEFORE the bot loses the agent\'s name', async () => {
+  it('tells the members while the bot still wears the agent\'s name', async () => {
     const { calls, deps } = await world();
     await archiveAgent(deps as any, 'a1');
 
@@ -105,8 +105,10 @@ describe('archiving frees the bot and keeps the agent', () => {
     expect(sent[0]!.body.text).toMatch(/archived/i);
     expect(sent[0]!.body.text).toMatch(/new bot|NEW bot/);
     expect(sent[0]!.body.text).not.toMatch(/removed/i);
-    expect(calls.findIndex((c) => c.method === 'sendMessage'))
-      .toBeLessThan(calls.findIndex((c) => c.method === 'setMyName'));
+    // No rename is spent here at all — the idle name is parked for later, so a
+    // restore can reuse the bot without burning Telegram's rename quota. That
+    // also means the goodbye necessarily goes out under the agent's own name.
+    expect(calls.filter((c) => c.method === 'setMyName')).toHaveLength(0);
   });
 
   it('keeps memory, members and settings — only the chat address goes', async () => {

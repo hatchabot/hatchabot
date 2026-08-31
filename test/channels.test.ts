@@ -54,17 +54,22 @@ describe('TelegramPoolProvisioner', () => {
     const calls: Array<{ url: string; body: string }> = [];
     const recorder = (async (url: any, init: any) => {
       calls.push({ url: String(url), body: String(init?.body ?? '') });
-      return new Response('{"ok":true}');
+      // getMe reports the bot still wearing its old name.
+      return new Response(String(url).includes('/getMe')
+        ? '{"ok":true,"result":{"first_name":"Someone Else"}}'
+        : '{"ok":true}');
     }) as unknown as typeof fetch;
     const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl: recorder });
     await pool.addToPool('recycledbot', 'tok-r');
     await pool.provision({ agentId: 'a1', agentName: 'Art Test', slug: 'art-test' });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toContain('/bottok-r/setMyName');
-    expect(JSON.parse(calls[0]!.body)).toEqual({ name: 'Art Test' });
+    const renames = calls.filter((c) => c.url.includes('setMyName'));
+    expect(renames).toHaveLength(1);
+    expect(renames[0]!.url).toContain('/bottok-r/setMyName');
+    expect(JSON.parse(renames[0]!.body)).toEqual({ name: 'Art Test' });
     // The idempotent re-lease does NOT rename again (nothing changed).
+    calls.length = 0;
     await pool.provision({ agentId: 'a1', agentName: 'Art Test', slug: 'art-test' });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(0);
   });
 
   it('a rename failure never blocks the lease (cosmetic, best-effort)', async () => {
@@ -248,7 +253,7 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     return { calls, fetchImpl };
   };
 
-  it('renames to an idle name on release, and says goodbye to its members first', async () => {
+  it('says goodbye on release, and PARKS the idle name instead of spending a rename', async () => {
     const { calls, fetchImpl } = recorder();
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
@@ -265,12 +270,16 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     expect(sends).toHaveLength(1);
     expect(sends[0]!.body.chat_id).toBe('555');
     expect(sends[0]!.body.text).toMatch(/no longer applies|belongs to the old one|removed/i);
-    // ...and the bot stops advertising the agent that just left.
-    const renames = calls.filter((c) => c.method === 'setMyName');
-    expect(renames.at(-1)!.body.name).toBe(TelegramPoolProvisioner.IDLE_NAME);
-    // Goodbye goes out BEFORE the rename, while it still looks like that agent.
-    expect(calls.findIndex((c) => c.method === 'sendMessage'))
-      .toBeLessThan(calls.findIndex((c) => c.method === 'setMyName'));
+    // Telegram grants roughly ONE rename per bot per few hours (observed
+    // retry_after: 11942s). An archive→restore used to spend two of them — to
+    // "unassigned" and straight back — which is how a live agent's bot ended up
+    // called "AgentClaw (unassigned)" for three hours. So release spends none:
+    // it parks the idle name for the sweep to apply only if the bot is still
+    // sitting free later.
+    expect(calls.filter((c) => c.method === 'setMyName')).toHaveLength(0);
+    const parked = db.prepare(`SELECT desired_name, rename_after FROM telegram_pool WHERE username='recycled'`).get() as any;
+    expect(parked.desired_name).toBe(TelegramPoolProvisioner.IDLE_NAME);
+    expect(Date.parse(parked.rename_after)).toBeGreaterThan(Date.now()); // deferred, not now
   });
 
   it('warns prior chatters when the bot comes back as a different agent', async () => {
@@ -321,7 +330,7 @@ describe('a mislabelled bot heals on rebuild', () => {
     // limiter, so this is the second chance.
     const composite = new CompositeTelegramProvisioner(pool, { release: async () => {} } as any);
     await composite.syncDisplayName('poolbot', 'Right Name');
-    expect(calls.map((c) => c.body.name)).toEqual(['Right Name']);
+    expect(calls.filter((c) => c.url.includes('setMyName')).map((c) => c.body.name)).toEqual(['Right Name']);
 
     // A hand-minted bot belongs to whoever created it — never renamed here.
     calls.length = 0;
@@ -374,7 +383,8 @@ describe('a rename that never reached Telegram is retried, then remembered', () 
   it('parks a failed rename and finishes it on the next sweep', async () => {
     // The live failure: the bot stayed "AgentClaw (unassigned)" after a restore
     // and nothing remembered it should have changed.
-    const { state, fetchImpl } = flaky(3); // outlasts the in-call retries
+    // getMe + three setMyName attempts must all fail for the rename to be parked.
+    const { state, fetchImpl } = flaky(4);
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl, renameBackoffMs: [0, 0] });
     await pool.addToPool('bot', 'tok');
@@ -385,6 +395,13 @@ describe('a rename that never reached Telegram is retried, then remembered', () 
     expect(parked.desired_name).toBe('Art Advisor');
 
     state.calls = 99; // network is back
+    // ...but the sweep waits for the deadline. Telegram answered a live rename
+    // with retry_after 11942s (3h19m) and the old sweep retried every two
+    // minutes regardless, which is both useless and rude.
+    expect(await pool.retryPendingNames()).toBe(0);
+
+    db.prepare(`UPDATE telegram_pool SET rename_after = ? WHERE username='bot'`)
+      .run(new Date(Date.now() - 1000).toISOString()); // deadline passes
     expect(await pool.retryPendingNames()).toBe(1);
     const after = db.prepare(`SELECT desired_name FROM telegram_pool WHERE username='bot'`).get() as any;
     expect(after.desired_name).toBeNull(); // nothing left to do

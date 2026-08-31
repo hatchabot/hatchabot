@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.70.0] — 2026-08-31
+
+### Fixed
+- **A restored agent's bot stayed called "AgentClaw (unassigned)" — because the
+  archive itself spent the rename.** Telegram rate-limits `setMyName` by HOURS,
+  not seconds: a live restore came back `Too Many Requests: retry after 11942`
+  — 3h19m. Every archive→restore was spending two renames against that quota,
+  one to the idle name and one straight back to the same agent, so the second
+  was refused and the live agent wore "unassigned" until the limit expired. Now:
+  - **Release parks the idle name instead of applying it** (15 min, tunable via
+    `AGENTCLAW_IDLE_RENAME_MS`). A bot re-leased before that spends no rename at
+    all; one genuinely left in the pool still stops advertising a departed agent.
+  - **`getMe` is checked before spending a rename.** It isn't rate-limited the
+    way `setMyName` is, so a bot that already wears the right name — the usual
+    case after a deferred release — costs nothing.
+  - **Telegram's `retry_after` is respected.** The repair sweep was retrying a
+    three-hour limit every two minutes; it now waits for the deadline it was
+    given.
+
 ## [0.69.3] — 2026-08-31
 
 ### Changed

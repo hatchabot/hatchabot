@@ -19,6 +19,14 @@ import type {
  * The ceiling is however many bots we have minted, which is why
  * TelegramManualProvisioner exists as the unbounded fallback.
  */
+/**
+ * How long a released bot keeps the departing agent's name before the sweep
+ * changes it to the idle one. Long enough that an archive→restore round trip
+ * (or a rollback) costs no rename at all; short enough that a bot genuinely
+ * left in the pool isn't advertising a dead agent for long.
+ */
+const IDLE_RENAME_DELAY_MS = Number(process.env.AGENTCLAW_IDLE_RENAME_MS ?? 15 * 60_000);
+
 export class TelegramPoolProvisioner implements ChannelProvisioner {
   readonly kind = 'telegram' as const;
 
@@ -56,6 +64,14 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // name we wanted turns that into something a timer can finish.
     try {
       this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN desired_name TEXT`);
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err))) throw err;
+    }
+    // Telegram rate-limits setMyName by HOURS (observed: retry_after 11942s —
+    // 3h19m). Retrying every two minutes against that is pointless and rude, so
+    // the deadline it hands back is stored and respected.
+    try {
+      this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN rename_after TEXT`);
     } catch (err) {
       if (!/duplicate column/i.test(String(err))) throw err;
     }
@@ -169,6 +185,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // chat header reads correctly (the @username can't change via API).
     // Best-effort and bounded: a rename is cosmetic; Telegram rate-limits
     // setMyName, and neither a limit nor an outage may block provisioning.
+    this.#park(free.username, req.agentName, 0);
     await this.#applyDisplayName(free.secret_ref, free.username, req.agentName);
     // A recycled bot may still be sitting in someone's Telegram list with the
     // previous agent's conversation above. We can't clear that (a bot can only
@@ -186,20 +203,51 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * call had failed or never been made. Still never throws: a rename is
    * cosmetic and must not cost anyone their agent.
    */
+  /** Record the name this bot SHOULD have, and the earliest we may try. */
+  #park(username: string, name: string, delayMs: number): void {
+    this.db
+      .prepare(`UPDATE telegram_pool SET desired_name = ?, rename_after = ? WHERE username = ? COLLATE NOCASE`)
+      .run(name, new Date(Date.now() + delayMs).toISOString(), username);
+  }
+
   async #applyDisplayName(secretRef: string, username: string, name: string): Promise<void> {
-    let res: { ok: boolean; error?: string };
+    let res: { ok: boolean; error?: string; retryAfter?: number };
     try {
       const token = await this.secrets.get(secretRef);
-      res = await setTelegramDisplayName(token, name, this.opts.fetchImpl ?? fetch, this.opts.renameBackoffMs);
+      // getMe is cheap and NOT rate-limited the way setMyName is, so ask before
+      // spending a rename. After a deferred release this is usually a hit: the
+      // bot still carries the very name we want, and the round trip costs zero
+      // of the quota.
+      const fetchImpl = this.opts.fetchImpl ?? fetch;
+      const me = (await fetchImpl(`https://api.telegram.org/bot${token}/getMe`, {
+        signal: AbortSignal.timeout(5000),
+      })
+        .then((r) => r.json())
+        .catch(() => null)) as { result?: { first_name?: string } } | null;
+      if (me?.result?.first_name === name.trim()) {
+        this.opts.log?.('channel.named', { username, name, ok: true, skipped: 'already correct' });
+        this.#clearParked(username);
+        return;
+      }
+      res = await setTelegramDisplayName(token, name, fetchImpl, this.opts.renameBackoffMs);
     } catch (err) {
       res = { ok: false, error: String(err) };
     }
     this.opts.log?.('channel.named', { username, name, ...res });
-    // Park it on failure so retryPendingNames() can finish the job later;
-    // clear it on success so the timer has nothing to do.
+    if (res.ok) {
+      this.#clearParked(username);
+      return;
+    }
+    // Keep the name parked, and respect the deadline Telegram gave us. Without
+    // this the sweep retried a three-hour limit every two minutes.
+    const waitMs = (res.retryAfter ?? 300) * 1000;
+    this.#park(username, name, waitMs);
+  }
+
+  #clearParked(username: string): void {
     this.db
-      .prepare(`UPDATE telegram_pool SET desired_name = ? WHERE username = ? COLLATE NOCASE`)
-      .run(res.ok ? null : name, username);
+      .prepare(`UPDATE telegram_pool SET desired_name = NULL, rename_after = NULL WHERE username = ? COLLATE NOCASE`)
+      .run(username);
   }
 
   /**
@@ -211,8 +259,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    */
   async retryPendingNames(): Promise<number> {
     const rows = this.db
-      .prepare(`SELECT username, secret_ref, desired_name FROM telegram_pool WHERE desired_name IS NOT NULL`)
-      .all() as Array<{ username: string; secret_ref: string; desired_name: string }>;
+      .prepare(
+        `SELECT username, secret_ref, desired_name FROM telegram_pool
+         WHERE desired_name IS NOT NULL AND (rename_after IS NULL OR rename_after <= ?)`,
+      )
+      .all(new Date().toISOString()) as Array<{ username: string; secret_ref: string; desired_name: string }>;
     let fixed = 0;
     for (const r of rows) {
       await this.#applyDisplayName(r.secret_ref, r.username, r.desired_name);
@@ -298,9 +349,14 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // belongs to an agent that no longer has this bot, and if it comes back as
     // something else, that history is not its own.
     if (departing) await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
-    // Then drop the old identity, so a bot sitting in the pool doesn't advertise
-    // a departed agent (a free bot was still calling itself "Julio & Mich").
-    await this.#applyDisplayName(row.secret_ref, accountId, TelegramPoolProvisioner.IDLE_NAME);
+    // The idle name is PARKED, not applied now. Renames are the scarce thing
+    // here — Telegram grants roughly one per bot every few hours — and an
+    // archive followed by a restore used to spend two of them: one to
+    // "unassigned", one back to the same agent. That is how a live agent's bot
+    // ended up called "AgentClaw (unassigned)" for three hours. Deferring means
+    // a bot re-leased before the sweep runs spends NONE, while one that really
+    // is sitting free still stops advertising a departed agent.
+    this.#park(accountId, TelegramPoolProvisioner.IDLE_NAME, IDLE_RENAME_DELAY_MS);
   }
 
   /**
