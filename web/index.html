@@ -918,6 +918,28 @@
   </div>
 </dialog>
 
+<dialog id="moveSourceDlg" style="width:min(600px,96vw)">
+  <h3 style="margin:0 0 4px">Move agents to <span id="moveSourceName"></span></h3>
+  <div class="sub" style="margin-bottom:10px">
+    Tick the agents to switch onto this AI source. Only your agents NOT already on
+    it are listed. Memory and everything on the volume are kept; a model an agent
+    had chosen that this source doesn't offer falls back to the new default.
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+    <label class="sub" style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
+      <input type="checkbox" id="moveSourceAll" onchange="toggleMoveAll(this.checked)" style="width:auto;flex:none"> Select all
+    </label>
+    <span class="sub" id="moveSourceCount"></span>
+  </div>
+  <div id="moveSourceList" style="max-height:320px;overflow:auto;border-top:1px solid var(--line);padding-top:4px"></div>
+  <div class="sub" id="moveSourceErr" style="color:var(--bad);margin-top:8px"></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
+    <button onclick="moveSourceDlg.close()">Cancel</button>
+    <button onclick="moveAgentsApply(false)" title="Ticked agents switch on their next rebuild. No rebuild now.">Switch, rebuild later</button>
+    <button class="primary" id="moveSourceBtn" onclick="moveAgentsApply(true)">Switch &amp; rebuild</button>
+  </div>
+</dialog>
+
 <dialog id="healthDlg" style="width:min(560px,94vw)">
   <h3 style="margin:0 0 4px">Health — <span id="healthAgent"></span></h3>
   <div class="sub">
@@ -1838,36 +1860,58 @@ async function applyModelToSelected(rebuild) {
   finally { $('applyModelBtn').disabled = false; }
 }
 
+let moveSourceState = null;
 /**
- * Switch a batch of agents onto one AI source. Reuses the apply-model dialog's
- * checkbox pattern would be nicer, but a confirm keeps this to one file change:
- * offer "all" by default and let the owner narrow with a comma list.
+ * Switch a batch of agents onto one AI source — checkbox list, no typing.
+ * Mirrors the apply-model dialog. Only offers agents not already on the source.
  */
-async function moveAgentsToSource(profileId, profileName) {
+function moveAgentsToSource(profileId, profileName) {
   const candidates = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== profileId);
   if (!candidates.length) { toast('Every one of your agents already uses this source.'); return; }
-  const list = candidates.map(a => a.name).join(', ');
-  const pick = prompt(
-    `Move which agents onto "${profileName}"?\n\nLeave blank for ALL ${candidates.length}, or type a comma-separated list of names.\n\nAvailable: ${list}`,
-    '',
-  );
-  if (pick === null) return; // cancelled
-  let apply;
-  if (pick.trim()) {
-    const wanted = pick.split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
-    apply = candidates.filter(a => wanted.includes(a.name.toLowerCase())).map(a => a.id);
-    if (!apply.length) { toast('No matching agents — nothing changed.'); return; }
-  }
-  const rebuild = confirm('Rebuild the switched agents now to apply?\n\nOK = rebuild now.  Cancel = switch, apply on next rebuild.');
+  moveSourceState = { profileId };
+  $('moveSourceName').textContent = profileName;
+  $('moveSourceErr').textContent = '';
+  $('moveSourceList').innerHTML = candidates.map(a => {
+    const src = profiles.find(p => p.id === a.aiProfileId);
+    return `<label class="pair" style="padding:5px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
+      <input type="checkbox" class="moveSourceCb" data-id="${esc(a.id)}" onchange="refreshMoveCount()" style="width:auto;flex:none">
+      <span class="grow"><b>${esc(a.name)}</b>
+        <span class="sub">· now on ${esc(src ? src.name : 'another source')}</span></span>
+    </label>`;
+  }).join('');
+  refreshMoveCount();
+  moveSourceDlg.showModal();
+}
+function toggleMoveAll(on) {
+  document.querySelectorAll('.moveSourceCb').forEach(cb => { cb.checked = on; });
+  refreshMoveCount();
+}
+function refreshMoveCount() {
+  const cbs = [...document.querySelectorAll('.moveSourceCb')];
+  const n = cbs.filter(cb => cb.checked).length;
+  $('moveSourceCount').textContent = `${n} of ${cbs.length} selected`;
+  $('moveSourceAll').checked = n > 0 && n === cbs.length;
+  $('moveSourceBtn').disabled = n === 0;
+  $('moveSourceBtn').textContent = n ? `Switch & rebuild ${n}` : 'Switch & rebuild';
+}
+async function moveAgentsApply(rebuild) {
+  if (!moveSourceState) return;
+  const apply = [...document.querySelectorAll('.moveSourceCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
+  if (!apply.length) return;
+  $('moveSourceBtn').disabled = true;
   try {
-    const r = await api(`/v1/ai-profiles/${profileId}/adopt-agents`, { method: 'POST', body: { apply, rebuild } });
+    const r = await api(`/v1/ai-profiles/${moveSourceState.profileId}/adopt-agents`, {
+      method: 'POST', body: { apply, rebuild },
+    });
     const bits = [`${r.switched} switched`];
     if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding} now`);
     else if (r.switched) bits.push('rebuild to apply');
     toast(bits.join(' — '));
-    for (const s of r.skipped ?? []) toast(`skipped ${s.name}: ${s.reason}`);
+    for (const sk of r.skipped ?? []) toast(`skipped ${sk.name}: ${sk.reason}`);
+    moveSourceDlg.close();
     await refresh(true); renderAiList();
-  } catch (e) { toast(e.message); }
+  } catch (e) { $('moveSourceErr').textContent = e.message; }
+  finally { $('moveSourceBtn').disabled = false; }
 }
 
 async function delAiProfile(id, name) {

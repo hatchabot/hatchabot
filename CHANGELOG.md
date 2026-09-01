@@ -2,6 +2,14 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.76.1] — 2026-09-01
+
+### Changed
+- **"Move agents here" now uses a checkbox list**, not a typed-in names prompt —
+  tick the agents to switch, "Select all", with a live count and rebuild-now vs
+  rebuild-later, mirroring the model-apply dialog. Only agents not already on the
+  source are listed.
+
 ## [0.76.0] — 2026-09-01
 
 ### Added
