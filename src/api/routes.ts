@@ -13,6 +13,7 @@ import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual
 import {
   claudeAuthDir,
   createAgentRecord,
+  checkpointMemory,
   effectiveModel,
   sharePathProblem,
   rebuildAgent,
@@ -2490,6 +2491,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const users = [...rows.values()].sort((x, y) =>
       Date.parse(y.lastSeen?.at ?? '1970') - Date.parse(x.lastSeen?.at ?? '1970'));
     return { users, note: 'lastSeen is the most recent exchange per agent thread — earlier speakers in a shared thread show their older reading.' };
+  });
+
+  /**
+   * Save the live conversation to memory on demand — the standalone form of the
+   * pre-rebuild checkpoint. Useful before archiving, before /new, or whenever
+   * you want durable facts written down ahead of a reset you can see coming. It
+   * writes to MEMORY.md/today's file and resets nothing.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/checkpoint', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply, 'save its conversation to memory');
+    if (!agent) return reply;
+    if (busyNow(agent, reply)) return reply;
+    // Runs an agent turn (~20s). Bounded and best-effort inside checkpointMemory;
+    // it writes to memory and resets nothing, so failure just means "not saved".
+    await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id));
+    return { ok: true };
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {

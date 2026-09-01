@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import {
   buildRuntimeSpec,
+  checkpointMemory,
   provisionAgent,
   rebuildAgent,
   runProvisionSteps,
@@ -707,5 +708,19 @@ describe('memory checkpoint before a source-switch rebuild', () => {
     }) as any;
     const out = await rebuildAgent({ ...w.deps, checkpointMemory: true }, agent.id);
     expect(out.state).toBe('RUNNING');
+  });
+});
+
+describe('checkpointMemory prompt is neutral (no false "about to reset")', () => {
+  it('asks to save durable facts without claiming an imminent reset', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const provider = w.provider as MockProvider;
+    provider.execLog.length = 0;
+    await checkpointMemory(provider, agent.runtimeRef!, agent.slug, () => {});
+    const turn = provider.execLog.find((a) => a[0] === 'agent' && a.includes('-m'));
+    const prompt = turn![turn!.indexOf('-m') + 1]!;
+    expect(prompt).toMatch(/memory/i);
+    expect(prompt).not.toMatch(/about to be reset/i); // honest for standalone use
   });
 });

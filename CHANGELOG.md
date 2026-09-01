@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.83.0] — 2026-09-01
+
+### Added
+- **"📝 Save chat to memory" on the agent card (⋯ menu, running agents).** The
+  standalone form of the pre-switch checkpoint: the agent writes the current
+  conversation's key facts into MEMORY.md/today's file on demand (~20s), so they
+  survive a reset you can see coming — before archiving, before `/new`, or just
+  to force durable facts down. `POST /v1/agents/:id/checkpoint`; it writes to
+  memory and resets nothing. The checkpoint prompt was neutralised (it no longer
+  claims a reset is imminent) so it's honest whether triggered manually or by a
+  source switch. Verified live end-to-end.
+
 ## [0.82.0] — 2026-09-01
 
 ### Added

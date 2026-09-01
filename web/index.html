@@ -2719,6 +2719,7 @@ function cardMenu(a) {
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
     items.push(`<button onclick="openHealth('${a.id}', '${jsq(a.name)}')">❤️ Health</button>`);
+    items.push(`<button onclick="checkpointAgent('${a.id}', '${jsq(a.name)}')" title="Have the agent write the current conversation's key facts into its memory now (~20s), so they survive a reset">📝 Save chat to memory</button>`);
   }
   if (a.state === 'RUNNING' || a.runtimeRef) {
     items.push(`<button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>`);
@@ -4007,6 +4008,19 @@ async function saveImagePin() {
     await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
     toast(v ? `Pinned to ${v} — applies on the next rebuild.` : 'Back on the fleet default image.');
     await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+/**
+ * On-demand memory checkpoint: the agent summarises the current conversation
+ * into MEMORY.md now. The manual form of the pre-switch checkpoint — for before
+ * an archive, before /new, or any reset you see coming. Resets nothing.
+ */
+async function checkpointAgent(id, name) {
+  toast(`Saving "${name}"'s conversation to memory… (~20s)`, 6000);
+  try {
+    await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
+    toast(`Saved "${name}"'s conversation to memory.`);
   } catch (e) { toast(e.message); }
 }
 

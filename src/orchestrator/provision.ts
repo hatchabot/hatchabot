@@ -486,11 +486,10 @@ export async function checkpointMemory(
   log: (event: string, detail: Record<string, unknown>) => void,
 ): Promise<void> {
   const prompt =
-    'System note: your current conversation is about to be reset for a maintenance ' +
-    'change, and the live transcript will not carry over. Before it does, write a concise ' +
-    'summary of anything from our recent discussion worth keeping — decisions, facts about ' +
-    'the people you serve, ongoing tasks or context — into your memory (MEMORY.md, or today\'s ' +
-    'file under memory/). Only durable things; skip small talk. Reply with just DONE when saved.';
+    'System note: please save anything from our recent conversation worth keeping — decisions, ' +
+    'facts about the people you serve, ongoing tasks or context — into your memory (MEMORY.md, ' +
+    'or today\'s file under memory/), so it survives if this chat is later reset. Only durable ' +
+    'things; skip small talk. Reply with just DONE when saved.';
   try {
     // Bounded by the provider's own exec timeout (AGENTCLAW_DOCKER_TIMEOUT_MS,
     // 60s default) — a summary is short; a model too slow to finish inside it
