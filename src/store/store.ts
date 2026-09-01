@@ -138,6 +138,35 @@ export class Store {
         PRIMARY KEY (agent_id, name)
       );
       CREATE INDEX IF NOT EXISTS data_sources_agent ON data_sources (agent_id);
+
+      -- Who has signed in, so a share can be addressed by email. Email is
+      -- mutable, so owner_id (the stable subject) is the key; email is the
+      -- lookup. Refreshed on every sign-in.
+      CREATE TABLE IF NOT EXISTS accounts (
+        owner_id TEXT PRIMARY KEY,
+        email TEXT,
+        last_seen TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS accounts_email ON accounts (email);
+
+      -- An agent handed to another user in-app: a secret-free TEMPLATE blob
+      -- waiting in their inbox. to_owner is bound once the recipient email is
+      -- a known account (possibly on their first sign-in). status:
+      -- pending | accepted | dismissed.
+      CREATE TABLE IF NOT EXISTS agent_shares (
+        id TEXT PRIMARY KEY,
+        from_owner TEXT NOT NULL,
+        from_email TEXT,
+        to_email TEXT NOT NULL,
+        to_owner TEXT,
+        agent_name TEXT NOT NULL,
+        message TEXT,
+        blob BLOB NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS shares_to_owner ON agent_shares (to_owner, status);
+      CREATE INDEX IF NOT EXISTS shares_to_email ON agent_shares (to_email, status);
     `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
@@ -575,6 +604,110 @@ export class Store {
    */
   transact<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  // ---- accounts (email <-> owner, for addressing shares) ------------------
+
+  /** Record/refresh a signed-in account so shares can be addressed by email. */
+  recordAccount(ownerId: string, email?: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO accounts (owner_id, email, last_seen) VALUES (?, ?, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET
+           email = COALESCE(excluded.email, accounts.email),
+           last_seen = excluded.last_seen`,
+      )
+      .run(ownerId, email ?? null, new Date().toISOString());
+  }
+
+  /** The owner behind an email, if that email has ever signed in. Case-insensitive. */
+  ownerForEmail(email: string): string | undefined {
+    const r = this.db
+      .prepare(`SELECT owner_id FROM accounts WHERE email = ? COLLATE NOCASE`)
+      .get(email.trim()) as { owner_id: string } | undefined;
+    return r?.owner_id;
+  }
+
+  /** Known accounts other than `exceptOwner` — the recipient picker for a share. */
+  listAccounts(exceptOwner?: string): Array<{ ownerId: string; email?: string }> {
+    return (
+      this.db
+        .prepare(`SELECT owner_id, email FROM accounts WHERE email IS NOT NULL ORDER BY email`)
+        .all() as Array<{ owner_id: string; email: string | null }>
+    )
+      .filter((r) => r.owner_id !== exceptOwner)
+      .map((r) => ({ ownerId: r.owner_id, email: r.email ?? undefined }));
+  }
+
+  // ---- agent shares (the inbox) -------------------------------------------
+
+  insertShare(s: {
+    id: string;
+    fromOwner: string;
+    fromEmail?: string;
+    toEmail: string;
+    toOwner?: string;
+    agentName: string;
+    message?: string;
+    blob: Buffer;
+    createdAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_shares
+           (id, from_owner, from_email, to_email, to_owner, agent_name, message, blob, status, created_at)
+         VALUES (@id, @fromOwner, @fromEmail, @toEmail, @toOwner, @agentName, @message, @blob, 'pending', @createdAt)`,
+      )
+      .run({
+        id: s.id, fromOwner: s.fromOwner, fromEmail: s.fromEmail ?? null,
+        toEmail: s.toEmail, toOwner: s.toOwner ?? null, agentName: s.agentName,
+        message: s.message ?? null, blob: s.blob, createdAt: s.createdAt,
+      });
+  }
+
+  /** Pending shares addressed to this owner (by bound owner OR their email). */
+  listInbox(ownerId: string, email?: string): Array<{
+    id: string; fromEmail?: string; agentName: string; message?: string; createdAt: string;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, from_email, agent_name, message, created_at FROM agent_shares
+         WHERE status = 'pending' AND (to_owner = ? OR (to_owner IS NULL AND to_email = ? COLLATE NOCASE))
+         ORDER BY created_at DESC`,
+      )
+      .all(ownerId, email ?? '\u0000') as Array<any>;
+    return rows.map((r) => ({
+      id: r.id, fromEmail: r.from_email ?? undefined, agentName: r.agent_name,
+      message: r.message ?? undefined, createdAt: r.created_at,
+    }));
+  }
+
+  /** A share the given owner may act on (theirs by owner or unclaimed email). */
+  getShareFor(id: string, ownerId: string, email?: string): { blob: Buffer; agentName: string } | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT blob, agent_name, to_owner, to_email, status FROM agent_shares WHERE id = ?`,
+      )
+      .get(id) as any;
+    if (!r || r.status !== 'pending') return undefined;
+    const mine = r.to_owner === ownerId || (r.to_owner == null && email && r.to_email?.toLowerCase() === email.toLowerCase());
+    return mine ? { blob: r.blob as Buffer, agentName: r.agent_name } : undefined;
+  }
+
+  setShareStatus(id: string, status: 'accepted' | 'dismissed', ownerId: string): void {
+    this.db
+      .prepare(`UPDATE agent_shares SET status = ?, to_owner = COALESCE(to_owner, ?) WHERE id = ?`)
+      .run(status, ownerId, id);
+  }
+
+  /** On sign-in, bind any email-addressed pending shares to this owner. */
+  claimSharesForEmail(ownerId: string, email: string): number {
+    return this.db
+      .prepare(
+        `UPDATE agent_shares SET to_owner = ?
+         WHERE to_owner IS NULL AND status = 'pending' AND to_email = ? COLLATE NOCASE`,
+      )
+      .run(ownerId, email.trim()).changes;
   }
 
   adoptLocalOwnerData(newOwnerId: string, localOwner = 'dev-owner'): number {

@@ -80,7 +80,7 @@ import {
   botPollState,
 } from '../orchestrator/adopt.js';
 import type { Agent, AIProfile } from '../domain/types.js';
-import { ownerIdOf } from './principal.js';
+import { ownerIdOf, principalOf } from './principal.js';
 import type { IdentityVerifier } from './identity.js';
 import {
   autoSnapshot,
@@ -3244,6 +3244,105 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     },
   );
+
+  // ---- inbox sharing: hand an agent to another user in-app -----------------
+
+  /** People a share can be addressed to — accounts that have signed in. */
+  app.get('/v1/accounts', async (req) => {
+    return { accounts: store.listAccounts(ownerIdOf(req)) };
+  });
+
+  /**
+   * Send an agent to another user's inbox — a secret-free TEMPLATE (same bytes
+   * as a shared file), delivered in-app instead of by email. The recipient
+   * imports it as a fresh agent they own, with their own bot.
+   */
+  app.post<{ Params: { id: string }; Body: { toEmail?: string; message?: string } }>(
+    '/v1/agents/:id/send',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
+      const toEmail = (req.body as { toEmail?: string } | null)?.toEmail?.trim();
+      const message = (req.body as { message?: string } | null)?.message?.trim();
+      if (!toEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(toEmail)) {
+        return reply.code(400).send({ error: 'A valid recipient email is required.' });
+      }
+      const me = principalOf(req);
+      if (me.email && toEmail.toLowerCase() === me.email.toLowerCase()) {
+        return reply.code(400).send({ error: "That's your own address — use Clone to copy an agent to yourself." });
+      }
+      try {
+        // The template is exactly what a shared file carries: SOUL/AGENTS
+        // (+memory), declared needs, NO bot/members/secrets.
+        const { data } = await exportTemplate(
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          agent.id,
+          { includeMemory: false },
+        );
+        if (data.length > 8 * 1024 * 1024) {
+          return reply.code(413).send({ error: 'That agent is too large to send in-app — use Share to a file instead.' });
+        }
+        store.insertShare({
+          id: randomUUID(),
+          fromOwner: me.ownerId,
+          fromEmail: me.email,
+          toEmail,
+          // Bind now if the recipient has signed in; else it binds on their
+          // first sign-in (claimSharesForEmail).
+          toOwner: store.ownerForEmail(toEmail),
+          agentName: agent.name,
+          message: message?.slice(0, 500),
+          blob: data,
+          createdAt: new Date().toISOString(),
+        });
+        return reply.code(201).send({ sent: true, to: toEmail });
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  /** Agents waiting in my inbox. */
+  app.get('/v1/inbox', async (req) => {
+    const me = principalOf(req);
+    return { shares: store.listInbox(me.ownerId, me.email) };
+  });
+
+  /** Import a received agent — stands up a fresh agent I own (my bot, my people). */
+  app.post<{ Params: { id: string }; Body: { name?: string; aiProfileId?: string; hostId?: string } }>(
+    '/v1/inbox/:id/accept',
+    async (req, reply) => {
+      const me = principalOf(req);
+      const share = store.getShareFor(req.params.id, me.ownerId, me.email);
+      if (!share) return reply.code(404).send({ error: 'Not found' });
+      const body = (req.body ?? {}) as { name?: string; aiProfileId?: string; hostId?: string };
+      const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
+      try {
+        const { agent, needs } = importTemplate(
+          { store, provider: providerFor((body.hostId ?? host?.id)!), log: trace() },
+          share.blob,
+          { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id },
+        );
+        store.setShareStatus(req.params.id, 'accepted', me.ownerId);
+        kickProvision(agent.id);
+        return reply.code(201).send({ ...publicAgent(agent), needs });
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  /** Turn a received agent away. */
+  app.post<{ Params: { id: string } }>('/v1/inbox/:id/dismiss', async (req, reply) => {
+    const me = principalOf(req);
+    const share = store.getShareFor(req.params.id, me.ownerId, me.email);
+    if (!share) return reply.code(404).send({ error: 'Not found' });
+    store.setShareStatus(req.params.id, 'dismissed', me.ownerId);
+    return { dismissed: true };
+  });
 
   // Clone: a faithful local copy (memory included — you own both copies, so
   // there's no privacy concern), with a fresh identity: new name, its own bot,

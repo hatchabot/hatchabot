@@ -105,6 +105,9 @@
   .toc-item .toc-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   /* "Someone is waiting to be let in" — driven by the live pairing poll, so it
      clears itself as soon as the request is approved or denied. */
+  .inbox-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px;
+    height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; font-size: 11px;
+    font-weight: 700; background: var(--accent); color: var(--accent-ink); }
   .toc-badge { flex: none; display: inline-flex; align-items: center; gap: 2px;
     padding: 0 6px; height: 17px; border-radius: 999px; font-size: 11px;
     font-weight: 700; color: var(--warn); border: 1px solid var(--warn);
@@ -293,6 +296,7 @@
       <button id="fleetUsageBtn" class="hbtn" title="Fleet usage — every running agent ranked by tokens" onclick="openFleetUsage()">📊 Usage</button>
       <button id="fleetSourcesBtn" class="hbtn" title="Which agents are on which AI source, and which models" onclick="openFleetSources()">📊 Sources</button>
       <button id="importBtn" class="hbtn" title="Open a .agentclaw file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
+      <button id="inboxBtn" class="hbtn" title="Agents other users have sent you" onclick="openInbox()">📥 Inbox<span id="inboxBadge" class="inbox-badge" hidden></span></button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
       <span class="spacer"></span>
       <span class="sub pool-ready" id="poolInfo" hidden title="Bots parked in the pool — a new agent grabs one instantly, no BotFather trip. Manage them in ⚙ Settings → Bot pool."></span>
@@ -917,6 +921,38 @@
   <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
     <button class="primary" onclick="fleetUsageDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="sendAgentDlg" style="width:min(520px,96vw)">
+  <h3 style="margin:0 0 4px">Send <span id="sendAgentName"></span></h3>
+  <div class="sub" style="margin-bottom:10px">
+    Sends a trained copy to another user on this server — its persona and instructions,
+    <b>no bot token, no members, no conversation history</b>. They import it as a fresh
+    agent they own, on their own Telegram bot. Same safe contents as a shared file, delivered in-app.
+  </div>
+  <label>Recipient email</label>
+  <input type="email" id="sendToEmail" list="accountEmails" placeholder="colleague@example.com" autocomplete="off">
+  <datalist id="accountEmails"></datalist>
+  <div class="sub" style="margin:-2px 0 6px">Pick someone who has signed in, or type any email — it waits in their inbox until they first sign in.</div>
+  <label>Note (optional)</label>
+  <textarea id="sendMessage" rows="2" maxlength="500" placeholder="What this agent is for…"></textarea>
+  <div class="err" id="sendErr"></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px">
+    <button onclick="sendAgentDlg.close()">Cancel</button>
+    <button class="primary" id="sendBtn" onclick="doSendAgent()">Send</button>
+  </div>
+</dialog>
+
+<dialog id="inboxDlg" style="width:min(560px,96vw)">
+  <div style="display:flex;justify-content:space-between;align-items:baseline">
+    <h3 style="margin:0">Inbox</h3>
+    <button class="hbtn" onclick="loadInbox()">Refresh</button>
+  </div>
+  <div class="sub" style="margin:4px 0 10px">Agents other users have sent you. Import stands up a fresh copy you own — you connect its Telegram bot.</div>
+  <div id="inboxBody">Loading…</div>
+  <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
+    <button class="primary" onclick="inboxDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -2690,6 +2726,7 @@ function agentCard(a) {
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
         ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
       <!-- lifecycle -->
@@ -3881,6 +3918,65 @@ async function importAgentFile(file) {
 
 // Share = a trained copy for someone else. It downloads a file (you send it);
 // the recipient's Import stands up a fresh agent with its own bot.
+let sendAgentId = null;
+function openSendAgent(id, name) {
+  sendAgentId = id;
+  $('sendAgentName').textContent = name;
+  $('sendToEmail').value = ''; $('sendMessage').value = ''; $('sendErr').textContent = '';
+  api('/v1/accounts').then(r => {
+    $('accountEmails').innerHTML = (r.accounts || []).filter(a => a.email).map(a => `<option value="${esc(a.email)}">`).join('');
+  }).catch(() => {});
+  sendAgentDlg.showModal();
+}
+async function doSendAgent() {
+  const toEmail = $('sendToEmail').value.trim();
+  if (!toEmail) { $('sendErr').textContent = 'Enter a recipient email.'; return; }
+  $('sendBtn').disabled = true;
+  try {
+    await api(`/v1/agents/${sendAgentId}/send`, { method: 'POST', body: { toEmail, message: $('sendMessage').value.trim() || undefined } });
+    sendAgentDlg.close();
+    toast(`Sent to ${toEmail} — it's in their inbox.`);
+  } catch (e) { $('sendErr').textContent = e.message; }
+  finally { $('sendBtn').disabled = false; }
+}
+
+// ---- inbox: agents others sent me ------------------------------------------
+async function openInbox() { inboxDlg.showModal(); loadInbox(); }
+async function loadInbox() {
+  const el = $('inboxBody');
+  try {
+    const { shares } = await api('/v1/inbox');
+    updateInboxBadge(shares.length);
+    if (!shares.length) { el.innerHTML = '<div class="sub">Nothing waiting. Agents other users send you appear here.</div>'; return; }
+    el.innerHTML = shares.map(s => `<div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
+      <div class="grow"><b>${esc(s.agentName)}</b>
+        <div class="sub">from ${esc(s.fromEmail || 'another user')} · ${ago(s.createdAt)}${s.message ? ' — ' + esc(s.message) : ''}</div></div>
+      <button class="primary" onclick="acceptShare('${s.id}', '${jsq(s.agentName)}')">Import</button>
+      <button onclick="dismissShare('${s.id}')" title="Turn it away">Dismiss</button>
+    </div>`).join('');
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+async function acceptShare(id, name) {
+  const cn = prompt(`Import "${name}" as — name it (it becomes a fresh agent you own; you connect its Telegram bot next):`, name);
+  if (cn === null) return;
+  try {
+    const r = await api(`/v1/inbox/${id}/accept`, { method: 'POST', body: { name: cn } });
+    toast(`Imported as "${r.name}" — connect its Telegram bot to finish`, 30000);
+    await loadInbox(); await refresh(true);
+  } catch (e) { toast(e.message, 20000); }
+}
+async function dismissShare(id) {
+  try { await api(`/v1/inbox/${id}/dismiss`, { method: 'POST' }); await loadInbox(); }
+  catch (e) { toast(e.message); }
+}
+function updateInboxBadge(n) {
+  const b = $('inboxBadge');
+  if (n > 0) { b.textContent = n; b.hidden = false; } else { b.hidden = true; }
+}
+async function refreshInboxBadge() {
+  try { const { shares } = await api('/v1/inbox'); updateInboxBadge(shares.length); } catch {}
+}
+
 function shareTemplate(id) {
   const inclMem = confirm(
     "Include the agent's MEMORY in the shared copy?\n\n" +
@@ -4206,6 +4302,7 @@ function closeToc() { $('toc').classList.remove('open'); }
 
 let pollTimer, pairTick = 0;
 async function refresh(withMeta) {
+  void refreshInboxBadge(); // keep the inbox count live without opening it
   try {
     if (withMeta || !profiles.length || !hosts.length) {
       [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);

@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.84.0] — 2026-09-01
+
+### Added
+- **Send an agent to another user's inbox** — Phase 1 of
+  `docs/sharing-and-templates-design.md`. A **📨 Send** action on the card ships
+  a trained copy (the same secret-free template as a shared file — persona and
+  instructions, no bot token, no members, no history) to another user on this
+  server by email, delivered in-app instead of download → email → import. It
+  lands in their **📥 Inbox** (header, with a live count badge); they Import it
+  as a fresh agent they own, on their own bot, or Dismiss it. A send to an email
+  that hasn't signed in yet waits and binds to them on first sign-in. Accounts
+  are registered as users sign in, so the recipient picker fills in over time;
+  sending by typed email always works.
+
 ## [0.83.1] — 2026-09-01
 
 ### Fixed

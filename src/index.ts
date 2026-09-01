@@ -111,6 +111,14 @@ await registerAuth(app, {
   mode: authModeFromEnv(),
   cliTokenOwner: (token) => store.ownerForCliToken(token),
   onAuthenticated: (principal) => {
+    // Register the account (email <-> owner) so agents can be shared to it by
+    // email, and bind any shares that were addressed to this email before its
+    // first sign-in. Cheap and idempotent; runs per authenticated request but
+    // the writes are no-ops once steady.
+    if (principal.ownerId !== LOCAL_OWNER) {
+      store.recordAccount(principal.ownerId, principal.email);
+      if (principal.email) store.claimSharesForEmail(principal.ownerId, principal.email);
+    }
     // Phase 3: the first real account adopts what password mode owned. Runs
     // at most once per process — it fires on every authenticated request.
     if (adoptionChecked) return;
