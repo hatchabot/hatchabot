@@ -161,8 +161,20 @@ vacuous — any reset of a day-old session satisfies it.
 are a `/new` or `/reset` typed in the chat, and something specific to the
 container-replacement path that fires only sometimes.
 
-**The decisive test**, not yet run: archive and restore an agent, then message it
-without typing any command, and see whether the thread survives.
+**The decisive test, run 2026-08-31:** Art Advisor was archived mid-conversation
+(about Van Gogh), restored, left alone for five minutes, then messaged in the
+existing chat with no command. The thread survived intact — same session id,
+no new `.reset.` file, the Van Gogh exchange still in context. Messaged 11s,
+15s and 35s after earlier restores, the same agent reset every time. So the
+trigger is TIMING, not archiving: an agent messaged seconds after its container
+comes back starts a new session.
+
+Acted on in v0.72.0: `waitForSkillsSettled` holds an agent in PROVISIONING /
+REBUILDING until its skill inventory stops changing, which is a proxy for "done
+moving" rather than a claim about the mechanism — `runRebuildHook` can install
+skills seconds before the agent goes live, on this very path. The probe is
+bounded and never fails a provision, and it logs `runtime.ready` with the
+settling time so the proxy can be judged from production data.
 
 **Separately true regardless:** nothing moves a conversation anywhere durable.
 `MEMORY.md` is written only if the agent chooses to write it, and on Art Advisor

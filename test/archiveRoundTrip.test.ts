@@ -35,7 +35,9 @@ describe('one bot, two agents, taking turns', () => {
     const pool = new TelegramPoolProvisioner(db, secrets, { fetchImpl: okFetch });
     const channel = new CompositeTelegramProvisioner(pool, new TelegramManualProvisioner(secrets));
     const log = () => {};
-    const deps = { store, secrets, provider, channel, log };
+    // sleep is injected so the readiness gate's poll interval doesn't put real
+    // seconds into the suite.
+    const deps = { store, secrets, provider, channel, log, sleep: async () => {} };
 
     store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
     store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-5', secretRef: 'ai/p1', createdAt: 'now' });

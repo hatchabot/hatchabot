@@ -2,6 +2,27 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.72.0] — 2026-08-31
+
+### Fixed
+- **An agent messaged seconds after a restore no longer loses its conversation.**
+  Measured: Art Advisor reset its thread when messaged 11s, 15s and 35s after a
+  container came back, and kept it perfectly when messaged five minutes later —
+  same session, Van Gogh exchange intact. The fault was ours: an agent was
+  called live the moment its gateway answered a health check, while things a
+  reply is judged against were still moving — not least because
+  `runRebuildHook` can install skills seconds earlier on the same code path.
+  Provision and rebuild now wait for the agent's skill inventory to stop
+  changing (two identical readings) before going live.
+
+  It is deliberately a **proxy** for "done moving", not a claim about the
+  mechanism inside OpenClaw, which is still unidentified — a probe that waits
+  for the agent to settle helps either way. It is bounded
+  (`AGENTCLAW_READY_TIMEOUT_MS`, default 90s) and never fails a provision: an
+  agent that won't settle goes live anyway, because late beats broken. Each run
+  logs `runtime.ready` with the settling time and poll count, so whether this is
+  the right proxy gets answered by production rather than by argument.
+
 ## [0.71.0] — 2026-08-31
 
 ### Added

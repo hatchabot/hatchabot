@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
 import { basename, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
@@ -229,6 +229,9 @@ async function runProvisionStepsInner(
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
+    // Step 7.9: let the agent stop moving before anyone can talk to it — a
+    // message that lands mid-settle has started a fresh session.
+    await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
 
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');
@@ -500,6 +503,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
+    await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
     return store.setAgentState(agentId, 'RUNNING');
   } catch (err) {
@@ -687,6 +691,67 @@ export async function provisionAgent(
 ): Promise<ProvisionResult> {
   const agent = createAgentRecord(deps.store, input);
   return runProvisionSteps(deps, agent.id);
+}
+
+/**
+ * Wait until the agent will not throw away its conversation on the first
+ * message.
+ *
+ * Healthy is not the same as ready. An agent restored at 16:24 answered its
+ * health check at 16:24:24 and was messaged 35 seconds later; that message
+ * began a NEW session and the previous thread was archived. The same agent,
+ * messaged five minutes after a restore, carried on exactly where it left off.
+ * The difference is on our side: we call an agent live the moment its gateway
+ * responds, while the things a reply is judged against are still moving — not
+ * least because `runRebuildHook` may have just installed skills, seconds
+ * earlier, on this very code path.
+ *
+ * So this waits for the agent's skill inventory to stop changing: two identical
+ * readings in a row and it is settled. Deliberately a PROXY, not a claim about
+ * the mechanism — the exact trigger inside OpenClaw is still unidentified
+ * (docs/pre-production.md §9), and a probe that waits for the agent to stop
+ * moving is useful whether or not skills are the cause. It is bounded and
+ * never fails a provision: an agent that will not settle goes live anyway,
+ * because a late agent beats a failed one.
+ *
+ * The measurement is logged, so the next question — is this the right proxy,
+ * and how long does settling actually take — is answered by production rather
+ * than by argument.
+ */
+export async function waitForSkillsSettled(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  sleep: (ms: number) => Promise<void>,
+  log: (event: string, detail: Record<string, unknown>) => void,
+  opts: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<void> {
+  const intervalMs = opts.intervalMs ?? Number(process.env.AGENTCLAW_READY_POLL_MS ?? 3000);
+  const timeoutMs = opts.timeoutMs ?? Number(process.env.AGENTCLAW_READY_TIMEOUT_MS ?? 90_000);
+  const started = Date.now();
+  let previous: string | undefined;
+  let polls = 0;
+  while (Date.now() - started < timeoutMs) {
+    polls++;
+    let fingerprint: string;
+    try {
+      const res = await provider.exec(runtimeRef, ['skills', 'check', '--agent', slug]);
+      // A failing probe is itself "not settled" — an agent whose CLI can't yet
+      // answer is exactly the state we're waiting out.
+      fingerprint = res.code === 0 ? createHash('sha256').update(res.stdout).digest('hex') : `err:${res.code}`;
+    } catch (err) {
+      fingerprint = `throw:${String(err).slice(0, 40)}`;
+    }
+    if (previous !== undefined && fingerprint === previous && !fingerprint.startsWith('err')
+        && !fingerprint.startsWith('throw')) {
+      log('runtime.ready', { settled: true, afterHealthyMs: Date.now() - started, polls });
+      return;
+    }
+    previous = fingerprint;
+    await sleep(intervalMs);
+  }
+  // Bounded: going live late is a nuisance, refusing to go live is an outage.
+  log('runtime.ready', { settled: false, afterHealthyMs: Date.now() - started, polls });
 }
 
 export async function waitForHealthy(
