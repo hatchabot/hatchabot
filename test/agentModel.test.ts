@@ -270,3 +270,42 @@ describe('PATCH /v1/agents/:id image pin', () => {
     expect(store.getAgent('a2')!.image).toBeUndefined();
   });
 });
+
+describe('POST /v1/ai-profiles/:id/adopt-agents (bulk source switch)', () => {
+  const adopt = (f: any, id: string, body: unknown, owner = OWNER) =>
+    f.inject({ method: 'POST', url: `/v1/ai-profiles/${id}/adopt-agents`, headers: { 'x-agentclaw-owner': owner }, payload: body });
+
+  it('moves ALL of the owner\'s agents off their current source when apply is omitted', async () => {
+    const { store, f } = await world();
+    // a1 starts on p1; add a2 also on p1. p2 is the destination.
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Den', slug: 'den', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    const res = await adopt(f, 'p2', {});
+    expect(res.statusCode).toBe(200);
+    expect(res.json().switched).toBe(2);
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p2');
+    expect(store.getAgent('a2')!.aiProfileId).toBe('p2');
+  });
+
+  it('switches only the named agents when apply is given, and drops a stale pin', async () => {
+    const { store, f } = await world();
+    store.setAgentModel('a1', 'claude-sonnet-5'); // valid on p1, NOT on p2 (menu is fable only)
+    store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Den', slug: 'den', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    const res = await adopt(f, 'p2', { apply: ['a1'] });
+    expect(res.json().switched).toBe(1);
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p2');
+    expect(store.getAgent('a1')!.model).toBeUndefined(); // stale pin cleared
+    expect(store.getAgent('a2')!.aiProfileId).toBe('p1'); // untouched
+  });
+
+  it('is a no-op for an agent already on the target', async () => {
+    const { f } = await world();
+    const res = await adopt(f, 'p1', {}); // a1 is already on p1
+    expect(res.json().switched).toBe(0);
+  });
+
+  it('404s a source the caller does not own', async () => {
+    const { f } = await world();
+    const res = await adopt(f, 'p1', {}, 'someone-else');
+    expect(res.statusCode).toBe(404);
+  });
+});

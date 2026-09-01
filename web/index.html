@@ -1677,6 +1677,7 @@ function renderAiList() {
         <input type="hidden" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(','))}">
       </div>
       <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
+        <button onclick="moveAgentsToSource('${p.id}', '${jsq(p.name)}')" title="Switch some or all of your agents onto this AI source">Move agents here…</button>
         <button class="primary" onclick="saveAiProfile('${p.id}')">Save</button>
         <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">Delete</button>
       </div>
@@ -1835,6 +1836,38 @@ async function applyModelToSelected(rebuild) {
     await refresh(true); renderAiList();
   } catch (e) { $('applyModelErr').textContent = e.message; }
   finally { $('applyModelBtn').disabled = false; }
+}
+
+/**
+ * Switch a batch of agents onto one AI source. Reuses the apply-model dialog's
+ * checkbox pattern would be nicer, but a confirm keeps this to one file change:
+ * offer "all" by default and let the owner narrow with a comma list.
+ */
+async function moveAgentsToSource(profileId, profileName) {
+  const candidates = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== profileId);
+  if (!candidates.length) { toast('Every one of your agents already uses this source.'); return; }
+  const list = candidates.map(a => a.name).join(', ');
+  const pick = prompt(
+    `Move which agents onto "${profileName}"?\n\nLeave blank for ALL ${candidates.length}, or type a comma-separated list of names.\n\nAvailable: ${list}`,
+    '',
+  );
+  if (pick === null) return; // cancelled
+  let apply;
+  if (pick.trim()) {
+    const wanted = pick.split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+    apply = candidates.filter(a => wanted.includes(a.name.toLowerCase())).map(a => a.id);
+    if (!apply.length) { toast('No matching agents — nothing changed.'); return; }
+  }
+  const rebuild = confirm('Rebuild the switched agents now to apply?\n\nOK = rebuild now.  Cancel = switch, apply on next rebuild.');
+  try {
+    const r = await api(`/v1/ai-profiles/${profileId}/adopt-agents`, { method: 'POST', body: { apply, rebuild } });
+    const bits = [`${r.switched} switched`];
+    if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding} now`);
+    else if (r.switched) bits.push('rebuild to apply');
+    toast(bits.join(' — '));
+    for (const s of r.skipped ?? []) toast(`skipped ${s.name}: ${s.reason}`);
+    await refresh(true); renderAiList();
+  } catch (e) { toast(e.message); }
 }
 
 async function delAiProfile(id, name) {

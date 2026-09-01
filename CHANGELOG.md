@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.76.0] — 2026-09-01
+
+### Added
+- **Switch many agents' AI source in one call.** `POST
+  /v1/ai-profiles/:id/adopt-agents` moves a batch of agents onto one source
+  (`:id` is the destination); omit `apply` to move *all* of your agents not
+  already on it, or name a subset. Same per-agent rules as the single switch: a
+  machine-login Max source that can't reach a runner-hosted agent is reported in
+  `skipped` rather than failing the batch, and a model pin the new source
+  doesn't offer is dropped so the agent falls back to the new default. `rebuild:
+  true` applies immediately; otherwise each agent shows "rebuild to apply".
+  Surfaced as `agentclaw switch-source --to <id|name> [--agents a,b] [--rebuild]`
+  and a "Move agents here…" button on each AI source in Settings. This is the
+  fleet-wide lever for moving off the machine-login `~/.claude` mount onto a
+  setup-token source (see the security audit / pre-production #1).
+
 ## [0.75.0] — 2026-09-01
 
 ### Added

@@ -67,6 +67,10 @@ Commands:
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
+  switch-source --to <id|name> [--agents a,b,c] [--rebuild]
+                               Move agents onto one AI source in a single call
+                               (default: all of yours). --rebuild applies now,
+                               else each shows "rebuild to apply".
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
          [--private] [--bot-token <tok>]
                                Create an agent and wait for it to boot.
@@ -666,6 +670,28 @@ async function main() {
   };
 
   switch (cmd) {
+    case 'switch-source': {
+      // Move agents onto one AI source in a single call. --to <id|name>,
+      // optional --agents a,b,c (default: ALL of yours), --rebuild to apply now.
+      const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
+      const want = flags.get('to') ?? fail('usage: agentclaw switch-source --to <source id or name> [--agents a,b] [--rebuild]');
+      const target = profiles.find((p) => p.id === want || p.name.toLowerCase() === want.toLowerCase())
+        ?? fail(`no AI source matches "${want}". Have: ${profiles.map((p) => p.name).join(', ') || '(none)'}`);
+      const apply = flags.get('agents')?.split(',').map((x) => x.trim()).filter(Boolean);
+      let ids: string[] | undefined;
+      if (apply) {
+        // Resolve names/slugs to ids so a human can pass either.
+        const all: any[] = await (await api(ctx, '/v1/agents')).json() as any[];
+        ids = apply.map((a) => all.find((x) => x.id === a || x.slug === a || x.name.toLowerCase() === a.toLowerCase())?.id ?? a);
+      }
+      const res: any = await (await jsonPost(`/v1/ai-profiles/${target.id}/adopt-agents`, {
+        apply: ids,
+        rebuild: flags.has('rebuild'),
+      })).json();
+      console.log(`switched ${res.switched} agent(s) to "${target.name}"${res.rebuilding ? `, rebuilding ${res.rebuilding} now` : ' (rebuild to apply)'}`);
+      for (const s of res.skipped ?? []) console.log(`  skipped ${s.name}: ${s.reason}`);
+      return;
+    }
     case 'create': {
       const name = rest.join(' ').trim() || fail('usage: agentclaw create <name> [options]');
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];

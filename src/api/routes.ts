@@ -1102,6 +1102,72 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   //   • PINS every other agent of yours on this source to the model it runs
   //     today, so it never silently switches — the pinned models are kept on
   //     the menu so the pins stay valid.
+  /**
+   * Move a batch of agents ONTO this AI source in one call — the bulk form of
+   * the per-agent switch in PATCH /v1/agents/:id. `:id` is the DESTINATION
+   * source. Same per-agent rules as that path (setup-token vs runner, stale
+   * model pins dropped), applied atomically per agent: an agent that can't
+   * legally switch is reported in `skipped`, and the rest still move.
+   *
+   * This is what the "change every agent's AI source" case needs — e.g. moving
+   * the whole fleet off a machine-login Max profile onto a setup-token one to
+   * close the ~/.claude mount (docs/pre-production.md #1).
+   */
+  app.post<{ Params: { id: string }; Body: { apply?: string[]; rebuild?: boolean } }>(
+    '/v1/ai-profiles/:id/adopt-agents',
+    async (req, reply) => {
+      const ownerId = ownerIdOf(req);
+      const target = store.getAIProfile(req.params.id);
+      if (!target || (target.ownerId !== ownerId && !target.shared)) {
+        return reply.code(404).send({ error: 'Not found' });
+      }
+      const parsed = z
+        .object({
+          /** Agent ids to move onto this source. Omitted/empty = ALL of the
+           *  caller's agents not already on it. */
+          apply: z.array(z.string()).max(500).optional(),
+          /** Rebuild each switched agent now (else it shows "rebuild to apply"). */
+          rebuild: z.boolean().optional(),
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+
+      const mine = store.listAgents(ownerId);
+      const requested = parsed.data.apply?.length
+        ? mine.filter((a) => parsed.data.apply!.includes(a.id))
+        : mine.filter((a) => a.aiProfileId !== target.id); // "all" = everything not already here
+
+      const switched: string[] = [];
+      const skipped: Array<{ name: string; reason: string }> = [];
+      let rebuilding = 0;
+      for (const a of requested) {
+        if (a.aiProfileId === target.id) continue; // already here — nothing to do
+        // A machine-login Max source (no secretRef) can't reach a runner-hosted
+        // agent, exactly as create/move/PATCH enforce. Refuse per agent rather
+        // than fail the whole batch.
+        const host = store.getHost(a.hostId);
+        if (
+          target.vendor !== 'local' &&
+          target.kind === 'subscription' &&
+          host?.kind !== 'local' &&
+          !target.secretRef
+        ) {
+          skipped.push({ name: a.name, reason: "machine-login Max can't run on a runner — use a setup-token source" });
+          continue;
+        }
+        store.setAgentAIProfile(a.id, target.id);
+        // Drop a model pin the new source doesn't offer, so the agent falls back
+        // to the new default instead of provisioning healthy and failing on use.
+        if (a.model && modelOverrideProblem(target, a.model)) store.setAgentModel(a.id, null);
+        switched.push(a.id);
+        if (parsed.data.rebuild && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
+          if (kickRebuild(a.id)) rebuilding++;
+        }
+      }
+      return { switched: switched.length, rebuilding, skipped };
+    },
+  );
+
   // Only your own agents are touched; a shared source's other users keep theirs.
   // Local sources run one model for the whole GPU, so they can't hold
   // individuals — they use the plain PATCH instead.
