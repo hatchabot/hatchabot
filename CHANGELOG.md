@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.79.1] — 2026-09-01
+
+### Changed
+- **A source with no running agent now says why its model list is short.** The
+  "+ add model" dropdown is absent on such a source because it can only see the
+  offline curated set (which it already lists in full) — not a bug, but it read
+  as inconsistent next to a source with live agents showing the full runtime
+  catalogue. The empty state now explains: common models only until an agent
+  runs on the source, then Sync (or the auto-probe) reveals the rest.
+
 ## [0.79.0] — 2026-09-01
 
 ### Added

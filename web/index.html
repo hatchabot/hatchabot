@@ -1029,6 +1029,7 @@ let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editDat
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
+let availableSource = {}; // profile id -> 'runtime' | 'curated' — was the list PROBED live, or the offline fallback
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
@@ -1635,6 +1636,7 @@ async function openAiDlg(tab) {
     try {
       const r = await api(`/v1/ai-profiles/${p.id}/available-models`);
       availableModels[p.id] = r.models ?? [];
+      availableSource[p.id] = r.source;
       staleModels[p.id] = r.stale ?? [];
       // Auto-clean: drop models this source lists that its runtime does not
       // serve. Only ever acts on a confident live answer ('runtime'), never on
@@ -1783,7 +1785,10 @@ function renderExtras(id) {
       ${opts.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')}
     </select>`;
   } else if (avail.length) {
-    adder = `<span class="sub">all models added</span>`;
+    adder = availableSource[id] === 'curated'
+      ? `<span class="sub">Showing common models only — no agent runs on this source yet, so its full
+          catalogue can't be read. Start an agent here (or <b>⟳ Sync</b> once one is running) to discover the rest.</span>`
+      : `<span class="sub">all models added</span>`;
   } else {
     // No list available (server unreachable / no key) — let them type as a fallback.
     adder = `<input data-add-text placeholder="type a model id, then Enter" style="${ctrlStyle};min-width:180px">`;
