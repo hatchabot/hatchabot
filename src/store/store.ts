@@ -160,6 +160,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN model TEXT`,
       // Owner-defined organization: an optional group label and a manual order.
       `ALTER TABLE agents ADD COLUMN group_name TEXT`,
+      `ALTER TABLE agents ADD COLUMN image TEXT`,
       `ALTER TABLE agents ADD COLUMN sort_order INTEGER`,
       // Bind an adopted agent's folder at its original host path, so existing
       // absolute-path references resolve unchanged.
@@ -1115,6 +1116,13 @@ export class Store {
     );
   }
 
+  /** Pin (or clear, with null) the agent's runtime image. Takes effect on rebuild. */
+  setAgentImage(id: string, image: string | null): void {
+    this.db
+      .prepare(`UPDATE agents SET image = ?, updated_at = ? WHERE id = ?`)
+      .run(image, new Date().toISOString(), id);
+  }
+
   setAgentMigratedTo(id: string, note: string | null): void {
     this.db.prepare(`UPDATE agents SET migrated_to = ? WHERE id = ?`).run(note, id);
   }
@@ -1378,6 +1386,7 @@ function rowToAgent(r: any): Agent {
     model: r.model ?? undefined,
     pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
     migratedTo: r.migrated_to ?? undefined,
+    image: r.image ?? undefined,
     sharedPaths: r.shared_paths ? JSON.parse(r.shared_paths) : undefined,
     appliedProfileId: r.applied_profile_id ?? undefined,
     appliedModel: r.applied_model ?? undefined,

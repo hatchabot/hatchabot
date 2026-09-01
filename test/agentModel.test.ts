@@ -239,3 +239,34 @@ describe('POST /v1/agents model override', () => {
     expect(res.json().error).toMatch(/local sources/i);
   });
 });
+
+describe('PATCH /v1/agents/:id image pin', () => {
+  it('pins, exposes on the record, and clears with null', async () => {
+    const { store, f } = await world();
+    let res = await patch(f, { image: 'agentclaw-runtime:candidate-9' });
+    expect(res.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.image).toBe('agentclaw-runtime:candidate-9');
+    res = await patch(f, { image: null });
+    expect(res.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.image).toBeUndefined();
+  });
+
+  it('refuses a caller who does not own the machine', async () => {
+    // Any local image is runnable by NAME, including ones unrelated to
+    // AgentClaw — so which image runs on this box is the machine owner's call,
+    // same as host paths. Agent ownership is not enough.
+    const { store, f } = await world();
+    store.insertAgent({
+      id: 'a2', ownerId: 'user-two', name: 'Theirs', slug: 'theirs', state: 'RUNNING',
+      aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a2',
+      headers: { 'x-agentclaw-owner': 'user-two' },
+      payload: { image: 'evil:latest' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(store.getAgent('a2')!.image).toBeUndefined();
+  });
+});

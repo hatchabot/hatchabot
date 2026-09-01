@@ -106,6 +106,13 @@ export interface Agent {
    * a stale copy: starting it would make two pollers fight over one bot token.
    */
   migratedTo?: string;
+  /**
+   * Pin this agent to a specific runtime image (e.g. a candidate build under
+   * test, or a derived image with extra system packages). Absent = the host's
+   * default (:latest), which is what fleet-wide promote moves. Applied on the
+   * next rebuild, like a model change.
+   */
+  image?: string;
   /** The AI profile the runtime was last configured with (vs the desired one). */
   appliedProfileId?: string;
   /** The model that configuration actually used. */

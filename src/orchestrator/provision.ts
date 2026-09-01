@@ -358,6 +358,9 @@ export async function buildRuntimeSpec(
   return {
     agentId,
     slug: agent.slug,
+    // Pinned image, when the agent has one — a candidate under test, or a
+    // derived image with extra system packages. Absent = provider default.
+    image: agent.image,
     previousRef: agent.runtimeRef,
     ports: [{ host: gateway.port, container: 18789 }],
     workspace: {

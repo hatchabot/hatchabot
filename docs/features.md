@@ -340,6 +340,15 @@ version bumps via the candidate → smoke → promote flow in
 `scripts/build-runtime-image.sh`, or a system package no static build can
 substitute for.
 
+**Per-agent image pin** (Settings → Definition, host owner only): pin one agent
+to a specific image — a candidate build under test, or a derived image with
+extra system packages — instead of promoting fleet-wide. Applies on the next
+rebuild; the card shows 📌 with the pinned tag; a pinned agent stops getting
+"update available" from fleet promotes, since it deliberately doesn't track
+`:latest`. Clearing the field returns it to the default. The pin is the
+foundation for derived images ("this agent's owner needs ffmpeg + LaTeX"):
+build `FROM agentclaw-runtime:latest` + the packages, tag it, pin the agent.
+
 ## Bots census
 
 Telegram caps an account at about 20 bots and offers no API to list them, so

@@ -45,7 +45,11 @@ export class MockProvider implements RuntimeProvider {
 
   #healthChecks = 0;
 
+  /** The most recent spec provisioned — lets tests assert what docker would see. */
+  lastSpec?: RuntimeSpec;
+
   async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
+    this.lastSpec = spec;
     if (this.opts.failOn === 'provision') {
       throw new ProviderError(
         'mock provision failure',

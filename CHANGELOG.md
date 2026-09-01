@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.74.0] — 2026-09-01
+
+### Added
+- **Per-agent runtime image pin.** An agent can now run a specific image instead
+  of the fleet's `:latest` — Settings → Definition → "Runtime image", host owner
+  only (any local image is runnable by name, so this is the machine owner's
+  call, like host paths). Applies on the next rebuild; the seed one-shots run on
+  the pinned image too, so a candidate is exercised by its own seed path. The
+  card shows 📌 with the tag — a forgotten pin would otherwise quietly strand an
+  agent on an old image forever — and a pinned agent is exempt from "update
+  available", which would only fight the pin. The pin is deliberately not
+  validated against `docker images`: pinning an image that is *about to exist*
+  is the normal candidate workflow, and a wrong name fails the next rebuild
+  loudly with Retry.
+
+  This is the foundation for derived images (per-owner "extra system packages"
+  built `FROM` the base) and, later, for the management agent driving that
+  pipeline — design in docs/features.md "Adding tools to an agent".
+
 ## [0.73.0] — 2026-09-01
 
 ### Added

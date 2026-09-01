@@ -1460,7 +1460,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             // Note this fires for ANY image rebuild, including a same-version one
             // (e.g. base tooling added), not only an OpenClaw version bump — the
             // app words it from the two versions so it doesn't over-claim.
-            updateAvailable = !!(
+            // A PINNED agent is exempt: it deliberately does not track :latest,
+            // and nagging it to "update" to an image it was pinned away from
+            // would fight the pin.
+            updateAvailable = !a.image && !!(
               running.imageId && current.imageId && running.imageId !== current.imageId
             );
           } catch {
@@ -1551,6 +1554,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           /** Organize into a group; empty string or null clears it. Cosmetic —
            *  takes effect immediately, no rebuild. */
           group: z.string().trim().max(48).nullable().optional(),
+          /**
+           * Pin this agent to a runtime image (candidate build, derived image
+           * with extra packages). `null` returns it to the fleet default.
+           * Applied on the next rebuild.
+           */
+          image: z.string().trim().min(1).max(200).nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1563,7 +1572,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         model === undefined &&
         !runsHere &&
         parsed.data.sharedPaths === undefined &&
-        group === undefined
+        group === undefined &&
+        parsed.data.image === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
@@ -1573,6 +1583,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
 
       if (runsHere) store.setAgentMigratedTo(agent.id, null);
+
+      if (parsed.data.image !== undefined) {
+        // Which image runs on this box is the MACHINE owner's call, like host
+        // paths: any local image is runnable by name, including ones that have
+        // nothing to do with AgentClaw. Agent ownership is not enough.
+        if (!ownsLocalHost(req)) {
+          return reply.code(403).send({ error: HOST_PATH_DENIED });
+        }
+        // Deliberately NOT validated against `docker images`: the point of a
+        // pin is often an image that is about to exist (candidate being built).
+        // A wrong name fails the next rebuild with a clear error and Retry.
+        store.setAgentImage(agent.id, parsed.data.image);
+      }
 
       if (parsed.data.sharedPaths) {
         const paths = parsed.data.sharedPaths.map((p) => p.trim()).filter(Boolean);

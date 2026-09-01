@@ -460,6 +460,16 @@
       </span>
     </label>
     <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
+    <div id="imagePinRow">
+      <label>Runtime image <span style="color:var(--dim)">— pin this agent to a specific image (host owner only)</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="editImage" maxlength="200" placeholder="fleet default (agentclaw-runtime:latest)" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px">
+        <button id="imageBtn" onclick="saveImagePin()">Pin</button>
+      </div>
+      <div class="sub" style="margin:-4px 0 4px">For testing a candidate build or a derived image with extra packages.
+        Applies on the next rebuild. A pinned agent stops getting "update available" from fleet promotes —
+        clear the field and Pin to return it to the default.</div>
+    </div>
     <label>File</label>
     <select id="editFile" onchange="loadEditFile()">
       <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
@@ -2411,6 +2421,7 @@ function agentMeta(a) {
   if (a.modelWarm === false) bits.push('warming up');
   if (a.dataSummary) bits.push(esc(a.dataSummary));
   if (a.sharedMemory) bits.push('shared memory');
+  if (a.image) bits.push(`📌 ${esc(a.image)}`);
   const debug = esc(a.runtimeRef.replace('docker://', '')) + (a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : '');
   return `<div class="runtime" title="${debug}">${bits.join(' · ') || '—'}</div>`;
 }
@@ -2606,6 +2617,7 @@ async function openEdit(id, name, tab = 'def') {
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
+  $('editImage').value = cur?.image ?? '';
   $('editShared').checked = !!cur?.sharedMemory;
   $('editShared').disabled = otherMembers.length > 0;
   $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
@@ -3781,6 +3793,16 @@ async function syncBotName(id, name) {
       const when = new Date(r.retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       toast(`Telegram won't accept another rename for this bot until ${when} — it's queued and will apply then.`);
     } else toast(`Telegram refused the rename: ${r.error || 'unknown reason'}`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+/** Pin (or clear) the runtime image. Empty input = back to the fleet default. */
+async function saveImagePin() {
+  const v = $('editImage').value.trim();
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
+    toast(v ? `Pinned to ${v} — applies on the next rebuild.` : 'Back on the fleet default image.');
     await refresh(false);
   } catch (e) { toast(e.message); }
 }

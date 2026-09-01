@@ -654,3 +654,20 @@ describe('TOOLS.md carries the install conventions', () => {
     expect(out).toContain('~/.local/bin');
   });
 });
+
+describe('a pinned runtime image reaches docker', () => {
+  it('provisions and rebuilds on the agent\'s own image, not the fleet default', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.setAgentImage(agent.id, 'agentclaw-runtime:candidate-x');
+    await rebuildAgent(w.deps, agent.id);
+    const spec = (w.provider as MockProvider).lastSpec!;
+    expect(spec.image).toBe('agentclaw-runtime:candidate-x');
+  });
+
+  it('an unpinned agent leaves the image to the provider default', async () => {
+    const w = await world();
+    await provisionAgent(w.deps, INPUT);
+    expect((w.provider as MockProvider).lastSpec!.image).toBeUndefined();
+  });
+});

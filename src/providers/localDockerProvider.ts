@@ -164,7 +164,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     for (const [k, v] of Object.entries(spec.env)) {
       args.push('-e', `${k}=${v}`);
     }
-    args.push(this.image, 'openclaw', 'gateway');
+    args.push(spec.image ?? this.image, 'openclaw', 'gateway');
     await this.#must(args, 'The agent runtime could not be created.');
 
     return { runtimeRef };
@@ -284,14 +284,14 @@ export class LocalDockerProvider implements RuntimeProvider {
           maxBuffer: 256 * 1024 * 1024,
         });
         res = await this.#runStdin(
-          ['run', '--rm', '-i', '-v', `${volume}:/home/node`, this.image,
+          ['run', '--rm', '-i', '-v', `${volume}:/home/node`, spec.image ?? this.image,
             'bash', '-c', `mkdir -p ${seedBase} && tar xz -C ${seedBase} && bash ${seedBase}/seed.sh`],
           tar.stdout as Buffer,
         );
       } else {
         res = await this.#docker([
           'run', '--rm', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
-          this.image, 'bash', '/seed/seed.sh',
+          spec.image ?? this.image, 'bash', '/seed/seed.sh',
         ]);
       }
       if (res.code !== 0) {

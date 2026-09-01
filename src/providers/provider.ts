@@ -21,6 +21,12 @@ export interface RuntimeSpec {
    *  a hostname concept ignore it. */
   hostname?: string;
   /**
+   * Image override for THIS runtime — an agent pinned to a candidate build or
+   * a derived image with extra packages. Absent = the provider's default,
+   * which is what fleet-wide promote moves.
+   */
+  image?: string;
+  /**
    * Set when this spec re-provisions an existing runtime (rebuild, retry).
    * The provider MUST keep using the same underlying storage so the agent's
    * memory survives; the returned ref stays equal to this one.
