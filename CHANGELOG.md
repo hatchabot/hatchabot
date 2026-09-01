@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.77.0] — 2026-09-01
+
+### Added
+- **A fleet-by-source / by-model summary.** `agentclaw sources` prints which
+  agents are on which AI source, a model histogram ("what everything runs now"),
+  and a per-source agent list with pins and pending rebuild-time model changes.
+  In the web app, each AI source now carries an expandable "<n> agents · Nx
+  <model>" line listing its agents and their current models — the summary lives
+  where you manage sources.
+
+### Fixed
+- **"Move agents here" is disabled when every agent is already on that source**,
+  instead of a click that produced only a fleeting toast (or, if missed, seemed
+  to do nothing). The button's tooltip says why, and shows the movable count
+  when there is one.
+
 ## [0.76.2] — 2026-09-01
 
 ### Fixed

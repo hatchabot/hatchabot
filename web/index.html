@@ -1673,6 +1673,29 @@ function defaultModelControl(p) {
   return `<input type="text" id="aiModel-${p.id}" value="${esc(p.model)}" oninput="renderExtras('${p.id}')" style="${box}">`;
 }
 
+/** A source's fleet: how many agents, split by the model they run now, with an
+ *  expandable list. Answers "which agents on which source, which models" where
+ *  you manage sources. */
+function sourceUsage(p) {
+  const ags = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId === p.id);
+  if (!ags.length) return '<div class="sub" style="width:100%">No agents on this source.</div>';
+  const byModel = {};
+  for (const a of ags) { const m = a.model || '(no model)'; (byModel[m] = byModel[m] || []).push(a); }
+  const breakdown = Object.entries(byModel).sort((x, y) => y[1].length - x[1].length)
+    .map(([m, list]) => `${list.length}× ${esc(m)}`).join(' · ');
+  const rows = ags.slice().sort((a, b) => a.name.localeCompare(b.name)).map(a => {
+    const pin = a.modelOverride ? ' <span class="sub">(pinned)</span>' : '';
+    const soon = a.pendingModel && a.pendingModel !== a.model
+      ? ` <span class="sub">→ ${esc(a.pendingModel)} on rebuild</span>` : '';
+    return `<div style="padding:2px 0"><span class="grow">${esc(a.name)}</span>
+      <span class="sub">${esc(a.model || '(no model)')}</span>${pin}${soon}</div>`;
+  }).join('');
+  return `<details style="width:100%">
+    <summary class="sub" style="cursor:pointer">${ags.length} agent${ags.length === 1 ? '' : 's'} · ${breakdown}</summary>
+    <div style="padding:4px 0 4px 14px">${rows}</div>
+  </details>`;
+}
+
 function renderAiList() {
   $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
@@ -1689,6 +1712,7 @@ function renderAiList() {
           <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
         </label>
       </div>
+      ${sourceUsage(p)}
       <div style="display:flex;align-items:center;gap:10px;width:100%">
         <label class="sub" style="min-width:104px">Default model</label>
         ${defaultModelControl(p)}
@@ -1702,7 +1726,12 @@ function renderAiList() {
         <input type="hidden" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(','))}">
       </div>
       <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
-        <button onclick="moveAgentsToSource('${p.id}', '${jsq(p.name)}')" title="Switch some or all of your agents onto this AI source">Move agents here…</button>
+        ${(() => {
+          const movable = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== p.id).length;
+          return movable
+            ? `<button onclick="moveAgentsToSource('${p.id}', '${jsq(p.name)}')" title="Switch ${movable} of your agents onto this AI source">Move agents here…</button>`
+            : `<button disabled title="Every one of your agents already uses this source">Move agents here…</button>`;
+        })()}
         <button class="primary" onclick="saveAiProfile('${p.id}')">Save</button>
         <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">Delete</button>
       </div>

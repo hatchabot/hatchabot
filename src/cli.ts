@@ -67,6 +67,8 @@ Commands:
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
+  sources                      Summary: which agents are on which AI source,
+                               and which models they run.
   switch-source --to <id|name> [--agents a,b,c] [--rebuild]
                                Move agents onto one AI source in a single call
                                (default: all of yours). --rebuild applies now,
@@ -670,6 +672,47 @@ async function main() {
   };
 
   switch (cmd) {
+    case 'sources': {
+      // Summary: which agents are on which AI source, and which models they run.
+      const [profiles, list] = await Promise.all([
+        (await api(ctx, '/v1/ai-profiles')).json() as Promise<any[]>,
+        (await api(ctx, '/v1/agents')).json() as Promise<any[]>,
+      ]);
+      const owned = list.filter((a) => !a.role || a.role === 'owner');
+      const bySource = new Map<string, any[]>();
+      for (const a of owned) (bySource.get(a.aiProfileId) ?? bySource.set(a.aiProfileId, []).get(a.aiProfileId)!).push(a);
+
+      console.log('AI sources:');
+      for (const p of profiles) {
+        const n = (bySource.get(p.id) ?? []).length;
+        const cred = p.kind === 'subscription'
+          ? (p.credential === 'setup-token' ? 'subscription · setup-token' : 'subscription · machine-login')
+          : p.kind === 'local' ? 'local' : `api key · ${p.vendor}`;
+        console.log(`  ${p.name}  [${cred}]  ${n} agent${n === 1 ? '' : 's'}`);
+      }
+      const orphanIds = [...bySource.keys()].filter((id) => !profiles.some((p) => p.id === id));
+      for (const id of orphanIds) console.log(`  (unknown source ${id.slice(0, 8)})  ${bySource.get(id)!.length} agents`);
+
+      console.log('\nModels in use now:');
+      const byModel = new Map<string, number>();
+      for (const a of owned) byModel.set(a.model ?? '(none)', (byModel.get(a.model ?? '(none)') ?? 0) + 1);
+      for (const [m, c] of [...byModel.entries()].sort((x, y) => y[1] - x[1])) console.log(`  ${String(c).padStart(3)}  ${m}`);
+      const pending = owned.filter((a) => a.pendingModel && a.pendingModel !== a.model);
+      if (pending.length) console.log(`  (${pending.length} will change on next rebuild)`);
+
+      console.log('\nBy source:');
+      for (const p of profiles) {
+        const ags = bySource.get(p.id) ?? [];
+        if (!ags.length) continue;
+        console.log(`  ${p.name}:`);
+        for (const a of ags.sort((x, y) => x.name.localeCompare(y.name))) {
+          const pin = a.modelOverride ? ' (pinned)' : '';
+          const soon = a.pendingModel && a.pendingModel !== a.model ? ` -> ${a.pendingModel} on rebuild` : '';
+          console.log(`    - ${a.name}  ${a.model ?? '(no model)'}${pin}${soon}`);
+        }
+      }
+      return;
+    }
     case 'switch-source': {
       // Move agents onto one AI source in a single call. --to <id|name>,
       // optional --agents a,b,c (default: ALL of yours), --rebuild to apply now.
