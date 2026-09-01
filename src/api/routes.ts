@@ -1150,7 +1150,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * the whole fleet off a machine-login Max profile onto a setup-token one to
    * close the ~/.claude mount (docs/pre-production.md #1).
    */
-  app.post<{ Params: { id: string }; Body: { apply?: string[]; rebuild?: boolean } }>(
+  app.post<{ Params: { id: string }; Body: { apply?: string[]; rebuild?: boolean; checkpoint?: boolean } }>(
     '/v1/ai-profiles/:id/adopt-agents',
     async (req, reply) => {
       const ownerId = ownerIdOf(req);
@@ -1165,6 +1165,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           apply: z.array(z.string()).max(500).optional(),
           /** Rebuild each switched agent now (else it shows "rebuild to apply"). */
           rebuild: z.boolean().optional(),
+          /** Summarise each agent's live conversation into MEMORY.md before its
+           *  rebuild — the source switch resets the thread, this is what
+           *  survives it. Only acts on a RUNNING agent being rebuilt now. */
+          checkpoint: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1198,7 +1202,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (a.model && modelOverrideProblem(target, a.model)) store.setAgentModel(a.id, null);
         switched.push(a.id);
         if (parsed.data.rebuild && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
-          if (kickRebuild(a.id)) rebuilding++;
+          // Checkpoint only a RUNNING agent — a stopped one has no live turn to
+          // summarise. Each runs as the first step of its own background rebuild.
+          const checkpoint = parsed.data.checkpoint === true && a.state === 'RUNNING';
+          if (kickRebuild(a.id, { checkpoint })) rebuilding++;
         }
       }
       return { switched: switched.length, rebuilding, skipped };

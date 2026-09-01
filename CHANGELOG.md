@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.81.0] — 2026-09-01
+
+### Added
+- **The memory checkpoint now covers the bulk "Move agents here" path too**, not
+  just the single-agent AI switch. The move dialog gains the same default-on
+  "Save each conversation to memory first" checkbox, with a note that it adds
+  ~20s per agent and only applies when rebuilding now. Each agent's summary runs
+  as the first step of its own rebuild, so a fleet move no longer resets every
+  conversation unsaved.
+
 ## [0.80.0] — 2026-09-01
 
 ### Added

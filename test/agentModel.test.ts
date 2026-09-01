@@ -371,3 +371,18 @@ describe('a new Anthropic source is stocked with the Claude line-up', () => {
     expect(store.getAIProfile(res.json().id)!.models).toEqual(['claude-opus-4-8', 'claude-haiku-4-5']);
   });
 })
+
+describe('bulk adopt-agents passes the checkpoint flag through to rebuild', () => {
+  it('accepts checkpoint in the body without error and reports rebuilding', async () => {
+    const { store, f } = await world();
+    // a1 on p1 → move to p2 with rebuild + checkpoint.
+    const res = await f.inject({
+      method: 'POST', url: '/v1/ai-profiles/p2/adopt-agents',
+      headers: { 'x-agentclaw-owner': OWNER },
+      payload: { apply: ['a1'], rebuild: true, checkpoint: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().switched).toBe(1);
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p2');
+  });
+})

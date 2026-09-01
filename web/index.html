@@ -952,6 +952,14 @@
     <span class="sub" id="moveSourceCount"></span>
   </div>
   <div id="moveSourceList" style="max-height:320px;overflow:auto;border-top:1px solid var(--line);padding-top:4px"></div>
+  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:10px 0 0">
+    <input type="checkbox" id="moveSourceCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
+    <span><b>Save each conversation to memory first</b>
+      <div class="sub" style="margin-top:2px">Switching source restarts each agent on a different engine, ending its
+        current Telegram conversation. With this on, each agent writes a short summary of its recent chat into memory
+        before rebuilding, so the context isn't lost. Adds about <b>20 seconds per agent</b>, and only applies when you
+        rebuild now. Durable notes already saved are kept regardless.</div></span>
+  </label>
   <div class="sub" id="moveSourceErr" style="color:var(--bad);margin-top:8px"></div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
     <button onclick="moveSourceDlg.close()">Cancel</button>
@@ -1957,7 +1965,7 @@ async function moveAgentsApply(rebuild) {
   $('moveSourceBtn').disabled = true;
   try {
     const r = await api(`/v1/ai-profiles/${moveSourceState.profileId}/adopt-agents`, {
-      method: 'POST', body: { apply, rebuild },
+      method: 'POST', body: { apply, rebuild, checkpoint: rebuild && $('moveSourceCheckpoint').checked },
     });
     const bits = [`${r.switched} switched`];
     if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding} now`);
