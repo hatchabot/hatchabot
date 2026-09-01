@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.78.1] — 2026-09-01
+
+### Changed
+- **The default-model field is a real dropdown when adding an Anthropic source**,
+  so you can pick the default (sonnet, haiku, …) at creation instead of it always
+  reading `claude-opus-4-8`. The previous autocomplete looked single-valued
+  because it was prefilled. An "Other (type an id)…" option keeps a newer,
+  not-yet-listed model reachable; local and Gemini sources keep the plain field.
+
 ## [0.78.0] — 2026-09-01
 
 ### Fixed
