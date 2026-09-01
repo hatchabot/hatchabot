@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.83.1] — 2026-09-01
+
+### Fixed
+- **The ⋯ card menu is no longer clipped by the jump legend.** It opens leftward
+  from the button and its left edge slid under the pinned legend, which (higher
+  z-index) rendered on top of it. Raised the menu above the legend so it's fully
+  visible. (Opening it rightward instead would push it off the card's right
+  edge, since ⋯ is the last action.)
+
 ## [0.83.0] — 2026-09-01
 
 ### Added

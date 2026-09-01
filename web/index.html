@@ -189,7 +189,12 @@
   details.menu > summary::-webkit-details-marker { display: none; }
   details.menu[open] > summary { border-color: var(--accent); }
   .menu-items {
-    position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 168px;
+    /* z-index ABOVE the jump legend (#toc is z-40): the menu opens leftward
+       from the ⋯ button and its left edge slides under the pinned legend, which
+       otherwise renders on top and clips it. Opening rightward instead would
+       push it off the card's right edge (⋯ is the last action), so we bring it
+       forward rather than move it. */
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 60; min-width: 168px;
     display: flex; flex-direction: column; gap: 2px; padding: 5px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
     box-shadow: 0 8px 26px rgba(0,0,0,0.28);
