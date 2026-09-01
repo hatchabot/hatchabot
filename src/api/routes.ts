@@ -995,6 +995,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const check = await checkLocalServer(body.baseUrl, body.model);
       if (!check.ok) return reply.code(400).send({ error: check.error });
     } else if (body.kind === 'api_key') {
+      // A `claude setup-token` (sk-ant-oat…) is an OAuth token, NOT an API key.
+      // Stored as ANTHROPIC_API_KEY it fails every call with an auth error the
+      // owner only sees as "something went wrong" in Telegram. It belongs in a
+      // subscription profile, where it's injected as CLAUDE_CODE_OAUTH_TOKEN.
+      if (/^sk-ant-oat/i.test(body.apiKey.trim())) {
+        return reply.code(400).send({
+          error:
+            "That's a Claude setup-token, not an API key — used as an API key it will fail every " +
+            'request. Create this source as "Claude subscription" instead and paste the token into ' +
+            'its setup-token field. (An API key looks like sk-ant-api…)',
+        });
+      }
       secretRef = `ai-profile/${id}`;
       await secrets.put(secretRef, body.apiKey);
     } else if (body.oauthToken) {

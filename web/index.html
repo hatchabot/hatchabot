@@ -633,7 +633,10 @@
     </div>
     <div id="aiTokenRow">
       <input type="password" id="aiToken" autocomplete="off"
-             placeholder="Mac only: paste the token from `claude setup-token` (optional on Linux)">
+             placeholder="Optional: paste a `claude setup-token`">
+      <div class="sub">Leave blank to use this machine's Claude login (mounts <code>~/.claude</code> into every
+        agent). <b>Paste a <code>claude setup-token</code></b> to inject just the token instead — no directory
+        mount, which is the safer choice on a shared or exposed box.</div>
     </div>
     <input type="text" id="aiModel" placeholder="Default model (e.g. claude-opus-4-8)">
     <input type="text" id="aiModelsAdd" placeholder="More switchable models, comma-separated (optional)">

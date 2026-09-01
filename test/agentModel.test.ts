@@ -309,3 +309,37 @@ describe('POST /v1/ai-profiles/:id/adopt-agents (bulk source switch)', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('a setup-token pasted as an API key is refused (it would fail every call)', () => {
+  const addProfile = (f: any, body: unknown) =>
+    f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: { 'x-agentclaw-owner': OWNER }, payload: body });
+
+  it('rejects an sk-ant-oat token in the api_key field with guidance', async () => {
+    const { f } = await world();
+    const res = await addProfile(f, {
+      kind: 'api_key', vendor: 'anthropic', name: 'Oops', model: 'claude-opus-4-8',
+      apiKey: 'sk-ant-oat01-REDACTEDsetuptoken',
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/setup-token/i);
+    expect(res.json().error).toMatch(/subscription/i);
+  });
+
+  it('still accepts a real API key (sk-ant-api…)', async () => {
+    const { f } = await world();
+    const res = await addProfile(f, {
+      kind: 'api_key', vendor: 'anthropic', name: 'Real', model: 'claude-opus-4-8',
+      apiKey: 'sk-ant-api03-REDACTEDrealkey',
+    });
+    expect(res.statusCode).toBe(201);
+  });
+
+  it('accepts the same setup-token when created as a subscription source', async () => {
+    const { f } = await world();
+    const res = await addProfile(f, {
+      kind: 'subscription', vendor: 'anthropic', name: 'Setup Token', model: 'claude-opus-4-8',
+      oauthToken: 'sk-ant-oat01-REDACTEDsetuptoken',
+    });
+    expect(res.statusCode).toBe(201);
+  });
+});

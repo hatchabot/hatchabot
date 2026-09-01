@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.76.2] — 2026-09-01
+
+### Fixed
+- **A `claude setup-token` pasted into the API-key field is now refused** with
+  guidance, instead of being stored as `ANTHROPIC_API_KEY` and failing every
+  request with an opaque "something went wrong" in Telegram. A setup-token
+  (`sk-ant-oat…`) is an OAuth credential and must be a **subscription** source,
+  where it's injected as `CLAUDE_CODE_OAUTH_TOKEN`; a real API key (`sk-ant-api…`)
+  is unaffected.
+- **The subscription source's token field no longer says "Mac only."** On Linux,
+  pasting a setup-token is the way to run Claude Max *without* mounting
+  `~/.claude` into every agent — the safer choice on a shared or exposed box —
+  so the field now explains that tradeoff instead of discouraging it.
+
 ## [0.76.1] — 2026-09-01
 
 ### Changed
