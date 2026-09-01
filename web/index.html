@@ -1736,6 +1736,7 @@ function renderAiList() {
         <input type="hidden" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(','))}">
       </div>
       <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
+        <button onclick="syncModels('${p.id}', '${jsq(p.name)}')" title="Reconcile this source's switchable models with what its runtime serves now — adds new models, drops ones no longer served">⟳ Sync models</button>
         ${(() => {
           const movable = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== p.id).length;
           return movable

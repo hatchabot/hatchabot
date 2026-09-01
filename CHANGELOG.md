@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.79.0] — 2026-09-01
+
+### Added
+- **"⟳ Sync models" on each AI source** reconciles its switchable-model list with
+  what the runtime serves right now. The app already auto-*pruned* models the
+  runtime stopped serving (on dialog open), but never *added* newly-shipped ones
+  — so a new Claude model showed in the "+ add" dropdown yet agents couldn't
+  switch to it until it was added by hand. Sync closes that in one click. A
+  confident live answer (a running agent to probe) is authoritative — adds new,
+  drops retired; without a running agent it can only add, never remove, so a
+  source isn't shrunk to the offline fallback. It reports exactly what changed.
+
 ## [0.78.1] — 2026-09-01
 
 ### Changed
