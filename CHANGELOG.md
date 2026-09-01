@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.82.0] — 2026-09-01
+
+### Added
+- **📊 Sources button on the main page**, beside Health and Usage. Opens a
+  breakdown of which agents are on which AI source (with credential type and a
+  per-source model split), a per-source agent list showing each agent's current
+  model, pins, and pending rebuild-time changes, and a fleet-wide "models in use
+  now" histogram — the web equivalent of `agentclaw sources`. Rendered from
+  already-loaded data, so it opens instantly.
+
 ## [0.81.1] — 2026-09-01
 
 ### Changed
