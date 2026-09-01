@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.77.1] — 2026-09-01
+
+### Added
+- **The "Default model" field is now a Claude-model picker**, not blind
+  free-text. For an Anthropic source (subscription, or an API key with vendor
+  Anthropic) it offers the known Claude model ids as a dropdown, prefills
+  `claude-opus-4-8`, and still accepts a hand-typed newer id — so the common
+  case needs no typing and a typo can't silently create a source that provisions
+  green and fails on first use. Gemini and local sources keep a plain field with
+  a format hint.
+
 ## [0.77.0] — 2026-09-01
 
 ### Added

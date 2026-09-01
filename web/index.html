@@ -628,7 +628,7 @@
     </div>
     <input type="text" id="aiName" placeholder="Name (e.g. Work Claude)" maxlength="64">
     <div id="aiKeyRow" style="display:none">
-      <select id="aiVendor"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
+      <select id="aiVendor" onchange="aiKindChanged()"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
       <input type="password" id="aiKey" placeholder="API key" autocomplete="off">
     </div>
     <div id="aiTokenRow">
@@ -638,7 +638,9 @@
         agent). <b>Paste a <code>claude setup-token</code></b> to inject just the token instead — no directory
         mount, which is the safer choice on a shared or exposed box.</div>
     </div>
-    <input type="text" id="aiModel" placeholder="Default model (e.g. claude-opus-4-8)">
+    <input type="text" id="aiModel" placeholder="Default model (e.g. claude-opus-4-8)" list="claudeModels" autocomplete="off">
+    <datalist id="claudeModels"></datalist>
+    <div class="sub" id="aiModelHint"></div>
     <input type="text" id="aiModelsAdd" placeholder="More switchable models, comma-separated (optional)">
     <h4 style="margin:18px 0 4px">Voice &amp; media understanding</h4>
     <div class="sub">
@@ -1613,6 +1615,7 @@ async function openAiDlg(tab) {
   // rather than on a page you then have to hunt through.
   showTab(tab || 'ai');
   aiDlg.showModal();
+  aiKindChanged();      // populate the model dropdown + prefill for the current kind
   renderAiList();       // instant paint (dropdowns fall back to text until models load)
   loadMediaKey();
   renderPeers();
@@ -2034,14 +2037,31 @@ async function rehostAgent(id, name) {
   } catch (e) { toast(e.message, 30000); }
 }
 
+// The Claude model ids the app knows about (same set it prices against). Newest
+// first — the dropdown's top entry is the sensible default.
+const CLAUDE_MODELS = ['claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5',
+  'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6'];
 function aiKindChanged() {
   const k = $('aiKind').value;
   $('aiKeyRow').style.display = k === 'api_key' ? '' : 'none';
   $('aiTokenRow').style.display = k === 'subscription' ? '' : 'none';
   $('aiLocalRow').style.display = k === 'local' ? '' : 'none';
-  $('aiModel').placeholder = k === 'local'
-    ? 'Default model (e.g. qwen3.6:27b-q8_0)'
-    : 'Default model (e.g. claude-opus-4-8)';
+  // Anthropic (subscription, or an api_key with vendor=Anthropic) → offer the
+  // Claude model dropdown so nobody hand-types an id and mistypes it. Gemini and
+  // local models aren't in the list, so the field stays plain free-text there.
+  const anthropic = k === 'subscription' || (k === 'api_key' && $('aiVendor').value === 'anthropic');
+  const dl = $('claudeModels');
+  dl.innerHTML = anthropic ? CLAUDE_MODELS.map(m => `<option value="${esc(m)}">`).join('') : '';
+  $('aiModel').setAttribute('list', anthropic ? 'claudeModels' : '');
+  $('aiModel').placeholder = k === 'local' ? 'Default model (e.g. qwen3.6:27b-q8_0)'
+    : k === 'api_key' && $('aiVendor').value === 'google' ? 'Default model (e.g. gemini-2.5-pro)'
+    : 'Default model — pick from the list (e.g. claude-opus-4-8)';
+  $('aiModelHint').textContent = anthropic
+    ? 'Start typing or click the field for the list of Claude models. You can still enter a newer id by hand.'
+    : k === 'local' ? 'Use the exact model tag your Ollama server serves.' : '';
+  // Prefill a sensible default the first time an Anthropic source is picked, so
+  // the common case needs no typing at all.
+  if (anthropic && !$('aiModel').value.trim()) $('aiModel').value = 'claude-opus-4-8';
 }
 
 async function newCliToken() {
