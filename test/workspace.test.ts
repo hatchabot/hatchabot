@@ -7,6 +7,8 @@ import {
   replaceMemoryPolicy,
   replaceSection,
   DATA_SOURCES_HEADING,
+  installConventionsSection,
+  INSTALL_HEADING,
 } from '../src/openclaw/workspace.js';
 
 describe('replaceMemoryPolicy', () => {
@@ -122,5 +124,30 @@ describe('replaceSection must not eat the user\'s file', () => {
     expect(replaceSection(once, DATA_SOURCES_HEADING, SEC)).toBe(once);
     expect(once).toContain('## Tail');
     expect(once).toContain('keep');
+  });
+});
+
+describe('installConventionsSection: the rules of the house, told to the agent', () => {
+  it('teaches every volume-layer install path, and warns off apt', () => {
+    const t = installConventionsSection();
+    // Each of these mechanisms exists in the runtime; the section is the ONLY
+    // place an agent learns them, so losing one silently breaks self-serve.
+    expect(t).toContain('~/.local/bin');
+    expect(t).toContain('npm install -g');
+    expect(t).toContain('pip install --target ~/.openclaw/pylibs');
+    expect(t).toContain('openclaw skills install');
+    expect(t).toContain('on-rebuild.sh');
+    expect(t).toMatch(/no apt/i); // the failure mode that escalated to a human
+    expect(t.startsWith(INSTALL_HEADING)).toBe(true);
+  });
+
+  it('replaces cleanly into an existing TOOLS.md without touching the agent\'s notes', () => {
+    const file = `# TOOLS.md - Local Notes\n\n### SSH\n\n- home-server -> 192.168.1.100\n`;
+    const once = replaceSection(file, INSTALL_HEADING, installConventionsSection());
+    expect(once).toContain('home-server'); // agent's notes intact
+    expect(once).toContain('~/.local/bin');
+    // Idempotent: a second sync with unchanged content is a no-op, which is
+    // what lets provisioning skip the write entirely.
+    expect(replaceSection(once, INSTALL_HEADING, installConventionsSection())).toBe(once);
   });
 });

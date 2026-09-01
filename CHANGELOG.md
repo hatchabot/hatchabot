@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.73.0] — 2026-09-01
+
+### Added
+- **Agents are now told how to install tools.** Every mechanism already existed
+  — `$HOME` survives rebuilds, `~/.local/bin` is on PATH, `~/.npm-global` is the
+  npm prefix, `~/.openclaw/pylibs` is on PYTHONPATH, `on-rebuild.sh` runs after
+  every rebuild — but the only place any of it was written down was comments in
+  AgentClaw's own source. An agent asked to "install ffmpeg" would try `apt`,
+  fail, and the request escalated to a human, which made the whole system feel
+  developer-dependent when it isn't. A managed "Installing tools" section is now
+  synced into every agent's `TOOLS.md` on provision and rebuild (created if
+  OpenClaw hasn't seeded the file yet; the agent's own notes around it are
+  never touched). Adding a tool is now a chat message to the agent, end to end.
+
 ## [0.72.0] — 2026-08-31
 
 ### Fixed

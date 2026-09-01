@@ -9,7 +9,7 @@ import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
-import { buildWorkspaceSeed, dataSourcesSection, replaceSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
 import { buildGitSyncScript, gitSyncReason } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
@@ -228,6 +228,7 @@ async function runProvisionStepsInner(
     // agent where they landed (AGENTS.md "## Data sources").
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+    await syncInstallDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
     // Step 7.9: let the agent stop moving before anyone can talk to it — a
     // message that lands mid-settle has started a fresh session.
@@ -502,6 +503,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
+    await syncInstallDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
@@ -648,6 +650,44 @@ async function syncDataSourceDocs(
     else log('datasource.docs_synced', { agentId, sources: sources.length });
   } catch (e) {
     log('datasource.docs_error', { agentId, error: String((e as Error).message ?? e) });
+  }
+}
+
+/**
+ * Write the install conventions into the agent's TOOLS.md (managed section).
+ *
+ * Unlike syncDataSourceDocs this CREATES the file when it is missing: OpenClaw
+ * seeds TOOLS.md lazily on first boot, and a brand-new agent reaches this step
+ * before that has happened. replaceSection appends when the heading is absent
+ * and rewrites in place when present, so an agent's own notes around the
+ * section survive every rebuild.
+ */
+async function syncInstallDocs(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  const path = `/home/node/.openclaw/agents/${agent.slug}/agent/TOOLS.md`;
+  const q = JSON.stringify(path);
+  try {
+    const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
+    const current = read.code === 0 ? read.stdout : '';
+    const base = current.trim() ? current : '# TOOLS.md - Local Notes\n';
+    const next = replaceSection(base, INSTALL_HEADING, installConventionsSection());
+    if (next === current) return; // already current: never churn the agent's file
+    const b64 = Buffer.from(next, 'utf8').toString('base64');
+    const res = await provider.execShell(
+      runtimeRef,
+      `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`,
+    );
+    if (res.code !== 0) log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) });
+    else log('installdocs.synced', { agentId });
+  } catch (e) {
+    log('installdocs.error', { agentId, error: String((e as Error).message ?? e) });
   }
 }
 

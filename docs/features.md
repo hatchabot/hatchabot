@@ -323,6 +323,23 @@ becomes **Restore** once archived. From the CLI: `agentclaw archive <agent>` and
 `agentclaw unarchive <agent>` — *not* `restore`, which already means "restore
 from a downloaded .agentclaw file".
 
+## Adding tools to an agent
+
+The runtime image is deliberately minimal and shared; tools belong to the agent
+that needs them, on its own volume, installed **through chat with the agent**.
+Every agent's `TOOLS.md` carries a managed "Installing tools" section (synced on
+every rebuild) that teaches it the rules of the house: no root and no apt;
+static binaries into `~/.local/bin`; `npm install -g` (lands in
+`~/.npm-global`); `pip install --target ~/.openclaw/pylibs`; OpenClaw skills via
+`openclaw skills install`; and `~/.openclaw/on-rebuild.sh` for anything that
+must be reconstituted outside `$HOME` after a rebuild. All of it survives
+rebuilds because the agent's whole `$HOME` is the durable volume.
+
+The base image itself changes rarely and deliberately — OpenClaw/Claude Code
+version bumps via the candidate → smoke → promote flow in
+`scripts/build-runtime-image.sh`, or a system package no static build can
+substitute for.
+
 ## Bots census
 
 Telegram caps an account at about 20 bots and offers no API to list them, so

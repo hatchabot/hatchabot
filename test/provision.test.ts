@@ -523,9 +523,15 @@ describe('per-agent env injection', () => {
 });
 
 describe('AGENTS.md "## Data sources" stays in step with reality', () => {
-  /** The base64 payload the write step pipes back, decoded. */
-  const written = (p: MockProvider) => {
-    const w = p.execLog.filter((a) => a[0] === 'sh').map((a) => a[1]!).filter((x) => x.includes('base64 -d')).at(-1);
+  /** The base64 payload written to ONE file, decoded. The install-conventions
+   *  sync writes TOOLS.md on the same path, so "the last write" is ambiguous —
+   *  select by filename. */
+  const written = (p: MockProvider, file = 'AGENTS.md') => {
+    const w = p.execLog
+      .filter((a) => a[0] === 'sh')
+      .map((a) => a[1]!)
+      .filter((x) => x.includes('base64 -d') && x.includes(file))
+      .at(-1);
     const m = w && /echo "([A-Za-z0-9+/=]+)"/.exec(w);
     return m ? Buffer.from(m[1]!, 'base64').toString('utf8') : undefined;
   };
@@ -612,5 +618,39 @@ describe('a git source that will not clone is visible, not just logged', () => {
     (w.provider as MockProvider).execResponses.set('sh', { code: 128, stdout: '', stderr: 'ERROR: Repository not found.' });
     await rebuildAgent(w.deps, agent.id);
     expect(w.store.getDataSource(agent.id, 'ds1')!.syncError).toMatch(/wasn't found/i);
+  });
+});
+
+describe('TOOLS.md carries the install conventions', () => {
+  const written = (p: MockProvider, file: string) => {
+    const w = p.execLog
+      .filter((a) => a[0] === 'sh')
+      .map((a) => a[1]!)
+      .filter((x) => x.includes('base64 -d') && x.includes(file))
+      .at(-1);
+    const m = w && /echo "([A-Za-z0-9+/=]+)"/.exec(w);
+    return m ? Buffer.from(m[1]!, 'base64').toString('utf8') : undefined;
+  };
+
+  it('creates TOOLS.md with the managed section when OpenClaw has not seeded it yet', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    void agent;
+    const out = written(w.provider as MockProvider, 'TOOLS.md')!;
+    expect(out).toBeDefined();
+    expect(out).toContain('## Installing tools (managed by AgentClaw)');
+    expect(out).toContain('pip install --target ~/.openclaw/pylibs');
+    expect(out).toContain('on-rebuild.sh');
+  });
+
+  it('adds the section to an existing TOOLS.md without touching the agent\'s notes', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const doc = '# TOOLS.md - Local Notes\n\n### SSH\n\n- home-server -> 192.168.1.100\n';
+    (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: doc, stderr: '' });
+    await rebuildAgent(w.deps, agent.id);
+    const out = written(w.provider as MockProvider, 'TOOLS.md')!;
+    expect(out).toContain('home-server -> 192.168.1.100'); // the agent's own notes
+    expect(out).toContain('~/.local/bin');
   });
 });

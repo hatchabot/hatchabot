@@ -84,6 +84,42 @@ export function dataSourcePath(d: {
 
 export const DATA_SOURCES_HEADING = '## Data sources';
 
+export const INSTALL_HEADING = '## Installing tools (managed by AgentClaw)';
+
+/**
+ * The install conventions, written INTO each agent's TOOLS.md.
+ *
+ * Every mechanism here has existed for a while ($HOME survives rebuilds,
+ * ~/.local/bin is on PATH, pylibs on PYTHONPATH, on-rebuild.sh runs after every
+ * rebuild) — but the only place they were written down was comments in our own
+ * source. An agent asked "install ffmpeg" would try apt, fail, and the request
+ * escalated to a human. The whole point of the volume layer is that adding a
+ * tool is a chat message to the agent; that's only true if the agent knows the
+ * rules of the house.
+ */
+export function installConventionsSection(): string {
+  return `${INSTALL_HEADING}
+
+<!-- AgentClaw rewrites this section on rebuild - keep your own notes outside it. -->
+
+This container is disposable; your HOME survives every rebuild. Install into
+HOME, never into the system:
+
+- **No root, no apt.** \`sudo\` and \`apt-get\` fail here - /usr belongs to the
+  shared image. If a tool truly needs a system package, say so: the host owner
+  can add it to the shared base image. Everything else fits below.
+- **Single-binary tools** -> download into \`~/.local/bin\` (already on PATH).
+  Most CLIs ship a static Linux build (jq, ripgrep, ffmpeg static builds, ...).
+- **npm CLIs** -> \`npm install -g <pkg>\` (lands in \`~/.npm-global\`, on PATH).
+- **Python libraries** -> \`pip install --target ~/.openclaw/pylibs <pkg>\`
+  (that directory is on PYTHONPATH automatically).
+- **OpenClaw skills** -> \`openclaw skills install <name>\`.
+- **Anything you had to place outside HOME** must be reinstalled after a
+  rebuild: append the install command to \`~/.openclaw/on-rebuild.sh\` and make
+  it executable. It runs after every rebuild with a 5-minute cap - keep it
+  fast and idempotent.`;
+}
+
 /**
  * The AGENTS.md section owned by the agent's data sources. AgentClaw keeps this
  * one section in sync (on every provision and rebuild) so the agent always knows
