@@ -291,6 +291,15 @@ const APP_VERSION: string = (() => {
   }
 })();
 
+/** The Claude models a new Anthropic source is stocked with, and the offline
+ *  fallback for available-models. Newest-first; keep in step with pricing.ts. */
+const CURATED_ANTHROPIC_MODELS = [
+  'claude-opus-4-8',
+  'claude-sonnet-5',
+  'claude-haiku-4-5',
+  'claude-fable-5',
+] as const;
+
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
 
@@ -1042,6 +1051,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
 
     const isLocal = body.kind === 'local';
+    // A fresh Anthropic source (Max subscription, or an Anthropic API key) comes
+    // pre-stocked with the current Claude line-up as switchable models, so its
+    // agents aren't stuck on the single default the way a source created with an
+    // empty `models` list would be. The owner can prune what they don't want,
+    // and the auto-clean on next open drops any the runtime doesn't actually
+    // serve (see available-models, source:'runtime'). Explicit models win.
+    const anthropic = !isLocal && body.vendor === 'anthropic';
+    const seededModels =
+      body.models && body.models.length
+        ? body.models
+        : anthropic
+          ? [body.model, ...CURATED_ANTHROPIC_MODELS].filter((m, i, a) => m && a.indexOf(m) === i)
+          : body.models;
     const profile = {
       id,
       ownerId: ownerIdOf(req),
@@ -1051,7 +1073,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       vendor: (isLocal ? 'local' : body.vendor) as 'anthropic' | 'google' | 'local',
       kind: (isLocal ? 'api_key' : body.kind) as 'api_key' | 'subscription',
       model: body.model,
-      models: body.models,
+      models: seededModels,
       baseUrl: isLocal ? body.baseUrl : undefined,
       secretRef,
       createdAt: new Date().toISOString(),
@@ -1329,15 +1351,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     // Fallback: a curated current list (no live agent to ask yet, e.g. the
     // profile's first agent hasn't been created). Offline-safe.
-    return {
-      models: [
-        'claude-opus-4-8',
-        'claude-sonnet-5',
-        'claude-haiku-4-5',
-        'claude-fable-5',
-      ],
-      source: 'curated' as const,
-    };
+    return { models: [...CURATED_ANTHROPIC_MODELS], source: 'curated' as const };
   });
 
   app.delete<{ Params: { id: string } }>('/v1/ai-profiles/:id', async (req, reply) => {

@@ -343,3 +343,31 @@ describe('a setup-token pasted as an API key is refused (it would fail every cal
     expect(res.statusCode).toBe(201);
   });
 });
+
+describe('a new Anthropic source is stocked with the Claude line-up', () => {
+  const addProfile = (f: any, body: unknown) =>
+    f.inject({ method: 'POST', url: '/v1/ai-profiles', headers: { 'x-agentclaw-owner': OWNER }, payload: body });
+
+  it('seeds switchable models on a subscription source created with none', async () => {
+    const { store, f } = await world();
+    const res = await addProfile(f, {
+      kind: 'subscription', vendor: 'anthropic', name: 'Setup Token', model: 'claude-opus-4-8',
+      oauthToken: 'sk-ant-oat01-x',
+    });
+    const id = res.json().id;
+    const models = store.getAIProfile(id)!.models ?? [];
+    // Not stuck on the single default — the alternates are there to switch to.
+    expect(models).toContain('claude-opus-4-8');
+    expect(models).toContain('claude-sonnet-5');
+    expect(models.length).toBeGreaterThan(1);
+  });
+
+  it('respects an explicit models list rather than overriding it', async () => {
+    const { store, f } = await world();
+    const res = await addProfile(f, {
+      kind: 'subscription', vendor: 'anthropic', name: 'Narrow', model: 'claude-opus-4-8',
+      oauthToken: 'sk-ant-oat01-x', models: ['claude-opus-4-8', 'claude-haiku-4-5'],
+    });
+    expect(store.getAIProfile(res.json().id)!.models).toEqual(['claude-opus-4-8', 'claude-haiku-4-5']);
+  });
+})

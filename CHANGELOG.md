@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.78.0] — 2026-09-01
+
+### Fixed
+- **A new Anthropic AI source now comes with the full Claude line-up as
+  switchable models**, instead of being stuck on its single default. A source
+  created with no explicit `models` (the normal case from the web form) was
+  stored with an empty alternates list, so every agent on it could only run the
+  default until the owner hand-added each model — which read as "the setup-token
+  source only offers one model." Subscription and Anthropic-API-key sources are
+  now seeded with the curated Claude set (the same list the model picker offers
+  and the usage rollup prices against); an explicit list still wins, local and
+  Gemini sources are untouched, and the runtime auto-clean still prunes any
+  model the CLI doesn't actually serve once a live agent exists.
+
 ## [0.77.2] — 2026-09-01
 
 ### Changed
