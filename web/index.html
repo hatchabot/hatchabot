@@ -503,6 +503,14 @@
       <button id="profileBtn" onclick="switchProfile()">Use this</button>
     </div>
     <div class="sub">Each agent can use a different AI. Add sources in <b>⚙ Settings</b>.</div>
+    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:8px 0 0">
+      <input type="checkbox" id="editCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
+      <span><b>Save conversation to memory before switching</b>
+        <div class="sub" style="margin-top:2px">Changing AI source restarts the agent on a different engine, which
+          ends the current Telegram conversation. With this on, the agent first writes a short summary of what you've
+          been discussing into its memory (~20s), so it doesn't forget the context. Durable notes it already saved are
+          kept either way — this is only about the <i>current</i> chat.</div></span>
+    </label>
     <div id="modelRow" style="display:none">
       <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -2935,8 +2943,12 @@ async function switchProfile() {
   try {
     await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { aiProfileId: id } });
     if (confirm('Saved. Rebuild now to start using it?\n\nThe agent restarts (memory kept) and is briefly offline. Tip: send /new in Telegram afterwards — a fresh conversation suits a new model.')) {
-      await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
-      toast('Rebuilding with the new AI source');
+      await api(`/v1/agents/${editAgentId}/rebuild`, {
+        method: 'POST', body: { checkpoint: $('editCheckpoint').checked },
+      });
+      toast($('editCheckpoint').checked
+        ? 'Saving conversation to memory, then rebuilding…'
+        : 'Rebuilding with the new AI source');
       editDlg.close();
     } else {
       toast('Saved — Rebuild to apply it');

@@ -32,6 +32,13 @@ export interface ProvisionDeps {
   /** Injected so tests don't sleep. */
   sleep?: (ms: number) => Promise<void>;
   log?: (event: string, detail: Record<string, unknown>) => void;
+  /**
+   * Ask the agent to distil the live conversation into MEMORY.md before this
+   * rebuild replaces the container. Set when the rebuild will change the AI
+   * backend (a source switch), which makes OpenClaw reset the thread — the
+   * summary is what survives the reset. Best-effort; never blocks the rebuild.
+   */
+  checkpointMemory?: boolean;
 }
 
 export interface ProvisionResult {
@@ -462,6 +469,44 @@ export async function buildRuntimeSpec(
  * delete (which purges) by construction: previousRef makes the provider reuse
  * the existing storage, and the seed script never overwrites existing files.
  */
+/**
+ * Have the agent write the live conversation's durable facts into MEMORY.md,
+ * on the STILL-RUNNING old container, before a rebuild that will reset the
+ * thread. This is OpenClaw's own "promote key facts, don't hoard transcripts"
+ * model, fired at the one moment AgentClaw knows context is about to drop.
+ *
+ * Best-effort by contract: any failure (model down, timeout, CLI hiccup) is
+ * logged and swallowed — a missed summary is a smaller harm than a blocked or
+ * failed switch.
+ */
+export async function checkpointMemory(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const prompt =
+    'System note: your current conversation is about to be reset for a maintenance ' +
+    'change, and the live transcript will not carry over. Before it does, write a concise ' +
+    'summary of anything from our recent discussion worth keeping — decisions, facts about ' +
+    'the people you serve, ongoing tasks or context — into your memory (MEMORY.md, or today\'s ' +
+    'file under memory/). Only durable things; skip small talk. Reply with just DONE when saved.';
+  try {
+    // Bounded by the provider's own exec timeout (AGENTCLAW_DOCKER_TIMEOUT_MS,
+    // 60s default) — a summary is short; a model too slow to finish inside it
+    // is one we'd rather abandon than let delay the rebuild.
+    const res = await provider.exec(runtimeRef, ['agent', '--agent', slug, '-m', prompt]);
+    log('memory.checkpointed', {
+      slug,
+      ok: res.code === 0 && !res.timedOut,
+      timedOut: !!res.timedOut,
+      tail: (res.stdout || res.stderr).slice(-200),
+    });
+  } catch (err) {
+    log('memory.checkpoint_failed', { slug, error: String((err as Error).message ?? err) });
+  }
+}
+
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
   return whileBusy(agentId, () => rebuildAgentInner(deps, agentId));
 }
@@ -482,6 +527,12 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   // captureSnapshot only reads a RUNNING agent (no-op unless RUNNING).
   if (agent.state === 'RUNNING') {
     await autoSnapshot({ store, provider, log }, agentId, 'pre-rebuild');
+    // Save the conversation into memory BEFORE we touch the container, while
+    // the old AI backend still answers — a source switch resets the thread on
+    // first message under the new backend, and this is what survives it.
+    if (deps.checkpointMemory) {
+      await checkpointMemory(provider, agent.runtimeRef, agent.slug, log);
+    }
   }
   // Visible immediately: the chip must not read RUNNING while the container
   // is being replaced.

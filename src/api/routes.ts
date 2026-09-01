@@ -557,12 +557,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * this returns at once). Returns false if the agent is already changing or
    * has no runtime — callers turn that into a 409 or just skip it in a batch.
    */
-  const kickRebuild = (agentId: string): boolean => {
+  const kickRebuild = (agentId: string, opts: { checkpoint?: boolean } = {}): boolean => {
     if (inflight.has(agentId)) return false;
     const agent = store.getAgent(agentId);
     if (!agent?.runtimeRef) return false;
     const task = rebuildAgent(
-      { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agentId) },
+      {
+        store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+        log: trace(agentId), checkpointMemory: opts.checkpoint,
+      },
       agentId,
     );
     inflight.set(
@@ -3292,22 +3295,29 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   );
 
   // Rebuild: new container from the current image, volume (memory) kept.
-  app.post<{ Params: { id: string } }>('/v1/agents/:id/rebuild', async (req, reply) => {
-    const agent = ownedAgent(req, req.params.id);
-    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-    if (movedAway(agent, reply)) return reply;
-    if (busyNow(agent, reply)) return reply;
-    if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
-      return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
-    }
-    // The pre-rebuild snapshot now runs as the first step of the background
-    // rebuild task (see rebuildAgentInner), so this returns 202 immediately
-    // instead of blocking on a ~1-2s docker-exec snapshot per agent.
-    if (!kickRebuild(agent.id)) {
-      return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
-    }
-    return reply.code(202).send({ rebuilding: true });
-  });
+  app.post<{ Params: { id: string }; Body: { checkpoint?: boolean } }>(
+    '/v1/agents/:id/rebuild',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      if (movedAway(agent, reply)) return reply;
+      if (busyNow(agent, reply)) return reply;
+      if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+        return reply.code(409).send({ error: `Cannot rebuild while ${agent.state}` });
+      }
+      // `checkpoint` = summarise the live conversation into MEMORY.md first
+      // (only meaningful for a RUNNING agent — a stopped one has no live turn to
+      // run). Used when the rebuild will change the AI backend, which resets
+      // the thread. The pre-rebuild snapshot + checkpoint both run as the first
+      // steps of the background task, so this still returns 202 at once.
+      const checkpoint = (req.body as { checkpoint?: boolean } | null)?.checkpoint === true
+        && agent.state === 'RUNNING';
+      if (!kickRebuild(agent.id, { checkpoint })) {
+        return reply.code(409).send({ error: 'Another operation is already running on this agent.' });
+      }
+      return reply.code(202).send({ rebuilding: true });
+    },
+  );
 
   // Retry after FAILED (or nudge a stuck PROVISIONING after a restart).
   app.post<{ Params: { id: string } }>('/v1/agents/:id/provision', async (req, reply) => {

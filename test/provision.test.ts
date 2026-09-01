@@ -671,3 +671,41 @@ describe('a pinned runtime image reaches docker', () => {
     expect((w.provider as MockProvider).lastSpec!.image).toBeUndefined();
   });
 });
+
+describe('memory checkpoint before a source-switch rebuild', () => {
+  it('runs the summary turn on the old container before it is replaced', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const provider = w.provider as MockProvider;
+    provider.execLog.length = 0;
+    await rebuildAgent({ ...w.deps, checkpointMemory: true }, agent.id);
+    // The checkpoint is an `openclaw agent -m <prompt>` exec naming the agent.
+    const turn = provider.execLog.find((a) => a[0] === 'agent' && a.includes('-m'));
+    expect(turn).toBeDefined();
+    expect(turn!.join(' ')).toContain(agent.slug);
+    expect(turn!.join(' ')).toMatch(/memory|MEMORY\.md/i);
+  });
+
+  it('does NOT run a checkpoint on an ordinary rebuild', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const provider = w.provider as MockProvider;
+    provider.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id); // no checkpointMemory
+    expect(provider.execLog.some((a) => a[0] === 'agent' && a.includes('-m'))).toBe(false);
+  });
+
+  it('a failed checkpoint never blocks the rebuild', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const provider = w.provider as MockProvider;
+    // Make the agent turn throw; the rebuild must still complete.
+    const realExec = provider.exec.bind(provider);
+    provider.exec = (async (ref: string, argv: string[]) => {
+      if (argv[0] === 'agent' && argv.includes('-m')) throw new Error('model unreachable');
+      return realExec(ref, argv);
+    }) as any;
+    const out = await rebuildAgent({ ...w.deps, checkpointMemory: true }, agent.id);
+    expect(out.state).toBe('RUNNING');
+  });
+});

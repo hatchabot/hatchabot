@@ -2,6 +2,31 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.80.0] — 2026-09-01
+
+### Added
+- **Save the conversation to memory before switching an agent's AI source.**
+  Switching an agent between AI backends (e.g. machine-login → setup-token)
+  restarts it on a different engine, which makes OpenClaw reset the live Telegram
+  thread — the agent "forgets" what was just discussed. It's an inherent
+  consequence of the backend change, not a bug we can suppress (verified: the
+  gateway's claude-cli runtime can't read the env token, so the two backends
+  can't be made identical). So instead, at the one moment AgentClaw knows the
+  reset is coming, it does what OpenClaw's own model prescribes — promote the key
+  facts into memory. A checkpoint checkbox (default **on**) on the agent's AI
+  tab has the still-running agent write a short summary of the current
+  conversation into `MEMORY.md`/today's memory file before the rebuild, so the
+  context survives the reset. Best-effort and bounded: a slow or failed summary
+  never blocks or fails the switch. Verified live end-to-end. Durable notes the
+  agent already saved are unaffected — this is only about the *current* chat.
+  Bulk-move integration deliberately deferred until this is exercised more.
+
+### Notes
+- The recovered/checkpointed memory also surfaced the standing gap that
+  `memory_search` needs: the `local` embedding provider isn't installed
+  (`@openclaw/llama-cpp-provider`), so semantic recall over memory files is
+  paused fleet-wide (keyword FTS still works). Separate from this change.
+
 ## [0.79.1] — 2026-09-01
 
 ### Changed
