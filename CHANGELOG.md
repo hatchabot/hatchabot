@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.77.2] — 2026-09-01
+
+### Changed
+- **"Add source" moved above the "Voice & media" section**, right under the
+  source fields it belongs to — it had been stranded below an unrelated section.
+- **A Show/Hide toggle on the API-key and setup-token fields**, so you can
+  reveal what you pasted to check the copy was right, then hide it again. The
+  value never leaves the field either way.
+
 ## [0.77.1] — 2026-09-01
 
 ### Added

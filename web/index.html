@@ -629,11 +629,17 @@
     <input type="text" id="aiName" placeholder="Name (e.g. Work Claude)" maxlength="64">
     <div id="aiKeyRow" style="display:none">
       <select id="aiVendor" onchange="aiKindChanged()"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
-      <input type="password" id="aiKey" placeholder="API key" autocomplete="off">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="password" id="aiKey" placeholder="API key" autocomplete="off" style="flex:1;min-width:0">
+        <button type="button" onclick="toggleReveal(this,'aiKey')">Show</button>
+      </div>
     </div>
     <div id="aiTokenRow">
-      <input type="password" id="aiToken" autocomplete="off"
-             placeholder="Optional: paste a `claude setup-token`">
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="password" id="aiToken" autocomplete="off"
+               placeholder="Optional: paste a `claude setup-token`" style="flex:1;min-width:0">
+        <button type="button" onclick="toggleReveal(this,'aiToken')">Show</button>
+      </div>
       <div class="sub">Leave blank to use this machine's Claude login (mounts <code>~/.claude</code> into every
         agent). <b>Paste a <code>claude setup-token</code></b> to inject just the token instead — no directory
         mount, which is the safer choice on a shared or exposed box.</div>
@@ -642,6 +648,10 @@
     <datalist id="claudeModels"></datalist>
     <div class="sub" id="aiModelHint"></div>
     <input type="text" id="aiModelsAdd" placeholder="More switchable models, comma-separated (optional)">
+    <div class="err" id="aiErr"></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" id="aiAddBtn" onclick="addAiProfile()">Add source</button>
+    </div>
     <h4 style="margin:18px 0 4px">Voice &amp; media understanding</h4>
     <div class="sub">
       With a <b>Gemini API key</b> (free tier at
@@ -658,10 +668,6 @@
       <input type="password" id="mediaKey" placeholder="Gemini API key" autocomplete="off" style="flex:1;min-width:0">
       <button id="mediaKeySaveBtn" onclick="saveMediaKey()">Save</button>
       <button id="mediaKeyDelBtn" onclick="removeMediaKey()" style="display:none">Remove</button>
-    </div>
-    <div class="err" id="aiErr"></div>
-    <div class="actions" style="justify-content:flex-start">
-      <button class="primary" id="aiAddBtn" onclick="addAiProfile()">Add source</button>
     </div>
   </section>
 
@@ -2041,6 +2047,14 @@ async function rehostAgent(id, name) {
 // first — the dropdown's top entry is the sensible default.
 const CLAUDE_MODELS = ['claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5',
   'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6'];
+/** Flip a password field to plaintext so the user can verify a pasted key,
+ *  and back. Purely local — the value never leaves the field either way. */
+function toggleReveal(btn, inputId) {
+  const el = $(inputId);
+  const show = el.type === 'password';
+  el.type = show ? 'text' : 'password';
+  btn.textContent = show ? 'Hide' : 'Show';
+}
 function aiKindChanged() {
   const k = $('aiKind').value;
   $('aiKeyRow').style.display = k === 'api_key' ? '' : 'none';
