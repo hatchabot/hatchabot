@@ -2,6 +2,26 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.75.0] — 2026-09-01
+
+### Added
+- **`agentclaw users` — the people roster.** Every Telegram user across your
+  agents: which agents they belong to and their role, when they joined, and
+  when they were last heard from (`--all`, host owner: every account's agents).
+  Backed by `GET /v1/users`. One honesty caveat, stated in the output: OpenClaw
+  keeps one shared session per agent DM thread and records only the *last*
+  exchange per thread, so "last exchange" shows the most recent speaker — an
+  earlier speaker in the same thread shows the older reading from whenever they
+  were last the latest. Per-message per-user history isn't recorded anywhere,
+  and the command doesn't pretend otherwise. Container reads are batched six at
+  a time (26 concurrent execs measurably slowed the box once before) and cached
+  for a minute; a failed read degrades to memberships-only rather than sinking
+  the roster.
+
+### Fixed
+- Removed a stray empty `test/agents.test.ts` that made the suite report a
+  failed file with zero failed tests.
+
 ## [0.74.0] — 2026-09-01
 
 ### Added

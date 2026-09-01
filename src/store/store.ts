@@ -932,10 +932,11 @@ export class Store {
     displayName?: string;
     channelUserId?: string;
     status: string;
+    joinedAt?: string;
   }> {
     const rows = this.db
       .prepare(
-        `SELECT user_id, role, display_name, channel_user_id, status
+        `SELECT user_id, role, display_name, channel_user_id, status, joined_at
          FROM memberships WHERE agent_id = ? ORDER BY joined_at`,
       )
       .all(agentId) as any[];
@@ -943,6 +944,7 @@ export class Store {
       userId: r.user_id,
       role: r.role,
       displayName: r.display_name ?? undefined,
+      joinedAt: r.joined_at ?? undefined,
       channelUserId: r.channel_user_id ?? undefined,
       status: r.status,
     }));

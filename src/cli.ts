@@ -61,6 +61,9 @@ Commands:
   list [--all]                 Agents with state, model, and last activity.
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
+  users [--all]                Every Telegram user across your agents: which
+                               agents they belong to, when they joined, and
+                               when they were last heard from.
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
@@ -993,6 +996,39 @@ async function main() {
         await api(ctx, `/v1/bots?consolidated=1&live=${live ? 1 : 0}`)
       ).json()) as { hosts: any[] };
       for (const line of fmtBots(hosts, live)) console.log(line);
+      return;
+    }
+    case 'users': {
+      // Who talks to your agents, and when they were last heard from. --all
+      // (host owner) widens to every account's agents.
+      const all = flags.has('all');
+      const res = await api(ctx, `/v1/users${all ? '?all=1' : ''}`);
+      const { users } = (await res.json()) as {
+        users: Array<{
+          channelUserId?: string;
+          displayName?: string;
+          memberships: Array<{ agentName: string; agentState: string; role: string; joinedAt?: string }>;
+          lastSeen?: { at: string; agentName: string; thread: string };
+        }>;
+      };
+      if (!users.length) return console.log('no members on any agent');
+      console.log(`${users.length} Telegram user(s) across your agents\n`);
+      for (const u of users) {
+        const id = u.channelUserId ? `telegram:${u.channelUserId}` : '(not linked — invited, never messaged)';
+        const who = u.displayName ? `${u.displayName}  ${id}` : id;
+        const seen = u.lastSeen
+          ? `last exchange ${ago(u.lastSeen.at)} (${u.lastSeen.agentName}${u.lastSeen.thread === 'group' ? ', group chat' : ''})`
+          : 'no activity recorded';
+        console.log(`${who}`);
+        console.log(`  ${seen}`);
+        for (const m of u.memberships.sort((a2, b2) => a2.agentName.localeCompare(b2.agentName))) {
+          const joined = m.joinedAt ? `, joined ${m.joinedAt.slice(0, 10)}` : '';
+          const state = m.agentState === 'RUNNING' ? '' : ` [${m.agentState.toLowerCase()}]`;
+          console.log(`  - ${m.agentName}${state} (${m.role}${joined})`);
+        }
+        console.log('');
+      }
+      console.log('note: "last exchange" is per agent thread — in a shared thread only the most recent speaker is recorded, so an earlier speaker shows their older reading.');
       return;
     }
     case 'list': {
