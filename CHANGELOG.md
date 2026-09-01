@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.81.1] — 2026-09-01
+
+### Changed
+- **The agent card names its AI source**, e.g. "Household Claude · claude-opus-4-8",
+  so you can see at a glance which source each agent is on without opening
+  Settings. Shown only when more than one source exists (with a single source
+  it's the same for every agent). Complements the existing per-source rollup
+  (Settings → AI sources, and `agentclaw sources`).
+
 ## [0.81.0] — 2026-09-01
 
 ### Added

@@ -2588,6 +2588,11 @@ function agentMeta(a) {
   if (!a.runtimeRef) return '';
   const host = hosts.find(h => h.id === a.hostId);
   const bits = [];
+  // Name the AI source, then the model of it — only when more than one source
+  // exists, since with a single source it's the same for every agent and just
+  // noise. Reads "Household Claude · claude-opus-4-8".
+  const src = profiles.find(p => p.id === a.aiProfileId);
+  if (src && profiles.length > 1) bits.push(esc(src.name));
   if (a.model) bits.push(esc(a.model));
   // The bot IS the agent's identity — name it right after the model.
   if (a.botUsername) bits.push(`@${esc(a.botUsername)}`);
