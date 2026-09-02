@@ -101,7 +101,7 @@ with a single action — no files to shuttle.
 
 On the **destination**: ⚙ Settings → Access → **New token**, and copy it.
 
-On the **source**: ⚙ Settings → Servers → add its name, URL and that token.
+On the **source**: ⚙ Settings → Cluster servers → add its name, URL and that token.
 AgentClaw checks the token works before saving it.
 
 Then use **Rehost** on the agent card, or:
@@ -183,7 +183,7 @@ A template is deliberately **stripped of identity**, so it's safe to email:
 | Carried | Left out |
 |---|---|
 | the trained **`SOUL.md` + `AGENTS.md`** | the **bot token** |
-| the agent's **`MEMORY.md`** (a faithful copy — opt out for "instructions only") | all **members** and their Telegram IDs |
+| the agent's **`MEMORY.md`** (web: asked when you Share; CLI: only with `--include-memory`) | all **members** and their Telegram IDs |
 | the AI **vendor** preference | conversation history |
 | a checklist of **data sources & env-var names** it expects | — |
 
@@ -192,11 +192,13 @@ bot (a pool bot or a pasted BotFather token — the normal create flow), binds
 their **own** AI source, and invites their **own** people. The trained files
 seed the new agent at first provision. Import then prints what the agent still
 needs — any data sources or env vars the template declared — for the recipient
-to wire up in **⚙ Configuration**.
+to wire up in **⚙ Settings**.
 
-*Note on memory:* it's included by default so the copy is faithful. If the
-memory holds personal facts (or, on a shared-memory agent, `source:<telegram_id>`
-tags), choose "instructions only" when Sharing, or curate `MEMORY.md` first.
+*Note on memory:* the web app asks when you Share — OK for a faithful copy,
+Cancel for persona & instructions only; the CLI leaves memory out unless you
+pass `--include-memory`. If the memory holds personal facts (or, on a
+shared-memory agent, `source:<telegram_id>` tags), share without it, or curate
+`MEMORY.md` first.
 
 Download/Restore = "the same agent, elsewhere." Share/Import = "a trained copy, for
 someone else."

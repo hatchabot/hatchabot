@@ -361,7 +361,7 @@ export class Broker {
       }
       case 'approve_member': {
         const code = args.code;
-        if (typeof code !== 'string' || !/^[A-Za-z0-9]{4,12}$/.test(code)) {
+        if (typeof code !== 'string' || !/^[A-Za-z0-9]{4,16}$/.test(code)) {
           throw new BrokerError('INVALID_INPUT', 'Invalid pairing code.');
         }
         return { ...base, code };

@@ -1,5 +1,8 @@
 # Sharing agents & operating templates — design
 
+*Status: Feature 1 (inbox sharing) SHIPPED in v0.84.0. Feature 2 (operating
+templates) is still design — Phase 2a/2b pending.*
+
 Two requested features, both **extensions of mechanisms that already exist**:
 
 1. **Inbox sharing** — send an agent to another user on this installation, who
@@ -17,16 +20,16 @@ Two requested features, both **extensions of mechanisms that already exist**:
   no history. This is the safety property everything below preserves: *a shared
   artifact never carries the author's secrets.*
 - **Import** (`importTemplate`) already stands up a fresh agent owned by the
-  importer, and the UI already tells them what to configure (the `needs` hint at
-  routes.ts:3306 → web/index.html:3869). Today that's a hint; the work below
-  turns it into a guided form.
+  importer, and the UI already tells them what to configure (the `needs` hint
+  the import route returns and the import dialog shows). Today that's a hint;
+  the work below turns it into a guided form.
 - **Identity mode is on** (`AGENTCLAW_AUTH=identity`): real accounts with
   `ownerId` + `email`. Five distinct owners already have agents. So "send to a
   user" has real recipients to target.
 - **Download/Restore** (`transfer.ts`) is the *other* path — the whole identity,
   for re-hosting the SAME agent. Sharing/templates stay separate from it.
 
-## Feature 1 — Agent inbox (in-app sharing)
+## Feature 1 — Agent inbox (in-app sharing) — SHIPPED v0.84.0
 
 Pure transport change: reuse the template format, deliver it in-app instead of
 by email.
@@ -121,8 +124,8 @@ a working, personalized Condo Advisor boots, on their bot, their account.*
 
 ## Recommended sequencing
 
-1. **Inbox sharing** (Phase 1) — small, immediate ("no more emailing files"),
-   reuses everything, zero new security surface.
+1. **Inbox sharing** (Phase 1 — DONE, v0.84.0) — small, immediate ("no more
+   emailing files"), reuses everything, zero new security surface.
 2. **Placeholder parameters** (Phase 2a) — `{{key}}` → `soul`/`agents` only. The
    biggest UX win for the least machinery; covers Stock Advisor's "investment
    style" case entirely.

@@ -1,6 +1,9 @@
 # Design: Connections & skills for advanced agents
 
-*Status: design, 2026-08-24. Nothing here is built yet except where noted.*
+*Status: designed 2026-08-24. Phase 1 has SHIPPED since — the `gog` Google
+Workspace CLI is baked into the runtime image, `GOG_HOME` puts each agent's
+tokens on its own volume, and auth happens in the chat. Later phases (OAuth
+brokering, per-agent search-provider plumbing) remain design.*
 
 Most agents need no outside data — they organize conversations and carry
 training. But the advanced ones (the condo adviser reading board emails from
@@ -40,7 +43,7 @@ agent's connection should be to an account scoped to the agent's job, because
 ## The design: credentials live ON THE AGENT'S VOLUME
 
 The decisive choice. Put connection credentials (e.g. the gog token store)
-on the agent's own volume — `GOG_CONFIG_DIR=/home/node/.openclaw/connections/gog`
+on the agent's own volume — `GOG_HOME=/home/node/.openclaw/connections/gog`
 style — instead of mounting a host directory. Everything else falls out:
 
 - **Refresh works** — the volume is writable, tokens rewrite in place.

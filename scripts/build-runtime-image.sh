@@ -23,8 +23,22 @@ REPO="${AGENTCLAW_IMAGE_REPO:-agentclaw-runtime}"
 # OpenClaw version for the normal upgrade flow.
 IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
 
+# The embedding plugin declares openclaw as a peerDependency, so its pin must
+# move with OPENCLAW_VERSION (Dockerfile ARG LLAMA_CPP_PROVIDER_VERSION). The
+# sanctioned upgrade flow only sets OPENCLAW_VERSION — pass the plugin pin
+# through when given, and warn when an OpenClaw bump leaves it implicit so the
+# stale-peer case is at least loud (audit 2026-09-02).
+PLUGIN_ARG=()
+if [ -n "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
+  PLUGIN_ARG=(--build-arg "LLAMA_CPP_PROVIDER_VERSION=${LLAMA_CPP_PROVIDER_VERSION}")
+elif [ "${OPENCLAW_VERSION}" != "$(grep -oP 'ARG OPENCLAW_VERSION=\K\S+' docker/Dockerfile.runtime)" ]; then
+  echo "⚠ OPENCLAW_VERSION=${OPENCLAW_VERSION} but LLAMA_CPP_PROVIDER_VERSION not set —" >&2
+  echo "  the embedding plugin keeps the Dockerfile's pinned version; verify it peers with this OpenClaw." >&2
+fi
+
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
+  "${PLUGIN_ARG[@]}" \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/

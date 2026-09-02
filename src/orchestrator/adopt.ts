@@ -7,6 +7,7 @@ import type { Store } from '../store/store.js';
 import { sharePathProblem } from './provision.js';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
+import { openclawConfigPath } from './openclawImport.js';
 
 const execFileP = promisify(execFile);
 
@@ -266,7 +267,7 @@ export function findExistingBot(
   workspaceDir: string,
   // Honor OPENCLAW_CONFIG so a non-default install (and the smoke harness)
   // resolves the same config discovery does, not a hardcoded ~/.openclaw path.
-  configPath = process.env.OPENCLAW_CONFIG || resolve(homedir(), '.openclaw/openclaw.json'),
+  configPath = openclawConfigPath(),
 ): ExistingBot | undefined {
   let cfg: OpenClawConfig;
   try {

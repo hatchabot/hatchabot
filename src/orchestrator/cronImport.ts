@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { openclawConfigPath } from './openclawImport.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 
@@ -18,7 +19,7 @@ function stateDbPath(): string {
   return process.env.OPENCLAW_STATE_DB || resolve(homedir(), '.openclaw/state/openclaw.sqlite');
 }
 function configPath(): string {
-  return process.env.OPENCLAW_CONFIG || resolve(homedir(), '.openclaw/openclaw.json');
+  return openclawConfigPath();
 }
 
 export interface SourceCron {

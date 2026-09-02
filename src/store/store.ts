@@ -170,6 +170,14 @@ export class Store {
       CREATE INDEX IF NOT EXISTS shares_to_owner ON agent_shares (to_owner, status);
       CREATE INDEX IF NOT EXISTS shares_to_email ON agent_shares (to_email, status);
 
+      -- NOCASE variants: the email/account lookups query with COLLATE NOCASE,
+      -- which a binary-collated index cannot serve (full scan). Tiny today;
+      -- structurally wrong forever (audit 2026-09-02).
+      CREATE INDEX IF NOT EXISTS accounts_email_nocase ON accounts (email COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS shares_to_email_nocase ON agent_shares (to_email COLLATE NOCASE, status);
+      CREATE INDEX IF NOT EXISTS channels_account_nocase ON channels (account_id COLLATE NOCASE);
+      CREATE INDEX IF NOT EXISTS invites_agent ON invites (agent_id);
+
       -- Runtime images an owner built FROM the base + their own Dockerfile lines
       -- (system packages a volume install can't provide). The dockerfile is kept
       -- so the image can be rebuilt against a newer base. Host-scoped, not
@@ -228,6 +236,10 @@ export class Store {
         if (!/duplicate column name/i.test(String((e as Error)?.message ?? e))) throw e;
       }
     }
+    // Indexes on ALTER-added columns must come AFTER the additive loop — on a
+    // fresh DB the CREATE TABLE block doesn't have the column yet.
+    this.db.exec(`CREATE INDEX IF NOT EXISTS agents_image ON agents (image)`);
+
     // Backfill order for agents created before sort_order existed: rowid is the
     // insertion sequence, so this preserves the old created-at order. Runs once
     // (new agents get an explicit sort_order); idempotent via the NULL guard.
@@ -242,6 +254,76 @@ export class Store {
         applied_model = (SELECT model FROM ai_profiles WHERE id = agents.ai_profile_id)
       WHERE applied_profile_id IS NULL AND state != 'DELETED'
     `);
+
+    // CLI tokens minted before expires_at existed carry NULL — which
+    // ownerForCliToken treats as ETERNAL, contradicting the bounded-lifetime
+    // design (a pre-migration token was found live in prod, audit 2026-09-02).
+    // Bound them to 90 days from now: long enough that whoever depends on one
+    // sees it working while they rotate, finite so it can't outlive everyone.
+    this.db
+      .prepare(`UPDATE cli_tokens SET expires_at = ? WHERE expires_at IS NULL`)
+      .run(new Date(Date.now() + 90 * 86400000).toISOString());
+
+    // Tombstone hygiene: DELETED agents are kept as rows (slug bookkeeping),
+    // but must not retain credential material or member PII. Older deletes
+    // left gateway tokens and memberships behind (13 tokens / 24 membership
+    // rows found in prod, audit 2026-09-02); scrub them here once, and the
+    // delete path now scrubs going forward (scrubAgentResidue).
+    this.db.exec(`
+      UPDATE agents SET gateway_token = NULL, gateway_port = NULL
+        WHERE state = 'DELETED' AND (gateway_token IS NOT NULL OR gateway_port IS NOT NULL);
+      DELETE FROM memberships WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+      DELETE FROM invites     WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+      DELETE FROM data_sources WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+      DELETE FROM agent_env   WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+      DELETE FROM agent_seed  WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+    `);
+  }
+
+  /**
+   * Remove everything a tombstone must not keep: gateway credentials and the
+   * child rows (memberships hold Telegram user IDs = PII; source/env/seed rows
+   * would dangle). Secrets themselves are deleted by the caller first — this
+   * only clears rows and refs. Idempotent; also re-run for ALL tombstones by
+   * the migration above, so pre-fix deletes get cleaned too.
+   */
+  scrubAgentResidue(agentId: string): void {
+    this.db
+      .prepare(`UPDATE agents SET gateway_token = NULL, gateway_port = NULL WHERE id = ?`)
+      .run(agentId);
+    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed'] as const) {
+      this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId);
+    }
+  }
+
+  /**
+   * Delete telegram bot-token secrets no table references anymore. A failed
+   * best-effort pool release on agent delete leaks exactly this way (2 live
+   * orphaned tokens found in prod, audit 2026-09-02). Only 'telegram/bot/*'
+   * refs are eligible — fixed-ref secrets (media key) and per-channel/env/
+   * source secrets have their own lifecycles. The referencing tables span
+   * modules (channels here, telegram_pool/peers elsewhere in the same DB), so
+   * call this AFTER all stores are constructed; missing tables abort silently.
+   */
+  sweepOrphanBotSecrets(): string[] {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT ref FROM secrets
+           WHERE ref LIKE 'telegram/bot/%'
+             AND ref NOT IN (SELECT secret_ref FROM channels)
+             AND ref NOT IN (SELECT secret_ref FROM telegram_pool)
+             AND ref NOT IN (SELECT secret_ref FROM peers)`,
+        )
+        .all() as Array<{ ref: string }>;
+      if (rows.length) {
+        const del = this.db.prepare(`DELETE FROM secrets WHERE ref = ?`);
+        for (const { ref } of rows) del.run(ref);
+      }
+      return rows.map((r) => r.ref);
+    } catch {
+      return []; // a table doesn't exist yet (fresh install mid-boot) — skip
+    }
   }
 
   // ---- AI profiles -------------------------------------------------------
@@ -332,7 +414,7 @@ export class Store {
       kind: r.kind,
       provider: r.provider,
       name: r.name,
-      settings: JSON.parse(r.settings),
+      settings: safeJson(r.settings, {}),
       createdAt: r.created_at,
     };
   }
@@ -964,7 +1046,7 @@ export class Store {
       )
       .all(agentId) as any[];
     return rows.map((r) => {
-      const files = JSON.parse(r.files) as Record<string, string>;
+      const files = safeJson<Record<string, string>>(r.files, {});
       return {
         id: r.id,
         label: r.label,
@@ -1526,12 +1608,6 @@ export class Store {
       .run(displayName, new Date().toISOString(), agentId, userId);
   }
 
-  setMembershipDisplayName(agentId: string, userId: string, name: string): void {
-    this.db
-      .prepare(`UPDATE memberships SET display_name = ? WHERE agent_id = ? AND user_id = ?`)
-      .run(name, agentId, userId);
-  }
-
   /**
    * Bind the telegram identity a first-contact claim approved (§12.4).
    * Conditional and reported: refuses to overwrite a membership that is
@@ -1596,6 +1672,21 @@ function safeParse(text: string): Record<string, unknown> | undefined {
   }
 }
 
+/**
+ * JSON.parse that survives a torn/corrupt value. These run inside the row
+ * mappers under listAgents/listVisibleAgents — before this guard, ONE invalid
+ * JSON value in one row threw and took down every fleet endpoint at once. Same
+ * lesson agent_events.detail already learned (see the safeParse there).
+ */
+function safeJson<T>(raw: unknown, fallback: T): T {
+  if (typeof raw !== 'string' || !raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function rowToAgent(r: any): Agent {
   return {
     id: r.id,
@@ -1610,10 +1701,10 @@ function rowToAgent(r: any): Agent {
     persona: r.persona,
     sharedMemory: !!r.shared_memory,
     model: r.model ?? undefined,
-    pendingAction: r.pending_action ? JSON.parse(r.pending_action) : undefined,
+    pendingAction: r.pending_action ? safeJson(r.pending_action, undefined) : undefined,
     migratedTo: r.migrated_to ?? undefined,
     image: r.image ?? undefined,
-    sharedPaths: r.shared_paths ? JSON.parse(r.shared_paths) : undefined,
+    sharedPaths: r.shared_paths ? safeJson(r.shared_paths, undefined) : undefined,
     appliedProfileId: r.applied_profile_id ?? undefined,
     appliedModel: r.applied_model ?? undefined,
     gatewayPort: r.gateway_port ?? undefined,
@@ -1633,7 +1724,7 @@ function rowToAIProfile(r: any): AIProfile {
     vendor: r.vendor,
     kind: r.kind,
     model: r.model,
-    models: r.models ? JSON.parse(r.models) : undefined,
+    models: r.models ? safeJson(r.models, undefined) : undefined,
     baseUrl: r.base_url ?? undefined,
     secretRef: r.secret_ref ?? undefined,
     shared: !!r.shared,

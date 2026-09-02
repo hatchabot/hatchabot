@@ -1,7 +1,8 @@
 # AgentClaw features — a tour
 
-What exists today (v0.31.2), in one place. Each section says how to do the
-thing; where a deeper doc exists, it's linked instead of duplicated.
+What exists today (v0.86.0), in one place. Each section says how to do the
+thing; where a deeper doc exists, it's linked instead of duplicated. The tour
+is updated as of 2026-09-02.
 
 ## What AgentClaw is
 
@@ -23,9 +24,9 @@ memory private" checkbox decides shared vs private memory at birth.
 Every agent needs a Telegram bot — its identity on Telegram. Telegram has no
 API to mint bots, so normally you're walked through creating one at
 [@BotFather](https://t.me/botfather) and pasting its token (~60 seconds).
-When you delete the agent, the bot still exists on Telegram's side — reveal
-its token first (⚙ Settings → Telegram) if you want to recycle it into a
-future agent, because AgentClaw forgets it on delete.
+When you delete the agent, the bot still exists on Telegram's side — and its
+token isn't lost: delete parks it in the Bot pool by default (API callers can
+opt out with `?recycleBot=0`), ready for a future agent.
 
 Bots outlive agents by default: **deleting an agent parks its bot in the
 Bot pool** (⚙ Settings → Bot pool) — pool-leased and hand-pasted alike — and
@@ -65,6 +66,12 @@ tabs: **📖 Definition · Snapshots · AI · Data · Telegram · Environment**.
   now**). Restore one to roll the agent's definition and memory back — so a
   bad edit is always undoable. (CLI: `agentclaw snapshot` / `revert`.)
 
+**📝 Save chat to memory** (card ⋯ menu) asks the agent to write the current
+conversation's key facts into MEMORY.md now (~20s) — a checkpoint, so the
+context survives a reset. The same checkpoint is offered as a checkbox when
+switching an agent's AI source (and on the bulk switch-and-rebuild), because
+a backend switch resets the live Telegram thread.
+
 **Rebuild** (on the card) replaces the container but keeps the volume —
 containers are cattle, volumes are not. Only **Delete** purges, and it makes
 you type the agent's name.
@@ -76,8 +83,9 @@ Five distinct verbs, for five intents:
 - **⧉ Clone** (card) — duplicate the agent on this machine: a faithful copy,
   memory included, with its own bot and name. CLI: `agentclaw clone`.
 - **📤 Share** (card) — export a **template** for someone else: the trained
-  SOUL.md + AGENTS.md and memory (untick to send "persona & instructions
-  only"), the AI vendor preference, and a checklist of data sources and
+  SOUL.md + AGENTS.md — plus memory if you say so (the web asks: OK for a
+  faithful copy, Cancel for persona & instructions only; the CLI leaves memory
+  out unless `--include-memory`) — the AI vendor preference, and a checklist of data sources and
   env-var *names* — but **no bot token, members, or conversation history**.
   Safe to email. The recipient uses **Import** (header) to stand up a fresh
   agent with their own bot, AI source, and people.
@@ -97,6 +105,13 @@ Five distinct verbs, for five intents:
   It transfers with memory, members, and Telegram identity, and is managed
   from that server's dashboard afterwards. The local copy stays STOPPED —
   never start both, they'd fight over the same bot. CLI: `agentclaw rehost`.
+
+**📨 Send** (card) skips the file when the recipient is on this server: pick
+them by email and the same secret-free template lands in their **📥 Inbox**
+(header button, with a pending-count badge), where they **Import** or
+**Dismiss** it. A send to an email that hasn't signed in yet waits and binds
+to that account on its first sign-in. Identity mode only — on a single-login
+box, Share to a file instead.
 
 Rules and formats: [moving-agents.md](moving-agents.md).
 
@@ -191,6 +206,12 @@ live from each container, so stopped agents aren't counted — they show as "N
 not counted (live-only)" rather than as zero. On the CLI, `agentclaw usage` (no
 agent name) prints the same ranked table with cost; `agentclaw usage <agent>`
 still shows one agent's breakdown by model.
+
+**📊 Sources** (header) answers "who runs on what": each AI source with its
+credential kind, the agents on it and each agent's current model (pins and
+pending switches flagged), plus a models-in-use tally. The card's status line
+also names each agent's AI source (when more than one exists) alongside its
+model, bot, and host.
 
 Per-agent, the card's ⋯ menu has **📊 Usage** (tokens by model,
 honest billing context), **❤️ Health** (is it actually answering?), and

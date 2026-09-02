@@ -186,7 +186,10 @@ export const MANIFEST: ToolDef[] = [
     input_schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { agent: agentRef, code: { type: 'string', pattern: '^[A-Za-z0-9]{4,12}$' } },
+      // {4,16} to match members.ts/broker.ts — a 13-16 char code from
+      // OpenClaw's external pairing store was approvable via the button path
+      // but rejected here (audit 2026-09-02).
+      properties: { agent: agentRef, code: { type: 'string', pattern: '^[A-Za-z0-9]{4,16}$' } },
       required: ['agent', 'code'],
     },
   },

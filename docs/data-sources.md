@@ -2,7 +2,7 @@
 
 An agent should have one clear answer to "what data can it see?" — not three
 scattered mechanisms. A **data source** is one thing an agent can access, unified
-across kinds, shown as a single list per agent (⚙ Configuration → Data) with a card summary
+across kinds, shown as a single list per agent (⚙ Settings → Data) with a card summary
 (`reads 2 folders · 1 writable folder`).
 
 Each source declares four things: **kind** (folder / git / …), **access** (`ro` /
@@ -42,6 +42,9 @@ non-versioned data you're comfortable the agent editing.
 - `POST /v1/agents/:id/data-sources` `{ kind, access, path | repoUrl }` — add
   (`path` for a folder, `repoUrl` for a git repo). Folder mounts
   are gated to the machine owner and pass `sharePathProblem`.
+- `PATCH /v1/agents/:id/data-sources/:dsId` `{ access }` — flip a source
+  between read-only (`ro`) and read-write (`rw`), without remove-and-re-add;
+  applies on the next Rebuild.
 - `DELETE /v1/agents/:id/data-sources/:dsId` — remove.
 - Legacy folders are still managed via `PATCH /v1/agents/:id { sharedPaths }`
   (the CLI `folders` command and old clients keep working).

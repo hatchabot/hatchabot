@@ -3,15 +3,16 @@ import { z } from 'zod';
 import type { Agent } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
-import { workspacePath } from './snapshots.js';
+import { CORE_FILES, workspacePath } from './snapshots.js';
 import { createAgentRecord } from './provision.js';
 import { TransferError } from './transfer.js';
 
 /**
  * A "template" is a SHAREABLE copy of an agent — its training (SOUL.md +
  * AGENTS.md) and what it expects to run against, with NONE of its identity: no
- * bot token, no members, no conversation history, and (for now) no memory. It's
- * safe to email. Import stands up a FRESH agent: the importer owns it, supplies
+ * bot token, no members, no conversation history; memory only when the sharer
+ * explicitly opts in (includeMemory). It's safe to email. Import stands up a
+ * FRESH agent: the importer owns it, supplies
  * their own bot (the normal create flow), and re-invites their own people.
  *
  * This is deliberately separate from Save/Load (transfer.ts), which carries the
@@ -22,8 +23,8 @@ export const TEMPLATE_VERSION = 1;
 
 /** Always carried: the agent's persona and instructions. */
 const TRAINED_FILES = ['SOUL.md', 'AGENTS.md'];
-/** Files a template may seed on import (memory is carried unless excluded). */
-const SEEDABLE_FILES = ['SOUL.md', 'AGENTS.md', 'MEMORY.md'];
+/** Files a template may seed on import — the same core set snapshots protect. */
+const SEEDABLE_FILES = CORE_FILES;
 
 export interface TemplateManifest {
   format: typeof TEMPLATE_FORMAT;

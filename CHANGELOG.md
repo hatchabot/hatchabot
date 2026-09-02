@@ -2,6 +2,39 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.86.1] — 2026-09-02
+
+### Fixed (7th audit — see docs/audit-2026-09-02.md)
+- **⟳ Sync models button now works** — the commit that added it shipped only
+  the button; the function was never written. Same class as the dead 📊 Sources
+  button: `npm test` (check-web) now fails if any inline handler names an
+  undefined function, so this can't ship again.
+- **Production data hygiene**, deployed and verified live: CLI tokens minted
+  before expiry existed were eternal (backfilled to +90d); orphaned decryptable
+  Telegram bot-token secrets are swept at boot; DELETED tombstones no longer
+  retain gateway tokens, memberships (Telegram-ID PII), invites, or
+  source/env/seed rows — one-time migration scrub + the delete path scrubs
+  going forward. Row mappers survive a torn JSON value instead of bricking
+  every fleet endpoint; email/account lookups get NOCASE indexes.
+- **`claude-opus-5` removed from the web model list and e2e** — the model whose
+  missing claude-cli catalog entry broke compaction fleet-wide had been
+  resurrected in the web fallback list. New `test/driftGuards.test.ts` bans it
+  and pins the other silent-drift pairs (embed paths ↔ Dockerfile,
+  OPENCLAW_VERSION defaults); the build script passes
+  `LLAMA_CPP_PROVIDER_VERSION` through and warns when an OpenClaw bump leaves
+  the plugin pin implicit.
+- **CLI `--include-memory` was missing from BOOL_FLAGS** — it silently
+  swallowed the following argument; fixed and documented (template memory is
+  excluded unless you pass it).
+- **📨 Send is refused in password mode** (route + hidden button) — shares bind
+  to the recipient by email, which password-mode principals don't have; the
+  share would have sat unclaimable forever.
+- Pairing-code validation unified at `{4,16}` (the LLM-tool path rejected
+  13–16 char codes the button path accepted); CLI derived-image tag scheme now
+  imports `deriveTag` instead of re-spelling it; removed the unused `ollama`
+  dependency and dead code; docs accuracy pass (features.md was stamped
+  v0.31.2 and missed five shipped features).
+
 ## [0.86.0] — 2026-09-02
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "agentclaw",
-  "version": "0.86.0",
+  "version": "0.86.1",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
@@ -30,7 +30,6 @@
     "better-sqlite3": "^13.0.1",
     "fastify": "^5.10.0",
     "grammy": "^1.45.1",
-    "ollama": "^0.6.3",
     "qrcode": "^1.5.4",
     "zod": "^4.4.3"
   },

@@ -3401,6 +3401,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!toEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(toEmail)) {
         return reply.code(400).send({ error: 'A valid recipient email is required.' });
       }
+      // Shares bind to the recipient by EMAIL on their sign-in. In password
+      // mode nobody has one, so a share would sit unclaimable forever — refuse
+      // up front instead of silently swallowing the agent (audit 2026-09-02).
+      if (deps.authMode !== 'identity') {
+        return reply.code(400).send({
+          error: 'In-app sending needs accounts (identity mode) — use Share to a file instead.',
+        });
+      }
       const me = principalOf(req);
       if (me.email && toEmail.toLowerCase() === me.email.toLowerCase()) {
         return reply.code(400).send({ error: "That's your own address — use Clone to copy an agent to yourself." });
@@ -3997,6 +4005,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // Kill any outstanding invite links: redeeming one after deletion would
     // mint a membership against a tombstone with no bot to talk to.
     store.expireInvitesFor(agent.id);
+    // The tombstone keeps only the agent row (slug bookkeeping): drop gateway
+    // credentials and the child rows — memberships carry Telegram user IDs
+    // (PII), source/env/seed rows would dangle (their secrets were scrubbed
+    // above). Pre-fix tombstones are cleaned by the same scrub in #migrate.
+    store.scrubAgentResidue(agent.id);
     return publicAgent(store.setAgentState(agent.id, 'DELETED'));
   });
 }

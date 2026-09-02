@@ -75,13 +75,15 @@ on the laptop on Max.
 **What exists today:** the routes, the host abstraction, per-user identity, AI
 profiles (all three kinds), the setup-token host-registration flow, Rehost,
 backups, adopt. `LocalDockerProvider` runs Docker on the same box the control
-plane runs on.
+plane runs on — and, since the runner work shipped, over `ssh://` endpoints on
+remote hosts too.
 
 **What the cloud step adds:**
 
-1. **`RemoteDockerProvider`** — `LocalDockerProvider` talking to a remote Docker
-   socket (TLS/SSH) instead of the local one, plus **least-loaded placement**
-   across the VM fleet. This is the single biggest new component. Bin-packing
+1. **`RemoteDockerProvider`** — *half shipped:* `LocalDockerProvider` already
+   talks to remote Docker over `ssh://` endpoints, with guided runner setup and
+   Move between hosts, validated live 2026-08-24 (see topologies.md). What
+   remains is **least-loaded placement** across the VM fleet. Bin-packing
    ~20–30 idle agents per `e2-standard-4` is what makes the unit economics work
    (per-agent Cloud Run/GKE was rejected at ~$10–15/agent idle, because OpenClaw
    long-polls Telegram and never scales to zero).
@@ -115,8 +117,10 @@ plane runs on.
   backups, the health dashboard.
 - **M1 — Postgres:** port `Store` from `better-sqlite3` to `pg` behind the same
   interface; run the existing suite against both. *Unblocks multi-tenant.*
-- **M2 — RemoteDockerProvider + placement:** run agents on a remote Docker host;
-  least-loaded placement across a static 1–2 VM fleet. *Unblocks cloud agents.*
+- **M2 — RemoteDockerProvider + placement:** *half done* — agents run on remote
+  Docker hosts today (`ssh://` runners, guided setup, Move between hosts,
+  validated live 2026-08-24); least-loaded placement across a static 1–2 VM
+  fleet remains. *Unblocks cloud agents.*
 - **M3 — control plane on Cloud Run:** deploy the Fastify app to Cloud Run against
   Cloud SQL + Secret Manager; the desktop-host hybrid (home box registers into the
   cloud control plane) works end to end.

@@ -71,7 +71,7 @@ one-off check, set it explicitly: `PYTHONPATH=/home/node/.openclaw/pylibs`.
 ## Secrets & environment variables — per agent
 
 An agent's own tools often need a credential of their own — a market-data API
-key, a webhook secret. Set these per agent in **⚙ Configuration → Environment variables**
+key, a webhook secret. Set these per agent in **⚙ Settings → Environment variables**
 (or `POST /v1/agents/:id/env` with `{name, value}`):
 
 - **Values are secrets.** They're stored encrypted in the SecretStore, **never**
@@ -96,7 +96,7 @@ agent, re-add its variables on the new host. (Carrying them is a follow-up.)
 ## Data — three patterns, chosen per folder
 
 **1. Read-only reference data** — broker exports, tax reports, anything the
-agent only reads. Use an agent folder (⚙ Configuration → Data, or `agentclaw folders`):
+agent only reads. Use an agent folder (⚙ Settings → Data, or `agentclaw folders`):
 it mounts the host dir read-only at `/data/<name>`. Read-only is enforced by the
 kernel, and the refused-paths list still applies (see `ai-profiles.md`).
 
@@ -109,7 +109,7 @@ on the volume** and pushes to the remote — host untouched, every change a
 reviewable commit, blast radius contained to the one repo. This is now a
 first-class **git data source**: the app generates the repo-scoped deploy key,
 clones onto the volume, and wires up the SSH command for you — no manual
-`ssh-keygen`/`git clone`. Add one via ⚙ Configuration → Data (or
+`ssh-keygen`/`git clone`. Add one via ⚙ Settings → Data (or
 `POST /v1/agents/:id/data-sources`); see [docs/data-sources.md](data-sources.md).
 
 **3. Local mutable data with no git** — a writable mount, only as an explicit,
@@ -129,14 +129,14 @@ disable, **run one now to test**, or delete — driven through the in-container
 `openclaw cron` CLI, never the store directly. *Adding* a task is still done by
 asking the agent in chat; declarative add/edit is the next step.
 
-Still manual, and the intended next steps for a fully declarative environment
-carried by `adopt`/`migrate`:
+**Crons are carried on adopt.** Scheduled tasks come across from the old
+gateway's store with host paths rewritten to their in-container equivalents,
+arriving **disabled** so you review them in ⏰ Tasks before they fire.
 
-- a per-agent **tool/lib manifest** (`requirements.txt`/`setup.sh`) run on
-  provision and rebuild, so the volume libs (above) are reproducible and portable;
-- **crons carried on adopt**, with host paths rewritten to their in-container
-  equivalents (today the tasks themselves are managed in-app, but adopt does not
-  yet copy them across a move).
+Still manual, and the intended next step for a fully declarative environment
+carried by `adopt`/`migrate`: a per-agent **tool/lib manifest**
+(`requirements.txt`/`setup.sh`) run on provision and rebuild, so the volume
+libs (above) are reproducible and portable.
 
-Until then, reconstruct those pieces by hand as above; the Stock Advisor
+Until then, reconstruct the libraries by hand as above; the Stock Advisor
 migration is the worked example.

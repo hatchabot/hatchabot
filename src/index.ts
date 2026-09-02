@@ -105,6 +105,12 @@ const app = Fastify(serverOptions);
 // Mend any state drift from reboots/crashes before serving a single request —
 // containers auto-restart with the box, the DB doesn't know that.
 await reconcileAgents(store, providers, (e, d) => app.log.info(d, e));
+
+// Bot-token secrets no table references anymore are dead weight holding a live
+// credential (a failed best-effort pool release on delete leaks them). All
+// referencing stores are constructed above, so the sweep sees every table.
+const sweptRefs = store.sweepOrphanBotSecrets();
+if (sweptRefs.length) app.log.warn({ refs: sweptRefs }, 'deleted orphaned bot-token secrets');
 await registerAuth(app, {
   password: process.env.AGENTCLAW_PASSWORD,
   secret: LocalSecretStore.keyFromEnv(),

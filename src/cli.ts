@@ -91,8 +91,10 @@ Commands:
                                as a secret; the agent is left STOPPED)
   restore <file> [--profile <aiProfileId>] [--host <id>]
                                Restore an agent from a downloaded copy and boot it
-  share <agent> [-o <file>]    Share a TEMPLATE for someone else — the agent's
-                               trained SOUL/AGENTS (+memory), no bot token/members
+  share <agent> [-o <file>] [--include-memory]
+                               Share a TEMPLATE for someone else — the agent's
+                               trained SOUL/AGENTS, no bot token/members. Memory
+                               stays private unless --include-memory
   import <file> [--name <n>] [--profile <aiProfileId>]
                                Import a template as a fresh agent (you give it
                                its own bot); prints what it still needs
@@ -264,7 +266,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1022,8 +1024,10 @@ async function main() {
     case 'images': {
       // Derived runtime images: FROM the base + your Dockerfile lines, for system
       // packages a volume install can't provide. Host-owner only (the API gates
-      // it). A bare name means the derived tag agentclaw-runtime:derived-<name>.
-      const toTag = (ref: string) => (ref.includes(':') ? ref : `agentclaw-runtime:derived-${ref}`);
+      // it). A bare name means the derived tag from deriveTag — imported, not
+      // re-spelled, so the tag scheme has exactly one definition.
+      const { deriveTag } = await import('./orchestrator/derivedImage.js');
+      const toTag = (ref: string) => (ref.includes(':') ? ref : deriveTag(ref));
       const sub = rest[0];
 
       if (!sub || sub === 'list') {

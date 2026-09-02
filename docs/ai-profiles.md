@@ -6,10 +6,12 @@ difference decides what AgentClaw can host.
 
 ## API key — fully supported
 
-An `ANTHROPIC_API_KEY` is a bearer string. We store it encrypted, inject it into
-the runtime at boot, and it works identically on a cloud container and a local
-box. Billing is metered per token against the key's organisation. This is the
-only credential type that would work on a host you don't control.
+An API key is a bearer string — Anthropic (`ANTHROPIC_API_KEY`) or Google
+Gemini (the profile's vendor is `anthropic` or `google`). We store it
+encrypted, inject it into the runtime at boot, and it works identically on a
+cloud container and a local box. Billing is metered per token against the
+key's organisation. This is the only credential type that would work on a host
+you don't control.
 
 ## Claude Max subscription — owner-hosted only
 
@@ -111,7 +113,7 @@ sharing where you can.
 
 One AI source can drive many agents on different models. A source has a
 **default model** plus a switchable `/model` list; each agent may pin any model
-from that list, or follow the default. Set it in **⚙ Configuration → Model** (the row
+from that list, or follow the default. Set it in **⚙ Settings → Model** (the row
 appears only for cloud sources) — it applies on the agent's next Rebuild.
 
 Why this shape:
@@ -141,7 +143,7 @@ Why this shape:
 
 ## Sharing your files with an agent
 
-An agent normally sees only its own workspace. **⚙ Configuration → "Data this agent
+An agent normally sees only its own workspace. **⚙ Settings → "Data this agent
 can read"** mounts a host folder into its container at `/data/<folder>`,
 **read-only**, for that agent alone.
 

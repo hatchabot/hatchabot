@@ -10,10 +10,6 @@ import {
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 

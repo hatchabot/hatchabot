@@ -136,7 +136,7 @@ async function runProvisionStepsInner(
   deps: ProvisionDeps,
   agentId: string,
 ): Promise<ProvisionResult> {
-  const { store, secrets, provider, channel } = deps;
+  const { store, provider, channel } = deps;
   const log = deps.log ?? (() => {});
   const sleep = deps.sleep ?? defaultSleep;
 
@@ -149,8 +149,6 @@ async function runProvisionStepsInner(
     return { agent }; // already live (or being deleted) — nothing to do
   }
 
-  const profile = store.getAIProfile(agent.aiProfileId)!;
-  const host = store.getHost(agent.hostId)!;
   const rollback: Array<() => Promise<void>> = [];
 
   try {

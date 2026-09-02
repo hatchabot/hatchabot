@@ -10,7 +10,7 @@ is there one control plane plus dumb runners?**
 
 Every machine is a full, self-governing AgentClaw **node**: its own control
 plane, its own DB, its own login. Nodes are linked as **peers** (⚙ Settings →
-Servers / `agentclaw servers add`) and agents move between them with **Rehost**,
+Cluster servers / `agentclaw servers add`) and agents move between them with **Rehost**,
 which carries the agent's whole state (bot token, memory, members) and re-binds
 it to a vendor-matched AI profile on the destination.
 

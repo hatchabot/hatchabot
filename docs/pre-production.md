@@ -131,9 +131,10 @@ per-member, make it a visible per-agent setting, and — if per-member — route
 sender to their own session key. Until then the sharing should at minimum be
 stated where members are invited, since today nothing tells them.
 
-## 9. Session resets are unexplained, and nothing checkpoints a conversation
+## 9. PARTIALLY CLOSED — session resets: the race is fixed and checkpoints exist, but chat-initiated resets still lose the thread
 
-*Opened 2026-08-30 with a wrong explanation; corrected 2026-08-31.*
+*Opened 2026-08-30 with a wrong explanation; corrected 2026-08-31; partially
+closed since — see "Shipped" and "Still open" below.*
 
 **Retracted:** an earlier version of this entry claimed OpenClaw resets every
 conversation at 4am UTC. That is false. The default policy resolves to
@@ -169,19 +170,27 @@ no new `.reset.` file, the Van Gogh exchange still in context. Messaged 11s,
 trigger is TIMING, not archiving: an agent messaged seconds after its container
 comes back starts a new session.
 
-Acted on in v0.72.0: `waitForSkillsSettled` holds an agent in PROVISIONING /
-REBUILDING until its skill inventory stops changing, which is a proxy for "done
-moving" rather than a claim about the mechanism — `runRebuildHook` can install
-skills seconds before the agent goes live, on this very path. The probe is
-bounded and never fails a provision, and it logs `runtime.ready` with the
-settling time so the proxy can be judged from production data.
+**Shipped:**
 
-**Separately true regardless:** nothing moves a conversation anywhere durable.
-`MEMORY.md` is written only if the agent chooses to write it, and on Art Advisor
-it was still the 166-byte stub, so a reset — whatever causes it — takes the only
-copy of that context. OpenClaw fires a **`before_reset` hook** with the outgoing
-transcript's messages, which is the natural place to hang a checkpoint. A
-checkpoint turn measured ~19s on a short conversation.
+- v0.72.0 — `waitForSkillsSettled` holds an agent in PROVISIONING / REBUILDING
+  until its skill inventory stops changing, which is a proxy for "done moving"
+  rather than a claim about the mechanism — `runRebuildHook` can install
+  skills seconds before the agent goes live, on this very path. The probe is
+  bounded and never fails a provision, and it logs `runtime.ready` with the
+  settling time so the proxy can be judged from production data.
+- A manual checkpoint: **📝 Save chat to memory** on the card
+  (`POST /v1/agents/:id/checkpoint`) has the agent summarise the live
+  conversation into `MEMORY.md` (~20s, measured on a short conversation).
+- The same checkpoint offered automatically before the resets AgentClaw itself
+  causes: a pre-ticked checkbox on the AI-source switch and the bulk
+  switch-and-rebuild.
+
+**Still open:** nothing hooks OpenClaw's **`before_reset`** — the hook fires
+with the outgoing transcript's messages, the natural place to hang a
+checkpoint — so a `/new` or `/reset` typed in the chat still loses the thread
+with no checkpoint. `MEMORY.md` is written only if the agent chooses to write
+it (on Art Advisor it was still the 166-byte stub), so a chat-initiated reset
+takes the only copy of that context.
 
 ---
 

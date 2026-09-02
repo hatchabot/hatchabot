@@ -46,7 +46,7 @@ store.insertAIProfile({
   name: 'My Claude',
   vendor: 'anthropic',
   kind: 'api_key',
-  model: 'claude-opus-5',
+  model: 'claude-opus-4-8',
   secretRef: `ai-profile/${profileId}`,
   createdAt: new Date().toISOString(),
 });

@@ -2305,9 +2305,12 @@ async function rehostAgent(id, name) {
   } catch (e) { toast(e.message, 30000); }
 }
 
-// The Claude model ids the app knows about (same set it prices against). Newest
-// first — the dropdown's top entry is the sensible default.
-const CLAUDE_MODELS = ['claude-opus-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5',
+// The Claude model ids the app offers when it can't ask a live runtime. Newest
+// first — the dropdown's top entry is the sensible default. Keep in step with
+// CURATED_ANTHROPIC_MODELS in src/api/routes.ts. NO claude-opus-5: the
+// claude-cli (Max) runtime has no catalog entry for it — it once became a fleet
+// default and every conversation broke on compaction (see runtimeModels.ts).
+const CLAUDE_MODELS = ['claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5', 'claude-fable-5',
   'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6'];
 /** Flip a password field to plaintext so the user can verify a pasted key,
  *  and back. Purely local — the value never leaves the field either way. */
@@ -2910,7 +2913,7 @@ function agentCard(a) {
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
-      ${a.state === 'RUNNING' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
+      ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
         ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
       <!-- lifecycle -->
