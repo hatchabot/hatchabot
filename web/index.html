@@ -304,6 +304,7 @@
     <input type="file" id="importFile" accept=".agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
+  <div id="mgmtStrip"></div>
   <div id="agents"></div>
   <div class="card" id="activityCard" hidden>
     <div class="row">
@@ -1881,13 +1882,19 @@ async function pollDerivedBuild(name) {
   finally { derivedBuilding.delete(name); loadDerivedImages(); }
 }
 
-// Honest status from the mgmt-bot's own cli-token: whether setup has run, and
-// when the bot last used it (a proxy for "it's been active"). We can't claim
-// "running" from here — the bot is a separate process — so we don't.
+// Status for Settings → Access. Prefer the bot's own heartbeat (it says alive
+// vs offline, mode, LLM); fall back to the cli-token heuristic for a bot that
+// predates heartbeats and hasn't been restarted yet.
 async function refreshMgmtBotStatus() {
   const el = $('mgmtBotStatus');
   if (!el) return;
   try {
+    const s = await api('/v1/mgmt/status');
+    if (s.configured) {
+      el.textContent = `@${s.botUsername} · ${s.online ? 'online' : `offline, last seen ${ago(s.seenAt)}`} · ${s.mode}${s.llm ? ` · ${s.llm}` : ''}`;
+      el.style.color = s.online ? 'var(--ok)' : 'var(--warn)';
+      return;
+    }
     const tokens = await api('/v1/cli-tokens');
     const t = tokens.find(x => x.label === 'mgmt-bot');
     if (!t) { el.textContent = 'not set up yet'; el.style.color = 'var(--dim)'; return; }
@@ -4854,6 +4861,40 @@ function closeToc() { $('toc').classList.remove('open'); }
 
 // ---- polling ------------------------------------------------------------------
 
+// ---- management-bot presence card --------------------------------------------
+// The mgmt bot is a separate process; it heartbeats to the control plane and
+// this strip is that heartbeat made visible. Deliberately NOT an agent card —
+// it has no container, no volume, no members — just a slim always-on rail.
+let mgmtStatus = null, mgmtTick = 0;
+async function loadMgmtStatus() {
+  try { mgmtStatus = await api('/v1/mgmt/status'); } catch { mgmtStatus = null; }
+  renderMgmtStrip();
+}
+function renderMgmtStrip() {
+  const el = $('mgmtStrip');
+  if (!el) return;
+  // Nothing heartbeating for this account → no strip. The Settings → Access
+  // block still explains how to set the bot up, so absence isn't a dead end.
+  if (!mgmtStatus?.configured) { el.innerHTML = ''; return; }
+  const s = mgmtStatus;
+  const dot = s.online ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--warn)">●</span>';
+  const state = s.online ? 'online' : `offline · last seen ${ago(s.seenAt)}`;
+  const armed = s.mode === 'read-write';
+  const bits = [
+    `<span class="sub" style="${armed ? 'color:var(--warn)' : ''}">${armed ? '🔓 read-write' : '🔒 read-only'}</span>`,
+    s.llm ? `<span class="sub">🧠 ${esc(s.llm)}</span>` : '<span class="sub">slash commands only</span>',
+    `<span class="sub">${s.allowlisted} operator${s.allowlisted === 1 ? '' : 's'}</span>`,
+  ];
+  el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+      border:1px dashed var(--line);border-radius:10px;padding:8px 12px;margin-bottom:10px">
+    ${dot} <b>🛠 Management bot</b>
+    <a href="https://t.me/${esc(s.botUsername)}" target="_blank" rel="noopener">@${esc(s.botUsername)}</a>
+    <span class="sub">${state}</span>
+    <span class="spacer" style="flex:1"></span>
+    ${bits.join(' ')}
+  </div>`;
+}
+
 let pollTimer, pairTick = 0;
 async function refresh(withMeta) {
   void refreshInboxBadge(); // keep the inbox count live without opening it
@@ -4879,6 +4920,9 @@ async function refresh(withMeta) {
     }).catch(() => {});
     agents = await api('/v1/agents');
     loadActivity();
+    // Presence strip: cheap single-row read, but 30s staleness is fine —
+    // refresh it on the meta pass and every 4th poll.
+    if (withMeta || mgmtTick++ % 4 === 0) void loadMgmtStatus();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       const running = agents.filter(a => a.state === 'RUNNING');

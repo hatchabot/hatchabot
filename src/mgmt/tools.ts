@@ -31,6 +31,29 @@ const agentRef = {
   maxLength: 64,
 } as const;
 
+/** A template setup field — mirrors the control plane's TemplateParamSchema
+ *  (orchestrator/template.ts); the broker re-validates with the real zod
+ *  schema before any confirmation card is shown. */
+const SETUP_FIELD = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    key: {
+      type: 'string',
+      pattern: '^[a-z][a-z0-9_]{0,31}$',
+      description: 'snake_case; substituted into {{key}} placeholders',
+    },
+    label: { type: 'string', minLength: 1, maxLength: 64 },
+    help: { type: 'string', maxLength: 200 },
+    required: { type: 'boolean', description: 'default false' },
+    type: { type: 'string', enum: ['text', 'longtext', 'choice', 'boolean'] },
+    default: { type: 'string', maxLength: 2000 },
+    options: { type: 'array', maxItems: 12, items: { type: 'string', minLength: 1, maxLength: 120 } },
+    target: { type: 'string', enum: ['soul', 'agents'], description: 'default soul' },
+  },
+  required: ['key', 'label', 'type'],
+} as const;
+
 export const MANIFEST: ToolDef[] = [
   // ---- read tier (auto-execute) ----
   {
@@ -202,6 +225,57 @@ export const MANIFEST: ToolDef[] = [
       additionalProperties: false,
       properties: { agent: agentRef, userId: { type: 'string', minLength: 1, maxLength: 128 } },
       required: ['agent', 'userId'],
+    },
+  },
+
+  // ---- authoring (mutate; one proposal card carries the FULL spec) ----
+  {
+    name: 'create_agent',
+    tier: 'mutate',
+    description:
+      'Draft a NEW agent for the owner to approve: name, one-line persona, full SOUL.md ' +
+      '(identity & instructions), optional AGENTS.md (playbook), and optional setup fields ' +
+      'whose {{key}} placeholders in the files make the agent a reusable template. ' +
+      'Nothing is created until the owner confirms the proposal card. Compose complete, ' +
+      'production-quality file content — the card shows the owner exactly what you wrote.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 64 },
+        persona: { type: 'string', maxLength: 4000, description: 'One-line card description.' },
+        soul: {
+          type: 'string',
+          minLength: 1,
+          maxLength: 24000,
+          description: 'Full SOUL.md content. May contain {{key}} placeholders matching fields.',
+        },
+        agents_md: { type: 'string', maxLength: 24000, description: 'Full AGENTS.md content (optional).' },
+        fields: { type: 'array', maxItems: 24, items: SETUP_FIELD },
+      },
+      required: ['name', 'soul'],
+    },
+  },
+  {
+    name: 'update_definition',
+    tier: 'mutate',
+    description:
+      "Propose replacing an existing agent's definition: SOUL.md and/or AGENTS.md content " +
+      '(full replacement, not a patch), its one-line persona, and/or its setup-field ' +
+      'declarations. The owner sees a diff-style summary and full preview before anything ' +
+      'is written; a snapshot is taken automatically so the change is reversible. ' +
+      'MEMORY.md is never editable here.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        agent: agentRef,
+        soul: { type: 'string', minLength: 1, maxLength: 24000 },
+        agents_md: { type: 'string', minLength: 1, maxLength: 24000 },
+        persona: { type: 'string', maxLength: 4000 },
+        fields: { type: 'array', maxItems: 24, items: SETUP_FIELD },
+      },
+      required: ['agent'],
     },
   },
 ];

@@ -413,7 +413,14 @@ snapshots, moves, adopt, backups, health, usage, and more. Run
 
 An optional **Telegram management bot** controls the fleet from chat: list,
 start/stop, rebuild, approve pairing requests, plus read-only `/health`,
-`/usage`, and `/events` — every change confirmed with a tap. Set it up with
+`/usage`, and `/events` — every change confirmed with a tap. With an LLM
+configured it also **authors**: ask it in plain language to draft a new agent
+(SOUL.md, AGENTS.md, persona, template setup fields) or rewrite an existing
+definition — the full spec lands on one confirm card, and nothing is created
+or written until you approve it. The bot heartbeats to the control plane, so
+the web app shows a slim presence strip above the agent cards (online/offline,
+@handle deep link, read-only vs read-write, LLM model) and a live line in
+⚙ Settings → Access. Set it up with
 `agentclaw mgmt-bot setup` (needs its own BotFather token; discoverable in
 ⚙ Settings → Access). Design and limits:
 [control-interfaces.md](control-interfaces.md) and

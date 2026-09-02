@@ -64,6 +64,53 @@ class FakeApi implements ApiClient {
   async removeMember(id: string, userId: string) {
     this.calls.push(`remove:${id}:${userId}`);
   }
+
+  // ---- authoring ----
+  files: Record<string, string> = { 'SOUL.md': 'old line one\nold line two' };
+  /** States the freshly created agent walks through on successive getAgent
+   *  polls — lets tests exercise the wait-for-RUNNING loop. */
+  createdStates: string[] = ['RUNNING'];
+  async listProfiles() {
+    return [
+      { id: 'p1', name: 'Claude Max', vendor: 'anthropic', model: 'claude-opus-4-8' },
+      { id: 'p2', name: 'Spare Key', vendor: 'anthropic', model: 'claude-sonnet-5' },
+    ];
+  }
+  async listHosts() {
+    return [
+      { id: 'h1', name: 'This machine', kind: 'local' },
+      { id: 'h2', name: 'MacBook', kind: 'runner' },
+    ];
+  }
+  async createAgent(body: { name: string; persona?: string; aiProfileId: string; hostId: string }) {
+    this.calls.push(`create:${body.name}:${body.aiProfileId}:${body.hostId}`);
+    const created: AgentSummary = {
+      id: 'new1',
+      name: body.name,
+      slug: 'new1',
+      state: this.createdStates[0] ?? 'RUNNING',
+      aiProfileId: body.aiProfileId,
+    };
+    let poll = 0;
+    this.agents = [...this.agents, created];
+    const states = this.createdStates;
+    this.getAgent = async (id: string) => {
+      if (id !== 'new1') return this.agents.find((a) => a.id === id)!;
+      poll = Math.min(poll + 1, states.length - 1);
+      return { ...created, state: states[poll]! };
+    };
+    return created;
+  }
+  async getFile(_id: string, name: string) {
+    return this.files[name] ?? '';
+  }
+  async putFile(id: string, name: string, content: string) {
+    this.calls.push(`put:${id}:${name}:${content.length}`);
+    this.files[name] = content;
+  }
+  async patchAgent(id: string, body: { persona?: string; parameters?: Array<Record<string, unknown>> }) {
+    this.calls.push(`patch:${id}:${Object.keys(body).sort().join('+')}`);
+  }
 }
 
 const AGENTS: AgentSummary[] = [
@@ -76,7 +123,7 @@ function make(opts: { rw?: boolean; now?: () => number; models?: Record<string, 
   const api = new FakeApi(AGENTS, opts.models ?? { p1: ['claude-opus-4-8', 'claude-sonnet-5'] });
   let seq = 0;
   const pending = new PendingStore({ now: opts.now, genId: () => `c_${++seq}` });
-  const broker = new Broker(api, pending, { now: opts.now });
+  const broker = new Broker(api, pending, { now: opts.now, pollIntervalMs: 1, pollTimeoutMs: 2000 });
   if (opts.rw) broker.setMode(true);
   return { api, pending, broker };
 }
@@ -188,6 +235,116 @@ describe('broker mutate tier — propose, never act', () => {
     expect(pending.peek('c_1')).toBeUndefined(); // no confirmation was created
     const good = await broker.handleTool('set_model', { agent: 'a1', model: 'claude-sonnet-5' }, WHO);
     expect((good as any).pending).toBeTruthy();
+  });
+});
+
+describe('authoring tools — the full spec rides the confirmation', () => {
+  const FIELDS = [
+    { key: 'risk_tolerance', label: 'Risk tolerance', type: 'choice', options: ['low', 'high'] },
+    { key: 'enable_leaps', label: 'Enable LEAPS', type: 'boolean', default: 'false' },
+  ];
+
+  it('create_agent is read-only-gated like every mutate', async () => {
+    const { broker, api } = make();
+    const r = await broker.handleTool('create_agent', { name: 'X', soul: 's' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'READ_ONLY_MODE' } });
+    expect(api.calls).toEqual([]);
+  });
+
+  it('proposes with a spec card (name, placement, fields) and a long TTL — nothing created yet', async () => {
+    const { broker, api, pending } = make({ rw: true });
+    const r = await broker.handleTool(
+      'create_agent',
+      { name: 'Stock Broker', persona: 'Markets copilot', soul: 'You are {{risk_tolerance}}.\nLine 2.', fields: FIELDS },
+      WHO,
+    );
+    expect(r.ok).toBe(true);
+    const summary = (r as any).pending.summary as string;
+    expect(summary).toContain('Create agent "Stock Broker"');
+    expect(summary).toContain('Claude Max'); // broker-chosen placement is on the card
+    expect(summary).toContain('risk_tolerance, enable_leaps');
+    expect(summary).toContain('SOUL.md'); // preview present
+    expect(api.calls).toEqual([]); // proposal only
+    const rec = pending.peek('c_1')!;
+    expect(rec.expiresAtMs - rec.createdAtMs).toBe(600_000); // authoring TTL, not 120s
+    expect(rec.resolved.spec?.hostId).toBe('h1'); // local host, never the runner
+  });
+
+  it('refuses a name clash and bad fields BEFORE showing a card', async () => {
+    const { broker, pending } = make({ rw: true });
+    const clash = await broker.handleTool('create_agent', { name: 'tech advisor', soul: 's' }, WHO);
+    expect(clash).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    const badKey = await broker.handleTool(
+      'create_agent',
+      { name: 'Fresh', soul: 's', fields: [{ key: 'Bad-Key', label: 'x', type: 'text' }] },
+      WHO,
+    );
+    expect(badKey).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    const dupKeys = await broker.handleTool(
+      'create_agent',
+      { name: 'Fresh', soul: 's', fields: [FIELDS[0], FIELDS[0]] },
+      WHO,
+    );
+    expect(dupKeys).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(pending.peek('c_1')).toBeUndefined();
+  });
+
+  it('confirm creates, waits for RUNNING, then writes files and declares fields', async () => {
+    const { broker, api } = make({ rw: true });
+    api.createdStates = ['PROVISIONING', 'PROVISIONING', 'RUNNING'];
+    await broker.handleTool(
+      'create_agent',
+      { name: 'Fresh', soul: 'soul body', agents_md: 'playbook', fields: FIELDS },
+      WHO,
+    );
+    const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(out.ok).toBe(true);
+    expect((out as any).text).toContain('✅');
+    expect(api.calls).toEqual([
+      'create:Fresh:p1:h1',
+      'put:new1:SOUL.md:9',
+      'put:new1:AGENTS.md:8',
+      'patch:new1:parameters',
+    ]);
+  });
+
+  it('a FAILED provision surfaces as a failure, not silence', async () => {
+    const { broker, api } = make({ rw: true });
+    api.createdStates = ['PROVISIONING', 'FAILED'];
+    await broker.handleTool('create_agent', { name: 'Fresh', soul: 's' }, WHO);
+    const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(out.ok).toBe(true);
+    expect((out as any).text).toContain('⚠ Failed');
+    expect(api.calls.some((c) => c.startsWith('put:'))).toBe(false); // no files onto a failed agent
+  });
+
+  it('update_definition shows a diff stat and rejects an empty change', async () => {
+    const { broker, api } = make({ rw: true });
+    const empty = await broker.handleTool('update_definition', { agent: 'a1' }, WHO);
+    expect(empty).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    const r = await broker.handleTool(
+      'update_definition',
+      { agent: 'a1', soul: 'old line one\nnew line two\nnew line three' },
+      WHO,
+    );
+    const summary = (r as any).pending.summary as string;
+    expect(summary).toContain('Update definition of "Tech Advisor"');
+    expect(summary).toContain('2 → 3 lines'); // measured against the LIVE file
+    expect(api.calls).toEqual([]);
+    const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(out.ok).toBe(true);
+    expect(api.calls).toEqual(['put:a1:SOUL.md:40']);
+  });
+
+  it('update_definition patches persona and fields through the agent PATCH', async () => {
+    const { broker, api } = make({ rw: true });
+    await broker.handleTool(
+      'update_definition',
+      { agent: 'a1', persona: 'sharper one-liner', fields: FIELDS },
+      WHO,
+    );
+    await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['patch:a1:parameters+persona']);
   });
 });
 

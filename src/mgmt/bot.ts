@@ -1,4 +1,4 @@
-import { Broker, type AgentSummary, type Proposer, type ToolResult } from './broker.js';
+import { AUTHORING_TOOLS, Broker, type AgentSummary, type Proposer, type ToolResult } from './broker.js';
 import type { AgentSink, LlmAgent } from './llm.js';
 
 /**
@@ -203,12 +203,24 @@ export class ManagementBot {
     }
     const id = m[1]!;
     const yn = m[2]!;
+    // Authoring confirms do real work (create agent → wait for RUNNING → write
+    // files) that outlives Telegram's ~15s callback window — answer the tap
+    // first and mark the card as working, so the button never hangs and a late
+    // answerCallback never throws.
+    const peeked = this.broker.pending.peek(id);
+    const slow = yn === 'y' && peeked?.status === 'pending' && AUTHORING_TOOLS.has(peeked.tool);
+    if (slow) {
+      await this.tx.answerCallback(callbackId);
+      await this.tx.editMessage(chatId, messageId, '⏳ Working — this can take a minute…');
+    }
     const out = await this.broker.confirm(id, yn === 'y' ? 'confirm' : 'cancel', { fromUserId, chatId });
     if (!out.ok) {
-      await this.tx.answerCallback(callbackId, out.reason === 'expired' ? 'Expired' : 'Already handled');
+      const why = out.reason === 'expired' ? 'Expired' : 'Already handled';
+      if (slow) await this.tx.editMessage(chatId, messageId, `⚠ ${why}.`);
+      else await this.tx.answerCallback(callbackId, why);
       return;
     }
-    await this.tx.answerCallback(callbackId);
+    if (!slow) await this.tx.answerCallback(callbackId);
     await this.tx.editMessage(chatId, out.rec.messageId || messageId, out.text);
   }
 }
@@ -217,6 +229,7 @@ const HELP = [
   'Fleet: /list [state] · /agent <ref> · /logs <ref> [n] · /members <ref> · /pending <ref> · /pool · /events [ref] [n]',
   'Check: /health <ref> · /usage <ref>',
   'Change (needs /mode readwrite): /stop <ref> · /start_agent <ref> · /rebuild <ref> · /model <ref> <model> · /approve <ref> <code>',
+  'Author (plain language, needs /mode readwrite): ask me to draft a new agent or rewrite one\'s definition — you approve the full spec on a card before anything is created or changed.',
   'Safety: /mode readwrite|readonly · /pause · /resume',
 ].join('\n');
 

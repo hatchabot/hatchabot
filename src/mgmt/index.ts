@@ -110,8 +110,26 @@ bot.catch((err) => console.error('mgmt bot error', err.error));
 // Drop resolved/expired confirmations periodically.
 setInterval(() => pending.sweep(), 60_000).unref();
 
+// Phase-A presence: heartbeat to the control plane every 30s so the web UI
+// can show a live management-bot card (online/offline derives from seen_at).
+const llmModel = llm ? (process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5') : undefined;
+const startHeartbeat = (botUsername: string) => {
+  const beat = () =>
+    api
+      .heartbeat({
+        botUsername,
+        mode: broker.readWrite ? 'read-write' : 'read-only',
+        llm: llmModel,
+        allowlisted: allowlist.length,
+      })
+      .catch((e) => console.error('mgmt heartbeat failed', (e as Error).message));
+  void beat();
+  setInterval(beat, 30_000).unref();
+};
+
 await bot.start({
-  onStart: (me) =>
+  onStart: (me) => {
+    startHeartbeat(me.username);
     console.log(
       JSON.stringify({
         event: 'mgmt.up',
@@ -119,7 +137,8 @@ await bot.start({
         baseUrl,
         allowlisted: allowlist.length,
         mode: broker.readWrite ? 'read-write' : 'read-only',
-        llm: llm ? (process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5') : 'off (no API key)',
+        llm: llmModel ?? 'off (no API key)',
       }),
-    ),
+    );
+  },
 });

@@ -9,12 +9,29 @@ import { randomBytes } from 'node:crypto';
  * See docs/management-broker.md §6.
  */
 
+/** The full agent spec an authoring proposal carries. The Telegram card shows
+ *  a preview; THIS is what executes on confirm — the card is never the truth. */
+export interface AuthorSpec {
+  name?: string;
+  persona?: string;
+  soul?: string;
+  agentsMd?: string;
+  fields?: Array<Record<string, unknown>>;
+  /** create_agent placement, chosen by the broker (never by the model). */
+  aiProfileId?: string;
+  aiProfileName?: string;
+  hostId?: string;
+  /** update_definition: precomputed change-size line, shown on the card. */
+  diff?: string;
+}
+
 export interface Resolved {
   agentId: string;
   agentName: string;
   /** set_model */ model?: string;
   /** approve_member */ code?: string;
   /** remove_member */ userId?: string;
+  /** create_agent / update_definition */ spec?: AuthorSpec;
 }
 
 export interface PendingConfirm {
@@ -58,6 +75,9 @@ export class PendingStore {
 
   create(
     fields: Omit<PendingConfirm, 'id' | 'createdAtMs' | 'expiresAtMs' | 'status' | 'messageId'>,
+    /** Per-record override — authoring proposals give the owner longer to
+     *  read a full spec than the 2 minutes a stop/start needs. */
+    ttlMs?: number,
   ): PendingConfirm {
     const now = this.#now();
     const rec: PendingConfirm = {
@@ -65,7 +85,7 @@ export class PendingStore {
       id: this.#genId(),
       messageId: 0,
       createdAtMs: now,
-      expiresAtMs: now + this.#ttlMs,
+      expiresAtMs: now + (ttlMs ?? this.#ttlMs),
       status: 'pending',
     };
     this.#map.set(rec.id, rec);

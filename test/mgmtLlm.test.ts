@@ -61,6 +61,25 @@ class FakeApi implements ApiClient {
   async approvePairing() {}
   async denyPairing() {}
   async removeMember() {}
+  async listProfiles() {
+    return [{ id: 'p1', name: 'Claude Max', vendor: 'anthropic' }];
+  }
+  async listHosts() {
+    return [{ id: 'h1', name: 'This machine', kind: 'local' }];
+  }
+  async createAgent(body: { name: string; aiProfileId: string; hostId: string }) {
+    this.calls.push(`create:${body.name}`);
+    return { id: 'new1', name: body.name, slug: 'new1', state: 'RUNNING', aiProfileId: body.aiProfileId };
+  }
+  async getFile() {
+    return '';
+  }
+  async putFile(id: string, name: string) {
+    this.calls.push(`put:${id}:${name}`);
+  }
+  async patchAgent(id: string) {
+    this.calls.push(`patch:${id}`);
+  }
 }
 
 /** Plays back a scripted sequence of model turns; records the requests it saw. */

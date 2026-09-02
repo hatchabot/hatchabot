@@ -1,4 +1,4 @@
-import type { ApiClient, AgentSummary, Member, PairingRequest, PendingJoin, EventRow, HealthResult, UsageResult } from './broker.js';
+import type { ApiClient, AgentSummary, Member, PairingRequest, PendingJoin, EventRow, HealthResult, UsageResult, ProfileSummary, HostSummary } from './broker.js';
 
 /**
  * The concrete owner-scoped /v1 client the broker drives. One bearer token (a
@@ -115,5 +115,50 @@ export class HttpApiClient implements ApiClient {
   }
   async removeMember(id: string, userId: string): Promise<void> {
     await this.#req('DELETE', `/v1/agents/${id}/members/${encodeURIComponent(userId)}`);
+  }
+
+  // ---- authoring ----------------------------------------------------------
+
+  async listProfiles(): Promise<ProfileSummary[]> {
+    const rows = (await this.#req('GET', '/v1/ai-profiles')) as ProfileSummary[];
+    return rows.map((p) => ({ id: p.id, name: p.name, vendor: p.vendor, model: p.model }));
+  }
+  async listHosts(): Promise<HostSummary[]> {
+    const rows = (await this.#req('GET', '/v1/hosts')) as HostSummary[];
+    return rows.map((h) => ({ id: h.id, name: h.name, kind: h.kind }));
+  }
+  async createAgent(body: {
+    name: string;
+    persona?: string;
+    aiProfileId: string;
+    hostId: string;
+  }): Promise<AgentSummary> {
+    return (await this.#req('POST', '/v1/agents', body)) as AgentSummary;
+  }
+  async getFile(id: string, name: string): Promise<string> {
+    const r = (await this.#req('GET', `/v1/agents/${id}/files/${encodeURIComponent(name)}`)) as {
+      content?: string;
+    };
+    return r.content ?? '';
+  }
+  async putFile(id: string, name: string, content: string): Promise<void> {
+    await this.#req('PUT', `/v1/agents/${id}/files/${encodeURIComponent(name)}`, { content });
+  }
+  async patchAgent(
+    id: string,
+    body: { persona?: string; parameters?: Array<Record<string, unknown>> },
+  ): Promise<void> {
+    await this.#req('PATCH', `/v1/agents/${id}`, body);
+  }
+
+  /** Phase-A presence: tell the control plane this bot is alive and how it's
+   *  armed, so the web UI can show a real card instead of guessing. */
+  async heartbeat(hb: {
+    botUsername: string;
+    mode: 'read-only' | 'read-write';
+    llm?: string;
+    allowlisted: number;
+  }): Promise<void> {
+    await this.#req('POST', '/v1/mgmt/heartbeat', hb);
   }
 }

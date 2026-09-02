@@ -164,10 +164,44 @@ Also read-tier, same shape: `list_members` (`GET …/members`), `get_pool`
 ```
 
 **Forbidden** (never in the tool array — the model literally cannot call them):
-`add_ai_key`, set/paste bot token, set password, edit `SOUL.md`/`MEMORY.md`,
+`add_ai_key`, set/paste bot token, set password, edit `MEMORY.md`,
 `delete_agent`. These return a canned "do this in the web app: <deep-link>".
 `delete_agent` may later exist as a mutate tool behind a typed-name double
-confirm, but ships absent.
+confirm, but ships absent. (`SOUL.md`/`AGENTS.md` editing graduated from this
+list to the confirm-gated authoring tools below — the server snapshots before
+every write, so a bad edit is reversible; a poisoned MEMORY.md is not, so
+memory stays forbidden.)
+
+---
+
+## 3b. Authoring tools (mutate; one card carries the FULL spec)
+
+`create_agent` and `update_definition` let "define me a stock broker agent
+with these template fields" work through the management interface. The shape
+that keeps this sound: the model **composes**, the broker **validates**, and a
+single confirm-gated proposal card carries the complete spec — name, persona,
+full `SOUL.md`/`AGENTS.md` content, setup-field declarations — so one human
+tap approves exactly what will exist. The card is a preview; the spec that
+executes lives server-side in the pending record, never in Telegram
+`callback_data`.
+
+Differences from the verb-shaped mutates:
+
+- **Validation is the control plane's own.** Setup fields are checked with the
+  real `TemplateParamSchema` (orchestrator/template.ts), name clashes are
+  rejected at propose time, and `update_definition` computes a line-diff stat
+  against the LIVE file so the card says how big the change is.
+- **Placement is broker-chosen, never model-chosen.** `create_agent` always
+  lands on the local host with the AI profile most of the fleet already uses;
+  the card shows the owner what was picked.
+- **Longer TTL (10 min, not 120 s)** — the owner is reading a document, not a
+  verb.
+- **Execution is multi-step**: create → wait for RUNNING → write files (each
+  write takes the server's pre-edit snapshot) → declare fields. The bot answers
+  the button tap immediately and edits the card to "⏳ Working…", because this
+  outlives Telegram's callback window. A timeout or FAILED provision reports
+  honestly what remains ("still provisioning — propose update_definition once
+  RUNNING").
 
 ---
 

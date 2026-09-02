@@ -1,5 +1,7 @@
+import { z } from 'zod';
 import { toolDef } from './tools.js';
-import { PendingStore, type PendingConfirm, type Resolved } from './pendingStore.js';
+import { TemplateParamSchema } from '../orchestrator/template.js';
+import { PendingStore, type AuthorSpec, type PendingConfirm, type Resolved } from './pendingStore.js';
 
 /**
  * The deterministic layer between a management client (slash commands now, an
@@ -16,8 +18,22 @@ export interface AgentSummary {
   name: string;
   slug: string;
   state: string;
+  stateReason?: string;
   model?: string;
   aiProfileId: string;
+}
+
+export interface ProfileSummary {
+  id: string;
+  name: string;
+  vendor: string;
+  model?: string;
+}
+
+export interface HostSummary {
+  id: string;
+  name: string;
+  kind: string;
 }
 
 export interface Member {
@@ -88,6 +104,13 @@ export interface ApiClient {
   approvePairing(id: string, code: string): Promise<void>;
   denyPairing(id: string, code: string): Promise<void>;
   removeMember(id: string, userId: string): Promise<void>;
+  // authoring
+  listProfiles(): Promise<ProfileSummary[]>;
+  listHosts(): Promise<HostSummary[]>;
+  createAgent(body: { name: string; persona?: string; aiProfileId: string; hostId: string }): Promise<AgentSummary>;
+  getFile(id: string, name: string): Promise<string>;
+  putFile(id: string, name: string, content: string): Promise<void>;
+  patchAgent(id: string, body: { persona?: string; parameters?: Array<Record<string, unknown>> }): Promise<void>;
 }
 
 export type ErrCode =
@@ -116,7 +139,16 @@ export interface BrokerOptions {
   mutateLimit?: number;
   mutateWindowMs?: number;
   audit?: (event: string, detail: Record<string, unknown>) => void;
+  /** create_agent waits for the fresh agent to reach RUNNING before writing
+   *  its files; injectable for tests. */
+  pollIntervalMs?: number;
+  pollTimeoutMs?: number;
 }
+
+/** Tools whose confirmation carries a full spec: longer TTL (the owner is
+ *  reading a document, not a verb) and a working notice while they execute. */
+export const AUTHORING_TOOLS = new Set(['create_agent', 'update_definition']);
+const AUTHORING_TTL_MS = 600_000;
 
 class BrokerError extends Error {
   constructor(readonly code: ErrCode, message: string) {
@@ -132,6 +164,8 @@ export class Broker {
   #mutateLimit: number;
   #mutateWindowMs: number;
   #mutateHits: number[] = [];
+  #pollIntervalMs: number;
+  #pollTimeoutMs: number;
 
   constructor(
     private readonly api: ApiClient,
@@ -142,6 +176,8 @@ export class Broker {
     this.#audit = opts.audit ?? (() => {});
     this.#mutateLimit = opts.mutateLimit ?? 20;
     this.#mutateWindowMs = opts.mutateWindowMs ?? 60_000;
+    this.#pollIntervalMs = opts.pollIntervalMs ?? 3000;
+    this.#pollTimeoutMs = opts.pollTimeoutMs ?? 150_000;
   }
 
   get readWrite(): boolean {
@@ -178,7 +214,10 @@ export class Broker {
       this.#rateGate();
       const resolved = await this.#resolveMutate(name, args);
       const summary = summarize(name, resolved);
-      const rec = this.pending.create({ ownerId: who.ownerId, chatId: who.chatId, fromUserId: who.fromUserId, tool: name, resolved, summary });
+      const rec = this.pending.create(
+        { ownerId: who.ownerId, chatId: who.chatId, fromUserId: who.fromUserId, tool: name, resolved, summary },
+        AUTHORING_TOOLS.has(name) ? AUTHORING_TTL_MS : undefined,
+      );
       this.#audit('mgmt.propose', { tool: name, confirmId: rec.id, resolved, ...who });
       return { ok: true, tool: name, pending: { confirmId: rec.id, summary } };
     } catch (e) {
@@ -337,9 +376,68 @@ export class Broker {
     }
   }
 
+  /** Validate + normalize setup-field declarations with the control plane's
+   *  REAL schema, so a proposal that would 400 at PATCH time fails before the
+   *  owner is ever shown a card. Friendly defaults for the two fields the
+   *  schema requires but a model plausibly omits. */
+  #normalizeFields(raw: unknown): Array<Record<string, unknown>> | undefined {
+    if (raw === undefined) return undefined;
+    if (!Array.isArray(raw)) throw new BrokerError('INVALID_INPUT', 'fields must be an array.');
+    const filled = raw.map((f) => ({ required: false, target: 'soul', ...(f as object) }));
+    const parsed = z.array(TemplateParamSchema).max(24).safeParse(filled);
+    if (!parsed.success) {
+      throw new BrokerError('INVALID_INPUT', `Bad setup fields: ${parsed.error.issues[0]?.message ?? 'invalid'}.`);
+    }
+    if (new Set(parsed.data.map((p) => p.key)).size !== parsed.data.length) {
+      throw new BrokerError('INVALID_INPUT', 'Setup field keys must be unique.');
+    }
+    return parsed.data as unknown as Array<Record<string, unknown>>;
+  }
+
+  /** create_agent placement: the LOCAL host and the AI profile most of the
+   *  fleet already uses (first profile when the fleet is empty). The model
+   *  never chooses placement — the card shows the owner what was picked. */
+  async #placement(): Promise<{ hostId: string; aiProfileId: string; aiProfileName: string }> {
+    const hosts = await this.api.listHosts();
+    const local = hosts.find((h) => h.kind === 'local');
+    if (!local) throw new BrokerError('UPSTREAM_ERROR', 'No local host to create the agent on.');
+    const profiles = await this.api.listProfiles();
+    if (!profiles.length) throw new BrokerError('UPSTREAM_ERROR', 'No AI source configured — add one in the web app first.');
+    const agents = await this.api.listAgents();
+    const counts = new Map<string, number>();
+    for (const a of agents) counts.set(a.aiProfileId, (counts.get(a.aiProfileId) ?? 0) + 1);
+    const best = [...profiles].sort(
+      (a, b) => (counts.get(b.id) ?? 0) - (counts.get(a.id) ?? 0),
+    )[0]!;
+    return { hostId: local.id, aiProfileId: best.id, aiProfileName: best.name };
+  }
+
   /** Build the concrete Resolved for a mutate, validating inputs up front so a
    *  bad model or code fails BEFORE a confirmation is ever shown. */
   async #resolveMutate(name: string, args: Record<string, unknown>): Promise<Resolved> {
+    if (name === 'create_agent') {
+      const agentName = args.name;
+      if (typeof agentName !== 'string' || !agentName.trim() || agentName.length > 64) {
+        throw new BrokerError('INVALID_INPUT', 'Missing or bad agent name.');
+      }
+      const soul = args.soul;
+      if (typeof soul !== 'string' || !soul.trim()) throw new BrokerError('INVALID_INPUT', 'SOUL.md content is required.');
+      const clash = (await this.api.listAgents()).find(
+        (a) => a.name.toLowerCase() === agentName.trim().toLowerCase(),
+      );
+      if (clash) {
+        throw new BrokerError('INVALID_INPUT', `There is already an agent named "${clash.name}" (${clash.state}). Pick another name.`);
+      }
+      const spec: AuthorSpec = {
+        name: agentName.trim(),
+        persona: typeof args.persona === 'string' ? args.persona : undefined,
+        soul,
+        agentsMd: typeof args.agents_md === 'string' ? args.agents_md : undefined,
+        fields: this.#normalizeFields(args.fields),
+        ...(await this.#placement()),
+      };
+      return { agentId: '', agentName: spec.name!, spec };
+    }
     const agent = await this.#resolve(args.agent);
     const base: Resolved = { agentId: agent.id, agentName: agent.name };
     switch (name) {
@@ -371,6 +469,29 @@ export class Broker {
         if (typeof userId !== 'string' || !userId) throw new BrokerError('INVALID_INPUT', 'Missing userId.');
         return { ...base, userId };
       }
+      case 'update_definition': {
+        const soul = typeof args.soul === 'string' ? args.soul : undefined;
+        const agentsMd = typeof args.agents_md === 'string' ? args.agents_md : undefined;
+        const persona = typeof args.persona === 'string' ? args.persona : undefined;
+        const fields = this.#normalizeFields(args.fields);
+        if (soul === undefined && agentsMd === undefined && persona === undefined && fields === undefined) {
+          throw new BrokerError('INVALID_INPUT', 'Nothing to change — give soul, agents_md, persona, or fields.');
+        }
+        // Diff stats against what's live NOW, so the card says how big the
+        // change is, not just that there is one. Best-effort: a stopped agent
+        // can't serve its files, and the write itself will fail loudly later.
+        const diffs: string[] = [];
+        for (const [label, next] of [['SOUL.md', soul], ['AGENTS.md', agentsMd]] as const) {
+          if (next === undefined) continue;
+          try {
+            const cur = await this.api.getFile(agent.id, label);
+            diffs.push(`${label}: ${diffStat(cur, next)}`);
+          } catch {
+            diffs.push(`${label}: ${next.split('\n').length} lines (current unavailable)`);
+          }
+        }
+        return { ...base, spec: { soul, agentsMd, persona, fields, diff: diffs.join(' · ') || undefined } };
+      }
       default:
         throw new BrokerError('FORBIDDEN_TOOL', `Not a mutate tool: ${name}`);
     }
@@ -378,6 +499,44 @@ export class Broker {
 
   async #execMutate(name: string, r: Resolved): Promise<void> {
     switch (name) {
+      case 'create_agent': {
+        const s = r.spec!;
+        const created = await this.api.createAgent({
+          name: s.name!,
+          persona: s.persona,
+          aiProfileId: s.aiProfileId!,
+          hostId: s.hostId!,
+        });
+        // Files land on the agent's volume, which exists only once the agent
+        // is RUNNING — wait for provisioning (bot from the pool, container up).
+        const deadline = this.#now() + this.#pollTimeoutMs;
+        let cur = created;
+        while (cur.state !== 'RUNNING') {
+          if (cur.state === 'FAILED') {
+            throw new Error(`created, but provisioning failed${cur.stateReason ? `: ${cur.stateReason}` : ''} — fix it in the web app, then propose update_definition`);
+          }
+          if (this.#now() > deadline) {
+            throw new Error('created, but still provisioning — once it is RUNNING, propose update_definition to apply the definition');
+          }
+          await new Promise((res) => setTimeout(res, this.#pollIntervalMs));
+          cur = await this.api.getAgent(created.id);
+        }
+        await this.api.putFile(created.id, 'SOUL.md', s.soul!);
+        if (s.agentsMd !== undefined) await this.api.putFile(created.id, 'AGENTS.md', s.agentsMd);
+        if (s.fields?.length) await this.api.patchAgent(created.id, { parameters: s.fields });
+        return;
+      }
+      case 'update_definition': {
+        const s = r.spec!;
+        // File writes first (each takes its own pre-edit snapshot server-side).
+        if (s.soul !== undefined) await this.api.putFile(r.agentId, 'SOUL.md', s.soul);
+        if (s.agentsMd !== undefined) await this.api.putFile(r.agentId, 'AGENTS.md', s.agentsMd);
+        const patch: { persona?: string; parameters?: Array<Record<string, unknown>> } = {};
+        if (s.persona !== undefined) patch.persona = s.persona;
+        if (s.fields !== undefined) patch.parameters = s.fields;
+        if (Object.keys(patch).length) await this.api.patchAgent(r.agentId, patch);
+        return;
+      }
       case 'start_agent':
         return this.api.startAgent(r.agentId);
       case 'stop_agent':
@@ -396,8 +555,53 @@ export class Broker {
   }
 }
 
-/** Human-facing confirmation text — the RESOLVED target, never the raw input. */
+/** Approximate line-diff size: "120 → 180 lines (~64 changed)". Set-based, so
+ *  it understates moves — good enough for a card whose full content the owner
+ *  can read below it. */
+export function diffStat(before: string, after: string): string {
+  const a = before.split('\n');
+  const b = after.split('\n');
+  const aSet = new Set(a);
+  const bSet = new Set(b);
+  const changed = Math.max(
+    a.filter((l) => !bSet.has(l)).length,
+    b.filter((l) => !aSet.has(l)).length,
+  );
+  return `${a.length} → ${b.length} lines (~${changed} changed)`;
+}
+
+const previewOf = (label: string, text: string, maxChars: number): string => {
+  const lines = text.split('\n').slice(0, 14).join('\n');
+  const clipped = lines.length > maxChars ? lines.slice(0, maxChars) + '…' : lines;
+  return `――― ${label} ―――\n${clipped}${clipped.length < text.length ? '\n…' : ''}`;
+};
+
+/** Human-facing confirmation text — the RESOLVED target, never the raw input.
+ *  Authoring proposals are multi-line: the card IS the review surface. */
 export function summarize(tool: string, r: Resolved): string {
+  if (tool === 'create_agent' || tool === 'update_definition') {
+    const s = r.spec!;
+    const head =
+      tool === 'create_agent'
+        ? `🧬 Create agent "${r.agentName}"\nAI: ${s.aiProfileName} · host: this machine`
+        : `✏️ Update definition of "${r.agentName}"`;
+    const parts: string[] = [head];
+    if (s.persona !== undefined) parts.push(`persona: ${s.persona.slice(0, 200)}`);
+    if (tool === 'create_agent') {
+      const files = [`SOUL.md ${s.soul!.split('\n').length} lines`];
+      if (s.agentsMd !== undefined) files.push(`AGENTS.md ${s.agentsMd.split('\n').length} lines`);
+      parts.push(files.join(' · '));
+    } else if (s.diff) {
+      parts.push(s.diff);
+    }
+    if (s.fields?.length) {
+      parts.push(`Setup fields (${s.fields.length}): ${s.fields.map((f) => String(f.key)).join(', ')}`);
+    }
+    if (s.soul !== undefined) parts.push(previewOf('SOUL.md', s.soul, 900));
+    else if (s.agentsMd !== undefined) parts.push(previewOf('AGENTS.md', s.agentsMd, 900));
+    const text = parts.join('\n');
+    return text.length > 2000 ? text.slice(0, 2000) + '…' : text;
+  }
   switch (tool) {
     case 'start_agent':
       return `▶ Start "${r.agentName}"`;

@@ -2,6 +2,36 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.90.0] — 2026-09-02
+
+### Added
+- **The management bot is visible.** It heartbeats to the control plane every
+  30s (`POST /v1/mgmt/heartbeat`, owner-scoped via its own cli-token), and the
+  web app shows a slim presence strip above the agent cards — online/offline
+  dot, @handle deep link, 🔒 read-only / 🔓 read-write, LLM model, operator
+  count — deliberately not an agent card (no container, no members). The
+  ⚙ Settings → Access line now uses the same live status instead of guessing
+  from cli-token timestamps. New `GET /v1/mgmt/status`.
+- **The management bot can author — with one human tap on the full spec.**
+  Two new confirm-gated tools: `create_agent` (name, persona, complete
+  SOUL.md/AGENTS.md, template setup fields) and `update_definition` (full-file
+  replacement + persona + field declarations, with a line-diff stat measured
+  against the LIVE file on the card). The model composes; the broker validates
+  with the control plane's real `TemplateParamSchema`, refuses name clashes
+  and bad fields before any card is shown, and chooses placement itself (local
+  host, the fleet's majority AI profile — never the model's pick). The card
+  carries the whole spec server-side (10-min TTL — you're reading a document,
+  not a verb); on confirm the broker creates, waits for RUNNING, writes files
+  (each behind the server's automatic pre-edit snapshot), and declares fields.
+  SOUL/AGENTS editing thereby graduates off the Forbidden list; MEMORY.md,
+  secrets, and delete stay forbidden. LLM output budget raised 1024 → 8192
+  tokens so a full SOUL.md can be composed in one call.
+
+### Fixed
+- Authoring confirms outlive Telegram's ~15s callback window — the tap is
+  answered immediately and the card shows "⏳ Working…" while the create/write
+  sequence runs, instead of a hanging button and a late answer that throws.
+
 ## [0.89.0] — 2026-09-02
 
 ### Added

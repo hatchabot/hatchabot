@@ -1558,6 +1558,35 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { revoked: true };
   });
 
+  // ---- management bot ------------------------------------------------------
+  // The mgmt bot is a separate process the control plane otherwise can't see.
+  // It phones home here (authenticated by its own cli-token, so the row is
+  // owner-scoped) and the web UI reads the result to show a live presence card
+  // instead of guessing from cli-token last-used timestamps.
+
+  const MgmtHeartbeat = z.object({
+    botUsername: z.string().trim().min(1).max(64),
+    mode: z.enum(['read-only', 'read-write']),
+    llm: z.string().trim().max(64).optional(),
+    allowlisted: z.number().int().min(0).max(1000),
+  });
+
+  app.post('/v1/mgmt/heartbeat', async (req, reply) => {
+    const parsed = MgmtHeartbeat.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    store.upsertMgmtHeartbeat(ownerIdOf(req), parsed.data);
+    return { ok: true };
+  });
+
+  app.get('/v1/mgmt/status', async (req) => {
+    const hb = store.getMgmtHeartbeat(ownerIdOf(req));
+    if (!hb) return { configured: false };
+    // Beats arrive every 30s; three missed beats = offline. Derived here so
+    // the client never has to agree with the bot about the interval.
+    const online = Date.now() - Date.parse(hb.seenAt) < 90_000;
+    return { configured: true, online, ...hb };
+  });
+
   // ---- agents ---------------------------------------------------------------
 
   app.post('/v1/agents', async (req, reply) => {

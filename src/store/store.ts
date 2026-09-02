@@ -87,6 +87,15 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS cli_tokens_owner ON cli_tokens (owner_id);
 
+      -- Last heartbeat from the (separate-process) management bot, so the web
+      -- UI can show that it exists, is alive, and how it's armed. One row per
+      -- owner; staleness is derived from seen_at, never stored.
+      CREATE TABLE IF NOT EXISTS mgmt_heartbeat (
+        owner_id TEXT PRIMARY KEY, bot_username TEXT NOT NULL,
+        mode TEXT NOT NULL, llm TEXT, allowlisted INTEGER NOT NULL,
+        seen_at TEXT NOT NULL
+      );
+
       -- Other AgentClaw installations this owner can move agents to. The
       -- access token is a credential, so it lives in the SecretStore and only
       -- its ref is here.
@@ -1025,6 +1034,39 @@ export class Store {
     return (
       this.db.prepare(`DELETE FROM cli_tokens WHERE id = ? AND owner_id = ?`).run(id, ownerId).changes === 1
     );
+  }
+
+  // ---- Management-bot heartbeat ------------------------------------------
+
+  upsertMgmtHeartbeat(
+    ownerId: string,
+    hb: { botUsername: string; mode: string; llm?: string; allowlisted: number },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO mgmt_heartbeat (owner_id, bot_username, mode, llm, allowlisted, seen_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET bot_username = excluded.bot_username,
+           mode = excluded.mode, llm = excluded.llm,
+           allowlisted = excluded.allowlisted, seen_at = excluded.seen_at`,
+      )
+      .run(ownerId, hb.botUsername, hb.mode, hb.llm ?? null, hb.allowlisted, new Date().toISOString());
+  }
+
+  getMgmtHeartbeat(
+    ownerId: string,
+  ): { botUsername: string; mode: string; llm?: string; allowlisted: number; seenAt: string } | undefined {
+    const r = this.db
+      .prepare(`SELECT bot_username, mode, llm, allowlisted, seen_at FROM mgmt_heartbeat WHERE owner_id = ?`)
+      .get(ownerId) as any;
+    if (!r) return undefined;
+    return {
+      botUsername: r.bot_username,
+      mode: r.mode,
+      llm: r.llm ?? undefined,
+      allowlisted: r.allowlisted,
+      seenAt: r.seen_at,
+    };
   }
 
   // ---- Snapshots ---------------------------------------------------------
