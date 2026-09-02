@@ -2965,6 +2965,7 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
+      ${a.state === 'RUNNING' && a.botUsername ? `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" title="Rename the Telegram bot's display name to match this agent. Pool bots are renamed automatically; a bot you pasted from BotFather keeps its name until you press this.">🏷 Sync name</button>` : ''}
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
@@ -3007,9 +3008,6 @@ function cardMenu(a) {
   }
   if (a.state === 'RUNNING' || a.runtimeRef) {
     items.push(`<button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>`);
-  }
-  if (a.botUsername) {
-    items.push(`<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" title="Point the Telegram bot's display name at this agent's name">🏷 Sync name</button>`);
   }
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
