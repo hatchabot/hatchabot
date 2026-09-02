@@ -66,7 +66,7 @@ tabs: **📖 Definition · Snapshots · AI · Data · Telegram · Environment**.
   now**). Restore one to roll the agent's definition and memory back — so a
   bad edit is always undoable. (CLI: `agentclaw snapshot` / `revert`.)
 
-**📝 Save chat to memory** (card ⋯ menu) asks the agent to write the current
+**📝 Chat → Memory** (card) asks the agent to write the current
 conversation's key facts into MEMORY.md now (~20s) — a checkpoint, so the
 context survives a reset. The same checkpoint is offered as a checkbox when
 switching an agent's AI source (and on the bulk switch-and-rebuild), because
