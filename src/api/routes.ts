@@ -73,6 +73,14 @@ import {
 } from '../orchestrator/runnerSetup.js';
 import { probeImageCapabilities } from '../orchestrator/runtimeCaps.js';
 import {
+  baseProblem,
+  buildDerivedImage,
+  buildLogPath,
+  deriveTag,
+  derivedNameProblem,
+  removeDerivedImage,
+} from '../orchestrator/derivedImage.js';
+import {
   AdoptError,
   applyWorkspace,
   findExistingBot,
@@ -113,6 +121,9 @@ export interface ApiDeps {
   /** Override the OpenClaw npm dist-tags lookup (tests). Defaults to the real
    *  registry fetch; the endpoint caches the result. */
   openclawDistTags?: () => Promise<OpenclawDistTags>;
+  /** Override the derived-image builder (tests). Defaults to the real
+   *  `docker build`; tests inject a stub so no docker runs. */
+  buildImage?: typeof buildDerivedImage;
 }
 
 const LocalProfile = z.object({
@@ -737,6 +748,128 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const res = await installRuntimeImage(dockerHost, { image: process.env.AGENTCLAW_IMAGE });
     if (!res.ok) return reply.code(502).send({ error: `Image install failed: ${res.error}` });
     return { installed: true };
+  });
+
+  // ---- Derived runtime images (host-owner only) ---------------------------
+  // A derived image is `FROM agentclaw-runtime:<base>` + the owner's Dockerfile
+  // lines, for system packages a volume install can't provide. Building runs a
+  // Dockerfile on this box — a privilege the local-host owner already has, and
+  // one a co-tenant must never get, so EVERY route here is ownsLocalHost-gated.
+  const DEFAULT_BASE = process.env.AGENTCLAW_IMAGE ?? 'agentclaw-runtime:latest';
+  // In-process guard against two concurrent builds of the same name (the store's
+  // BUILDING status is the cross-request signal; this stops a double-submit).
+  const buildingImages = new Set<string>();
+
+  const kickImageBuild = (name: string): void => {
+    if (buildingImages.has(name)) return;
+    const rec = store.getDerivedImage(name);
+    if (!rec) return;
+    buildingImages.add(name);
+    const build = deps.buildImage ?? buildDerivedImage;
+    void build({ name, base: rec.base, dockerfile: rec.dockerfile, tag: rec.tag })
+      .then((res) => {
+        store.setDerivedImageStatus(name, res.ok ? 'READY' : 'FAILED', res.ok ? null : res.error);
+        app.log.info({ name, ok: res.ok }, 'derived image build finished');
+      })
+      .catch((err) => {
+        store.setDerivedImageStatus(name, 'FAILED', String(err?.message ?? err));
+        app.log.error({ err, name }, 'derived image build threw');
+      })
+      .finally(() => buildingImages.delete(name));
+  };
+
+  app.get('/v1/images', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    // Annotate each with how many agents pin it, so the UI can gate delete.
+    const images = store.listDerivedImages().map((img) => ({
+      ...img,
+      pinnedBy: store.agentsPinnedToImage(img.tag).length,
+    }));
+    return { base: DEFAULT_BASE, images };
+  });
+
+  app.post<{ Body: { name?: string; dockerfile?: string; base?: string } }>(
+    '/v1/images',
+    async (req, reply) => {
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      const parsed = z
+        .object({
+          name: z.string().trim().min(1).max(40),
+          // The owner's Dockerfile lines, appended verbatim after the FROM.
+          dockerfile: z.string().min(1).max(20000),
+          // Defaults to the fleet base; must be an agentclaw-runtime:* tag.
+          base: z.string().trim().min(1).max(160).optional(),
+        })
+        .safeParse(req.body ?? {});
+      if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+      const { name, dockerfile } = parsed.data;
+      const base = parsed.data.base ?? DEFAULT_BASE;
+
+      const nameErr = derivedNameProblem(name);
+      if (nameErr) return reply.code(400).send({ error: nameErr });
+      const baseErr = baseProblem(base);
+      if (baseErr) return reply.code(400).send({ error: baseErr });
+      if (buildingImages.has(name)) {
+        return reply.code(409).send({ error: 'That image is already building.' });
+      }
+
+      store.upsertDerivedImage({ name, tag: deriveTag(name), base, dockerfile, createdBy: ownerIdOf(req) });
+      kickImageBuild(name);
+      return reply.code(202).send({ building: true, tag: deriveTag(name) });
+    },
+  );
+
+  app.post<{ Params: { name: string }; Body: { base?: string } }>(
+    '/v1/images/:name/rebuild',
+    async (req, reply) => {
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      const rec = store.getDerivedImage(req.params.name);
+      if (!rec) return reply.code(404).send({ error: 'Not found' });
+      if (buildingImages.has(rec.name)) {
+        return reply.code(409).send({ error: 'That image is already building.' });
+      }
+      // Rebuild against the same base by default; allow moving it onto a newer
+      // base (e.g. after a fleet promote) without retyping the Dockerfile.
+      const base = (req.body as { base?: string } | null)?.base?.trim() || rec.base;
+      const baseErr = baseProblem(base);
+      if (baseErr) return reply.code(400).send({ error: baseErr });
+      store.upsertDerivedImage({
+        name: rec.name, tag: rec.tag, base, dockerfile: rec.dockerfile, createdBy: rec.createdBy,
+      });
+      kickImageBuild(rec.name);
+      return reply.code(202).send({ building: true });
+    },
+  );
+
+  app.delete<{ Params: { name: string } }>('/v1/images/:name', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const rec = store.getDerivedImage(req.params.name);
+    if (!rec) return reply.code(404).send({ error: 'Not found' });
+    if (buildingImages.has(rec.name)) {
+      return reply.code(409).send({ error: 'Cannot delete while it is building.' });
+    }
+    // Refuse while an agent still pins it — deleting the image out from under a
+    // pinned agent would fail its next rebuild with a cryptic "no such image".
+    const pinned = store.agentsPinnedToImage(rec.tag);
+    if (pinned.length) {
+      return reply.code(409).send({
+        error: `In use by ${pinned.length} agent(s): ${pinned.map((a) => a.name).join(', ')}. Unpin them first.`,
+      });
+    }
+    await removeDerivedImage(rec.tag);
+    store.deleteDerivedImage(rec.name);
+    return { deleted: true };
+  });
+
+  // Tail the build log so the CLI/web can show progress and diagnose a failure.
+  app.get<{ Params: { name: string } }>('/v1/images/:name/log', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const rec = store.getDerivedImage(req.params.name);
+    if (!rec) return reply.code(404).send({ error: 'Not found' });
+    const path = buildLogPath(rec.name);
+    const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    // Cap the payload; a build log can be large.
+    return { status: rec.status, error: rec.error, log: text.slice(-20000) };
   });
 
   // Register a runner host (Cluster mode): a remote Docker endpoint that the

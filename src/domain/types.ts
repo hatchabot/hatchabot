@@ -204,6 +204,34 @@ export interface Host {
   createdAt: string;
 }
 
+export type DerivedImageStatus = 'BUILDING' | 'READY' | 'FAILED';
+
+/**
+ * A runtime image an owner built `FROM agentclaw-runtime:<base>` plus their own
+ * Dockerfile lines — for system packages a volume install can't provide (apt,
+ * root-level setup). The Dockerfile snippet is kept so the image can be rebuilt
+ * against a newer base after a fleet promote. Host-owner scoped: building runs
+ * a Dockerfile on this box, a privilege the local-host owner already has.
+ */
+export interface DerivedImage {
+  /** kebab name, unique on this host; the tag is `agentclaw-runtime:derived-<name>`. */
+  name: string;
+  /** The full image tag docker built (what an agent pins to). */
+  tag: string;
+  /** Base tag it was built FROM (e.g. "agentclaw-runtime:latest"). */
+  base: string;
+  /** The owner's Dockerfile lines, appended verbatim after the FROM. */
+  dockerfile: string;
+  status: DerivedImageStatus;
+  /** Last build error (FAILED), else null. */
+  error: string | null;
+  /** Owner who created it (audit; the feature is host-owner gated). */
+  createdBy: string;
+  createdAt: string;
+  /** Last successful build, or null if never built. */
+  builtAt: string | null;
+}
+
 export type ChannelKind = 'telegram';
 
 export interface Channel {

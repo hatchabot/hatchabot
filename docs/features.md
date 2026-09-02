@@ -345,9 +345,22 @@ to a specific image — a candidate build under test, or a derived image with
 extra system packages — instead of promoting fleet-wide. Applies on the next
 rebuild; the card shows 📌 with the pinned tag; a pinned agent stops getting
 "update available" from fleet promotes, since it deliberately doesn't track
-`:latest`. Clearing the field returns it to the default. The pin is the
-foundation for derived images ("this agent's owner needs ffmpeg + LaTeX"):
-build `FROM agentclaw-runtime:latest` + the packages, tag it, pin the agent.
+`:latest`. Clearing the field returns it to the default.
+
+**Derived images** (⚙ → Runtime, or `agentclaw image`, host owner only): the
+first-class form of "this agent's owner needs ffmpeg + LaTeX". Build an image
+`FROM agentclaw-runtime:<base>` plus your own Dockerfile lines — for system
+packages (apt) a volume install can't provide — and pin an agent to it. Your
+lines run as **root** (the base ends as `USER node`), then the image restores
+`USER node`, the runtime contract the volume (uid 1000) and Claude Code depend
+on; you never write your own `FROM`/`USER`. The image is tagged
+`agentclaw-runtime:derived-<name>`; the Dockerfile is kept so **Rebuild**
+reruns it against a promoted base after a fleet upgrade. Delete is refused while
+an agent still pins it. From the CLI:
+`echo 'RUN apt-get update && apt-get install -y ffmpeg' | agentclaw image derive media`,
+then `agentclaw image pin <agent> media`. Building runs a Dockerfile on the box,
+a privilege the local-host owner already has — so it, and the pin, are
+host-owner gated and never exposed to a co-tenant.
 
 ## Bots census
 

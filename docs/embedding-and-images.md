@@ -89,11 +89,36 @@ The plugin's native addon is arch-specific; `openclaw plugins install` during
 the image on the same arch it runs on is required — cross-arch builds would need
 the matching `@node-llama-cpp/<arch>` prebuilt.
 
-## Next: derived images
+## Derived images
 
 This bake is the first "shared base layer" problem solved, and the pattern
-generalizes. A **derived image** is `FROM agentclaw-runtime:latest` plus
+generalizes. A **derived image** is `FROM agentclaw-runtime:<base>` plus
 agent-specific system packages (a market agent's pandas/numpy stack, a media
 agent's ffmpeg) — heavy things that shouldn't sit in every agent's volume *or*
 in the base image everyone shares. Same discipline: shared, immutable bytes in
-an image layer; only per-agent state on the volume. Designed, not yet built.
+an image layer; only per-agent state on the volume.
+
+Built as a first-class feature (⚙ → Runtime, or `agentclaw image`; see
+`docs/features.md` → Derived images):
+
+- **Build** (`POST /v1/images`, `agentclaw image derive`): the owner supplies a
+  name + Dockerfile lines; `src/orchestrator/derivedImage.ts` renders
+  `FROM <base>` + `USER root` + the lines + `USER node` (the root wrap is why
+  apt works; the trailing `USER node` is enforced, not optional — an image that
+  ended as root would break every agent, since the volume is uid 1000 and Claude
+  Code refuses root). No `--pull`: the base is a local image, never a registry
+  one. Tag: `agentclaw-runtime:derived-<name>`.
+- **Track** (`derived_images` store table): name, base, Dockerfile, status,
+  built-at. The Dockerfile is kept so **Rebuild** reruns it against a promoted
+  base after a fleet upgrade.
+- **Use**: the existing per-agent pin attaches an agent to the derived tag; the
+  provider already runs `spec.image ?? :latest`, so a rebuild lands the agent on
+  it. Delete is refused while an agent still pins it.
+- **Gate**: building runs a Dockerfile on the box — a privilege the local-host
+  owner already has (they can run docker directly) and a co-tenant must never
+  get. Every route is `ownsLocalHost`-gated.
+
+### Multi-arch note (applies to derived images too)
+
+A derived image inherits the base's arch; `docker build` on the host produces
+the host's arch. As with the base, build on the arch you deploy.

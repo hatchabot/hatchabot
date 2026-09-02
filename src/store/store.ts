@@ -7,6 +7,8 @@ import type {
   AIProfile,
   Channel,
   DataSource,
+  DerivedImage,
+  DerivedImageStatus,
   Host,
   Membership,
   MemberRole,
@@ -167,6 +169,24 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS shares_to_owner ON agent_shares (to_owner, status);
       CREATE INDEX IF NOT EXISTS shares_to_email ON agent_shares (to_email, status);
+
+      -- Runtime images an owner built FROM the base + their own Dockerfile lines
+      -- (system packages a volume install can't provide). The dockerfile is kept
+      -- so the image can be rebuilt against a newer base. Host-scoped, not
+      -- owner-partitioned: an image is a machine-level artifact (like the base),
+      -- and building/pinning is already host-owner gated at the API. status:
+      -- BUILDING | READY | FAILED.
+      CREATE TABLE IF NOT EXISTS derived_images (
+        name TEXT PRIMARY KEY,
+        tag TEXT NOT NULL,
+        base TEXT NOT NULL,
+        dockerfile TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'BUILDING',
+        error TEXT,
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        built_at TEXT
+      );
     `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
@@ -1260,6 +1280,77 @@ export class Store {
 
   setAgentMigratedTo(id: string, note: string | null): void {
     this.db.prepare(`UPDATE agents SET migrated_to = ? WHERE id = ?`).run(note, id);
+  }
+
+  // --- Derived runtime images (docs/embedding-and-images.md → derived images) ---
+
+  #mapDerivedImage = (r: any): DerivedImage => ({
+    name: r.name,
+    tag: r.tag,
+    base: r.base,
+    dockerfile: r.dockerfile,
+    status: r.status as DerivedImageStatus,
+    error: r.error ?? null,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    builtAt: r.built_at ?? null,
+  });
+
+  /**
+   * Create or replace a derived image record, resetting it to BUILDING. Same
+   * name = same tag, so a re-derive under an existing name rebuilds in place
+   * (and the agents pinned to that tag pick up the new build on next rebuild).
+   */
+  upsertDerivedImage(rec: {
+    name: string;
+    tag: string;
+    base: string;
+    dockerfile: string;
+    createdBy: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO derived_images (name, tag, base, dockerfile, status, error, created_by, created_at, built_at)
+         VALUES (@name, @tag, @base, @dockerfile, 'BUILDING', NULL, @createdBy, @now, NULL)
+         ON CONFLICT(name) DO UPDATE SET
+           tag = excluded.tag, base = excluded.base, dockerfile = excluded.dockerfile,
+           status = 'BUILDING', error = NULL`,
+      )
+      .run({ ...rec, now: new Date().toISOString() });
+  }
+
+  getDerivedImage(name: string): DerivedImage | undefined {
+    const r = this.db.prepare(`SELECT * FROM derived_images WHERE name = ?`).get(name);
+    return r ? this.#mapDerivedImage(r) : undefined;
+  }
+
+  listDerivedImages(): DerivedImage[] {
+    return this.db
+      .prepare(`SELECT * FROM derived_images ORDER BY name`)
+      .all()
+      .map(this.#mapDerivedImage);
+  }
+
+  /** Mark a build's outcome. On READY, stamp built_at; on FAILED, keep the error. */
+  setDerivedImageStatus(name: string, status: DerivedImageStatus, error?: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE derived_images SET status = ?, error = ?, built_at = CASE WHEN ? = 'READY' THEN ? ELSE built_at END WHERE name = ?`,
+      )
+      .run(status, error ?? null, status, new Date().toISOString(), name);
+  }
+
+  deleteDerivedImage(name: string): boolean {
+    return this.db.prepare(`DELETE FROM derived_images WHERE name = ?`).run(name).changes > 0;
+  }
+
+  /** Agents currently pinned to this image tag — used to refuse a delete. */
+  agentsPinnedToImage(tag: string): Agent[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM agents WHERE image = ? AND state != 'DELETED'`)
+        .all(tag) as any[]
+    ).map(rowToAgent);
   }
 
   setAgentApplied(id: string, aiProfileId: string, model: string): void {

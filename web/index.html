@@ -473,12 +473,13 @@
     <div id="imagePinRow">
       <label>Runtime image <span style="color:var(--dim)">— pin this agent to a specific image (host owner only)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
-        <input type="text" id="editImage" maxlength="200" placeholder="fleet default (agentclaw-runtime:latest)" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px">
+        <input type="text" id="editImage" maxlength="200" list="derivedImageList" placeholder="fleet default (agentclaw-runtime:latest)" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px">
+        <datalist id="derivedImageList"></datalist>
         <button id="imageBtn" onclick="saveImagePin()">Pin</button>
       </div>
-      <div class="sub" style="margin:-4px 0 4px">For testing a candidate build or a derived image with extra packages.
-        Applies on the next rebuild. A pinned agent stops getting "update available" from fleet promotes —
-        clear the field and Pin to return it to the default.</div>
+      <div class="sub" style="margin:-4px 0 4px">For testing a candidate build or a derived image with extra packages
+        (build them in ⚙ → Runtime). Applies on the next rebuild. A pinned agent stops getting "update available" from
+        fleet promotes — clear the field and Pin to return it to the default.</div>
     </div>
     <label>File</label>
     <select id="editFile" onchange="loadEditFile()">
@@ -823,6 +824,32 @@
     <h4 style="margin:18px 0 4px">What agents can do</h4>
     <div class="sub">Probed live from the image — this list can't drift from reality.</div>
     <div id="runtimeCaps" style="margin-top:8px">Loading…</div>
+
+    <div id="derivedSection" hidden>
+      <h4 style="margin:22px 0 4px">Derived images</h4>
+      <div class="sub">Build an image <code>FROM</code> the base plus your own Dockerfile lines — for
+        system packages (apt) a volume install can't provide. Your lines run as <b>root</b>, then the
+        image restores <code>USER node</code>. Pin an agent to one in its <b>Definition</b> tab.</div>
+      <div id="derivedList" style="margin-top:10px">Loading…</div>
+      <details id="derivedNew" style="margin-top:12px">
+        <summary style="cursor:pointer">➕ New derived image</summary>
+        <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
+          <input type="text" id="derivedName" placeholder="name — e.g. media-tools" maxlength="40"
+            style="font-family:ui-monospace,monospace;font-size:13px">
+          <input type="text" id="derivedBase" placeholder="base (default: agentclaw-runtime:latest)" maxlength="160"
+            style="font-family:ui-monospace,monospace;font-size:13px">
+          <textarea id="derivedDockerfile" rows="5" spellcheck="false"
+            placeholder="RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*"
+            style="font-family:ui-monospace,monospace;font-size:13px;width:100%;box-sizing:border-box;resize:vertical"></textarea>
+          <div class="sub">Dockerfile lines appended after <code>FROM</code>. Don't write your own
+            <code>FROM</code> or <code>USER</code> — those are managed.</div>
+          <div class="actions" style="justify-content:flex-start;margin:0">
+            <button class="primary" id="derivedBuildBtn" onclick="createDerivedImage()">Build</button>
+          </div>
+        </div>
+      </details>
+      <pre id="derivedBuildOut" hidden style="margin-top:10px;max-height:280px;overflow:auto;background:#0b0b0b;color:#ddd;padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap"></pre>
+    </div>
   </section>
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
@@ -1649,6 +1676,7 @@ async function loadRuntimeCaps() {
 
 async function loadRuntime() {
   loadRuntimeCaps();
+  loadDerivedImages();
   const el = $('runtimeStatus');
   try {
     const r = await api('/v1/runtime');
@@ -1669,6 +1697,124 @@ async function loadRuntime() {
          <div class="invite-link" style="margin-top:4px">agentclaw upgrade-image --version &lt;X&gt; --candidate</div>
        </div>`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+// --- Derived runtime images (host owner only) ---------------------------------
+
+let derivedBuilding = new Set(); // names currently polling, so we don't double-poll
+
+/** Fill the per-agent pin datalist with built derived tags (best-effort). */
+async function populateDerivedDatalist() {
+  const dl = $('derivedImageList');
+  if (!dl) return;
+  try {
+    const r = await api('/v1/images');
+    dl.innerHTML = (r.images || [])
+      .filter(i => i.status === 'READY')
+      .map(i => `<option value="${esc(i.tag)}">${esc(i.name)}</option>`).join('');
+  } catch { /* 403 for non-host-owners — just leave the datalist empty */ }
+}
+
+async function loadDerivedImages() {
+  const sec = $('derivedSection'), el = $('derivedList');
+  if (!sec || !el) return;
+  let r;
+  try {
+    r = await api('/v1/images');
+  } catch {
+    sec.hidden = true; // not the host owner — hide the whole thing
+    return;
+  }
+  sec.hidden = false;
+  populateDerivedDatalist();
+  if (!r.images.length) {
+    el.innerHTML = `<div class="sub">None yet. Build one below — e.g. a media agent that needs <code>ffmpeg</code>.</div>`;
+    return;
+  }
+  el.innerHTML = r.images.map(img => {
+    const mark = img.status === 'READY' ? '<span style="color:var(--ok)">✓</span>'
+      : img.status === 'FAILED' ? '<span style="color:var(--warn)">✗</span>' : '<span style="color:var(--dim)">⏳</span>';
+    const pins = img.pinnedBy ? ` · <span class="sub">${img.pinnedBy} agent${img.pinnedBy > 1 ? 's' : ''}</span>` : '';
+    const busy = img.status === 'BUILDING';
+    const err = img.status === 'FAILED' && img.error
+      ? `<div class="sub" style="color:var(--warn);margin-top:2px">${esc(String(img.error).split('\n').pop())}</div>` : '';
+    return `<div style="padding:8px 0;border-top:1px solid var(--line)">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        ${mark} <b>${esc(img.name)}</b>
+        <code style="font-size:12px;color:var(--dim)">${esc(img.tag)}</code>${pins}
+        <span style="flex:1"></span>
+        <button class="hbtn" ${busy ? 'disabled' : ''} onclick="rebuildDerivedImage('${jsq(img.name)}')">Rebuild</button>
+        <button class="hbtn" onclick="showDerivedLog('${jsq(img.name)}')">Log</button>
+        <button class="hbtn" ${busy ? 'disabled' : ''} onclick="deleteDerivedImage('${jsq(img.name)}')">Delete</button>
+      </div>${err}
+    </div>`;
+  }).join('');
+  // Resume following any build still in progress (e.g. after a page reload).
+  for (const img of r.images) if (img.status === 'BUILDING') pollDerivedBuild(img.name);
+}
+
+async function createDerivedImage() {
+  const name = $('derivedName').value.trim();
+  const dockerfile = $('derivedDockerfile').value;
+  const base = $('derivedBase').value.trim();
+  if (!name || !dockerfile.trim()) { toast('Give it a name and some Dockerfile lines.'); return; }
+  const btn = $('derivedBuildBtn'); btn.disabled = true;
+  try {
+    await api('/v1/images', { method: 'POST', body: { name, dockerfile, ...(base ? { base } : {}) } });
+    $('derivedName').value = ''; $('derivedDockerfile').value = ''; $('derivedBase').value = '';
+    $('derivedNew').open = false;
+    toast(`Building ${name}…`);
+    await loadDerivedImages();
+    pollDerivedBuild(name);
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+}
+
+async function rebuildDerivedImage(name) {
+  try {
+    await api(`/v1/images/${encodeURIComponent(name)}/rebuild`, { method: 'POST', body: {} });
+    toast(`Rebuilding ${name}…`);
+    await loadDerivedImages();
+    pollDerivedBuild(name);
+  } catch (e) { toast(e.message); }
+}
+
+async function deleteDerivedImage(name) {
+  if (!confirm(`Delete derived image "${name}"? This removes it from docker.`)) return;
+  try {
+    await api(`/v1/images/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    toast(`Removed "${name}".`);
+    loadDerivedImages();
+  } catch (e) { toast(e.message); } // 409 = still pinned; the message names who
+}
+
+async function showDerivedLog(name) {
+  const pre = $('derivedBuildOut');
+  try {
+    const r = await api(`/v1/images/${encodeURIComponent(name)}/log`);
+    pre.hidden = false;
+    pre.textContent = r.log || '(no build output yet)';
+    pre.scrollTop = pre.scrollHeight;
+  } catch (e) { toast(e.message); }
+}
+
+/** Follow a running build: stream the log into the output box until it ends. */
+async function pollDerivedBuild(name) {
+  if (derivedBuilding.has(name)) return;
+  derivedBuilding.add(name);
+  const pre = $('derivedBuildOut');
+  pre.hidden = false;
+  try {
+    for (;;) {
+      const r = await api(`/v1/images/${encodeURIComponent(name)}/log`);
+      pre.textContent = r.log || '';
+      pre.scrollTop = pre.scrollHeight;
+      if (r.status === 'READY') { toast(`✓ Built ${name}.`); break; }
+      if (r.status === 'FAILED') { toast(`✗ ${name} failed to build — see the log.`); break; }
+      await new Promise(res => setTimeout(res, 1500));
+    }
+  } catch (e) { toast(e.message); }
+  finally { derivedBuilding.delete(name); loadDerivedImages(); }
 }
 
 // Honest status from the mgmt-bot's own cli-token: whether setup has run, and
@@ -2860,6 +3006,7 @@ async function openEdit(id, name, tab = 'def') {
   renderModelPickerForAgent(cur);
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
   $('editImage').value = cur?.image ?? '';
+  populateDerivedDatalist();
   $('editShared').checked = !!cur?.sharedMemory;
   $('editShared').disabled = otherMembers.length > 0;
   $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';

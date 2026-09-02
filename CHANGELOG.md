@@ -2,6 +2,23 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.86.0] — 2026-09-02
+
+### Added
+- **Derived runtime images** (⚙ → Runtime, or `agentclaw image`, host owner
+  only). Build an image `FROM agentclaw-runtime:<base>` plus your own Dockerfile
+  lines — for system packages (apt) a volume install can't provide (ffmpeg,
+  LaTeX, a heavy numpy stack) — then pin an agent to it. Your lines run as
+  **root**, and the image restores `USER node` (the runtime contract the volume
+  and Claude Code depend on), so you never write your own `FROM`/`USER`. The
+  Dockerfile is kept so **Rebuild** reruns it against a promoted base after a
+  fleet upgrade; delete is refused while an agent still pins it. New
+  `derived_images` store, `POST/GET/DELETE /v1/images` (+ `/rebuild`, `/log`),
+  `agentclaw image derive|list|rebuild|rm|log|pin|unpin`, and a manager UI with
+  live build output. Building runs a Dockerfile on the box — host-owner gated,
+  never exposed to a co-tenant. See `docs/embedding-and-images.md` → Derived
+  images.
+
 ## [0.85.0] — 2026-09-01
 
 ### Added

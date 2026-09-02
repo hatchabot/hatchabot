@@ -144,6 +144,18 @@ Commands:
                                Set up the Telegram management bot: mints a token,
                                pre-fills your Telegram id, writes .env.mgmt, and
                                installs the service (needs a BotFather token).
+  image [list]                 Derived runtime images (host owner). A derived
+                               image is FROM the base + your Dockerfile lines,
+                               for system packages (apt) a volume install can't
+                               provide; your lines run as root, then USER node.
+  image derive <name> [--from <file>] [--base <tag>]
+                               Build one (Dockerfile lines from --from or stdin)
+                               and follow the build. Run on the host.
+  image rebuild <name> [--base <tag>]   Rebuild (e.g. onto a promoted base)
+  image rm <name>              Delete it (refused while an agent pins it)
+  image log <name>             Show the last build's output
+  image pin <agent> <name-or-tag>       Pin an agent to an image (next rebuild)
+  image unpin <agent>          Return an agent to the fleet default image
 
 Global options:
   --url <url>        Control plane (env AGENTCLAW_URL, default http://localhost:8080)
@@ -302,6 +314,29 @@ async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Resp
 
 async function agents(ctx: Ctx): Promise<any[]> {
   return (await api(ctx, '/v1/agents')).json() as Promise<any[]>;
+}
+
+/**
+ * Poll a derived image's build log and stream new output until it finishes.
+ * The build runs server-side (survives the CLI exiting); this just follows it.
+ * Exits non-zero via fail() on FAILED so scripts can trust the status.
+ */
+async function streamImageBuild(ctx: Ctx, name: string): Promise<void> {
+  let printed = 0;
+  for (;;) {
+    const r: any = await (await api(ctx, `/v1/images/${encodeURIComponent(name)}/log`)).json();
+    const log: string = r.log ?? '';
+    if (log.length > printed) {
+      process.stdout.write(log.slice(printed));
+      printed = log.length;
+    }
+    if (r.status === 'READY') {
+      console.log(`\n✓ Built agentclaw-runtime:derived-${name}. Pin an agent:  agentclaw image pin <agent> ${name}`);
+      return;
+    }
+    if (r.status === 'FAILED') fail(`\n✗ Build failed: ${r.error ?? 'see the log above'}`);
+    await new Promise((res) => setTimeout(res, 1200));
+  }
 }
 
 async function resolveAgent(ctx: Ctx, ref: string): Promise<any> {
@@ -982,6 +1017,96 @@ async function main() {
         console.log(`Rebuild it to adopt the new version, memory kept:  agentclaw rebuild "<agent>"`);
       }
       return;
+    }
+    case 'image':
+    case 'images': {
+      // Derived runtime images: FROM the base + your Dockerfile lines, for system
+      // packages a volume install can't provide. Host-owner only (the API gates
+      // it). A bare name means the derived tag agentclaw-runtime:derived-<name>.
+      const toTag = (ref: string) => (ref.includes(':') ? ref : `agentclaw-runtime:derived-${ref}`);
+      const sub = rest[0];
+
+      if (!sub || sub === 'list') {
+        const r: any = await (await api(ctx, '/v1/images')).json();
+        if (!r.images?.length) {
+          console.log(`No derived images. Build one:\n  agentclaw image derive <name> --from <Dockerfile-snippet>`);
+          console.log(`(base: ${r.base})`);
+          return;
+        }
+        console.log(`base: ${r.base}\n`);
+        for (const img of r.images) {
+          const mark = img.status === 'READY' ? '✓' : img.status === 'FAILED' ? '✗' : '…';
+          const pins = img.pinnedBy ? `  ${img.pinnedBy} agent(s)` : '';
+          console.log(`${mark} ${img.name.padEnd(20)} ${img.tag.padEnd(38)} ${img.status}${pins}`);
+          if (img.status === 'FAILED' && img.error) console.log(`    ${img.error.split('\n').pop()}`);
+        }
+        return;
+      }
+
+      if (sub === 'derive') {
+        const name = rest[1] ?? fail('usage: agentclaw image derive <name> [--from <file>] [--base <tag>]');
+        // The Dockerfile snippet comes from --from <file>, or stdin if piped.
+        const fromFile = flags.get('from');
+        let dockerfile: string;
+        if (fromFile) {
+          dockerfile = readFileSync(resolve(fromFile.replace(/^~(?=\/|$)/, homedir())), 'utf8');
+        } else if (!process.stdin.isTTY) {
+          dockerfile = readFileSync(0, 'utf8');
+        } else {
+          fail('Provide the Dockerfile lines with --from <file>, or pipe them on stdin.\n' +
+            "  e.g.  echo 'RUN apt-get update && apt-get install -y ffmpeg' | agentclaw image derive media");
+        }
+        if (!dockerfile.trim()) fail('The Dockerfile snippet is empty.');
+        const body: any = { name, dockerfile };
+        if (flags.get('base')) body.base = flags.get('base');
+        const res: any = await (await jsonPost('/v1/images', body)).json();
+        console.log(`Building ${res.tag}… (runs as root, then restores USER node)\n`);
+        await streamImageBuild(ctx, name);
+        return;
+      }
+
+      if (sub === 'rebuild') {
+        const name = rest[1] ?? fail('usage: agentclaw image rebuild <name> [--base <tag>]');
+        const body: any = {};
+        if (flags.get('base')) body.base = flags.get('base');
+        await jsonPost(`/v1/images/${encodeURIComponent(name)}/rebuild`, body);
+        console.log(`Rebuilding ${name}…\n`);
+        await streamImageBuild(ctx, name);
+        return;
+      }
+
+      if (sub === 'rm' || sub === 'delete') {
+        const name = rest[1] ?? fail('usage: agentclaw image rm <name>');
+        await api(ctx, `/v1/images/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        console.log(`Removed derived image "${name}".`);
+        return;
+      }
+
+      if (sub === 'log') {
+        const name = rest[1] ?? fail('usage: agentclaw image log <name>');
+        const r: any = await (await api(ctx, `/v1/images/${encodeURIComponent(name)}/log`)).json();
+        console.log(r.log || '(no build log yet)');
+        return;
+      }
+
+      if (sub === 'pin') {
+        const agentRef = rest[1] ?? fail('usage: agentclaw image pin <agent> <name-or-tag>');
+        const image = rest[2] ?? fail('usage: agentclaw image pin <agent> <name-or-tag>');
+        const a = await resolveAgent(ctx, agentRef);
+        await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH');
+        console.log(`"${a.name}" pinned to ${toTag(image)} — applies on: agentclaw rebuild "${a.name}"`);
+        return;
+      }
+
+      if (sub === 'unpin') {
+        const agentRef = rest[1] ?? fail('usage: agentclaw image unpin <agent>');
+        const a = await resolveAgent(ctx, agentRef);
+        await jsonPost(`/v1/agents/${a.id}`, { image: null }, 'PATCH');
+        console.log(`"${a.name}" returned to the fleet default image — applies on: agentclaw rebuild "${a.name}"`);
+        return;
+      }
+
+      fail(`unknown: agentclaw image ${sub}\n  try: list | derive | rebuild | rm | log | pin | unpin`);
     }
     case 'servers': {
       if (rest[0] === 'add') {
