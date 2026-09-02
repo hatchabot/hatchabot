@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.85.0] — 2026-09-01
+
+### Added
+- **Local memory embeddings, baked into the runtime image (shared).** Semantic
+  (vector) `memory_search` needs a `local` embedding provider that wasn't in the
+  image, so fleet-wide semantic recall silently degraded to keyword-only. The
+  runtime image now bakes the `@openclaw/llama-cpp-provider` plugin (with its
+  native `node-llama-cpp` addon) and the `embeddinggemma-300m` GGUF model
+  **outside `/home/node`**, so every agent shares one copy from the image
+  instead of duplicating ~385 MB onto each volume (~13 GB across the fleet). Each
+  agent's volume keeps only a tiny `--link` registry pointer; provisioning points
+  `memorySearch.local.modelPath` at the shared model. Existing agents pick it up
+  on their next Rebuild (memory preserved). See `docs/embedding-and-images.md`.
+
+### Changed
+- `scripts/build-runtime-image.sh` accepts `IMAGE_TAG` so a content revision of
+  the image (like this embedding bake) gets its own tag without clobbering the
+  proven `:OPENCLAW_VERSION` image — supports the candidate → pin → promote flow.
+
 ## [0.84.0] — 2026-09-01
 
 ### Added

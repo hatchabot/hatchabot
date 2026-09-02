@@ -74,6 +74,38 @@ describe('web search provider', () => {
   });
 });
 
+describe('local embedding provider (image-baked)', () => {
+  // provider=local is inert without the `local` provider plugin present. The
+  // plugin + model are baked into the image; each agent links the plugin (no
+  // volume copy) and points modelPath at the shared model file.
+  const cmds = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
+
+  it('links the baked plugin instead of copying it onto the volume', () => {
+    const link = cmds.find((c) => c.argv[0] === 'plugins' && c.argv[1] === 'install');
+    expect(link?.argv).toEqual([
+      'plugins', 'install', '--link', '/opt/agentclaw/llama-cpp/llama-cpp-provider',
+    ]);
+    expect(cmds.some((c) => c.argv.join(' ') === 'plugins enable llama-cpp')).toBe(true);
+  });
+
+  it('points modelPath at the shared image model, not the hf: URI', () => {
+    // A bare `hf:` default would download 314MB to the volume on first index.
+    expect(argFor(cmds, 'agents.defaults.memorySearch.local.modelPath')).toBe(
+      '/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf',
+    );
+  });
+
+  it('keeps the plugin verbs out of the batched set run', () => {
+    // install/enable are not `config set` — they must not collapse into a batch.
+    const batched = batchConfigCommands(cmds);
+    const batch = batched.find((c) => c.argv.includes('--batch-json'));
+    const paths = batch ? JSON.parse(batch.argv[batch.argv.indexOf('--batch-json') + 1]!).map((o: any) => o.path) : [];
+    expect(paths).toContain('agents.defaults.memorySearch.local.modelPath');
+    expect(paths).not.toContain('plugins');
+    expect(batched.some((c) => c.argv.join(' ') === 'plugins enable llama-cpp')).toBe(true);
+  });
+});
+
 describe('buildConfigCommands multi-model', () => {
   it('registers every model on claude-cli, primary first and deduped', () => {
     const cmds = buildConfigCommands({

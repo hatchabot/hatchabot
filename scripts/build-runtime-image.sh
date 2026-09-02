@@ -15,15 +15,23 @@ cd "$(dirname "$0")/.."
 OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.7.1-2}"
 REPO="${AGENTCLAW_IMAGE_REPO:-agentclaw-runtime}"
 
+# The image TAG is normally the OpenClaw version, but the image can change
+# WITHOUT an OpenClaw bump — e.g. baking in the embedding provider, or new base
+# packages. Those need their own tag so they don't clobber the proven
+# :OPENCLAW_VERSION image and so an agent can pin one for a candidate run. Set
+# IMAGE_TAG=2026.7.1-2-emb1 (etc.) for a content revision; it defaults to the
+# OpenClaw version for the normal upgrade flow.
+IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
+
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
-  -t "${REPO}:${OPENCLAW_VERSION}" \
+  -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/
 
 if [ "${NO_LATEST:-0}" != "1" ]; then
-  docker tag "${REPO}:${OPENCLAW_VERSION}" "${REPO}:latest"
-  echo "Built ${REPO}:${OPENCLAW_VERSION} (promoted to :latest)"
+  docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"
+  echo "Built ${REPO}:${IMAGE_TAG} (promoted to :latest)"
 else
-  echo "Built ${REPO}:${OPENCLAW_VERSION} (candidate — :latest untouched)"
+  echo "Built ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"
 fi

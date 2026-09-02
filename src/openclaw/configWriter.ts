@@ -46,6 +46,17 @@ export interface ConfigCommand {
 export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent';
 
 /**
+ * Baked-image paths for local memory embeddings (docker/Dockerfile.runtime,
+ * mirrored by the AGENTCLAW_EMBED_* env). The plugin (with node-llama-cpp's
+ * native addon) and the GGUF model live in the image, OUTSIDE /home/node, so
+ * every agent shares one copy. Each agent's volume keeps only a tiny `--link`
+ * registry pointer — no per-volume 71MB plugin, no per-volume 314MB model.
+ * These MUST match the Dockerfile; a mismatch degrades semantic recall to FTS.
+ */
+export const EMBED_PLUGIN_DIR = '/opt/agentclaw/llama-cpp/llama-cpp-provider';
+export const EMBED_MODEL_PATH = '/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf';
+
+/**
  * Collapse consecutive plain `config set` commands into one `--batch-json`
  * invocation. Each `openclaw` start costs ~600ms inside the runtime, and a
  * seed issues a dozen of them — batching turns ~7.5s of process startup into
@@ -136,6 +147,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // only while they stay consecutive.
   cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
 
+  // Local memory embeddings from the image-baked GGUF provider. `--link` points
+  // the agent's registry at the plugin in the IMAGE (no 71MB volume copy); the
+  // model is a single image file every agent's modelPath references (set below).
+  // Both are idempotent — safe to re-run on every rebuild. Absent the plugin,
+  // memorySearch.provider=local has no `local` provider and semantic recall is
+  // silently dead (the fleet-wide gap this closes). `--link` + `enable` are not
+  // `config set`, so they break the batch run — harmless, they just run alone.
+  cmds.push({ argv: ['plugins', 'install', '--link', EMBED_PLUGIN_DIR] });
+  cmds.push({ argv: ['plugins', 'enable', 'llama-cpp'] });
+
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
   // Memory search: OpenClaw's default points at OpenAI embeddings, which no
   // AgentClaw agent has a key for — so semantic recall over MEMORY.md was
@@ -143,6 +164,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // The bundled local embedding model needs no key and no network at query
   // time; keyed remote embeddings stay a per-agent choice via config.
   cmds.push({ argv: ['config', 'set', 'agents.defaults.memorySearch.provider', 'local'] });
+  // Point at the image-baked model, not the plugin's default `hf:` URI — the URI
+  // would download 314MB to the volume on first index. Absolute path = shared,
+  // offline, deterministic. Batches with the provider set above.
+  cmds.push({
+    argv: ['config', 'set', 'agents.defaults.memorySearch.local.modelPath', EMBED_MODEL_PATH],
+  });
   if (patch.gatewayToken) {
     cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'token'] });
     cmds.push({

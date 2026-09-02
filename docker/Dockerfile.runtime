@@ -26,6 +26,21 @@ ARG OPENCLAW_VERSION=2026.7.1-2
 # (with the openclaw version or alone) to actually ship a new one.
 ARG CLAUDE_CODE_VERSION=2.1.224
 
+# Local memory embeddings (docs/embedding-and-images.md). OpenClaw's memory_search
+# does semantic (vector) recall only when a `local` embedding provider is present;
+# that provider is the external @openclaw/llama-cpp-provider plugin plus a GGUF
+# model. Both are BAKED here — outside /home/node — so every agent shares one copy
+# from the image. See the two RUN blocks below the gog install.
+#
+# Keep the plugin version in step with OPENCLAW_VERSION: the plugin declares
+# openclaw as a peerDependency and is linked against the global install.
+ARG LLAMA_CPP_PROVIDER_VERSION=2026.7.1
+# embeddinggemma-300m (QAT, Q8_0) — ~314MB, no API key, no network at query time.
+# GitHub/HF release blobs are mutable → pin sha256 and verify BEFORE it ships into
+# the image every agent's memory search depends on.
+ARG EMBED_MODEL_URL=https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf
+ARG EMBED_MODEL_SHA256=6fa0c02a9c302be6f977521d399b4de3a46310a4f2621ee0063747881b673f67
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client curl procps \
       python3 python3-pip python3-venv \
@@ -56,6 +71,42 @@ RUN ARCH="$(dpkg --print-architecture)" \
  && rm /tmp/gog.tgz \
  && chmod +x /usr/local/bin/gog \
  && gog --version
+
+# --- Local embedding provider: shared plugin + model, baked outside /home/node ---
+#
+# Why not `openclaw plugins install` per agent? That writes the 71MB plugin (with
+# node-llama-cpp's native addon) to the agent's VOLUME, and first use downloads the
+# 314MB model to the volume too — ×N agents. Instead the plugin lives in the IMAGE
+# and each agent's volume holds only a tiny `--link` registry pointer (proven: a
+# fully-indexed agent's ~/.openclaw stayed ~4MB). The model is a single image file
+# every agent points `memorySearch.local.modelPath` at.
+#
+# The plugin package is self-contained (it bundles node-llama-cpp and the arch's
+# llama-addon.node). We install it into a throwaway HOME with openclaw's own
+# installer — which resolves the exact pinned dep tree — then relocate just the
+# package dir. The peerDependency symlink targets the global openclaw, which stays
+# put after the move, so the link keeps resolving.
+RUN export HOME=/tmp/ocbuild \
+ && mkdir -p "$HOME" && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
+ && openclaw plugins install "@openclaw/llama-cpp-provider@${LLAMA_CPP_PROVIDER_VERSION}" --acknowledge-clawhub-risk \
+ && mkdir -p /opt/agentclaw/llama-cpp \
+ && cp -a "$HOME"/.openclaw/npm/projects/openclaw-llama-cpp-provider-*/node_modules/@openclaw/llama-cpp-provider \
+      /opt/agentclaw/llama-cpp/llama-cpp-provider \
+ && test -f /opt/agentclaw/llama-cpp/llama-cpp-provider/dist/index.js \
+ && find /opt/agentclaw/llama-cpp/llama-cpp-provider/node_modules -name llama-addon.node -print -quit | grep -q . \
+ && rm -rf /tmp/ocbuild
+
+# The GGUF model — verified against its pinned digest before it can ship.
+RUN mkdir -p /opt/agentclaw/models \
+ && curl -fsSL -o /opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf "${EMBED_MODEL_URL}" \
+ && echo "${EMBED_MODEL_SHA256}  /opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf" | sha256sum -c - \
+ && chmod -R a+rX /opt/agentclaw
+
+# Well-known paths the control plane links/points at when it enables local
+# embeddings (src/openclaw/configWriter.ts). Exposed as ENV so a running agent —
+# and anything inspecting the image — can discover them without hardcoding.
+ENV AGENTCLAW_EMBED_PLUGIN=/opt/agentclaw/llama-cpp/llama-cpp-provider \
+    AGENTCLAW_EMBED_MODEL=/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf
 
 # Python 3 + pip are in the base so agents whose workspaces carry scripts can
 # run them (`python3 script.py`, as their cron jobs do). The base stays lean:
