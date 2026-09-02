@@ -66,7 +66,7 @@ import {
 } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { admitMember, AdmitError, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
@@ -1998,7 +1998,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           void secrets
             .get(chan.secretRef)
             .then((tok) => setTelegramDisplayName(tok, name))
-            .then((res) => trace(agent.id)('channel.renamed', { name, ...res }))
+            .then((res) => {
+              trace(agent.id)('channel.renamed', { name, ...res });
+              // Document the change in the chat itself, so members aren't left
+              // wondering why the label changed under them. Only on success.
+              if (res.ok && agent.runtimeRef) {
+                void announceToMembers(
+                  { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+                  {
+                    agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: chan.accountId,
+                    text: `🏷 This agent was renamed: it's now “${name}”. Same agent, same chat — only the name changed.`,
+                  },
+                );
+              }
+            })
             .catch(() => {});
         }
       }
@@ -3935,11 +3948,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!chan || chan.kind !== 'telegram') {
       return reply.code(409).send({ error: 'This agent has no Telegram bot yet.' });
     }
+    // Document the change IN the chat — the label changing silently under the
+    // members is the confusing part; a one-line DM from the bot is the record.
+    // Best-effort, and only when the rename actually happened.
+    const announce = () => {
+      if (!agent.runtimeRef) return;
+      void announceToMembers(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        {
+          agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: chan.accountId,
+          text: `🏷 This bot is now named “${agent.name}”. Same agent, same chat — only the display name changed.`,
+        },
+      );
+    };
     const pooled = deps.channel.pool.owns(chan.accountId);
     if (pooled) {
       await deps.channel.syncDisplayName?.(chan.accountId, agent.name);
       const pending = deps.channel.pool.pendingName?.(chan.accountId);
       // Still parked = Telegram refused; the sweep will finish it.
+      if (!pending) announce();
       return pending
         ? { ok: false, name: pending.name, retryAt: pending.retryAt }
         : { ok: true, name: agent.name };
@@ -3948,6 +3975,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     try {
       const res = await setTelegramDisplayName(await secrets.get(chan.secretRef), agent.name);
       trace(agent.id)('channel.renamed', { name: agent.name, ...res, manual: true });
+      if (res.ok) announce();
       return res.ok
         ? { ok: true, name: agent.name }
         : {

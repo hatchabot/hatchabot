@@ -167,6 +167,36 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   return { userId, displayName, channelUserId: req.id, alreadyMember: false };
 }
 
+/**
+ * Tell everyone in the agent's chat something — one DM per active member with
+ * a bound Telegram identity (bots have no broadcast). Best-effort throughout:
+ * an announcement must never fail the operation it documents. Used for bot
+ * renames, so the chat itself records "this bot is now called X" instead of
+ * the label silently changing under people.
+ */
+export async function announceToMembers(
+  deps: RevokeDeps,
+  opts: { agentId: string; runtimeRef: string; accountId: string; text: string },
+): Promise<number> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const targets = store
+    .listMemberships(opts.agentId)
+    .filter((m) => m.status === 'active' && m.channelUserId);
+  let sent = 0;
+  for (const m of targets) {
+    const res = await provider
+      .exec(opts.runtimeRef, [
+        'message', 'send', '--channel', 'telegram',
+        '--account', opts.accountId, '--target', m.channelUserId!, '-m', opts.text,
+      ])
+      .catch(() => ({ code: 1, stdout: '', stderr: 'exec failed' }));
+    if (res.code === 0) sent++;
+  }
+  log('members.announced', { agentId: opts.agentId, sent, of: targets.length });
+  return sent;
+}
+
 export interface DenyOptions {
   agentId: string;
   runtimeRef: string;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { admitMember, AdmitError, denyPairing, revokeMember, RevokeError } from '../src/orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../src/orchestrator/members.js';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -346,5 +346,37 @@ describe('"That\'s me — link & approve" (account-level Telegram link)', () => 
     expect(store.accountTelegram('u1')).toBeUndefined();
     // the membership fallback still knows it (existing agents keep working)
     expect(store.getMembership('a1', 'u1')).toMatchObject({ channelUserId: '555' });
+  });
+});
+
+describe('announceToMembers', () => {
+  it('DMs every active member with a bound Telegram id, skipping unbound seats', async () => {
+    const { store, provider, opts } = await setup();
+    // owner seat unbound (no channelUserId) + two bound members + one revoked
+    store.insertMembership({ id: 'b1', agentId: 'a1', userId: 'x1', role: 'user', channelUserId: '111', status: 'active' });
+    store.insertMembership({ id: 'b2', agentId: 'a1', userId: 'x2', role: 'user', channelUserId: '222', status: 'active' });
+    store.insertMembership({ id: 'b3', agentId: 'a1', userId: 'x3', role: 'user', channelUserId: '333', status: 'revoked' });
+
+    const sent = await announceToMembers({ store, provider }, {
+      agentId: 'a1', runtimeRef: opts.runtimeRef, accountId: 'bot',
+      text: '🏷 This bot is now named "Fam".',
+    });
+    expect(sent).toBe(2);
+    const targets = provider.execLog
+      .filter((a) => a[0] === 'message' && a[1] === 'send')
+      .map((a) => a[a.indexOf('--target') + 1]);
+    expect(targets.sort()).toEqual(['111', '222']); // not the unbound owner, not the revoked
+    // the message rode along
+    expect(provider.execLog.find((a) => a[0] === 'message')!.at(-1)).toContain('now named');
+  });
+
+  it('a failed send never throws — announcements must not fail the rename', async () => {
+    const { store, provider, opts } = await setup();
+    store.insertMembership({ id: 'b1', agentId: 'a1', userId: 'x1', role: 'user', channelUserId: '111', status: 'active' });
+    provider.execResponses.set('message send', { code: 1, stdout: '', stderr: 'boom' });
+    const sent = await announceToMembers({ store, provider }, {
+      agentId: 'a1', runtimeRef: opts.runtimeRef, accountId: 'bot', text: 'x',
+    });
+    expect(sent).toBe(0); // reported honestly, thrown never
   });
 });
