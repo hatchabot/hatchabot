@@ -1,6 +1,6 @@
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
-import type { Agent } from '../domain/types.js';
+import type { Agent, TemplateParam } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, workspacePath } from './snapshots.js';
@@ -26,6 +26,29 @@ const TRAINED_FILES = ['SOUL.md', 'AGENTS.md'];
 /** Files a template may seed on import — the same core set snapshots protect. */
 const SEEDABLE_FILES = CORE_FILES;
 
+// TemplateParam (domain/types.ts): a setup field the template's AUTHOR
+// declares — the importer fills it and the value is substituted into {{key}}
+// placeholders. The manifest carries DEFINITIONS and defaults only, never the
+// author's own filled values — the no-secrets guarantee stays intact. `target`
+// records where the author expects the placeholder; substitution itself
+// follows the placeholders.
+export type { TemplateParam } from '../domain/types.js';
+
+/** Placeholder syntax: {{ key }} — keys are snake_case, author-friendly. */
+export const PARAM_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
+const PLACEHOLDER_RE = /\{\{\s*([a-z][a-z0-9_]{0,31})\s*\}\}/g;
+
+export const TemplateParamSchema = z.object({
+  key: z.string().regex(PARAM_KEY_RE, 'keys are snake_case, ≤32 chars'),
+  label: z.string().min(1).max(64),
+  help: z.string().max(200).optional(),
+  required: z.boolean(),
+  type: z.enum(['text', 'longtext', 'choice', 'boolean']),
+  default: z.string().max(2000).optional(),
+  options: z.array(z.string().min(1).max(120)).max(12).optional(),
+  target: z.enum(['soul', 'agents']),
+});
+
 export interface TemplateManifest {
   format: typeof TEMPLATE_FORMAT;
   version: number;
@@ -37,6 +60,8 @@ export interface TemplateManifest {
   dataNeeds: Array<{ kind: string; access: string; mountName: string; repoUrl?: string }>;
   /** Env var NAMES the agent's tools expect — the importer supplies the values. */
   envNeeds: string[];
+  /** Setup fields the importer fills; substituted into {{key}} placeholders. */
+  parameters: TemplateParam[];
 }
 
 const TemplateSchema = z.object({
@@ -64,6 +89,10 @@ const TemplateSchema = z.object({
     .max(32)
     .default([]),
   envNeeds: z.array(z.string().max(128)).max(64).default([]),
+  // Optional + defaulted: templates from before Phase 2a parse as having none,
+  // and older apps reading a newer template strip the unknown key (zod objects
+  // are non-strict) — no version bump needed in either direction.
+  parameters: z.array(TemplateParamSchema).max(24).default([]),
 });
 
 export interface TemplateDeps {
@@ -113,12 +142,84 @@ export async function exportTemplate(
       repoUrl: d.repoUrl,
     })),
     envNeeds: store.listAgentEnv(agentId).map((e) => e.name),
+    parameters: collectParameters(agent, files),
   };
   deps.log?.('template.exported', { agentId });
   return {
     filename: `${agent.slug}.template.agentclaw`,
     data: gzipSync(Buffer.from(JSON.stringify(manifest))),
   };
+}
+
+/**
+ * The template's setup fields: what the author DECLARED on the agent, plus any
+ * {{key}} placeholder hand-written into SOUL/AGENTS/persona that was never
+ * declared — auto-derived as a required text field, so writing a placeholder is
+ * enough to make sharing ask for it (no declaration UI required).
+ */
+function collectParameters(
+  agent: Agent,
+  files: Record<string, string>,
+): TemplateParam[] {
+  const declared = (agent.parameters ?? []).slice(0, 24);
+  const seen = new Set(declared.map((p) => p.key));
+  const derived: TemplateParam[] = [];
+  const scan = (text: string | undefined, target: 'soul' | 'agents') => {
+    for (const m of (text ?? '').matchAll(PLACEHOLDER_RE)) {
+      const key = m[1]!;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      derived.push({ key, label: key.replace(/_/g, ' '), required: true, type: 'text', target });
+    }
+  };
+  scan(files['SOUL.md'], 'soul');
+  scan(agent.persona, 'soul');
+  scan(files['AGENTS.md'], 'agents');
+  return [...declared, ...derived].slice(0, 24);
+}
+
+/**
+ * Replace {{key}} placeholders with the importer's values (or the declared
+ * default). Unknown placeholders are left verbatim — a doc showing the syntax
+ * must not get mangled.
+ */
+export function applyParamValues(text: string, values: Record<string, string>): string {
+  return text.replace(PLACEHOLDER_RE, (whole, key: string) =>
+    Object.hasOwn(values, key) ? values[key]! : whole,
+  );
+}
+
+/**
+ * Validate the importer's values against the template's declared fields.
+ * Returns the effective values (importer's, else defaults) or throws a
+ * TransferError naming every problem at once — the caller renders one form,
+ * the importer should see one list.
+ */
+export function resolveParamValues(
+  params: TemplateParam[],
+  values: Record<string, string> = {},
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const problems: string[] = [];
+  for (const p of params) {
+    let v = values[p.key] ?? p.default;
+    if (p.type === 'boolean' && v !== undefined) {
+      v = /^(true|yes|1|on)$/i.test(v) ? 'true' : 'false';
+    }
+    if (p.type === 'choice' && v !== undefined && p.options?.length && !p.options.includes(v)) {
+      problems.push(`"${p.label}" must be one of: ${p.options.join(', ')}`);
+      continue;
+    }
+    if (p.required && (v === undefined || v === '')) {
+      problems.push(`"${p.label}" is required`);
+      continue;
+    }
+    if (v !== undefined) out[p.key] = v;
+  }
+  if (problems.length) {
+    throw new TransferError(`This template needs setup values — ${problems.join('; ')}.`);
+  }
+  return out;
 }
 
 // A template is trained text files; 64 MB decompressed is already generous and
@@ -149,10 +250,20 @@ export interface ImportTemplateResult {
 export function importTemplate(
   deps: TemplateDeps,
   data: Buffer,
-  opts: { ownerId: string; aiProfileId?: string; hostId?: string; name?: string },
+  opts: {
+    ownerId: string;
+    aiProfileId?: string;
+    hostId?: string;
+    name?: string;
+    /** Importer's answers to the template's setup fields ({{key}} → value). */
+    values?: Record<string, string>;
+  },
 ): ImportTemplateResult {
   const { store } = deps;
   const manifest = parseTemplate(data);
+  // Validate BEFORE creating anything — a missing required value must not
+  // leave a half-made agent behind.
+  const values = resolveParamValues(manifest.parameters, opts.values);
 
   // The importer's OWN profile, vendor-matched — same rule as a full Load, so a
   // template never silently bills someone else's shared subscription.
@@ -179,7 +290,7 @@ export function importTemplate(
     agent = createAgentRecord(store, {
       ownerId: opts.ownerId,
       name,
-      persona: manifest.agent.persona,
+      persona: applyParamValues(manifest.agent.persona, values),
       aiProfileId: profile.id,
       hostId: host.id,
       sharedMemory: manifest.agent.sharedMemory,
@@ -188,11 +299,15 @@ export function importTemplate(
     throw new TransferError(`Couldn't create "${name}" — an agent with that name may already exist here. Import under a different name.`);
   }
 
-  // Seed the trained files (and MEMORY.md if the template carried it) verbatim;
-  // anything absent falls back to the fresh generated default.
+  // Seed the trained files (and MEMORY.md if the template carried it).
+  // Setup-field values are substituted into the TRAINED files only — memory is
+  // verbatim history, never a substitution surface.
   const seed: Record<string, string> = {};
   for (const n of SEEDABLE_FILES) {
-    if (typeof manifest.files[n] === 'string') seed[n] = manifest.files[n];
+    if (typeof manifest.files[n] !== 'string') continue;
+    seed[n] = TRAINED_FILES.includes(n)
+      ? applyParamValues(manifest.files[n], values)
+      : manifest.files[n];
   }
   store.setAgentSeed(agent.id, seed);
 

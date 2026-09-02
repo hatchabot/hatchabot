@@ -57,7 +57,13 @@ import {
   rewriteWorkspaceFiles,
   selfPathReplacements,
 } from '../orchestrator/cronImport.js';
-import { exportTemplate, importTemplate, TEMPLATE_FORMAT } from '../orchestrator/template.js';
+import {
+  exportTemplate,
+  importTemplate,
+  parseTemplate,
+  TemplateParamSchema,
+  TEMPLATE_FORMAT,
+} from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
@@ -1796,6 +1802,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
            * Applied on the next rebuild.
            */
           image: z.string().trim().min(1).max(200).nullable().optional(),
+          /**
+           * Setup fields this agent's shares/templates ask the importer to
+           * fill (sharing Phase 2a). `null`/empty clears them. Keys must be
+           * unique — two fields fighting over one placeholder is authoring
+           * error, not a merge.
+           */
+          parameters: z
+            .array(TemplateParamSchema)
+            .max(24)
+            .refine((a) => new Set(a.map((p) => p.key)).size === a.length, {
+              message: 'parameter keys must be unique',
+            })
+            .nullable()
+            .optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1809,9 +1829,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         !runsHere &&
         parsed.data.sharedPaths === undefined &&
         group === undefined &&
-        parsed.data.image === undefined
+        parsed.data.image === undefined &&
+        parsed.data.parameters === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
+      }
+
+      if (parsed.data.parameters !== undefined) {
+        store.setAgentParameters(agent.id, parsed.data.parameters);
       }
 
       if (persona !== undefined) store.setAgentPersona(agent.id, persona.trim());
@@ -3448,7 +3473,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   /** Agents waiting in my inbox. */
   app.get('/v1/inbox', async (req) => {
     const me = principalOf(req);
-    return { shares: store.listInbox(me.ownerId, me.email) };
+    // Augment each share with the template's setup fields so the Import dialog
+    // can render the form before accepting. Best-effort per item: a share whose
+    // blob won't parse still lists (Accept will surface the real error).
+    const shares = store.listInbox(me.ownerId, me.email).map((s) => {
+      try {
+        const blob = store.getShareFor(s.id, me.ownerId, me.email)?.blob;
+        return { ...s, parameters: blob ? parseTemplate(blob).parameters : [] };
+      } catch {
+        return { ...s, parameters: [] };
+      }
+    });
+    return { shares };
   });
 
   /** Import a received agent — stands up a fresh agent I own (my bot, my people). */
@@ -3458,13 +3494,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const me = principalOf(req);
       const share = store.getShareFor(req.params.id, me.ownerId, me.email);
       if (!share) return reply.code(404).send({ error: 'Not found' });
-      const body = (req.body ?? {}) as { name?: string; aiProfileId?: string; hostId?: string };
+      const body = (req.body ?? {}) as {
+        name?: string; aiProfileId?: string; hostId?: string;
+        /** Answers to the template's setup fields ({{key}} → value). */
+        values?: Record<string, string>;
+      };
+      const vals = z
+        .record(z.string().max(64), z.string().max(2000))
+        .refine((r) => Object.keys(r).length <= 24)
+        .optional()
+        .safeParse(body.values);
+      if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
       try {
         const { agent, needs } = importTemplate(
           { store, provider: providerFor((body.hostId ?? host?.id)!), log: trace() },
           share.blob,
-          { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id },
+          { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id, values: vals.data },
         );
         store.setShareStatus(req.params.id, 'accepted', me.ownerId);
         kickProvision(agent.id);
@@ -3512,12 +3558,29 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // format and does the right thing — a template becomes a fresh agent, a full
   // copy (a Download) is restored as the same agent. The /restore route above
   // stays for the CLI's explicit `restore` verb.
-  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string } }>(
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string; values?: string } }>(
     '/v1/agents/import',
     async (req, reply) => {
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return reply.code(400).send({ error: 'Send the .agentclaw file as the request body.' });
+      }
+      // Setup-field answers ride a query param (the body is the raw file).
+      // Phase 2a values are plain text — never secrets (those are 2b, env-typed).
+      let values: Record<string, string> | undefined;
+      if (req.query.values) {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(req.query.values.slice(0, 16_000));
+        } catch {
+          return reply.code(400).send({ error: 'Malformed setup values.' });
+        }
+        const v = z
+          .record(z.string().max(64), z.string().max(2000))
+          .refine((r) => Object.keys(r).length <= 24)
+          .safeParse(raw);
+        if (!v.success) return reply.code(400).send({ error: 'Malformed setup values.' });
+        values = v.data;
       }
       const ownerId = ownerIdOf(req);
       const hosts = store.listHosts(ownerId);
@@ -3539,7 +3602,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           const { agent, needs } = importTemplate(
             { store, provider: providerFor(host.id), log: trace() },
             body,
-            { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name },
+            { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name, values },
           );
           // Fresh agent → provision its own bot the normal way (pool or paste).
           kickProvision(agent.id);

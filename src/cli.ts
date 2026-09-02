@@ -95,9 +95,11 @@ Commands:
                                Share a TEMPLATE for someone else — the agent's
                                trained SOUL/AGENTS, no bot token/members. Memory
                                stays private unless --include-memory
-  import <file> [--name <n>] [--profile <aiProfileId>]
+  import <file> [--name <n>] [--profile <aiProfileId>] [--host <id>] [--values <json>]
                                Import a template as a fresh agent (you give it
-                               its own bot); prints what it still needs
+                               its own bot); prompts for the template's setup
+                               fields ({{key}} placeholders) and prints what it
+                               still needs
   clone <agent> [new name]     Duplicate an agent here — a faithful copy with its
                                own bot and name
   start|stop|rebuild <agent>   Lifecycle controls
@@ -1291,12 +1293,41 @@ async function main() {
       return;
     }
     case 'import': { // template
-      const file = rest[0] ?? fail('usage: agentclaw import <file> [--name <name>] [--profile <aiProfileId>]');
+      const file = rest[0] ?? fail('usage: agentclaw import <file> [--name <name>] [--profile <aiProfileId>] [--values <json>]');
       const data = await readFile(file);
       const params = new URLSearchParams();
       if (flags.has('name')) params.set('name', flags.get('name')!);
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
       if (flags.has('host')) params.set('hostId', flags.get('host')!);
+      // Setup fields (sharing Phase 2a): the template may declare {{key}}
+      // fields the importer fills. Peek the file LOCALLY (it's right here) and
+      // prompt for each; --values '{"key":"v"}' skips prompting for scripts.
+      let values: Record<string, string> | undefined;
+      if (flags.has('values')) {
+        values = JSON.parse(flags.get('values')!);
+      } else {
+        try {
+          const { gunzipSync } = await import('node:zlib');
+          const manifest = JSON.parse(gunzipSync(data, { maxOutputLength: 64 * 1024 * 1024 }).toString('utf8'));
+          const fields: any[] = Array.isArray(manifest?.parameters) ? manifest.parameters : [];
+          if (fields.length && process.stdin.isTTY) {
+            console.log('This template has setup fields:');
+            values = {};
+            for (const p of fields) {
+              const hints = [
+                p.options?.length ? `one of: ${p.options.join(', ')}` : '',
+                p.default !== undefined ? `default: ${p.default}` : '',
+                p.required ? 'required' : 'optional — Enter to skip',
+              ].filter(Boolean).join('; ');
+              if (p.help) console.log(`  ${p.help}`);
+              const v = await askLine(`  ${p.label}${hints ? ` (${hints})` : ''}: `);
+              if (v) values[p.key] = v;
+            }
+          }
+          // Non-TTY with required fields: let the server's validation name them.
+        } catch { /* not gunzippable here (full backup?) — server sorts it out */ }
+      }
+      if (values && Object.keys(values).length) params.set('values', JSON.stringify(values));
       const q = params.size ? `?${params}` : '';
       const res = await api(ctx, `/v1/agents/import${q}`, {
         method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: data,

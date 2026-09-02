@@ -481,6 +481,35 @@
         (build them in ⚙ → Runtime). Applies on the next rebuild. A pinned agent stops getting "update available" from
         fleet promotes — clear the field and Pin to return it to the default.</div>
     </div>
+    <div id="setupFieldsRow">
+      <label>Setup fields <span style="color:var(--dim)">— asked when someone imports a shared copy</span></label>
+      <div class="sub" style="margin:0 0 6px">Fields someone importing a shared copy fills in — write
+        <code>{{key}}</code> where the value should land in SOUL.md/AGENTS.md; sharing asks for any
+        <code>{{placeholder}}</code> automatically even without declaring it.</div>
+      <div id="paramList"></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px">
+        <input type="text" id="paramKey" placeholder="key (a-z, 0-9, _)" maxlength="32" style="width:150px;font-family:ui-monospace,monospace;font-size:13px">
+        <input type="text" id="paramLabel" placeholder="Label shown to the importer" maxlength="120" style="flex:1;min-width:140px">
+        <select id="paramType" style="width:auto" onchange="onParamTypeChange()">
+          <option value="text">text</option>
+          <option value="longtext">longtext</option>
+          <option value="choice">choice</option>
+          <option value="boolean">boolean</option>
+        </select>
+        <select id="paramTarget" style="width:auto" title="Which file the {{key}} placeholder lives in">
+          <option value="soul">soul</option>
+          <option value="agents">agents</option>
+        </select>
+        <label style="display:flex;gap:4px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
+          <input type="checkbox" id="paramRequired" style="width:auto;flex:none">required</label>
+        <input type="text" id="paramDefault" placeholder="default (optional)" maxlength="200" style="width:150px">
+        <input type="text" id="paramOptions" placeholder="options, comma-separated" style="display:none;flex:1;min-width:170px">
+        <button id="paramAddBtn" onclick="addSetupField()">Add field</button>
+      </div>
+      <div class="actions" style="justify-content:flex-end;margin-top:6px">
+        <button id="paramSaveBtn" onclick="saveSetupFields()">Save fields</button>
+      </div>
+    </div>
     <label>File</label>
     <select id="editFile" onchange="loadEditFile()">
       <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
@@ -980,6 +1009,20 @@
   <div id="inboxBody">Loading…</div>
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:12px;padding-top:12px">
     <button class="primary" onclick="inboxDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="paramFormDlg" style="width:min(520px,96vw)">
+  <h3 style="margin:0 0 4px">Set up <span id="paramFormName"></span></h3>
+  <div class="sub" style="margin-bottom:10px">
+    This template asks you to fill in a few values — they're written into the
+    agent's persona and instructions before it's created.
+  </div>
+  <div id="paramFormBody"></div>
+  <div class="err" id="paramFormErr"></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px">
+    <button onclick="cancelParamForm()">Cancel</button>
+    <button class="primary" id="paramFormBtn" onclick="submitParamForm()">Continue</button>
   </div>
 </dialog>
 
@@ -3048,6 +3091,8 @@ async function openEdit(id, name, tab = 'def') {
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
   $('editImage').value = cur?.image ?? '';
   populateDerivedDatalist();
+  editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
+  renderParamList();
   $('editShared').checked = !!cur?.sharedMemory;
   $('editShared').disabled = otherMembers.length > 0;
   $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
@@ -3369,6 +3414,66 @@ async function removeEnvVar(id, name) {
     toast('Removed — Rebuild to apply it');
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
+}
+
+// ---- setup fields (template parameters) — author side ----------------------
+// The fields a shared copy's importer is asked to fill in. Edited as a local
+// array; Save PATCHes the whole list ({parameters: null} clears it).
+
+let editParams = [];
+
+function renderParamList() {
+  $('paramList').innerHTML = editParams.length
+    ? editParams.map((p, i) => `<div class="pair"><span class="grow">${esc(p.label || p.key)} <code>{{${esc(p.key)}}}</code>
+        <span class="sub">${esc(p.type)}${p.type === 'choice' && p.options?.length ? ' (' + esc(p.options.join(', ')) + ')' : ''}
+          · ${p.target === 'agents' ? 'AGENTS.md' : 'SOUL.md'}${p.required ? ' · <b>required</b>' : ''}${p.default != null && p.default !== '' ? ' · default: ' + esc(String(p.default)) : ''}</span></span>
+        <button class="danger" onclick="removeSetupField(${i})">×</button></div>`).join('')
+    : '<div class="sub">None declared — sharing still asks for any <code>{{placeholder}}</code> it finds in the files.</div>';
+}
+
+function onParamTypeChange() {
+  $('paramOptions').style.display = $('paramType').value === 'choice' ? '' : 'none';
+}
+
+function addSetupField() {
+  const key = $('paramKey').value.trim();
+  if (!/^[a-z][a-z0-9_]{0,31}$/.test(key)) { toast('Key must start with a-z, then a-z 0-9 _ only (max 32 chars)'); return; }
+  if (editParams.some(p => p.key === key)) { toast(`{{${key}}} is already declared`); return; }
+  if (editParams.length >= 24) { toast('Max 24 setup fields'); return; }
+  const type = $('paramType').value;
+  const f = {
+    key,
+    label: $('paramLabel').value.trim() || key,
+    required: $('paramRequired').checked,
+    type,
+    target: $('paramTarget').value,
+  };
+  const def = $('paramDefault').value.trim();
+  if (def) f.default = def;
+  if (type === 'choice') {
+    const options = $('paramOptions').value.split(',').map(s => s.trim()).filter(Boolean);
+    if (!options.length) { toast('Choice fields need options (comma-separated)'); return; }
+    f.options = options;
+  }
+  editParams.push(f);
+  $('paramKey').value = ''; $('paramLabel').value = ''; $('paramDefault').value = '';
+  $('paramOptions').value = ''; $('paramRequired').checked = false;
+  renderParamList();
+}
+
+function removeSetupField(i) { editParams.splice(i, 1); renderParamList(); }
+
+async function saveSetupFields() {
+  $('paramSaveBtn').disabled = true;
+  $('editErr').textContent = '';
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { parameters: editParams.length ? editParams : null } });
+    toast(editParams.length
+      ? `Saved ${editParams.length} setup field${editParams.length > 1 ? 's' : ''} — shared copies now ask for them`
+      : 'Setup fields cleared');
+    await refresh(false);
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('paramSaveBtn').disabled = false; }
 }
 
 const EVENT_WORDS = {
@@ -4142,13 +4247,83 @@ async function downloadAgent(id, name) {
   setTimeout(() => refresh(false), 2500);
 }
 
+// ---- setup-value form (template parameters) — importer side ----------------
+// One dialog, reused by file import and inbox accept. Returns a promise:
+// {key: value} on Continue, null if the user backs out (Cancel or Esc).
+
+let paramFormFields = [], paramFormResolve = null;
+
+function collectParamValues(parameters, title) {
+  paramFormFields = parameters;
+  $('paramFormName').textContent = title || 'this agent';
+  $('paramFormErr').textContent = '';
+  $('paramFormBody').innerHTML = parameters.map((p, i) => {
+    const id = `pfv-${i}`;
+    const star = p.required ? ' <span style="color:var(--warn)">*</span>' : '';
+    const help = p.help ? `<div class="sub" style="margin:-2px 0 4px">${esc(p.help)}</div>` : '';
+    let input;
+    if (p.type === 'longtext') {
+      input = `<textarea id="${id}" rows="3">${esc(p.default ?? '')}</textarea>`;
+    } else if (p.type === 'choice') {
+      input = `<select id="${id}">${(p.options ?? []).map(o =>
+        `<option${String(p.default ?? '') === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    } else if (p.type === 'boolean') {
+      input = `<label style="display:flex;gap:8px;align-items:center;font-weight:400;cursor:pointer">
+        <input type="checkbox" id="${id}"${p.default === true || p.default === 'true' ? ' checked' : ''} style="width:auto;flex:none"> Yes</label>`;
+    } else {
+      input = `<input type="text" id="${id}" value="${esc(p.default ?? '')}">`;
+    }
+    return `<label>${esc(p.label || p.key)}${star}</label>${help}${input}`;
+  }).join('');
+  return new Promise((resolve) => {
+    paramFormResolve = resolve;
+    paramFormDlg.showModal();
+  });
+}
+// Esc / backdrop-close counts as Cancel — the pending promise must settle.
+paramFormDlg.addEventListener('close', () => {
+  if (paramFormResolve) { const r = paramFormResolve; paramFormResolve = null; r(null); }
+});
+function cancelParamForm() { paramFormDlg.close(); }
+function submitParamForm() {
+  const values = {};
+  for (let i = 0; i < paramFormFields.length; i++) {
+    const p = paramFormFields[i], el = $(`pfv-${i}`);
+    if (p.type === 'boolean') { values[p.key] = el.checked ? 'true' : 'false'; continue; }
+    const v = el.value.trim();
+    if (!v) {
+      if (p.required) { $('paramFormErr').textContent = `“${p.label || p.key}” is required.`; el.focus(); return; }
+      continue; // empty optional — let the template's own default/blank stand
+    }
+    values[p.key] = v;
+  }
+  const done = paramFormResolve;
+  paramFormResolve = null;
+  paramFormDlg.close();
+  if (done) done(values);
+}
+
 // Import = open any .agentclaw file. The server sniffs it: a full backup is
 // restored as the SAME agent (its bot and members ride along); a shared
 // template stands up a FRESH agent that you give your own bot.
 async function importAgentFile(file) {
   if (!file) return;
   try {
-    const res = await fetch('/v1/agents/import', {
+    // Peek inside first: a template that declares setup fields gets its form
+    // BEFORE upload. Any peek failure (full backup, not gzip, old browser) is
+    // fine — upload as-is and the server's own validation speaks.
+    let query = '';
+    let tpl = null;
+    try {
+      const text = await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      tpl = JSON.parse(text);
+    } catch { /* not a peekable template — the server sorts it out */ }
+    if (tpl?.format === 'agentclaw-template' && tpl.parameters?.length) {
+      const values = await collectParamValues(tpl.parameters, tpl.name || file.name);
+      if (values === null) return; // cancelled — don't upload
+      query = `?values=${encodeURIComponent(JSON.stringify(values))}`;
+    }
+    const res = await fetch(`/v1/agents/import${query}`, {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: file,
@@ -4195,10 +4370,12 @@ async function doSendAgent() {
 
 // ---- inbox: agents others sent me ------------------------------------------
 async function openInbox() { inboxDlg.showModal(); loadInbox(); }
+let inboxShares = []; // last-loaded shares — acceptShare needs their .parameters
 async function loadInbox() {
   const el = $('inboxBody');
   try {
     const { shares } = await api('/v1/inbox');
+    inboxShares = shares;
     updateInboxBadge(shares.length);
     if (!shares.length) { el.innerHTML = '<div class="sub">Nothing waiting. Agents other users send you appear here.</div>'; return; }
     el.innerHTML = shares.map(s => `<div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
@@ -4212,8 +4389,16 @@ async function loadInbox() {
 async function acceptShare(id, name) {
   const cn = prompt(`Import "${name}" as — name it (it becomes a fresh agent you own; you connect its Telegram bot next):`, name);
   if (cn === null) return;
+  const body = { name: cn };
+  // Templates with setup fields ask for their values before the accept.
+  const share = inboxShares.find(s => s.id === id);
+  if (share?.parameters?.length) {
+    const values = await collectParamValues(share.parameters, name);
+    if (values === null) return; // cancelled
+    body.values = values;
+  }
   try {
-    const r = await api(`/v1/inbox/${id}/accept`, { method: 'POST', body: { name: cn } });
+    const r = await api(`/v1/inbox/${id}/accept`, { method: 'POST', body });
     toast(`Imported as "${r.name}" — connect its Telegram bot to finish`, 30000);
     await loadInbox(); await refresh(true);
   } catch (e) { toast(e.message, 20000); }

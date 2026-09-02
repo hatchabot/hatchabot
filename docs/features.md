@@ -113,6 +113,16 @@ them by email and the same secret-free template lands in their **📥 Inbox**
 to that account on its first sign-in. Identity mode only — on a single-login
 box, Share to a file instead.
 
+**Setup fields** make a shared template *operating*: write `{{investment_style}}`
+into SOUL.md (or AGENTS.md, or the persona) and anyone importing the template is
+asked to fill it — export auto-derives every hand-written placeholder as a
+required field, no declaration needed. For nicer forms, declare fields in
+📖 Definition → **Setup fields**: label, help text, text/longtext/choice/boolean,
+default, required. The importer's answers substitute into the seeded files
+before the agent boots (web renders a form on file-import and inbox-accept; the
+CLI prompts). The template carries field *definitions and defaults* only — never
+the author's own filled values.
+
 Rules and formats: [moving-agents.md](moving-agents.md).
 
 ## Adopting existing OpenClaw agents

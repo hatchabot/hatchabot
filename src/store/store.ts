@@ -9,6 +9,7 @@ import type {
   DataSource,
   DerivedImage,
   DerivedImageStatus,
+  TemplateParam,
   Host,
   Membership,
   MemberRole,
@@ -227,6 +228,9 @@ export class Store {
       // only in the audit log.
       `ALTER TABLE data_sources ADD COLUMN sync_error TEXT`,
       `ALTER TABLE data_sources ADD COLUMN synced_at TEXT`,
+      // Setup fields this agent's shares/templates ask the importer to fill
+      // (JSON array of TemplateParam; sharing Phase 2a).
+      `ALTER TABLE agents ADD COLUMN params TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -1353,6 +1357,13 @@ export class Store {
     );
   }
 
+  /** Declare (or clear, with null) the agent's template setup fields. */
+  setAgentParameters(id: string, params: TemplateParam[] | null): void {
+    this.db
+      .prepare(`UPDATE agents SET params = ?, updated_at = ? WHERE id = ?`)
+      .run(params?.length ? JSON.stringify(params) : null, new Date().toISOString(), id);
+  }
+
   /** Pin (or clear, with null) the agent's runtime image. Takes effect on rebuild. */
   setAgentImage(id: string, image: string | null): void {
     this.db
@@ -1711,6 +1722,7 @@ function rowToAgent(r: any): Agent {
     gatewayToken: r.gateway_token ?? undefined,
     group: r.group_name ?? undefined,
     sortOrder: r.sort_order ?? undefined,
+    parameters: r.params ? safeJson(r.params, undefined) : undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

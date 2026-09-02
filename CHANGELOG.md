@@ -2,6 +2,23 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.87.0] — 2026-09-02
+
+### Added
+- **Template setup fields** (sharing Phase 2a — the "operating template").
+  Write `{{investment_style}}` into SOUL.md/AGENTS.md (or the persona) and
+  anyone importing a shared copy is asked to fill it: export auto-derives every
+  hand-written placeholder as a required text field, and 📖 Definition →
+  **Setup fields** declares richer ones (label, help, text/longtext/choice/
+  boolean, default, required). Values are validated before anything is created
+  (one error naming every missing/invalid field) and substituted into the
+  seeded files before the agent boots — memory is never a substitution
+  surface. The web renders the form on file-import and inbox-accept
+  (client-side template peek, graceful fallback); the CLI prompts
+  interactively (`--values '{…}'` for scripts); `GET /v1/inbox` exposes each
+  share's fields. The template carries field definitions and defaults only —
+  never the author's own filled values, keeping the no-secrets guarantee.
+
 ## [0.86.1] — 2026-09-02
 
 ### Fixed (7th audit — see docs/audit-2026-09-02.md)

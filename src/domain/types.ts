@@ -121,6 +121,8 @@ export interface Agent {
    *  (ascending) used within the group. Absent group = "ungrouped". */
   group?: string;
   sortOrder?: number;
+  /** Setup fields this agent's shares/templates ask the importer to fill. */
+  parameters?: TemplateParam[];
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */
   gatewayPort?: number;
   /** Gateway auth token for that Control UI. */
@@ -202,6 +204,23 @@ export interface Host {
   /** Provider-specific settings (project id, zone, docker socket, ...). */
   settings: Record<string, unknown>;
   createdAt: string;
+}
+
+/**
+ * A setup field a template's author declares on their agent (sharing Phase 2a):
+ * the importer fills it and the value replaces `{{key}}` placeholders in the
+ * seeded SOUL.md/AGENTS.md (and persona). Definitions and defaults only —
+ * never the author's own filled values.
+ */
+export interface TemplateParam {
+  key: string;
+  label: string;
+  help?: string;
+  required: boolean;
+  type: 'text' | 'longtext' | 'choice' | 'boolean';
+  default?: string;
+  options?: string[];
+  target: 'soul' | 'agents';
 }
 
 export type DerivedImageStatus = 'BUILDING' | 'READY' | 'FAILED';

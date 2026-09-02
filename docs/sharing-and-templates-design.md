@@ -1,7 +1,12 @@
 # Sharing agents & operating templates — design
 
-*Status: Feature 1 (inbox sharing) SHIPPED in v0.84.0. Feature 2 (operating
-templates) is still design — Phase 2a/2b pending.*
+*Status: Feature 1 (inbox sharing) SHIPPED in v0.84.0. Feature 2 Phase 2a
+(placeholder parameters `{{key}}` → SOUL/AGENTS/persona) SHIPPED in v0.87.0 —
+declare fields on the agent (📖 Definition → Setup fields, or just hand-write a
+`{{placeholder}}`: export auto-derives it as a required text field), the
+importer fills a generated form (web file-import and inbox accept; CLI prompts)
+and values substitute before the agent boots. Phase 2b (typed `env:` /
+`datasource:` targets) remains design.*
 
 Two requested features, both **extensions of mechanisms that already exist**:
 
@@ -126,9 +131,9 @@ a working, personalized Condo Advisor boots, on their bot, their account.*
 
 1. **Inbox sharing** (Phase 1 — DONE, v0.84.0) — small, immediate ("no more
    emailing files"), reuses everything, zero new security surface.
-2. **Placeholder parameters** (Phase 2a) — `{{key}}` → `soul`/`agents` only. The
-   biggest UX win for the least machinery; covers Stock Advisor's "investment
-   style" case entirely.
+2. **Placeholder parameters** (Phase 2a — DONE, v0.87.0) — `{{key}}` →
+   `soul`/`agents` only. The biggest UX win for the least machinery; covers
+   Stock Advisor's "investment style" case entirely.
 3. **Typed targets** (Phase 2b) — `env:` and `datasource:` parameters, for the
    connection-heavy case (Condo Advisor's Gmail/Drive).
 

@@ -112,3 +112,85 @@ describe('importTemplate', () => {
     expect(() => importTemplate({ store, provider }, Buffer.from('not a template'), { ownerId: 'o' })).toThrow();
   });
 });
+
+describe('template parameters (sharing Phase 2a)', () => {
+  const { gzipSync } = require('node:zlib');
+  const mk = (extra: Record<string, unknown> = {}) => gzipSync(Buffer.from(JSON.stringify({
+    format: 'agentclaw-template', version: 1, exportedAt: 'now',
+    agent: { name: 'Stock Advisor', persona: 'advises with {{style}} discipline', sharedMemory: false },
+    files: {
+      'SOUL.md': 'You advise with a {{style}} philosophy and {{risk}} risk appetite.',
+      'AGENTS.md': 'Report to {{ style }} standards.', // spaced placeholder form
+    },
+    ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+    parameters: [
+      { key: 'style', label: 'Investment style', required: true, type: 'choice',
+        options: ['value', 'growth', 'index'], target: 'soul' },
+      { key: 'risk', label: 'Risk tolerance', required: false, type: 'text',
+        default: 'moderate', target: 'soul' },
+    ],
+    ...extra,
+  })));
+  const freshStore = () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p', createdAt: 'now' });
+    return store;
+  };
+
+  it('substitutes values into SOUL/AGENTS and persona; defaults fill the rest', () => {
+    const store = freshStore();
+    const { agent } = importTemplate({ store, provider: new MockProvider() }, mk(), {
+      ownerId: 'o', values: { style: 'value' },
+    });
+    const seed = store.getAgentSeed(agent.id);
+    expect(seed['SOUL.md']).toBe('You advise with a value philosophy and moderate risk appetite.');
+    expect(seed['AGENTS.md']).toBe('Report to value standards.'); // {{ spaced }} form works
+    expect(agent.persona).toBe('advises with value discipline');
+  });
+
+  it('refuses a missing required value BEFORE creating anything, naming the field', () => {
+    const store = freshStore();
+    expect(() => importTemplate({ store, provider: new MockProvider() }, mk(), { ownerId: 'o' }))
+      .toThrow(/Investment style/);
+    // nothing half-made
+    expect(store.listAgents('o')).toHaveLength(0);
+  });
+
+  it('refuses a choice value outside the options', () => {
+    const store = freshStore();
+    expect(() => importTemplate({ store, provider: new MockProvider() }, mk(), {
+      ownerId: 'o', values: { style: 'yolo' },
+    })).toThrow(/must be one of/);
+  });
+
+  it('a template with no parameters imports exactly as before', () => {
+    const store = freshStore();
+    const { agent } = importTemplate({ store, provider: new MockProvider() }, mk({ parameters: [] }), {
+      ownerId: 'o', values: undefined,
+    });
+    // placeholders left verbatim — no declared fields means no substitution
+    expect(store.getAgentSeed(agent.id)['SOUL.md']).toContain('{{style}}');
+  });
+
+  it('export carries declared params AND auto-derives undeclared {{placeholders}}', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p', createdAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'adv', workspace: { files: {}, configPatch: { agentId: 'adv', authMode: 'api-key' } }, env: {} } as any);
+    store.insertAgent({ id: 'a1', ownerId: 'o', name: 'Adv', slug: 'adv', state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', runtimeRef, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentParameters('a1', [
+      { key: 'style', label: 'Investment style', required: true, type: 'choice', options: ['value', 'growth'], target: 'soul' },
+    ]);
+    // The trained files hand-write an UNDECLARED placeholder too.
+    provider.execResponses.set('sh', { code: 0, stdout: 'Serve {{style}} clients from {{home_city}}.', stderr: '' });
+
+    const { data } = await exportTemplate({ store, provider }, 'a1');
+    const m = parseTemplate(data);
+    expect(m.parameters.map((p) => p.key)).toEqual(['style', 'home_city']);
+    // declared field survives verbatim; derived one is a required text field
+    expect(m.parameters[0]).toMatchObject({ label: 'Investment style', type: 'choice' });
+    expect(m.parameters[1]).toMatchObject({ label: 'home city', required: true, type: 'text' });
+  });
+});
