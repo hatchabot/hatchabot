@@ -2053,6 +2053,44 @@ async function shareAiProfile(id, shared, isMachineLogin) {
   } catch (e) { $('aiErr').textContent = e.message; renderAiList(); }
 }
 
+/** ⟳ Sync models: reconcile this source's switchable list with what its
+ *  runtime serves now — add newly served models, drop ones no longer served.
+ *  Mirrors the dialog-open auto-clean's caution: models are only DROPPED on a
+ *  confident live answer (source:'runtime'), never on the offline curated
+ *  fallback or an unreachable model server; additions are always safe. The
+ *  default model is never changed here — if it's stale, the existing warning
+ *  under the picker says so and the owner picks a new one deliberately. */
+async function syncModels(id, name) {
+  const p = (profiles ?? []).find(x => x.id === id);
+  if (!p) return;
+  let r;
+  try { r = await api(`/v1/ai-profiles/${id}/available-models`); }
+  catch (e) { toast(e.message); return; }
+  const served = r.models ?? [];
+  if (!served.length) { toast(r.error || `Couldn't get a model list for ${name} — nothing changed.`); return; }
+  availableModels[id] = served; availableSource[id] = r.source; staleModels[id] = r.stale ?? [];
+
+  const listed = [p.model, ...(p.models ?? [])].filter(Boolean);
+  const adds = served.filter(m => !listed.includes(m));
+  const confident = r.source === 'runtime' || p.vendor === 'local' || p.vendor === 'google';
+  const drops = confident ? listed.filter(m => m !== p.model && !served.includes(m)) : [];
+  if (!adds.length && !drops.length) {
+    toast(`${name} is already in sync${r.source === 'curated' ? ' with the curated list (no live agent to ask yet)' : ''}.`);
+    renderAiList();
+    return;
+  }
+  const next = [...new Set([p.model, ...listed.filter(m => !drops.includes(m)), ...adds])].filter(Boolean);
+  try {
+    await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { models: next } });
+    const bits = [];
+    if (adds.length) bits.push(`added ${adds.join(', ')}`);
+    if (drops.length) bits.push(`dropped ${drops.join(', ')}`);
+    toast(`${name}: ${bits.join(' · ')}${r.source === 'curated' ? ' (from the curated list — no live agent to ask yet)' : ''}`, 8000);
+    try { profiles = await api('/v1/ai-profiles'); } catch { /* keep last-known */ }
+    renderAiList();
+  } catch (e) { toast(e.message); }
+}
+
 async function saveAiProfile(id) {
   const model = $(`aiModel-${id}`).value.trim();
   if (!model) { $('aiErr').textContent = 'Default model is required.'; return; }
