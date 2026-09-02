@@ -4714,7 +4714,10 @@ function tocDotColor(a) {
 }
 function renderToc() {
   const nav = $('toc');
-  const enough = agents && agents.length >= 2; // not worth the chrome for 0–1
+  // Shown from the FIRST agent, not the second: the legend doubles as the
+  // status/pairing rail, and hiding it on small fleets made a one-agent
+  // account look like a different app than a thirty-agent one.
+  const enough = agents && agents.length >= 1;
   // `has-toc` both shows the pinned legend and reserves its gutter, so the two
   // can never disagree (a gutter with no legend, or a legend over the cards).
   document.body.classList.toggle('has-toc', enough);
