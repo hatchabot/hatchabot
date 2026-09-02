@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.88.1] — 2026-09-02
+
+### Changed
+- **🏷 Sync name promoted to the agent card** (from the ⋯ menu). Pool bots are
+  renamed automatically; a bot you pasted from BotFather deliberately never is
+  — this button is the only way those take the agent's name, and it was buried.
+- **Bot renames announce themselves in the chat**: on a successful rename
+  (Sync name, or renaming the agent), every member gets a DM from the bot —
+  "This bot is now named X. Same agent, same chat — only the name changed" —
+  so the label never changes silently under people.
+- **Runtime-image pin moved from the Definition tab to Environment** — the
+  Definition tab is the agent's mind; which docker image the container runs is
+  infrastructure ("what the container runs with", beside the env vars).
+
 ## [0.88.0] — 2026-09-02
 
 ### Added
