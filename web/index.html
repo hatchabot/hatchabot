@@ -470,17 +470,6 @@
       </span>
     </label>
     <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
-    <div id="imagePinRow">
-      <label>Runtime image <span style="color:var(--dim)">— pin this agent to a specific image (host owner only)</span></label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <input type="text" id="editImage" maxlength="200" list="derivedImageList" placeholder="fleet default (agentclaw-runtime:latest)" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px">
-        <datalist id="derivedImageList"></datalist>
-        <button id="imageBtn" onclick="saveImagePin()">Pin</button>
-      </div>
-      <div class="sub" style="margin:-4px 0 4px">For testing a candidate build or a derived image with extra packages
-        (build them in ⚙ → Runtime). Applies on the next rebuild. A pinned agent stops getting "update available" from
-        fleet promotes — clear the field and Pin to return it to the default.</div>
-    </div>
     <div id="setupFieldsRow">
       <label>Setup fields <span style="color:var(--dim)">— asked when someone imports a shared copy</span></label>
       <div class="sub" style="margin:0 0 6px">Fields someone importing a shared copy fills in — write
@@ -631,6 +620,18 @@
       Injected as environment variables on the next <b>Rebuild</b>. Values are
       <b>write-only</b> — stored encrypted, never shown again; you can only replace or remove
       them. Provider/proxy/loader names are reserved for safety.
+    </div>
+
+    <div id="imagePinRow" style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
+      <label>Runtime image <span style="color:var(--dim)">— pin this agent to a specific image (host owner only)</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="editImage" maxlength="200" list="derivedImageList" placeholder="fleet default (agentclaw-runtime:latest)" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px">
+        <datalist id="derivedImageList"></datalist>
+        <button id="imageBtn" onclick="saveImagePin()">Pin</button>
+      </div>
+      <div class="sub" style="margin:-4px 0 4px">For testing a candidate build or a derived image with extra packages
+        (build them in ⚙ → Runtime). Applies on the next rebuild. A pinned agent stops getting "update available" from
+        fleet promotes — clear the field and Pin to return it to the default.</div>
     </div>
   </section>
 

@@ -73,7 +73,7 @@ with no keyword overlap matched the right memory line.
 
 - Existing agents get embeddings on their **next Rebuild** against a
   `:latest` that carries the bake — memory preserved (volume untouched).
-- The per-agent **image pin** (Settings → Definition) is how a candidate is
+- The per-agent **image pin** (Settings → Environment) is how a candidate is
   proven on one agent before promotion.
 - Build a content revision without an OpenClaw bump:
   ```
