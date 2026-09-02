@@ -123,8 +123,11 @@ Commands:
   servers add <name> <url> <token>
                                Register one (token from that server's
                                ⚙ Settings → Access)
-  rehost <agent> <server>      Move an agent there: preflight, transfer, verify.
+  rehost <agent> <server> [--drop-pin]
+                               Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
+                               --drop-pin moves a pinned agent anyway (it runs
+                               the destination's default image)
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
   approve <agent> <code>       Let a pending requester in (creates a member)
@@ -268,7 +271,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1135,7 +1138,10 @@ async function main() {
       const peer = peers.find((p) => p.id === ref || p.name === ref);
       if (!peer) fail(`no server matches "${ref}"`);
       console.log(`rehosting "${a.name}" to ${peer.name}…`);
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, { peerId: peer.id })).json();
+      // --drop-pin: a pinned runtime image doesn't travel; state the choice.
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, {
+        peerId: peer.id, ...(flags.has('drop-pin') ? { allowDroppedPin: true } : {}),
+      })).json();
       console.log(`done — now running on ${res.movedTo} as ${res.remoteAgentId}`);
       console.log(`"${a.name}" here is ${res.sourceState} and was NOT deleted.`);
       console.log(`Keep it that way: two copies polling one bot token fight over messages.`);

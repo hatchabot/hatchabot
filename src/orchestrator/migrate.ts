@@ -58,15 +58,55 @@ export interface PreflightAnswer {
  * Answer "would I accept this agent?" without changing anything. Every reason
  * here is a failure the import would otherwise hit halfway through.
  */
+/**
+ * Dotted-version compare for OpenClaw image versions (e.g. "2026.7.1-2").
+ * Lexicographic string compare lies ("2026.10" < "2026.7"), so compare each
+ * numeric segment. True when `a` is strictly behind `b`.
+ */
+export function versionBehind(a: string, b: string): boolean {
+  const seg = (v: string) => v.split(/[.-]/).map((s) => Number.parseInt(s, 10) || 0);
+  const [as, bs] = [seg(a), seg(b)];
+  for (let i = 0; i < Math.max(as.length, bs.length); i++) {
+    const d = (as[i] ?? 0) - (bs[i] ?? 0);
+    if (d !== 0) return d < 0;
+  }
+  return false;
+}
+
 export function preflight(
   store: Store,
   ownerId: string,
-  req: { slug: string; accountId: string; vendor?: string; sharedPaths?: string[] },
+  req: {
+    slug: string;
+    accountId: string;
+    vendor?: string;
+    sharedPaths?: string[];
+    /** The SOURCE's runtime-image OpenClaw version, for skew detection. */
+    openclawVersion?: string;
+  },
+  /** Facts about THIS box the route supplies (async to gather, so not read here). */
+  local: { openclawVersion?: string } = {},
 ): PreflightAnswer {
   const reasons: string[] = [];
 
   if (store.listAllActiveAgents().some((a) => a.slug === req.slug)) {
     reasons.push(`An agent with id "${req.slug}" already lives here.`);
+  }
+
+  // A volume written by a newer OpenClaw landing on an older runtime is the
+  // documented hazard (the config schema moves between releases) — refuse the
+  // DOWNGRADE direction; same-or-newer here is fine. Only when both sides
+  // actually know their version: absence must not block a move.
+  if (
+    req.openclawVersion &&
+    local.openclawVersion &&
+    versionBehind(local.openclawVersion, req.openclawVersion)
+  ) {
+    reasons.push(
+      `This server's runtime image is OpenClaw ${local.openclawVersion}, older than the agent's ` +
+        `${req.openclawVersion} — its config may not load there. Upgrade that server's image first ` +
+        `(agentclaw upgrade-image).`,
+    );
   }
   if (store.findAgentUsingAccount(req.accountId)) {
     reasons.push(`Bot @${req.accountId} is already wired to an agent here.`);
@@ -181,19 +221,21 @@ export async function migrateAgent(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
+  opts: { allowDroppedPin?: boolean } = {},
 ): Promise<MigrateResult> {
   // Busy for the whole move: between export stopping the source and the
   // tombstone landing, the agent looks like an ordinary STOPPED agent — a
   // Start, Rebuild or Delete in that window boots or purges the copy whose
   // bot is about to belong elsewhere. (Routes check isBusy; this also stops
   // reconcile from judging the stopped source mid-move.)
-  return whileBusy(agentId, () => migrateAgentInner(deps, agentId, peer));
+  return whileBusy(agentId, () => migrateAgentInner(deps, agentId, peer, opts));
 }
 
 async function migrateAgentInner(
   deps: MigrateDeps,
   agentId: string,
   peer: Peer,
+  opts: { allowDroppedPin?: boolean } = {},
 ): Promise<MigrateResult> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
@@ -202,9 +244,28 @@ async function migrateAgentInner(
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
     throw new MigrateError(`Can't move an agent while it is ${agent.state}.`);
   }
+  // An image pin does NOT travel (the export carries no image, and the
+  // destination may not have it) — the agent would land on that server's
+  // fleet default, silently missing whatever the pinned image adds (a derived
+  // image's apt packages, say). Losing capability must be a stated choice.
+  if (agent.image && !opts.allowDroppedPin) {
+    throw new MigrateError(
+      `This agent is pinned to image "${agent.image}", and pins don't travel — on ${peer.name} it ` +
+        `would run that server's default image, losing whatever the pinned image adds. Unpin it ` +
+        `first (Settings → Environment), or move anyway accepting the default (CLI: --drop-pin).`,
+    );
+  }
   const channel = store.getChannelForAgent(agentId);
   if (!channel) throw new MigrateError('This agent has no messaging identity to move.');
   const profile = store.getAIProfile(agent.aiProfileId);
+
+  // Our runtime-image version rides along so the destination can refuse a
+  // DOWNGRADE (its image older than ours — the config-schema hazard).
+  // Best-effort: an unknown version must not block the move.
+  const sourceVersion = await provider
+    .currentImageInfo()
+    .then((i) => i.openclawVersion)
+    .catch(() => undefined);
 
   // 1. Preflight — nothing has changed yet, so a refusal is free.
   let answer: PreflightAnswer;
@@ -217,6 +278,7 @@ async function migrateAgentInner(
         accountId: channel.accountId,
         vendor: profile?.vendor,
         sharedPaths: agent.sharedPaths,
+        openclawVersion: sourceVersion,
       }),
     });
     if (res.status === 401) throw new MigrateError(`${peer.name} rejected our access token.`);

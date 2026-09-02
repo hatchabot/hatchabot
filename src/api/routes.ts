@@ -3241,10 +3241,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           // sender's folder list and made the missing-folders refusal dead
           // code for every real (HTTP) migration.
           sharedPaths: z.array(z.string().max(512)).max(8).optional(),
+          // The source's runtime-image OpenClaw version, so we can refuse a
+          // DOWNGRADE (our image older than the volume's config schema).
+          openclawVersion: z.string().max(64).optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-      return preflight(store, ownerIdOf(req), parsed.data);
+      // Our own image version, best-effort — unknown must not block a move.
+      const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+      const localVersion = localHost
+        ? await providerFor(localHost.id)
+            .currentImageInfo()
+            .then((i) => i.openclawVersion)
+            .catch(() => undefined)
+        : undefined;
+      return preflight(store, ownerIdOf(req), parsed.data, { openclawVersion: localVersion });
     },
   );
 
@@ -3292,7 +3303,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     },
   );
 
-  app.post<{ Params: { id: string }; Body: { peerId?: string } }>(
+  app.post<{ Params: { id: string }; Body: { peerId?: string; allowDroppedPin?: boolean } }>(
     '/v1/agents/:id/rehost',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
@@ -3304,12 +3315,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const peerId = (req.body as { peerId?: string } | null)?.peerId;
       const peer = peerId && store.getPeer(ownerIdOf(req), peerId);
       if (!peer) return reply.code(400).send({ error: 'Unknown server' });
+      // Image pins don't travel — moving a pinned agent silently drops its
+      // extra packages, so it's refused unless the caller states the choice.
+      const allowDroppedPin = (req.body as { allowDroppedPin?: boolean } | null)?.allowDroppedPin === true;
       try {
         return await migrateAgent(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
             log: trace(agent.id) },
           agent.id,
           peer,
+          { allowDroppedPin },
         );
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
