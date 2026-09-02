@@ -39,12 +39,13 @@ async function world() {
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
   store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Mine', slug: 'mine', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
   const f = Fastify();
+  const provider = new MockProvider();
   await registerRoutes(f, {
     store, secrets: new MemSecrets(),
-    providers: new Map([['mock', new MockProvider()]]),
+    providers: new Map([['mock', provider]]),
     channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
   });
-  return { store, f };
+  return { store, f, provider };
 }
 
 describe('PATCH /v1/agents/:id parameters', () => {
@@ -132,5 +133,62 @@ describe('inbox with parameters', () => {
     const ok = await f.inject({ method: 'POST', url: '/v1/inbox/s1/accept', headers: H, payload: { values: { style: 'growth' } } });
     expect(ok.statusCode).toBe(201);
     expect(store.getAgentSeed(ok.json().id)['SOUL.md']).toBe('A growth advisor.');
+  });
+});
+
+describe('PUT /v1/agents/:id/params (edit values later)', () => {
+  async function importedWorld() {
+    const { store, f, provider } = await world();
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ style: 'value' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: TEMPLATE,
+    });
+    const id = res.json().id as string;
+    // The import stored the full editable state.
+    const a = store.getAgent(id)!;
+    expect(a.parameters?.map((p) => p.key)).toEqual(['style']);
+    expect(a.paramValues).toEqual({ style: 'value' });
+    expect(a.paramFiles?.soul).toContain('{{style}}'); // raw layer, not rendered
+    // Bring it up so the params route (RUNNING-gated, like file edits) works.
+    // The background kickProvision fails on the stub channel (→ FAILED), so
+    // wait for it and walk the legal FAILED → PROVISIONING → RUNNING path.
+    await new Promise((r) => setTimeout(r, 30));
+    const { runtimeRef } = await provider.provision({
+      agentId: id, slug: 'sb',
+      workspace: { files: {}, configPatch: { agentId: 'sb', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef(id, runtimeRef);
+    if (store.getAgent(id)!.state === 'FAILED') store.setAgentState(id, 'PROVISIONING');
+    store.setAgentState(id, 'RUNNING');
+    return { store, f, id };
+  }
+
+  it('edits a value: files re-render, persona and stored values update', async () => {
+    const { store, f, id } = await importedWorld();
+    const res = await f.inject({ method: 'PUT', url: `/v1/agents/${id}/params`, headers: H, payload: { values: { style: 'growth' } } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().values).toEqual({ style: 'growth' });
+    expect(store.getAgent(id)!.paramValues).toEqual({ style: 'growth' });
+    // the raw layer is untouched — editable forever
+    expect(store.getAgent(id)!.paramFiles?.soul).toContain('{{style}}');
+  });
+
+  it('reset re-applies defaults, and refuses when a required field has none', async () => {
+    const { store, f, id } = await importedWorld();
+    // "style" is required with NO default in TEMPLATE — a blanket reset must say so.
+    const res = await f.inject({ method: 'PUT', url: `/v1/agents/${id}/params`, headers: H, payload: { reset: true } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/Investment style/);
+    expect(store.getAgent(id)!.paramValues).toEqual({ style: 'value' }); // unchanged
+  });
+
+  it('rejects an invalid choice and an agent without editable state', async () => {
+    const { store, f, id } = await importedWorld();
+    expect((await f.inject({ method: 'PUT', url: `/v1/agents/${id}/params`, headers: H, payload: { values: { style: 'yolo' } } })).statusCode).toBe(400);
+    // a1 (created directly, no template import) has no editable values
+    store.setAgentRuntimeRef('a1', 'docker://a1'); // ensure the 400 is about state, not 404
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: {} } })).statusCode).toBe(400);
   });
 });

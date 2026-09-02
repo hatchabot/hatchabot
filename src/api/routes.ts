@@ -58,9 +58,11 @@ import {
   selfPathReplacements,
 } from '../orchestrator/cronImport.js';
 import {
+  applyParamValues,
   exportTemplate,
   importTemplate,
   parseTemplate,
+  resolveParamValues,
   TemplateParamSchema,
   TEMPLATE_FORMAT,
 } from '../orchestrator/template.js';
@@ -389,6 +391,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return {
       ...agent,
       gatewayToken: undefined,
+      // The raw template layer is bulky file text — the app only needs to know
+      // the values are editable; the PUT /params route re-reads the real thing.
+      paramFiles: undefined,
+      hasParamFiles: !!agent.paramFiles,
       hasGateway: !!(agent.gatewayPort && agent.gatewayToken),
       /** What the runtime is actually running right now. */
       model: agent.appliedModel ?? desiredModel,
@@ -2078,6 +2084,79 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
+    },
+  );
+
+  /**
+   * Edit (or reset) a configured template copy's setup values in place —
+   * standing preferences change over time, and a Share→Import round-trip is
+   * a terrible way to flip "enable LEAPS". The agent keeps its raw
+   * placeholder-bearing layer from import (paramFiles); this re-renders
+   * SOUL/AGENTS/persona from it with the new values. A snapshot is taken
+   * first, so a re-render over hand-edits is always recoverable.
+   */
+  app.put<{ Params: { id: string }; Body: { values?: Record<string, string>; reset?: boolean } }>(
+    '/v1/agents/:id/params',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      if (!agent.parameters?.length || !agent.paramFiles) {
+        return reply.code(400).send({
+          error: 'This agent has no editable setup values — they exist on agents imported from a template with setup fields.',
+        });
+      }
+      if (agent.state !== 'RUNNING') {
+        return reply.code(409).send({ error: 'Start the agent to change its setup values.' });
+      }
+      const body = (req.body ?? {}) as { values?: Record<string, string>; reset?: boolean };
+      const vals = z
+        .record(z.string().max(64), z.string().max(2000))
+        .refine((r) => Object.keys(r).length <= 24)
+        .optional()
+        .safeParse(body.values);
+      if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
+      let resolved: Record<string, string>;
+      try {
+        // reset → resolve with nothing supplied: defaults fill in (a required
+        // field WITHOUT a default correctly refuses a blanket reset).
+        resolved = resolveParamValues(agent.parameters, body.reset ? {} : (vals.data ?? {}));
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+      const writes: Array<{ name: string; content: string }> = [];
+      if (typeof agent.paramFiles.soul === 'string') {
+        writes.push({ name: 'SOUL.md', content: applyParamValues(agent.paramFiles.soul, resolved) });
+      }
+      if (typeof agent.paramFiles.agents === 'string') {
+        writes.push({ name: 'AGENTS.md', content: applyParamValues(agent.paramFiles.agents, resolved) });
+      }
+      if (busyNow(agent, reply)) return reply;
+      try {
+        const res = await whileBusy(agent.id, async () => {
+          await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-params');
+          for (const w of writes) {
+            const b64 = Buffer.from(w.content, 'utf8').toString('base64');
+            const path = workspacePath(agent.slug, w.name);
+            const r = await providerFor(agent.hostId).execShell(
+              agent.runtimeRef!,
+              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
+            );
+            if (r.code !== 0) return r;
+          }
+          return { code: 0, stdout: '', stderr: '' };
+        });
+        if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
+      if (typeof agent.paramFiles.persona === 'string') {
+        store.setAgentPersona(agent.id, applyParamValues(agent.paramFiles.persona, resolved));
+      }
+      store.setAgentParamState(agent.id, resolved);
+      trace(agent.id)('params.applied', { reset: !!body.reset, keys: Object.keys(resolved).length });
+      return { applied: true, values: resolved };
     },
   );
 

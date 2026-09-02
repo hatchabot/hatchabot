@@ -311,6 +311,19 @@ export function importTemplate(
   }
   store.setAgentSeed(agent.id, seed);
 
+  // A configured copy stays RE-configurable: keep the field declarations (so
+  // re-sharing works and the values panel knows its schema), the values as
+  // applied, and the raw placeholder-bearing layer they rendered into — so
+  // values can be edited or reset later without a re-import.
+  if (manifest.parameters.length) {
+    store.setAgentParameters(agent.id, manifest.parameters);
+    store.setAgentParamState(agent.id, values, {
+      soul: manifest.files['SOUL.md'],
+      agents: manifest.files['AGENTS.md'],
+      persona: manifest.agent.persona,
+    });
+  }
+
   deps.log?.('template.imported', { agentId: agent.id });
   return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds } };
 }

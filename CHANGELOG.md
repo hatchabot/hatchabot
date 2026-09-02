@@ -2,6 +2,23 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.89.0] — 2026-09-02
+
+### Added
+- **Setup values are editable after import.** A configured template copy keeps
+  its field declarations, its applied values, AND the raw placeholder layer —
+  so 📖 Definition → **Setup values** can change any answer (or **Reset to
+  defaults**) later, re-rendering SOUL.md/AGENTS.md/persona in place with a
+  snapshot taken first. No more Share→Import round-trip to flip "enable
+  LEAPS". Import previously LOST the field declarations on the copy — fixed,
+  so re-sharing a configured copy asks the next importer too. New
+  `PUT /v1/agents/:id/params`.
+- **Rehost guards**: an image-pinned agent refuses a cross-cluster move until
+  the pin drop is stated (pins don't travel; API `allowDroppedPin`, CLI
+  `--drop-pin`), and preflight refuses moving onto an OLDER runtime image
+  (the config-schema hazard) via numeric version compare. New real-HTTP
+  two-server integration test for the whole rehost transport.
+
 ## [0.88.1] — 2026-09-02
 
 ### Changed

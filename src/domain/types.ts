@@ -123,6 +123,12 @@ export interface Agent {
   sortOrder?: number;
   /** Setup fields this agent's shares/templates ask the importer to fill. */
   parameters?: TemplateParam[];
+  /** The values currently applied (imported agents) — editable, re-rendered. */
+  paramValues?: Record<string, string>;
+  /** The raw placeholder-bearing layer the values render into: template
+   *  SOUL/AGENTS text + persona, kept so values can be changed LATER without
+   *  a re-import. Absent on agents that aren't configured template copies. */
+  paramFiles?: { soul?: string; agents?: string; persona?: string };
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */
   gatewayPort?: number;
   /** Gateway auth token for that Control UI. */

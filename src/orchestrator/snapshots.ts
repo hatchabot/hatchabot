@@ -28,6 +28,7 @@ export type SnapshotReason =
   | 'pre-restore'
   | 'pre-rebuild'
   | 'pre-adopt'
+  | 'pre-params' // before re-rendering files from edited setup values
   | 'scheduled';
 
 export interface SnapshotDeps {

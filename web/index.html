@@ -499,6 +499,16 @@
         <button id="paramSaveBtn" onclick="saveSetupFields()">Save fields</button>
       </div>
     </div>
+    <div id="setupValuesRow" hidden>
+      <label>Setup values <span style="color:var(--dim)">— this copy's current answers; edit or reset any time</span></label>
+      <div class="sub" style="margin:0 0 6px">Standing preferences change — saving re-renders SOUL.md/AGENTS.md
+        from the template layer with the new values (a snapshot is taken first, so it's undoable).</div>
+      <div id="setupValuesList" style="display:flex;flex-direction:column;gap:8px"></div>
+      <div class="actions" style="justify-content:flex-end;margin-top:8px">
+        <button onclick="resetSetupValues()" title="Re-apply every field's declared default">Reset to defaults</button>
+        <button class="primary" onclick="saveSetupValues()">Apply values</button>
+      </div>
+    </div>
     <label>File</label>
     <select id="editFile" onchange="loadEditFile()">
       <option>SOUL.md</option><option>AGENTS.md</option><option>MEMORY.md</option>
@@ -3103,6 +3113,7 @@ async function openEdit(id, name, tab = 'def') {
   $('editImage').value = cur?.image ?? '';
   populateDerivedDatalist();
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
+  renderSetupValues(cur);
   renderParamList();
   $('editShared').checked = !!cur?.sharedMemory;
   $('editShared').disabled = otherMembers.length > 0;
@@ -3485,6 +3496,70 @@ async function saveSetupFields() {
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('paramSaveBtn').disabled = false; }
+}
+
+// --- Setup VALUES (a configured template copy's current answers) -------------
+// Rendered only for agents imported from a template with setup fields: they
+// keep the raw placeholder layer, so values stay editable/resettable forever.
+
+function renderSetupValues(a) {
+  const row = $('setupValuesRow');
+  const editable = !!(a?.parameters?.length && a?.paramValues && a?.hasParamFiles);
+  row.hidden = !editable;
+  if (!editable) return;
+  $('setupValuesList').innerHTML = a.parameters.map(p => {
+    const cur = a.paramValues[p.key] ?? p.default ?? '';
+    const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
+    let input;
+    if (p.type === 'choice') {
+      input = `<select id="spv-${esc(p.key)}" style="width:auto">${(p.options ?? [])
+        .map(o => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    } else if (p.type === 'boolean') {
+      input = `<label style="display:flex;gap:6px;align-items:center;width:auto;font-weight:400;margin:0;cursor:pointer">
+        <input type="checkbox" id="spv-${esc(p.key)}" style="width:auto;flex:none"${cur === 'true' ? ' checked' : ''}> enabled</label>`;
+    } else if (p.type === 'longtext') {
+      input = `<textarea id="spv-${esc(p.key)}" rows="2" style="flex:1;font-size:13px">${esc(cur)}</textarea>`;
+    } else {
+      input = `<input type="text" id="spv-${esc(p.key)}" value="${esc(cur)}" style="flex:1;min-width:120px">`;
+    }
+    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span style="min-width:180px">${esc(p.label)}${p.required ? ' *' : ''}</span>${input}
+    </div>${help}`;
+  }).join('');
+}
+
+function collectSetupValues(a) {
+  const values = {};
+  for (const p of a.parameters) {
+    const el = $(`spv-${p.key}`);
+    if (!el) continue;
+    const v = p.type === 'boolean' ? (el.checked ? 'true' : 'false') : el.value.trim();
+    if (v !== '') values[p.key] = v;
+  }
+  return values;
+}
+
+async function saveSetupValues() {
+  const a = agents.find(x => x.id === editAgentId);
+  if (!a) return;
+  try {
+    await api(`/v1/agents/${editAgentId}/params`, { method: 'PUT', body: { values: collectSetupValues(a) } });
+    toast('Values applied — SOUL/AGENTS re-rendered (snapshot taken first).');
+    await refresh(false);
+    renderSetupValues(agents.find(x => x.id === editAgentId));
+  } catch (e) { $('editErr').textContent = e.message; }
+}
+
+async function resetSetupValues() {
+  const a = agents.find(x => x.id === editAgentId);
+  if (!a) return;
+  if (!confirm('Reset every setup value to its declared default and re-render the files?\n\nA snapshot is taken first.')) return;
+  try {
+    await api(`/v1/agents/${editAgentId}/params`, { method: 'PUT', body: { reset: true } });
+    toast('Reset to defaults.');
+    await refresh(false);
+    renderSetupValues(agents.find(x => x.id === editAgentId));
+  } catch (e) { $('editErr').textContent = e.message; }
 }
 
 const EVENT_WORDS = {

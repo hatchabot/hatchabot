@@ -231,6 +231,11 @@ export class Store {
       // Setup fields this agent's shares/templates ask the importer to fill
       // (JSON array of TemplateParam; sharing Phase 2a).
       `ALTER TABLE agents ADD COLUMN params TEXT`,
+      // A configured template copy's editable state: the values applied and
+      // the raw placeholder-bearing layer they render into (JSON) — what lets
+      // setup values be edited or reset later without a re-import.
+      `ALTER TABLE agents ADD COLUMN param_values TEXT`,
+      `ALTER TABLE agents ADD COLUMN param_files TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -1362,6 +1367,25 @@ export class Store {
     );
   }
 
+  /** A configured copy's editable state: current values + the raw template
+   *  layer they render into. Set at import; values updated on later edits. */
+  setAgentParamState(
+    id: string,
+    values: Record<string, string> | null,
+    files?: { soul?: string; agents?: string; persona?: string } | null,
+  ): void {
+    if (files !== undefined) {
+      this.db
+        .prepare(`UPDATE agents SET param_values = ?, param_files = ?, updated_at = ? WHERE id = ?`)
+        .run(values ? JSON.stringify(values) : null, files ? JSON.stringify(files) : null,
+          new Date().toISOString(), id);
+    } else {
+      this.db
+        .prepare(`UPDATE agents SET param_values = ?, updated_at = ? WHERE id = ?`)
+        .run(values ? JSON.stringify(values) : null, new Date().toISOString(), id);
+    }
+  }
+
   /** Declare (or clear, with null) the agent's template setup fields. */
   setAgentParameters(id: string, params: TemplateParam[] | null): void {
     this.db
@@ -1781,6 +1805,8 @@ function rowToAgent(r: any): Agent {
     group: r.group_name ?? undefined,
     sortOrder: r.sort_order ?? undefined,
     parameters: r.params ? safeJson(r.params, undefined) : undefined,
+    paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,
+    paramFiles: r.param_files ? safeJson(r.param_files, undefined) : undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
