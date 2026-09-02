@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.88.0] — 2026-09-02
+
+### Added
+- **Link your Telegram to your login** — the explicit form of the "pair once
+  per person" promise, which a fresh account could never actually reach: its
+  first self-approval minted the owner a second time as a member named from
+  their Telegram profile, and the account-level link never formed (found when a
+  second Google login imported a shared agent and got "Christopher wants to
+  talk to this agent" from its own bot). A pairing card now offers **That's me
+  — link** alongside "Let them in": choosing it binds the owner seat, records
+  the Telegram id on the ACCOUNT (`accounts.telegram_user_id` — survives
+  deleting every agent), absorbs any duplicate member rows that identity
+  minted earlier, and every agent created or imported afterwards admits you
+  automatically. ⚙ Settings → Access shows the link status with **Unlink**
+  (existing agents keep working; only future auto-admit stops). New
+  `GET /v1/account`, `DELETE /v1/account/telegram`, `asSelf` on pairing
+  approve.
+
 ## [0.87.0] — 2026-09-02
 
 ### Added

@@ -231,6 +231,11 @@ export class Store {
       // Setup fields this agent's shares/templates ask the importer to fill
       // (JSON array of TemplateParam; sharing Phase 2a).
       `ALTER TABLE agents ADD COLUMN params TEXT`,
+      // The account's linked Telegram identity ("That's me" on a pairing card):
+      // the durable, account-level form of what knownChannelUserId used to
+      // infer from membership rows — survives deleting every agent, and lets a
+      // FRESH account link on its very first approval.
+      `ALTER TABLE accounts ADD COLUMN telegram_user_id TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -1648,6 +1653,14 @@ export class Store {
    * owner pair with their own bot a fifth time.
    */
   knownChannelUserId(userId: string): string | undefined {
+    // The explicit account-level link wins; the membership scan remains as the
+    // fallback for accounts that bound an agent before linking existed.
+    const linked = (
+      this.db.prepare(`SELECT telegram_user_id FROM accounts WHERE owner_id = ?`).get(userId) as
+        | { telegram_user_id: string | null }
+        | undefined
+    )?.telegram_user_id;
+    if (linked) return linked;
     const r = this.db
       .prepare(
         `SELECT channel_user_id FROM memberships
@@ -1656,6 +1669,51 @@ export class Store {
       )
       .get(userId) as { channel_user_id: string } | undefined;
     return r?.channel_user_id;
+  }
+
+  /**
+   * Link (or with null, unlink) the account's Telegram identity. Upserts: a
+   * password-mode owner has no sign-in-created accounts row, and linking must
+   * still work there.
+   */
+  setAccountTelegram(ownerId: string, channelUserId: string | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO accounts (owner_id, telegram_user_id, last_seen) VALUES (?, ?, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET telegram_user_id = excluded.telegram_user_id`,
+      )
+      .run(ownerId, channelUserId, new Date().toISOString());
+  }
+
+  /** The account's linked Telegram id, if the explicit link has been made. */
+  accountTelegram(ownerId: string): string | undefined {
+    const r = this.db
+      .prepare(`SELECT telegram_user_id FROM accounts WHERE owner_id = ?`)
+      .get(ownerId) as { telegram_user_id: string | null } | undefined;
+    return r?.telegram_user_id ?? undefined;
+  }
+
+  /**
+   * After a link: on every agent this owner has, bind their (unbound) owner
+   * seat to the linked Telegram id and absorb any duplicate MEMBER row that
+   * carries the same id — the "same person listed twice" a fresh account's
+   * first approval used to mint. Returns how many duplicates were absorbed.
+   */
+  absorbOwnerTelegram(ownerId: string, channelUserId: string): number {
+    this.db
+      .prepare(
+        `UPDATE memberships SET channel_user_id = ?
+         WHERE user_id = ? AND role = 'owner' AND channel_user_id IS NULL
+           AND agent_id IN (SELECT id FROM agents WHERE owner_id = ? AND state != 'DELETED')`,
+      )
+      .run(channelUserId, ownerId, ownerId);
+    return this.db
+      .prepare(
+        `DELETE FROM memberships
+         WHERE channel_user_id = ? AND role != 'owner' AND user_id != ?
+           AND agent_id IN (SELECT id FROM agents WHERE owner_id = ? AND state != 'DELETED')`,
+      )
+      .run(channelUserId, ownerId, ownerId).changes;
   }
 
   /** Active members' channel ids — this is what becomes the bot allowlist. */

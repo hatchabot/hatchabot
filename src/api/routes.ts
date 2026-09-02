@@ -3410,6 +3410,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { accounts: store.listAccounts(ownerIdOf(req)) };
   });
 
+  /** The caller's own account: email + linked Telegram identity. */
+  app.get('/v1/account', async (req) => {
+    const me = principalOf(req);
+    return {
+      ownerId: me.ownerId,
+      email: me.email,
+      /** Set by "That's me — link & approve" on a pairing card. */
+      telegramUserId: store.accountTelegram(me.ownerId),
+    };
+  });
+
+  /**
+   * Unlink the account's Telegram identity. Existing memberships keep working
+   * (they carry their own binding); this only stops FUTURE agents from
+   * auto-admitting that Telegram user — e.g. after handing a phone number on.
+   */
+  app.delete('/v1/account/telegram', async (req) => {
+    store.setAccountTelegram(ownerIdOf(req), null);
+    return { unlinked: true };
+  });
+
   /**
    * Send an agent to another user's inbox — a secret-free TEMPLATE (same bytes
    * as a shared file), delivered in-app instead of by email. The recipient
@@ -3818,6 +3839,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const agent = ownedAgent(req, req.params.id);
       const channel = agent && store.getChannelForAgent(agent.id);
       const code = (req.body as { code?: string } | null)?.code;
+      // "That's me — link & approve" (owner-only by construction: ownedAgent
+      // gates this route). Binds the owner seat + links the account's Telegram.
+      const asSelf = (req.body as { asSelf?: boolean } | null)?.asSelf === true;
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
       if (!code) return reply.code(400).send({ error: 'code required' });
       try {
@@ -3830,6 +3854,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             code,
             agentName: agent.name,
             sharedMemory: agent.sharedMemory,
+            asSelf,
           },
         );
         return { approved: true, member: admitted };

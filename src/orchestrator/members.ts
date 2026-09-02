@@ -46,6 +46,15 @@ export interface AdmitOptions {
   code: string;
   agentName: string;
   sharedMemory: boolean;
+  /**
+   * "That's me — link & approve": the approving OWNER states the requester is
+   * themself. Binds the owner seat, records the Telegram id on their ACCOUNT
+   * (so every future agent admits them at creation), and absorbs any duplicate
+   * member rows carrying the same id. Without it, a fresh account's first
+   * self-approval minted the owner a second time as a member named from their
+   * Telegram profile, and the account-level link never formed.
+   */
+  asSelf?: boolean;
 }
 
 export interface AdmitResult {
@@ -82,9 +91,18 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   // twice. If this telegram id is the owner's own (known from any of their
   // agents), bind the owner seat instead.
   const agent = store.getAgent(opts.agentId);
-  if (agent && store.knownChannelUserId(agent.ownerId) === req.id) {
+  if (agent && (opts.asSelf || store.knownChannelUserId(agent.ownerId) === req.id)) {
     store.bindMembershipChannelUser(opts.agentId, agent.ownerId, req.id);
-    log('member.owner_self_claim', { agentId: opts.agentId, channelUserId: req.id });
+    if (opts.asSelf) {
+      // The explicit link: account-level, so it survives deleting every agent
+      // and seeds the owner seat of everything created from now on. Absorb any
+      // duplicate member rows this identity minted before the link existed.
+      store.setAccountTelegram(agent.ownerId, req.id);
+      const absorbed = store.absorbOwnerTelegram(agent.ownerId, req.id);
+      log('member.telegram_linked', { agentId: opts.agentId, channelUserId: req.id, absorbed });
+    } else {
+      log('member.owner_self_claim', { agentId: opts.agentId, channelUserId: req.id });
+    }
     return {
       userId: agent.ownerId,
       displayName: 'You', // the owner seat is rendered as "You", never a name

@@ -289,3 +289,62 @@ describe('denyPairing', () => {
     }
   });
 });
+
+describe('"That\'s me — link & approve" (account-level Telegram link)', () => {
+  it('asSelf binds the owner seat, links the ACCOUNT, and future agents auto-admit', async () => {
+    const { store, provider, opts } = await setup();
+    const res = await admitMember({ store, provider }, { ...opts, asSelf: true });
+
+    // The owner seat is bound — NOT a second member named from Telegram.
+    expect(res).toMatchObject({ userId: 'u1', displayName: 'You', channelUserId: '555' });
+    expect(store.listMemberships('a1').filter((m) => m.role !== 'owner')).toHaveLength(0);
+    expect(store.getMembership('a1', 'u1')).toMatchObject({ channelUserId: '555' });
+
+    // The account-level link exists and drives knownChannelUserId — even with
+    // every membership gone (the flaw in the old inference).
+    expect(store.accountTelegram('u1')).toBe('555');
+    store.deleteMemberships('a1');
+    expect(store.knownChannelUserId('u1')).toBe('555');
+  });
+
+  it('asSelf absorbs the duplicate member a pre-link approval minted', async () => {
+    const { store, provider, opts } = await setup();
+    // The rbc scenario: fresh account approved itself normally first → duplicate
+    // member "Christopher" alongside the unbound owner seat.
+    store.insertMembership({
+      id: 'dup', agentId: 'a1', userId: 'member-x', role: 'user',
+      displayName: 'Christopher', channelUserId: '555', status: 'active',
+    });
+    // A second agent of the same owner with an unbound seat gets bound too.
+    store.insertAgent({
+      id: 'a2', ownerId: 'u1', name: 'Second', slug: 'a2', state: 'RUNNING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    store.insertMembership({ id: 'm9', agentId: 'a2', userId: 'u1', role: 'owner', status: 'active' });
+
+    await admitMember({ store, provider }, { ...opts, asSelf: true });
+
+    // Duplicate gone; both owner seats bound; allowlists still carry the id.
+    expect(store.listMemberships('a1').map((m) => m.role)).toEqual(['owner']);
+    expect(store.getMembership('a2', 'u1')).toMatchObject({ channelUserId: '555' });
+    expect(store.listAllowedChannelUserIds('a1')).toEqual(['555']);
+    expect(store.listAllowedChannelUserIds('a2')).toEqual(['555']);
+  });
+
+  it('without asSelf a fresh account still mints a member (the informed default)', async () => {
+    const { store, provider, opts } = await setup();
+    const res = await admitMember({ store, provider }, opts);
+    expect(res.displayName).toBe('Grandma'); // could genuinely BE grandma
+    expect(store.accountTelegram('u1')).toBeUndefined(); // no silent linking
+  });
+
+  it('unlink stops future auto-admit but keeps existing bindings', async () => {
+    const { store, provider, opts } = await setup();
+    await admitMember({ store, provider }, { ...opts, asSelf: true });
+    store.setAccountTelegram('u1', null);
+    expect(store.accountTelegram('u1')).toBeUndefined();
+    // the membership fallback still knows it (existing agents keep working)
+    expect(store.getMembership('a1', 'u1')).toMatchObject({ channelUserId: '555' });
+  });
+});

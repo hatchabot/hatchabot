@@ -802,6 +802,16 @@
   </section>
 
   <section id="paneAccess" role="tabpanel" hidden>
+    <h4 style="margin:0 0 4px">Your Telegram</h4>
+    <div class="sub">
+      Your login (email) and your Telegram are separate identities: the login
+      manages agents, Telegram talks to them. Linking them means every agent
+      you create or import admits your Telegram automatically — the pairing
+      dance happens once per account, not once per agent.
+    </div>
+    <div id="tgLinkStatus" class="sub" style="margin:8px 0 18px">Loading…</div>
+
+    <h4 style="margin:0 0 4px">Access tokens</h4>
     <div class="sub">
       An access token for this server. Two uses: the <code>agentclaw</code>
       command line (works with any sign-in method — needed if you sign in with
@@ -2937,7 +2947,9 @@ function agentCard(a) {
         <span class="grow">🔑 <b>${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
         <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
                 title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
-        <button class="primary" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
+        ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
+                title="This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.">That's me — link</button>` : ''}
+        <button class="${myAccount.telegramUserId ? 'primary' : ''}" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
       </div>`).join('')}
     ${(members[a.id] ?? []).length > 1 ? `
       <div class="members">👥 ${(members[a.id] ?? []).map(m => {
@@ -4453,14 +4465,41 @@ async function toggleSharedFromEdit() {
   }
 }
 
-async function approve(id, code) {
+async function approve(id, code, asSelf) {
   try {
-    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code } });
-    toast(res.member?.alreadyMember
-      ? `${res.member.displayName} is already a member — access restored`
-      : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
+    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code, ...(asSelf ? { asSelf: true } : {}) } });
+    if (asSelf) {
+      toast('Linked — this Telegram is you now. Every agent you make admits you automatically.', 8000);
+      loadMyAccount(); // the card + Settings reflect the link immediately
+    } else {
+      toast(res.member?.alreadyMember
+        ? `${res.member.displayName} is already a member — access restored`
+        : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
+    }
     pairTick = 0; // refetch members on next poll
     await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+// The caller's own account (email + linked Telegram). Drives the "That's me"
+// button on pairing cards and the Telegram block in Settings → Access.
+let myAccount = {};
+async function loadMyAccount() {
+  try { myAccount = await api('/v1/account'); } catch { myAccount = {}; }
+  const el = $('tgLinkStatus');
+  if (el) el.innerHTML = myAccount.telegramUserId
+    ? `✓ Linked (Telegram id <code>${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
+       <button class="hbtn" onclick="unlinkTelegram()">Unlink</button>`
+    : `Not linked. Message one of your agents on Telegram, then choose <b>That's me — link</b> on the request card
+       that appears here. After that, you never pair with your own agents again.`;
+}
+
+async function unlinkTelegram() {
+  if (!confirm('Unlink your Telegram from this login?\n\nExisting agents keep working — only agents created afterwards stop admitting this Telegram automatically.')) return;
+  try {
+    await api('/v1/account/telegram', { method: 'DELETE' });
+    toast('Unlinked.');
+    loadMyAccount();
   } catch (e) { toast(e.message); }
 }
 
@@ -4744,6 +4783,9 @@ async function refresh(withMeta) {
   try {
     if (withMeta || !profiles.length || !hosts.length) {
       [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
+      // Who am I (email + linked Telegram) — drives the "That's me" pairing
+      // button and the Telegram block in Settings → Access.
+      void loadMyAccount();
     }
     // The pool count is refreshed on EVERY poll, not just a withMeta one: it
     // changes from plenty of places that don't go through this tab — deleting
