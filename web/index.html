@@ -143,6 +143,10 @@
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
+  /* The agent name doubles as the chat deep-link (tg://) — dress like text,
+     reveal the affordance on hover. */
+  a.name { color: inherit; text-decoration: none; }
+  a.name:hover { text-decoration: underline; }
   .chip {
     font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
     padding: 3px 9px; border-radius: 99px; border: 1px solid transparent; white-space: nowrap;
@@ -2848,7 +2852,9 @@ function memberCard(a) {
   <div class="card" id="card-${a.id}">
     <div class="row">
       <div class="grow">
-        <span class="name">${esc(a.name)}</span>
+        ${a.deepLink && a.state === 'RUNNING'
+          ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
+          : `<span class="name">${esc(a.name)}</span>`}
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
       </div>
       <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
@@ -2857,8 +2863,7 @@ function memberCard(a) {
       You're a member of this agent${a.sharedMemory ? ' — its memory is shared with everyone who uses it' : ''}.
     </div>
     <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>
-        <a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Telegram App</a>` : ''}
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>` : ''}
     </div>
   </div>`;
 }
@@ -2939,7 +2944,9 @@ function agentCard(a) {
         <button class="movebtn" title="Move down" onclick="moveAgent('${a.id}','down')">▼</button>
       </div>
       <div class="grow">
-        <span class="name">${esc(a.name)}</span>
+        ${a.deepLink && a.state === 'RUNNING'
+          ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
+          : `<span class="name">${esc(a.name)}</span>`}
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
       </div>
       <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
@@ -2978,8 +2985,8 @@ function agentCard(a) {
       }).join('')}
       </div>` : ''}
     <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING'
-        ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open in the Telegram app">Telegram App</a>` : ''}
+      <!-- "Telegram App" button retired: the agent NAME is the deep-link now;
+           Telegram Web stays in the ⋯ menu. -->
       ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
         <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
