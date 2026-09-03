@@ -191,4 +191,46 @@ describe('PUT /v1/agents/:id/params (edit values later)', () => {
     store.setAgentRuntimeRef('a1', 'docker://a1'); // ensure the 400 is about state, not 404
     expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: {} } })).statusCode).toBe(400);
   });
+
+  async function runningMaster(store: Store, provider: MockProvider) {
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+  }
+
+  it('a MASTER (fields declared here, no imported layer) seeds its layer from the live files', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { parameters: [{ key: 'style', label: 'Style', required: true, type: 'choice', options: ['value', 'growth'], target: 'soul' }] },
+    });
+    // The live SOUL.md still carries the author's literal placeholder — the
+    // seed reads it via `cat` (mock cans every execShell as 'sh').
+    provider.execResponses.set('sh', { code: 0, stdout: 'A {{style}} advisor.\n', stderr: '' });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'growth' } } });
+    expect(res.statusCode).toBe(200);
+    const a = store.getAgent('a1')!;
+    expect(a.paramValues).toEqual({ style: 'growth' });
+    expect(a.paramFiles?.soul).toContain('{{style}}'); // seeded raw layer persisted
+    // second edit works off the stored layer like any imported copy
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'value' } } })).statusCode).toBe(200);
+    expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'value' });
+  });
+
+  it('a master whose files have NO placeholders is refused with a pointer, not silently no-oped', async () => {
+    const { store, f, provider } = await world();
+    await runningMaster(store, provider);
+    await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { parameters: [{ key: 'style', label: 'Style', required: false, type: 'text', target: 'soul' }] },
+    });
+    provider.execResponses.set('sh', { code: 0, stdout: 'Plain prose, nothing templated.\n', stderr: '' });
+    const res = await f.inject({ method: 'PUT', url: '/v1/agents/a1/params', headers: H, payload: { values: { style: 'x' } } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/placeholder/i);
+    expect(store.getAgent('a1')!.paramFiles).toBeUndefined(); // nothing persisted
+  });
 });

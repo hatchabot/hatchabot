@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.91.0] — 2026-09-02
+
+### Added
+- **The management bot's LLM rides your AI sources — no separate key.** The
+  control plane proxies the bot's chat calls (`POST /v1/mgmt/llm/complete`)
+  with the credential of whichever Anthropic source you flag as
+  **🛠 Management** in ⚙ Settings → AI sources (single-select; auto-picks
+  api-key first, then setup-token, when nothing is flagged). The credential is
+  decrypted per-call server-side and never reaches the bot process — the bot
+  keeps holding only its cli-token. Machine-login and local sources can't back
+  a raw API call and say so. `AGENTCLAW_MGMT_ANTHROPIC_KEY` remains as an
+  explicit override. The presence strip/heartbeat now reports e.g.
+  "claude-sonnet-5 via Claude Max Setup Token".
+- **Setup values are editable on a template MASTER, not just imported
+  copies.** An agent whose fields were declared right here (its live files
+  still carrying `{{placeholders}}`) seeds its raw layer from those files on
+  the first Apply — so authors configure in place instead of the Send→Import
+  round-trip. Files with no placeholders are refused with a pointer rather
+  than silently no-oped.
+- Agent-name deep-link now *looks* like a link (accent color, ↗ tail,
+  hover underline).
+
 ## [0.90.0] — 2026-09-02
 
 ### Added

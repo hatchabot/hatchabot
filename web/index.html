@@ -2012,7 +2012,12 @@ function renderAiList() {
       <div style="display:flex;align-items:center;gap:6px;width:100%">
         <b>${esc(p.name)}</b>
         <span class="chip">${vendorChip(p)}</span>
+        ${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? `
         <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
+               title="The management bot's assistant answers with THIS source — the control plane makes the calls, so the bot never holds the key">
+          <input type="checkbox" ${p.mgmtLlm ? 'checked' : ''} onchange="setMgmtLlmSource('${p.id}', this.checked)"> 🛠 Management
+        </label>` : ''}
+        <label class="sub" style="display:flex;align-items:center;gap:4px;${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? '' : 'margin-left:auto'}"
                title="Let every account on this server use this source for their agents — they spend on it">
           <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
         </label>
@@ -2107,6 +2112,15 @@ function renderExtras(id) {
 }
 function chosenNow(id) {
   return $(`aiModels-${id}`).value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+async function setMgmtLlmSource(id, on) {
+  try {
+    await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { mgmtLlm: on } });
+    profiles = await api('/v1/ai-profiles');
+    renderAiList();
+    toast(on ? 'Management bot now answers with this source.' : 'Cleared — the bot falls back to the automatic pick.');
+  } catch (e) { toast(e.message); renderAiList(); }
 }
 
 async function shareAiProfile(id, shared, isMachineLogin) {
@@ -3519,11 +3533,14 @@ async function saveSetupFields() {
 
 function renderSetupValues(a) {
   const row = $('setupValuesRow');
-  const editable = !!(a?.parameters?.length && a?.paramValues && a?.hasParamFiles);
+  // Any RUNNING agent with declared fields is editable: imported copies carry
+  // their raw layer already, and on a master the server seeds the layer from
+  // the live files on the first Apply (so authors never need Send→Import).
+  const editable = !!(a?.parameters?.length && a?.state === 'RUNNING');
   row.hidden = !editable;
   if (!editable) return;
   $('setupValuesList').innerHTML = a.parameters.map(p => {
-    const cur = a.paramValues[p.key] ?? p.default ?? '';
+    const cur = (a.paramValues ?? {})[p.key] ?? p.default ?? '';
     const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
     let input;
     if (p.type === 'choice') {

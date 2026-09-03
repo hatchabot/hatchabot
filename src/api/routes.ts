@@ -48,6 +48,7 @@ import {
   startBackup,
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
+import { completeWithProfile, pickMgmtProfile, usableForMgmt } from './mgmtLlm.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import {
@@ -132,6 +133,8 @@ export interface ApiDeps {
   /** Override the derived-image builder (tests). Defaults to the real
    *  `docker build`; tests inject a stub so no docker runs. */
   buildImage?: typeof buildDerivedImage;
+  /** Override the mgmt-LLM proxy's Anthropic call (tests). */
+  mgmtLlmComplete?: typeof completeWithProfile;
 }
 
 const LocalProfile = z.object({
@@ -1249,6 +1252,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           /** Owner opt-in: every account on this installation may use this
            *  source for their agents. Shared spend, so explicit only. */
           shared: z.boolean().optional(),
+          /** Back the management bot's LLM with this source (single-select;
+           *  the control plane proxies the calls — see api/mgmtLlm.ts). */
+          mgmtLlm: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1258,6 +1264,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
       if (parsed.data.shared !== undefined) {
         store.setAIProfileShared(profile.id, parsed.data.shared);
+      }
+      if (parsed.data.mgmtLlm !== undefined) {
+        if (parsed.data.mgmtLlm && !usableForMgmt(profile)) {
+          return reply.code(400).send({
+            error:
+              profile.vendor !== 'anthropic'
+                ? 'Only an Anthropic source can back the management bot.'
+                : "This source uses this machine's Claude login, which only the Claude CLI can use. " +
+                  'Pick a source with an API key or a setup-token.',
+          });
+        }
+        if (parsed.data.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), profile.id);
+        else if (profile.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), null);
       }
       // Editing the model or its switchable list can orphan a per-agent pin.
       // effectiveModel already refuses to run a stale pin; also clear it from
@@ -1585,6 +1604,55 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // the client never has to agree with the bot about the interval.
     const online = Date.now() - Date.parse(hb.seenAt) < 90_000;
     return { configured: true, online, ...hb };
+  });
+
+  // Which AI source backs the mgmt bot's LLM right now (flagged, else the
+  // automatic pick). The bot reads this at boot and on every heartbeat; the
+  // web shows it under the source toggle.
+  app.get('/v1/mgmt/llm', async (req) => {
+    const p = pickMgmtProfile(store, ownerIdOf(req));
+    if (!p) return { available: false };
+    return {
+      available: true,
+      profileId: p.id,
+      profileName: p.name,
+      model: p.model,
+      credential: p.kind === 'api_key' ? 'api-key' : 'setup-token',
+      flagged: !!p.mgmtLlm,
+    };
+  });
+
+  /**
+   * Server-side LLM proxy for the management bot: the broker's chat loop posts
+   * its (system, tools, messages) here and the control plane makes the
+   * Anthropic call with the picked source's credential — which is decrypted
+   * per-call and never leaves this process. Owner-scoped like everything else;
+   * the mgmt bot's cli-token is what authenticates it.
+   */
+  const MgmtLlmBody = z.object({
+    system: z.string().max(20_000),
+    tools: z.array(z.unknown()).max(32),
+    messages: z.array(z.unknown()).max(200),
+    maxTokens: z.number().int().min(1).max(16_384),
+  });
+  const mgmtComplete = deps.mgmtLlmComplete ?? completeWithProfile;
+  app.post('/v1/mgmt/llm/complete', async (req, reply) => {
+    const parsed = MgmtLlmBody.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const profile = pickMgmtProfile(store, ownerIdOf(req));
+    if (!profile) {
+      return reply.code(409).send({
+        error:
+          'No AI source can back the management bot — add an Anthropic source with an API key ' +
+          'or setup-token, or flag one under ⚙ Settings → AI sources.',
+      });
+    }
+    try {
+      return await mgmtComplete(secrets, profile, parsed.data);
+    } catch (err) {
+      const msg = String((err as Error).message ?? err);
+      return reply.code(502).send({ error: `LLM call via "${profile.name}" failed: ${msg.slice(0, 300)}` });
+    }
   });
 
   // ---- agents ---------------------------------------------------------------
@@ -2129,13 +2197,43 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
-      if (!agent.parameters?.length || !agent.paramFiles) {
+      if (!agent.parameters?.length) {
         return reply.code(400).send({
-          error: 'This agent has no editable setup values — they exist on agents imported from a template with setup fields.',
+          error: 'This agent declares no setup fields — add them under 📖 Definition → Setup fields first.',
         });
       }
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to change its setup values.' });
+      }
+      // The raw placeholder-bearing layer normally arrives on import. On a
+      // MASTER — fields authored here, live files still carrying their
+      // {{placeholders}} — seed the layer from the live files on first edit,
+      // so the author can fill values directly instead of the Send→Import
+      // round-trip this feature exists to kill.
+      let paramFiles = agent.paramFiles;
+      if (!paramFiles) {
+        const read = async (name: string) =>
+          (
+            await providerFor(agent.hostId).execShell(
+              agent.runtimeRef!,
+              `cat ${JSON.stringify(workspacePath(agent.slug, name))} 2>/dev/null || true`,
+            )
+          ).stdout;
+        const soul = await read('SOUL.md');
+        const agentsMd = await read('AGENTS.md');
+        paramFiles = {
+          soul: soul || undefined,
+          agents: agentsMd || undefined,
+          persona: agent.persona || undefined,
+        };
+        const PH = /\{\{\s*[a-z][a-z0-9_]{0,31}\s*\}\}/;
+        if (![paramFiles.soul, paramFiles.agents, paramFiles.persona].some((t) => typeof t === 'string' && PH.test(t))) {
+          return reply.code(400).send({
+            error:
+              'No {{placeholders}} found in SOUL.md/AGENTS.md/persona — applying values would change nothing. ' +
+              'Reference the declared fields as {{key}} in the files first.',
+          });
+        }
       }
       const body = (req.body ?? {}) as { values?: Record<string, string>; reset?: boolean };
       const vals = z
@@ -2154,11 +2252,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         throw err;
       }
       const writes: Array<{ name: string; content: string }> = [];
-      if (typeof agent.paramFiles.soul === 'string') {
-        writes.push({ name: 'SOUL.md', content: applyParamValues(agent.paramFiles.soul, resolved) });
+      if (typeof paramFiles.soul === 'string') {
+        writes.push({ name: 'SOUL.md', content: applyParamValues(paramFiles.soul, resolved) });
       }
-      if (typeof agent.paramFiles.agents === 'string') {
-        writes.push({ name: 'AGENTS.md', content: applyParamValues(agent.paramFiles.agents, resolved) });
+      if (typeof paramFiles.agents === 'string') {
+        writes.push({ name: 'AGENTS.md', content: applyParamValues(paramFiles.agents, resolved) });
       }
       if (busyNow(agent, reply)) return reply;
       try {
@@ -2180,10 +2278,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
-      if (typeof agent.paramFiles.persona === 'string') {
-        store.setAgentPersona(agent.id, applyParamValues(agent.paramFiles.persona, resolved));
+      if (typeof paramFiles.persona === 'string') {
+        store.setAgentPersona(agent.id, applyParamValues(paramFiles.persona, resolved));
       }
-      store.setAgentParamState(agent.id, resolved);
+      // Persist the freshly seeded layer alongside the values on a master's
+      // first edit; imported copies already have theirs stored.
+      store.setAgentParamState(agent.id, resolved, agent.paramFiles ? undefined : paramFiles);
       trace(agent.id)('params.applied', { reset: !!body.reset, keys: Object.keys(resolved).length });
       return { applied: true, values: resolved };
     },

@@ -64,6 +64,13 @@ export interface AIProfile {
    */
   secretRef?: string;
   /**
+   * Owner's pick: the management bot's LLM rides THIS source, via the control
+   * plane's server-side proxy (the credential never reaches the bot process).
+   * Single-select per owner; needs a portable anthropic credential (api key or
+   * setup-token) — machine-login and local sources can't back a raw API call.
+   */
+  mgmtLlm?: boolean;
+  /**
    * Owner opted in to every account on this installation using this source
    * for THEIR agents — deliberately sharing a Max subscription (or a key)
    * with the family. Off by default: sharing spend is an explicit act.

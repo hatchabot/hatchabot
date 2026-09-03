@@ -222,6 +222,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN gateway_port INTEGER`,
       `ALTER TABLE agents ADD COLUMN gateway_token TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN shared INTEGER NOT NULL DEFAULT 0`,
+      // The management bot's LLM rides this source (single-select per owner).
+      `ALTER TABLE ai_profiles ADD COLUMN mgmt_llm INTEGER NOT NULL DEFAULT 0`,
       // Optional per-agent model override (cloud only). NULL = follow the
       // profile's default model.
       `ALTER TABLE agents ADD COLUMN model TEXT`,
@@ -370,6 +372,17 @@ export class Store {
 
   setAIProfileShared(id: string, shared: boolean): void {
     this.db.prepare(`UPDATE ai_profiles SET shared = ? WHERE id = ?`).run(shared ? 1 : 0, id);
+  }
+
+  /** Single-select per owner: which source backs the management bot's LLM.
+   *  Pass null to clear the owner's pick entirely. */
+  setAIProfileMgmtLlm(ownerId: string, profileId: string | null): void {
+    this.db.prepare(`UPDATE ai_profiles SET mgmt_llm = 0 WHERE owner_id = ?`).run(ownerId);
+    if (profileId) {
+      this.db
+        .prepare(`UPDATE ai_profiles SET mgmt_llm = 1 WHERE id = ? AND owner_id = ?`)
+        .run(profileId, ownerId);
+    }
   }
 
   setAIProfileModel(id: string, model: string): void {
@@ -1866,6 +1879,7 @@ function rowToAIProfile(r: any): AIProfile {
     baseUrl: r.base_url ?? undefined,
     secretRef: r.secret_ref ?? undefined,
     shared: !!r.shared,
+    mgmtLlm: !!r.mgmt_llm,
     createdAt: r.created_at,
   };
 }

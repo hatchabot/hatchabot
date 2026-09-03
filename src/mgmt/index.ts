@@ -24,6 +24,7 @@ import { GrammyTransport } from './telegram.js';
 import { createPairingNotifier } from './notifier.js';
 import { LlmAgent } from './llm.js';
 import { AnthropicChatModel } from './anthropicModel.js';
+import { ProxyChatModel } from './proxyModel.js';
 
 // Load .env.mgmt from the working directory if present, so `npm run mgmt` works
 // straight after `agentclaw mgmt-bot setup`. Under systemd the EnvironmentFile
@@ -74,13 +75,17 @@ const broker = new Broker(api, pending, {
   audit: (event, detail) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...detail })),
 });
 
-// Phase 2 (optional): natural-language control via an LLM. Enabled only when an
-// Anthropic key is present — without it, the bot is slash-commands only. The LLM
-// proposes tools through the SAME broker, so it gains no extra authority.
+// Phase 2: natural-language control via an LLM. Default path is the control
+// plane's server-side proxy — it rides whichever AI source the owner flagged
+// (⚙ Settings → AI sources), and this process never holds an AI credential.
+// AGENTCLAW_MGMT_ANTHROPIC_KEY remains as an explicit override for a dedicated
+// key. Either way the LLM proposes tools through the SAME broker, so it gains
+// no extra authority; if no source is usable, each chat message answers with
+// the server's clear 409 instead of silence.
 const anthropicKey = process.env.AGENTCLAW_MGMT_ANTHROPIC_KEY ?? process.env.ANTHROPIC_API_KEY;
 const llm = anthropicKey
   ? new LlmAgent(new AnthropicChatModel(anthropicKey, process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5'), broker)
-  : undefined;
+  : new LlmAgent(new ProxyChatModel(api), broker);
 
 const bot = new Bot(botToken);
 const transport = new GrammyTransport(bot.api);
@@ -112,19 +117,32 @@ setInterval(() => pending.sweep(), 60_000).unref();
 
 // Phase-A presence: heartbeat to the control plane every 30s so the web UI
 // can show a live management-bot card (online/offline derives from seen_at).
-const llmModel = llm ? (process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5') : undefined;
+// The llm string is resolved per beat: with a dedicated key it's the env
+// model; on the proxy path it's whatever source the server picks right now.
 const startHeartbeat = (botUsername: string) => {
-  const beat = () =>
-    api
+  const beat = async () => {
+    let llmLabel: string | undefined;
+    if (anthropicKey) {
+      llmLabel = process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5';
+    } else {
+      try {
+        const s = await api.llmStatus();
+        if (s.available) llmLabel = `${s.model} via ${s.profileName}`;
+      } catch {
+        /* status is best-effort; the beat itself still goes out */
+      }
+    }
+    await api
       .heartbeat({
         botUsername,
         mode: broker.readWrite ? 'read-write' : 'read-only',
-        llm: llmModel,
+        llm: llmLabel,
         allowlisted: allowlist.length,
       })
       .catch((e) => console.error('mgmt heartbeat failed', (e as Error).message));
+  };
   void beat();
-  setInterval(beat, 30_000).unref();
+  setInterval(() => void beat(), 30_000).unref();
 };
 
 await bot.start({
@@ -137,7 +155,7 @@ await bot.start({
         baseUrl,
         allowlisted: allowlist.length,
         mode: broker.readWrite ? 'read-write' : 'read-only',
-        llm: llmModel ?? 'off (no API key)',
+        llm: anthropicKey ? (process.env.AGENTCLAW_MGMT_MODEL ?? 'claude-sonnet-5') : 'via control-plane proxy',
       }),
     );
   },
