@@ -6,6 +6,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, workspacePath } from './snapshots.js';
 import { createAgentRecord } from './provision.js';
 import { TransferError } from './transfer.js';
+import { reservedEnvProblem } from './envPolicy.js';
 
 /**
  * A "template" is a SHAREABLE copy of an agent — its training (SOUL.md +
@@ -47,7 +48,10 @@ export const TemplateParamSchema = z
     type: z.enum(['text', 'longtext', 'choice', 'multichoice', 'boolean']),
     default: z.string().max(2000).optional(),
     options: z.array(z.string().min(1).max(120)).max(12).optional(),
-    target: z.enum(['soul', 'agents']),
+    /** Where the value lands: substituted into a file's {{key}} placeholder,
+     *  or (Phase 2b) as an agent env var named KEY-uppercased — a write-only
+     *  secret, never stored in paramValues. */
+    target: z.enum(['soul', 'agents', 'env']),
   })
   // An option-less choice renders an empty, unfillable <select>; a required
   // one makes the copy unconfigurable. Catch it at declaration, everywhere
@@ -59,6 +63,16 @@ export const TemplateParamSchema = z
   // never round-trip — it splits into picks that fail the subset check.
   .refine((p) => p.type !== 'multichoice' || !(p.options ?? []).some((o) => o.includes(',')), {
     message: 'multichoice options must not contain commas',
+  })
+  // Env targets are text-typed credentials/config: choices and booleans have
+  // no meaning as env material, and — the security boundary — the derived
+  // NAME must pass the same reserved-name policy as the env route, or a
+  // template could declare {{anthropic_base_url}} and exfiltrate a shared key.
+  .refine((p) => p.target !== 'env' || p.type === 'text', {
+    message: 'env-target fields must be type "text"',
+  })
+  .refine((p) => p.target !== 'env' || !reservedEnvProblem(p.key.toUpperCase()), {
+    message: 'that key maps to a reserved env variable name',
   });
 
 export interface TemplateManifest {
@@ -269,6 +283,14 @@ export interface ImportTemplateResult {
   agent: Agent;
   /** What the importer still needs to wire up (data sources, env-var names). */
   needs: { dataSources: TemplateManifest['dataNeeds']; envVars: string[] };
+  /**
+   * Filled env-target setup fields (sharing Phase 2b): NAME=VALUE pairs the
+   * caller must materialize as agent env vars via the SecretStore BEFORE
+   * provisioning. Returned instead of created here — this module is sync and
+   * deliberately secret-free; the async route layer owns secret writes. These
+   * values are never persisted in paramValues (they're credentials).
+   */
+  envValues: Array<{ name: string; value: string }>;
 }
 
 export function importTemplate(
@@ -287,7 +309,14 @@ export function importTemplate(
   const manifest = parseTemplate(data);
   // Validate BEFORE creating anything — a missing required value must not
   // leave a half-made agent behind.
-  const values = resolveParamValues(manifest.parameters, opts.values);
+  const resolved = resolveParamValues(manifest.parameters, opts.values);
+  // Env-target fields (Phase 2b) split off: their values become agent env
+  // vars (write-only secrets), never file substitutions or stored paramValues.
+  const envKeys = new Set(manifest.parameters.filter((p) => p.target === 'env').map((p) => p.key));
+  const envValues = [...envKeys]
+    .filter((k) => resolved[k] !== undefined && resolved[k] !== '')
+    .map((k) => ({ name: k.toUpperCase(), value: resolved[k]! }));
+  const values = Object.fromEntries(Object.entries(resolved).filter(([k]) => !envKeys.has(k)));
 
   // The importer's OWN profile, vendor-matched — same rule as a full Load, so a
   // template never silently bills someone else's shared subscription.
@@ -349,5 +378,5 @@ export function importTemplate(
   }
 
   deps.log?.('template.imported', { agentId: agent.id });
-  return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds } };
+  return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds }, envValues };
 }

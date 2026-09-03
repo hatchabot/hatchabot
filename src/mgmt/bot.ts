@@ -248,6 +248,26 @@ export class ManagementBot {
     if (slow) {
       await this.tx.answerCallback(callbackId);
       await this.tx.editMessage(chatId, messageId, '⏳ Working — this can take a minute…');
+      // DETACHED: a confirmed create awaits provisioning for up to 150s, and
+      // grammY processes updates sequentially — awaiting here froze every
+      // other message and button behind one build (audit 2026-09-03 backlog
+      // #1). The claim is single-use, so nothing can double-run; the card is
+      // the completion signal.
+      void this.broker
+        .confirm(id, 'confirm', { fromUserId, chatId })
+        .then(async (out) => {
+          if (!out.ok) {
+            await this.tx.editMessage(chatId, messageId, '⚠ Already handled.');
+            return;
+          }
+          await this.tx.editMessage(chatId, out.rec.messageId || messageId, out.text);
+        })
+        .catch(async (e) => {
+          await this.tx
+            .editMessage(chatId, messageId, `⚠ Failed: ${String((e as Error).message ?? e).slice(0, 300)}`)
+            .catch(() => {});
+        });
+      return;
     }
     const out = await this.broker.confirm(id, yn === 'y' ? 'confirm' : 'cancel', { fromUserId, chatId });
     if (!out.ok) {
@@ -255,11 +275,10 @@ export class ManagementBot {
         out.reason === 'expired' ? 'Expired'
         : out.reason === 'not_yours' ? 'Not your confirmation'
         : 'Already handled';
-      if (slow) await this.tx.editMessage(chatId, messageId, `⚠ ${why}.`);
-      else await this.tx.answerCallback(callbackId, why);
+      await this.tx.answerCallback(callbackId, why);
       return;
     }
-    if (!slow) await this.tx.answerCallback(callbackId);
+    await this.tx.answerCallback(callbackId);
     await this.tx.editMessage(chatId, out.rec.messageId || messageId, out.text);
   }
 }

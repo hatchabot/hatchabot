@@ -114,9 +114,19 @@ export class LlmAgent {
     this.#maxTokens = opts.maxTokens ?? 8192;
   }
 
-  /** Run the tool loop for one user message, streaming output into `sink`. */
-  async respond(who: Proposer, userText: string, sink: AgentSink): Promise<void> {
-    const messages: ChatMessage[] = [{ role: 'user', content: userText }];
+  /**
+   * Run the tool loop for one user message, streaming output into `sink`.
+   * `history` carries prior turns (the web chat pane is a conversation; the
+   * Telegram path passes none and stays stateless). Returns the full message
+   * list so the caller can persist it as the next call's history.
+   */
+  async respond(
+    who: Proposer,
+    userText: string,
+    sink: AgentSink,
+    history: ChatMessage[] = [],
+  ): Promise<ChatMessage[]> {
+    const messages: ChatMessage[] = [...history, { role: 'user', content: userText }];
 
     for (let step = 0; step < this.#maxSteps; step++) {
       const resp = await this.model.create({
@@ -132,7 +142,7 @@ export class LlmAgent {
         if (b.type === 'text' && b.text.trim()) await sink.say(b.text.trim());
       }
 
-      if (resp.stopReason !== 'tool_use') return;
+      if (resp.stopReason !== 'tool_use') return messages;
 
       // Execute each proposed tool through the broker; a mutate becomes a card.
       const results: ContentBlock[] = [];
@@ -156,5 +166,6 @@ export class LlmAgent {
     }
 
     await sink.say('(Stopped — too many steps. Try a more specific request.)');
+    return messages;
   }
 }

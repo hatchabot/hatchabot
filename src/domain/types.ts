@@ -233,7 +233,7 @@ export interface TemplateParam {
   type: 'text' | 'longtext' | 'choice' | 'multichoice' | 'boolean';
   default?: string;
   options?: string[];
-  target: 'soul' | 'agents';
+  target: 'soul' | 'agents' | 'env';
 }
 
 export type DerivedImageStatus = 'BUILDING' | 'READY' | 'FAILED';

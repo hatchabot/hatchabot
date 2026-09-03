@@ -238,6 +238,15 @@ an explicit dedicated-key override (`AGENTCLAW_MGMT_MODEL`, default
 `/v1` access; it gains no authority the broker doesn't already gate. Slash
 commands keep working alongside it.
 
+**Phase C (implemented) — the web chat pane.** 💬 Manage in the web app hosts
+the SAME broker in-process, per signed-in owner: its `/v1` calls dispatch
+through the server's own router carrying the caller's auth (the pane can
+never do more than the person typing), the LLM runs server-side on the
+🛠 Management source, and every change is a card rendered in the pane showing
+the FULL spec, executed only on Confirm. Read-only until the "Allow changes"
+toggle arms it; single-use/TTL confirm semantics identical to Telegram.
+Sessions (history + arm state) are in-memory per owner and clear on restart.
+
 ---
 
 ## B. Mobile app

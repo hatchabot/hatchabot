@@ -422,10 +422,47 @@ describe('authoring hardening (audit 2026-09-03)', () => {
     expect(tx.edits).toHaveLength(0);
     expect(broker.pending.peek('c_1')!.status).toBe('pending');
 
-    // The proposer's tap still works.
+    // The proposer's tap works — the execute is DETACHED, so completion is
+    // observed via the card edit, not the handler's return.
     await bot.onCallback(100, 555, 'cb2', 'cfm:c_1:y', card.messageId);
-    expect(broker.pending.peek('c_1')!.status).toBe('confirmed');
+    expect(broker.pending.peek('c_1')!.status).toBe('confirmed'); // claim is immediate
+    await new Promise((r) => setTimeout(r, 20)); // let the detached execute land
     expect(tx.edits.some((e) => e.text.startsWith('✅'))).toBe(true);
+  });
+
+  it('a confirmed create does NOT block the bot — other messages process mid-build', async () => {
+    const { broker, api } = make({ rw: true });
+    const tx = new FakeTx();
+    // A create whose provision stalls 80ms — long enough to prove ordering.
+    let releaseCreate!: () => void;
+    const gate = new Promise<void>((r) => (releaseCreate = r));
+    const origCreate = api.createAgent.bind(api);
+    api.createAgent = async (body) => {
+      await gate;
+      return origCreate(body);
+    };
+    const fakeLlm = {
+      respond: async (who: any, _t: string, sink: any) => {
+        const r = await broker.handleTool('create_agent', { name: 'Fresh', soul: 's' }, who);
+        await sink.proposeCard((r as any).pending.confirmId, (r as any).pending.summary);
+      },
+    };
+    const bot = new ManagementBot(broker, tx, { ownerId: 'o', allowlist: [555], llm: fakeLlm as any });
+    await bot.onMessage(100, 555, 'draft me an agent');
+
+    // Confirm returns promptly even though the create is stalled...
+    await bot.onCallback(100, 555, 'cb1', 'cfm:c_1:y', 99);
+    expect(tx.edits.some((e) => e.text.startsWith('⏳'))).toBe(true);
+    expect(tx.edits.some((e) => e.text.startsWith('✅'))).toBe(false); // not done yet
+
+    // ...and the bot keeps serving OTHER commands mid-build.
+    await bot.onMessage(100, 555, '/list');
+    expect(tx.sent.some((m) => m.text.includes('Tech Advisor'))).toBe(true);
+
+    releaseCreate();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(tx.edits.some((e) => e.text.startsWith('✅'))).toBe(true);
+    expect(api.calls.some((c) => c.startsWith('put:new1:SOUL.md'))).toBe(true);
   });
 });
 

@@ -89,10 +89,13 @@ parameters: [
 - `target` — *where the value lands on import*:
   - `soul` / `agents` → substitute a `{{key}}` placeholder the author wrote into
     `SOUL.md` / `AGENTS.md` (the simplest, most flexible form)
-  - `env:VARNAME` → a per-agent env var (`store.setAgentEnv`, encrypted) — for a
-    `secret` like an API token
-  - `datasource:<mount>.<field>` → fill a data-source config, e.g. a Drive/repo
-    URL
+  - `env` (SHIPPED, Phase 2b) → the value becomes an agent env var named
+    KEY-uppercased: masked entry on the import form, secret into the
+    SecretStore before first boot, never stored in `paramValues`, never
+    substituted into files; the key must pass the reserved-name policy
+    (envPolicy.ts) at declaration. Text type only.
+  - `datasource:<mount>.<field>` (future) → fill a data-source config, e.g. a
+    Drive/repo URL
 
 **Examples**
 

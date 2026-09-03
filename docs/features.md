@@ -119,7 +119,11 @@ into SOUL.md (or AGENTS.md, or the persona) and anyone importing the template is
 asked to fill it — export auto-derives every hand-written placeholder as a
 required field, no declaration needed. For nicer forms, declare fields in
 📖 Definition → **Setup fields**: label, help text,
-text/longtext/choice/multichoice/boolean, default, required. The importer's
+text/longtext/choice/multichoice/boolean, default, required. A field can
+target a file placeholder or an **env var** (target `env`): the importer's
+answer is masked on entry and becomes a write-only agent env credential —
+so a template can ask for its API key at import instead of a manual
+Environment step. The importer's
 answers substitute into the seeded files before the agent boots (web renders a
 form on file-import and inbox-accept; the CLI prompts). The template carries
 field *definitions and defaults* only — never the author's own filled values.
@@ -424,7 +428,10 @@ start/stop, rebuild, approve pairing requests, plus read-only `/health`,
 needs no key of its own: the control plane proxies the LLM calls with the AI
 source flagged **🛠 Management** in ⚙ Settings → AI sources (auto-picked when
 none is flagged; the credential never leaves the server). It also
-**authors**: ask it in plain language to draft a new agent
+**authors**: ask it in plain language to draft a new agent. The same
+assistant lives in the web app as **💬 Manage** — a chat pane where change
+proposals render as cards with the full content and a Confirm button, armed
+by an explicit "Allow changes" toggle. It can also
 (SOUL.md, AGENTS.md, persona, template setup fields) or rewrite an existing
 definition — the full spec lands on one confirm card, and nothing is created
 or written until you approve it. The bot heartbeats to the control plane, so

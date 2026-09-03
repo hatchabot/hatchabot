@@ -111,6 +111,63 @@ describe('POST /v1/agents/import with values', () => {
   });
 });
 
+describe('env-target setup fields (sharing Phase 2b)', () => {
+  const ENV_TEMPLATE = gzipSync(Buffer.from(JSON.stringify({
+    format: 'agentclaw-template', version: 1, exportedAt: 'now',
+    agent: { name: 'Broker', persona: 'p', sharedMemory: false },
+    files: { 'SOUL.md': 'A {{style}} broker.', 'AGENTS.md': '# A' },
+    ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+    parameters: [
+      { key: 'style', label: 'Style', required: true, type: 'choice', options: ['value', 'growth'], target: 'soul' },
+      { key: 'brave_api_key', label: 'Brave Search key', required: true, type: 'text', target: 'env' },
+    ],
+  })));
+
+  it('the filled value becomes a real env var — secret stored, never in paramValues or files', async () => {
+    const { store, f } = await world();
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ style: 'value', brave_api_key: 'brv-12345' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: ENV_TEMPLATE,
+    });
+    expect(res.statusCode).toBe(201);
+    const id = res.json().id as string;
+    const envs = store.listAgentEnv(id);
+    expect(envs.map((e) => e.name)).toEqual(['BRAVE_API_KEY']);
+    // never persisted as a readable setup value
+    expect(store.getAgent(id)!.paramValues).toEqual({ style: 'value' });
+    // never substituted into the seeded files
+    expect(JSON.stringify(store.getAgentSeed(id))).not.toContain('brv-12345');
+    // the response never echoes it either
+    expect(res.body).not.toContain('brv-12345');
+  });
+
+  it('a required env field missing refuses BEFORE creating anything', async () => {
+    const { store, f } = await world();
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ style: 'value' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: ENV_TEMPLATE,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/Brave Search key/);
+    expect(store.listAgents(OWNER)).toHaveLength(1); // only the pre-seeded a1
+  });
+
+  it('a reserved key cannot be declared as an env field', async () => {
+    const { f, store } = await world();
+    store.setAgentRuntimeRef('a1', 'docker://x');
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { parameters: [{ key: 'anthropic_base_url', label: 'Endpoint', required: false, type: 'text', target: 'env' }] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/reserved/);
+  });
+});
+
 describe('inbox with parameters', () => {
   it('lists a share with its parameters, and accept substitutes values', async () => {
     const { store, f } = await world();

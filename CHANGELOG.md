@@ -2,6 +2,32 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.95.0] — 2026-09-03
+
+### Added
+- **💬 Manage — the web management chat pane (management Phase C).** The
+  Telegram assistant's broker, hosted in-process in the control plane, one
+  session per signed-in owner: ask about the fleet or say what to create or
+  change, and every mutation becomes a card IN THE PANE showing the full
+  SOUL.md/AGENTS.md/Dockerfile with a Confirm button. Three properties keep
+  it sound: the broker's /v1 calls dispatch through the server's own router
+  carrying the caller's auth (the pane can never exceed the person typing);
+  the LLM runs server-side on the 🛠 Management source; confirmations are the
+  same single-use, TTL'd records as Telegram's. Read-only until the explicit
+  "Allow changes" toggle. The LLM loop gained conversation history for this
+  (Telegram stays stateless by design).
+- **Env-target setup fields (sharing Phase 2b).** A template field with
+  `target: env` asks the importer for a credential (masked input), which
+  lands as a real agent env var — secret into the SecretStore BEFORE first
+  boot, never stored in paramValues, never substituted into files, never
+  echoed. Declaration-time guard: the derived NAME must pass the same
+  reserved-name policy as the env route (a template cannot declare
+  `{{anthropic_base_url}}`). Templates can now ship fully self-contained —
+  the Stock Broker can ask for its market-data key at import.
+- **The mgmt Telegram bot no longer blocks on a confirmed create** (audit
+  backlog #1): authoring confirms execute detached; the card is the
+  completion signal, and other messages/buttons process mid-build.
+
 ## [0.94.0] — 2026-09-03
 
 Backlog burn-down (categories 3 + 4 of the 2026-09-03 audit) + HTTPS.

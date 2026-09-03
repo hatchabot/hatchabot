@@ -1,25 +1,17 @@
 import type { ApiClient, AgentSummary, Member, PairingRequest, PendingJoin, EventRow, HealthResult, UsageResult, ProfileSummary, HostSummary, ImageSummary } from './broker.js';
 
-/**
- * The concrete owner-scoped /v1 client the broker drives. One bearer token (a
- * cli-token minted for this bot) authenticates every call, so results are
- * inherently scoped to that account. Uses global fetch (Node 22+); no deps.
- *
- * Response-shape coupling is deliberately forgiving — the control plane's
- * publicAgent already returns { id, name, slug, state, model, aiProfileId },
- * and the few list endpoints are normalized here so the broker sees clean types.
- */
-export class HttpApiClient implements ApiClient {
-  constructor(
-    private readonly baseUrl: string,
-    private readonly token: string,
-  ) {}
+/** How a request reaches /v1: over the network (fetch, the mgmt bot) or
+ *  in-process (app.inject, the web chat pane). Resolves the parsed body or
+ *  throws an Error whose message is the server's `error` field. */
+export type Requester = (method: string, path: string, body?: unknown) => Promise<unknown>;
 
-  async #req(method: string, path: string, body?: unknown): Promise<unknown> {
-    const res = await fetch(new URL(path, this.baseUrl), {
+/** The mgmt bot's transport: real HTTP with its cli-token. Global fetch, no deps. */
+export function fetchRequester(baseUrl: string, token: string): Requester {
+  return async (method, path, body) => {
+    const res = await fetch(new URL(path, baseUrl), {
       method,
       headers: {
-        authorization: `Bearer ${this.token}`,
+        authorization: `Bearer ${token}`,
         ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -36,6 +28,30 @@ export class HttpApiClient implements ApiClient {
     }
     const ct = res.headers.get('content-type') ?? '';
     return ct.includes('application/json') ? res.json() : res.text();
+  };
+}
+
+/**
+ * The concrete owner-scoped /v1 client the broker drives. The transport
+ * carries the caller's identity (bearer token over HTTP, or the web session's
+ * own headers via app.inject), so results are inherently scoped to that
+ * account — the broker never has more authority than whoever it acts for.
+ *
+ * Response-shape coupling is deliberately forgiving — the control plane's
+ * publicAgent already returns { id, name, slug, state, model, aiProfileId },
+ * and the few list endpoints are normalized here so the broker sees clean types.
+ */
+export class HttpApiClient implements ApiClient {
+  #request: Requester;
+
+  constructor(requester: Requester);
+  constructor(baseUrl: string, token: string);
+  constructor(a: Requester | string, b?: string) {
+    this.#request = typeof a === 'string' ? fetchRequester(a, b!) : a;
+  }
+
+  async #req(method: string, path: string, body?: unknown): Promise<unknown> {
+    return this.#request(method, path, body);
   }
 
   async listAgents(): Promise<AgentSummary[]> {

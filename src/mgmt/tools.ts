@@ -49,7 +49,11 @@ const SETUP_FIELD = {
     type: { type: 'string', enum: ['text', 'longtext', 'choice', 'multichoice', 'boolean'] },
     default: { type: 'string', maxLength: 2000 },
     options: { type: 'array', maxItems: 12, items: { type: 'string', minLength: 1, maxLength: 120 } },
-    target: { type: 'string', enum: ['soul', 'agents'], description: 'default soul' },
+    target: {
+      type: 'string',
+      enum: ['soul', 'agents', 'env'],
+      description: 'default soul; env = the value becomes an env var named KEY uppercased (text type only)',
+    },
   },
   required: ['key', 'label', 'type'],
 } as const;

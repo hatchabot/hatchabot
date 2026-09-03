@@ -50,6 +50,7 @@ import {
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, pickMgmtProfile, usableForMgmt } from './mgmtLlm.js';
 import { reservedEnvProblem } from '../orchestrator/envPolicy.js';
+import { registerMgmtChat } from './mgmtChat.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import {
@@ -1638,6 +1639,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     maxTokens: z.number().int().min(1).max(16_384),
   });
   const mgmtComplete = deps.mgmtLlmComplete ?? completeWithProfile;
+  // Phase C: the web management chat pane — same broker, web transport.
+  registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {
     const parsed = MgmtLlmBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -2232,6 +2235,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           error: 'This agent declares no setup fields — add them under 📖 Definition → Setup fields first.',
         });
       }
+      // Env-target fields (Phase 2b) are write-only credentials managed under
+      // Settings → Environment — they never live in paramValues and must not
+      // block (as "required") the re-render of the file-target fields.
+      const editableParams = agent.parameters.filter((p) => p.target !== 'env');
+      if (!editableParams.length) {
+        return reply.code(400).send({
+          error: 'All of this agent’s setup fields are env credentials — change those under ⚙ Settings → Environment.',
+        });
+      }
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to change its setup values.' });
       }
@@ -2251,7 +2263,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       try {
         // reset → resolve with nothing supplied: defaults fill in (a required
         // field WITHOUT a default correctly refuses a blanket reset).
-        resolved = resolveParamValues(agent.parameters, body.reset ? {} : (vals.data ?? {}));
+        resolved = resolveParamValues(editableParams, body.reset ? {} : (vals.data ?? {}));
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -3789,11 +3801,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
       try {
-        const { agent, needs } = importTemplate(
+        const { agent, needs, envValues } = importTemplate(
           { store, provider: providerFor((body.hostId ?? host?.id)!), log: trace() },
           share.blob,
           { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id, values: vals.data },
         );
+        await materializeEnvValues(agent.id, envValues);
         store.setShareStatus(req.params.id, 'accepted', me.ownerId);
         kickProvision(agent.id);
         return reply.code(201).send({ ...publicAgent(agent), needs });
@@ -3803,6 +3816,37 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     },
   );
+
+  /**
+   * Phase 2b: filled env-target setup fields become real agent env vars —
+   * secret in the SecretStore, name in agent_env — BEFORE provisioning, so
+   * the container first boots with them. importTemplate is sync and
+   * secret-free by design; this async step is the route layer's half. On
+   * failure the fresh agent is rolled back whole, matching import semantics.
+   */
+  const materializeEnvValues = async (
+    agentId: string,
+    envValues: Array<{ name: string; value: string }>,
+  ): Promise<void> => {
+    const created: string[] = [];
+    try {
+      for (const v of envValues) {
+        const id = randomUUID();
+        const ref = `agent-env/${id}`;
+        await secrets.put(ref, v.value);
+        created.push(ref);
+        store.insertAgentEnv({ id, agentId, name: v.name, secretRef: ref, createdAt: new Date().toISOString() });
+      }
+    } catch (err) {
+      for (const ref of created) await secrets.delete(ref).catch(() => {});
+      try {
+        store.scrubAgentResidue(agentId);
+        store.setAgentState(agentId, 'DELETING');
+        store.setAgentState(agentId, 'DELETED');
+      } catch { /* rollback is best-effort; the import error below is what the user sees */ }
+      throw new TransferError(`Couldn't store the setup credentials: ${String((err as Error).message ?? err).slice(0, 200)}`);
+    }
+  };
 
   /** Turn a received agent away. */
   app.post<{ Params: { id: string } }>('/v1/inbox/:id/dismiss', async (req, reply) => {
@@ -3881,11 +3925,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         // bot, importer as sole owner); anything else is a full copy (a Download)
         // that restores the SAME agent, carrying its bot token and members.
         if (peekFormat(body) === TEMPLATE_FORMAT) {
-          const { agent, needs } = importTemplate(
+          const { agent, needs, envValues } = importTemplate(
             { store, provider: providerFor(host.id), log: trace() },
             body,
             { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name, values },
           );
+          await materializeEnvValues(agent.id, envValues);
           // Fresh agent → provision its own bot the normal way (pool or paste).
           kickProvision(agent.id);
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });

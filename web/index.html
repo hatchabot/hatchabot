@@ -302,6 +302,7 @@
       <button id="fleetSourcesBtn" class="hbtn" title="Which agents are on which AI source, and which models" onclick="openFleetSources()">📊 Sources</button>
       <button id="importBtn" class="hbtn" title="Open a .agentclaw file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
       <button id="inboxBtn" class="hbtn" title="Agents other users have sent you" onclick="openInbox()">📥 Inbox<span id="inboxBadge" class="inbox-badge" hidden></span></button>
+      <button id="mgmtChatBtn" class="hbtn" title="Management chat — ask in plain language; every change needs your Confirm" onclick="openMgmtChat()">💬 Manage</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
       <span class="spacer"></span>
       <span class="sub pool-ready" id="poolInfo" hidden title="Bots parked in the pool — a new agent grabs one instantly, no BotFather trip. Manage them in ⚙ Settings → Bot pool."></span>
@@ -495,9 +496,10 @@
           <option value="multichoice">multichoice</option>
           <option value="boolean">boolean</option>
         </select>
-        <select id="paramTarget" style="width:auto" title="Which file the {{key}} placeholder lives in">
+        <select id="paramTarget" style="width:auto" title="Where the value lands: a {{key}} placeholder in a file, or an env var named KEY (uppercased) — a write-only credential">
           <option value="soul">soul</option>
           <option value="agents">agents</option>
+          <option value="env">env var</option>
         </select>
         <label style="display:flex;gap:4px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
           <input type="checkbox" id="paramRequired" style="width:auto;flex:none">required</label>
@@ -914,6 +916,31 @@
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
     <button onclick="aiDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="mgmtChatDlg" style="width:min(760px,96vw)">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <h3 style="margin:0">💬 Management chat</h3>
+    <span class="sub" id="mgmtChatLlm"></span>
+    <span class="spacer" style="flex:1"></span>
+    <label class="sub" style="display:flex;align-items:center;gap:5px;width:auto;margin:0;cursor:pointer"
+           title="Change tools stay refused until armed. Every change still needs your Confirm on its card.">
+      <input type="checkbox" id="mgmtChatArm" onchange="toggleMgmtMode(this.checked)" style="width:auto;flex:none"> 🔓 Allow changes
+    </label>
+    <button class="hbtn" title="Forget this conversation" onclick="resetMgmtChat()">New chat</button>
+  </div>
+  <div id="mgmtChatLog" style="height:min(48vh,460px);overflow:auto;border:1px solid var(--line);border-radius:10px;
+       padding:12px;margin:12px 0;display:flex;flex-direction:column;gap:8px"></div>
+  <div style="display:flex;gap:8px">
+    <input type="text" id="mgmtChatInput" placeholder="Ask about the fleet, or say what to create or change…"
+           style="flex:1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMgmtChat();}">
+    <button class="primary" id="mgmtChatSend" onclick="sendMgmtChat()">Send</button>
+  </div>
+  <div class="sub" style="margin-top:8px">Reads run immediately. Every change becomes a card here showing the
+    <b>full</b> content — nothing happens until you press Confirm on it.</div>
+  <div class="actions" style="justify-content:flex-end;margin-top:10px">
+    <button onclick="mgmtChatDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -3493,7 +3520,7 @@ function renderParamList() {
   $('paramList').innerHTML = editParams.length
     ? editParams.map((p, i) => `<div class="pair"><span class="grow">${esc(p.label || p.key)} <code>{{${esc(p.key)}}}</code>
         <span class="sub">${esc(p.type)}${(p.type === 'choice' || p.type === 'multichoice') && p.options?.length ? ' (' + esc(p.options.join(', ')) + ')' : ''}
-          · ${p.target === 'agents' ? 'AGENTS.md' : 'SOUL.md'}${p.required ? ' · <b>required</b>' : ''}${p.default != null && p.default !== '' ? ' · default: ' + esc(String(p.default)) : ''}</span></span>
+          · ${p.target === 'env' ? `env: ${esc(p.key.toUpperCase())}` : p.target === 'agents' ? 'AGENTS.md' : 'SOUL.md'}${p.required ? ' · <b>required</b>' : ''}${p.default != null && p.default !== '' ? ' · default: ' + esc(String(p.default)) : ''}</span></span>
         <button class="danger" onclick="removeSetupField(${i})">×</button></div>`).join('')
     : '<div class="sub">None declared — sharing still asks for any <code>{{placeholder}}</code> it finds in the files.</div>';
 }
@@ -3509,12 +3536,14 @@ function addSetupField() {
   if (editParams.some(p => p.key === key)) { toast(`{{${key}}} is already declared`); return; }
   if (editParams.length >= 24) { toast('Max 24 setup fields'); return; }
   const type = $('paramType').value;
+  const target = $('paramTarget').value;
+  if (target === 'env' && type !== 'text') { toast('Env-var fields must be type "text" — the value is a credential, not a choice.'); return; }
   const f = {
     key,
     label: $('paramLabel').value.trim() || key,
     required: $('paramRequired').checked,
     type,
-    target: $('paramTarget').value,
+    target,
   };
   const def = $('paramDefault').value.trim();
   if (def) f.default = def;
@@ -3553,10 +3582,15 @@ function renderSetupValues(a) {
   // Any RUNNING agent with declared fields is editable: imported copies carry
   // their raw layer already, and on a master the server seeds the layer from
   // the live files on the first Apply (so authors never need Send→Import).
-  const editable = !!(a?.parameters?.length && a?.state === 'RUNNING');
+  const fileParams = (a?.parameters ?? []).filter(p => p.target !== 'env');
+  const envParams = (a?.parameters ?? []).filter(p => p.target === 'env');
+  const editable = !!(fileParams.length && a?.state === 'RUNNING');
   row.hidden = !editable;
   if (!editable) return;
-  $('setupValuesList').innerHTML = a.parameters.map(p => {
+  const envNote = envParams.length
+    ? `<div class="sub">🔑 ${envParams.map(p => esc(p.key.toUpperCase())).join(', ')} — credential${envParams.length > 1 ? 's' : ''}; change under the Environment tab.</div>`
+    : '';
+  $('setupValuesList').innerHTML = envNote + fileParams.map(p => {
     const cur = (a.paramValues ?? {})[p.key] ?? p.default ?? '';
     const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
     let input;
@@ -4409,7 +4443,12 @@ function collectParamValues(parameters, title) {
     const star = p.required ? ' <span style="color:var(--warn)">*</span>' : '';
     const help = p.help ? `<div class="sub" style="margin:-2px 0 4px">${esc(p.help)}</div>` : '';
     let input;
-    if (p.type === 'longtext') {
+    if (p.target === 'env') {
+      // A credential: masked entry, lands as an env var in the SecretStore —
+      // write-only, never shown again, never inside the shared files.
+      input = `<input type="password" id="${id}" autocomplete="off"
+        placeholder="stored as env var ${esc(p.key.toUpperCase())} — write-only">`;
+    } else if (p.type === 'longtext') {
       input = `<textarea id="${id}" rows="3">${esc(p.default ?? '')}</textarea>`;
     } else if (p.type === 'choice') {
       input = `<select id="${id}">${(p.options ?? []).map(o =>
@@ -4958,6 +4997,132 @@ function renderMgmtStrip() {
     <span class="spacer" style="flex:1"></span>
     ${bits.join(' ')}
   </div>`;
+}
+
+// ---- management chat pane (Phase C) ------------------------------------------
+// The same broker as the Telegram management bot, over the web: reads run,
+// changes become cards HERE with the full content, and nothing executes until
+// Confirm. The server acts with this session's own auth — the pane can never
+// do more than the person typing.
+
+async function openMgmtChat() {
+  mgmtChatDlg.showModal();
+  const log = $('mgmtChatLog');
+  log.innerHTML = '<div class="sub">Loading…</div>';
+  try {
+    const s = await api('/v1/mgmt/chat');
+    $('mgmtChatArm').checked = s.mode === 'read-write';
+    $('mgmtChatLlm').textContent = s.available ? `${s.llm.model} via ${s.llm.profileName}` : '';
+    log.innerHTML = '';
+    if (!s.available) {
+      mgmtBubble('assistant', 'No AI source can back management chat yet — flag one as 🛠 Management under ⚙ Settings → AI sources.');
+      return;
+    }
+    for (const m of s.transcript) mgmtBubble(m.kind, m.text);
+    if (!s.transcript.length) {
+      mgmtBubble('assistant', 'Hi — ask about your fleet, or tell me what to create or change. Try: “which agents look unhealthy?” or “draft a recipe-keeper agent with a cuisine setup field”.');
+    }
+  } catch (e) { log.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  $('mgmtChatInput').focus();
+}
+
+function mgmtBubble(kind, text) {
+  const log = $('mgmtChatLog');
+  const el = document.createElement('div');
+  el.style.cssText = kind === 'user'
+    ? 'align-self:flex-end;background:var(--accent);color:var(--accent-ink);border-radius:12px 12px 2px 12px;padding:8px 12px;max-width:85%;white-space:pre-wrap;font-size:14px'
+    : 'align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-radius:12px 12px 12px 2px;padding:8px 12px;max-width:85%;white-space:pre-wrap;font-size:14px';
+  el.textContent = text;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+/** A confirmation card: summary + the FULL spec (expandable) + Confirm/Cancel.
+ *  Built with createElement/textContent — file bodies never touch innerHTML. */
+function mgmtProposalCard(p) {
+  const log = $('mgmtChatLog');
+  const card = document.createElement('div');
+  card.style.cssText = 'align-self:stretch;border:1px solid var(--warn);border-radius:10px;padding:10px 12px;font-size:14px';
+  const head = document.createElement('div');
+  head.style.cssText = 'white-space:pre-wrap;font-family:inherit';
+  head.textContent = p.summary;
+  card.appendChild(head);
+  const full = [['SOUL.md', p.spec?.soul], ['AGENTS.md', p.spec?.agentsMd], ['Dockerfile lines', p.spec?.dockerfile]]
+    .filter(([, t]) => typeof t === 'string' && t.length);
+  for (const [label, text] of full) {
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.style.cssText = 'cursor:pointer;margin-top:8px';
+    sum.textContent = `📄 ${label} — full content (${text.split('\n').length} lines)`;
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'max-height:260px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:12px;white-space:pre-wrap;word-break:break-word;margin:6px 0 0';
+    pre.textContent = text;
+    det.appendChild(sum); det.appendChild(pre); card.appendChild(det);
+  }
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:10px';
+  const done = (text, ok) => {
+    card.style.borderColor = ok ? 'var(--ok)' : 'var(--line)';
+    row.remove();
+    const res = document.createElement('div');
+    res.style.cssText = 'margin-top:8px;white-space:pre-wrap';
+    res.textContent = text;
+    card.appendChild(res);
+  };
+  const act = async (verb) => {
+    for (const b of row.querySelectorAll('button')) b.disabled = true;
+    try {
+      const r = await api('/v1/mgmt/chat/confirm', { method: 'POST', body: { confirmId: p.confirmId, verb } });
+      done(r.text, verb === 'confirm');
+    } catch (e) { done(`⚠ ${e.message}`, false); }
+  };
+  const cancel = document.createElement('button');
+  cancel.textContent = '✖ Cancel';
+  cancel.addEventListener('click', () => act('cancel'));
+  const ok = document.createElement('button');
+  ok.className = 'primary';
+  ok.textContent = '✅ Confirm';
+  ok.addEventListener('click', () => act('confirm'));
+  row.appendChild(cancel); row.appendChild(ok); card.appendChild(row);
+  log.appendChild(card);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendMgmtChat() {
+  const input = $('mgmtChatInput');
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = '';
+  mgmtBubble('user', message);
+  const thinking = mgmtBubble('assistant', '…');
+  $('mgmtChatSend').disabled = true;
+  try {
+    const r = await api('/v1/mgmt/chat', { method: 'POST', body: { message } });
+    thinking.remove();
+    for (const t of r.texts) mgmtBubble('assistant', t);
+    for (const p of r.proposals) mgmtProposalCard(p);
+    if (!r.texts.length && !r.proposals.length) mgmtBubble('assistant', '(no reply)');
+  } catch (e) {
+    thinking.textContent = `⚠ ${e.message}`;
+  } finally {
+    $('mgmtChatSend').disabled = false;
+    input.focus();
+  }
+}
+
+async function toggleMgmtMode(on) {
+  try {
+    const r = await api('/v1/mgmt/chat/mode', { method: 'POST', body: { readWrite: on } });
+    toast(r.mode === 'read-write'
+      ? 'Changes armed — every change still needs your Confirm on its card.'
+      : 'Read-only — change proposals are refused.');
+  } catch (e) { toast(e.message); $('mgmtChatArm').checked = !on; }
+}
+
+async function resetMgmtChat() {
+  try { await api('/v1/mgmt/chat', { method: 'DELETE' }); } catch { /* nothing to clear */ }
+  openMgmtChat();
 }
 
 let pollTimer, pairTick = 0;
