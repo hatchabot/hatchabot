@@ -48,7 +48,7 @@ import {
   startBackup,
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
-import { completeWithProfile, pickMgmtProfile, usableForMgmt } from './mgmtLlm.js';
+import { completeWithProfile, friendlyLlmError, pickMgmtProfile, usableForMgmt } from './mgmtLlm.js';
 import { reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
@@ -1655,8 +1655,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     try {
       return await mgmtComplete(secrets, profile, parsed.data);
     } catch (err) {
-      const msg = String((err as Error).message ?? err);
-      return reply.code(502).send({ error: `LLM call via "${profile.name}" failed: ${msg.slice(0, 300)}` });
+      const msg = friendlyLlmError(String((err as Error).message ?? err));
+      return reply.code(502).send({ error: `LLM call via "${profile.name}" failed: ${msg}` });
     }
   });
 

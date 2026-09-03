@@ -40,6 +40,25 @@ export interface MgmtChatResponse {
   content: unknown[];
 }
 
+/**
+ * Turn an Anthropic SDK error into something a chat pane can show. The raw
+ * message is a JSON blob ("429 {\"type\":\"error\"...}") — useless to the
+ * person mid-conversation. Rate limits deserve the honest household truth:
+ * agents, the management chat, and Claude Code all share one subscription.
+ */
+export function friendlyLlmError(raw: string): string {
+  if (/429|rate_limit/i.test(raw)) {
+    return 'The AI source is rate-limited right now — your agents, this chat, and Claude Code share its budget. Wait a minute and try again.';
+  }
+  if (/529|overloaded/i.test(raw)) {
+    return "Anthropic is overloaded at the moment — not your quota. Try again shortly.";
+  }
+  if (/401|invalid.*(key|bearer|token)/i.test(raw)) {
+    return 'The AI source rejected its credential — check the 🛠 Management source under ⚙ Settings → AI sources.';
+  }
+  return raw.slice(0, 300);
+}
+
 export async function completeWithProfile(
   secrets: SecretStore,
   profile: AIProfile,

@@ -130,7 +130,8 @@ describe('POST /v1/mgmt/llm/complete (server-side proxy)', () => {
     const res = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: BODY });
     expect(res.statusCode).toBe(502);
     expect(res.json().error).toMatch(/Spare Key/);
-    expect(res.json().error).toMatch(/invalid bearer/);
+    // Raw SDK errors are translated for humans (friendlyLlmError).
+    expect(res.json().error).toMatch(/rejected its credential/);
     await f.close();
   });
 });

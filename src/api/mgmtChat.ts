@@ -6,7 +6,7 @@ import { Broker } from '../mgmt/broker.js';
 import { PendingStore } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { LlmAgent, type AgentSink, type ChatMessage, type ChatModel } from '../mgmt/llm.js';
-import { completeWithProfile, pickMgmtProfile, type MgmtChatRequest } from './mgmtLlm.js';
+import { completeWithProfile, friendlyLlmError, pickMgmtProfile, type MgmtChatRequest } from './mgmtLlm.js';
 import { ownerIdOf } from './principal.js';
 
 /**
@@ -181,7 +181,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       const msgs = await s.llm.respond({ ownerId, ...WEB_WHO }, parsed.data.message, sink, s.history);
       s.history = msgs.slice(-HISTORY_CAP);
     } catch (err) {
-      return reply.code(502).send({ error: String((err as Error).message ?? err).slice(0, 400) });
+      return reply.code(502).send({ error: friendlyLlmError(String((err as Error).message ?? err)) });
     }
     s.transcript.push({ kind: 'user', text: parsed.data.message });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });
