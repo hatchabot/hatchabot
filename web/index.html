@@ -476,8 +476,11 @@
       </span>
     </label>
     <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
-    <div id="setupFieldsRow">
-      <label>Setup fields <span style="color:var(--dim)">— asked when someone imports a shared copy</span></label>
+    <!-- Collapsed by default: the everyday surface is Setup VALUES below;
+         this drawer is the author's field-definition editor, and showing both
+         expanded listed every field twice. -->
+    <details id="setupFieldsRow">
+      <summary style="cursor:pointer;margin:10px 0 4px"><b>Setup fields</b> <span class="sub" style="color:var(--dim)">— field definitions (open to add or edit)</span></summary>
       <div class="sub" style="margin:0 0 6px">Fields someone importing a shared copy fills in — write
         <code>{{key}}</code> where the value should land in SOUL.md/AGENTS.md; sharing asks for any
         <code>{{placeholder}}</code> automatically even without declaring it.</div>
@@ -504,7 +507,7 @@
       <div class="actions" style="justify-content:flex-end;margin-top:6px">
         <button id="paramSaveBtn" onclick="saveSetupFields()">Save fields</button>
       </div>
-    </div>
+    </details>
     <div id="setupValuesRow" hidden>
       <label>Setup values <span style="color:var(--dim)">— this copy's current answers; edit or reset any time</span></label>
       <div class="sub" style="margin:0 0 6px">Standing preferences change — saving re-renders SOUL.md/AGENTS.md
@@ -3144,6 +3147,7 @@ async function openEdit(id, name, tab = 'def') {
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
   renderSetupValues(cur);
   renderParamList();
+  $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
   $('editShared').checked = !!cur?.sharedMemory;
   $('editShared').disabled = otherMembers.length > 0;
   $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
