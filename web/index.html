@@ -998,10 +998,21 @@
   <div class="sub">
     The agent's own scheduled jobs, kept on its volume (they survive rebuilds).
     Turn one on or off, <b>run one now</b> to test it, or delete it. Its result
-    arrives the task's usual way (e.g. a Telegram message). Adding a new task is
-    done by asking the agent in chat, for now.
+    arrives as a message in the agent's chat.
   </div>
   <div id="cronList" style="margin-top:12px"></div>
+  <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
+    <label>New task</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input type="text" id="cronName" placeholder="Name (e.g. Pre-market briefing)" style="flex:1;min-width:160px">
+      <input type="text" id="cronExpr" placeholder="Cron (e.g. 0 8 * * 1-5)" style="width:150px;font-family:ui-monospace,monospace" title="minute hour day month weekday — e.g. 0 8 * * 1-5 is 8:00 on weekdays">
+      <input type="text" id="cronTz" placeholder="Timezone" style="width:170px" title="IANA zone the schedule runs in, e.g. America/New_York">
+    </div>
+    <textarea id="cronMsg" rows="2" placeholder="What to tell the agent when it fires — e.g. Post the pre-market briefing: commodities, index futures, rates, crypto." style="margin-top:6px"></textarea>
+    <div class="actions" style="justify-content:flex-end;margin-top:6px">
+      <button class="primary" id="cronAddBtn" onclick="addCronJob()">Add task</button>
+    </div>
+  </div>
   <div class="err" id="cronErr"></div>
   <div class="actions" style="justify-content:flex-end">
     <button onclick="loadCrons()">Refresh</button>
@@ -4243,9 +4254,22 @@ async function loadCrons() {
     renderCrons(crons);
   } catch (e) { $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
 }
+async function addCronJob() {
+  const name = $('cronName').value.trim(), cron = $('cronExpr').value.trim();
+  const tz = $('cronTz').value.trim(), message = $('cronMsg').value.trim();
+  if (!name || !cron || !message) { $('cronErr').textContent = 'Name, cron expression, and message are all needed.'; return; }
+  $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
+  try {
+    await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: { name, cron, message, tz: tz || undefined } });
+    toast('Task added');
+    $('cronName').value = ''; $('cronExpr').value = ''; $('cronMsg').value = '';
+    await loadCrons();
+  } catch (e) { $('cronErr').textContent = e.message; }
+  finally { $('cronAddBtn').disabled = false; }
+}
 function renderCrons(crons) {
   if (!crons.length) {
-    $('cronList').innerHTML = '<div class="sub">No scheduled tasks yet. Ask the agent in chat to add one.</div>';
+    $('cronList').innerHTML = '<div class="sub">No scheduled tasks yet — add one below.</div>';
     return;
   }
   $('cronList').innerHTML = crons.map(c => {

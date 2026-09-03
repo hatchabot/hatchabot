@@ -69,6 +69,50 @@ export async function listCrons(
   }
 }
 
+export interface AddCronOptions {
+  name: string;
+  /** The prompt fired at the agent when the schedule triggers. */
+  message: string;
+  /** 5/6-field cron expression, e.g. "0 8 * * 1-5". Exactly one of cron/everyMs. */
+  cron?: string;
+  everyMs?: number;
+  /** IANA tz the expression is evaluated in, e.g. "America/New_York". */
+  tz?: string;
+  /** Deliver the run's final text to the agent's chat (what a scheduled
+   *  briefing is FOR — default true). */
+  announce?: boolean;
+}
+
+/**
+ * Create a scheduled task. The one verb this module lacked — AgentClaw could
+ * list/enable/run/delete crons but nothing could CREATE one, so a definition
+ * that *describes* a schedule (the Stock Broker's 8am briefing) never actually
+ * fired (audit backlog; surfaced by Chris 2026-09-04).
+ */
+export async function addCron(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+  opts: AddCronOptions,
+): Promise<{ ok: true; id?: string } | { ok: false; error: string }> {
+  const argv = ['cron', 'add', '--json', '--agent', slug, '--name', opts.name, '--message', opts.message];
+  if (opts.cron) argv.push('--cron', opts.cron);
+  else if (opts.everyMs) argv.push('--every', `${Math.round(opts.everyMs / 60_000)}m`);
+  else return { ok: false, error: 'Give a cron expression or an interval.' };
+  if (opts.tz) argv.push('--tz', opts.tz);
+  if (opts.announce !== false) argv.push('--announce', '--best-effort-deliver');
+  const res = await provider.exec(runtimeRef, argv);
+  if (res.code !== 0) {
+    return { ok: false, error: (res.stderr || res.stdout || 'cron add failed').slice(0, 300) };
+  }
+  try {
+    const parsed = JSON.parse(res.stdout);
+    return { ok: true, id: parsed?.id ? String(parsed.id) : parsed?.job?.id ? String(parsed.job.id) : undefined };
+  } catch {
+    return { ok: true };
+  }
+}
+
 /** Enable or disable a task. Job ids are globally unique, so no agent filter. */
 export async function setCronEnabled(
   provider: RuntimeProvider,

@@ -163,3 +163,40 @@ describe('cron routes', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () => {
+  const as = { 'x-agentclaw-owner': 'user-owner' };
+  it('creates a cron job with expression, tz, and announce delivery', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-9"}', stderr: '' });
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents/a1/crons', headers: as,
+      payload: { name: 'Pre-market briefing', cron: '0 8 * * 1-5', tz: 'America/New_York', message: 'Post the pre-market briefing.' },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ created: true, id: 'job-9' });
+    const call = provider.execLog.find((c) => c[0] === 'cron' && c[1] === 'add')!;
+    expect(call).toContain('--cron'); expect(call).toContain('0 8 * * 1-5');
+    expect(call).toContain('--tz'); expect(call).toContain('America/New_York');
+    expect(call).toContain('--announce'); // a briefing that never posts is a no-op
+    expect(call).toContain('--agent');
+  });
+
+  it('refuses zero or two schedules, and surfaces CLI failure as 502', async () => {
+    const { provider, f } = await world();
+    const none = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'x', message: 'y' } });
+    expect(none.statusCode).toBe(400);
+    const both = await f.inject({
+      method: 'POST', url: '/v1/agents/a1/crons', headers: as,
+      payload: { name: 'x', message: 'y', cron: '0 8 * * *', everyMinutes: 5 },
+    });
+    expect(both.statusCode).toBe(400);
+    provider.execResponses.set('cron add', { code: 1, stdout: '', stderr: 'bad expression' });
+    const bad = await f.inject({
+      method: 'POST', url: '/v1/agents/a1/crons', headers: as,
+      payload: { name: 'x', message: 'y', cron: '0 8 * * 1-5' },
+    });
+    expect(bad.statusCode).toBe(502);
+    expect(bad.json().error).toContain('bad expression');
+  });
+});

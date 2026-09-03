@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.97.0] — 2026-09-04
+
+### Added
+- **Scheduled tasks can be CREATED now** — the verb every interface lacked
+  (a definition could *describe* an 8am briefing; only a real gateway cron
+  fires one). `POST /v1/agents/:id/crons` {name, message, cron|everyMinutes,
+  tz} maps onto `openclaw cron add` with announce-to-chat delivery on by
+  default; the ⏰ Tasks dialog gains a New-task form (name, cron expression,
+  timezone, message).
+- **Telegram group-chat quick help with a live check** (⚙ Settings →
+  Telegram → 👥 Group chats): the two BotFather steps — which no API can
+  change — plus a getMe-backed ✅/⚠ status per toggle
+  (`GET /v1/agents/:id/group-readiness`).
+
 ## [0.96.0] — 2026-09-03
 
 ### Changed

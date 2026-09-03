@@ -28,7 +28,7 @@ import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
-import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
+import { addCron, listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -2794,6 +2794,39 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!agent) return reply;
     const crons = await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
     return { crons };
+  });
+
+  // The missing verb (audit backlog: "no interface creates a cron"): a
+  // definition can DESCRIBE a schedule, but only a real gateway cron fires.
+  app.post<{
+    Params: { id: string };
+    Body: { name?: string; message?: string; cron?: string; everyMinutes?: number; tz?: string; announce?: boolean };
+  }>('/v1/agents/:id/crons', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply, 'add a scheduled task');
+    if (!agent) return reply;
+    const parsed = z
+      .object({
+        name: z.string().trim().min(1).max(80),
+        message: z.string().trim().min(1).max(4000),
+        cron: z.string().trim().min(9).max(64).optional(),
+        everyMinutes: z.number().int().min(1).max(60 * 24 * 30).optional(),
+        tz: z.string().trim().max(64).optional(),
+        announce: z.boolean().optional(),
+      })
+      .refine((b) => !!b.cron !== !!b.everyMinutes, { message: 'give exactly one of cron / everyMinutes' })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const out = await addCron(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, {
+      name: parsed.data.name,
+      message: parsed.data.message,
+      cron: parsed.data.cron,
+      everyMs: parsed.data.everyMinutes ? parsed.data.everyMinutes * 60_000 : undefined,
+      tz: parsed.data.tz,
+      announce: parsed.data.announce,
+    });
+    if (!out.ok) return reply.code(502).send({ error: out.error });
+    trace(agent.id)('cron.created', { name: parsed.data.name, cron: parsed.data.cron, everyMinutes: parsed.data.everyMinutes });
+    return reply.code(201).send({ created: true, id: out.id });
   });
 
   // Per-agent token usage, read from its OpenClaw session store. Accurate usage,
