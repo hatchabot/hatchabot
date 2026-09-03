@@ -21,6 +21,7 @@ import {
   skipPoolOnce,
   slugify,
   MEDIA_KEY_REF,
+  SEARCH_KEY_REF,
 } from '../orchestrator/provision.js';
 import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
@@ -1063,6 +1064,32 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.delete('/v1/media-key', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     await secrets.delete(MEDIA_KEY_REF).catch(() => {});
+    return { set: false };
+  });
+
+  // ---- fleet search key ----------------------------------------------------
+  // One Brave key upgrading EVERY agent's web search from the keyless
+  // DuckDuckGo baseline (search itself is always on). Same shape as the media
+  // key: write-only, injected at provision, per-agent BRAVE_API_KEY overrides.
+  app.get('/v1/search-key', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const set = await secrets.get(SEARCH_KEY_REF).then(() => true, () => false);
+    return { set };
+  });
+
+  app.put<{ Body: { key?: string } }>('/v1/search-key', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const parsed = z.object({ key: z.string().min(1).max(400) }).safeParse(req.body ?? {});
+    if (!parsed.success || !parsed.data.key.trim()) {
+      return reply.code(400).send({ error: 'Paste a Brave Search API key.' });
+    }
+    await secrets.put(SEARCH_KEY_REF, parsed.data.key.trim());
+    return { set: true };
+  });
+
+  app.delete('/v1/search-key', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    await secrets.delete(SEARCH_KEY_REF).catch(() => {});
     return { set: false };
   });
 

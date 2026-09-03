@@ -159,14 +159,14 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
 
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
 
-  // Per-agent web search (connections plumbing): when the agent carries a
-  // search-provider key, turn the managed web_search tool on — OpenClaw
-  // auto-detects the provider from the available API keys, so the key env
-  // var is the whole per-agent story. Written both ways so removing the key
-  // converges on rebuild instead of leaving search half-enabled.
-  cmds.push({
-    argv: ['config', 'set', 'tools.web.search.enabled', patch.enableWebSearch ? 'true' : 'false'],
-  });
+  // Web search is MANDATORY for every agent (Chris, 2026-09-04): always on.
+  // The keyless DuckDuckGo plugin (enabled below) is the baseline; a
+  // BRAVE_API_KEY env var (fleet search key or per-agent) upgrades the
+  // provider — OpenClaw auto-detects from the keys it finds. NOTE the live
+  // fleet ran with this UNSET (= enabled by default); an earlier draft wrote
+  // `false` for keyless agents, which would have disabled search fleet-wide
+  // on the next rebuild — caught before any rebuild ran.
+  cmds.push({ argv: ['config', 'set', 'tools.web.search.enabled', 'true'] });
   // Memory search: OpenClaw's default points at OpenAI embeddings, which no
   // AgentClaw agent has a key for — so semantic recall over MEMORY.md was
   // silently dead fleet-wide (doctor flagged it once the lint sweep landed).

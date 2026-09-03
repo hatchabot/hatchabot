@@ -296,12 +296,10 @@ describe('group-chat access (GroupAccess → openclaw config)', () => {
   });
 });
 
-describe('per-agent web search (connections plumbing)', () => {
+describe('web search is always on (mandatory baseline)', () => {
   const base = { agentId: 'a1', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
-  it('a search key enables the managed tool; absence writes false so key removal converges', () => {
-    const on = buildConfigCommands({ ...base, enableWebSearch: true });
-    expect(argFor(on, 'tools.web.search.enabled')).toBe('true');
-    const off = buildConfigCommands(base);
-    expect(argFor(off, 'tools.web.search.enabled')).toBe('false');
+  it('every agent gets tools.web.search.enabled true — never false (a false write would have disabled the live fleet, whose configs have it unset-and-working)', () => {
+    const cmds = buildConfigCommands(base);
+    expect(argFor(cmds, 'tools.web.search.enabled')).toBe('true');
   });
 });

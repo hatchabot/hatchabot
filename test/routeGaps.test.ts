@@ -224,3 +224,19 @@ describe('group access over HTTP', () => {
     expect(store.getAgent('a1')!.groupAccess).toEqual({ mode: 'room', roomId: '-1000000000001' });
   });
 });
+
+describe('fleet search key routes', () => {
+  it('host-owner gated, write-only lifecycle', async () => {
+    const { f } = await liveWorld();
+    expect((await f.inject({ method: 'GET', url: '/v1/search-key', headers: H })).json()).toEqual({ set: false });
+    const put = await f.inject({ method: 'PUT', url: '/v1/search-key', headers: H, payload: { key: 'BSA-test-123' } });
+    expect(put.statusCode).toBe(200);
+    const got = await f.inject({ method: 'GET', url: '/v1/search-key', headers: H });
+    expect(got.json()).toEqual({ set: true });
+    expect(got.body).not.toContain('BSA-test-123'); // write-only
+    expect((await f.inject({ method: 'DELETE', url: '/v1/search-key', headers: H })).json()).toEqual({ set: false });
+    // not the host owner → 403
+    const stranger = await f.inject({ method: 'GET', url: '/v1/search-key', headers: { 'x-agentclaw-owner': 'someone-else' } });
+    expect(stranger.statusCode).toBe(403);
+  });
+});

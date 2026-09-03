@@ -44,6 +44,12 @@ ARG EMBED_MODEL_SHA256=6fa0c02a9c302be6f977521d399b4de3a46310a4f2621ee0063747881
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client curl procps \
       python3 python3-pip python3-venv \
+      # PDF ingestion with OCR (base, not derived, ON PURPOSE): image-only
+      # pages in scanned PDFs have no text layer, and without local OCR an
+      # agent silently drops them and reports "nothing new" — a silent-fail
+      # class, proven live when the condo agent missed 7 pages of vendor
+      # approvals. Every agent gets handed PDFs eventually.
+      poppler-utils qpdf tesseract-ocr ocrmypdf \
  && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \

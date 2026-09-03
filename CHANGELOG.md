@@ -2,6 +2,29 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.101.0] — 2026-09-04
+
+### Fixed
+- **Averted: v0.100.0 would have disabled web search fleet-wide on the next
+  rebuild.** It wrote `tools.web.search.enabled false` for keyless agents —
+  but the live fleet runs with the key UNSET (= enabled by default) on the
+  DuckDuckGo baseline. Caught by Chris questioning the feature before any
+  rebuild ran. Search is now written explicitly **true for every agent** —
+  it's mandatory, not key-gated.
+
+### Added
+- **Fleet search key** (⚙ Settings → Media): one Brave Search API key
+  upgrades every agent's search provider on rebuild — media-key pattern
+  (write-only secret, host-owner routes GET/PUT/DELETE /v1/search-key,
+  injected as BRAVE_API_KEY at provision). A per-agent BRAVE_API_KEY env var
+  overrides it with the agent's own quota.
+- **PDF/OCR stack in the BASE image** (poppler-utils, qpdf, tesseract-ocr,
+  ocrmypdf): image-only pages in scanned PDFs silently drop without local
+  OCR — a silent-fail class proven live (the condo agent missed 7 pages of
+  vendor approvals). Base, not derived, on purpose: every agent gets handed
+  PDFs eventually. Lands with the next `upgrade-image` run; drift guard
+  added.
+
 ## [0.100.0] — 2026-09-04
 
 ### Added

@@ -115,10 +115,22 @@ describe('heartbeat cadence: sender 30s ↔ receiver 90s window (audit 2026-09-0
   });
 });
 
-describe('search-key names: provision constant ↔ web hint (audit habit)', () => {
-  it('the env-tab hint names a key the provision constant actually honors', async () => {
-    const { SEARCH_KEY_ENV_NAMES } = await import('../src/orchestrator/provision.js');
-    expect(SEARCH_KEY_ENV_NAMES).toContain('BRAVE_API_KEY');
+describe('fleet search key: provision injection ↔ web hint', () => {
+  it('the injected env name and the UI hint agree on BRAVE_API_KEY', async () => {
+    const prov = read('src/orchestrator/provision.ts');
+    expect(prov).toContain("BRAVE_API_KEY: searchKey");
     expect(read('web/index.html')).toContain('BRAVE_API_KEY');
+  });
+});
+
+describe('base image carries the OCR stack (silent-fail class)', () => {
+  // Image-only PDF pages silently drop without local OCR — the condo agent
+  // lost 7 pages of vendor approvals to exactly this. Base, not derived:
+  // every agent gets handed PDFs eventually.
+  it('the Dockerfile installs the PDF/OCR packages', () => {
+    const df = read('docker/Dockerfile.runtime');
+    for (const pkg of ['poppler-utils', 'qpdf', 'tesseract-ocr', 'ocrmypdf']) {
+      expect(df).toContain(pkg);
+    }
   });
 });

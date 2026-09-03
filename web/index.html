@@ -684,8 +684,8 @@
       Injected as environment variables on the next <b>Rebuild</b>. Values are
       <b>write-only</b> — stored encrypted, never shown again; you can only replace or remove
       them. Provider/proxy/loader names are reserved for safety.
-      <br>🔎 Special case: add <code>BRAVE_API_KEY</code> and the next Rebuild turns on this
-      agent's own <b>web search</b> (provider auto-detected from the key).
+      <br>🔎 Special case: <code>BRAVE_API_KEY</code> gives this agent its <b>own</b> Brave
+      search quota, overriding the fleet search key (⚙ Settings → Media).
     </div>
 
     <div id="imagePinRow" style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
@@ -784,6 +784,22 @@
       <input type="password" id="mediaKey" placeholder="Gemini API key" autocomplete="off" style="flex:1;min-width:0">
       <button id="mediaKeySaveBtn" onclick="saveMediaKey()">Save</button>
       <button id="mediaKeyDelBtn" onclick="removeMediaKey()" style="display:none">Remove</button>
+    </div>
+
+    <label style="margin-top:18px">Fleet search key</label>
+    <div class="sub">
+      Every agent has web search built in (keyless DuckDuckGo). Paste one
+      <a href="https://brave.com/search/api/" target="_blank" rel="noopener">Brave Search API key</a>
+      here and the whole fleet upgrades to Brave on each agent's next
+      <b>Rebuild</b> — better results, proper rate limits. A per-agent
+      <code>BRAVE_API_KEY</code> env var overrides it (its own quota).
+      <b>Shared credential</b> — same caveats as the media key above.
+    </div>
+    <div id="searchKeyStatus" style="margin-top:8px;font-size:14px"></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <input type="password" id="searchKey" placeholder="Brave Search API key" autocomplete="off" style="flex:1;min-width:0">
+      <button id="searchKeySaveBtn" onclick="saveSearchKey()">Save</button>
+      <button id="searchKeyDelBtn" onclick="removeSearchKey()" style="display:none">Remove</button>
     </div>
   </section>
 
@@ -1548,6 +1564,38 @@ async function removeMediaKey() {
   catch (e) { toast(e.message, 10000); }
 }
 
+async function loadSearchKey() {
+  try {
+    const r = await api('/v1/search-key');
+    const el = $('searchKeyStatus');
+    if (r.set) {
+      el.style.color = 'var(--ok)';
+      el.innerHTML = '✓ <b>Fleet search key set</b> — agents use Brave on their next Rebuild. <span class="sub">(Write-only; paste a new one to replace.)</span>';
+      $('searchKey').placeholder = 'Replace key…';
+    } else {
+      el.style.color = 'var(--dim)';
+      el.innerHTML = 'No key — agents use the keyless DuckDuckGo baseline.';
+      $('searchKey').placeholder = 'Brave Search API key';
+    }
+    $('searchKeyDelBtn').style.display = r.set ? '' : 'none';
+  } catch { /* not the host owner — leave inert */ }
+}
+async function saveSearchKey() {
+  const key = $('searchKey').value.trim();
+  if (!key) return toast('Paste a Brave Search API key first.');
+  try {
+    await api('/v1/search-key', { method: 'PUT', body: { key } });
+    $('searchKey').value = '';
+    toast('Search key saved — agents upgrade to Brave on their next Rebuild.', 10000);
+    loadSearchKey();
+  } catch (e) { toast(e.message, 10000); }
+}
+async function removeSearchKey() {
+  if (!confirm('Remove the fleet search key? Agents fall back to DuckDuckGo on their next Rebuild.')) return;
+  try { await api('/v1/search-key', { method: 'DELETE' }); loadSearchKey(); }
+  catch (e) { toast(e.message, 10000); }
+}
+
 async function loadPool() {
   const el = $('poolList');
   try {
@@ -2005,6 +2053,7 @@ async function openAiDlg(tab) {
   aiKindChanged();      // populate the model dropdown + prefill for the current kind
   renderAiList();       // instant paint (dropdowns fall back to text until models load)
   loadMediaKey();
+  loadSearchKey();
   renderPeers();
   // Fetch what each of your sources offers, then re-render so the model fields
   // become dropdowns instead of text boxes. Refetched EVERY time this opens (no

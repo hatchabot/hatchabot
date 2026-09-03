@@ -12,12 +12,13 @@ import { autoSnapshot } from './snapshots.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
 
 /**
- * Env-var names whose presence gives an agent its own web search — OpenClaw's
- * managed web_search auto-detects the provider from these keys. Verified in
- * the runtime dist (BRAVE_API_KEY, 2026-09-04); extend as providers are
- * confirmed rather than guessed.
+ * Fleet-wide search key (Brave), following the media-key pattern: stored
+ * once, injected into every agent at provision as BRAVE_API_KEY — upgrading
+ * the whole fleet's search provider from the keyless DuckDuckGo baseline. A
+ * per-agent BRAVE_API_KEY env var overrides it (spread order below).
+ * Verified in the runtime dist that OpenClaw reads this name (2026-09-04).
  */
-export const SEARCH_KEY_ENV_NAMES = ['BRAVE_API_KEY'];
+export const SEARCH_KEY_REF = 'media/brave-api-key';
 import { buildGitSyncScript, gitSyncReason } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
@@ -342,6 +343,7 @@ export async function buildRuntimeSpec(
   // reserved there on purpose) and only when the profile doesn't already
   // provide it (a google-vendor profile's own key wins via spread order).
   const mediaKey = await secrets.get(MEDIA_KEY_REF).catch(() => undefined);
+  const searchKey = await secrets.get(SEARCH_KEY_REF).catch(() => undefined);
   // Subscription with a stored secret = a `claude setup-token` token (macOS
   // hosts, where the login lives in the Keychain and can't be file-mounted).
   // Claude Code reads it from CLAUDE_CODE_OAUTH_TOKEN; no ~/.claude mount.
@@ -368,10 +370,6 @@ export async function buildRuntimeSpec(
   for (const e of store.listAgentEnv(agentId)) {
     perAgentEnv[e.name] = await secrets.get(e.secretRef);
   }
-  // A search-provider key turns the managed web_search tool on for THIS
-  // agent (docs/connections-design.md — per-agent search plumbing). OpenClaw
-  // auto-detects the provider from the key names it finds.
-  const enableWebSearch = SEARCH_KEY_ENV_NAMES.some((n) => n in perAgentEnv);
   return {
     agentId,
     slug: agent.slug,
@@ -394,7 +392,6 @@ export async function buildRuntimeSpec(
         agentId: agent.slug,
         model: effectiveModel(agent, profile),
         models: profile.models,
-        enableWebSearch,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
@@ -414,6 +411,9 @@ export async function buildRuntimeSpec(
     hostname: containerHostname,
     env: {
       ...(mediaKey ? { GEMINI_API_KEY: mediaKey } : {}),
+      // Fleet search key first, per-agent env after — an agent's own
+      // BRAVE_API_KEY (its own quota/bill) wins over the household one.
+      ...(searchKey ? { BRAVE_API_KEY: searchKey } : {}),
       ...perAgentEnv,
       // Orientation, not configuration: the human name of the machine this
       // agent runs on, refreshed by every rebuild/move.
