@@ -16,7 +16,13 @@ export class AnthropicChatModel implements ChatModel {
     apiKey: string,
     private readonly model: string,
   ) {
-    this.#client = new Anthropic({ apiKey });
+    // A Claude Max/Pro setup-token (`claude setup-token`, sk-ant-oat…) is an
+    // OAuth bearer, not an API key — the SDK sends it via authToken. Accepting
+    // both here means AGENTCLAW_MGMT_ANTHROPIC_KEY takes whichever credential
+    // the owner has, same as the fleet's AI profiles do.
+    this.#client = apiKey.startsWith('sk-ant-oat')
+      ? new Anthropic({ authToken: apiKey, apiKey: null })
+      : new Anthropic({ apiKey });
   }
 
   async create(req: {

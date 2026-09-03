@@ -143,9 +143,10 @@
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
-  /* The agent name doubles as the chat deep-link (tg://) — dress like text,
-     reveal the affordance on hover. */
-  a.name { color: inherit; text-decoration: none; }
+  /* The agent name doubles as the chat deep-link (tg://). It must LOOK
+     clickable: accent color, a Telegram-ish ↗ tail, underline on hover. */
+  a.name { color: var(--accent); text-decoration: none; }
+  a.name::after { content: " ↗"; font-size: 12px; font-weight: 400; opacity: .7; }
   a.name:hover { text-decoration: underline; }
   .chip {
     font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
