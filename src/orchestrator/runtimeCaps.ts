@@ -25,6 +25,11 @@ const PROBES: Array<{ key: string; cmd: string }> = [
   { key: 'python', cmd: 'python3 --version 2>/dev/null' },
   { key: 'git', cmd: 'git --version 2>/dev/null' },
   { key: 'gog', cmd: 'gog --version 2>/dev/null | head -1' },
+  // PDF/OCR stack (base image since 2026-09-04 — the silent scanned-page fix)
+  { key: 'tesseract', cmd: 'tesseract --version 2>&1 | head -1' },
+  { key: 'ocrmypdf', cmd: 'ocrmypdf --version 2>/dev/null | head -1' },
+  { key: 'pdftotext', cmd: 'pdftotext -v 2>&1 | head -1' },
+  { key: 'qpdf', cmd: 'qpdf --version 2>/dev/null | head -1' },
 ];
 /** Deliberately-absent extras — surfaced so "can it?" has a truthful no. */
 const ABSENT_PROBES = ['ffmpeg', 'whisper', 'chromium'];

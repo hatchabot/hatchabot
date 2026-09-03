@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.101.1] — 2026-09-04
+
+### Changed
+- **Settings → Runtime documents what the base image carries** (OpenClaw,
+  Claude CLI, gog, embedding model, the PDF/OCR stack) and points at the
+  Fleet search key; the live capability probe now reports tesseract /
+  ocrmypdf / pdftotext / qpdf versions, so the list can't drift from the
+  image.
+- **🏷 Sync name is name-aware**: the card fetches the bot's live Telegram
+  display name (getMe, cached 10 min per agent, invalidated on rename) —
+  the button greys out when it already matches, and lights amber with a
+  "currently named X" tooltip when it doesn't.
+
 ## [0.101.0] — 2026-09-04
 
 ### Fixed

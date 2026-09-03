@@ -1787,6 +1787,27 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return reply.code(202).send(agent);
   });
 
+  // The bot's live Telegram DISPLAY name (getMe first_name), so the card's
+  // Sync-name button can grey out when it already matches. Names change
+  // rarely: cache 10 min per agent, invalidate on a successful sync/rename.
+  const botNameCache = new Map<string, { fetchedAt: number; value?: string }>();
+  const botDisplayNameFor = async (agentId: string, secretRef: string): Promise<string | undefined> => {
+    const hit = botNameCache.get(agentId);
+    if (hit && Date.now() - hit.fetchedAt < 10 * 60_000) return hit.value;
+    let value: string | undefined;
+    try {
+      const token = await secrets.get(secretRef);
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(4000) });
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { first_name?: string } };
+      if (body.ok) value = body.result?.first_name;
+    } catch {
+      /* offline / rate-limited — omit rather than fail or churn the cache */
+      return hit?.value;
+    }
+    botNameCache.set(agentId, { fetchedAt: Date.now(), value });
+    return value;
+  };
+
   // "Last active" = newest OpenClaw session update inside the runtime. The
   // CLI costs ~1s to start in-container, and the app polls the agent list
   // every few seconds — so cache per agent and refresh at most once a minute.
@@ -1858,6 +1879,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           ...(role === 'owner' ? {} : { paramValues: undefined }),
           deepLink: chan?.deepLink,
           botUsername: chan?.accountId,
+          /** Live Telegram display name (cached 10 min) — the Sync-name
+           *  button greys out when it already matches the agent. */
+          botDisplayName: chan && a.state === 'RUNNING' ? await botDisplayNameFor(a.id, chan.secretRef) : undefined,
           /** Pool-leased bots auto-recycle on delete; pasted ones are offered
            *  a trip INTO the pool — the app needs to know which is which. */
           botPooled: chan ? deps.channel.pool.owns(chan.accountId) : undefined,
@@ -4397,6 +4421,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         },
       );
     };
+    // The card's Sync button greys off this cache — a stale entry after a
+    // successful rename would keep the button lit (or grey it wrongly).
+    botNameCache.delete(agent.id);
     const pooled = deps.channel.pool.owns(chan.accountId);
     if (pooled) {
       await deps.channel.syncDisplayName?.(chan.accountId, agent.name);
