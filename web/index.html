@@ -643,6 +643,19 @@
         <span id="tgGroupStatus" class="sub"></span>
       </div>
       <div id="tgGroupResult" style="margin-top:6px"></div>
+
+      <label style="margin-top:12px">Who may talk to it in groups</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="tgGroupMode" style="width:auto" onchange="onGroupModeChange()">
+          <option value="members">Members only (default) — people you've admitted</option>
+          <option value="off">Nobody — ignore groups entirely</option>
+          <option value="room">Everyone in ONE chosen room (mention-gated)</option>
+        </select>
+        <select id="tgGroupRoom" style="display:none;width:auto"></select>
+        <button id="tgGroupFindBtn" style="display:none" onclick="findGroupRooms()">Find rooms</button>
+        <button class="primary" onclick="saveGroupAccess()">Save</button>
+      </div>
+      <div class="sub" id="tgGroupModeHelp" style="margin-top:4px"></div>
     </div>
   </section>
 
@@ -3208,6 +3221,7 @@ async function openEdit(id, name, tab = 'def') {
   populateDerivedDatalist();
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
   renderSetupValues(cur);
+  renderGroupAccess(cur);
   renderParamList();
   $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
   $('editShared').checked = !!cur?.sharedMemory;
@@ -4133,6 +4147,59 @@ function renderHealth(h) {
     }
   }
   $('healthBody').innerHTML = body + rows.join('');
+}
+
+function onGroupModeChange() {
+  const room = $('tgGroupMode').value === 'room';
+  $('tgGroupRoom').style.display = room ? '' : 'none';
+  $('tgGroupFindBtn').style.display = room ? '' : 'none';
+  $('tgGroupModeHelp').textContent = room
+    ? '⚠ In that room, BEING IN THE ROOM is the invite — group admins control who that is. The agent only answers @mentions there. Add the bot to the group, say anything in it, then Find rooms.'
+    : $('tgGroupMode').value === 'off'
+      ? 'The agent will not respond in any group.'
+      : 'Groups work as a shared surface for people already admitted; anyone else in the room is ignored.';
+}
+
+function renderGroupAccess(a) {
+  const ga = a?.groupAccess ?? { mode: 'members' };
+  $('tgGroupMode').value = ga.mode;
+  if (ga.mode === 'room' && ga.roomId) {
+    $('tgGroupRoom').innerHTML = `<option value="${esc(ga.roomId)}">room ${esc(ga.roomId)}</option>`;
+  }
+  onGroupModeChange();
+}
+
+async function findGroupRooms() {
+  const btn = $('tgGroupFindBtn');
+  btn.disabled = true;
+  try {
+    const { rooms } = await api(`/v1/agents/${editAgentId}/group-chats`);
+    if (!rooms.length) {
+      toast('No group chats seen yet — add the bot to the group (privacy OFF), say anything in it, then try again.');
+      return;
+    }
+    const cur = $('tgGroupRoom').value;
+    $('tgGroupRoom').innerHTML = rooms
+      .map(r => `<option value="${esc(r.id)}"${r.id === cur ? ' selected' : ''}>room ${esc(r.id)}</option>`).join('');
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+}
+
+async function saveGroupAccess() {
+  const mode = $('tgGroupMode').value;
+  const roomId = $('tgGroupRoom').value;
+  if (mode === 'room' && !roomId) { toast('Pick the room first (Find rooms).'); return; }
+  try {
+    // Always store the explicit mode — 'members' included. A cleared setting
+    // would skip the config write on rebuild and let a stale open-room entry
+    // survive on the volume.
+    await api(`/v1/agents/${editAgentId}`, {
+      method: 'PATCH',
+      body: { groupAccess: { mode, ...(mode === 'room' ? { roomId } : {}) } },
+    });
+    toast('Saved — applies on the next Rebuild.');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
 }
 
 async function checkGroupReadiness() {

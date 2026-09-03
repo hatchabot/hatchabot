@@ -247,6 +247,8 @@ export class Store {
       // setup values be edited or reset later without a re-import.
       `ALTER TABLE agents ADD COLUMN param_values TEXT`,
       `ALTER TABLE agents ADD COLUMN param_files TEXT`,
+      // Telegram group-chat access (domain/types.ts GroupAccess), JSON.
+      `ALTER TABLE agents ADD COLUMN group_access TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -1436,6 +1438,12 @@ export class Store {
 
   /** A configured copy's editable state: current values + the raw template
    *  layer they render into. Set at import; values updated on later edits. */
+  setAgentGroupAccess(id: string, ga: { mode: string; roomId?: string } | null): void {
+    this.db
+      .prepare(`UPDATE agents SET group_access = ?, updated_at = ? WHERE id = ?`)
+      .run(ga ? JSON.stringify(ga) : null, new Date().toISOString(), id);
+  }
+
   setAgentParamState(
     id: string,
     values: Record<string, string> | null,
@@ -1874,6 +1882,7 @@ function rowToAgent(r: any): Agent {
     parameters: r.params ? safeJson(r.params, undefined) : undefined,
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,
     paramFiles: r.param_files ? safeJson(r.param_files, undefined) : undefined,
+    groupAccess: r.group_access ? safeJson(r.group_access, undefined) : undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

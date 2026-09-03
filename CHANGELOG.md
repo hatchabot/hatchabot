@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.98.0] — 2026-09-04
+
+### Added
+- **Group-chat access policy, per agent** (⚙ Settings → Telegram → 👥):
+  *Members only* (default — matches OpenClaw's own allowlist: an accidental
+  addee is ignored), *Nobody*, or *one bound room* where room membership is
+  the invite — `groupPolicy: open` scoped to a single chat id with
+  `requireMention`, never channel-wide, so the accident blast radius is the
+  one room the owner chose (their explicit security requirement). Rooms are
+  discovered from the gateway's group sessions ("Find rooms" — add the bot,
+  say anything in the room, pick it). Mode changes CONVERGE on rebuild (the
+  groups map is always rewritten, so a stale open-room entry can't survive a
+  switch back). New: `agents.group_access`, PATCH `groupAccess`,
+  `GET /v1/agents/:id/group-chats`.
+
 ## [0.97.0] — 2026-09-04
 
 ### Added

@@ -156,3 +156,32 @@ describe('DELETE /v1/agents/:id/members/:userId', () => {
     expect(owner.statusCode).toBeGreaterThanOrEqual(400); // never the owner seat
   });
 });
+
+describe('group access over HTTP', () => {
+  it('PATCH stores the mode; room mode requires the bound id; discovery parses group sessions', async () => {
+    const { store, f, provider } = await liveWorld();
+    // room without id → refused
+    const bad = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { groupAccess: { mode: 'room' } } });
+    expect(bad.statusCode).toBe(400);
+
+    // discovery: only group sessions surface, deduped
+    provider.execResponses.set('sessions list', {
+      code: 0,
+      stdout: JSON.stringify({ sessions: [
+        { key: 'agent:kitchen:main' },
+        { key: 'agent:kitchen:telegram:group:-1000000000001' },
+        { key: 'agent:kitchen:telegram:group:-1000000000001' },
+      ] }),
+      stderr: '',
+    });
+    const rooms = (await f.inject({ method: 'GET', url: '/v1/agents/a1/group-chats', headers: H })).json().rooms;
+    expect(rooms).toEqual([{ id: '-1000000000001', key: 'agent:kitchen:telegram:group:-1000000000001' }]);
+
+    const ok = await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { groupAccess: { mode: 'room', roomId: '-1000000000001' } },
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.groupAccess).toEqual({ mode: 'room', roomId: '-1000000000001' });
+  });
+});

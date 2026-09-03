@@ -394,6 +394,7 @@ export async function buildRuntimeSpec(
           botToken,
           dmPolicy: 'pairing',
           allowFrom,
+          groupAccess: agent.groupAccess,
         },
       },
     },

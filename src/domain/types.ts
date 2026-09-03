@@ -136,6 +136,8 @@ export interface Agent {
    *  SOUL/AGENTS text + persona, kept so values can be changed LATER without
    *  a re-import. Absent on agents that aren't configured template copies. */
   paramFiles?: { soul?: string; agents?: string; persona?: string };
+  /** Telegram group-chat access; absent = OpenClaw's default (members-only). */
+  groupAccess?: GroupAccess;
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */
   gatewayPort?: number;
   /** Gateway auth token for that Control UI. */
@@ -234,6 +236,22 @@ export interface TemplateParam {
   default?: string;
   options?: string[];
   target: 'soul' | 'agents' | 'env';
+}
+
+/**
+ * How an agent treats Telegram GROUP chats. DM pairing stays the core access
+ * model; groups layer on top of it:
+ *  - 'off'     — the agent ignores groups entirely.
+ *  - 'members' — (OpenClaw's own default) only already-admitted members are
+ *                answered in groups; an accidental addee is ignored.
+ *  - 'room'    — ONE bound group id is open: being in that room is the
+ *                invite (mention-gated). Never channel-wide — the accident
+ *                blast radius is exactly one room the owner chose.
+ */
+export interface GroupAccess {
+  mode: 'off' | 'members' | 'room';
+  /** Telegram chat id of the bound room (mode 'room'), e.g. "-1001234…". */
+  roomId?: string;
 }
 
 export type DerivedImageStatus = 'BUILDING' | 'READY' | 'FAILED';

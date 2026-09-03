@@ -1931,6 +1931,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             })
             .nullable()
             .optional(),
+          /**
+           * Telegram group access: off | members | room (one bound chat id,
+           * mention-gated open). Applied on the next rebuild. `null` clears
+           * back to OpenClaw's default (members-only).
+           */
+          groupAccess: z
+            .object({
+              mode: z.enum(['off', 'members', 'room']),
+              roomId: z.string().regex(/^-?\d{1,20}$/).optional(),
+            })
+            .refine((g) => g.mode !== 'room' || !!g.roomId, {
+              message: 'room mode needs the bound group chat id',
+            })
+            .nullable()
+            .optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1945,13 +1960,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         parsed.data.sharedPaths === undefined &&
         group === undefined &&
         parsed.data.image === undefined &&
-        parsed.data.parameters === undefined
+        parsed.data.parameters === undefined &&
+        parsed.data.groupAccess === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
 
       if (parsed.data.parameters !== undefined) {
         store.setAgentParameters(agent.id, parsed.data.parameters);
+      }
+
+      if (parsed.data.groupAccess !== undefined) {
+        store.setAgentGroupAccess(agent.id, parsed.data.groupAccess);
       }
 
       if (persona !== undefined) {
@@ -3202,6 +3222,34 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     } catch {
       return reply.code(502).send({ error: 'Couldn’t reach Telegram — try again.' });
     }
+  });
+
+  /**
+   * Group rooms the gateway has SEEN — for binding one in 'room' mode. A
+   * group session exists once any admitted member has spoken in the room
+   * (members-only default lets their messages through), so the flow is: add
+   * the bot to the group, say anything in it, then pick it here.
+   */
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/group-chats', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef || agent.state !== 'RUNNING') {
+      return reply.code(409).send({ error: 'Start the agent to look for its group chats.' });
+    }
+    const res = await providerFor(agent.hostId).exec(agent.runtimeRef, [
+      'sessions', 'list', '--agent', agent.slug, '--json',
+    ]);
+    if (res.code !== 0) return reply.code(502).send({ error: 'The gateway didn’t answer.' });
+    const rooms: Array<{ id: string; key: string }> = [];
+    try {
+      const sessions: Array<{ key?: string }> = JSON.parse(res.stdout).sessions ?? [];
+      for (const s of sessions) {
+        const m = /(?:^|:)group[:_](-?\d{1,20})/.exec(s.key ?? '');
+        if (m && !rooms.some((r) => r.id === m[1])) rooms.push({ id: m[1]!, key: s.key! });
+      }
+    } catch {
+      /* unparsable list → no rooms */
+    }
+    return { rooms };
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/bot-token', async (req, reply) => {

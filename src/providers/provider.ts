@@ -107,6 +107,11 @@ export interface OpenClawConfigPatch {
      */
     dmPolicy: 'pairing' | 'allowlist';
     allowFrom?: string[];
+    /**
+     * Group-chat access (see domain/types.ts GroupAccess). Absent = leave the
+     * runtime's group config untouched (OpenClaw's own default: allowlist).
+     */
+    groupAccess?: { mode: 'off' | 'members' | 'room'; roomId?: string };
   };
 }
 

@@ -260,3 +260,38 @@ describe('buildConfigCommands multi-model', () => {
     ]);
   });
 });
+
+describe('group-chat access (GroupAccess → openclaw config)', () => {
+  const base = {
+    agentId: 'a1', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x',
+  };
+  const tg = (groupAccess?: { mode: 'off' | 'members' | 'room'; roomId?: string }) => ({
+    ...base,
+    telegram: { accountId: 'b', botToken: 't', dmPolicy: 'pairing' as const, allowFrom: ['1'], groupAccess },
+  });
+
+  it('absent = the config is left alone (OpenClaw default: members-only)', () => {
+    const cmds = buildConfigCommands(tg(undefined));
+    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBeUndefined();
+    expect(argFor(cmds, 'channels.telegram.groups')).toBeUndefined();
+  });
+
+  it("'off' disables groups; groups map is emptied so nothing stale survives", () => {
+    const cmds = buildConfigCommands(tg({ mode: 'off' }));
+    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('disabled');
+    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
+  });
+
+  it("'room' opens exactly ONE bound chat, mention-gated — never channel-wide", () => {
+    const cmds = buildConfigCommands(tg({ mode: 'room', roomId: '-1001234567890' }));
+    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('allowlist'); // channel stays closed
+    const groups = JSON.parse(argFor(cmds, 'channels.telegram.groups')!);
+    expect(groups).toEqual({ '-1001234567890': { groupPolicy: 'open', requireMention: true } });
+  });
+
+  it("switching back to 'members' converges: policy allowlist, groups emptied", () => {
+    const cmds = buildConfigCommands(tg({ mode: 'members' }));
+    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('allowlist');
+    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
+  });
+});

@@ -47,7 +47,12 @@ lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 only sees /commands and @mentions). Neither is settable by API, but ⚙
 Settings → Telegram → **👥 Group chats** shows the quick-help steps and a
 live check of both toggles for that bot (re-add the bot to existing groups
-after flipping privacy — Telegram isn't retroactive).
+after flipping privacy — Telegram isn't retroactive). The same panel sets
+**who may talk to it in groups**: *Members only* (default — the group is a
+shared surface for people you've admitted; accidental addees are ignored),
+*Nobody*, or *one chosen room* where being in the room is the invite —
+mention-gated, bound to a single chat id, never channel-wide. DM pairing
+stays the core access model. Applies on the next Rebuild.
 
 Tap the **agent's name** on its card (it's the Telegram deep-link; Telegram
 Web lives in the ⋯ menu) and say hi. Your first-ever message claims
