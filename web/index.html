@@ -622,6 +622,28 @@
       <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
       <button id="botTokenBtn" onclick="showBotToken()">Show</button>
     </div>
+
+    <div style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
+      <label>👥 Group chats <span style="color:var(--dim)">— letting this bot join and read a group</span></label>
+      <div class="sub" style="margin:0 0 8px">
+        Two <b>@BotFather</b> settings control this, and neither can be changed by
+        API — message @BotFather in Telegram:
+        <ol style="margin:6px 0 6px 18px;padding:0">
+          <li><code>/setjoingroups</code> → pick this bot → <b>Enable</b> (may it be added to groups)</li>
+          <li><code>/setprivacy</code> → pick this bot → <b>Disable</b> (may it read <i>all</i> group messages —
+            left on, it only sees /commands and @mentions, which reads as "the bot ignores the group")</li>
+        </ol>
+        Then add the bot to the group like any member. <b>If it was already in the
+        group when you changed privacy, remove and re-add it</b> — Telegram doesn't
+        apply the change retroactively. The agent still answers only admitted
+        members, so pair everyone in the group first.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="tgGroupBtn" onclick="checkGroupReadiness()">Check this bot's settings</button>
+        <span id="tgGroupStatus" class="sub"></span>
+      </div>
+      <div id="tgGroupResult" style="margin-top:6px"></div>
+    </div>
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
@@ -4100,6 +4122,23 @@ function renderHealth(h) {
     }
   }
   $('healthBody').innerHTML = body + rows.join('');
+}
+
+async function checkGroupReadiness() {
+  const btn = $('tgGroupBtn'), out = $('tgGroupResult'), st = $('tgGroupStatus');
+  btn.disabled = true; st.textContent = 'asking Telegram…'; out.innerHTML = '';
+  try {
+    const r = await api(`/v1/agents/${editAgentId}/group-readiness`);
+    st.textContent = `@${r.username}`;
+    const row = (ok, okText, badText) =>
+      `<div class="pair"><span class="grow">${ok ? '✅ ' + okText : '⚠ ' + badText}</span></div>`;
+    out.innerHTML =
+      row(r.canJoinGroups, 'Can be added to groups', 'Groups are OFF — @BotFather → /setjoingroups → Enable') +
+      row(r.canReadAllGroupMessages,
+        'Privacy mode off — it sees every group message',
+        'Privacy mode is ON — @BotFather → /setprivacy → Disable (then remove & re-add the bot to existing groups)');
+  } catch (e) { st.textContent = ''; out.innerHTML = `<div class="sub">⚠ ${esc(e.message)}</div>`; }
+  finally { btn.disabled = false; }
 }
 
 async function showBotToken() {

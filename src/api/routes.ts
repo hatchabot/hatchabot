@@ -3138,6 +3138,39 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Owner-facing reveal of the agent's bot token — for recycling a hand-made
   // bot into a new agent after deleting this one. Owner-authed like all /v1.
+  /**
+   * Group-chat readiness: BotFather's two group settings can NOT be changed
+   * by any API (they live only in the BotFather chat), but getMe REPORTS
+   * them — so the app can show live status next to the quick-help steps
+   * instead of leaving the owner to guess which toggle they missed.
+   */
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/group-readiness', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    const channel = agent && store.getChannelForAgent(agent.id);
+    if (!channel) return reply.code(404).send({ error: 'Not found' });
+    try {
+      const token = await secrets.get(channel.secretRef);
+      const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        result?: { username?: string; can_join_groups?: boolean; can_read_all_group_messages?: boolean };
+      };
+      if (!body.ok || !body.result) {
+        return reply.code(502).send({ error: 'Telegram didn’t answer for this bot — try again.' });
+      }
+      return {
+        username: body.result.username,
+        canJoinGroups: !!body.result.can_join_groups,
+        // false = privacy mode ON (the usual "bot ignores the group" cause).
+        canReadAllGroupMessages: !!body.result.can_read_all_group_messages,
+      };
+    } catch {
+      return reply.code(502).send({ error: 'Couldn’t reach Telegram — try again.' });
+    }
+  });
+
   app.get<{ Params: { id: string } }>('/v1/agents/:id/bot-token', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);

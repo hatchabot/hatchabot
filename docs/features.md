@@ -42,6 +42,13 @@ instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 `AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
+**Group chats**: two @BotFather settings gate a bot in a group —
+`/setjoingroups` Enable and `/setprivacy` Disable (privacy left on = the bot
+only sees /commands and @mentions). Neither is settable by API, but ⚙
+Settings → Telegram → **👥 Group chats** shows the quick-help steps and a
+live check of both toggles for that bot (re-add the bot to existing groups
+after flipping privacy — Telegram isn't retroactive).
+
 Tap the **agent's name** on its card (it's the Telegram deep-link; Telegram
 Web lives in the ⋯ menu) and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth
