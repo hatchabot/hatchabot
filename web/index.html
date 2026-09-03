@@ -2966,6 +2966,7 @@ function agentCard(a) {
           ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
           : `<span class="name">${esc(a.name)}</span>`}
         ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
+        ${a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona) ? `<div class="sub" style="color:var(--warn)">⚙ Template not configured — <a onclick="openEdit('${a.id}','${jsq(a.name)}','def')" style="cursor:pointer;text-decoration:underline">fill its Setup values</a> to complete the description.</div>` : ''}
       </div>
       <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
     </div>
