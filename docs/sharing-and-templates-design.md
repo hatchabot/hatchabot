@@ -5,8 +5,8 @@
 declare fields on the agent (📖 Definition → Setup fields, or just hand-write a
 `{{placeholder}}`: export auto-derives it as a required text field), the
 importer fills a generated form (web file-import and inbox accept; CLI prompts)
-and values substitute before the agent boots. Phase 2b (typed `env:` /
-`datasource:` targets) remains design.*
+and values substitute before the agent boots. Phase 2b `env` targets SHIPPED
+(v0.95.0 — see the `target` list below); `datasource:` targets remain design.*
 
 Two requested features, both **extensions of mechanisms that already exist**:
 

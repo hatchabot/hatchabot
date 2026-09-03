@@ -17,6 +17,8 @@
  *   AGENTCLAW_URL                    control plane base URL (default http://localhost:8080)
  *   AGENTCLAW_MGMT_OWNER             owner id for audit/proposer records (default "local")
  *   AGENTCLAW_MGMT_ANTHROPIC_KEY     dedicated LLM credential — overrides the proxy path
+ *                                    (an ambient ANTHROPIC_API_KEY does the same — unset
+ *                                    it in the service env if you want the proxy path)
  *   AGENTCLAW_MGMT_MODEL             model for the dedicated-key path (default claude-sonnet-5)
  *   AGENTCLAW_MGMT_PAIRING_POLL_MS   approval-push poll interval (default 20000)
  */

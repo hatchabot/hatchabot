@@ -40,12 +40,13 @@ async function world() {
   store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Mine', slug: 'mine', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
   const f = Fastify();
   const provider = new MockProvider();
+  const secrets = new MemSecrets();
   await registerRoutes(f, {
-    store, secrets: new MemSecrets(),
+    store, secrets,
     providers: new Map([['mock', provider]]),
     channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
   });
-  return { store, f, provider };
+  return { store, f, provider, secrets };
 }
 
 describe('PATCH /v1/agents/:id parameters', () => {
@@ -154,6 +155,43 @@ describe('env-target setup fields (sharing Phase 2b)', () => {
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/Brave Search key/);
     expect(store.listAgents(OWNER)).toHaveLength(1); // only the pre-seeded a1
+  });
+
+  it('a failing secret write rolls the fresh agent back whole (audit 2026-09-04 M4)', async () => {
+    const { store, f, secrets } = await world();
+    const realPut = secrets.put.bind(secrets);
+    secrets.put = async (ref: string, v: string) => {
+      if (ref.startsWith('agent-env/')) throw new Error('disk full');
+      return realPut(ref, v);
+    };
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ style: 'value', brave_api_key: 'brv-x' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: ENV_TEMPLATE,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/setup credentials/);
+    // no half-made agent survives — slug free for the retry
+    expect(store.listAgents(OWNER).filter((a) => a.name === 'Broker')).toHaveLength(0);
+    expect(store.listAllActiveAgents().some((a) => a.slug === 'broker')).toBe(false);
+  });
+
+  it('inbox accept materializes env values through the same path', async () => {
+    const { store, f } = await world();
+    store.insertShare({
+      id: 'sh-env', agentName: 'Broker', fromOwner: 'sender', fromEmail: 'sender@example.com',
+      toEmail: 'me@example.com', toOwner: OWNER, blob: ENV_TEMPLATE,
+      message: 'here', createdAt: new Date().toISOString(),
+    } as any);
+    const res = await f.inject({
+      method: 'POST', url: '/v1/inbox/sh-env/accept', headers: H,
+      payload: { values: { style: 'growth', brave_api_key: 'brv-inbox' } },
+    });
+    expect(res.statusCode).toBe(201);
+    const id = res.json().id as string;
+    expect(store.listAgentEnv(id).map((e) => e.name)).toEqual(['BRAVE_API_KEY']);
+    expect(res.body).not.toContain('brv-inbox');
   });
 
   it('a reserved key cannot be declared as an env field', async () => {

@@ -157,8 +157,12 @@ backup as the same agent or standing a shared template up as a fresh one.
 
 ## Rules of the road
 
-- **The file is a credential.** It contains the agent's Telegram bot token.
-  Treat it like a password; delete it after a successful import.
+- **The file is a credential.** It contains the agent's Telegram bot token
+  AND (since v0.94.0) every env var's name **and value** — the whole point is
+  that the agent arrives working, so the archive holds its secrets. Treat it
+  like a password; delete it after a successful import. Import re-validates
+  every env name against the reserved-name policy, so a tampered archive
+  can't smuggle a proxy/credential/loader variable.
 - **One poller per bot.** Download leaves the source agent STOPPED. Keep it
   that way (or delete it) once the import is live — two copies polling the
   same bot flip-flop messages between them. Telegram needs no changes:

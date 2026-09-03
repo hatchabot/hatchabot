@@ -10,7 +10,7 @@ import {
   type ProvisionDeps,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
-import { reservedEnvProblem } from './envPolicy.js';
+import { ENV_NAME_RE, reservedEnvProblem } from './envPolicy.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -136,7 +136,7 @@ const ManifestSchema = z.object({
       z.object({
         // Same shape rule as the env route; the reserved-name POLICY is
         // enforced at import time via envPolicy.ts (the archive is untrusted).
-        name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(128),
+        name: z.string().regex(ENV_NAME_RE).max(128),
         value: z.string().min(1).max(8192),
       }),
     )

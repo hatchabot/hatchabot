@@ -50,7 +50,7 @@ export interface AgentSink {
 }
 
 export const SYSTEM_PROMPT = [
-  'You are the AgentClaw fleet-management assistant, operated over Telegram by the owner.',
+  'You are the AgentClaw fleet-management assistant, operated by the owner (over Telegram or the web chat pane).',
   'Help them inspect and operate their agents using ONLY the provided tools.',
   '',
   'How actions work:',

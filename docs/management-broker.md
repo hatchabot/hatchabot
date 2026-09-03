@@ -293,6 +293,13 @@ construction** (status flips on first resolve), TTL is trivial to enforce, and
 the button stays tiny. The id is a capability — random and short-lived — not a
 secret to verify.
 
+Since v0.95.0 the web chat pane (control-interfaces.md Phase C) runs a second
+instance of this same broker **in-process per owner**: it holds no cli-token —
+its ApiClient dispatches through the server's own router carrying the caller's
+auth headers — and web confirmations bind to a synthetic proposer
+(`chatId 0`) in that session's own PendingStore. Everything below about
+single-use/TTL/user-binding applies unchanged.
+
 **Confirm handler (on every callback query):**
 
 ```
@@ -312,6 +319,13 @@ onCallback(cb):
   audit('mutate.confirmed', rec, result)
 ```
 
+For AUTHORING tools (v0.95.0) the flow above is DETACHED: the tap is answered
+and the card edited to "⏳ Working…" first (proposer-bound peek), then
+`brokerCall` runs off the update loop and the card edit is the completion
+signal — a confirmed create waits for provisioning (≤150s) and must not block
+every other message behind it. The claim is still the synchronous single-use
+gate, so a double-tap can't double-run.
+
 Replay, forgery, and confused-deputy are all closed: the id is unguessable and
 single-use, TTL-bounded, and bound to the proposing user + chat; a stale or
 duplicate callback finds `status != 'pending'` and no-ops.
@@ -320,9 +334,10 @@ duplicate callback finds `status != 'pending'` and no-ops.
 
 ## 7. Policy the broker enforces (independently of the model)
 
-- **Read-only default.** Mutate tools return `READ_ONLY_MODE` until an
-  allowlisted `/mode readwrite` arms them. (No idle auto-disarm exists yet —
-  arming is manual and process-global; a `/mode readonly` or restart disarms.)
+- **Read-only default.** Mutate tools return `READ_ONLY_MODE` until armed.
+  (No idle auto-disarm exists yet; arming is manual. Telegram's `/mode
+  readwrite` is process-global across its allowlist; the web pane's "Allow
+  changes" toggle is per-owner-session.)
 - **Rate limit.** One global window over mutate *proposals* (default 20/min);
   `RATE_LIMITED` past the cap. Reads are unmetered.
 - **Kill switch.** `/pause` sets a flag that fails every tool at the broker door.

@@ -34,7 +34,38 @@ interface ChatSession {
   history: ChatMessage[];
   /** What the pane renders on reload — display-shaped, capped. */
   transcript: Array<{ kind: 'user' | 'assistant'; text: string }>;
+  /** One turn at a time: concurrent POSTs raced on `history` and silently
+   *  lost whole turns (audit 2026-09-04). */
+  busy: boolean;
   setAuth: (req: FastifyRequest) => void;
+}
+
+/**
+ * Cap history WITHOUT breaking the Messages-API grammar. A blind
+ * `slice(-cap)` could start the window on a user message whose content is
+ * tool_results referencing a trimmed-off tool_use — a hard 400 that made
+ * long api-key sessions permanently broken (audit 2026-09-04). Trim the
+ * front to the first plain-text user turn, and the tail back to the last
+ * assistant message that isn't awaiting a tool_result.
+ */
+export function sanitizeHistory(msgs: ChatMessage[], cap: number): ChatMessage[] {
+  const hasBlock = (m: ChatMessage, type: string): boolean =>
+    Array.isArray(m.content) && m.content.some((b) => (b as { type?: string }).type === type);
+  // Tail: never end mid-exchange (assistant tool_use with no result, or a
+  // dangling user message the next POST would double up on).
+  let end = msgs.length;
+  while (end > 0) {
+    const m = msgs[end - 1]!;
+    if (m.role === 'assistant' && !hasBlock(m, 'tool_use')) break;
+    end--;
+  }
+  const closed = msgs.slice(0, end);
+  // Front: after capping, drop until a plain-text user turn opens the window.
+  let out = closed.slice(-cap);
+  while (out.length && !(out[0]!.role === 'user' && typeof out[0]!.content === 'string')) {
+    out = out.slice(1);
+  }
+  return out;
 }
 
 const HISTORY_CAP = 30; // model-side turns kept
@@ -54,9 +85,22 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   const complete = deps.mgmtLlmComplete ?? completeWithProfile;
   const sessions = new Map<string, ChatSession>();
 
+  // Sweep every session's pending store — the bot process sweeps its own
+  // singleton, but these per-owner stores had nobody doing it and resolved
+  // authoring cards carry multi-KB specs (audit 2026-09-04).
+  setInterval(() => {
+    for (const s of sessions.values()) s.broker.pending.sweep();
+  }, 60_000).unref();
+
   const sessionFor = (ownerId: string): ChatSession => {
     const existing = sessions.get(ownerId);
-    if (existing) return existing;
+    if (existing) {
+      // LRU touch: re-insert so eviction drops the least-recently-USED owner,
+      // not the first-ever-created one.
+      sessions.delete(ownerId);
+      sessions.set(ownerId, existing);
+      return existing;
+    }
     if (sessions.size >= MAX_SESSIONS) {
       const oldest = sessions.keys().next().value;
       if (oldest !== undefined) sessions.delete(oldest);
@@ -116,6 +160,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       llm: new LlmAgent(model, broker),
       history: [],
       transcript: [],
+      busy: false,
       setAuth: (req) => {
         headers = {};
         const auth = req.headers.authorization;
@@ -177,6 +222,10 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     if (!parsed.success) return reply.code(400).send({ error: 'message required' });
     const ownerId = ownerIdOf(req);
     const s = sessionFor(ownerId);
+    if (s.busy) {
+      return reply.code(409).send({ error: 'A message is already being answered — wait for the reply.' });
+    }
+    s.busy = true;
     s.setAuth(req);
     const texts: string[] = [];
     const proposals: Array<ReturnType<typeof enrich>> = [];
@@ -186,9 +235,11 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     };
     try {
       const msgs = await s.llm.respond({ ownerId, ...WEB_WHO }, parsed.data.message, sink, s.history);
-      s.history = msgs.slice(-HISTORY_CAP);
+      s.history = sanitizeHistory(msgs, HISTORY_CAP);
     } catch (err) {
       return reply.code(502).send({ error: friendlyLlmError(String((err as Error).message ?? err)) });
+    } finally {
+      s.busy = false;
     }
     s.transcript.push({ kind: 'user', text: parsed.data.message });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });

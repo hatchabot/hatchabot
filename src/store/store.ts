@@ -9,6 +9,7 @@ import type {
   DataSource,
   DerivedImage,
   DerivedImageStatus,
+  GroupAccess,
   TemplateParam,
   Host,
   Membership,
@@ -1438,7 +1439,7 @@ export class Store {
 
   /** A configured copy's editable state: current values + the raw template
    *  layer they render into. Set at import; values updated on later edits. */
-  setAgentGroupAccess(id: string, ga: { mode: string; roomId?: string } | null): void {
+  setAgentGroupAccess(id: string, ga: GroupAccess | null): void {
     this.db
       .prepare(`UPDATE agents SET group_access = ?, updated_at = ? WHERE id = ?`)
       .run(ga ? JSON.stringify(ga) : null, new Date().toISOString(), id);

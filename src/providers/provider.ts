@@ -3,6 +3,7 @@
  * is wired at launch. Everything the control plane knows about a runtime goes
  * through here — no provider-specific types leak into the orchestrator.
  */
+import type { GroupAccess } from '../domain/types.js';
 
 export interface RuntimeSpec {
   /** Stable id of the agent this runtime serves. */
@@ -107,11 +108,8 @@ export interface OpenClawConfigPatch {
      */
     dmPolicy: 'pairing' | 'allowlist';
     allowFrom?: string[];
-    /**
-     * Group-chat access (see domain/types.ts GroupAccess). Absent = leave the
-     * runtime's group config untouched (OpenClaw's own default: allowlist).
-     */
-    groupAccess?: { mode: 'off' | 'members' | 'room'; roomId?: string };
+    /** Group-chat access. Absent converges to members-only on rebuild. */
+    groupAccess?: GroupAccess;
   };
 }
 

@@ -316,23 +316,21 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       sensitive: true,
     });
 
-    // Group-chat access. Written ONLY when the owner chose a mode — absent
-    // means "leave OpenClaw's own default alone" (allowlist: admitted members
-    // only, an accidental addee is ignored). 'room' is deliberately never
-    // channel-wide open: exactly one bound chat id, mention-gated, so the
-    // accident blast radius is the one room the owner picked.
-    if (groupAccess) {
-      const policy = groupAccess.mode === 'off' ? 'disabled' : 'allowlist';
-      cmds.push({ argv: ['config', 'set', 'channels.telegram.groupPolicy', policy] });
-      const groups =
-        groupAccess.mode === 'room' && groupAccess.roomId
-          ? { [groupAccess.roomId]: { groupPolicy: 'open', requireMention: true } }
-          : {};
-      // Always write groups so switching modes CONVERGES on rebuild — a stale
-      // open-room entry surviving a change back to members-only would be a
-      // silent hole.
-      cmds.push({ argv: ['config', 'set', 'channels.telegram.groups', JSON.stringify(groups), '--replace'] });
-    }
+    // Group-chat access — written UNCONDITIONALLY (audit 2026-09-04): with an
+    // if-guard, clearing the setting back to default skipped the write and a
+    // stale open-room entry survived on the durable volume forever — a silent
+    // hole the UI claimed was closed. Absent/`members` converge on OpenClaw's
+    // own default (allowlist: admitted members only; an accidental addee is
+    // ignored). 'room' is deliberately never channel-wide open: exactly one
+    // bound chat id, mention-gated, so the accident blast radius is the one
+    // room the owner picked.
+    const policy = groupAccess?.mode === 'off' ? 'disabled' : 'allowlist';
+    cmds.push({ argv: ['config', 'set', 'channels.telegram.groupPolicy', policy] });
+    const groups =
+      groupAccess?.mode === 'room' && groupAccess.roomId
+        ? { [groupAccess.roomId]: { groupPolicy: 'open', requireMention: true } }
+        : {};
+    cmds.push({ argv: ['config', 'set', 'channels.telegram.groups', JSON.stringify(groups), '--replace'] });
   }
 
   // Last: `agents add` scaffolds the workspace, sets the agent's model, and

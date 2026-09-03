@@ -234,10 +234,15 @@ source flagged **🛠 Management** in ⚙ Settings → AI sources (auto-picked w
 none is flagged — api-key → setup-token → machine-login). An api-key source
 hits the Messages API directly; a subscription source rides the host's
 Claude CLI — the sanctioned Max surface, so no new credential is ever needed
-(local model servers are the only exclusion). `AGENTCLAW_MGMT_ANTHROPIC_KEY`
-remains as an explicit dedicated-key override (`AGENTCLAW_MGMT_MODEL`,
-default `claude-sonnet-5`, applies only on that path). The model holds no
-token and no
+(only Anthropic sources qualify; local and other-vendor sources are excluded).
+The CLI child is locked down: no built-in tools, no MCP, no session
+persistence, minimal env, scratch cwd — a pure completion engine
+(`AGENTCLAW_CLAUDE_BIN` overrides the binary path,
+`AGENTCLAW_CLI_TIMEOUT_MS` the 180s call timeout).
+`AGENTCLAW_MGMT_ANTHROPIC_KEY` — or an ambient `ANTHROPIC_API_KEY` in the
+bot's environment — remains as a dedicated-key override for the Telegram
+bot (`AGENTCLAW_MGMT_MODEL`, default `claude-sonnet-5`, applies only on
+that path). The model holds no token and no
 `/v1` access; it gains no authority the broker doesn't already gate. Slash
 commands keep working alongside it.
 
@@ -362,6 +367,10 @@ role is meant to grant (chat only). Handing it to members would bypass the
 membership model rather than extend it.
 
 ### If the goal is "users can talk to the agent without Telegram"
+
+(Distinct from the shipped 💬 Manage pane: that is the OWNER talking to the
+*management assistant* about the fleet. This section is members talking to an
+AGENT — still future.)
 
 Build a **chat panel inside AgentClaw**, not access to OpenClaw's console:
 - it reuses the existing login and owner/member roles, so there's no new auth story;

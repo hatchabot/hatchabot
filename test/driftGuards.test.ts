@@ -103,3 +103,14 @@ describe('heartbeat llm label: sender slice ↔ receiver max (audit 2026-09-03)'
     expect(read('src/api/routes.ts')).toMatch(/llm:\s*z\.string\(\)\.trim\(\)\.max\(64\)/);
   });
 });
+
+describe('heartbeat cadence: sender 30s ↔ receiver 90s window (audit 2026-09-04)', () => {
+  // "Three missed beats = offline" is arithmetic across two processes with no
+  // import edge. If either number moves alone, presence flaps or lags.
+  it('both constants are present and the window is 3× the beat', () => {
+    const sender = read('src/mgmt/index.ts');
+    const receiver = read('src/api/routes.ts');
+    expect(sender).toMatch(/setInterval\(\(\) => void beat\(\), 30_000\)/);
+    expect(receiver).toMatch(/< 90_000/);
+  });
+});

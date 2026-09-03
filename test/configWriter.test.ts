@@ -270,10 +270,10 @@ describe('group-chat access (GroupAccess → openclaw config)', () => {
     telegram: { accountId: 'b', botToken: 't', dmPolicy: 'pairing' as const, allowFrom: ['1'], groupAccess },
   });
 
-  it('absent = the config is left alone (OpenClaw default: members-only)', () => {
+  it('absent CONVERGES to members-only — a cleared open-room must not survive on the volume', () => {
     const cmds = buildConfigCommands(tg(undefined));
-    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBeUndefined();
-    expect(argFor(cmds, 'channels.telegram.groups')).toBeUndefined();
+    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('allowlist');
+    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
   });
 
   it("'off' disables groups; groups map is emptied so nothing stale survives", () => {

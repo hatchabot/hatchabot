@@ -975,7 +975,7 @@
   <div id="mgmtChatLog" style="height:min(48vh,460px);overflow:auto;border:1px solid var(--line);border-radius:10px;
        padding:12px;margin:12px 0;display:flex;flex-direction:column;gap:8px"></div>
   <div style="display:flex;gap:8px">
-    <input type="text" id="mgmtChatInput" placeholder="Ask about the fleet, or say what to create or change…"
+    <input type="text" id="mgmtChatInput" maxlength="8000" placeholder="Ask about the fleet, or say what to create or change…"
            style="flex:1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMgmtChat();}">
     <button class="primary" id="mgmtChatSend" onclick="sendMgmtChat()">Send</button>
   </div>
@@ -1024,11 +1024,11 @@
   <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
     <label>New task</label>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input type="text" id="cronName" placeholder="Name (e.g. Pre-market briefing)" style="flex:1;min-width:160px">
-      <input type="text" id="cronExpr" placeholder="Cron (e.g. 0 8 * * 1-5)" style="width:150px;font-family:ui-monospace,monospace" title="minute hour day month weekday — e.g. 0 8 * * 1-5 is 8:00 on weekdays">
-      <input type="text" id="cronTz" placeholder="Timezone" style="width:170px" title="IANA zone the schedule runs in, e.g. America/New_York">
+      <input type="text" id="cronName" maxlength="80" placeholder="Name (e.g. Pre-market briefing)" style="flex:1;min-width:160px">
+      <input type="text" id="cronExpr" maxlength="64" placeholder="Cron (e.g. 0 8 * * 1-5)" style="width:150px;font-family:ui-monospace,monospace" title="minute hour day month weekday — e.g. 0 8 * * 1-5 is 8:00 on weekdays">
+      <input type="text" id="cronTz" maxlength="64" placeholder="Timezone" style="width:170px" title="IANA zone the schedule runs in, e.g. America/New_York">
     </div>
-    <textarea id="cronMsg" rows="2" placeholder="What to tell the agent when it fires — e.g. Post the pre-market briefing: commodities, index futures, rates, crypto." style="margin-top:6px"></textarea>
+    <textarea id="cronMsg" maxlength="4000" rows="2" placeholder="What to tell the agent when it fires — e.g. Post the pre-market briefing: commodities, index futures, rates, crypto." style="margin-top:6px"></textarea>
     <div class="actions" style="justify-content:flex-end;margin-top:6px">
       <button class="primary" id="cronAddBtn" onclick="addCronJob()">Add task</button>
     </div>
@@ -5203,7 +5203,7 @@ function mgmtProposalCard(p) {
   head.style.cssText = 'white-space:pre-wrap;font-family:inherit';
   head.textContent = p.summary;
   card.appendChild(head);
-  const full = [['SOUL.md', p.spec?.soul], ['AGENTS.md', p.spec?.agentsMd], ['Dockerfile lines', p.spec?.dockerfile]]
+  const full = [['Persona', p.spec?.persona], ['SOUL.md', p.spec?.soul], ['AGENTS.md', p.spec?.agentsMd], ['Dockerfile lines', p.spec?.dockerfile]]
     .filter(([, t]) => typeof t === 'string' && t.length);
   for (const [label, text] of full) {
     const det = document.createElement('details');
@@ -5245,6 +5245,7 @@ function mgmtProposalCard(p) {
 }
 
 async function sendMgmtChat() {
+  if ($('mgmtChatSend').disabled) return; // Enter while a turn is in flight
   const input = $('mgmtChatInput');
   const message = input.value.trim();
   if (!message) return;

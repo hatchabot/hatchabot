@@ -1,8 +1,8 @@
 # AgentClaw features — a tour
 
-What exists today (v0.93.0), in one place. Each section says how to do the
+What exists today (v0.99.0), in one place. Each section says how to do the
 thing; where a deeper doc exists, it's linked instead of duplicated. The tour
-is updated as of 2026-09-03.
+is updated as of 2026-09-04.
 
 ## What AgentClaw is
 
@@ -214,8 +214,10 @@ To let someone in, tap **Invite…** on the card:
   instead. When they message it, a "wants to talk" card appears on the agent
   and **Let them in** makes them a member.
 
-Members show on the card; remove one with its **×**. CLI: `agentclaw invite`,
-`approve`, `members`, `kick`.
+Members show on the card (when there's more than one) and always under
+⚙ Settings → Telegram → **Members** — role, Telegram-link status, Remove,
+and Invite… in one place. CLI: `agentclaw invite`, `approve`, `deny`,
+`members`, `kick`.
 
 ## Fleet operations
 
@@ -440,13 +442,12 @@ start/stop, rebuild, approve pairing requests, plus read-only `/health`,
 needs no key of its own: the control plane proxies the LLM calls with the AI
 source flagged **🛠 Management** in ⚙ Settings → AI sources (auto-picked when
 none is flagged; the credential never leaves the server). It also
-**authors**: ask it in plain language to draft a new agent. The same
-assistant lives in the web app as **💬 Manage** — a chat pane where change
-proposals render as cards with the full content and a Confirm button, armed
-by an explicit "Allow changes" toggle. It can also
-(SOUL.md, AGENTS.md, persona, template setup fields) or rewrite an existing
+**authors**: ask it in plain language to draft a new agent (SOUL.md,
+AGENTS.md, persona, template setup fields) or rewrite an existing
 definition — the full spec lands on one confirm card, and nothing is created
-or written until you approve it. The bot heartbeats to the control plane, so
+or written until you approve it. The same assistant lives in the web app as
+**💬 Manage** — a chat pane where proposals render as cards with the full
+content and a Confirm button, armed by an explicit "Allow changes" toggle. The bot heartbeats to the control plane, so
 the web app shows a slim presence strip above the agent cards (online/offline,
 @handle deep link, read-only vs read-write, LLM model) and a live line in
 ⚙ Settings → Access. Set it up with

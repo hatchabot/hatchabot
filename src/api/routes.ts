@@ -49,7 +49,7 @@ import {
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
-import { reservedEnvProblem } from '../orchestrator/envPolicy.js';
+import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
@@ -1636,7 +1636,6 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     messages: z.array(z.unknown()).max(200),
     maxTokens: z.number().int().min(1).max(16_384),
   });
-  const mgmtComplete = deps.mgmtLlmComplete ?? completeWithProfile;
   // Phase C: the web management chat pane — same broker, web transport.
   registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {
@@ -2263,7 +2262,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const editableParams = agent.parameters.filter((p) => p.target !== 'env');
       if (!editableParams.length) {
         return reply.code(400).send({
-          error: 'All of this agent’s setup fields are env credentials — change those under ⚙ Settings → Environment.',
+          error: "All of this agent's setup fields are env credentials — change those under ⚙ Settings → Environment.",
         });
       }
       if (agent.state !== 'RUNNING') {
@@ -2725,7 +2724,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const { name, value } = parsed.data;
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+      if (!ENV_NAME_RE.test(name)) {
         return reply.code(400).send({
           error: 'Not a valid variable name — use letters, digits and underscores, not starting with a digit.',
         });
@@ -3211,7 +3210,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         result?: { username?: string; can_join_groups?: boolean; can_read_all_group_messages?: boolean };
       };
       if (!body.ok || !body.result) {
-        return reply.code(502).send({ error: 'Telegram didn’t answer for this bot — try again.' });
+        return reply.code(502).send({ error: "Telegram didn't answer for this bot — try again." });
       }
       return {
         username: body.result.username,
@@ -3220,7 +3219,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         canReadAllGroupMessages: !!body.result.can_read_all_group_messages,
       };
     } catch {
-      return reply.code(502).send({ error: 'Couldn’t reach Telegram — try again.' });
+      return reply.code(502).send({ error: "Couldn't reach Telegram — try again." });
     }
   });
 
@@ -3232,13 +3231,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    */
   app.get<{ Params: { id: string } }>('/v1/agents/:id/group-chats', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
-    if (!agent?.runtimeRef || agent.state !== 'RUNNING') {
+    if (!agent) return reply.code(404).send({ error: 'Not found' }); // foreign/missing: no existence leak
+    if (!agent.runtimeRef || agent.state !== 'RUNNING') {
       return reply.code(409).send({ error: 'Start the agent to look for its group chats.' });
     }
     const res = await providerFor(agent.hostId).exec(agent.runtimeRef, [
       'sessions', 'list', '--agent', agent.slug, '--json',
     ]);
-    if (res.code !== 0) return reply.code(502).send({ error: 'The gateway didn’t answer.' });
+    if (res.code !== 0) return reply.code(502).send({ error: "The gateway didn't answer." });
     const rooms: Array<{ id: string; key: string }> = [];
     try {
       const sessions: Array<{ key?: string }> = JSON.parse(res.stdout).sessions ?? [];

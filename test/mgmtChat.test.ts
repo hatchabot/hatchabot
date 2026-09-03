@@ -139,6 +139,35 @@ describe('POST /v1/mgmt/chat', () => {
     expect(p.spec.soul).toBe(longSoul); // every byte, not a preview
   });
 
+  it('one turn at a time: a concurrent POST is 409, never a silently lost turn (audit 2026-09-04)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const store = new Store(new Database(':memory:'));
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'K', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' });
+    const f = Fastify();
+    await registerRoutes(f, {
+      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0, owns: () => false }, release: async () => {} } as any,
+      mgmtLlmComplete: async () => {
+        await gate; // stall the first turn until we've probed the second
+        return { stopReason: 'end_turn', content: [{ type: 'text', text: 'slow reply' }] } as any;
+      },
+    });
+    const first = chat(f, 'first message'); // in flight, not awaited
+    await new Promise((r) => setTimeout(r, 20)); // let it reach the model stall
+    const second = await chat(f, 'second message');
+    expect(second.statusCode).toBe(409);
+    expect(second.json().error).toMatch(/already being answered/);
+    release();
+    const done = await first;
+    expect(done.statusCode).toBe(200);
+    expect(done.json().texts).toEqual(['slow reply']);
+    // and the session is usable again — busy cleared
+    const after = await f.inject({ method: 'GET', url: '/v1/mgmt/chat', headers: H });
+    expect(after.json().transcript.length).toBe(2);
+    await f.close();
+  });
+
   it('history persists across calls — the second message sees the first exchange', async () => {
     const { f, modelCalls } = await world([
       { stopReason: 'end_turn', content: [{ type: 'text', text: 'Hello Chris.' }] },

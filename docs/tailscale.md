@@ -65,10 +65,9 @@ client's authorized JavaScript origins in the GCP console — the old
 
 **No tailnet?** The server also speaks TLS natively: point
 `AGENTCLAW_TLS_CERT` / `AGENTCLAW_TLS_KEY` at PEM files in `.env` and it
-serves HTTPS itself (both or neither — half-configured refuses to boot).
-You own the cert lifecycle on that path.
-
-then `systemctl --user restart agentclaw`.
+serves HTTPS itself (both or neither — half-configured refuses to boot),
+then `systemctl --user restart agentclaw`. You own the cert lifecycle on
+that path.
 
 ## Deliberately NOT enabled: Funnel
 

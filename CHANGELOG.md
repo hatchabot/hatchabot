@@ -2,6 +2,36 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.99.0] — 2026-09-04
+
+9th audit (six parallel auditors; record in docs/audit-2026-09-04.md).
+Same-day fixes:
+
+### Security
+- **The mgmt CLI child is now a pure completion engine.** `claude -p` print
+  mode had its own live tool surface (host file reads + read-only Bash, cwd
+  beside `.env` with the secret-store master key, full env inherited) — a
+  prompt-injected chat could read every fleet secret. Now: `--tools ""`,
+  `--strict-mcp-config`, `--no-session-persistence`, scratch cwd (0700),
+  minimal env allowlist; tool results fenced against role-spoofing.
+  Verified live end-to-end after lockdown.
+- Cleared group-access no longer leaves a stale open room on the volume —
+  the group config block writes unconditionally and converges.
+
+### Fixed
+- Control-plane crash via unhandled stdin EPIPE when the CLI child exits
+  before draining a large prompt (reproduced, then pinned by test).
+- Web-chat history capping now respects the Messages-API grammar
+  (`sanitizeHistory`) — long api-key sessions no longer die with orphaned
+  tool_results; concurrent sends 409 instead of silently losing a turn;
+  session eviction is LRU; per-session pending stores are swept; ambient
+  CLAUDE_CODE_OAUTH_TOKEN can't hijack machine-login; CLI scratch home
+  derives from AGENTCLAW_DB's directory; raw CLI JSON never shown as prose;
+  /group-chats 404s for foreign agents; AGENTCLAW_CLI_TIMEOUT_MS override.
+- Hygiene: dead binding, ENV_NAME_RE actually shared, GroupAccess single
+  declaration, Persona in the proposal card's full-content view, maxlength
+  on new inputs. 24 new tests (786); 10 doc corrections.
+
 ## [0.98.0] — 2026-09-04
 
 ### Added
