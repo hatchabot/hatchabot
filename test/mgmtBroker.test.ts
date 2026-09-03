@@ -370,6 +370,65 @@ describe('authoring tools — the full spec rides the confirmation', () => {
   });
 });
 
+describe('authoring hardening (audit 2026-09-03)', () => {
+  it('update_definition refuses empty-string files (an empty soul would zero-byte SOUL.md)', async () => {
+    const { broker, api } = make({ rw: true });
+    const r = await broker.handleTool('update_definition', { agent: 'a1', soul: '   ' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(api.calls).toEqual([]);
+  });
+
+  it('option-less choice fields are refused by the real schema at propose time', async () => {
+    const { broker } = make({ rw: true });
+    const r = await broker.handleTool(
+      'create_agent',
+      { name: 'Fresh', soul: 's {{pick}}', fields: [{ key: 'pick', label: 'Pick', type: 'choice' }] },
+      WHO,
+    );
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect((r as any).error.message).toMatch(/option/);
+  });
+
+  it('the FULL spec is sent before an authoring card, and a second operator cannot destroy it', async () => {
+    const { broker } = make({ rw: true });
+    const tx = new FakeTx();
+    const longSoul = Array.from({ length: 30 }, (_, i) => `soul line ${i + 1}`).join('\n');
+    // Minimal LLM stand-in: propose through the REAL broker, present through
+    // the REAL sink path — exactly what the model-driven flow does.
+    const fakeLlm = {
+      respond: async (who: any, _t: string, sink: any) => {
+        const r = await broker.handleTool('create_agent', { name: 'Fresh', soul: longSoul }, who);
+        await sink.proposeCard((r as any).pending.confirmId, (r as any).pending.summary);
+      },
+    };
+    const bot = new ManagementBot(broker, tx, { ownerId: 'o', allowlist: [555, 666], llm: fakeLlm as any });
+    await bot.onMessage(100, 555, 'draft me an agent');
+
+    // Full content precedes the card — including lines beyond the 14-line
+    // preview clip, which is the whole point.
+    const full = tx.sent.filter((m) => m.text.startsWith('📄 SOUL.md'));
+    expect(full.length).toBeGreaterThan(0);
+    expect(full.map((m) => m.text).join('\n')).toContain('soul line 30');
+    const card = tx.sent[tx.sent.length - 1]!;
+    expect(card.text).toContain('Confirm:');
+    expect(card.text).toContain('more line(s) NOT shown'); // preview admits the clip
+    expect(card.buttons).toBeTruthy();
+
+    // Operator B (allowlisted, not the proposer) taps Confirm: toast only —
+    // the card must NOT be edited (editing strips the buttons) and the
+    // record must stay pending for operator A.
+    await bot.onCallback(100, 666, 'cb1', 'cfm:c_1:y', card.messageId);
+    expect(tx.answers).toContain('Not your confirmation');
+    expect(tx.edits).toHaveLength(0);
+    expect(broker.pending.peek('c_1')!.status).toBe('pending');
+
+    // The proposer's tap still works.
+    await bot.onCallback(100, 555, 'cb2', 'cfm:c_1:y', card.messageId);
+    expect(broker.pending.peek('c_1')!.status).toBe('confirmed');
+    expect(tx.edits.some((e) => e.text.startsWith('✅'))).toBe(true);
+  });
+});
+
 describe('image tools', () => {
   it('runtime + image list + build log are read-tier', async () => {
     const { broker, api } = make();

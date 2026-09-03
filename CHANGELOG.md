@@ -2,6 +2,35 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.93.0] — 2026-09-03
+
+8th audit (six parallel auditors; record in docs/audit-2026-09-03.md).
+Same-day fixes:
+
+### Fixed
+- **Presence could die silently**: a >64-char "model via source" label made
+  every mgmt heartbeat 400 — sender truncates now, drift guard added.
+- **Mgmt `/logs` printed raw JSON** — the client finally handles the route's
+  real `{ text }` shape.
+- **The confirm card now shows everything it approves**: full
+  SOUL.md/AGENTS.md/Dockerfile posted as messages above authoring/build
+  cards; previews state how many lines they clip. (Injected content below
+  the 14-line fold was the audit's one major security finding.)
+- **A second operator's tap no longer destroys a pending authoring card**
+  (proposer-bound slow path; honest "Not your confirmation" toast).
+- **Direct file/persona edits update the template layer** — "Apply values"
+  no longer reverts an approved rewrite to the import-time copy; master
+  seeding also moved inside the busy guard.
+- `paramValues` no longer visible to member-role viewers or `?all=1`.
+- Empty `PUT /params` body 400s instead of silently resetting; cleared web
+  fields send `''` instead of resurrecting defaults; empty `update_definition`
+  files refused; choice/multichoice must declare options; multichoice options
+  may not contain commas.
+- Store: transactional single-select for the 🛠 Management flag + partial
+  UNIQUE index; `getSnapshot` survives a torn row.
+- 13 stale-docs findings fixed (control-interfaces, management-broker,
+  features, sharing design, ai-profiles); three new drift-guard tests.
+
 ## [0.92.0] — 2026-09-03
 
 ### Added

@@ -3573,17 +3573,19 @@ function renderSetupValues(a) {
 }
 
 function collectSetupValues(a) {
+  // Cleared fields are sent as '' — omitting a key makes the server fall back
+  // to the declared default, silently resurrecting the value the owner just
+  // deleted (audit 2026-09-03). Explicit empty means empty.
   const values = {};
   for (const p of a.parameters) {
     const el = $(`spv-${p.key}`);
     if (!el) continue;
     if (p.type === 'multichoice') {
       const picks = [...el.querySelectorAll('input:checked')].map(c => c.dataset.opt);
-      if (picks.length) values[p.key] = picks.join(', ');
+      values[p.key] = picks.join(', ');
       continue;
     }
-    const v = p.type === 'boolean' ? (el.checked ? 'true' : 'false') : el.value.trim();
-    if (v !== '') values[p.key] = v;
+    values[p.key] = p.type === 'boolean' ? (el.checked ? 'true' : 'false') : el.value.trim();
   }
   return values;
 }

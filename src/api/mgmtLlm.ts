@@ -47,7 +47,8 @@ export async function completeWithProfile(
 ): Promise<MgmtChatResponse> {
   const cred = await secrets.get(profile.secretRef!);
   // A setup-token (sk-ant-oat…) is an OAuth bearer, not an API key.
-  const client = cred.startsWith('sk-ant-oat')
+  // Case-insensitive, matching the routes-side oat detection.
+  const client = /^sk-ant-oat/i.test(cred)
     ? new Anthropic({ authToken: cred, apiKey: null })
     : new Anthropic({ apiKey: cred });
   const resp = await client.messages.create({

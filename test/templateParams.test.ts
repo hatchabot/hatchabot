@@ -220,6 +220,28 @@ describe('PUT /v1/agents/:id/params (edit values later)', () => {
     expect(store.getAgent('a1')!.paramValues).toEqual({ style: 'value' });
   });
 
+  it('an empty body is refused — it would silently re-apply every default', async () => {
+    const { f, id, store } = await importedWorld();
+    const res = await f.inject({ method: 'PUT', url: `/v1/agents/${id}/params`, headers: H, payload: {} });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/reset: true/);
+    expect(store.getAgent(id)!.paramValues).toEqual({ style: 'value' }); // untouched
+  });
+
+  it('a direct file edit updates the template layer, so the next Apply does not revert it', async () => {
+    const { f, id, store } = await importedWorld();
+    const rewritten = 'Rewritten by hand. Style stays {{style}}.';
+    const put = await f.inject({
+      method: 'PUT', url: `/v1/agents/${id}/files/SOUL.md`, headers: H, payload: { content: rewritten },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(store.getAgent(id)!.paramFiles?.soul).toBe(rewritten); // layer follows the edit
+    // Applying a new value renders from the NEW layer, not the import-time one.
+    await f.inject({ method: 'PUT', url: `/v1/agents/${id}/params`, headers: H, payload: { values: { style: 'growth' } } });
+    expect(store.getAgent(id)!.paramFiles?.soul).toBe(rewritten);
+    expect(store.getAgent(id)!.paramValues).toEqual({ style: 'growth' });
+  });
+
   it('a master whose files have NO placeholders is refused with a pointer, not silently no-oped', async () => {
     const { store, f, provider } = await world();
     await runningMaster(store, provider);

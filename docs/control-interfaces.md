@@ -118,8 +118,8 @@ in the broker, regardless of what the model (or injected text) "wants":
 
 | Tier | Handling | Tools → endpoint |
 |---|---|---|
-| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `get_agent` → `GET /v1/agents/:id`; `get_logs` → `GET …/logs`; `list_members` → `GET …/members`; `list_pending` → `GET …/pairing`; `get_pool` → `GET /v1/pool`; `list_events` → `GET /v1/events`; `get_health` → `GET …/health`; `get_usage` → `GET …/usage` |
-| **mutate** | require a human-confirm tap showing the **resolved** action | `start_agent`/`stop_agent`/`rebuild_agent` → `POST …/{start,stop,rebuild}`; `approve_member` → `POST …/pairing/approve`; `remove_member` → `DELETE …/members/:userId`; `set_model` → `PATCH /v1/agents/:id`; `create_agent` → `POST /v1/agents` + file writes + `PATCH` (full-spec proposal card, 10-min TTL); `update_definition` → `PUT …/files/:name` + `PATCH` (diff-stat card; server snapshots first) |
+| **read** | execute immediately, no confirm | `list_agents` → `GET /v1/agents`; `get_agent` → `GET /v1/agents/:id`; `get_logs` → `GET …/logs`; `list_members` → `GET …/members`; `list_pending` → `GET …/pairing`; `get_pool` → `GET /v1/pool`; `list_events` → `GET /v1/events`; `get_health` → `GET …/health`; `get_usage` → `GET …/usage`; `get_runtime` → `GET /v1/runtime`; `list_images` → `GET /v1/images`; `get_image_log` → `GET /v1/images/:name/log` |
+| **mutate** | require a human-confirm tap showing the **resolved** action | `start_agent`/`stop_agent`/`rebuild_agent` → `POST …/{start,stop,rebuild}`; `approve_member` → `POST …/pairing/approve`; `remove_member` → `DELETE …/members/:userId`; `set_model` → `PATCH /v1/agents/:id`; `create_agent` → `POST /v1/agents` + file writes + `PATCH` (full-spec proposal card, 10-min TTL); `update_definition` → `PUT …/files/:name` + `PATCH` (diff-stat card; server snapshots first); `build_image` → `POST /v1/images` (Dockerfile snippet on the card, 10-min TTL); `rebuild_image` → `POST /v1/images/:name/rebuild`; `remove_image` → `DELETE /v1/images/:name` (refused while pinned) |
 | **forbidden** | not exposed to the model at all — deep-link to web | `add_ai_key`, paste bot token, set password, edit `MEMORY.md`, `delete_agent` (or gate behind a typed-name double-confirm) |
 
 Inputs are schema-validated (agent id must resolve to one the owner owns; enums
@@ -154,17 +154,24 @@ fallback. They hit the same broker tools, so the same tiers/confirms apply.
 | Command | Does | Endpoint(s) |
 |---|---|---|
 | `/start`, `/help` | Onboard, list commands | — |
-| `/list` | Fleet with state · model · last-active (paginated) | `GET /v1/agents` |
-| `/agent <name>` | Detail card + action buttons (below) | `GET /v1/agents/:id` |
-| `/start <name>` | Start | `POST /v1/agents/:id/start` |
-| `/stop <name>` | Stop | `POST /v1/agents/:id/stop` |
-| `/rebuild <name>` | Rebuild (confirm button) | `POST /v1/agents/:id/rebuild` |
-| `/logs <name>` | Tail recent logs (paginated) | `GET /v1/agents/:id/logs` |
-| `/members <name>` | List members, each with a Remove button | `GET /v1/agents/:id/members` |
-| `/pending` | Pairing requests across the fleet, Approve/Deny buttons | `GET /v1/agents/:id/pairing` |
+| `/list [state]` | Fleet with state · model | `GET /v1/agents` |
+| `/agent <ref>` | Detail for one agent | `GET /v1/agents/:id` |
+| `/start_agent <ref>` | Start (confirm card) | `POST /v1/agents/:id/start` |
+| `/stop <ref>` | Stop (confirm card) | `POST /v1/agents/:id/stop` |
+| `/rebuild <ref>` | Rebuild, memory kept (confirm card) | `POST /v1/agents/:id/rebuild` |
+| `/model <ref> <model>` | Switch model (validated, confirm card) | `PATCH /v1/agents/:id` |
+| `/approve <ref> <code>` | Admit a pairing request (confirm card) | `POST …/pairing/approve` |
+| `/logs <ref> [n]` | Tail recent logs | `GET /v1/agents/:id/logs` |
+| `/members <ref>` | List members | `GET /v1/agents/:id/members` |
+| `/pending <ref>` | Pairing requests for one agent | `GET /v1/agents/:id/pairing` |
+| `/events [ref] [n]` | Recent fleet/agent activity | `GET /v1/events` |
+| `/health <ref>` · `/usage <ref>` | Live probe · token usage | `GET …/health`, `GET …/usage` |
 | `/pool` | Bots free vs used | `GET /v1/pool` |
-| `/new` | **Does not create in chat** — replies with a deep link to the web create form | (web) |
-| `/delete <name>` | Guarded: confirm button, or deep-link to web | `DELETE /v1/agents/:id` |
+| `/mode readwrite\|readonly` · `/pause` · `/resume` | Arm/disarm mutations · kill switch | (broker state) |
+
+There is deliberately no `/delete` (Forbidden list) and no create/author slash
+command — authoring is plain-language only, because the spec is a document,
+not an argument string.
 
 ### Inline-button flow (the good part)
 Discrete ops map to inline keyboards. `callback_data` encodes `action:agentId`
@@ -190,8 +197,10 @@ Never over Telegram — the bot deep-links to the web app instead:
 - entering **AI API keys, bot tokens, or the app password** — Telegram messages
   live in its cloud, appear in history, and aren't end-to-end encrypted, so chat
   is not a secret-entry channel;
-- editing `SOUL.md` / `MEMORY.md` or multi-field config;
-- anything where a 4096-char message or clumsy file upload is the wrong tool.
+- editing `MEMORY.md` (a poisoned memory is not reversible the way a
+  snapshotted SOUL.md edit is — SOUL/AGENTS editing moved to the confirm-gated
+  authoring tools in v0.90.0);
+- anything where a clumsy file upload is the wrong tool.
 
 ### Security checklist
 The bot's security rests on a strict in-code Telegram-id allowlist (never the
@@ -217,13 +226,17 @@ Or let the CLI do steps 2–4: `agentclaw mgmt-bot setup`.
 
 It refuses to start with an empty allowlist.
 
-**Phase 2 (implemented) — natural language.** Set `AGENTCLAW_MGMT_ANTHROPIC_KEY`
-(or `ANTHROPIC_API_KEY`) and plain-text messages route to an LLM
-(`AGENTCLAW_MGMT_MODEL`, default `claude-sonnet-5`) that proposes tools through
-the **same broker** — reads run, changes still become confirm cards. Without a
-key the bot is slash-commands only. The model holds no token and no `/v1`
-access; it gains no authority the broker doesn't already gate. Slash commands
-keep working alongside it.
+**Phase 2 (implemented) — natural language.** Plain-text messages route to an
+LLM that proposes tools through the **same broker** — reads run, changes still
+become confirm cards. The bot needs **no AI credential of its own**: by default
+the control plane proxies the calls (`POST /v1/mgmt/llm/complete`) with the AI
+source flagged **🛠 Management** in ⚙ Settings → AI sources (auto-picked when
+none is flagged — api-key first, then setup-token; machine-login and local
+sources can't back a raw API call). `AGENTCLAW_MGMT_ANTHROPIC_KEY` remains as
+an explicit dedicated-key override (`AGENTCLAW_MGMT_MODEL`, default
+`claude-sonnet-5`, applies only on that path). The model holds no token and no
+`/v1` access; it gains no authority the broker doesn't already gate. Slash
+commands keep working alongside it.
 
 ---
 

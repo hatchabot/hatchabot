@@ -2,8 +2,8 @@ import { AUTHORING_TOOLS, Broker, type AgentSummary, type Proposer, type ToolRes
 import type { AgentSink, LlmAgent } from './llm.js';
 
 /**
- * Transport-agnostic management bot logic (Phase 1: deterministic slash
- * commands, no LLM). It maps commands and confirm-button taps onto the broker
+ * Transport-agnostic management bot logic: deterministic slash commands plus
+ * the LLM plain-text path. It maps commands and confirm-button taps onto the broker
  * and renders the results. The actual Telegram transport (grammY, etc.) plugs in
  * behind BotTransport, so all of this is testable with a fake.
  *
@@ -149,8 +149,35 @@ export class ManagementBot {
   }
 
   /** Post a mutate confirmation card and remember its message id, so both the
-   *  slash path and the LLM path present confirmations identically. */
+   *  slash path and the LLM path present confirmations identically.
+   *
+   *  Authoring/build proposals FIRST send the complete spec (full SOUL.md,
+   *  AGENTS.md, Dockerfile lines) as plain messages, then the card. The tap is
+   *  the review — a card whose preview clips at 14 lines while 24k chars
+   *  execute let injected content ride below the fold (audit 2026-09-03).
+   *  The card is a summary; the messages above it are the truth. */
   async #postCard(chatId: number, confirmId: string, summary: string): Promise<void> {
+    const rec = this.broker.pending.peek(confirmId);
+    const spec = rec?.resolved.spec;
+    if (spec) {
+      const full: Array<[string, string | undefined]> = [
+        ['SOUL.md', spec.soul],
+        ['AGENTS.md', spec.agentsMd],
+        ['Dockerfile lines', spec.dockerfile],
+      ];
+      for (const [label, text] of full) {
+        if (typeof text !== 'string' || !text.length) continue;
+        // Telegram messages cap at 4096 chars — chunk, labeled and numbered.
+        const chunks: string[] = [];
+        for (let i = 0; i < text.length; i += 3500) chunks.push(text.slice(i, i + 3500));
+        for (let i = 0; i < chunks.length; i++) {
+          await this.tx.sendMessage(
+            chatId,
+            `📄 ${label}${chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : ''} — full content:\n${chunks[i]}`,
+          );
+        }
+      }
+    }
     const { messageId } = await this.tx.sendMessage(chatId, `Confirm: ${summary}?`, [
       [
         { text: '✅ Confirm', data: `cfm:${confirmId}:y` },
@@ -206,16 +233,28 @@ export class ManagementBot {
     // Authoring confirms do real work (create agent → wait for RUNNING → write
     // files) that outlives Telegram's ~15s callback window — answer the tap
     // first and mark the card as working, so the button never hangs and a late
-    // answerCallback never throws.
+    // answerCallback never throws. The slow path is PROPOSER-BOUND: a second
+    // operator's tap must fall through to claim() and get "not yours" as a
+    // toast — editing the card first destroyed a still-pending proposal
+    // (editMessageText drops the inline keyboard) and lied "Already handled"
+    // (audit 2026-09-03).
     const peeked = this.broker.pending.peek(id);
-    const slow = yn === 'y' && peeked?.status === 'pending' && AUTHORING_TOOLS.has(peeked.tool);
+    const slow =
+      yn === 'y' &&
+      peeked?.status === 'pending' &&
+      AUTHORING_TOOLS.has(peeked.tool) &&
+      peeked.fromUserId === fromUserId &&
+      peeked.chatId === chatId;
     if (slow) {
       await this.tx.answerCallback(callbackId);
       await this.tx.editMessage(chatId, messageId, '⏳ Working — this can take a minute…');
     }
     const out = await this.broker.confirm(id, yn === 'y' ? 'confirm' : 'cancel', { fromUserId, chatId });
     if (!out.ok) {
-      const why = out.reason === 'expired' ? 'Expired' : 'Already handled';
+      const why =
+        out.reason === 'expired' ? 'Expired'
+        : out.reason === 'not_yours' ? 'Not your confirmation'
+        : 'Already handled';
       if (slow) await this.tx.editMessage(chatId, messageId, `⚠ ${why}.`);
       else await this.tx.answerCallback(callbackId, why);
       return;

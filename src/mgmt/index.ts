@@ -1,18 +1,24 @@
 /**
- * Management bot entry point (Phase 1: deterministic slash commands, no LLM).
+ * Management bot entry point: deterministic slash commands + an LLM assistant
+ * (plain-language control and authoring, every change confirm-gated).
  *
  * Runs as its own process, separate from the control plane, and holds two
  * secrets from the environment: its own BotFather token and a cli-token that
- * grants it owner-level /v1 access. Start it as a systemd unit — see
- * deploy/agentclaw-mgmt-bot.service and docs/control-interfaces.md.
+ * grants it owner-level /v1 access. The LLM needs NO credential here — by
+ * default calls ride the control plane's proxy (the 🛠 Management-flagged AI
+ * source). Start it as a systemd unit — see deploy/agentclaw-mgmt-bot.service
+ * and docs/control-interfaces.md.
  *
  * Required env:
  *   AGENTCLAW_MGMT_BOT_TOKEN   BotFather token for the management bot
  *   AGENTCLAW_MGMT_TOKEN       a cli-token (POST /v1/cli-tokens) — the bearer
  *   AGENTCLAW_MGMT_ALLOWLIST   comma-separated Telegram user ids allowed to control
  * Optional:
- *   AGENTCLAW_URL              control plane base URL (default http://localhost:8080)
- *   AGENTCLAW_MGMT_OWNER       owner id for audit/proposer records (default "local")
+ *   AGENTCLAW_URL                    control plane base URL (default http://localhost:8080)
+ *   AGENTCLAW_MGMT_OWNER             owner id for audit/proposer records (default "local")
+ *   AGENTCLAW_MGMT_ANTHROPIC_KEY     dedicated LLM credential — overrides the proxy path
+ *   AGENTCLAW_MGMT_MODEL             model for the dedicated-key path (default claude-sonnet-5)
+ *   AGENTCLAW_MGMT_PAIRING_POLL_MS   approval-push poll interval (default 20000)
  */
 import { readFileSync } from 'node:fs';
 import { Bot } from 'grammy';
@@ -127,7 +133,10 @@ const startHeartbeat = (botUsername: string) => {
     } else {
       try {
         const s = await api.llmStatus();
-        if (s.available) llmLabel = `${s.model} via ${s.profileName}`;
+        // MgmtHeartbeat caps llm at 64 chars and a zod failure 400s the WHOLE
+        // beat — profile names are unbounded, so an over-long label silently
+        // killed the presence feature (audit 2026-09-03). Truncate, never fail.
+        if (s.available) llmLabel = `${s.model} via ${s.profileName}`.slice(0, 64);
       } catch {
         /* status is best-effort; the beat itself still goes out */
       }

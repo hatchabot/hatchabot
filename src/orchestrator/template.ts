@@ -38,16 +38,28 @@ export type { TemplateParam } from '../domain/types.js';
 export const PARAM_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
 const PLACEHOLDER_RE = /\{\{\s*([a-z][a-z0-9_]{0,31})\s*\}\}/g;
 
-export const TemplateParamSchema = z.object({
-  key: z.string().regex(PARAM_KEY_RE, 'keys are snake_case, ≤32 chars'),
-  label: z.string().min(1).max(64),
-  help: z.string().max(200).optional(),
-  required: z.boolean(),
-  type: z.enum(['text', 'longtext', 'choice', 'multichoice', 'boolean']),
-  default: z.string().max(2000).optional(),
-  options: z.array(z.string().min(1).max(120)).max(12).optional(),
-  target: z.enum(['soul', 'agents']),
-});
+export const TemplateParamSchema = z
+  .object({
+    key: z.string().regex(PARAM_KEY_RE, 'keys are snake_case, ≤32 chars'),
+    label: z.string().min(1).max(64),
+    help: z.string().max(200).optional(),
+    required: z.boolean(),
+    type: z.enum(['text', 'longtext', 'choice', 'multichoice', 'boolean']),
+    default: z.string().max(2000).optional(),
+    options: z.array(z.string().min(1).max(120)).max(12).optional(),
+    target: z.enum(['soul', 'agents']),
+  })
+  // An option-less choice renders an empty, unfillable <select>; a required
+  // one makes the copy unconfigurable. Catch it at declaration, everywhere
+  // this schema is enforced (PATCH parameters, import, mgmt authoring).
+  .refine((p) => !(p.type === 'choice' || p.type === 'multichoice') || (p.options?.length ?? 0) > 0, {
+    message: 'choice/multichoice fields need at least one option',
+  })
+  // Multichoice values are comma-joined, so a comma INSIDE an option can
+  // never round-trip — it splits into picks that fail the subset check.
+  .refine((p) => p.type !== 'multichoice' || !(p.options ?? []).some((o) => o.includes(',')), {
+    message: 'multichoice options must not contain commas',
+  });
 
 export interface TemplateManifest {
   format: typeof TEMPLATE_FORMAT;

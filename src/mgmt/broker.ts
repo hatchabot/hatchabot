@@ -523,6 +523,10 @@ export class Broker {
       case 'update_definition': {
         const soul = typeof args.soul === 'string' ? args.soul : undefined;
         const agentsMd = typeof args.agents_md === 'string' ? args.agents_md : undefined;
+        // An empty replacement zero-bytes a live file — mirror create_agent's
+        // refusal instead of trusting the schema's advisory minLength.
+        if (soul !== undefined && !soul.trim()) throw new BrokerError('INVALID_INPUT', 'soul must not be empty.');
+        if (agentsMd !== undefined && !agentsMd.trim()) throw new BrokerError('INVALID_INPUT', 'agents_md must not be empty.');
         const persona = typeof args.persona === 'string' ? args.persona : undefined;
         const fields = this.#normalizeFields(args.fields);
         if (soul === undefined && agentsMd === undefined && persona === undefined && fields === undefined) {
@@ -628,9 +632,15 @@ export function diffStat(before: string, after: string): string {
 }
 
 const previewOf = (label: string, text: string, maxChars: number): string => {
-  const lines = text.split('\n').slice(0, 14).join('\n');
+  const all = text.split('\n');
+  const lines = all.slice(0, 14).join('\n');
   const clipped = lines.length > maxChars ? lines.slice(0, maxChars) + '…' : lines;
-  return `――― ${label} ―――\n${clipped}${clipped.length < text.length ? '\n…' : ''}`;
+  // Never let a clipped preview read as complete — the model can be steered
+  // by injected text, and hostile content below the fold is exactly what a
+  // reviewer must know exists. The bot also sends the FULL content as
+  // separate messages before the card (see ManagementBot.#postCard).
+  const hidden = clipped.length < text.length ? `\n⋯ +${Math.max(all.length - 14, 1)} more line(s) NOT shown here` : '';
+  return `――― ${label} ―――\n${clipped}${hidden}`;
 };
 
 /** Human-facing confirmation text — the RESOLVED target, never the raw input.

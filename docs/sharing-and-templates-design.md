@@ -83,7 +83,9 @@ parameters: [
 ]
 ```
 
-- `type`: `text` | `longtext` | `secret` | `url` | `email` | `choice` | `boolean`
+- `type`: `text` | `longtext` | `choice` | `multichoice` | `boolean`
+  (shipped set — `secret`/`url`/`email` from the original design never landed;
+  multichoice values are a comma-joined subset of the options)
 - `target` — *where the value lands on import*:
   - `soul` / `agents` → substitute a `{{key}}` placeholder the author wrote into
     `SOUL.md` / `AGENTS.md` (the simplest, most flexible form)

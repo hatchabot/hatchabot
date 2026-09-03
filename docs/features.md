@@ -1,8 +1,8 @@
 # AgentClaw features — a tour
 
-What exists today (v0.86.0), in one place. Each section says how to do the
+What exists today (v0.93.0), in one place. Each section says how to do the
 thing; where a deeper doc exists, it's linked instead of duplicated. The tour
-is updated as of 2026-09-02.
+is updated as of 2026-09-03.
 
 ## What AgentClaw is
 
@@ -42,7 +42,8 @@ instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 `AGENTCLAW_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
-Tap **Telegram App** on the card and say hi. Your first-ever message claims
+Tap the **agent's name** on its card (it's the Telegram deep-link; Telegram
+Web lives in the ⋯ menu) and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth
 and answer immediately. Send `/new` in Telegram to start a fresh
 conversation (file edits apply to new conversations).
@@ -117,11 +118,14 @@ box, Share to a file instead.
 into SOUL.md (or AGENTS.md, or the persona) and anyone importing the template is
 asked to fill it — export auto-derives every hand-written placeholder as a
 required field, no declaration needed. For nicer forms, declare fields in
-📖 Definition → **Setup fields**: label, help text, text/longtext/choice/boolean,
-default, required. The importer's answers substitute into the seeded files
-before the agent boots (web renders a form on file-import and inbox-accept; the
-CLI prompts). The template carries field *definitions and defaults* only — never
-the author's own filled values.
+📖 Definition → **Setup fields**: label, help text,
+text/longtext/choice/multichoice/boolean, default, required. The importer's
+answers substitute into the seeded files before the agent boots (web renders a
+form on file-import and inbox-accept; the CLI prompts). The template carries
+field *definitions and defaults* only — never the author's own filled values.
+Values stay editable afterwards: 📖 Definition → **Setup values** edits or
+resets any answer in place (snapshot first), on imported copies AND on the
+master itself (its layer seeds from the live files on first Apply).
 
 Rules and formats: [moving-agents.md](moving-agents.md).
 

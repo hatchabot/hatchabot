@@ -64,6 +64,14 @@ describe('picking the management LLM source', () => {
     expect(pickMgmtProfile(store, OWNER)?.id).toBe('ak1');
   });
 
+  it('a stale or foreign id rolls back instead of silently clearing the pick', () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertAIProfile(profile({ id: 'ak1' }));
+    store.setAIProfileMgmtLlm(OWNER, 'ak1');
+    expect(() => store.setAIProfileMgmtLlm(OWNER, 'ghost')).toThrow(/ghost/);
+    expect(store.getAIProfile('ak1')!.mgmtLlm).toBe(true); // pick survived
+  });
+
   it("another owner's flagged profile never backs my bot", () => {
     const store = new Store(new Database(':memory:'));
     store.insertAIProfile(profile({ id: 'theirs', ownerId: 'other', shared: true }));

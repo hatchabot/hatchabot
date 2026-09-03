@@ -102,6 +102,7 @@ import type { IdentityVerifier } from './identity.js';
 import {
   autoSnapshot,
   captureSnapshot,
+  CORE_FILES,
   restoreSnapshot,
   SnapshotError,
 } from '../orchestrator/snapshots.js';
@@ -1816,9 +1817,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           }
         }
         const chan = store.getChannelForAgent(a.id);
+        const role = store.accessRole(a.id, ownerIdOf(req));
         return publicAgent(a, {
           /** What the viewer may do — drives which controls the app renders. */
-          role: store.accessRole(a.id, ownerIdOf(req)),
+          role,
+          // The owner's applied setup ANSWERS are theirs — a member (or the
+          // ?all=1 metadata view) gets the declarations, never the values.
+          ...(role === 'owner' ? {} : { paramValues: undefined }),
           deepLink: chan?.deepLink,
           botUsername: chan?.accountId,
           /** Pool-leased bots auto-recycle on delete; pasted ones are offered
@@ -1863,7 +1868,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
   // Workspace file editing — the "full OpenClaw interface" promise (§9.3):
   // the persona and memory are the user's files, editable from the app.
-  const EDITABLE_FILES = new Set(['SOUL.md', 'AGENTS.md', 'MEMORY.md']);
+  // Same triple the snapshot system protects — one source of truth.
+  const EDITABLE_FILES = new Set<string>(CORE_FILES);
   const workspacePath = (slug: string, name: string) =>
     `/home/node/.openclaw/agents/${slug}/agent/${name}`;
 
@@ -1942,7 +1948,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAgentParameters(agent.id, parsed.data.parameters);
       }
 
-      if (persona !== undefined) store.setAgentPersona(agent.id, persona.trim());
+      if (persona !== undefined) {
+        store.setAgentPersona(agent.id, persona.trim());
+        // Same layer-sync rule as direct file edits: without it, the next
+        // "Apply values" re-renders the persona from the stale layer and
+        // reverts this edit.
+        if (agent.paramFiles) {
+          store.setAgentParamState(agent.id, agent.paramValues ?? {}, {
+            ...agent.paramFiles,
+            persona: persona.trim(),
+          });
+        }
+      }
 
       if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
 
@@ -2176,6 +2193,18 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           );
         });
         if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
+        // Keep the template layer in step with a direct edit: the layer is
+        // what "Apply values" re-renders from, and a frozen import-time copy
+        // silently REVERTED any approved rewrite on the next value change
+        // (audit 2026-09-03). The edited content becomes the layer — any
+        // {{placeholders}} it still contains keep rendering; prose it
+        // hard-coded stays as written.
+        if (agent.paramFiles && (req.params.name === 'SOUL.md' || req.params.name === 'AGENTS.md')) {
+          store.setAgentParamState(agent.id, agent.paramValues ?? {}, {
+            ...agent.paramFiles,
+            [req.params.name === 'SOUL.md' ? 'soul' : 'agents']: content,
+          });
+        }
         return { saved: true };
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -2205,37 +2234,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to change its setup values.' });
       }
-      // The raw placeholder-bearing layer normally arrives on import. On a
-      // MASTER — fields authored here, live files still carrying their
-      // {{placeholders}} — seed the layer from the live files on first edit,
-      // so the author can fill values directly instead of the Send→Import
-      // round-trip this feature exists to kill.
-      let paramFiles = agent.paramFiles;
-      if (!paramFiles) {
-        const read = async (name: string) =>
-          (
-            await providerFor(agent.hostId).execShell(
-              agent.runtimeRef!,
-              `cat ${JSON.stringify(workspacePath(agent.slug, name))} 2>/dev/null || true`,
-            )
-          ).stdout;
-        const soul = await read('SOUL.md');
-        const agentsMd = await read('AGENTS.md');
-        paramFiles = {
-          soul: soul || undefined,
-          agents: agentsMd || undefined,
-          persona: agent.persona || undefined,
-        };
-        const PH = /\{\{\s*[a-z][a-z0-9_]{0,31}\s*\}\}/;
-        if (![paramFiles.soul, paramFiles.agents, paramFiles.persona].some((t) => typeof t === 'string' && PH.test(t))) {
-          return reply.code(400).send({
-            error:
-              'No {{placeholders}} found in SOUL.md/AGENTS.md/persona — applying values would change nothing. ' +
-              'Reference the declared fields as {{key}} in the files first.',
-          });
-        }
-      }
       const body = (req.body ?? {}) as { values?: Record<string, string>; reset?: boolean };
+      // An empty body would resolve as {} and silently re-apply every default
+      // over the current values — a reset nobody asked for. Require intent.
+      if (body.values === undefined && !body.reset) {
+        return reply.code(400).send({ error: 'Send { values } to apply, or { reset: true } to restore defaults.' });
+      }
       const vals = z
         .record(z.string().max(64), z.string().max(2000))
         .refine((r) => Object.keys(r).length <= 24)
@@ -2251,16 +2255,47 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
-      const writes: Array<{ name: string; content: string }> = [];
-      if (typeof paramFiles.soul === 'string') {
-        writes.push({ name: 'SOUL.md', content: applyParamValues(paramFiles.soul, resolved) });
-      }
-      if (typeof paramFiles.agents === 'string') {
-        writes.push({ name: 'AGENTS.md', content: applyParamValues(paramFiles.agents, resolved) });
-      }
       if (busyNow(agent, reply)) return reply;
+      // Seed + write both run INSIDE the busy guard: the master-seeding reads
+      // become this agent's permanent template layer, and a concurrent file
+      // save or restore interleaving with them would freeze a torn layer
+      // (audit 2026-09-03).
+      let paramFiles = agent.paramFiles;
+      class NoPlaceholders extends Error {}
       try {
         const res = await whileBusy(agent.id, async () => {
+          if (!paramFiles) {
+            // The raw placeholder-bearing layer normally arrives on import.
+            // On a MASTER — fields authored here, live files still carrying
+            // their {{placeholders}} — seed the layer from the live files on
+            // first edit, so the author can fill values directly instead of
+            // the Send→Import round-trip this feature exists to kill.
+            const read = async (name: string) =>
+              (
+                await providerFor(agent.hostId).execShell(
+                  agent.runtimeRef!,
+                  `cat ${JSON.stringify(workspacePath(agent.slug, name))} 2>/dev/null || true`,
+                )
+              ).stdout;
+            const soul = await read('SOUL.md');
+            const agentsMd = await read('AGENTS.md');
+            paramFiles = {
+              soul: soul || undefined,
+              agents: agentsMd || undefined,
+              persona: agent.persona || undefined,
+            };
+            const PH = /\{\{\s*[a-z][a-z0-9_]{0,31}\s*\}\}/;
+            if (![paramFiles.soul, paramFiles.agents, paramFiles.persona].some((t) => typeof t === 'string' && PH.test(t))) {
+              throw new NoPlaceholders();
+            }
+          }
+          const writes: Array<{ name: string; content: string }> = [];
+          if (typeof paramFiles.soul === 'string') {
+            writes.push({ name: 'SOUL.md', content: applyParamValues(paramFiles.soul, resolved) });
+          }
+          if (typeof paramFiles.agents === 'string') {
+            writes.push({ name: 'AGENTS.md', content: applyParamValues(paramFiles.agents, resolved) });
+          }
           await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-params');
           for (const w of writes) {
             const b64 = Buffer.from(w.content, 'utf8').toString('base64');
@@ -2276,14 +2311,22 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
       } catch (err) {
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        if (err instanceof NoPlaceholders) {
+          return reply.code(400).send({
+            error:
+              'No {{placeholders}} found in SOUL.md/AGENTS.md/persona — applying values would change nothing. ' +
+              'Reference the declared fields as {{key}} in the files first.',
+          });
+        }
         throw err;
       }
-      if (typeof paramFiles.persona === 'string') {
-        store.setAgentPersona(agent.id, applyParamValues(paramFiles.persona, resolved));
+      const layer = paramFiles!; // set on entry or seeded inside the guard
+      if (typeof layer.persona === 'string') {
+        store.setAgentPersona(agent.id, applyParamValues(layer.persona, resolved));
       }
       // Persist the freshly seeded layer alongside the values on a master's
       // first edit; imported copies already have theirs stored.
-      store.setAgentParamState(agent.id, resolved, agent.paramFiles ? undefined : paramFiles);
+      store.setAgentParamState(agent.id, resolved, agent.paramFiles ? undefined : layer);
       trace(agent.id)('params.applied', { reset: !!body.reset, keys: Object.keys(resolved).length });
       return { applied: true, values: resolved };
     },
@@ -2361,7 +2404,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = visibleAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const channel = store.getChannelForAgent(agent.id);
-    return publicAgent(agent, { deepLink: channel?.deepLink });
+    const role = store.accessRole(agent.id, ownerIdOf(req));
+    return publicAgent(agent, {
+      role,
+      deepLink: channel?.deepLink,
+      // Members see declarations, never the owner's applied answers.
+      ...(role === 'owner' ? {} : { paramValues: undefined }),
+    });
   });
 
   // On-demand Control UI credential — same shape as the bot-token reveal, so

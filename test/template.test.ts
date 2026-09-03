@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { exportTemplate, importTemplate, parseTemplate } from '../src/orchestrator/template.js';
+import { exportTemplate, importTemplate, parseTemplate, TemplateParamSchema } from '../src/orchestrator/template.js';
 import { buildWorkspaceSeed } from '../src/openclaw/workspace.js';
 
 /**
@@ -181,6 +181,14 @@ describe('template parameters (sharing Phase 2a)', () => {
     expect(() => importTemplate({ store: freshStore(), provider: new MockProvider() }, multi, {
       ownerId: 'o', values: { style: 'swing, yolo' },
     })).toThrow(/allows only/);
+  });
+
+  it('declaration-time refinements: choice needs options; multichoice options may not contain commas', () => {
+    const base = { key: 'k', label: 'K', required: false, target: 'soul' as const };
+    expect(TemplateParamSchema.safeParse({ ...base, type: 'choice' }).success).toBe(false);
+    expect(TemplateParamSchema.safeParse({ ...base, type: 'multichoice', options: ['stocks, ETFs'] }).success).toBe(false);
+    expect(TemplateParamSchema.safeParse({ ...base, type: 'multichoice', options: ['stocks', 'ETFs'] }).success).toBe(true);
+    expect(TemplateParamSchema.safeParse({ ...base, type: 'text' }).success).toBe(true); // options stay optional elsewhere
   });
 
   it('a template with no parameters imports exactly as before', () => {

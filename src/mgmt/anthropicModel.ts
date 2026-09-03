@@ -2,9 +2,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { ChatModel, ChatMessage, ChatResponse, ContentBlock, ToolSchema } from './llm.js';
 
 /**
- * The only place the Anthropic SDK is touched. Maps the SDK-agnostic ChatModel
- * request/response onto the Messages API. Kept thin so llm.ts stays testable
- * without a network or an API key.
+ * The mgmt bot's OWN-KEY path onto the Messages API (the default path is the
+ * control plane's proxy — see proxyModel.ts and api/mgmtLlm.ts, which has the
+ * server-side twin of this credential handling). Kept thin so llm.ts stays
+ * testable without a network or an API key.
  *
  * Extended thinking is intentionally left off for now: this is short, mechanical
  * tool-calling, and thinking would add thinking-block replay plumbing to the
@@ -20,7 +21,10 @@ export class AnthropicChatModel implements ChatModel {
     // OAuth bearer, not an API key — the SDK sends it via authToken. Accepting
     // both here means AGENTCLAW_MGMT_ANTHROPIC_KEY takes whichever credential
     // the owner has, same as the fleet's AI profiles do.
-    this.#client = apiKey.startsWith('sk-ant-oat')
+    // Case-insensitive to match the routes-side detection (routes.ts rejects
+    // oat-as-api-key with /i) — a mixed-case token must not slip into the
+    // wrong client mode.
+    this.#client = /^sk-ant-oat/i.test(apiKey)
       ? new Anthropic({ authToken: apiKey, apiKey: null })
       : new Anthropic({ apiKey });
   }

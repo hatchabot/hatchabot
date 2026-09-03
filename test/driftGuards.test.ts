@@ -60,3 +60,46 @@ describe('claude-opus-5 must stay banished from offered model lists', () => {
     for (const m of curated) expect(webModels).toContain(`'${m}'`);
   });
 });
+
+describe('mgmt SETUP_FIELD json-schema ↔ TemplateParamSchema zod (audit 2026-09-03)', () => {
+  // multichoice was hand-added to both sides; nothing linked them. The broker
+  // re-validates with the zod schema, so drift here means the model is offered
+  // shapes the broker then rejects (or worse, never offered valid ones).
+  it('type enums and bounds agree', async () => {
+    const { MANIFEST } = await import('../src/mgmt/tools.js');
+    const { TemplateParamSchema } = await import('../src/orchestrator/template.js');
+    const createTool = MANIFEST.find((t) => t.name === 'create_agent')!;
+    const field = (createTool.input_schema.properties as any).fields.items;
+    const zodShape = (TemplateParamSchema as any).def.schema?.shape ?? (TemplateParamSchema as any).shape;
+    const zodTypes = (zodShape.type as any).options ?? (zodShape.type as any).def.values;
+    expect([...field.properties.type.enum].sort()).toEqual([...zodTypes].sort());
+    const zodTargets = (zodShape.target as any).options ?? (zodShape.target as any).def.values;
+    expect([...field.properties.target.enum].sort()).toEqual([...zodTargets].sort());
+    expect(field.properties.label.maxLength).toBe(64);
+    expect(field.properties.help.maxLength).toBe(200);
+    expect(field.properties.default.maxLength).toBe(2000);
+    expect(field.properties.options.maxItems).toBe(12);
+  });
+});
+
+describe('AUTHORING_TOOLS ↔ manifest (audit 2026-09-03)', () => {
+  it('every authoring tool exists in the manifest and is mutate-tier', async () => {
+    const { AUTHORING_TOOLS } = await import('../src/mgmt/broker.js');
+    const { toolDef } = await import('../src/mgmt/tools.js');
+    for (const name of AUTHORING_TOOLS) {
+      const def = toolDef(name);
+      expect(def, `${name} missing from manifest`).toBeTruthy();
+      expect(def!.tier).toBe('mutate');
+    }
+  });
+});
+
+describe('heartbeat llm label: sender slice ↔ receiver max (audit 2026-09-03)', () => {
+  // The sender composes "model via profileName" (unbounded inputs) and the
+  // receiver 400s the WHOLE beat past 64 chars — this pair diverging is how a
+  // healthy bot showed as offline forever. Both sides must name 64.
+  it('both files carry the 64-char bound', () => {
+    expect(read('src/mgmt/index.ts')).toMatch(/\.slice\(0,\s*64\)/);
+    expect(read('src/api/routes.ts')).toMatch(/llm:\s*z\.string\(\)\.trim\(\)\.max\(64\)/);
+  });
+});

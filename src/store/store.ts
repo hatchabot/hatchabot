@@ -264,6 +264,12 @@ export class Store {
     // Indexes on ALTER-added columns must come AFTER the additive loop — on a
     // fresh DB the CREATE TABLE block doesn't have the column yet.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agents_image ON agents (image)`);
+    // The one-management-source-per-owner invariant, enforced by the schema
+    // instead of living only in setAIProfileMgmtLlm's clear-then-set.
+    this.db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ai_profiles_mgmt_llm_one
+         ON ai_profiles (owner_id) WHERE mgmt_llm = 1`,
+    );
 
     // Backfill order for agents created before sort_order existed: rowid is the
     // insertion sequence, so this preserves the old created-at order. Runs once
@@ -375,14 +381,20 @@ export class Store {
   }
 
   /** Single-select per owner: which source backs the management bot's LLM.
-   *  Pass null to clear the owner's pick entirely. */
+   *  Pass null to clear the owner's pick entirely. One transaction: a clear
+   *  followed by a failed set (stale/foreign id) must not silently drop the
+   *  existing pick. */
   setAIProfileMgmtLlm(ownerId: string, profileId: string | null): void {
-    this.db.prepare(`UPDATE ai_profiles SET mgmt_llm = 0 WHERE owner_id = ?`).run(ownerId);
-    if (profileId) {
-      this.db
-        .prepare(`UPDATE ai_profiles SET mgmt_llm = 1 WHERE id = ? AND owner_id = ?`)
-        .run(profileId, ownerId);
-    }
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE ai_profiles SET mgmt_llm = 0 WHERE owner_id = ?`).run(ownerId);
+      if (profileId) {
+        const set = this.db
+          .prepare(`UPDATE ai_profiles SET mgmt_llm = 1 WHERE id = ? AND owner_id = ?`)
+          .run(profileId, ownerId);
+        // Roll the clear back too — a stale/foreign id must not eat the pick.
+        if (set.changes !== 1) throw new Error(`No AI profile ${profileId} owned by ${ownerId}`);
+      }
+    })();
   }
 
   setAIProfileModel(id: string, model: string): void {
@@ -1139,7 +1151,7 @@ export class Store {
       label: r.label,
       reason: r.reason,
       createdAt: r.created_at,
-      files: JSON.parse(r.files),
+      files: safeJson(r.files, {}),
     };
   }
 

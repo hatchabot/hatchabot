@@ -101,6 +101,12 @@ their create dialog. Flip it off and no new agents can take it; agents
 already on it keep working until switched. Only the profile's owner can
 edit, share, or delete it.
 
+A second per-profile toggle, **🛠 Management** (single-select, api-key or
+setup-token sources only), names the source that backs the management bot's
+LLM — the control plane proxies those calls server-side, so the credential
+never reaches the bot process. With none flagged, a usable source is
+auto-picked (api-key first).
+
 **Sharing is a credential hand-off, not a metered proxy.** A borrower's agent
 runs with your key as container env (or, for a subscription, your `~/.claude`
 mounted in), so an account you share with can read the raw credential from inside

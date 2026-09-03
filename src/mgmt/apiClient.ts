@@ -56,7 +56,10 @@ export class HttpApiClient implements ApiClient {
     const r = (await this.#req('GET', `/v1/agents/${id}/logs?lines=${lines}`)) as unknown;
     if (typeof r === 'string') return r;
     if (r && typeof r === 'object') {
-      const o = r as { lines?: string[]; logs?: string };
+      // The real route returns { text } — the shape this method somehow never
+      // handled, so every live /logs rendered raw JSON (audit 2026-09-03).
+      const o = r as { text?: string; lines?: string[]; logs?: string };
+      if (typeof o.text === 'string') return o.text;
       if (Array.isArray(o.lines)) return o.lines.join('\n');
       if (typeof o.logs === 'string') return o.logs;
     }

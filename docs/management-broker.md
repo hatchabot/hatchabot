@@ -77,20 +77,24 @@ what the model *proposes*; it can never change a tool's tier or target endpoint.
   }
 }   // → GET /v1/agents/:id/logs
 
-// list_pending  (pairing requests; all agents if `agent` omitted)
+// list_pending  (pairing requests for ONE agent — `agent` is required;
+// the fleet-wide sweep is the notifier's job, via GET /v1/pending)
 {
   "name": "list_pending",
   "description": "People waiting to be let into an agent (pairing requests).",
   "input_schema": {
     "type": "object", "additionalProperties": false,
-    "properties": { "agent": { "$ref": "#/$defs/agentRef" } }
+    "properties": { "agent": { "$ref": "#/$defs/agentRef" } },
+    "required": ["agent"]
   }
-}   // → GET /v1/agents/:id/pairing  (fan-out if omitted)
+}   // → GET /v1/agents/:id/pairing
 ```
 
 Also read-tier, same shape: `list_members` (`GET …/members`), `get_pool`
 (`GET /v1/pool`), `list_events` (`GET /v1/events`, optional `agent` filter),
-`get_health` (`GET …/health`), `get_usage` (`GET …/usage`).
+`get_health` (`GET …/health`), `get_usage` (`GET …/usage`), and the image
+reads `get_runtime` (`GET /v1/runtime`), `list_images` (`GET /v1/images`),
+`get_image_log` (`GET /v1/images/:name/log`).
 
 `$defs.agentRef` is shared:
 
@@ -123,7 +127,7 @@ Also read-tier, same shape: `list_members` (`GET …/members`), `get_pool`
 // set_model
 {
   "name": "set_model",
-  "description": "Set an agent's model. Must be one the agent's AI source offers; use list_models first if unsure.",
+  "description": "Set an agent's model. Must be one the agent's AI source offers (the broker validates against the source's menu before any card is shown).",
   "input_schema": {
     "type": "object", "additionalProperties": false,
     "properties": {
@@ -142,7 +146,7 @@ Also read-tier, same shape: `list_members` (`GET …/members`), `get_pool`
     "type": "object", "additionalProperties": false,
     "properties": {
       "agent": { "$ref": "#/$defs/agentRef" },
-      "code":  { "type": "string", "pattern": "^[A-Za-z0-9]{4,12}$" }
+      "code":  { "type": "string", "pattern": "^[A-Za-z0-9]{4,16}$" }
     },
     "required": ["agent","code"]
   }
@@ -162,6 +166,15 @@ Also read-tier, same shape: `list_members` (`GET …/members`), `get_pool`
   }
 }   // tier: mutate → DELETE /v1/agents/:id/members/:userId
 ```
+
+Image mutates (v0.92.0), same confirm discipline: `build_image` (name +
+Dockerfile lines + optional base → `POST /v1/images`; the snippet rides the
+card and the FULL lines are posted above it, 10-min authoring TTL; existing
+names refused at propose time — use `rebuild_image`), `rebuild_image` (name +
+optional newer base → `POST /v1/images/:name/rebuild`), and `remove_image`
+(`DELETE /v1/images/:name`; refused BEFORE a card when any agent pins the
+image). The BASE image is read-only to the bot (`get_runtime` reports it);
+base builds are a host operation (`scripts/build-runtime.sh`).
 
 **Forbidden** (never in the tool array — the model literally cannot call them):
 `add_ai_key`, set/paste bot token, set password, edit `MEMORY.md`,
@@ -308,16 +321,19 @@ duplicate callback finds `status != 'pending'` and no-ops.
 ## 7. Policy the broker enforces (independently of the model)
 
 - **Read-only default.** Mutate tools return `READ_ONLY_MODE` until an
-  allowlisted `/mode readwrite` arms them; auto-disarm after N minutes idle.
-- **Rate limits.** Per chat: cap mutate confirmations/minute and total tool
-  calls/minute; `RATE_LIMITED` past the cap.
+  allowlisted `/mode readwrite` arms them. (No idle auto-disarm exists yet —
+  arming is manual and process-global; a `/mode readonly` or restart disarms.)
+- **Rate limit.** One global window over mutate *proposals* (default 20/min);
+  `RATE_LIMITED` past the cap. Reads are unmetered.
 - **Kill switch.** `/pause` sets a flag that fails every tool at the broker door.
 - **Least privilege at the token.** The `cli-token` is owner-scoped; the broker
   narrows further to the tool set — even a compromised broker process can't
   exceed the tool catalog it exposes.
-- **Untrusted content.** Read results fed back to the model carry member names,
-  memory, and logs as data — the broker prefixes such free-text fields with a
-  fenced marker and never lets them re-enter as tool arguments unvalidated.
+- **Untrusted content.** Read results fed back to the model (member names,
+  memory, logs) are data, not instructions — the system prompt says so, length
+  caps apply, and every mutate the model is steered into still lands on a
+  human-reviewed card whose FULL spec is posted above it (v0.93.0). The tap is
+  the enforcement; the prompt is not the boundary.
 
 ---
 
