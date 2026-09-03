@@ -3178,6 +3178,7 @@ async function loadSnapshots() {
             <span style="color:var(--dim)">${ago(s.createdAt)} · ${s.files.length} files${s.reason === 'manual' ? ' · kept' : ''}</span>
           </span>
           <button onclick="revertSnapshot('${s.id}', '${jsq(s.label)}')">Revert</button>
+          <button class="danger" title="Delete this restore point" onclick="deleteSnapshot('${s.id}', '${jsq(s.label)}')">×</button>
         </div>`).join('')
       : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -3193,6 +3194,15 @@ async function takeSnapshot() {
     await loadSnapshots();
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('snapBtn').disabled = false; }
+}
+
+async function deleteSnapshot(snapId, label) {
+  if (!confirm(`Delete snapshot "${label}"? This restore point is gone for good — the agent's live files are untouched.`)) return;
+  try {
+    await api(`/v1/agents/${editAgentId}/snapshots/${snapId}`, { method: 'DELETE' });
+    toast('Snapshot deleted');
+    await loadSnapshots();
+  } catch (e) { $('editErr').textContent = e.message; }
 }
 
 async function revertSnapshot(snapId, label) {

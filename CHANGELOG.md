@@ -2,6 +2,35 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.94.0] — 2026-09-03
+
+Backlog burn-down (categories 3 + 4 of the 2026-09-03 audit) + HTTPS.
+
+### Added
+- **Env vars travel.** A full export (Download, Restore, Move to another
+  cluster) now carries each env var's name AND value; import recreates them —
+  policy-checked, so a crafted archive can't smuggle a reserved
+  proxy/credential/loader variable — before the container first boots, and
+  rolls them back with everything else on failure. A var whose secret is
+  missing fails the export loudly instead of shipping a silently broken
+  agent. Shared templates still carry names only. (Reserved-name policy
+  extracted to orchestrator/envPolicy.ts, shared by route and import.)
+- **CLI parity**: `agentclaw env <agent> [set NAME [value] | rm NAME]`
+  (value from stdin when omitted — secrets stay out of shell history),
+  `agentclaw checkpoint <agent>`, `agentclaw deny <agent> <code>`.
+- **Snapshots can be pruned**: a × button per snapshot row wires up the
+  previously dead DELETE route.
+- **HTTPS**: documented `tailscale serve` as the recommended path (auto
+  certs, localhost consumers untouched) and native TLS
+  (`AGENTCLAW_TLS_CERT`/`AGENTCLAW_TLS_KEY`) as the no-tailnet option.
+
+### Tests
+- HTTP coverage for the audit's riskiest untested routes: pairing approve
+  (incl. the asSelf owner-link branch), file GET/PUT gates, snapshot
+  create/restore/delete, member removal, plus env round-trip/tamper tests.
+- Mgmt branches: LLM-proxy 502 mapping, heartbeat offline derivation,
+  broker rate gate, create_agent poll-timeout. 753 tests total.
+
 ## [0.93.0] — 2026-09-03
 
 8th audit (six parallel auditors; record in docs/audit-2026-09-03.md).

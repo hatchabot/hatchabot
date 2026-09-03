@@ -10,6 +10,7 @@ import {
   type ProvisionDeps,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
+import { reservedEnvProblem } from './envPolicy.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -67,6 +68,13 @@ export interface ExportManifest {
     channelUserId?: string;
     status: 'active' | 'revoked';
   }>;
+  /**
+   * Per-agent env vars WITH their secret values. A full export is a private
+   * identity backup (it already carries the bot token — treat like a
+   * password); an agent that arrives without its env secrets is silently
+   * broken, which is worse. Templates (template.ts) still carry NAMES only.
+   */
+  envVars?: Array<{ name: string; value: string }>;
   /** base64 gzipped tarball of the OpenClaw state dir. */
   state: string;
 }
@@ -123,6 +131,17 @@ const ManifestSchema = z.object({
       }),
     )
     .max(256),
+  envVars: z
+    .array(
+      z.object({
+        // Same shape rule as the env route; the reserved-name POLICY is
+        // enforced at import time via envPolicy.ts (the archive is untrusted).
+        name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).max(128),
+        value: z.string().min(1).max(8192),
+      }),
+    )
+    .max(64)
+    .optional(),
   state: z.string(),
 });
 
@@ -223,6 +242,21 @@ export async function exportAgent(
       role: m.role as MemberRole,
       status: m.status as 'active' | 'revoked',
     })),
+    envVars: await Promise.all(
+      store.listAgentEnv(agentId).map(async (e) => {
+        try {
+          return { name: e.name, value: await secrets.get(e.secretRef) };
+        } catch {
+          // A missing secret means the var is already broken here — say so
+          // rather than exporting an archive that silently lacks it.
+          await restoreIfRunning();
+          throw new TransferError(
+            `Env var "${e.name}" has no stored value (its secret is missing). Remove it in ` +
+              'Settings → Environment, then export again.',
+          );
+        }
+      }),
+    ),
     state: state.toString('base64'),
   };
   log('agent.exported', { agentId, bytes: state.length });
@@ -354,6 +388,7 @@ async function importAgentInner(
   markBusy(agent.id);
 
   const secretRef = `channel/${agent.id}/bot-token`;
+  const envSecretRefs: string[] = [];
   let runtimeRef: string | undefined;
   try {
     // Memberships travel verbatim, except the owner seat belongs to whoever
@@ -405,6 +440,26 @@ async function importAgentInner(
       createdAt: now,
     });
 
+    // Recreate the env vars BEFORE provisioning renders the runtime spec, so
+    // the container boots with them (an agent without its env secrets is
+    // silently broken). The archive is untrusted: the same reserved-name
+    // policy the web route enforces applies here — a crafted archive must not
+    // smuggle in a proxy/credential/loader variable. Refuse loudly rather
+    // than skip: a quietly dropped var is this bug in a new costume.
+    for (const v of manifest.envVars ?? []) {
+      const reserved = reservedEnvProblem(v.name);
+      if (reserved) {
+        throw new TransferError(`This archive sets env var "${v.name}", which is not allowed: ${reserved}`);
+      }
+    }
+    for (const v of manifest.envVars ?? []) {
+      const envId = randomUUID();
+      const envRef = `agent-env/${envId}`;
+      await secrets.put(envRef, v.value);
+      envSecretRefs.push(envRef);
+      store.insertAgentEnv({ id: envId, agentId: agent.id, name: v.name, secretRef: envRef, createdAt: now });
+    }
+
     // Provision creates + seeds the volume; the snapshot then overwrites it
     // with the real state; a second provision re-applies THIS installation's
     // config (model, auth mode) over the imported openclaw.json — the seed
@@ -445,8 +500,13 @@ async function importAgentInner(
     };
     if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
     await secrets.delete(secretRef).catch(() => {});
+    for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});
     step(() => store.deleteChannelForAgent(agent.id));
     step(() => store.deleteMemberships(agent.id));
+    // Env rows too — their secrets are already deleted above; a tombstone
+    // keeping references to swept secrets is the residue class the v0.90
+    // audit scrubbed.
+    step(() => store.scrubAgentResidue(agent.id));
     step(() => {
       store.setAgentState(agent.id, 'DELETING');
       store.setAgentState(agent.id, 'DELETED');

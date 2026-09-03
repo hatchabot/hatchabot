@@ -56,6 +56,18 @@ If the second command mentions enabling HTTPS certificates: admin console →
 AGENTCLAW_PUBLIC_URL=https://<your-machine>.<your-tailnet>.ts.net
 ```
 
+`serve` proxies 443 → localhost:8080, so everything that talks to
+`http://localhost:8080` directly (the management bot, the CLI, cron scripts)
+keeps working unchanged, and cert renewal is Tailscale's problem. If you're
+using Google sign-in, add the new `https://…ts.net` origin to the OAuth
+client's authorized JavaScript origins in the GCP console — the old
+`http://…:8080` origin stops matching.
+
+**No tailnet?** The server also speaks TLS natively: point
+`AGENTCLAW_TLS_CERT` / `AGENTCLAW_TLS_KEY` at PEM files in `.env` and it
+serves HTTPS itself (both or neither — half-configured refuses to boot).
+You own the cert lifecycle on that path.
+
 then `systemctl --user restart agentclaw`.
 
 ## Deliberately NOT enabled: Funnel

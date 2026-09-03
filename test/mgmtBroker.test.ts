@@ -473,6 +473,36 @@ describe('image tools', () => {
   });
 });
 
+describe('broker limits (audit 2026-09-03 coverage)', () => {
+  it('the mutate rate gate trips past the window cap', async () => {
+    const api = new FakeApi(AGENTS, { p1: [] });
+    let seq = 0;
+    const pending = new PendingStore({ genId: () => `c_${++seq}` });
+    const broker = new Broker(api, pending, { mutateLimit: 2, mutateWindowMs: 60_000 });
+    broker.setMode(true);
+    expect((await broker.handleTool('stop_agent', { agent: 'a1' }, WHO)).ok).toBe(true);
+    expect((await broker.handleTool('stop_agent', { agent: 'a1' }, WHO)).ok).toBe(true);
+    const third = await broker.handleTool('stop_agent', { agent: 'a1' }, WHO);
+    expect(third).toMatchObject({ ok: false, error: { code: 'RATE_LIMITED' } });
+  });
+
+  it('a create that never reaches RUNNING times out with a next step, and writes nothing', async () => {
+    const api = new FakeApi(AGENTS, { p1: [] });
+    let seq = 0;
+    const pending = new PendingStore({ genId: () => `c_${++seq}` });
+    // real clock, tiny budget: the deadline branch is the thing under test
+    const broker = new Broker(api, pending, { pollIntervalMs: 1, pollTimeoutMs: 25 });
+    broker.setMode(true);
+    api.createdStates = ['PROVISIONING']; // stuck forever (e.g. pool empty, parked on bot_token)
+    await broker.handleTool('create_agent', { name: 'Fresh', soul: 's' }, WHO);
+    const out = await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(out.ok).toBe(true);
+    expect((out as any).text).toContain('⚠ Failed');
+    expect((out as any).text).toContain('still provisioning');
+    expect(api.calls.some((c) => c.startsWith('put:'))).toBe(false);
+  });
+});
+
 describe('confirm token — single-use, TTL, user-bound', () => {
   it('is single-use: a replayed confirm no-ops', async () => {
     const { broker, api } = make({ rw: true });

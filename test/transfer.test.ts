@@ -85,6 +85,45 @@ describe('export failure handling', () => {
   });
 });
 
+describe('env vars travel (audit backlog #1 → fixed)', () => {
+  it('export carries name+value; import recreates rows and secrets before provisioning', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    await src.secrets.put('agent-env/e1', 'super-secret');
+    src.store.insertAgentEnv({ id: 'e1', agentId: 'a1', name: 'BRAVE_API_KEY', secretRef: 'agent-env/e1', createdAt: 'now' });
+
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    const agent = await importAgent(dst.deps, data, { ownerId: 'importer' });
+
+    const envs = dst.store.listAgentEnv(agent.id);
+    expect(envs.map((e) => e.name)).toEqual(['BRAVE_API_KEY']);
+    await expect(dst.secrets.get(envs[0]!.secretRef)).resolves.toBe('super-secret');
+  });
+
+  it('a missing env secret fails the export loudly (and restarts the agent) instead of shipping a broken archive', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    // Row exists, secret does not — the silently-broken shape.
+    src.store.insertAgentEnv({ id: 'e1', agentId: 'a1', name: 'BRAVE_API_KEY', secretRef: 'agent-env/gone', createdAt: 'now' });
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/BRAVE_API_KEY/);
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
+  it('a crafted archive cannot smuggle a reserved env var past the route policy', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const manifest = JSON.parse(require('node:zlib').gunzipSync(data).toString('utf8'));
+    manifest.envVars = [{ name: 'HTTPS_PROXY', value: 'http://evil.example' }];
+    const tampered = require('node:zlib').gzipSync(Buffer.from(JSON.stringify(manifest)));
+    const dst = await installation('importer');
+    await expect(importAgent(dst.deps, tampered, { ownerId: 'importer' })).rejects.toThrow(/HTTPS_PROXY/);
+    // rolled back — no half-made agent holds the slug
+    expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+  });
+});
+
 describe('agent export/import', () => {
   it('round-trips an agent to a second installation intact', async () => {
     const src = await installation();

@@ -131,8 +131,15 @@ Commands:
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
   approve <agent> <code>       Let a pending requester in (creates a member)
+  deny <agent> <code>          Turn a pending requester away (not a ban)
   members <agent>              List members
   kick <agent> <userId>        Revoke a member
+  env <agent>                  List env var names (values are write-only)
+  env <agent> set <NAME> [<value>]
+                               Set one (omit the value to read it from stdin,
+                               keeping secrets out of shell history)
+  env <agent> rm <NAME>        Remove one
+  checkpoint <agent>           Write the chat's key facts to MEMORY.md now (~20s)
   snapshot <agent> [--label <text>]
                                Save a restore point of SOUL/AGENTS/MEMORY
   snapshots <agent>            List restore points
@@ -1178,6 +1185,54 @@ async function main() {
         ? `${res.member.displayName} is already a member — access restored`
         : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
       return;
+    }
+    case 'deny': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw deny <agent> <code>'));
+      const code = rest[1] ?? fail('give the pairing code (see: agentclaw pairing)');
+      await jsonPost(`/v1/agents/${a.id}/pairing/deny`, { code });
+      console.log('turned away — not a ban; they can ask again by messaging the bot');
+      return;
+    }
+    case 'checkpoint': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw checkpoint <agent>'));
+      await jsonPost(`/v1/agents/${a.id}/checkpoint`, {});
+      console.log("checkpoint requested — the agent is writing the conversation's key facts to MEMORY.md (~20s)");
+      return;
+    }
+    case 'env': {
+      const usage = 'usage: agentclaw env <agent> [set <NAME> [<value>] | rm <NAME>]';
+      const a = await resolveAgent(ctx, rest[0] ?? fail(usage));
+      const sub = rest[1];
+      const envOf = async () =>
+        ((await (await api(ctx, `/v1/agents/${a.id}`)).json()) as any).envVars ?? [];
+      if (!sub) {
+        const vars = await envOf();
+        if (!vars.length) return console.log('no env vars set');
+        for (const e of vars) console.log(`${e.name.padEnd(32)} set ${e.createdAt?.slice(0, 10) ?? ''}`);
+        return;
+      }
+      if (sub === 'set') {
+        const name = rest[2] ?? fail(usage);
+        // Value from argv, or stdin when omitted — argv lands in shell
+        // history and `ps`, which is no place for a secret.
+        let value = rest[3];
+        if (value === undefined) {
+          if (process.stdin.isTTY) console.error(`enter the value for ${name} (end with Ctrl-D):`);
+          value = readFileSync(0, 'utf8').replace(/\n$/, '');
+        }
+        if (!value) fail('empty value');
+        await jsonPost(`/v1/agents/${a.id}/env`, { name, value });
+        console.log(`${name} set — applies on the next rebuild`);
+        return;
+      }
+      if (sub === 'rm') {
+        const name = rest[2] ?? fail(usage);
+        const e = (await envOf()).find((v: any) => v.name === name) ?? fail(`no env var "${name}" (see: agentclaw env "${a.name}")`);
+        await api(ctx, `/v1/agents/${a.id}/env/${e.id}`, { method: 'DELETE' });
+        console.log(`${name} removed — applies on the next rebuild`);
+        return;
+      }
+      return fail(usage);
     }
     case 'members': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: agentclaw members <agent>'));

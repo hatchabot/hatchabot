@@ -117,4 +117,34 @@ describe('POST /v1/mgmt/llm/complete (server-side proxy)', () => {
     const bad = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: { ...BODY, maxTokens: 1e9 } });
     expect(bad.statusCode).toBe(400);
   });
+
+  it('an upstream failure maps to 502 naming the source — never a raw crash', async () => {
+    const store = new Store(new Database(':memory:'));
+    const f = Fastify();
+    await registerRoutes(f, {
+      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
+      mgmtLlmComplete: async () => { throw new Error('401 invalid bearer'); },
+    });
+    store.insertAIProfile(profile({ id: 'ak', name: 'Spare Key' }));
+    const res = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: BODY });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/Spare Key/);
+    expect(res.json().error).toMatch(/invalid bearer/);
+    await f.close();
+  });
+});
+
+describe('GET /v1/mgmt/status offline derivation', () => {
+  it('a stale heartbeat reports offline, not vanished', async () => {
+    const { store, f } = await world();
+    store.upsertMgmtHeartbeat(OWNER, { botUsername: 'b', mode: 'read-only', allowlisted: 1 });
+    // Age the beat past the 90s window (in-memory test DB; direct UPDATE is
+    // the clock injection upsert doesn't offer).
+    (store as any).db
+      .prepare(`UPDATE mgmt_heartbeat SET seen_at = ?`)
+      .run(new Date(Date.now() - 5 * 60_000).toISOString());
+    const s = (await f.inject({ method: 'GET', url: '/v1/mgmt/status', headers: H })).json();
+    expect(s).toMatchObject({ configured: true, online: false, botUsername: 'b' });
+  });
 });

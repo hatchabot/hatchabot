@@ -127,7 +127,10 @@ Values stay editable afterwards: 📖 Definition → **Setup values** edits or
 resets any answer in place (snapshot first), on imported copies AND on the
 master itself (its layer seeds from the live files on first Apply).
 
-Rules and formats: [moving-agents.md](moving-agents.md).
+Environment variables travel with a full copy: Download/Restore and
+cross-cluster moves carry each var's name **and** value (the archive already
+holds the bot token — guard it like a password). Shared templates still carry
+names only. Rules and formats: [moving-agents.md](moving-agents.md).
 
 ## Adopting existing OpenClaw agents
 
