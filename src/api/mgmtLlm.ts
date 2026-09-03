@@ -46,9 +46,21 @@ export interface MgmtChatResponse {
  * person mid-conversation. Rate limits deserve the honest household truth:
  * agents, the management chat, and Claude Code all share one subscription.
  */
-export function friendlyLlmError(raw: string): string {
+export function friendlyLlmError(raw: string, credential?: 'api-key' | 'setup-token'): string {
   if (/429|rate_limit/i.test(raw)) {
-    return 'The AI source is rate-limited right now — your agents, this chat, and Claude Code share its budget. Wait a minute and try again.';
+    // Measured on this installation (2026-09-03): a Max setup-token gets a
+    // generic 429 on DIRECT API calls even when the account is idle — the
+    // same subscription serving Claude Code fine in the same minute. That's
+    // a refusal of the token class, not load. Say so, with the way out.
+    if (credential === 'setup-token') {
+      return (
+        'Anthropic rejected this Claude Max setup-token for direct API use (it reports as a ' +
+        'rate limit even when idle — setup-tokens only work through the Claude CLI your agents ' +
+        'use). Add an Anthropic API-key source and flag it 🛠 Management under ⚙ Settings → ' +
+        'AI sources; chat usage costs pennies.'
+      );
+    }
+    return 'The AI source is rate-limited right now — wait a minute and try again.';
   }
   if (/529|overloaded/i.test(raw)) {
     return "Anthropic is overloaded at the moment — not your quota. Try again shortly.";

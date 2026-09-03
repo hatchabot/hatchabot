@@ -181,7 +181,13 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       const msgs = await s.llm.respond({ ownerId, ...WEB_WHO }, parsed.data.message, sink, s.history);
       s.history = msgs.slice(-HISTORY_CAP);
     } catch (err) {
-      return reply.code(502).send({ error: friendlyLlmError(String((err as Error).message ?? err)) });
+      const p = pickMgmtProfile(store, ownerId);
+      return reply.code(502).send({
+        error: friendlyLlmError(
+          String((err as Error).message ?? err),
+          p ? (p.kind === 'api_key' ? 'api-key' : 'setup-token') : undefined,
+        ),
+      });
     }
     s.transcript.push({ kind: 'user', text: parsed.data.message });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });

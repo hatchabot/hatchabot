@@ -1655,7 +1655,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     try {
       return await mgmtComplete(secrets, profile, parsed.data);
     } catch (err) {
-      const msg = friendlyLlmError(String((err as Error).message ?? err));
+      const msg = friendlyLlmError(
+        String((err as Error).message ?? err),
+        profile.kind === 'api_key' ? 'api-key' : 'setup-token',
+      );
       return reply.code(502).send({ error: `LLM call via "${profile.name}" failed: ${msg}` });
     }
   });
