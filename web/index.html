@@ -684,6 +684,8 @@
       Injected as environment variables on the next <b>Rebuild</b>. Values are
       <b>write-only</b> — stored encrypted, never shown again; you can only replace or remove
       them. Provider/proxy/loader names are reserved for safety.
+      <br>🔎 Special case: add <code>BRAVE_API_KEY</code> and the next Rebuild turns on this
+      agent's own <b>web search</b> (provider auto-detected from the key).
     </div>
 
     <div id="imagePinRow" style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
@@ -5173,7 +5175,16 @@ async function openMgmtChat() {
       mgmtBubble('assistant', 'No AI source can back management chat yet — flag one as 🛠 Management under ⚙ Settings → AI sources.');
       return;
     }
-    for (const m of s.transcript) mgmtBubble(m.kind, m.text);
+    for (const m of s.transcript) {
+      if (m.kind === 'proposal' && m.proposal) {
+        // A reloaded pane re-renders unconfirmed cards live; resolved ones
+        // show as a plain note (their outcome line follows in the transcript).
+        if (m.pending) mgmtProposalCard(m.proposal);
+        else mgmtBubble('assistant', `🗂 (earlier proposal: ${(m.proposal.summary || '').split('\n')[0]})`);
+        continue;
+      }
+      mgmtBubble(m.kind, m.text);
+    }
     if (!s.transcript.length) {
       mgmtBubble('assistant', 'Hi — ask about your fleet, or tell me what to create or change. Try: “which agents look unhealthy?” or “draft a recipe-keeper agent with a cuisine setup field”.');
     }

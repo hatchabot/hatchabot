@@ -158,6 +158,15 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   cmds.push({ argv: ['plugins', 'enable', 'llama-cpp'] });
 
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
+
+  // Per-agent web search (connections plumbing): when the agent carries a
+  // search-provider key, turn the managed web_search tool on — OpenClaw
+  // auto-detects the provider from the available API keys, so the key env
+  // var is the whole per-agent story. Written both ways so removing the key
+  // converges on rebuild instead of leaving search half-enabled.
+  cmds.push({
+    argv: ['config', 'set', 'tools.web.search.enabled', patch.enableWebSearch ? 'true' : 'false'],
+  });
   // Memory search: OpenClaw's default points at OpenAI embeddings, which no
   // AgentClaw agent has a key for — so semantic recall over MEMORY.md was
   // silently dead fleet-wide (doctor flagged it once the lint sweep landed).

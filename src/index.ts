@@ -21,6 +21,13 @@ const DB_PATH = process.env.AGENTCLAW_DB ?? 'data/agentclaw.sqlite';
 const PORT = Number(process.env.PORT ?? 8080);
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
+// The data dir holds the DB, CLI scratch homes, and build logs — no other
+// local user has any business even listing it (audit 2026-09-04 #4).
+try {
+  chmodSync(dirname(DB_PATH), 0o700);
+} catch {
+  /* best-effort — a shared/system-owned dir shouldn't block boot */
+}
 const db = new Database(DB_PATH);
 // The DB holds encrypted secrets AND cleartext gateway tokens — no other
 // local user has any business reading it. (WAL siblings too.)

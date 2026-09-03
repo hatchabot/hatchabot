@@ -168,6 +168,34 @@ describe('POST /v1/mgmt/chat', () => {
     await f.close();
   });
 
+  it('proposal cards survive a pane reload — pending ones stay confirmable (audit backlog #2)', async () => {
+    const { store, f } = await world([
+      { stopReason: 'tool_use', content: [{ type: 'tool_use', id: 't1', name: 'stop_agent', input: { agent: 'a1' } }] },
+      { stopReason: 'end_turn', content: [{ type: 'text', text: 'Card posted.' }] },
+    ]);
+    await f.inject({ method: 'POST', url: '/v1/mgmt/chat/mode', headers: H, payload: { readWrite: true } });
+    const [p] = (await chat(f, 'stop kitchen')).json().proposals;
+
+    // Simulate a reload: GET must return the proposal entry, marked pending.
+    const state = (await f.inject({ method: 'GET', url: '/v1/mgmt/chat', headers: H })).json();
+    const entry = state.transcript.find((t: any) => t.kind === 'proposal');
+    expect(entry).toBeTruthy();
+    expect(entry.pending).toBe(true);
+    expect(entry.proposal.confirmId).toBe(p.confirmId);
+
+    // Confirm from the "reloaded" pane — the card is still live.
+    const confirmed = await f.inject({
+      method: 'POST', url: '/v1/mgmt/chat/confirm', headers: H,
+      payload: { confirmId: entry.proposal.confirmId, verb: 'confirm' },
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.state).toBe('STOPPED');
+
+    // After resolution the reload shows it as no longer pending.
+    const after = (await f.inject({ method: 'GET', url: '/v1/mgmt/chat', headers: H })).json();
+    expect(after.transcript.find((t: any) => t.kind === 'proposal').pending).toBe(false);
+  });
+
   it('history persists across calls — the second message sees the first exchange', async () => {
     const { f, modelCalls } = await world([
       { stopReason: 'end_turn', content: [{ type: 'text', text: 'Hello Chris.' }] },

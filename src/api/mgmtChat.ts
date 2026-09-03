@@ -32,8 +32,15 @@ interface ChatSession {
   broker: Broker;
   llm: LlmAgent;
   history: ChatMessage[];
-  /** What the pane renders on reload — display-shaped, capped. */
-  transcript: Array<{ kind: 'user' | 'assistant'; text: string }>;
+  /** What the pane renders on reload — display-shaped, capped. Proposal
+   *  entries carry the full card so a long turn outliving the HTTP request
+   *  (or a page reload) can't lose an unconfirmed card (audit backlog #2). */
+  transcript: Array<{
+    kind: 'user' | 'assistant' | 'proposal';
+    text?: string;
+    proposal?: unknown;
+    confirmId?: string;
+  }>;
   /** One turn at a time: concurrent POSTs raced on `history` and silently
    *  lost whole turns (audit 2026-09-04). */
   busy: boolean;
@@ -209,11 +216,18 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     const ownerId = ownerIdOf(req);
     const s = sessions.get(ownerId);
     const profile = pickMgmtProfile(store, ownerId);
+    // Annotate proposal entries with their CURRENT confirmability, so a
+    // reloaded pane renders live buttons only on still-pending cards.
+    const transcript = (s?.transcript ?? []).map((t) =>
+      t.kind === 'proposal'
+        ? { ...t, pending: !!t.confirmId && s!.broker.pending.peek(t.confirmId)?.status === 'pending' }
+        : t,
+    );
     return {
       available: !!profile,
       llm: profile ? { model: profile.model, profileName: profile.name } : undefined,
       mode: s?.broker.readWrite ? 'read-write' : 'read-only',
-      transcript: s?.transcript ?? [],
+      transcript,
     };
   });
 
@@ -243,6 +257,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     }
     s.transcript.push({ kind: 'user', text: parsed.data.message });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });
+    for (const p of proposals) s.transcript.push({ kind: 'proposal', proposal: p, confirmId: p.confirmId });
     s.transcript = s.transcript.slice(-TRANSCRIPT_CAP);
     return { texts, proposals, mode: s.broker.readWrite ? 'read-write' : 'read-only' };
   });
@@ -262,6 +277,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       });
     }
     s.transcript.push({ kind: 'assistant', text: out.text });
+    s.transcript = s.transcript.slice(-TRANSCRIPT_CAP);
     return { done: out.done, text: out.text };
   });
 

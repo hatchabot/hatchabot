@@ -1,9 +1,26 @@
 # Design: Connections & skills for advanced agents
 
-*Status: designed 2026-08-24. Phase 1 has SHIPPED since — the `gog` Google
-Workspace CLI is baked into the runtime image, `GOG_HOME` puts each agent's
-tokens on its own volume, and auth happens in the chat. Later phases (OAuth
-brokering, per-agent search-provider plumbing) remain design.*
+*Status: designed 2026-08-24. Phase 1 SHIPPED — the `gog` Google Workspace
+CLI is baked into the runtime image, `GOG_HOME` puts each agent's tokens on
+its own volume, and auth happens in the chat. Per-agent SEARCH shipped
+2026-09-04 (v0.100.0): add a `BRAVE_API_KEY` env var to an agent and the next
+rebuild enables OpenClaw's managed web_search for it (provider auto-detected
+from the key; removal converges the same way). Remaining design: OAuth
+brokering, the Connections tab, and `datasource:` template targets.*
+
+*Field notes from the live Condo Adviser (2026-09-04, productization
+groundwork): its Gmail/Drive run over `gog` with the keyring password kept at
+`~/.openclaw/connections/gog/` (the volume — survives rebuilds; the agent
+discovered this convention itself); its Jira creds lived at
+`~/.config/atlassian/env`, which a rebuild WIPED — it recovered them from a
+session transcript, which is exactly the failure mode agent env vars (v0.94:
+they travel, they re-inject on every rebuild) exist to prevent. Its OCR
+system packages also vanish on rebuild — that's the derived-image feature.
+Lessons for the connections work: (1) durable connection state belongs under
+`~/.openclaw/connections/<name>/` or in AgentClaw env vars, never bare
+`~/.config`; (2) a Connections tab should offer to migrate exactly these two
+patterns; (3) the condo template's future `datasource:` fields are gog-account
++ Jira-site bindings, with env-target fields carrying their tokens.*
 
 Most agents need no outside data — they organize conversations and carry
 training. But the advanced ones (the condo adviser reading board emails from

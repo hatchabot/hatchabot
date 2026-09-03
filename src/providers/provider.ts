@@ -98,6 +98,12 @@ export interface OpenClawConfigPatch {
    * provider can publish its port — the per-agent Control UI debug door.
    */
   gatewayToken?: string;
+  /**
+   * Turn on OpenClaw's managed web_search tool. Set when the agent carries a
+   * search-provider key (e.g. BRAVE_API_KEY env var) — the provider itself is
+   * auto-detected by OpenClaw from the available keys.
+   */
+  enableWebSearch?: boolean;
   telegram?: {
     accountId: string;
     botToken: string;

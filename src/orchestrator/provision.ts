@@ -10,6 +10,14 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
+
+/**
+ * Env-var names whose presence gives an agent its own web search — OpenClaw's
+ * managed web_search auto-detects the provider from these keys. Verified in
+ * the runtime dist (BRAVE_API_KEY, 2026-09-04); extend as providers are
+ * confirmed rather than guessed.
+ */
+export const SEARCH_KEY_ENV_NAMES = ['BRAVE_API_KEY'];
 import { buildGitSyncScript, gitSyncReason } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
@@ -360,6 +368,10 @@ export async function buildRuntimeSpec(
   for (const e of store.listAgentEnv(agentId)) {
     perAgentEnv[e.name] = await secrets.get(e.secretRef);
   }
+  // A search-provider key turns the managed web_search tool on for THIS
+  // agent (docs/connections-design.md — per-agent search plumbing). OpenClaw
+  // auto-detects the provider from the key names it finds.
+  const enableWebSearch = SEARCH_KEY_ENV_NAMES.some((n) => n in perAgentEnv);
   return {
     agentId,
     slug: agent.slug,
@@ -382,6 +394,7 @@ export async function buildRuntimeSpec(
         agentId: agent.slug,
         model: effectiveModel(agent, profile),
         models: profile.models,
+        enableWebSearch,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.

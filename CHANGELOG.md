@@ -2,6 +2,26 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.100.0] — 2026-09-04
+
+### Added
+- **Per-agent web search** (the connections follow-up): an agent with a
+  `BRAVE_API_KEY` env var gets OpenClaw's managed web_search enabled on its
+  next rebuild (provider auto-detected from the key); removing the key
+  converges it back off. Composes with env-target template fields — a shared
+  Stock Broker can ask for the search key at import and arrive with working
+  live-data briefings.
+- **Proposal cards survive pane reloads**: 💬 Manage persists proposals into
+  the session transcript; a reopened pane re-renders still-pending cards
+  with live Confirm buttons and shows resolved ones as notes — a long
+  authoring turn can no longer lose its card to a dropped connection.
+- HTTP tests for `POST /v1/join` (the unauthenticated invite redemption —
+  the last untested internet-facing route): happy path, single-use, bad/
+  missing codes, no-verifier token behavior.
+- `data/` is chmod 700 at boot; stale `data/tls` + `data/server.log`
+  artifacts removed. Field notes from the live Condo Adviser inspection
+  recorded in connections-design.md (productization groundwork).
+
 ## [0.99.0] — 2026-09-04
 
 9th audit (six parallel auditors; record in docs/audit-2026-09-04.md).

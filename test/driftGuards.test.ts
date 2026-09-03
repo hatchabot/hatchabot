@@ -114,3 +114,11 @@ describe('heartbeat cadence: sender 30s ↔ receiver 90s window (audit 2026-09-0
     expect(receiver).toMatch(/< 90_000/);
   });
 });
+
+describe('search-key names: provision constant ↔ web hint (audit habit)', () => {
+  it('the env-tab hint names a key the provision constant actually honors', async () => {
+    const { SEARCH_KEY_ENV_NAMES } = await import('../src/orchestrator/provision.js');
+    expect(SEARCH_KEY_ENV_NAMES).toContain('BRAVE_API_KEY');
+    expect(read('web/index.html')).toContain('BRAVE_API_KEY');
+  });
+});

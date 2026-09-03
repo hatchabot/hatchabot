@@ -143,6 +143,12 @@ Values stay editable afterwards: 📖 Definition → **Setup values** edits or
 resets any answer in place (snapshot first), on imported copies AND on the
 master itself (its layer seeds from the live files on first Apply).
 
+**Per-agent web search**: add a `BRAVE_API_KEY` env var (Settings →
+Environment, or an env-target template field) and the next Rebuild enables
+OpenClaw's managed web_search for that agent — provider auto-detected from
+the key, and removing the key converges back off. Every agent keeps the
+keyless DuckDuckGo baseline regardless.
+
 Environment variables travel with a full copy: Download/Restore and
 cross-cluster moves carry each var's name **and** value (the archive already
 holds the bot token — guard it like a password). Shared templates still carry
