@@ -23,6 +23,9 @@ export interface AuthorSpec {
   hostId?: string;
   /** update_definition: precomputed change-size line, shown on the card. */
   diff?: string;
+  /** build_image / rebuild_image: the Dockerfile snippet and base tag. */
+  dockerfile?: string;
+  base?: string;
 }
 
 export interface Resolved {

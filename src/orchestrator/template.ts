@@ -43,7 +43,7 @@ export const TemplateParamSchema = z.object({
   label: z.string().min(1).max(64),
   help: z.string().max(200).optional(),
   required: z.boolean(),
-  type: z.enum(['text', 'longtext', 'choice', 'boolean']),
+  type: z.enum(['text', 'longtext', 'choice', 'multichoice', 'boolean']),
   default: z.string().max(2000).optional(),
   options: z.array(z.string().min(1).max(120)).max(12).optional(),
   target: z.enum(['soul', 'agents']),
@@ -209,6 +209,18 @@ export function resolveParamValues(
     if (p.type === 'choice' && v !== undefined && p.options?.length && !p.options.includes(v)) {
       problems.push(`"${p.label}" must be one of: ${p.options.join(', ')}`);
       continue;
+    }
+    // multichoice: the value is a comma-separated SUBSET of the options,
+    // normalized to "a, b" — that string is what lands in the {{placeholder}},
+    // so it must read naturally in prose.
+    if (p.type === 'multichoice' && v !== undefined && v !== '' && p.options?.length) {
+      const picks = v.split(',').map((s) => s.trim()).filter(Boolean);
+      const bad = picks.filter((s) => !p.options!.includes(s));
+      if (bad.length) {
+        problems.push(`"${p.label}" allows only: ${p.options.join(', ')} (got ${bad.join(', ')})`);
+        continue;
+      }
+      v = picks.join(', ');
     }
     if (p.required && (v === undefined || v === '')) {
       problems.push(`"${p.label}" is required`);

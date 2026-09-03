@@ -111,6 +111,22 @@ export interface ApiClient {
   getFile(id: string, name: string): Promise<string>;
   putFile(id: string, name: string, content: string): Promise<void>;
   patchAgent(id: string, body: { persona?: string; parameters?: Array<Record<string, unknown>> }): Promise<void>;
+  // images
+  getRuntime(): Promise<{ imageVersion?: string; npmLatest?: string; upgradeAvailable: boolean }>;
+  listImages(): Promise<{ base: string; images: ImageSummary[] }>;
+  imageLog(name: string): Promise<{ status: string; error?: string; log: string }>;
+  buildImage(body: { name: string; dockerfile: string; base?: string }): Promise<void>;
+  rebuildImage(name: string, base?: string): Promise<void>;
+  removeImage(name: string): Promise<void>;
+}
+
+export interface ImageSummary {
+  name: string;
+  tag: string;
+  status: string;
+  base: string;
+  pinnedBy: number;
+  error?: string;
 }
 
 export type ErrCode =
@@ -147,7 +163,7 @@ export interface BrokerOptions {
 
 /** Tools whose confirmation carries a full spec: longer TTL (the owner is
  *  reading a document, not a verb) and a working notice while they execute. */
-export const AUTHORING_TOOLS = new Set(['create_agent', 'update_definition']);
+export const AUTHORING_TOOLS = new Set(['create_agent', 'update_definition', 'build_image']);
 const AUTHORING_TTL_MS = 600_000;
 
 class BrokerError extends Error {
@@ -371,6 +387,14 @@ export class Broker {
         return this.api.getHealth((await this.#resolve(args.agent)).id);
       case 'get_usage':
         return this.api.getUsage((await this.#resolve(args.agent)).id);
+      case 'get_runtime':
+        return this.api.getRuntime();
+      case 'list_images':
+        return this.api.listImages();
+      case 'get_image_log': {
+        if (typeof args.name !== 'string' || !args.name) throw new BrokerError('INVALID_INPUT', 'Missing image name.');
+        return this.api.imageLog(args.name);
+      }
       default:
         throw new BrokerError('FORBIDDEN_TOOL', `Not a read tool: ${name}`);
     }
@@ -438,6 +462,33 @@ export class Broker {
       };
       return { agentId: '', agentName: spec.name!, spec };
     }
+    if (name === 'build_image' || name === 'rebuild_image' || name === 'remove_image') {
+      const imgName = args.name;
+      if (typeof imgName !== 'string' || !imgName.trim()) throw new BrokerError('INVALID_INPUT', 'Missing image name.');
+      const base = typeof args.base === 'string' && args.base.trim() ? args.base.trim() : undefined;
+      const { images } = await this.api.listImages();
+      const existing = images.find((i) => i.name === imgName);
+      if (name === 'build_image') {
+        if (existing) {
+          throw new BrokerError('INVALID_INPUT', `"${imgName}" already exists — use rebuild_image to rebuild it.`);
+        }
+        const dockerfile = args.dockerfile;
+        if (typeof dockerfile !== 'string' || !dockerfile.trim()) {
+          throw new BrokerError('INVALID_INPUT', 'Missing Dockerfile lines.');
+        }
+        return { agentId: '', agentName: imgName, spec: { name: imgName, dockerfile, base } };
+      }
+      if (!existing) {
+        throw new BrokerError('NOT_FOUND', `No derived image named "${imgName}" — list_images shows what exists.`);
+      }
+      if (name === 'remove_image' && existing.pinnedBy > 0) {
+        throw new BrokerError(
+          'INVALID_INPUT',
+          `"${imgName}" is pinned by ${existing.pinnedBy} agent(s) — unpin them (Settings → Environment) first.`,
+        );
+      }
+      return { agentId: '', agentName: imgName, spec: { name: imgName, base } };
+    }
     const agent = await this.#resolve(args.agent);
     const base: Resolved = { agentId: agent.id, agentName: agent.name };
     switch (name) {
@@ -499,6 +550,12 @@ export class Broker {
 
   async #execMutate(name: string, r: Resolved): Promise<void> {
     switch (name) {
+      case 'build_image':
+        return this.api.buildImage({ name: r.spec!.name!, dockerfile: r.spec!.dockerfile!, base: r.spec!.base });
+      case 'rebuild_image':
+        return this.api.rebuildImage(r.spec!.name!, r.spec!.base);
+      case 'remove_image':
+        return this.api.removeImage(r.spec!.name!);
       case 'create_agent': {
         const s = r.spec!;
         const created = await this.api.createAgent({
@@ -579,6 +636,19 @@ const previewOf = (label: string, text: string, maxChars: number): string => {
 /** Human-facing confirmation text — the RESOLVED target, never the raw input.
  *  Authoring proposals are multi-line: the card IS the review surface. */
 export function summarize(tool: string, r: Resolved): string {
+  if (tool === 'build_image') {
+    const s = r.spec!;
+    return [
+      `🧱 Build derived image "${r.agentName}"${s.base ? ` FROM ${s.base}` : ' (fleet base)'}`,
+      previewOf('Dockerfile lines', s.dockerfile ?? '', 700),
+    ].join('\n');
+  }
+  if (tool === 'rebuild_image') {
+    return `🧱 Rebuild image "${r.agentName}"${r.spec?.base ? ` onto ${r.spec.base}` : ' (same base)'}`;
+  }
+  if (tool === 'remove_image') {
+    return `🗑 Delete derived image "${r.agentName}"`;
+  }
   if (tool === 'create_agent' || tool === 'update_definition') {
     const s = r.spec!;
     const head =

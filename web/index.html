@@ -492,6 +492,7 @@
           <option value="text">text</option>
           <option value="longtext">longtext</option>
           <option value="choice">choice</option>
+          <option value="multichoice">multichoice</option>
           <option value="boolean">boolean</option>
         </select>
         <select id="paramTarget" style="width:auto" title="Which file the {{key}} placeholder lives in">
@@ -3481,14 +3482,15 @@ let editParams = [];
 function renderParamList() {
   $('paramList').innerHTML = editParams.length
     ? editParams.map((p, i) => `<div class="pair"><span class="grow">${esc(p.label || p.key)} <code>{{${esc(p.key)}}}</code>
-        <span class="sub">${esc(p.type)}${p.type === 'choice' && p.options?.length ? ' (' + esc(p.options.join(', ')) + ')' : ''}
+        <span class="sub">${esc(p.type)}${(p.type === 'choice' || p.type === 'multichoice') && p.options?.length ? ' (' + esc(p.options.join(', ')) + ')' : ''}
           · ${p.target === 'agents' ? 'AGENTS.md' : 'SOUL.md'}${p.required ? ' · <b>required</b>' : ''}${p.default != null && p.default !== '' ? ' · default: ' + esc(String(p.default)) : ''}</span></span>
         <button class="danger" onclick="removeSetupField(${i})">×</button></div>`).join('')
     : '<div class="sub">None declared — sharing still asks for any <code>{{placeholder}}</code> it finds in the files.</div>';
 }
 
 function onParamTypeChange() {
-  $('paramOptions').style.display = $('paramType').value === 'choice' ? '' : 'none';
+  const t = $('paramType').value;
+  $('paramOptions').style.display = t === 'choice' || t === 'multichoice' ? '' : 'none';
 }
 
 function addSetupField() {
@@ -3506,7 +3508,7 @@ function addSetupField() {
   };
   const def = $('paramDefault').value.trim();
   if (def) f.default = def;
-  if (type === 'choice') {
+  if (type === 'choice' || type === 'multichoice') {
     const options = $('paramOptions').value.split(',').map(s => s.trim()).filter(Boolean);
     if (!options.length) { toast('Choice fields need options (comma-separated)'); return; }
     f.options = options;
@@ -3551,6 +3553,11 @@ function renderSetupValues(a) {
     if (p.type === 'choice') {
       input = `<select id="spv-${esc(p.key)}" style="width:auto">${(p.options ?? [])
         .map(o => `<option value="${esc(o)}"${o === cur ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    } else if (p.type === 'multichoice') {
+      const picked = String(cur).split(',').map(s => s.trim());
+      input = `<div id="spv-${esc(p.key)}" style="display:flex;flex-wrap:wrap;gap:10px">${(p.options ?? [])
+        .map(o => `<label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
+          <input type="checkbox" data-opt="${esc(o)}"${picked.includes(o) ? ' checked' : ''} style="width:auto;flex:none"> ${esc(o)}</label>`).join('')}</div>`;
     } else if (p.type === 'boolean') {
       input = `<label style="display:flex;gap:6px;align-items:center;width:auto;font-weight:400;margin:0;cursor:pointer">
         <input type="checkbox" id="spv-${esc(p.key)}" style="width:auto;flex:none"${cur === 'true' ? ' checked' : ''}> enabled</label>`;
@@ -3570,6 +3577,11 @@ function collectSetupValues(a) {
   for (const p of a.parameters) {
     const el = $(`spv-${p.key}`);
     if (!el) continue;
+    if (p.type === 'multichoice') {
+      const picks = [...el.querySelectorAll('input:checked')].map(c => c.dataset.opt);
+      if (picks.length) values[p.key] = picks.join(', ');
+      continue;
+    }
     const v = p.type === 'boolean' ? (el.checked ? 'true' : 'false') : el.value.trim();
     if (v !== '') values[p.key] = v;
   }
@@ -4390,6 +4402,11 @@ function collectParamValues(parameters, title) {
     } else if (p.type === 'choice') {
       input = `<select id="${id}">${(p.options ?? []).map(o =>
         `<option${String(p.default ?? '') === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
+    } else if (p.type === 'multichoice') {
+      const defaults = String(p.default ?? '').split(',').map(s => s.trim());
+      input = `<div id="${id}" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:6px">${(p.options ?? []).map(o =>
+        `<label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
+          <input type="checkbox" data-opt="${esc(o)}"${defaults.includes(o) ? ' checked' : ''} style="width:auto;flex:none"> ${esc(o)}</label>`).join('')}</div>`;
     } else if (p.type === 'boolean') {
       input = `<label style="display:flex;gap:8px;align-items:center;font-weight:400;cursor:pointer">
         <input type="checkbox" id="${id}"${p.default === true || p.default === 'true' ? ' checked' : ''} style="width:auto;flex:none"> Yes</label>`;
@@ -4413,6 +4430,12 @@ function submitParamForm() {
   for (let i = 0; i < paramFormFields.length; i++) {
     const p = paramFormFields[i], el = $(`pfv-${i}`);
     if (p.type === 'boolean') { values[p.key] = el.checked ? 'true' : 'false'; continue; }
+    if (p.type === 'multichoice') {
+      const picks = [...el.querySelectorAll('input:checked')].map(c => c.dataset.opt);
+      if (!picks.length && p.required) { $('paramFormErr').textContent = `“${p.label || p.key}” needs at least one pick.`; return; }
+      if (picks.length) values[p.key] = picks.join(', ');
+      continue;
+    }
     const v = el.value.trim();
     if (!v) {
       if (p.required) { $('paramFormErr').textContent = `“${p.label || p.key}” is required.`; el.focus(); return; }

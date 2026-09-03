@@ -111,6 +111,28 @@ class FakeApi implements ApiClient {
   async patchAgent(id: string, body: { persona?: string; parameters?: Array<Record<string, unknown>> }) {
     this.calls.push(`patch:${id}:${Object.keys(body).sort().join('+')}`);
   }
+
+  // ---- images ----
+  images = [{ name: 'ml-tools', tag: 'agentclaw-runtime:derived-ml-tools', status: 'ready', base: 'agentclaw-runtime:latest', pinnedBy: 2 }];
+  async getRuntime() {
+    return { imageVersion: '2026.8.1', npmLatest: '2026.9.0', upgradeAvailable: true };
+  }
+  async listImages() {
+    return { base: 'agentclaw-runtime:latest', images: this.images };
+  }
+  async imageLog(name: string) {
+    this.calls.push(`imglog:${name}`);
+    return { status: 'ready', log: 'Step 1/3 …' };
+  }
+  async buildImage(body: { name: string; dockerfile: string; base?: string }) {
+    this.calls.push(`imgbuild:${body.name}:${body.base ?? 'default'}:${body.dockerfile.length}`);
+  }
+  async rebuildImage(name: string, base?: string) {
+    this.calls.push(`imgrebuild:${name}:${base ?? 'same'}`);
+  }
+  async removeImage(name: string) {
+    this.calls.push(`imgrm:${name}`);
+  }
 }
 
 const AGENTS: AgentSummary[] = [
@@ -345,6 +367,50 @@ describe('authoring tools — the full spec rides the confirmation', () => {
     );
     await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
     expect(api.calls).toEqual(['patch:a1:parameters+persona']);
+  });
+});
+
+describe('image tools', () => {
+  it('runtime + image list + build log are read-tier', async () => {
+    const { broker, api } = make();
+    expect(((await broker.handleTool('get_runtime', {}, WHO)) as any).data.upgradeAvailable).toBe(true);
+    expect(((await broker.handleTool('list_images', {}, WHO)) as any).data.images).toHaveLength(1);
+    await broker.handleTool('get_image_log', { name: 'ml-tools' }, WHO);
+    expect(api.calls).toEqual(['imglog:ml-tools']);
+  });
+
+  it('build_image shows the Dockerfile on the card, refuses a name that exists, executes on confirm', async () => {
+    const { broker, api, pending } = make({ rw: true });
+    const dup = await broker.handleTool('build_image', { name: 'ml-tools', dockerfile: 'RUN apt-get install -y ffmpeg' }, WHO);
+    expect(dup).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    const r = await broker.handleTool('build_image', { name: 'av-tools', dockerfile: 'RUN apt-get install -y ffmpeg' }, WHO);
+    const summary = (r as any).pending.summary as string;
+    expect(summary).toContain('Build derived image "av-tools"');
+    expect(summary).toContain('apt-get install -y ffmpeg'); // the snippet IS the review
+    const rec = pending.peek((r as any).pending.confirmId)!;
+    expect(rec.expiresAtMs - rec.createdAtMs).toBe(600_000); // reading a Dockerfile, not a verb
+    await broker.confirm(rec.id, 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['imgbuild:av-tools:default:29']);
+  });
+
+  it('remove_image refuses a pinned image BEFORE any card; rebuild targets must exist', async () => {
+    const { broker, api } = make({ rw: true });
+    const pinned = await broker.handleTool('remove_image', { name: 'ml-tools' }, WHO);
+    expect(pinned).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect((pinned as any).error.message).toContain('pinned by 2');
+    const ghost = await broker.handleTool('rebuild_image', { name: 'nope' }, WHO);
+    expect(ghost).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+    api.images[0]!.pinnedBy = 0;
+    await broker.handleTool('remove_image', { name: 'ml-tools' }, WHO);
+    await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['imgrm:ml-tools']);
+  });
+
+  it('rebuild_image can move onto a new base', async () => {
+    const { broker, api } = make({ rw: true });
+    await broker.handleTool('rebuild_image', { name: 'ml-tools', base: 'agentclaw-runtime:2026.9.0' }, WHO);
+    await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['imgrebuild:ml-tools:agentclaw-runtime:2026.9.0']);
   });
 });
 

@@ -230,6 +230,7 @@ const HELP = [
   'Check: /health <ref> · /usage <ref>',
   'Change (needs /mode readwrite): /stop <ref> · /start_agent <ref> · /rebuild <ref> · /model <ref> <model> · /approve <ref> <code>',
   'Author (plain language, needs /mode readwrite): ask me to draft a new agent or rewrite one\'s definition — you approve the full spec on a card before anything is created or changed.',
+  'Images (plain language): runtime/upgrade status, list derived images, build/rebuild/delete them — builds show their Dockerfile lines on the card first.',
   'Safety: /mode readwrite|readonly · /pause · /resume',
 ].join('\n');
 
@@ -242,6 +243,23 @@ function renderData(tool: string, data: unknown): string {
   }
   if (tool === 'get_pool' && data && typeof data === 'object') {
     return `Bots available: ${(data as { availableBots: number }).availableBots}`;
+  }
+  if (tool === 'get_runtime' && data && typeof data === 'object') {
+    const r = data as { imageVersion?: string; npmLatest?: string; upgradeAvailable: boolean };
+    return `Base image: OpenClaw ${r.imageVersion ?? 'unknown'} · npm latest ${r.npmLatest ?? 'unknown'} · ${
+      r.upgradeAvailable ? '⬆ upgrade available (base builds run on the host: scripts/build-runtime.sh)' : '✓ up to date'
+    }`;
+  }
+  if (tool === 'list_images' && data && typeof data === 'object') {
+    const d = data as { base: string; images: Array<{ name: string; status: string; pinnedBy: number; error?: string }> };
+    const rows = (d.images ?? []).map(
+      (i) => `• ${i.name} — ${i.status}${i.pinnedBy ? ` · pinned by ${i.pinnedBy}` : ''}${i.error ? ` · ⚠ ${i.error.slice(0, 120)}` : ''}`,
+    );
+    return `Base: ${d.base}\n${rows.join('\n') || 'No derived images.'}`;
+  }
+  if (tool === 'get_image_log' && data && typeof data === 'object') {
+    const l = data as { status: string; error?: string; log: string };
+    return `${l.status}${l.error ? ` — ${l.error}` : ''}\n\`\`\`\n${(l.log || '(no log)').slice(-3000)}\n\`\`\``;
   }
   if (tool === 'get_logs' && typeof data === 'string') {
     return data.slice(-3500) || '(no logs)';

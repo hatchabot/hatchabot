@@ -230,7 +230,7 @@ export interface TemplateParam {
   label: string;
   help?: string;
   required: boolean;
-  type: 'text' | 'longtext' | 'choice' | 'boolean';
+  type: 'text' | 'longtext' | 'choice' | 'multichoice' | 'boolean';
   default?: string;
   options?: string[];
   target: 'soul' | 'agents';

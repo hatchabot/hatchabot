@@ -1,4 +1,4 @@
-import type { ApiClient, AgentSummary, Member, PairingRequest, PendingJoin, EventRow, HealthResult, UsageResult, ProfileSummary, HostSummary } from './broker.js';
+import type { ApiClient, AgentSummary, Member, PairingRequest, PendingJoin, EventRow, HealthResult, UsageResult, ProfileSummary, HostSummary, ImageSummary } from './broker.js';
 
 /**
  * The concrete owner-scoped /v1 client the broker drives. One bearer token (a
@@ -149,6 +149,35 @@ export class HttpApiClient implements ApiClient {
     body: { persona?: string; parameters?: Array<Record<string, unknown>> },
   ): Promise<void> {
     await this.#req('PATCH', `/v1/agents/${id}`, body);
+  }
+
+  // ---- images -------------------------------------------------------------
+
+  async getRuntime(): Promise<{ imageVersion?: string; npmLatest?: string; upgradeAvailable: boolean }> {
+    return (await this.#req('GET', '/v1/runtime')) as {
+      imageVersion?: string;
+      npmLatest?: string;
+      upgradeAvailable: boolean;
+    };
+  }
+  async listImages(): Promise<{ base: string; images: ImageSummary[] }> {
+    return (await this.#req('GET', '/v1/images')) as { base: string; images: ImageSummary[] };
+  }
+  async imageLog(name: string): Promise<{ status: string; error?: string; log: string }> {
+    return (await this.#req('GET', `/v1/images/${encodeURIComponent(name)}/log`)) as {
+      status: string;
+      error?: string;
+      log: string;
+    };
+  }
+  async buildImage(body: { name: string; dockerfile: string; base?: string }): Promise<void> {
+    await this.#req('POST', '/v1/images', body);
+  }
+  async rebuildImage(name: string, base?: string): Promise<void> {
+    await this.#req('POST', `/v1/images/${encodeURIComponent(name)}/rebuild`, base ? { base } : {});
+  }
+  async removeImage(name: string): Promise<void> {
+    await this.#req('DELETE', `/v1/images/${encodeURIComponent(name)}`);
   }
 
   // ---- LLM via the control plane's proxy ----------------------------------

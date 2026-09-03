@@ -46,7 +46,7 @@ const SETUP_FIELD = {
     label: { type: 'string', minLength: 1, maxLength: 64 },
     help: { type: 'string', maxLength: 200 },
     required: { type: 'boolean', description: 'default false' },
-    type: { type: 'string', enum: ['text', 'longtext', 'choice', 'boolean'] },
+    type: { type: 'string', enum: ['text', 'longtext', 'choice', 'multichoice', 'boolean'] },
     default: { type: 'string', maxLength: 2000 },
     options: { type: 'array', maxItems: 12, items: { type: 'string', minLength: 1, maxLength: 120 } },
     target: { type: 'string', enum: ['soul', 'agents'], description: 'default soul' },
@@ -225,6 +225,74 @@ export const MANIFEST: ToolDef[] = [
       additionalProperties: false,
       properties: { agent: agentRef, userId: { type: 'string', minLength: 1, maxLength: 128 } },
       required: ['agent', 'userId'],
+    },
+  },
+
+  // ---- images (host-owner surface; the /v1 routes gate on that too) ----
+  {
+    name: 'get_runtime',
+    tier: 'read',
+    description:
+      "The fleet's base runtime: which OpenClaw version the base image bakes in, the newest on npm, and whether an upgrade is available. (Building the base itself is a host operation — scripts/build-runtime.sh — not a bot action.)",
+    input_schema: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'list_images',
+    tier: 'read',
+    description:
+      'The base image plus every derived image (extra packages on top of the base): name, tag, build status, base, and how many agents pin each.',
+    input_schema: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'get_image_log',
+    tier: 'read',
+    description: "A derived image's build status and log tail — for diagnosing a failed build.",
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', minLength: 1, maxLength: 40 } },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'build_image',
+    tier: 'mutate',
+    description:
+      'Build a NEW derived image: a name and the Dockerfile lines to append after FROM (apt/pip installs etc.). The owner reviews the snippet on a card; the build runs in the background after confirm — check list_images / get_image_log for the result.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 40, description: 'lowercase, digits, dashes' },
+        dockerfile: { type: 'string', minLength: 1, maxLength: 20000 },
+        base: { type: 'string', minLength: 1, maxLength: 160, description: 'defaults to the fleet base' },
+      },
+      required: ['name', 'dockerfile'],
+    },
+  },
+  {
+    name: 'rebuild_image',
+    tier: 'mutate',
+    description: 'Rebuild an existing derived image (same Dockerfile), optionally onto a newer base. Requires confirm.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', minLength: 1, maxLength: 40 },
+        base: { type: 'string', minLength: 1, maxLength: 160 },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'remove_image',
+    tier: 'mutate',
+    description: 'Delete a derived image. The server refuses while any agent pins it. Requires confirm.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { name: { type: 'string', minLength: 1, maxLength: 40 } },
+      required: ['name'],
     },
   },
 

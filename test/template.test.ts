@@ -164,6 +164,25 @@ describe('template parameters (sharing Phase 2a)', () => {
     })).toThrow(/must be one of/);
   });
 
+  it('multichoice accepts a comma-separated subset, normalizes it, and refuses strays', () => {
+    const multi = mk({
+      parameters: [
+        { key: 'style', label: 'Trading styles', required: true, type: 'multichoice',
+          options: ['buy-and-hold', 'swing', 'momentum'], target: 'soul' },
+        { key: 'risk', label: 'Risk tolerance', required: false, type: 'text', default: 'moderate', target: 'soul' },
+      ],
+    });
+    const store = freshStore();
+    const { agent } = importTemplate({ store, provider: new MockProvider() }, multi, {
+      ownerId: 'o', values: { style: 'buy-and-hold,  swing' }, // sloppy spacing in, prose out
+    });
+    expect(store.getAgentSeed(agent.id)['SOUL.md'])
+      .toBe('You advise with a buy-and-hold, swing philosophy and moderate risk appetite.');
+    expect(() => importTemplate({ store: freshStore(), provider: new MockProvider() }, multi, {
+      ownerId: 'o', values: { style: 'swing, yolo' },
+    })).toThrow(/allows only/);
+  });
+
   it('a template with no parameters imports exactly as before', () => {
     const store = freshStore();
     const { agent } = importTemplate({ store, provider: new MockProvider() }, mk({ parameters: [] }), {

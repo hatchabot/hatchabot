@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.92.0] — 2026-09-03
+
+### Added
+- **The management bot manages runtime images.** Read tools `get_runtime`
+  (base image's OpenClaw version vs npm latest), `list_images` (base + derived
+  with build status and pin counts), and `get_image_log`; confirm-gated
+  `build_image` (the Dockerfile snippet IS the card, 10-min TTL),
+  `rebuild_image` (optionally onto a newer base), and `remove_image` (refused
+  while pinned, before a card is ever shown). Base image *builds* remain a
+  host operation (scripts/build-runtime.sh) by design.
+- **`multichoice` setup-field type** — a template field whose value is any
+  subset of its options, rendered as checkboxes in the import form and the
+  Setup values panel, substituted as natural prose ("buy-and-hold, swing").
+  Validation rejects picks outside the options at import and edit time.
+
 ## [0.91.0] — 2026-09-02
 
 ### Added

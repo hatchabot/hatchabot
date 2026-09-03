@@ -80,6 +80,24 @@ class FakeApi implements ApiClient {
   async patchAgent(id: string) {
     this.calls.push(`patch:${id}`);
   }
+  async getRuntime() {
+    return { upgradeAvailable: false };
+  }
+  async listImages() {
+    return { base: 'agentclaw-runtime:latest', images: [] };
+  }
+  async imageLog() {
+    return { status: 'ready', log: '' };
+  }
+  async buildImage(body: { name: string }) {
+    this.calls.push(`imgbuild:${body.name}`);
+  }
+  async rebuildImage(name: string) {
+    this.calls.push(`imgrebuild:${name}`);
+  }
+  async removeImage(name: string) {
+    this.calls.push(`imgrm:${name}`);
+  }
 }
 
 /** Plays back a scripted sequence of model turns; records the requests it saw. */
