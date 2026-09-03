@@ -644,6 +644,13 @@
       </div>
       <div id="tgGroupResult" style="margin-top:6px"></div>
 
+      <label style="margin-top:12px">Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
+      <div id="tgMemberList" style="margin-bottom:6px"></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+        <button onclick="invite(editAgentId, $('editName')?.value || '')">Invite…</button>
+        <span class="sub">DM pairing is how someone new gets in — Invite mints them the link.</span>
+      </div>
+
       <label style="margin-top:12px">Who may talk to it in groups</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <select id="tgGroupMode" style="width:auto" onchange="onGroupModeChange()">
@@ -3222,6 +3229,7 @@ async function openEdit(id, name, tab = 'def') {
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
   renderSetupValues(cur);
   renderGroupAccess(cur);
+  void renderEditMembers();
   renderParamList();
   $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
   $('editShared').checked = !!cur?.sharedMemory;
@@ -4147,6 +4155,23 @@ function renderHealth(h) {
     }
   }
   $('healthBody').innerHTML = body + rows.join('');
+}
+
+async function renderEditMembers() {
+  const el = $('tgMemberList');
+  if (!el) return;
+  try {
+    const ms = (members[editAgentId] = await api(`/v1/agents/${editAgentId}/members`));
+    el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
+      const label = esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 12)));
+      const linked = m.channelUserId
+        ? `<span class="sub" title="Telegram id ${esc(m.channelUserId)}">✓ linked</span>`
+        : '<span class="sub" style="color:var(--warn)">not linked yet</span>';
+      const kickBtn = m.role === 'owner' ? '' :
+        `<button class="danger" onclick="kick('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || m.userId)}').then(renderEditMembers)">Remove</button>`;
+      return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${kickBtn}</div>`;
+    }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
 function onGroupModeChange() {
