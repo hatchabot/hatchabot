@@ -48,7 +48,7 @@ import {
   startBackup,
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
-import { completeWithProfile, friendlyLlmError, pickMgmtProfile, usableForMgmt } from './mgmtLlm.js';
+import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
 import { reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
@@ -138,6 +138,8 @@ export interface ApiDeps {
   buildImage?: typeof buildDerivedImage;
   /** Override the mgmt-LLM proxy's Anthropic call (tests). */
   mgmtLlmComplete?: typeof completeWithProfile;
+  /** Override the mgmt-LLM CLI path (tests — the real one spawns `claude`). */
+  mgmtCliComplete?: Parameters<typeof runMgmtCompletion>[0]['cliComplete'];
 }
 
 const LocalProfile = z.object({
@@ -1271,11 +1273,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (parsed.data.mgmtLlm !== undefined) {
         if (parsed.data.mgmtLlm && !usableForMgmt(profile)) {
           return reply.code(400).send({
-            error:
-              profile.vendor !== 'anthropic'
-                ? 'Only an Anthropic source can back the management bot.'
-                : "This source uses this machine's Claude login, which only the Claude CLI can use. " +
-                  'Pick a source with an API key or a setup-token.',
+            error: 'Only an Anthropic source can back the management assistant (local model servers cannot).',
           });
         }
         if (parsed.data.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), profile.id);
@@ -1620,7 +1618,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       profileId: p.id,
       profileName: p.name,
       model: p.model,
-      credential: p.kind === 'api_key' ? 'api-key' : 'setup-token',
+      credential: mgmtBackendOf(p).credential,
       flagged: !!p.mgmtLlm,
     };
   });
@@ -1640,7 +1638,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
   const mgmtComplete = deps.mgmtLlmComplete ?? completeWithProfile;
   // Phase C: the web management chat pane — same broker, web transport.
-  registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete });
+  registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {
     const parsed = MgmtLlmBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1653,12 +1651,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       });
     }
     try {
-      return await mgmtComplete(secrets, profile, parsed.data);
-    } catch (err) {
-      const msg = friendlyLlmError(
-        String((err as Error).message ?? err),
-        profile.kind === 'api_key' ? 'api-key' : 'setup-token',
+      return await runMgmtCompletion(
+        { secrets, apiComplete: deps.mgmtLlmComplete, cliComplete: deps.mgmtCliComplete },
+        profile,
+        parsed.data,
       );
+    } catch (err) {
+      const msg = friendlyLlmError(String((err as Error).message ?? err));
       return reply.code(502).send({ error: `LLM call via "${profile.name}" failed: ${msg}` });
     }
   });

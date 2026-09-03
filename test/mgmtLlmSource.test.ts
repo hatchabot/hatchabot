@@ -42,11 +42,12 @@ async function world(completions: Array<Record<string, unknown>> = []) {
 }
 
 describe('picking the management LLM source', () => {
-  it('excludes machine-login and local sources; prefers api-key over setup-token', () => {
+  it('any anthropic source works (no extra credential needed); local excluded; api-key > setup-token > machine-login', () => {
     const store = new Store(new Database(':memory:'));
-    store.insertAIProfile(profile({ id: 'ml', kind: 'subscription', secretRef: undefined })); // machine login
     store.insertAIProfile(profile({ id: 'lq', vendor: 'local', kind: 'api_key', secretRef: undefined }));
-    expect(pickMgmtProfile(store, OWNER)).toBeUndefined();
+    expect(pickMgmtProfile(store, OWNER)).toBeUndefined(); // local can't
+    store.insertAIProfile(profile({ id: 'ml', kind: 'subscription', secretRef: undefined })); // machine login
+    expect(pickMgmtProfile(store, OWNER)?.id).toBe('ml'); // zero-credential CLI path
     store.insertAIProfile(profile({ id: 'st', kind: 'subscription' })); // setup-token
     expect(pickMgmtProfile(store, OWNER)?.id).toBe('st');
     store.insertAIProfile(profile({ id: 'ak' })); // api key
@@ -80,20 +81,58 @@ describe('picking the management LLM source', () => {
   });
 });
 
+describe('CLI tool-emission protocol', () => {
+  it('parses a bare or fenced JSON tool call; leaves prose alone', async () => {
+    const { parseToolEmission } = await import('../src/api/cliChatModel.js');
+    expect(parseToolEmission('{"tool":"list_agents","input":{}}')).toEqual({ tool: 'list_agents', input: {} });
+    expect(parseToolEmission('```json\n{"tool":"get_agent","input":{"agent":"a1"}}\n```'))
+      .toEqual({ tool: 'get_agent', input: { agent: 'a1' } });
+    expect(parseToolEmission('Your fleet looks healthy.')).toBeUndefined();
+    expect(parseToolEmission('{not json at all')).toBeUndefined();
+    expect(parseToolEmission('{"noTool":"here"}')).toBeUndefined();
+  });
+});
+
 describe('PATCH mgmtLlm + GET /v1/mgmt/llm', () => {
-  it('flags a usable source and reports it; refuses machine-login with a pointer', async () => {
+  it('flags any anthropic source (machine-login included — CLI backend); local refused', async () => {
     const { store, f } = await world();
-    store.insertAIProfile(profile({ id: 'ml', kind: 'subscription', secretRef: undefined }));
-    store.insertAIProfile(profile({ id: 'ak', name: 'Spare Key' }));
+    store.insertAIProfile(profile({ id: 'ml', name: 'Household Claude', kind: 'subscription', secretRef: undefined }));
+    store.insertAIProfile(profile({ id: 'lq', name: 'Local Qwen', vendor: 'local', secretRef: undefined }));
 
-    const bad = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/ml', headers: H, payload: { mgmtLlm: true } });
-    expect(bad.statusCode).toBe(400);
-    expect(bad.json().error).toMatch(/setup-token/);
+    const local = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/lq', headers: H, payload: { mgmtLlm: true } });
+    expect(local.statusCode).toBe(400);
 
-    const ok = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/ak', headers: H, payload: { mgmtLlm: true } });
-    expect(ok.statusCode).toBe(200);
+    const ml = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/ml', headers: H, payload: { mgmtLlm: true } });
+    expect(ml.statusCode).toBe(200);
     const s = (await f.inject({ method: 'GET', url: '/v1/mgmt/llm', headers: H })).json();
-    expect(s).toMatchObject({ available: true, profileName: 'Spare Key', model: 'claude-sonnet-5', credential: 'api-key', flagged: true });
+    expect(s).toMatchObject({
+      available: true, profileName: 'Household Claude',
+      credential: 'machine-login · claude-cli', flagged: true,
+    });
+  });
+
+  it('a subscription source completes through the CLI seam — no API key anywhere', async () => {
+    const store = new Store(new Database(':memory:'));
+    const f = Fastify();
+    const cliCalls: Array<{ model: string; oauthToken?: string }> = [];
+    await registerRoutes(f, {
+      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
+      mgmtLlmComplete: async () => { throw new Error('api path must not be used for a subscription source'); },
+      mgmtCliComplete: async (opts) => {
+        cliCalls.push(opts);
+        return { stopReason: 'end_turn', content: [{ type: 'text', text: 'via cli' }] };
+      },
+    });
+    store.insertAIProfile(profile({ id: 'ml', kind: 'subscription', secretRef: undefined, model: 'claude-opus-4-8' }));
+    const res = await f.inject({
+      method: 'POST', url: '/v1/mgmt/llm/complete', headers: H,
+      payload: { system: 's', tools: [], messages: [{ role: 'user', content: 'hi' }], maxTokens: 50 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().content[0].text).toBe('via cli');
+    expect(cliCalls).toEqual([{ model: 'claude-opus-4-8', oauthToken: undefined }]); // machine login: no token at all
+    await f.close();
   });
 });
 

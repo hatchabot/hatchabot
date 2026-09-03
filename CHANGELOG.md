@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.96.0] — 2026-09-03
+
+### Changed
+- **The management assistant needs no credential at all now.** Measured
+  yesterday: Anthropic refuses Max setup-tokens on direct Messages calls
+  (generic 429 even when idle). Rather than requiring an API key — an
+  adoption hurdle — subscription sources now ride the **Claude CLI on the
+  host**, the surface Max actually sanctions: machine-login spawns with the
+  host's own ~/.claude; a setup-token is decrypted into
+  CLAUDE_CODE_OAUTH_TOKEN with a scratch HOME. The broker's tool loop stays
+  ours; the CLI is only the model call, with a strict emit-one-JSON-object
+  tool protocol (the broker validates everything downstream). An api-key
+  source, if one exists, is still preferred (faster); auto-pick order is
+  api-key → setup-token → machine-login. 🛠 Management can now flag any
+  Anthropic source, machine-login included.
+
 ## [0.95.0] — 2026-09-03
 
 ### Added

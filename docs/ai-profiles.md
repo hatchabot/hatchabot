@@ -101,11 +101,13 @@ their create dialog. Flip it off and no new agents can take it; agents
 already on it keep working until switched. Only the profile's owner can
 edit, share, or delete it.
 
-A second per-profile toggle, **🛠 Management** (single-select, api-key or
-setup-token sources only), names the source that backs the management bot's
-LLM — the control plane proxies those calls server-side, so the credential
-never reaches the bot process. With none flagged, a usable source is
-auto-picked (api-key first).
+A second per-profile toggle, **🛠 Management** (single-select, any Anthropic
+source), names the source that backs the management assistant — no extra
+credential is ever required. An api-key source calls the Messages API
+directly; a subscription source (setup-token or machine-login) rides the
+Claude CLI on the host, the surface a Max plan sanctions. Calls run
+server-side either way; nothing reaches the bot process. With none flagged, a
+source is auto-picked (api-key → setup-token → machine-login).
 
 **Sharing is a credential hand-off, not a metered proxy.** A borrower's agent
 runs with your key as container env (or, for a subscription, your `~/.claude`

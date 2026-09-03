@@ -228,13 +228,16 @@ It refuses to start with an empty allowlist.
 
 **Phase 2 (implemented) — natural language.** Plain-text messages route to an
 LLM that proposes tools through the **same broker** — reads run, changes still
-become confirm cards. The bot needs **no AI credential of its own**: by default
-the control plane proxies the calls (`POST /v1/mgmt/llm/complete`) with the AI
+become confirm cards. The bot needs **no AI credential of its own**: the
+control plane runs the calls (`POST /v1/mgmt/llm/complete`) with the AI
 source flagged **🛠 Management** in ⚙ Settings → AI sources (auto-picked when
-none is flagged — api-key first, then setup-token; machine-login and local
-sources can't back a raw API call). `AGENTCLAW_MGMT_ANTHROPIC_KEY` remains as
-an explicit dedicated-key override (`AGENTCLAW_MGMT_MODEL`, default
-`claude-sonnet-5`, applies only on that path). The model holds no token and no
+none is flagged — api-key → setup-token → machine-login). An api-key source
+hits the Messages API directly; a subscription source rides the host's
+Claude CLI — the sanctioned Max surface, so no new credential is ever needed
+(local model servers are the only exclusion). `AGENTCLAW_MGMT_ANTHROPIC_KEY`
+remains as an explicit dedicated-key override (`AGENTCLAW_MGMT_MODEL`,
+default `claude-sonnet-5`, applies only on that path). The model holds no
+token and no
 `/v1` access; it gains no authority the broker doesn't already gate. Slash
 commands keep working alongside it.
 

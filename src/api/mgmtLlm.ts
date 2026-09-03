@@ -11,21 +11,38 @@ import type { SecretStore } from '../secrets/secretStore.js';
  * cli-token like it does for everything else.
  */
 
-/** A source can back the proxy only if its credential is portable to a raw
- *  Messages call: an anthropic api key or a Max setup-token. Machine-login
- *  (~/.claude, CLI-managed) and local model servers can't. */
+/**
+ * Any Anthropic source can back the management assistant — no extra
+ * credential is ever required (an adoption hurdle by design, per Chris,
+ * 2026-09-03). An api-key goes to the Messages API directly; a subscription
+ * (setup-token or machine-login) rides the Claude CLI on the host, the
+ * surface Max actually sanctions. Only local model servers are out.
+ */
 export function usableForMgmt(p: AIProfile): boolean {
-  return p.vendor === 'anthropic' && !!p.secretRef;
+  return p.vendor === 'anthropic';
 }
 
-/** The owner's flagged source; else the sensible automatic pick (api-key
- *  before setup-token, so metered-but-supported beats subscription-but-gray). */
+/** The owner's flagged source; else the automatic pick: api-key (fastest)
+ *  → setup-token → machine-login, all zero-setup. */
 export function pickMgmtProfile(store: Store, ownerId: string): AIProfile | undefined {
   const own = store.listAIProfiles(ownerId).filter((p) => p.ownerId === ownerId);
   const flagged = own.find((p) => p.mgmtLlm && usableForMgmt(p));
   if (flagged) return flagged;
   const usable = own.filter(usableForMgmt);
-  return usable.find((p) => p.kind === 'api_key') ?? usable[0];
+  return (
+    usable.find((p) => p.kind === 'api_key') ??
+    usable.find((p) => p.kind === 'subscription' && !!p.secretRef) ??
+    usable[0]
+  );
+}
+
+/** How a profile's calls are made + the label the UI shows for it. */
+export function mgmtBackendOf(p: AIProfile): { kind: 'api' | 'cli'; credential: string } {
+  if (p.kind === 'api_key') return { kind: 'api', credential: 'api-key' };
+  return {
+    kind: 'cli',
+    credential: p.secretRef ? 'setup-token · claude-cli' : 'machine-login · claude-cli',
+  };
 }
 
 export interface MgmtChatRequest {
@@ -46,20 +63,8 @@ export interface MgmtChatResponse {
  * person mid-conversation. Rate limits deserve the honest household truth:
  * agents, the management chat, and Claude Code all share one subscription.
  */
-export function friendlyLlmError(raw: string, credential?: 'api-key' | 'setup-token'): string {
+export function friendlyLlmError(raw: string): string {
   if (/429|rate_limit/i.test(raw)) {
-    // Measured on this installation (2026-09-03): a Max setup-token gets a
-    // generic 429 on DIRECT API calls even when the account is idle — the
-    // same subscription serving Claude Code fine in the same minute. That's
-    // a refusal of the token class, not load. Say so, with the way out.
-    if (credential === 'setup-token') {
-      return (
-        'Anthropic rejected this Claude Max setup-token for direct API use (it reports as a ' +
-        'rate limit even when idle — setup-tokens only work through the Claude CLI your agents ' +
-        'use). Add an Anthropic API-key source and flag it 🛠 Management under ⚙ Settings → ' +
-        'AI sources; chat usage costs pennies.'
-      );
-    }
     return 'The AI source is rate-limited right now — wait a minute and try again.';
   }
   if (/529|overloaded/i.test(raw)) {
@@ -69,6 +74,34 @@ export function friendlyLlmError(raw: string, credential?: 'api-key' | 'setup-to
     return 'The AI source rejected its credential — check the 🛠 Management source under ⚙ Settings → AI sources.';
   }
   return raw.slice(0, 300);
+}
+
+export interface RunCompletionDeps {
+  secrets: SecretStore;
+  /** Test seams: the api-key path and the CLI path. */
+  apiComplete?: typeof completeWithProfile;
+  cliComplete?: (opts: { model: string; oauthToken?: string }, req: MgmtChatRequest) => Promise<MgmtChatResponse>;
+}
+
+/**
+ * One entry point for a management completion, whatever the source's shape:
+ * api-key → direct Messages call; subscription → the Claude CLI on the host
+ * (setup-token decrypted into CLAUDE_CODE_OAUTH_TOKEN; machine-login uses the
+ * host's own ~/.claude). Both the web chat pane and the Telegram proxy route
+ * go through here.
+ */
+export async function runMgmtCompletion(
+  deps: RunCompletionDeps,
+  profile: AIProfile,
+  req: MgmtChatRequest,
+): Promise<MgmtChatResponse> {
+  const backend = mgmtBackendOf(profile);
+  if (backend.kind === 'api') {
+    return (deps.apiComplete ?? completeWithProfile)(deps.secrets, profile, req);
+  }
+  const { completeViaCli } = await import('./cliChatModel.js');
+  const oauthToken = profile.secretRef ? await deps.secrets.get(profile.secretRef) : undefined;
+  return (deps.cliComplete ?? completeViaCli)({ model: profile.model, oauthToken }, req);
 }
 
 export async function completeWithProfile(

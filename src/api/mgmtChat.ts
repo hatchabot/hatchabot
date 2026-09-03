@@ -6,7 +6,7 @@ import { Broker } from '../mgmt/broker.js';
 import { PendingStore } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { LlmAgent, type AgentSink, type ChatMessage, type ChatModel } from '../mgmt/llm.js';
-import { completeWithProfile, friendlyLlmError, pickMgmtProfile, type MgmtChatRequest } from './mgmtLlm.js';
+import { completeWithProfile, friendlyLlmError, pickMgmtProfile, runMgmtCompletion, type MgmtChatRequest, type RunCompletionDeps } from './mgmtLlm.js';
 import { ownerIdOf } from './principal.js';
 
 /**
@@ -44,8 +44,9 @@ const MAX_SESSIONS = 20;
 export interface MgmtChatDeps {
   store: Store;
   secrets: SecretStore;
-  /** Test seam — same override the Telegram proxy route uses. */
+  /** Test seams — same overrides the Telegram proxy route uses. */
   mgmtLlmComplete?: typeof completeWithProfile;
+  mgmtCliComplete?: RunCompletionDeps['cliComplete'];
 }
 
 export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void {
@@ -95,12 +96,18 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
         const profile = pickMgmtProfile(store, ownerId);
         if (!profile) {
           throw new Error(
-            'No AI source can back management chat — flag one as 🛠 Management under ⚙ Settings → AI sources.',
+            'No AI source can back management chat — add an Anthropic source under ⚙ Settings → AI sources.',
           );
         }
-        const resp = await complete(secrets, profile, req as MgmtChatRequest);
-        // The proxy returns wire-shaped blocks; llm.ts only reads
-        // type/text/id/name/input, a structural subset.
+        // api-key → direct Messages call; subscription → the Claude CLI on
+        // the host. No credential beyond what the fleet already has.
+        const resp = await runMgmtCompletion(
+          { secrets, apiComplete: complete, cliComplete: deps.mgmtCliComplete },
+          profile,
+          req as MgmtChatRequest,
+        );
+        // Wire-shaped blocks; llm.ts only reads type/text/id/name/input,
+        // a structural subset.
         return resp as unknown as Awaited<ReturnType<ChatModel['create']>>;
       },
     };
@@ -181,13 +188,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       const msgs = await s.llm.respond({ ownerId, ...WEB_WHO }, parsed.data.message, sink, s.history);
       s.history = msgs.slice(-HISTORY_CAP);
     } catch (err) {
-      const p = pickMgmtProfile(store, ownerId);
-      return reply.code(502).send({
-        error: friendlyLlmError(
-          String((err as Error).message ?? err),
-          p ? (p.kind === 'api_key' ? 'api-key' : 'setup-token') : undefined,
-        ),
-      });
+      return reply.code(502).send({ error: friendlyLlmError(String((err as Error).message ?? err)) });
     }
     s.transcript.push({ kind: 'user', text: parsed.data.message });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });
