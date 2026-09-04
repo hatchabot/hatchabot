@@ -50,7 +50,21 @@ RUN apt-get update \
       # class, proven live when the condo agent missed 7 pages of vendor
       # approvals. Every agent gets handed PDFs eventually.
       poppler-utils qpdf tesseract-ocr ocrmypdf \
+      # PDF CREATION (Chris, 2026-09-04): agents produce documents, not just
+      # read them — meeting packages, notices, reports. pandoc converts
+      # markdown/HTML/docx; weasyprint is its LaTeX-free PDF engine
+      # (HTML/CSS → PDF): `pandoc doc.md -o doc.pdf --pdf-engine=weasyprint`.
+      # fonts-liberation gives metric-compatible Times/Arial/Courier looks.
+      # weasyprint itself comes from pip below — Debian's package hard-drags
+      # gcc/boost/scipy/sympy (+1GB, measured); the wheel needs only these
+      # pango/cairo runtime libs.
+      pandoc fonts-liberation \
+      libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 shared-mime-info \
  && rm -rf /var/lib/apt/lists/*
+
+# PEP 668: bookworm's python is "externally managed"; these are app-level
+# tools, not Debian-managed libs, and the image is single-purpose.
+RUN pip3 install --break-system-packages --no-cache-dir weasyprint markdown
 
 RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && npm cache clean --force

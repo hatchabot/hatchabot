@@ -70,6 +70,8 @@ export interface AIProfile {
    * setup-token) — machine-login and local sources can't back a raw API call.
    */
   mgmtLlm?: boolean;
+  /** Installation-wide default source for NEW agents (single-select). */
+  defaultSource?: boolean;
   /**
    * Owner opted in to every account on this installation using this source
    * for THEIR agents — deliberately sharing a Max subscription (or a key)

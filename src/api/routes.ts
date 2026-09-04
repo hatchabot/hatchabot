@@ -1288,6 +1288,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           /** Back the management bot's LLM with this source (single-select;
            *  the control plane proxies the calls — see api/mgmtLlm.ts). */
           mgmtLlm: z.boolean().optional(),
+          /** Installation-wide default for NEW agents (single-select):
+           *  preselected in the create form, preferred by import fallbacks.
+           *  Only reaches other accounts where the profile is Shared. */
+          defaultSource: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1306,6 +1310,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         }
         if (parsed.data.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), profile.id);
         else if (profile.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), null);
+      }
+      if (parsed.data.defaultSource !== undefined) {
+        if (parsed.data.defaultSource) store.setAIProfileDefault(profile.id);
+        else if (profile.defaultSource) store.setAIProfileDefault(null);
       }
       // Editing the model or its switchable list can orphan a per-agent pin.
       // effectiveModel already refuses to run a stale pin; also clear it from

@@ -710,3 +710,52 @@ describe('10th audit regressions', () => {
     expect(store.listProposals('a1')).toHaveLength(0);
   });
 });
+
+describe('default AI source (household default for new agents)', () => {
+  it('a visible default wins the silent import pick; PATCH keeps it single-select', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({
+      id: 'p-house', ownerId: 'user-other', name: 'Household Max', vendor: 'anthropic',
+      kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p-house',
+      shared: true, createdAt: 'now',
+    } as any);
+    store.setAIProfileDefault('p-house');
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ style: 'value' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: TEMPLATE,
+    });
+    expect(res.statusCode).toBe(201);
+    // importer has their OWN anthropic profile (p1), but the shared default wins
+    expect(store.getAgent(res.json().id)!.aiProfileId).toBe('p-house');
+
+    // single-select: flagging p1 clears p-house (schema-enforced too)
+    const patch = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/p1', headers: H, payload: { defaultSource: true } });
+    expect(patch.statusCode).toBe(200);
+    expect(store.getAIProfile('p1')!.defaultSource).toBe(true);
+    expect(store.getAIProfile('p-house')!.defaultSource).toBe(false);
+
+    // clearing from the flagged profile itself
+    await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/p1', headers: H, payload: { defaultSource: false } });
+    expect(store.getAIProfile('p1')!.defaultSource).toBe(false);
+  });
+
+  it('an UNSHARED default never reaches another account silently', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({
+      id: 'p-priv', ownerId: 'user-other', name: 'Private Max', vendor: 'anthropic',
+      kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p-priv',
+      shared: false, createdAt: 'now',
+    } as any);
+    store.setAIProfileDefault('p-priv');
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ style: 'value' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: TEMPLATE,
+    });
+    expect(res.statusCode).toBe(201);
+    expect(store.getAgent(res.json().id)!.aiProfileId).toBe('p1'); // own profile, not the invisible default
+  });
+});

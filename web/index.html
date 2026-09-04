@@ -966,8 +966,10 @@
     <div class="sub">
       The shared runtime image every agent runs. It bakes in the OpenClaw version,
       the Claude CLI, the <b>gog</b> Google Workspace CLI, the local embedding model
-      (semantic memory search), and the <b>PDF/OCR stack</b> (tesseract, ocrmypdf,
-      poppler, qpdf — so scanned pages are read, never silently skipped). Every
+      (semantic memory search), the <b>PDF/OCR stack</b> (tesseract, ocrmypdf,
+      poppler, qpdf — so scanned pages are read, never silently skipped), and
+      <b>PDF creation</b> (pandoc + weasyprint — agents turn markdown/HTML into
+      real PDFs: meeting packages, notices, reports). Every
       agent picks changes up on its next <b>Rebuild</b>. Upgrading the OpenClaw
       version is a deliberate, separate command-line step — image packages can be
       rebuilt without touching it. Web search is always on (keyless DuckDuckGo);
@@ -2138,7 +2140,7 @@ const vendorChip = p => p.vendor === 'local' ? 'local · no credential'
 // one here just invited "which model am I actually on?" confusion.
 const vendorLabel = v => v === 'local' ? 'Local' : v === 'google' ? 'Gemini' : 'Claude';
 const sourceOptionLabel = p =>
-  `${esc(p.name)} — ${vendorLabel(p.vendor)}${p.mine === false ? ' (shared)' : ''}`;
+  `${p.defaultSource ? '⭐ ' : ''}${esc(p.name)} — ${vendorLabel(p.vendor)}${p.mine === false ? ' (shared)' : ''}`;
 
 // The default model: a dropdown when we know what the source offers, a text
 // box as a graceful fallback (models not loaded yet, or a source that can't
@@ -2182,9 +2184,9 @@ function sourceUsage(p) {
 function renderAiList() {
   $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
-      <b>${esc(p.name)}</b>
+      <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
-      <span class="sub">shared by the server owner — usable for your agents, managed by them</span>
+      <span class="sub">shared by the server owner — usable for your agents, managed by them${p.defaultSource ? '; the default for new agents' : ''}</span>
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
       <div style="display:flex;align-items:center;gap:6px;width:100%">
@@ -2198,6 +2200,10 @@ function renderAiList() {
         <label class="sub" style="display:flex;align-items:center;gap:4px;${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? '' : 'margin-left:auto'}"
                title="Let every account on this server use this source for their agents — they spend on it">
           <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
+        </label>
+        <label class="sub" style="display:flex;align-items:center;gap:4px"
+               title="Preselect this source whenever anyone on this server creates or imports an agent (one source can hold this). Other accounts only see it if it's also Shared.">
+          <input type="checkbox" ${p.defaultSource ? 'checked' : ''} onchange="setDefaultSource('${p.id}', this.checked, ${p.shared ? 'true' : 'false'})"> ⭐ Default
         </label>
       </div>
       ${sourceUsage(p)}
@@ -2298,6 +2304,20 @@ async function setMgmtLlmSource(id, on) {
     profiles = await api('/v1/ai-profiles');
     renderAiList();
     toast(on ? 'Management bot now answers with this source.' : 'Cleared — the bot falls back to the automatic pick.');
+  } catch (e) { toast(e.message); renderAiList(); }
+}
+
+async function setDefaultSource(id, on, isShared) {
+  if (on && !isShared && !confirm(
+    "This source isn't Shared, so other accounts can't see it — the default " +
+    "will only apply to YOUR new agents.\n\nFor a household-wide default, turn " +
+    "on Shared too. Set it as default anyway?"
+  )) { renderAiList(); return; }
+  try {
+    await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { defaultSource: on } });
+    profiles = await api('/v1/ai-profiles');
+    renderAiList();
+    toast(on ? 'New agents now preselect this source.' : 'Default cleared — new agents preselect nothing special.');
   } catch (e) { toast(e.message); renderAiList(); }
 }
 
@@ -2670,8 +2690,10 @@ async function addAiProfile() {
 $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
+  // The ⭐ default source (if any, and visible to this account) is preselected;
+  // the picker still offers everything.
   $('agentProfile').innerHTML = profiles.map(p =>
-    `<option value="${p.id}">${sourceOptionLabel(p)}</option>`).join('');
+    `<option value="${p.id}"${p.defaultSource ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   // Host picker only when there's somewhere to choose (a runner exists). "Auto"
   // lands on the least-loaded runner.
   const runners = hosts.filter(h => h.kind !== 'local');

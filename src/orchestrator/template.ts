@@ -420,9 +420,13 @@ export function importTemplate(
   // the new agent to (and bill) another owner's subscription.
   const profiles = store.listAIProfiles(opts.ownerId);
   const mine = profiles.filter((p) => p.ownerId === opts.ownerId);
+  // The installation default (single-select, owner opt-in to sharing) wins
+  // the SILENT pick when visible to this importer — that's what "default for
+  // new agents" means; an explicit aiProfileId always overrides.
   const profile = opts.aiProfileId
     ? store.getAIProfile(opts.aiProfileId)
-    : (mine.find((p) => p.vendor === manifest.ai.vendor) ??
+    : (profiles.find((p) => p.defaultSource) ??
+      mine.find((p) => p.vendor === manifest.ai.vendor) ??
       mine[0] ??
       profiles.find((p) => p.vendor === manifest.ai.vendor) ??
       profiles[0]);

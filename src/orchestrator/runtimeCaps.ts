@@ -33,6 +33,9 @@ const PROBES: Array<{ key: string; cmd: string }> = [
   { key: 'ocrmypdf', cmd: 'ocrmypdf --version 2>/dev/null | head -1' },
   { key: 'pdftotext', cmd: 'command -v pdftotext >/dev/null 2>&1 && pdftotext -v 2>&1 | head -1' },
   { key: 'qpdf', cmd: 'qpdf --version 2>/dev/null | head -1' },
+  // PDF creation (base image since 2026-09-04): pandoc + weasyprint engine.
+  { key: 'pandoc', cmd: 'pandoc --version 2>/dev/null | head -1' },
+  { key: 'weasyprint', cmd: 'weasyprint --version 2>/dev/null | head -1' },
 ];
 /** Deliberately-absent extras — surfaced so "can it?" has a truthful no. */
 const ABSENT_PROBES = ['ffmpeg', 'whisper', 'chromium'];

@@ -133,4 +133,11 @@ describe('base image carries the OCR stack (silent-fail class)', () => {
       expect(df).toContain(pkg);
     }
   });
+
+  it('the Dockerfile installs the PDF-creation packages (pandoc + weasyprint)', () => {
+    const df = read('docker/Dockerfile.runtime');
+    for (const pkg of ['pandoc', 'weasyprint', 'fonts-liberation']) {
+      expect(df).toContain(pkg);
+    }
+  });
 });

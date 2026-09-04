@@ -266,6 +266,11 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN pending_schedules TEXT`,
       // Which agent a share was cut from — lets an accepted copy record lineage.
       `ALTER TABLE agent_shares ADD COLUMN source_agent_id TEXT`,
+      // Installation-wide default AI source for NEW agents (single-select):
+      // preselected in the create form and preferred by importTemplate's
+      // silent fallback — the "household default" once per-member profiles
+      // are retired. Only applies where the profile is visible (own/shared).
+      `ALTER TABLE ai_profiles ADD COLUMN default_source INTEGER NOT NULL DEFAULT 0`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -288,6 +293,11 @@ export class Store {
     this.db.exec(
       `CREATE UNIQUE INDEX IF NOT EXISTS ai_profiles_mgmt_llm_one
          ON ai_profiles (owner_id) WHERE mgmt_llm = 1`,
+    );
+    // One installation-wide default source, schema-enforced like mgmt_llm.
+    this.db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ai_profiles_default_one
+         ON ai_profiles (default_source) WHERE default_source = 1`,
     );
 
     // Backfill order for agents created before sort_order existed: rowid is the
@@ -418,6 +428,20 @@ export class Store {
           .run(profileId, ownerId);
         // Roll the clear back too — a stale/foreign id must not eat the pick.
         if (set.changes !== 1) throw new Error(`No AI profile ${profileId} owned by ${ownerId}`);
+      }
+    })();
+  }
+
+  /** Single-select installation-wide: the default source for NEW agents.
+   *  Pass null to clear. Same transactional clear-then-set as mgmt_llm. */
+  setAIProfileDefault(profileId: string | null): void {
+    this.db.transaction(() => {
+      this.db.prepare(`UPDATE ai_profiles SET default_source = 0 WHERE default_source = 1`).run();
+      if (profileId) {
+        const set = this.db
+          .prepare(`UPDATE ai_profiles SET default_source = 1 WHERE id = ?`)
+          .run(profileId);
+        if (set.changes !== 1) throw new Error(`No AI profile ${profileId}`);
       }
     })();
   }
@@ -1998,6 +2022,7 @@ function rowToAIProfile(r: any): AIProfile {
     secretRef: r.secret_ref ?? undefined,
     shared: !!r.shared,
     mgmtLlm: !!r.mgmt_llm,
+    defaultSource: !!r.default_source,
     createdAt: r.created_at,
   };
 }

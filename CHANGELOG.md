@@ -2,6 +2,25 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.107.0] — 2026-09-04
+
+### Added
+- **⭐ Default AI source.** One source per installation can be flagged
+  "Default" (⚙ Settings → AI sources, beside Shared) — it's preselected in
+  the new-agent form for everyone who can see it, and wins the silent pick
+  on imports/derives/accepts when no source is chosen explicitly. Set it on
+  a Shared setup-token source and the whole household lands on it by
+  default; an unshared default only applies to its owner (the UI warns).
+  Single-select, schema-enforced (`ai_profiles_default_one`); a member's
+  explicit choice always overrides.
+- **PDF creation in the base image.** `pandoc` + `weasyprint` (+
+  fonts-liberation): agents can now produce real PDFs from markdown or
+  HTML/CSS (`pandoc doc.md -o doc.pdf --pdf-engine=weasyprint`) — meeting
+  packages, notices, reports. LaTeX-free on purpose (small, CSS-styled).
+  OpenClaw stays pinned at 2026.7.1-2; capability probes, drift guard, and
+  the Runtime pane description cover the new stack. Applies per agent on
+  its next Rebuild.
+
 ## [0.106.0] — 2026-09-04
 
 ### Fixed (10th audit — the v0.100→v0.105 feature burst; details in docs/audit-2026-09-04.md, Round 10)
