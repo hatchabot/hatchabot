@@ -5195,9 +5195,19 @@ function renderToc() {
   $('tocCount').textContent = liveAgents().length;
   // Mirror the main list's order and group headers exactly.
   let html = '', lastGroup = null;
-  for (const a of liveAgents()) {
+  // Mirror the card view's lineage nesting: children indent under their
+  // master, never interleaved alphabetically above it.
+  const liveL = liveAgents();
+  const liveIdsL = new Set(liveL.map(x => x.id));
+  const ordered = [];
+  for (const a of liveL) {
+    if (a.parentAgentId && liveIdsL.has(a.parentAgentId)) continue;
+    ordered.push(a);
+    for (const k of liveL.filter(x => x.parentAgentId === a.id)) ordered.push({ ...k, __child: true });
+  }
+  for (const a of ordered) {
     const g = a.group || '';
-    if (g && g !== lastGroup) html += `<div class="toc-group">${esc(g)}</div>`;
+    if (g && g !== lastGroup && !a.__child) html += `<div class="toc-group">${esc(g)}</div>`;
     lastGroup = g;
     // Someone knocking on this agent (pairing request), or the agent itself
     // waiting on a bot token — either way it needs you, so flag it here.
@@ -5208,9 +5218,9 @@ function renderToc() {
     const tip = waiting
       ? `${a.name} — ${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`
       : a.name;
-    html += `<a class="toc-item" onclick="jumpToCard('${a.id}')" title="${esc(tip)}">
+    html += `<a class="toc-item" ${a.__child ? 'style="padding-left:18px"' : ''} onclick="jumpToCard('${a.id}')" title="${esc(tip)}">
       <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
-      <span class="toc-name">${esc(a.name)}</span>${badge}</a>`;
+      <span class="toc-name">${a.__child ? '↳ ' : ''}${esc(a.name)}</span>${badge}</a>`;
   }
   // Archived agents keep their own names in the legend, under a section header
   // like any group. Collapsing them into a single counted line meant an agent
