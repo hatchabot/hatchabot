@@ -423,3 +423,69 @@ describe('master ⇄ child lineage (condo-fleet pattern)', () => {
     expect(store.getAgent(child.id)!.paramValues).toEqual({ style: 'value' }); // untouched
   });
 });
+
+describe('distillation: child→master proposals', () => {
+  it('distill parks a proposal; merge appends to AGENTS.md with snapshot; push carries it to the child', async () => {
+    const { store, f, provider } = await world();
+    // master a1 RUNNING with a real mock runtime
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { parameters: [{ key: 'style', label: 'Style', required: false, type: 'text', default: 'calm', target: 'soul' }] },
+    });
+    provider.execResponses.set('sh', { code: 0, stdout: 'playbook {{style}} v1\n', stderr: '' });
+    // derive a child and bring it RUNNING
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Kid', values: { style: 'calm' } } });
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Kid')!;
+    await new Promise((r) => setTimeout(r, 30));
+    const kid = await provider.provision({
+      agentId: child.id, slug: 'kid',
+      workspace: { files: {}, configPatch: { agentId: 'kid', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef(child.id, kid.runtimeRef);
+    if (store.getAgent(child.id)!.state === 'FAILED') store.setAgentState(child.id, 'PROVISIONING');
+    store.setAgentState(child.id, 'RUNNING');
+
+    // the child's model writes the distillation (canned agent turn)
+    provider.execResponses.set('agent', { code: 0, stdout: '## Lesson\nAlways confirm quotes in writing before approving vendors.\n', stderr: '' });
+    const d = await f.inject({ method: 'POST', url: `/v1/agents/${child.id}/distill`, headers: H, payload: { topic: 'vendors' } });
+    expect(d.statusCode).toBe(201);
+    expect(store.listProposals('a1')).toHaveLength(1);
+
+    // merge (the mock cans every cat, so simulate the merged file for the
+    // separate push step below — production reads the real file)
+    const pid = store.listProposals('a1')[0]!.id;
+    const res = await f.inject({
+      method: 'POST', url: `/v1/agents/a1/proposals/${pid}/resolve`, headers: H,
+      payload: { action: 'merge', push: false },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ merged: true });
+    expect(store.listProposals('a1')).toHaveLength(0); // consumed
+    expect(store.listSnapshots('a1').some((s) => s.reason === 'pre-edit')).toBe(true); // master snapshotted
+
+    provider.execResponses.set('sh', { code: 0, stdout: 'playbook {{style}} v2\nAlways confirm quotes in writing.\n', stderr: '' });
+    const push = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(push.json().pushed).toBe(1);
+    expect(store.getAgent(child.id)!.paramFiles?.agents).toContain('confirm quotes in writing');
+  });
+
+  it('distill refuses an agent with no master; dismiss closes without touching files', async () => {
+    const { store, f, provider } = await world();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/distill', headers: H, payload: {} })).statusCode).toBe(400);
+    store.insertProposal({ id: 'pr1', masterAgentId: 'a1', childAgentId: 'x', childName: 'Kid', text: 'lesson text here padded to pass' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/proposals/pr1/resolve', headers: H, payload: { action: 'dismiss' } });
+    expect(res.json()).toEqual({ dismissed: true });
+    expect(store.listProposals('a1')).toHaveLength(0);
+    expect(store.listSnapshots('a1')).toHaveLength(0); // nothing written
+  });
+});

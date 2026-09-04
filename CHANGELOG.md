@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.103.0] — 2026-09-04
+
+### Added
+- **Distillation — the child→master return flow.** On a child's ⋯ menu,
+  **💡 Propose to master** has the child's own model write up its most
+  valuable generalizable lesson (strict prompt: no names, amounts, dates, or
+  identifying specifics) and parks it as a proposal on the master. The
+  master's **📥 Proposals** dialog shows each with Dismiss / Merge / Merge +
+  Push: merge appends to the master's AGENTS.md under a provenance comment
+  (snapshot first; the master's template layer stays coherent), push carries
+  it to every child with their own values re-applied. The owner's click is
+  the privacy filter between one deployment's history and the template the
+  siblings receive. New: agent_proposals table, POST /v1/agents/:id/distill,
+  GET /:id/proposals, POST /:id/proposals/:pid/resolve.
+- **TOC legend nests children under masters** (↳, indented), matching the
+  card view; **⏰ Tasks are editable** (✏️ Edit prefills the form; save
+  creates the replacement before deleting the original).
+
 ## [0.102.0] — 2026-09-04
 
 ### Added

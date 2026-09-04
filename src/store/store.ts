@@ -97,6 +97,16 @@ export class Store {
         seen_at TEXT NOT NULL
       );
 
+      -- Child→master distillation proposals (lineage flows): a child's
+      -- generalized learning awaiting the owner's review on the master.
+      CREATE TABLE IF NOT EXISTS agent_proposals (
+        id TEXT PRIMARY KEY, master_agent_id TEXT NOT NULL,
+        child_agent_id TEXT NOT NULL, child_name TEXT NOT NULL,
+        text TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS proposals_master ON agent_proposals (master_agent_id, status);
+
       -- Other AgentClaw installations this owner can move agents to. The
       -- access token is a credential, so it lives in the SecretStore and only
       -- its ref is here.
@@ -1452,6 +1462,31 @@ export class Store {
 
   /** A configured copy's editable state: current values + the raw template
    *  layer they render into. Set at import; values updated on later edits. */
+  insertProposal(p: { id: string; masterAgentId: string; childAgentId: string; childName: string; text: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_proposals (id, master_agent_id, child_agent_id, child_name, text, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(p.id, p.masterAgentId, p.childAgentId, p.childName, p.text, new Date().toISOString());
+  }
+
+  listProposals(masterAgentId: string): Array<{ id: string; childAgentId: string; childName: string; text: string; createdAt: string }> {
+    return (
+      this.db
+        .prepare(`SELECT * FROM agent_proposals WHERE master_agent_id = ? AND status = 'pending' ORDER BY created_at`)
+        .all(masterAgentId) as any[]
+    ).map((r) => ({ id: r.id, childAgentId: r.child_agent_id, childName: r.child_name, text: r.text, createdAt: r.created_at }));
+  }
+
+  resolveProposal(masterAgentId: string, id: string, status: 'merged' | 'dismissed'): boolean {
+    return (
+      this.db
+        .prepare(`UPDATE agent_proposals SET status = ? WHERE id = ? AND master_agent_id = ? AND status = 'pending'`)
+        .run(status, id, masterAgentId).changes === 1
+    );
+  }
+
   setAgentParent(id: string, parentAgentId: string | null): void {
     this.db
       .prepare(`UPDATE agents SET parent_agent_id = ? WHERE id = ?`)

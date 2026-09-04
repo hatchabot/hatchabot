@@ -1009,6 +1009,17 @@
   </div>
 </dialog>
 
+<dialog id="proposalsDlg" style="width:min(720px,94vw)">
+  <h3 style="margin:0 0 4px">📥 Proposals — <span id="proposalsAgent"></span></h3>
+  <div class="sub">Generalized learnings distilled by child agents. You are the privacy filter:
+    merging appends to this master's AGENTS.md (snapshot first); Merge&nbsp;+&nbsp;Push also
+    re-renders every child. Memory is never touched.</div>
+  <div id="proposalsList" style="margin-top:12px;max-height:55vh;overflow:auto"></div>
+  <div class="actions" style="justify-content:flex-end">
+    <button class="primary" onclick="proposalsDlg.close()">Close</button>
+  </div>
+</dialog>
+
 <dialog id="fleetDlg" style="width:min(720px,96vw)">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <h3 style="margin:0">Fleet health</h3>
@@ -3157,7 +3168,7 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
       ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
       ${a.state === 'RUNNING' && a.parameters?.length && !a.parentAgentId ? `<button onclick="deriveChild('${a.id}', '${jsq(a.name)}')" title="Create a child agent from this master: same training, its own setup values and bot, fresh memory. Children nest under this card.">👪 New child</button>` : ''}
-      ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
+      ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="openProposals('${a.id}', '${jsq(a.name)}')" title="Distilled learnings proposed by this master's children, awaiting your review">📥 Proposals</button><button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
         ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
       <!-- lifecycle -->
@@ -3195,6 +3206,9 @@ function cardMenu(a) {
   }
   if (a.state === 'RUNNING' || a.runtimeRef) {
     items.push(`<button onclick="openLogs('${a.id}', '${jsq(a.name)}')">Logs</button>`);
+  }
+  if (a.state === 'RUNNING' && a.parentAgentId) {
+    items.push(`<button onclick="distillToMaster('${a.id}', '${jsq(a.name)}')" title="The agent writes up its most valuable generalizable lesson (no names or specifics) as a proposal for its master's playbook — you review before anything merges">💡 Propose to master</button>`);
   }
   if (a.state === 'RUNNING' && a.hasGateway) {
     items.push(`<button onclick="openGateway('${a.id}', '${jsq(a.slug)}')">OpenClaw (debug)</button>`);
@@ -5007,6 +5021,47 @@ async function deriveChild(id, masterName) {
     await api(`/v1/agents/${id}/derive`, { method: 'POST', body: { name: name.trim(), values } });
     toast(`Child "${name.trim()}" is being created — it'll nest under ${masterName}.`);
     setTimeout(() => refresh(false), 800);
+  } catch (e) { toast(e.message, 10000); }
+}
+
+async function distillToMaster(id, name) {
+  const topic = prompt(`Ask ${name} to distill a lesson for its master. Optional focus topic (blank = its best general lesson):`, '');
+  if (topic === null) return;
+  toast('Distilling — the agent is writing (~20-60s)…');
+  try {
+    await api(`/v1/agents/${id}/distill`, { method: 'POST', body: { topic: topic.trim() || undefined } });
+    toast('Proposal parked on the master — review it via 📥 Proposals on the master card.', 10000);
+  } catch (e) { toast(e.message, 10000); }
+}
+
+let proposalsMasterId = null;
+async function openProposals(id, name) {
+  proposalsMasterId = id;
+  $('proposalsAgent').textContent = name;
+  $('proposalsList').innerHTML = 'Loading…';
+  proposalsDlg.showModal();
+  await loadProposals();
+}
+async function loadProposals() {
+  try {
+    const { proposals } = await api(`/v1/agents/${proposalsMasterId}/proposals`);
+    $('proposalsList').innerHTML = proposals.length ? proposals.map(p => `
+      <div style="border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+        <div class="sub">from <b>${esc(p.childName)}</b> · ${ago(p.createdAt)}</div>
+        <pre style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:14px;max-height:240px;overflow:auto;margin:6px 0">${esc(p.text)}</pre>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button onclick="resolveProposal('${jsq(p.id)}','dismiss',false)">Dismiss</button>
+          <button onclick="resolveProposal('${jsq(p.id)}','merge',false)">Merge</button>
+          <button class="primary" onclick="resolveProposal('${jsq(p.id)}','merge',true)">Merge + Push to children</button>
+        </div>
+      </div>`).join('') : '<div class="sub">No pending proposals. On a child card, ⋯ → 💡 Propose to master creates one.</div>';
+  } catch (e) { $('proposalsList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+async function resolveProposal(pid, action, push) {
+  try {
+    const r = await api(`/v1/agents/${proposalsMasterId}/proposals/${pid}/resolve`, { method: 'POST', body: { action, push } });
+    toast(action === 'dismiss' ? 'Dismissed.' : `Merged into the master's AGENTS.md${push ? ` — pushed to ${r.pushed} child(ren)` : ''}.`, 8000);
+    await loadProposals();
   } catch (e) { toast(e.message, 10000); }
 }
 

@@ -4160,6 +4160,126 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { pushed: results.filter((r) => r.ok).length, results };
   });
 
+  /**
+   * Child → master distillation (the return half of the lineage flows). The
+   * CHILD's own model writes up its generalizable learning — explicitly told
+   * to strip names/specifics — and the result parks as a PROPOSAL on the
+   * master for the owner's review. Nothing merges without the owner's click:
+   * the owner is the privacy filter between one condo's history and the
+   * template every other condo receives.
+   */
+  app.post<{ Params: { id: string }; Body: { topic?: string } }>(
+    '/v1/agents/:id/distill',
+    async (req, reply) => {
+      const child = runningAgent(req, req.params.id, reply, 'distill its learnings');
+      if (!child) return reply;
+      if (!child.parentAgentId || !store.getAgent(child.parentAgentId)) {
+        return reply.code(400).send({ error: 'This agent has no master to propose to.' });
+      }
+      const topic = ((req.body as { topic?: string } | null)?.topic ?? '').trim().slice(0, 400);
+      const prompt =
+        'System note: write a proposal to improve the MASTER playbook you were derived from. ' +
+        (topic ? `Focus: ${topic}. ` : '') +
+        'Distill the most valuable GENERALIZABLE procedure or lesson you have learned in service — ' +
+        'something every sibling agent should know. STRICT RULES: no names, no addresses, no amounts, ' +
+        'no dates, no identifying specifics of the people or organization you serve — generalize ' +
+        'everything. Output ONLY the proposal text as markdown (a heading + concise body), no preamble.';
+      const res = await providerFor(child.hostId).exec(child.runtimeRef!, [
+        'agent', '--agent', child.slug, '-m', prompt,
+      ]);
+      const text = (res.stdout || '').trim();
+      if (res.code !== 0 || text.length < 40) {
+        return reply.code(502).send({ error: 'The agent produced no usable distillation — try again or give a topic.' });
+      }
+      const id = randomUUID();
+      store.insertProposal({
+        id, masterAgentId: child.parentAgentId, childAgentId: child.id, childName: child.name,
+        text: text.slice(0, 20_000),
+      });
+      trace(child.id)('proposal.created', { masterAgentId: child.parentAgentId, proposalId: id });
+      return reply.code(201).send({ id, text: text.slice(0, 20_000) });
+    },
+  );
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/proposals', async (req, reply) => {
+    const master = ownedAgent(req, req.params.id);
+    if (!master) return reply.code(404).send({ error: 'Not found' });
+    return { proposals: store.listProposals(master.id) };
+  });
+
+  /** Owner's review verdict: merge appends to the master's AGENTS.md under a
+   *  "Distilled learnings" section (snapshot first), optionally pushing to
+   *  all children; dismiss just closes it. */
+  app.post<{ Params: { id: string; pid: string }; Body: { action?: string; push?: boolean } }>(
+    '/v1/agents/:id/proposals/:pid/resolve',
+    async (req, reply) => {
+      const master = ownedAgent(req, req.params.id);
+      if (!master) return reply.code(404).send({ error: 'Not found' });
+      const body = (req.body ?? {}) as { action?: string; push?: boolean };
+      if (body.action !== 'merge' && body.action !== 'dismiss') {
+        return reply.code(400).send({ error: 'action must be "merge" or "dismiss".' });
+      }
+      const proposal = store.listProposals(master.id).find((p) => p.id === req.params.pid);
+      if (!proposal) return reply.code(404).send({ error: 'No such pending proposal.' });
+      if (body.action === 'dismiss') {
+        store.resolveProposal(master.id, req.params.pid, 'dismissed');
+        return { dismissed: true };
+      }
+      if (master.state !== 'RUNNING' || !master.runtimeRef) {
+        return reply.code(409).send({ error: 'Start the master to merge into its playbook.' });
+      }
+      if (busyNow(master, reply)) return reply;
+      try {
+        await whileBusy(master.id, async () => {
+          await autoSnapshot(snapshotDeps(master), master.id, 'pre-edit');
+          const path = workspacePath(master.slug, 'AGENTS.md');
+          const cur = (
+            await providerFor(master.hostId).execShell(master.runtimeRef!, `cat ${JSON.stringify(path)} 2>/dev/null || true`)
+          ).stdout;
+          const stamp = new Date().toISOString().slice(0, 10);
+          const merged = `${cur.trimEnd()}\n\n<!-- distilled from ${proposal.childName}, ${stamp} -->\n${proposal.text}\n`;
+          const b64 = Buffer.from(merged, 'utf8').toString('base64');
+          const r = await providerFor(master.hostId).execShell(
+            master.runtimeRef!,
+            `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
+          );
+          if (r.code !== 0) throw new Error('write failed');
+        });
+      } catch (err) {
+        if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        throw err;
+      }
+      // Keep the master's own template layer coherent for its children flows.
+      if (master.paramFiles) {
+        const cur = (
+          await providerFor(master.hostId).execShell(
+            master.runtimeRef!,
+            `cat ${JSON.stringify(workspacePath(master.slug, 'AGENTS.md'))} 2>/dev/null || true`,
+          )
+        ).stdout;
+        store.setAgentParamState(master.id, master.paramValues ?? {}, { ...master.paramFiles, agents: cur });
+      }
+      store.resolveProposal(master.id, req.params.pid, 'merged');
+      trace(master.id)('proposal.merged', { proposalId: req.params.pid, from: proposal.childName });
+      let pushed = 0;
+      if (body.push) {
+        const pushRes = await app.inject({
+          method: 'POST',
+          url: `/v1/agents/${master.id}/push-definition`,
+          headers: {
+            ...(typeof req.headers.authorization === 'string' ? { authorization: req.headers.authorization } : {}),
+            ...(typeof req.headers.cookie === 'string' ? { cookie: req.headers.cookie } : {}),
+            ...(typeof req.headers['x-agentclaw-owner'] === 'string' ? { 'x-agentclaw-owner': req.headers['x-agentclaw-owner'] as string } : {}),
+            'content-type': 'application/json',
+          },
+          payload: '{}',
+        });
+        if (pushRes.statusCode === 200) pushed = pushRes.json().pushed;
+      }
+      return { merged: true, pushed };
+    },
+  );
+
   // Import: one entry point for any .agentclaw file. It sniffs the archive's
   // format and does the right thing — a template becomes a fresh agent, a full
   // copy (a Download) is restored as the same agent. The /restore route above
