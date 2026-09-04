@@ -38,6 +38,18 @@ those, grounded in the real condo-adviser setup.
 | Google OAuth credential | file-based token store (`gog auth`), needs periodic refresh, granted per service (gmail, drive, …) | **the hard part** |
 | Mail-fetch crons, workspace files | already handled by adopt | done |
 
+**Multiple accounts per agent are supported and first-class** (verified
+2026-09-04: `gog` takes a global `-a/--account=<email>` on every service
+command, and `gog auth add` enrolls any number of accounts side-by-side in
+the agent's volume store). A condo agent can hold `board@`, `treasurer@`,
+and `manager@` at once — auth each in chat, then the agent's AGENTS.md
+records which account serves which duty (e.g. "send minutes from board@,
+read invoices in treasurer@'s Drive"). Template guidance: declare a plain
+text setup field like `{{gmail_accounts}}` (comma-separated emails) that the
+SOUL/AGENTS references, and let each child's owner auth those accounts in
+chat after import — OAuth consent is inherently interactive, so the field
+carries the *intent*, the chat flow carries the tokens.
+
 A load-bearing observation from a live setup: the adviser authenticates as a
 **purpose-bound Google account** (e.g. `building-adviser@example.com`), not a
 personal one. That instinct should become the documented recommendation: an

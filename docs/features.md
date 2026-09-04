@@ -298,6 +298,10 @@ Advanced agents can connect to Google Workspace via the bundled `gog` CLI
 (seeded as a skill in every agent). Setup happens **in the Telegram chat**:
 ask the agent to connect an account and it walks the owner through Google's
 consent flow (`--remote` paste-back — no browser needed on the server).
+**Multiple accounts per agent are supported**: auth each one in chat
+(`board@`, `treasurer@`, …) and every gog command selects its identity with
+`-a <email>` — tell the agent which account serves which duty and it records
+that in its playbook.
 Credentials land on the agent's own volume (`GOG_HOME`), so they refresh in
 place and travel with Move, backups, and Download — while Share templates
 never include them. Recommend a **purpose-bound Google account** (scoped to
