@@ -1083,6 +1083,7 @@
   <div id="cronList" style="margin-top:12px"></div>
   <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
     <label>New task</label>
+    <div class="sub" id="cronEditNote" style="display:none;color:var(--warn);margin-bottom:4px"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <input type="text" id="cronName" maxlength="80" placeholder="Name (e.g. Pre-market briefing)" style="flex:1;min-width:160px">
       <input type="text" id="cronExpr" maxlength="64" placeholder="Cron (e.g. 0 8 * * 1-5)" style="width:150px;font-family:ui-monospace,monospace" title="minute hour day month weekday — e.g. 0 8 * * 1-5 is 8:00 on weekdays">
@@ -3185,8 +3186,8 @@ function agentCard(a) {
         <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
       ${a.state === 'RUNNING' && a.botUsername ? (
         a.botDisplayName === a.name
-          ? `<button disabled title="The bot's Telegram display name already matches ('${jsq(a.name)}') — nothing to sync.">🏷 Sync name</button>`
-          : `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" ${a.botDisplayName ? `style="border-color:var(--warn)" title="Bot is currently named '${jsq(a.botDisplayName)}' — press to rename it to '${jsq(a.name)}'. Members get a one-line heads-up DM."` : `title="Rename the Telegram bot's display name to match this agent."`}>🏷 Sync name</button>`
+          ? `<button disabled title="The bot's Telegram display name already matches ('${esc(a.name)}') — nothing to sync.">🏷 Sync name</button>`
+          : `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" ${a.botDisplayName ? `style="border-color:var(--warn)" title="Bot is currently named '${esc(a.botDisplayName)}' — press to rename it to '${esc(a.name)}'. Members get a one-line heads-up DM."` : `title="Rename the Telegram bot's display name to match this agent."`}>🏷 Sync name</button>`
       ) : ''}
       ${a.state === 'RUNNING' ? `<button onclick="checkpointAgent('${a.id}', '${jsq(a.name)}')" title="Have the agent write the current conversation's key facts into MEMORY.md now (~20s), so they survive a reset or backend switch">📝 Chat → Memory</button>` : ''}
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
@@ -4469,11 +4470,19 @@ function cronScheduleLabel(c) {
 }
 async function openCrons(id, name) {
   cronAgentId = id;
+  // A leftover edit armed from a previous open silently DELETED an unrelated
+  // task on the next add (10th audit) — every open starts in add mode.
+  cancelCronEdit();
   $('cronAgent').textContent = name;
   $('cronErr').textContent = '';
   $('cronList').innerHTML = 'Loading…';
   cronDlg.showModal();
   await loadCrons();
+}
+function cancelCronEdit() {
+  cronEditingId = null;
+  $('cronAddBtn').textContent = 'Add task';
+  $('cronEditNote').style.display = 'none';
 }
 async function loadCrons() {
   if (!cronAgentId) return;
@@ -4489,12 +4498,19 @@ function editCronJob(id) {
   const c = cronCache.find(x => x.id === id);
   if (!c) return;
   if (c.payloadKind === 'command') { toast('Shell-command tasks are edited by asking the agent (they carry scripts, not messages).'); return; }
+  // The form is cron-expression only; loading an interval/one-shot task
+  // prefilled an empty schedule and saving silently converted it (10th
+  // audit). Those are edited by asking the agent, same as shell tasks.
+  if (!c.scheduleExpr) { toast('This task runs on an interval, not a cron expression — edit it by asking the agent, or delete and re-add.'); return; }
   cronEditingId = id;
   $('cronName').value = c.name || '';
   $('cronExpr').value = c.scheduleExpr || '';
   $('cronTz').value = c.scheduleTz || '';
   $('cronMsg').value = c.message || '';
   $('cronAddBtn').textContent = 'Save changes (replaces the task)';
+  const note = $('cronEditNote');
+  note.style.display = '';
+  note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <a style="cursor:pointer;text-decoration:underline" onclick="cancelCronEdit()">cancel</a>`;
 }
 async function addCronJob() {
   const name = $('cronName').value.trim(), cron = $('cronExpr').value.trim();
@@ -4506,9 +4522,8 @@ async function addCronJob() {
     // Editing = replace: the new task exists before the old one is removed,
     // so a failed create can never lose the original.
     if (cronEditingId) {
-      await api(`/v1/agents/${cronAgentId}/crons/${cronEditingId}`, { method: 'DELETE' }).catch(() => toast('New task saved, but removing the old one failed — delete it manually.', 10000));
-      cronEditingId = null;
-      $('cronAddBtn').textContent = 'Add task';
+      await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(cronEditingId)}`, { method: 'DELETE' }).catch(() => toast('New task saved, but removing the old one failed — delete it manually.', 10000));
+      cancelCronEdit();
     }
     toast('Task saved');
     $('cronName').value = ''; $('cronExpr').value = ''; $('cronMsg').value = '';
@@ -5127,7 +5142,7 @@ async function loadProposals() {
 }
 async function resolveProposal(pid, action, push) {
   try {
-    const r = await api(`/v1/agents/${proposalsMasterId}/proposals/${pid}/resolve`, { method: 'POST', body: { action, push } });
+    const r = await api(`/v1/agents/${proposalsMasterId}/proposals/${encodeURIComponent(pid)}/resolve`, { method: 'POST', body: { action, push } });
     toast(action === 'dismiss' ? 'Dismissed.' : `Merged into the master's AGENTS.md${push ? ` — pushed to ${r.pushed} child(ren)` : ''}.`, 8000);
     await loadProposals();
   } catch (e) { toast(e.message, 10000); }
@@ -5254,10 +5269,23 @@ function renderAgents() {
   let html = '', lastGroup = null;
   const live = liveAgents();
   const liveIds = new Set(live.map(x => x.id));
+  // Lineage renders RECURSIVELY: a clone of a child is a grandchild, and the
+  // old direct-children-only pass skipped it entirely — a running agent with
+  // no card and no way to manage it (10th audit). `emitted` doubles as the
+  // cycle guard and feeds the orphan sweep below.
+  const emitted = new Set();
+  const renderKids = (id) => {
+    const kids = live.filter(k => k.parentAgentId === id && !emitted.has(k.id));
+    if (!kids.length) return '';
+    kids.forEach(k => emitted.add(k.id));
+    return `<div style="margin-left:26px;border-left:3px solid var(--line);padding-left:10px">
+      ${kids.map(k => agentCard(k) + renderKids(k.id)).join('')}</div>`;
+  };
   for (const a of live) {
     // A child renders INDENTED under its master, not in the main flow —
     // lineage is the visual grouping (Chris, condo-fleet pattern).
     if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
+    emitted.add(a.id);
     const g = a.group || '';
     if (g && g !== lastGroup) html += `<div class="group-header">
       <span class="grow">${esc(g)}</span>
@@ -5265,13 +5293,11 @@ function renderAgents() {
       <button class="movebtn" title="Move section down" onclick="moveGroup('${jsq(g)}','down')">▼</button>
     </div>`;
     lastGroup = g;
-    html += agentCard(a);
-    const kids = live.filter(k => k.parentAgentId === a.id);
-    if (kids.length) {
-      html += `<div style="margin-left:26px;border-left:3px solid var(--line);padding-left:10px">
-        ${kids.map(agentCard).join('')}</div>`;
-    }
+    html += agentCard(a) + renderKids(a.id);
   }
+  // Belt-and-suspenders: anything still unemitted (a lineage cycle from bad
+  // data) renders flat rather than vanishing.
+  for (const a of live) if (!emitted.has(a.id)) html += agentCard(a);
   const parked = archivedAgents();
   if (parked.length) {
     // `open` is restored from the last render: this list re-renders on every
@@ -5323,15 +5349,30 @@ function renderToc() {
   const liveL = liveAgents();
   const liveIdsL = new Set(liveL.map(x => x.id));
   const ordered = [];
+  // Recursive, like the card view: grandchildren indent one level deeper
+  // instead of vanishing; `seen` guards against lineage cycles.
+  const seen = new Set();
+  const pushKids = (id, depth) => {
+    for (const k of liveL.filter(x => x.parentAgentId === id && !seen.has(x.id))) {
+      seen.add(k.id);
+      ordered.push({ ...k, __depth: depth });
+      pushKids(k.id, depth + 1);
+    }
+  };
   for (const a of liveL) {
     if (a.parentAgentId && liveIdsL.has(a.parentAgentId)) continue;
+    seen.add(a.id);
     ordered.push(a);
-    for (const k of liveL.filter(x => x.parentAgentId === a.id)) ordered.push({ ...k, __child: true });
+    pushKids(a.id, 1);
   }
+  for (const a of liveL) if (!seen.has(a.id)) ordered.push(a); // cycle fallback
   for (const a of ordered) {
     const g = a.group || '';
-    if (g && g !== lastGroup && !a.__child) html += `<div class="toc-group">${esc(g)}</div>`;
-    lastGroup = g;
+    if (g && g !== lastGroup && !a.__depth) html += `<div class="toc-group">${esc(g)}</div>`;
+    // Children keep the surrounding group context: their own (usually empty)
+    // group must not reset the dedupe, or the next master in the same group
+    // prints a duplicate header (10th audit).
+    if (!a.__depth) lastGroup = g;
     // Someone knocking on this agent (pairing request), or the agent itself
     // waiting on a bot token — either way it needs you, so flag it here.
     const waiting = (pairings[a.id] ?? []).length;
@@ -5341,9 +5382,9 @@ function renderToc() {
     const tip = waiting
       ? `${a.name} — ${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`
       : a.name;
-    html += `<a class="toc-item" ${a.__child ? 'style="padding-left:18px"' : ''} onclick="jumpToCard('${a.id}')" title="${esc(tip)}">
+    html += `<a class="toc-item" ${a.__depth ? `style="padding-left:${6 + 12 * a.__depth}px"` : ''} onclick="jumpToCard('${a.id}')" title="${esc(tip)}">
       <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
-      <span class="toc-name">${a.__child ? '↳ ' : ''}${esc(a.name)}</span>${badge}</a>`;
+      <span class="toc-name">${a.__depth ? '↳ ' : ''}${esc(a.name)}</span>${badge}</a>`;
   }
   // Archived agents keep their own names in the legend, under a section header
   // like any group. Collapsing them into a single counted line meant an agent

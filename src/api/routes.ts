@@ -73,7 +73,7 @@ import {
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
-import { memoryPolicySection, replaceMemoryPolicy } from '../openclaw/workspace.js';
+import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -2241,7 +2241,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         agent.runtimeRef,
         `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(agent.slug, req.params.name))} 2>/dev/null || true`,
       );
-      if (res.stdout.length > MAX_FILE_BYTES) {
+      // Bytes, not JS chars — a multibyte-heavy file just over the cap passed
+      // the char-count check yet arrived truncated mid-character by head -c,
+      // and saving it back wrote the truncation (10th audit).
+      if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
         return reply.code(413).send({ error: `${req.params.name} is over ${MAX_FILE_BYTES / 1024}KB — edit it in chat instead.` });
       }
       return { name: req.params.name, content: res.stdout };
@@ -3355,14 +3358,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         return reply.code(409).send({ error: 'Start the agent to disconnect an account.' });
       }
       // Strict shape gate — the email is interpolated into a shell line, so
-      // only unambiguous mailbox characters may pass (no $, backticks, quotes).
+      // only unambiguous mailbox characters may pass (no $, backticks,
+      // quotes), and the FIRST char must be alphanumeric: a leading dash
+      // would reach gog's flag parser as an option. `--` below is the belt
+      // to that suspender.
       const email = req.params.email;
-      if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/.test(email) || email.length > 254) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(email) || email.length > 254) {
         return reply.code(400).send({ error: 'Not a recognizable account email.' });
       }
+      // --force: without it gog refuses removal in a non-interactive shell
+      // (verified live — every docker-exec disconnect failed with exit 2).
       const res = await providerFor(agent.hostId).execShell(
         agent.runtimeRef,
-        `gog auth remove "${email}"`,
+        `gog auth remove --force -- "${email}"`,
       );
       if (res.code !== 0) {
         return reply.code(502).send({ error: `Couldn't remove it: ${(res.stderr || res.stdout || 'gog gave no reason').slice(0, 200)}` });
@@ -4036,6 +4044,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         .optional()
         .safeParse(body.values);
       if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
+      if ((body.name?.trim().length ?? 0) > 64) return reply.code(400).send({ error: 'Names cap at 64 characters.' });
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
       try {
         const { agent, needs, envValues, dataSourceValues } = importTemplate(
@@ -4043,8 +4052,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           share.blob,
           { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id, values: vals.data },
         );
-        await materializeEnvValues(agent.id, envValues);
-        await materializeDataSources(agent, dataSourceValues);
+        await materializeImportEffects(agent, envValues, dataSourceValues);
         // Lineage: if the master still lives on this installation, record it —
         // the fleet view groups children under it and the master's push-
         // definition flow targets them.
@@ -4068,44 +4076,26 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * secret-free by design; this async step is the route layer's half. On
    * failure the fresh agent is rolled back whole, matching import semantics.
    */
-  const materializeEnvValues = async (
-    agentId: string,
+  const materializeImportEffects = async (
+    agent: Agent,
     envValues: Array<{ name: string; value: string }>,
+    dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }>,
   ): Promise<void> => {
+    // ONE rollback list across both kinds: env secrets written before a repo
+    // binding fails must be deleted too — scrubAgentResidue removes rows, not
+    // secrets, so two separate helpers orphaned the env credentials in the
+    // SecretStore forever (10th audit).
     const created: string[] = [];
+    let phase = 'setup credentials';
     try {
       for (const v of envValues) {
         const id = randomUUID();
         const ref = `agent-env/${id}`;
         await secrets.put(ref, v.value);
         created.push(ref);
-        store.insertAgentEnv({ id, agentId, name: v.name, secretRef: ref, createdAt: new Date().toISOString() });
+        store.insertAgentEnv({ id, agentId: agent.id, name: v.name, secretRef: ref, createdAt: new Date().toISOString() });
       }
-    } catch (err) {
-      for (const ref of created) await secrets.delete(ref).catch(() => {});
-      try {
-        store.scrubAgentResidue(agentId);
-        store.setAgentState(agentId, 'DELETING');
-        store.setAgentState(agentId, 'DELETED');
-      } catch { /* rollback is best-effort; the import error below is what the user sees */ }
-      throw new TransferError(`Couldn't store the setup credentials: ${String((err as Error).message ?? err).slice(0, 200)}`);
-    }
-  };
-
-  /**
-   * Filled datasource-target setup fields become real git data sources —
-   * deploy key generated here, private half in the SecretStore — BEFORE
-   * provisioning, so the first build clones the repo. importTemplate already
-   * validated the URLs (shape, reserved names, self-clash); this is the async
-   * half it can't do. Same whole-agent rollback as the env materializer: a
-   * child without the repo it was derived FOR is not a usable import.
-   */
-  const materializeDataSources = async (
-    agent: Agent,
-    dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }>,
-  ): Promise<void> => {
-    const created: string[] = [];
-    try {
+      phase = 'repo binding';
       for (const d of dataSourceValues) {
         const id = randomUUID();
         const key = generateDeployKey(`agentclaw-${agent.slug}-${d.repoName}-deploy`);
@@ -4124,7 +4114,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAgentState(agent.id, 'DELETING');
         store.setAgentState(agent.id, 'DELETED');
       } catch { /* rollback is best-effort; the import error below is what the user sees */ }
-      throw new TransferError(`Couldn't set up the repo binding: ${String((err as Error).message ?? err).slice(0, 200)}`);
+      throw new TransferError(`Couldn't store the ${phase}: ${String((err as Error).message ?? err).slice(0, 200)}`);
     }
   };
 
@@ -4150,7 +4140,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       try {
         const { data } = await exportTemplate(deps, agent.id, { includeMemory: true });
         const name = (req.body as { name?: string } | null)?.name?.trim() || `${agent.name} (copy)`;
-        const { agent: clone } = importTemplate(deps, data, { ownerId: ownerIdOf(req), name });
+        // Faithful copy: reuse the source's own filled values; lenient so a
+        // required env/datasource field (whose materialized record lives on
+        // the source, not in values) can't make cloning impossible.
+        const { agent: clone } = importTemplate(deps, data, {
+          ownerId: ownerIdOf(req), name, values: agent.paramValues ?? {}, lenient: true,
+        });
         store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
         kickProvision(clone.id);
         return reply.code(201).send(publicAgent(clone));
@@ -4176,6 +4171,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const body = (req.body ?? {}) as { name?: string; values?: Record<string, string> };
       const name = body.name?.trim();
       if (!name) return reply.code(400).send({ error: 'Name the child agent.' });
+      if (name.length > 64) return reply.code(400).send({ error: 'Names cap at 64 characters.' });
       const vals = z
         .record(z.string().max(64), z.string().max(2000))
         .refine((r) => Object.keys(r).length <= 24)
@@ -4188,8 +4184,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         const { agent: child, envValues, dataSourceValues } = importTemplate(deps2, data, {
           ownerId: ownerIdOf(req), name, values: vals.data,
         });
-        await materializeEnvValues(child.id, envValues);
-        await materializeDataSources(child, dataSourceValues);
+        await materializeImportEffects(child, envValues, dataSourceValues);
         store.setAgentParent(child.id, agent.id);
         trace(child.id)('agent.derived', { parentAgentId: agent.id, parentName: agent.name });
         kickProvision(child.id);
@@ -4214,18 +4209,32 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     const children = store.listChildren(master.id).filter((c) => c.ownerId === ownerIdOf(req));
     if (!children.length) return reply.code(400).send({ error: 'This agent has no derived children.' });
-    const readMaster = async (nameF: string) =>
-      (
-        await providerFor(master.hostId).execShell(
-          master.runtimeRef!,
-          `cat ${JSON.stringify(workspacePath(master.slug, nameF))} 2>/dev/null || true`,
-        )
-      ).stdout;
-    const layer = {
-      soul: (await readMaster('SOUL.md')) || undefined,
-      agents: (await readMaster('AGENTS.md')) || undefined,
-      persona: master.persona || undefined,
+    const readCapped = async (agentLike: Agent, nameF: string) => {
+      const res = await providerFor(agentLike.hostId).execShell(
+        agentLike.runtimeRef!,
+        `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(agentLike.slug, nameF))} 2>/dev/null || true`,
+      );
+      if (Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES) {
+        throw new TransferError(`${nameF} is over ${MAX_FILE_BYTES / 1024}KB — trim it before pushing.`);
+      }
+      return res.stdout;
     };
+    // The master's RAW template layer, when it has one — a master that filled
+    // its own setup values (the /params master-seeding flow) has RENDERED
+    // live files; pushing those overwrote every child's per-child values with
+    // the master's and froze placeholder-free text as each child's layer
+    // (10th audit). Live files are only the source when no layer exists.
+    let layer: { soul?: string; agents?: string; persona?: string };
+    try {
+      layer = master.paramFiles ?? {
+        soul: (await readCapped(master, 'SOUL.md')) || undefined,
+        agents: (await readCapped(master, 'AGENTS.md')) || undefined,
+        persona: master.persona || undefined,
+      };
+    } catch (err) {
+      if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
     if (!layer.soul && !layer.agents) {
       return reply.code(502).send({ error: "Couldn't read the master's files." });
     }
@@ -4238,16 +4247,32 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       try {
         // Same split as the /params route: env creds and datasource repo
         // bindings never live in paramValues, so a required one must not
-        // fail the resolve and block the push.
-        const values = resolveParamValues(
-          (child.parameters ?? []).filter((p) => p.target !== 'env' && p.target !== 'datasource'),
-          child.paramValues ?? {},
-        );
+        // fail the resolve and block the push. Resolved against the MASTER's
+        // current declarations, so a field added after derive reaches the
+        // child too (leniently — the child fills its value later; until then
+        // the {{placeholder}} renders verbatim, same as any unknown key).
+        const pushedParams = (master.parameters ?? child.parameters ?? [])
+          .filter((p) => p.target !== 'env' && p.target !== 'datasource')
+          .map((p) => ({ ...p, required: false }));
+        const values = resolveParamValues(pushedParams, child.paramValues ?? {});
         await whileBusy(child.id, async () => {
           await autoSnapshot(snapshotDeps(child), child.id, 'pre-params');
+          // The child's "## Data sources" section is platform-maintained and
+          // describes the CHILD's own mounts — a wholesale write of the
+          // master's file told every child it had the master's repos until
+          // the next rebuild (10th audit). Splice each child's own section
+          // back into the pushed content.
+          const childAgentsMd = typeof layer.agents === 'string'
+            ? await readCapped(child, 'AGENTS.md').catch(() => '')
+            : '';
+          const childDataSection = extractSection(childAgentsMd, DATA_SOURCES_HEADING);
           for (const [nameF, text] of [['SOUL.md', layer.soul], ['AGENTS.md', layer.agents]] as const) {
             if (typeof text !== 'string') continue;
-            const b64 = Buffer.from(applyParamValues(text, values), 'utf8').toString('base64');
+            let rendered = applyParamValues(text, values);
+            if (nameF === 'AGENTS.md' && childDataSection) {
+              rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
+            }
+            const b64 = Buffer.from(rendered, 'utf8').toString('base64');
             const r = await providerFor(child.hostId).execShell(
               child.runtimeRef!,
               `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(workspacePath(child.slug, nameF))}`,
@@ -4258,9 +4283,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (typeof layer.persona === 'string') {
           store.setAgentPersona(child.id, applyParamValues(layer.persona, values));
         }
-        // The pushed files become the child's new template layer, so its own
-        // Setup-values edits keep working against the CURRENT definition.
+        // The pushed RAW layer becomes the child's new template layer, so its
+        // own Setup-values edits keep working against the CURRENT definition —
+        // and the master's current field declarations come along, so the
+        // child's values panel can ask for any newly-added field.
         store.setAgentParamState(child.id, values, layer);
+        if (master.parameters?.length) store.setAgentParameters(child.id, master.parameters);
         trace(child.id)('definition.pushed', { from: master.id });
         results.push({ id: child.id, name: child.name, ok: true });
       } catch (err) {
@@ -4285,6 +4313,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!child) return reply;
       if (!child.parentAgentId || !store.getAgent(child.parentAgentId)) {
         return reply.code(400).send({ error: 'This agent has no master to propose to.' });
+      }
+      // The master may belong to a DIFFERENT owner (cross-household shares
+      // record lineage too), and its owner is the one who has to review
+      // these. Cap pending per child so a looped endpoint can't flood the
+      // master's queue with 20KB blobs (10th audit).
+      const alreadyPending = store.listProposals(child.parentAgentId)
+        .filter((p) => p.childAgentId === child.id).length;
+      if (alreadyPending >= 3) {
+        return reply.code(409).send({
+          error: 'This agent already has 3 proposals waiting on its master — they need review (or dismissal) first.',
+        });
       }
       const topic = ((req.body as { topic?: string } | null)?.topic ?? '').trim().slice(0, 400);
       const prompt =
@@ -4339,15 +4378,28 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         return reply.code(409).send({ error: 'Start the master to merge into its playbook.' });
       }
       if (busyNow(master, reply)) return reply;
+      // Claim FIRST (atomic pending→merged): two concurrent merges both passed
+      // the pending check and appended the text twice (10th audit). The loser
+      // of the race now 404s here; a failed write below reopens the claim.
+      if (!store.resolveProposal(master.id, req.params.pid, 'merged')) {
+        return reply.code(404).send({ error: 'No such pending proposal.' });
+      }
+      const stamp = new Date().toISOString().slice(0, 10);
+      const distilledBlock = `\n\n<!-- distilled from ${proposal.childName}, ${stamp} -->\n${proposal.text}\n`;
       try {
         await whileBusy(master.id, async () => {
           await autoSnapshot(snapshotDeps(master), master.id, 'pre-edit');
           const path = workspacePath(master.slug, 'AGENTS.md');
-          const cur = (
-            await providerFor(master.hostId).execShell(master.runtimeRef!, `cat ${JSON.stringify(path)} 2>/dev/null || true`)
-          ).stdout;
-          const stamp = new Date().toISOString().slice(0, 10);
-          const merged = `${cur.trimEnd()}\n\n<!-- distilled from ${proposal.childName}, ${stamp} -->\n${proposal.text}\n`;
+          // Capped read, same reason as the files route: a corrupt multi-MB
+          // AGENTS.md must fail loudly, not balloon through exec buffers.
+          const read = await providerFor(master.hostId).execShell(
+            master.runtimeRef!,
+            `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(path)} 2>/dev/null || true`,
+          );
+          if (Buffer.byteLength(read.stdout, 'utf8') > MAX_FILE_BYTES) {
+            throw new TransferError(`The master's AGENTS.md is over ${MAX_FILE_BYTES / 1024}KB — trim it before merging more.`);
+          }
+          const merged = `${read.stdout.trimEnd()}${distilledBlock}`;
           const b64 = Buffer.from(merged, 'utf8').toString('base64');
           const r = await providerFor(master.hostId).execShell(
             master.runtimeRef!,
@@ -4356,20 +4408,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           if (r.code !== 0) throw new Error('write failed');
         });
       } catch (err) {
+        store.reopenProposal(master.id, req.params.pid);
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
-      // Keep the master's own template layer coherent for its children flows.
-      if (master.paramFiles) {
-        const cur = (
-          await providerFor(master.hostId).execShell(
-            master.runtimeRef!,
-            `cat ${JSON.stringify(workspacePath(master.slug, 'AGENTS.md'))} 2>/dev/null || true`,
-          )
-        ).stdout;
-        store.setAgentParamState(master.id, master.paramValues ?? {}, { ...master.paramFiles, agents: cur });
+      // Keep the master's own template layer coherent: append the SAME block
+      // to the raw placeholder-bearing layer. (Reading the live file back
+      // froze its RENDERED text — placeholders gone — into the layer, so the
+      // next Apply-values had nothing to substitute; 10th audit.)
+      if (master.paramFiles?.agents !== undefined) {
+        store.setAgentParamState(master.id, master.paramValues ?? {}, {
+          ...master.paramFiles,
+          agents: `${(master.paramFiles.agents ?? '').trimEnd()}${distilledBlock}`,
+        });
       }
-      store.resolveProposal(master.id, req.params.pid, 'merged');
       trace(master.id)('proposal.merged', { proposalId: req.params.pid, from: proposal.childName });
       let pushed = 0;
       if (body.push) {
@@ -4440,8 +4493,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             body,
             { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name, values },
           );
-          await materializeEnvValues(agent.id, envValues);
-          await materializeDataSources(agent, dataSourceValues);
+          await materializeImportEffects(agent, envValues, dataSourceValues);
           // Fresh agent → provision its own bot the normal way (pool or paste).
           kickProvision(agent.id);
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });

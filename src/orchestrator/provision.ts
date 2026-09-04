@@ -9,7 +9,7 @@ import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
-import { addCron } from './crons.js';
+import { addCron, listCrons } from './crons.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
 
 /**
@@ -255,15 +255,31 @@ async function runProvisionStepsInner(
     // gateway retries on the next provision instead of dropping tasks.
     const pendingSchedules = store.getPendingSchedules(agentId);
     if (pendingSchedules.length) {
-      let failures = 0;
+      // Idempotent by NAME: crons live on the durable volume, so a retry after
+      // a partial failure must skip the ones that already landed — a bare
+      // re-add duplicated every success on each subsequent provision, and the
+      // duplicates fired forever (10th audit). Instead of the all-or-keep
+      // batch, each applied (or already-present) entry is dropped from the
+      // parked list individually; only genuine failures stay parked.
+      const existing = new Set(
+        (await listCrons(provider, runtimeRef, agent.slug).catch(() => []))
+          .map((c) => c.name)
+          .filter((n): n is string => !!n),
+      );
+      const stillPending: typeof pendingSchedules = [];
       for (const sch of pendingSchedules) {
+        if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
         const out = await addCron(provider, runtimeRef, agent.slug, {
           name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
         }).catch(() => ({ ok: false as const, error: 'exec failed' }));
-        if (!out.ok) { failures++; log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error }); }
-        else log('schedule.applied', { agentId, name: sch.name });
+        if (!out.ok) {
+          stillPending.push(sch);
+          log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error });
+        } else {
+          log('schedule.applied', { agentId, name: sch.name });
+        }
       }
-      if (!failures) store.setPendingSchedules(agentId, null);
+      store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
     }
 
     // Step 8: live.

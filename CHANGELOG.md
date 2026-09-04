@@ -2,6 +2,40 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.106.0] — 2026-09-04
+
+### Fixed (10th audit — the v0.100→v0.105 feature burst; details in docs/audit-2026-09-04.md, Round 10)
+- **Critical:** inbox-accept let a share recipient bind a new agent to a
+  FOREIGN owner's AI profile (billing their Max subscription) or host —
+  `importTemplate` now validates both (own-or-shared profile, own host) for
+  every import path.
+- **Push-definition** now renders children from the master's raw template
+  layer (a value-filled master pushed its own values over every child's and
+  froze the layer), preserves each child's own "## Data sources" section,
+  and carries the master's current field declarations to children.
+- **Proposal merge**: claim-first (no concurrent double-append), appends to
+  the raw layer (not the rendered read-back), capped reads, reopened on
+  write failure; distill capped at 3 pending per child (flood guard);
+  proposals scrubbed when their master is deleted.
+- **Import rollback** now cleans env secrets when a later repo-binding write
+  fails (single rollback list); **clone** works again on agents with
+  required no-default fields (lenient + the source's own values).
+- **Template schedules**: idempotent application (dedupe by name; applied
+  entries dropped individually — no more duplicate crons on retry);
+  seconds-accurate intervals (20s no longer became the CLI-rejected "0m");
+  disabled crons no longer travel and come back enabled.
+- **Web**: grandchildren (clone of a child) rendered nowhere — cards and TOC
+  now nest recursively; stale cron-edit state could silently delete an
+  unrelated task — edit mode resets per open, with a visible cancel;
+  interval tasks refuse the cron-only edit form; TOC duplicate group
+  headers; escaping/URL-encoding minors.
+- **Connections (live-verified)**: non-interactive `gog auth remove` needs
+  `--force` — Disconnect always failed in production; also leading-dash
+  email refusal and `--` separator against flag injection.
+- Files GET counts bytes (multibyte files no longer truncate mid-character
+  and save back truncated); runtime-capabilities probes no longer report
+  "command not found" as a version; derive/accept name caps.
+
 ## [0.105.0] — 2026-09-04
 
 ### Added

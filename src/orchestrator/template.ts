@@ -190,7 +190,9 @@ export async function exportTemplate(
     // Stock Broker's briefings arrive scheduled. Command crons carry scripts
     // and stay behind. Best-effort: an unreadable cron list exports none.
     schedules: (await listCrons(provider, agent.runtimeRef, agent.slug).catch(() => []))
-      .filter((c) => c.payloadKind === 'agentTurn' && c.message && (c.scheduleExpr || c.everyMs))
+      // enabled only: a task the owner deliberately switched off must not
+      // come back firing on every imported copy (10th audit).
+      .filter((c) => c.enabled && c.payloadKind === 'agentTurn' && c.message && (c.scheduleExpr || c.everyMs))
       .slice(0, 12)
       .map((c) => ({
         name: (c.name || 'task').slice(0, 80),
@@ -351,13 +353,22 @@ export function importTemplate(
     name?: string;
     /** Importer's answers to the template's setup fields ({{key}} → value). */
     values?: Record<string, string>;
+    /** Clone mode: required fields with no value are skipped instead of
+     *  refused. A clone copies an agent the caller already owns — its env
+     *  vars and repo bindings exist on the source, and demanding them again
+     *  made cloning any master with a required no-default field (every
+     *  required datasource field) impossible (10th audit). */
+    lenient?: boolean;
   },
 ): ImportTemplateResult {
   const { store } = deps;
   const manifest = parseTemplate(data);
   // Validate BEFORE creating anything — a missing required value must not
   // leave a half-made agent behind.
-  const resolved = resolveParamValues(manifest.parameters, opts.values);
+  const effectiveParams = opts.lenient
+    ? manifest.parameters.map((p) => ({ ...p, required: false }))
+    : manifest.parameters;
+  const resolved = resolveParamValues(effectiveParams, opts.values);
   // Env-target fields (Phase 2b) split off: their values become agent env
   // vars (write-only secrets), never file substitutions or stored paramValues.
   const envKeys = new Set(manifest.parameters.filter((p) => p.target === 'env').map((p) => p.key));
@@ -402,7 +413,11 @@ export function importTemplate(
   );
 
   // The importer's OWN profile, vendor-matched — same rule as a full Load, so a
-  // template never silently bills someone else's shared subscription.
+  // template never silently bills someone else's shared subscription. A
+  // caller-supplied id is validated HERE (not per-route) so every import path
+  // enforces it: it must be the importer's own profile or one shared with
+  // them — getAIProfile alone is unscoped, and an arbitrary UUID would bind
+  // the new agent to (and bill) another owner's subscription.
   const profiles = store.listAIProfiles(opts.ownerId);
   const mine = profiles.filter((p) => p.ownerId === opts.ownerId);
   const profile = opts.aiProfileId
@@ -411,11 +426,18 @@ export function importTemplate(
       mine[0] ??
       profiles.find((p) => p.vendor === manifest.ai.vendor) ??
       profiles[0]);
+  if (opts.aiProfileId && profile && profile.ownerId !== opts.ownerId && !profile.shared) {
+    throw new TransferError('Unknown AI profile.');
+  }
   if (!profile) throw new TransferError('Set up an AI source before importing a template.');
+  // Same rule for the host: only one the importer can already use — getHost
+  // is unscoped, and a foreign host id would provision onto someone else's
+  // machine.
+  const usableHosts = store.listHosts(opts.ownerId);
   const host = opts.hostId
-    ? store.getHost(opts.hostId)
-    : (store.listHosts(opts.ownerId).find((h) => h.kind === 'local') ??
-      store.listHosts(opts.ownerId)[0]);
+    ? usableHosts.find((h) => h.id === opts.hostId)
+    : (usableHosts.find((h) => h.kind === 'local') ?? usableHosts[0]);
+  if (opts.hostId && !host) throw new TransferError('Unknown host.');
   if (!host) throw new TransferError('No host available to import onto.');
 
   const name = (opts.name ?? manifest.agent.name).trim();

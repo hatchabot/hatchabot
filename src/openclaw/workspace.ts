@@ -71,6 +71,29 @@ export function replaceMemoryPolicy(content: string, section: string): string {
   return replaceSection(content, '## Memory policy', section);
 }
 
+/**
+ * The counterpart read: a managed section's current text (heading included),
+ * with the same fence-aware boundaries as replaceSection — so a caller can
+ * lift one file's section and splice it into another (push-definition keeps
+ * each child's own "## Data sources" this way). Empty string when absent.
+ */
+export function extractSection(content: string, heading: string): string {
+  const lines = content.split('\n');
+  const inFence: boolean[] = [];
+  let fence = false;
+  for (const l of lines) {
+    if (/^\s*(```|~~~)/.test(l)) { inFence.push(fence); fence = !fence; continue; }
+    inFence.push(fence);
+  }
+  const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
+  if (start === -1) return '';
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (!inFence[i] && /^#{1,6} /.test(lines[i]!)) { end = i; break; }
+  }
+  return lines.slice(start, end).join('\n').trimEnd();
+}
+
 /** In-container location of a data source — where the agent actually finds it. */
 export function dataSourcePath(d: {
   kind: string;

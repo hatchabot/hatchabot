@@ -84,6 +84,19 @@ export interface AddCronOptions {
 }
 
 /**
+ * Interval → the CLI's duration syntax, seconds-accurate. Rounding to whole
+ * minutes turned a 20s interval into `--every 0m`, which the gateway rejects —
+ * making that schedule a permanent failure (10th audit). Mirrors
+ * cronImport.ts's msToDuration semantics.
+ */
+export function msToEvery(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s % 3600 === 0) return `${s / 3600}h`;
+  if (s % 60 === 0) return `${s / 60}m`;
+  return `${s}s`;
+}
+
+/**
  * Create a scheduled task. The one verb this module lacked — AgentClaw could
  * list/enable/run/delete crons but nothing could CREATE one, so a definition
  * that *describes* a schedule (the Stock Broker's 8am briefing) never actually
@@ -97,7 +110,7 @@ export async function addCron(
 ): Promise<{ ok: true; id?: string } | { ok: false; error: string }> {
   const argv = ['cron', 'add', '--json', '--agent', slug, '--name', opts.name, '--message', opts.message];
   if (opts.cron) argv.push('--cron', opts.cron);
-  else if (opts.everyMs) argv.push('--every', `${Math.round(opts.everyMs / 60_000)}m`);
+  else if (opts.everyMs) argv.push('--every', msToEvery(opts.everyMs));
   else return { ok: false, error: 'Give a cron expression or an interval.' };
   if (opts.tz) argv.push('--tz', opts.tz);
   if (opts.announce !== false) argv.push('--announce', '--best-effort-deliver');

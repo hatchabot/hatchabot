@@ -263,7 +263,7 @@ describe('agent connections (gog accounts)', () => {
     const del = await f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/board%40example.com', headers: H });
     expect(del.statusCode).toBe(200);
     expect(del.json()).toEqual({ removed: true });
-    expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove "board@example.com"')).toBe(true);
+    expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove --force -- "board@example.com"')).toBe(true);
   });
 
   it('gog absent or unparsable output → empty list, not a 500', async () => {
@@ -299,5 +299,26 @@ describe('agent connections (gog accounts)', () => {
       expect(res.statusCode).toBe(409);
       expect(res.json().error).toMatch(/Start the agent/);
     }
+  });
+});
+
+describe('10th audit: file cap counts bytes, gog remove hardened', () => {
+  it('a multibyte file just over the cap 413s instead of returning a truncated read', async () => {
+    const { f, provider } = await liveWorld();
+    // ~137k '€' chars = ~411KB — char count is UNDER the 256KB cap, bytes over.
+    provider.execResponses.set('sh', { code: 0, stdout: '€'.repeat(137_000), stderr: '' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/files/MEMORY.md', headers: H });
+    expect(res.statusCode).toBe(413);
+  });
+
+  it('a leading-dash "email" is refused (gog flag injection), and remove uses the -- separator', async () => {
+    const { f, provider } = await liveWorld();
+    const evil = await f.inject({
+      method: 'DELETE', url: `/v1/agents/a1/connections/${encodeURIComponent('-all@example.com')}`, headers: H,
+    });
+    expect(evil.statusCode).toBe(400);
+    provider.execResponses.set('sh', { code: 0, stdout: '', stderr: '' });
+    await f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/ok%40x.com', headers: H });
+    expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove --force -- "ok@example.com"')).toBe(true);
   });
 });

@@ -327,6 +327,7 @@ export class Store {
       DELETE FROM data_sources WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
       DELETE FROM agent_env   WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
       DELETE FROM agent_seed  WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
+      DELETE FROM agent_proposals WHERE master_agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
     `);
   }
 
@@ -344,6 +345,11 @@ export class Store {
     for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed'] as const) {
       this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId);
     }
+    // Proposals addressed TO a deleted master are unreachable (no route can
+    // list or resolve them) and hold up to 20KB of model-written text about
+    // the household — same tombstone-hygiene rule as the rows above. Child-
+    // side rows stay: a live master's owner can still review them.
+    this.db.prepare(`DELETE FROM agent_proposals WHERE master_agent_id = ?`).run(agentId);
   }
 
   /**
@@ -1492,6 +1498,14 @@ export class Store {
         .prepare(`UPDATE agent_proposals SET status = ? WHERE id = ? AND master_agent_id = ? AND status = 'pending'`)
         .run(status, id, masterAgentId).changes === 1
     );
+  }
+
+  /** Undo a merge claim whose file write failed — the proposal must stay
+   *  reviewable, not vanish as "merged" without its text landing anywhere. */
+  reopenProposal(masterAgentId: string, id: string): void {
+    this.db
+      .prepare(`UPDATE agent_proposals SET status = 'pending' WHERE id = ? AND master_agent_id = ? AND status = 'merged'`)
+      .run(id, masterAgentId);
   }
 
   setPendingSchedules(id: string, schedules: unknown[] | null): void {

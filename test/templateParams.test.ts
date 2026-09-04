@@ -596,3 +596,117 @@ describe('template-carried schedules', () => {
     expect(parked).toEqual([{ name: 'Pre-market briefing', message: 'Post the briefing.', cron: '0 8 * * 1-5', tz: 'America/New_York' }]);
   });
 });
+
+describe('10th audit regressions', () => {
+  it('accept refuses a foreign unshared AI profile and a foreign host — no cross-owner billing', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({ id: 'p-foreign', ownerId: 'user-other', name: 'Their Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p-foreign', createdAt: 'now' });
+    store.insertHost({ id: 'h-foreign', ownerId: 'user-other', kind: 'cloud', provider: 'mock', name: 'their-laptop', settings: {}, createdAt: 'now' });
+    store.insertShare({
+      id: 'sh-x', agentName: 'Advisor', fromOwner: 'sender', fromEmail: 's@example.com',
+      toEmail: 'me@example.com', toOwner: OWNER, blob: TEMPLATE, message: 'hi', createdAt: new Date().toISOString(),
+    } as any);
+    for (const [payload, msg] of [
+      [{ values: { style: 'value' }, aiProfileId: 'p-foreign' }, /Unknown AI profile/],
+      [{ values: { style: 'value' }, hostId: 'h-foreign' }, /Unknown host/],
+    ] as const) {
+      const res = await f.inject({ method: 'POST', url: '/v1/inbox/sh-x/accept', headers: H, payload });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(msg);
+    }
+    expect(store.listAgents(OWNER)).toHaveLength(1); // nothing half-made
+  });
+
+  it('a failing deploy-key write rolls back the env secrets from the same import', async () => {
+    const { store, f, secrets } = await world();
+    const BOTH = gzipSync(Buffer.from(JSON.stringify({
+      format: 'agentclaw-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Both', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': 's', 'AGENTS.md': '# A' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+      parameters: [
+        { key: 'api_key', label: 'Key', required: true, type: 'text', target: 'env' },
+        { key: 'docs_repo', label: 'Repo', required: true, type: 'text', target: 'datasource' },
+      ],
+    })));
+    const realPut = secrets.put.bind(secrets);
+    secrets.put = async (ref: string, v: string) => {
+      if (ref.startsWith('data-source/')) throw new Error('disk full');
+      return realPut(ref, v);
+    };
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({ api_key: 'sk-test-x', docs_repo: 'git@github.com:a/b.git' }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: BOTH,
+    });
+    expect(res.statusCode).toBe(400);
+    // the env secret written BEFORE the failure must be gone too
+    expect([...secrets.map.keys()].filter((k) => k.startsWith('agent-env/'))).toHaveLength(0);
+    expect(store.listAgents(OWNER).filter((a) => a.name === 'Both')).toHaveLength(0);
+  });
+
+  it('clone succeeds on a master with a required no-default datasource field', async () => {
+    const { store, f, provider } = await world();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { parameters: [
+        { key: 'style', label: 'Style', required: true, type: 'text', target: 'soul' },
+        { key: 'docs_repo', label: 'Docs repo', required: true, type: 'text', target: 'datasource' },
+      ] },
+    });
+    store.setAgentParamState('a1', { style: 'calm' }, { soul: 'A {{style}} one.' });
+    provider.execResponses.set('sh', { code: 0, stdout: 'A calm one.\n', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: H, payload: {} });
+    expect(res.statusCode).toBe(201);
+    const clone = store.listAgents(OWNER).find((a) => a.name === 'Mine (copy)')!;
+    expect(clone).toBeTruthy();
+    expect(clone.paramValues).toEqual({ style: 'calm' }); // source's own answers carried
+  });
+
+  it('distill refuses once 3 proposals are already pending from the same child', async () => {
+    const { store, f, provider } = await world();
+    store.insertAgent({ id: 'kid1', ownerId: OWNER, name: 'Kid', slug: 'kid1', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    const kid = await provider.provision({
+      agentId: 'kid1', slug: 'kid1',
+      workspace: { files: {}, configPatch: { agentId: 'kid1', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('kid1', kid.runtimeRef);
+    store.setAgentState('kid1', 'RUNNING');
+    store.setAgentParent('kid1', 'a1');
+    for (let i = 0; i < 3; i++) {
+      store.insertProposal({ id: `pp${i}`, masterAgentId: 'a1', childAgentId: 'kid1', childName: 'Kid', text: 'x'.repeat(50) });
+    }
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/kid1/distill', headers: H, payload: {} });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/3 proposals/);
+    expect(store.listProposals('a1')).toHaveLength(3); // no 4th
+  });
+
+  it('a proposal merges exactly once — the second resolve 404s instead of double-appending', async () => {
+    const { store, f, provider } = await world();
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    provider.execResponses.set('sh', { code: 0, stdout: 'playbook v1\n', stderr: '' });
+    store.insertProposal({ id: 'pm1', masterAgentId: 'a1', childAgentId: 'kidX', childName: 'Kid', text: 'A lesson worth keeping around.' });
+    const first = await f.inject({ method: 'POST', url: '/v1/agents/a1/proposals/pm1/resolve', headers: H, payload: { action: 'merge' } });
+    expect(first.statusCode).toBe(200);
+    const second = await f.inject({ method: 'POST', url: '/v1/agents/a1/proposals/pm1/resolve', headers: H, payload: { action: 'merge' } });
+    expect(second.statusCode).toBe(404);
+  });
+
+  it('deleting a master scrubs its pending proposals', async () => {
+    const { store } = await world();
+    store.insertProposal({ id: 'ps1', masterAgentId: 'a1', childAgentId: 'kidY', childName: 'Kid', text: 'text' });
+    store.scrubAgentResidue('a1');
+    expect(store.listProposals('a1')).toHaveLength(0);
+  });
+});
