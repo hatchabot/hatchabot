@@ -262,6 +262,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN group_access TEXT`,
       // Lineage: the master this agent was derived from (same installation).
       `ALTER TABLE agents ADD COLUMN parent_agent_id TEXT`,
+      // Template-carried schedules awaiting the gateway (applied on RUNNING).
+      `ALTER TABLE agents ADD COLUMN pending_schedules TEXT`,
       // Which agent a share was cut from — lets an accepted copy record lineage.
       `ALTER TABLE agent_shares ADD COLUMN source_agent_id TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
@@ -1485,6 +1487,17 @@ export class Store {
         .prepare(`UPDATE agent_proposals SET status = ? WHERE id = ? AND master_agent_id = ? AND status = 'pending'`)
         .run(status, id, masterAgentId).changes === 1
     );
+  }
+
+  setPendingSchedules(id: string, schedules: unknown[] | null): void {
+    this.db
+      .prepare(`UPDATE agents SET pending_schedules = ? WHERE id = ?`)
+      .run(schedules ? JSON.stringify(schedules) : null, id);
+  }
+
+  getPendingSchedules(id: string): Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string }> {
+    const r = this.db.prepare(`SELECT pending_schedules FROM agents WHERE id = ?`).get(id) as any;
+    return r?.pending_schedules ? (safeJson(r.pending_schedules, []) as any[]) : [];
   }
 
   setAgentParent(id: string, parentAgentId: string | null): void {

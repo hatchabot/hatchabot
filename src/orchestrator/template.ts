@@ -4,6 +4,7 @@ import type { Agent, TemplateParam } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, workspacePath } from './snapshots.js';
+import { listCrons } from './crons.js';
 import { createAgentRecord } from './provision.js';
 import { TransferError } from './transfer.js';
 import { reservedEnvProblem } from './envPolicy.js';
@@ -88,6 +89,9 @@ export interface TemplateManifest {
   envNeeds: string[];
   /** Setup fields the importer fills; substituted into {{key}} placeholders. */
   parameters: TemplateParam[];
+  /** Scheduled agent-turn tasks (declarations — no scripts, no state). An
+   *  imported/derived copy recreates them once it is RUNNING. */
+  schedules?: Array<{ name: string; message: string; cron?: string; everyMs?: number; tz?: string }>;
 }
 
 const TemplateSchema = z.object({
@@ -119,6 +123,18 @@ const TemplateSchema = z.object({
   // and older apps reading a newer template strip the unknown key (zod objects
   // are non-strict) — no version bump needed in either direction.
   parameters: z.array(TemplateParamSchema).max(24).default([]),
+  schedules: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(80),
+        message: z.string().min(1).max(4000),
+        cron: z.string().min(9).max(64).optional(),
+        everyMs: z.number().int().positive().optional(),
+        tz: z.string().max(64).optional(),
+      }),
+    )
+    .max(12)
+    .optional(),
 });
 
 export interface TemplateDeps {
@@ -161,6 +177,19 @@ export async function exportTemplate(
     agent: { name: agent.name, persona: agent.persona, sharedMemory: agent.sharedMemory },
     files,
     ai: { vendor: profile?.vendor ?? 'anthropic' },
+    // agentTurn crons travel as DECLARATIONS (name/schedule/message) — the
+    // Stock Broker's briefings arrive scheduled. Command crons carry scripts
+    // and stay behind. Best-effort: an unreadable cron list exports none.
+    schedules: (await listCrons(provider, agent.runtimeRef, agent.slug).catch(() => []))
+      .filter((c) => c.payloadKind === 'agentTurn' && c.message && (c.scheduleExpr || c.everyMs))
+      .slice(0, 12)
+      .map((c) => ({
+        name: (c.name || 'task').slice(0, 80),
+        message: c.message!.slice(0, 4000),
+        cron: c.scheduleExpr,
+        everyMs: c.everyMs,
+        tz: c.scheduleTz,
+      })),
     dataNeeds: store.listDataSources(agentId).map((d) => ({
       kind: d.kind,
       access: d.access,
@@ -376,6 +405,10 @@ export function importTemplate(
       persona: manifest.agent.persona,
     });
   }
+
+  // Schedules apply once the agent is RUNNING (the gateway must exist) —
+  // parked on the record; provision's final step materializes and clears.
+  if (manifest.schedules?.length) store.setPendingSchedules(agent.id, manifest.schedules);
 
   deps.log?.('template.imported', { agentId: agent.id });
   return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds }, envValues };

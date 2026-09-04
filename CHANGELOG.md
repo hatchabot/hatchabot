@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.104.0] — 2026-09-04
+
+### Added
+- **Schedules travel with templates.** Export/Share/Send/Derive/Clone now
+  carry agent-turn scheduled tasks as DECLARATIONS (name, cron/interval, tz,
+  message — never scripts or state); an imported or derived copy recreates
+  them the moment it reaches RUNNING (parked on the record until the gateway
+  exists; retried on the next provision if any fail). A derived Stock Broker
+  arrives with its briefings already scheduled.
+
 ## [0.103.0] — 2026-09-04
 
 ### Added

@@ -489,3 +489,23 @@ describe('distillation: child→master proposals', () => {
     expect(store.listSnapshots('a1')).toHaveLength(0); // nothing written
   });
 });
+
+describe('template-carried schedules', () => {
+  it('import parks schedule declarations for provision to apply at RUNNING', async () => {
+    const { store, f } = await world();
+    const T = gzipSync(Buffer.from(JSON.stringify({
+      format: 'agentclaw-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Sched', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': 'x', 'AGENTS.md': 'y' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [], parameters: [],
+      schedules: [{ name: 'Pre-market briefing', message: 'Post the briefing.', cron: '0 8 * * 1-5', tz: 'America/New_York' }],
+    })));
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents/import',
+      headers: { ...H, 'content-type': 'application/octet-stream' }, payload: T,
+    });
+    expect(res.statusCode).toBe(201);
+    const parked = store.getPendingSchedules(res.json().id);
+    expect(parked).toEqual([{ name: 'Pre-market briefing', message: 'Post the briefing.', cron: '0 8 * * 1-5', tz: 'America/New_York' }]);
+  });
+});

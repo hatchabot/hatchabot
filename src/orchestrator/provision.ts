@@ -9,6 +9,7 @@ import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
+import { addCron } from './crons.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
 
 /**
@@ -247,6 +248,23 @@ async function runProvisionStepsInner(
     // Step 7.9: let the agent stop moving before anyone can talk to it — a
     // message that lands mid-settle has started a fresh session.
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
+
+    // Step 7.95: template-carried schedules — declarations parked at import
+    // become real gateway crons now that the gateway exists. Best-effort per
+    // job; the batch clears only on a pass with zero failures, so a flaky
+    // gateway retries on the next provision instead of dropping tasks.
+    const pendingSchedules = store.getPendingSchedules(agentId);
+    if (pendingSchedules.length) {
+      let failures = 0;
+      for (const sch of pendingSchedules) {
+        const out = await addCron(provider, runtimeRef, agent.slug, {
+          name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
+        }).catch(() => ({ ok: false as const, error: 'exec failed' }));
+        if (!out.ok) { failures++; log('schedule.apply_failed', { agentId, name: sch.name, error: (out as any).error }); }
+        else log('schedule.applied', { agentId, name: sch.name });
+      }
+      if (!failures) store.setPendingSchedules(agentId, null);
+    }
 
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');

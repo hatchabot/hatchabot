@@ -1,6 +1,6 @@
 {
   "name": "agentclaw",
-  "version": "0.103.0",
+  "version": "0.104.0",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
