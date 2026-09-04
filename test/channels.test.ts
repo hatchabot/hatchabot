@@ -282,16 +282,22 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     expect(Date.parse(parked.rename_after)).toBeGreaterThan(Date.now()); // deferred, not now
   });
 
-  it('warns prior chatters when the bot comes back as a different agent', async () => {
+  it('warns prior chatters when the bot comes back as a different agent — even after the old rows are scrubbed', async () => {
     const { calls, fetchImpl } = recorder();
     const db = new Database(':memory:');
     const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl });
     await pool.addToPool('recycled', 'tok');
-    // Someone chatted with this bot under a PREVIOUS agent.
-    db.prepare(`CREATE TABLE IF NOT EXISTS channels (id TEXT, agent_id TEXT, kind TEXT, account_id TEXT, secret_ref TEXT, deep_link TEXT, created_at TEXT)`).run();
+    await pool.provision({ agentId: 'old', agentName: 'Condo Adviser', slug: 'condo' });
     db.prepare(`CREATE TABLE IF NOT EXISTS memberships (id TEXT, agent_id TEXT, user_id TEXT, role TEXT, channel_user_id TEXT, status TEXT)`).run();
-    db.prepare(`INSERT INTO channels VALUES ('c0','old','telegram','recycled','r','d','now')`).run();
     db.prepare(`INSERT INTO memberships VALUES ('m0','old','u0','user','777','active')`).run();
+
+    // Release captures the chatters INTO the pool row; then the real world
+    // deletes the departed agent's rows (delete scrubs memberships, archive
+    // unlinks the channel) — a lease-time lookup would find nothing, which is
+    // exactly how the announcement silently died in production.
+    await pool.release('recycled');
+    db.prepare(`DELETE FROM memberships`).run();
+    calls.length = 0;
 
     await pool.provision({ agentId: 'a2', agentName: 'Tax Advisor', slug: 'tax' });
 
@@ -300,6 +306,16 @@ describe('a recycled pool bot does not keep the last agent\'s identity', () => {
     expect(notice[0]!.body.chat_id).toBe('777');
     expect(notice[0]!.body.text).toContain('Tax Advisor');
     expect(notice[0]!.body.text).toMatch(/above this line|no longer applies/i);
+    expect(notice[0]!.body.text).toMatch(/archived/i); // the buried-chat hint
+    // The API-resettable surface is shed on lease; BotFather-only settings can't be.
+    expect(calls.some((c) => c.method === 'setMyDescription')).toBe(true);
+    expect(calls.some((c) => c.method === 'deleteMyCommands')).toBe(true);
+
+    // Consumed: a second recycle without new chatters announces nothing stale.
+    await pool.release('recycled');
+    calls.length = 0;
+    await pool.provision({ agentId: 'a3', agentName: 'Third', slug: 'third' });
+    expect(calls.filter((c) => c.method === 'sendMessage')).toHaveLength(0);
   });
 
   it('says nothing on a bot that has never served an agent', async () => {
@@ -446,9 +462,11 @@ describe('an on-demand rename answers honestly', () => {
     const pool = new TelegramPoolProvisioner(new Database(':memory:'), new MemSecrets(), { fetchImpl });
     await pool.addToPool('bot', 'tok');
     await pool.provision({ agentId: 'a1', agentName: 'Art Advisor', slug: 'art' });
-    // getMe only — the rename quota is untouched, which is the whole point of
-    // checking first.
-    expect(calls).toEqual(['getMe']);
+    // No setMyName — the rename quota is untouched, which is the whole point
+    // of checking first. (The lease also sheds the recycled-bot surface via
+    // description/commands calls; those aren't quota-bearing.)
+    expect(calls).not.toContain('setMyName');
+    expect(calls).toContain('getMe');
     expect(pool.pendingName('bot')).toBeUndefined();
   });
 });

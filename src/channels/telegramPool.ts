@@ -83,6 +83,17 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     } catch (err) {
       if (!/duplicate column/i.test(String(err))) throw err;
     }
+    // Who had chatted with this bot, captured AT RELEASE (JSON array of
+    // Telegram user ids). The re-lease announcement used to look prior
+    // chatters up through the departed agent's membership/channel rows — but
+    // delete scrubs memberships and archive unlinks the channel, so by lease
+    // time the list was empty and nobody learned the bot had a new life
+    // (Chris found his recycled bot buried in Telegram's Archived folder).
+    try {
+      this.db.exec(`ALTER TABLE telegram_pool ADD COLUMN prior_chat_ids TEXT`);
+    } catch (err) {
+      if (!/duplicate column/i.test(String(err))) throw err;
+    }
   }
 
   /**
@@ -230,6 +241,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // delete its own recent messages, and chats are per-user), so mark the seam
     // for anyone who returns to it.
     await this.#announceReassignment(free.secret_ref, free.username, req.agentName);
+    // And shed the previous life's API-settable surface (description, command
+    // menu) — BotFather-only settings survive; the Group-chats panel reports
+    // those live via getMe.
+    await this.#resetBotSurface(free.secret_ref);
 
     return this.#toChannel(free.username, free.secret_ref);
   }
@@ -332,29 +347,68 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   /**
    * Tell anyone who previously chatted with this bot that it now serves someone
    * else. Only fires for a bot that has served before — a never-used one has no
-   * stale history to disown.
+   * stale history to disown. Recipients come from `prior_chat_ids`, captured at
+   * RELEASE while the departed agent's rows still existed (the live
+   * membership-join returned nothing by lease time: delete scrubs memberships,
+   * archive unlinks the channel). The message also surfaces the chat out of
+   * Telegram's Archived folder for anyone who hasn't muted it — the folder is
+   * per-user client state no bot API can touch directly.
    */
   async #announceReassignment(secretRef: string, username: string, agentName: string): Promise<void> {
     try {
-      const prior = this.db
-        .prepare(
-          `SELECT DISTINCT m.channel_user_id AS id FROM memberships m
-             JOIN channels c ON c.agent_id = m.agent_id
-            WHERE c.account_id = ? COLLATE NOCASE AND m.channel_user_id IS NOT NULL`,
-        )
-        .all(username) as Array<{ id: string }>;
+      const row = this.db
+        .prepare(`SELECT prior_chat_ids FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+        .get(username) as { prior_chat_ids?: string | null } | undefined;
+      let prior: string[] = [];
+      try {
+        prior = JSON.parse(row?.prior_chat_ids ?? '[]');
+      } catch { /* malformed → none */ }
       if (!prior.length) return; // fresh bot: nothing above to explain
       const token = await this.secrets.get(secretRef);
       const text =
         `— this bot is now "${agentName}" —\n\n` +
         'It has been reassigned to a different agent. Anything above this line ' +
-        'was a previous agent and no longer applies.';
-      for (const { id } of prior) {
+        'was a previous agent and no longer applies.\n\n' +
+        'If you had archived this chat, this message just brought it back — ' +
+        'unarchive it to keep the new agent handy.';
+      for (const id of prior) {
         if (!/^\d{1,32}$/.test(id)) continue;
         await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/sendMessage`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ chat_id: id, text }),
+          signal: AbortSignal.timeout(5000),
+        }).catch(() => {});
+      }
+      // Consumed: the next release captures a fresh list for the next lease.
+      this.db
+        .prepare(`UPDATE telegram_pool SET prior_chat_ids = NULL WHERE username = ? COLLATE NOCASE`)
+        .run(username);
+    } catch {
+      /* cosmetic — never blocks a lease */
+    }
+  }
+
+  /**
+   * Clear the per-bot state the Bot API CAN reset on a recycle: description,
+   * short description, and the command menu — all set by (or for) the previous
+   * agent and otherwise inherited by the next one. BotFather-only settings
+   * (group privacy, inline mode) survive by Telegram's design; getMe reports
+   * them and the Group-chats panel shows that state live.
+   */
+  async #resetBotSurface(secretRef: string): Promise<void> {
+    try {
+      const token = await this.secrets.get(secretRef);
+      const f = this.opts.fetchImpl ?? fetch;
+      for (const [method, body] of [
+        ['setMyDescription', { description: '' }],
+        ['setMyShortDescription', { short_description: '' }],
+        ['deleteMyCommands', {}],
+      ] as const) {
+        await f(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
           signal: AbortSignal.timeout(5000),
         }).catch(() => {});
       }
@@ -376,6 +430,28 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // so the token stays reusable) and has no lease to read — the caller names
     // the agent instead. Without this those members got no goodbye at all.
     const departing = opts.agentId ?? row?.leased_to;
+
+    // Capture who had chatted with this bot NOW, while the departing agent's
+    // membership rows still exist — the re-lease announcement reads this list
+    // (delete scrubs memberships and archive unlinks the channel, so a lease-
+    // time lookup finds nothing).
+    if (departing) {
+      try {
+        const prior = (
+          this.db
+            .prepare(
+              `SELECT DISTINCT channel_user_id AS id FROM memberships
+                WHERE agent_id = ? AND channel_user_id IS NOT NULL`,
+            )
+            .all(departing) as Array<{ id: string }>
+        ).map((r) => r.id).filter((id) => /^\d{1,32}$/.test(id)).slice(0, 64);
+        if (prior.length) {
+          this.db
+            .prepare(`UPDATE telegram_pool SET prior_chat_ids = ? WHERE username = ? COLLATE NOCASE`)
+            .run(JSON.stringify(prior), accountId);
+        }
+      } catch { /* no memberships table (isolated harness) → nothing to capture */ }
+    }
 
     // The bot goes back in the pool. We do NOT delete the token — the bot still
     // exists on Telegram's side and can serve the next agent.

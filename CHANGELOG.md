@@ -2,6 +2,28 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.108.0] — 2026-09-04
+
+### Fixed
+- **Recycled pool bots announce their new life again — and surface buried
+  chats.** The re-lease announcement looked prior chatters up through the
+  departed agent's membership/channel rows, which delete scrubs and archive
+  unlinks — so by lease time the list was empty and nobody was told the bot
+  had a new agent (Chris found his sitting silently in Telegram's Archived
+  folder). Release now captures the chatter list into the pool row
+  (`telegram_pool.prior_chat_ids`) while the rows still exist; the lease
+  announcement reads it, adds an "if you'd archived this chat…" hint (the
+  message itself pops an unmuted chat out of the Archived folder — the
+  folder is per-user client state no bot API can touch), and consumes the
+  list.
+- **Recycled bots shed their previous life's API-settable surface** on
+  lease: description, short description, and the command menu are cleared.
+  BotFather-only settings (`/setprivacy`, `/setjoingroups`) survive
+  recycling by Telegram's design and can't be reset by any API — the Group
+  chats panel's "Check this bot's settings" already reports the live state
+  via getMe, and the quick-help now says recycled bots keep those settings,
+  so check rather than assume defaults.
+
 ## [0.107.0] — 2026-09-04
 
 ### Added
