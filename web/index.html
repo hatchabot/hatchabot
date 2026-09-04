@@ -4405,8 +4405,21 @@ async function loadCrons() {
   $('cronErr').textContent = '';
   try {
     const { crons } = await api(`/v1/agents/${cronAgentId}/crons`);
+    cronCache = crons;
     renderCrons(crons);
   } catch (e) { $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
+}
+let cronEditingId = null, cronCache = [];
+function editCronJob(id) {
+  const c = cronCache.find(x => x.id === id);
+  if (!c) return;
+  if (c.payloadKind === 'command') { toast('Shell-command tasks are edited by asking the agent (they carry scripts, not messages).'); return; }
+  cronEditingId = id;
+  $('cronName').value = c.name || '';
+  $('cronExpr').value = c.scheduleExpr || '';
+  $('cronTz').value = c.scheduleTz || '';
+  $('cronMsg').value = c.message || '';
+  $('cronAddBtn').textContent = 'Save changes (replaces the task)';
 }
 async function addCronJob() {
   const name = $('cronName').value.trim(), cron = $('cronExpr').value.trim();
@@ -4415,7 +4428,14 @@ async function addCronJob() {
   $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
   try {
     await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: { name, cron, message, tz: tz || undefined } });
-    toast('Task added');
+    // Editing = replace: the new task exists before the old one is removed,
+    // so a failed create can never lose the original.
+    if (cronEditingId) {
+      await api(`/v1/agents/${cronAgentId}/crons/${cronEditingId}`, { method: 'DELETE' }).catch(() => toast('New task saved, but removing the old one failed — delete it manually.', 10000));
+      cronEditingId = null;
+      $('cronAddBtn').textContent = 'Add task';
+    }
+    toast('Task saved');
     $('cronName').value = ''; $('cronExpr').value = ''; $('cronMsg').value = '';
     await loadCrons();
   } catch (e) { $('cronErr').textContent = e.message; }
@@ -4434,6 +4454,7 @@ function renderCrons(crons) {
         <div class="sub">⏱ ${esc(cronScheduleLabel(c))}${c.payloadKind === 'command' ? ' · shell' : ''}</div>
         ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
       </span>
+      <button onclick="editCronJob('${jsq(c.id)}')" title="Load this task into the form below — saving replaces it">✏️ Edit</button>
       <button onclick="toggleCron('${jsq(c.id)}', ${!c.enabled})">${c.enabled ? 'Disable' : 'Enable'}</button>
       <button onclick="runCron('${jsq(c.id)}', ${c.payloadKind === 'command'})" title="Fire it now to test — the result arrives the task's usual way">Run now</button>
       <button onclick="deleteCron('${jsq(c.id)}', '${jsq(c.name || 'this task')}')">Delete</button>
