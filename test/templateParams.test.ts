@@ -206,6 +206,93 @@ describe('env-target setup fields (sharing Phase 2b)', () => {
   });
 });
 
+describe('datasource-target setup fields (per-child repo bindings)', () => {
+  const DS_TEMPLATE = gzipSync(Buffer.from(JSON.stringify({
+    format: 'agentclaw-template', version: 1, exportedAt: 'now',
+    agent: { name: 'Condo Advisor', persona: 'p', sharedMemory: false },
+    files: { 'SOUL.md': 'A {{building}} advisor.', 'AGENTS.md': '# A' },
+    ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+    parameters: [
+      { key: 'building', label: 'Building', required: true, type: 'text', target: 'soul' },
+      { key: 'docs_repo', label: 'Document repo', required: true, type: 'text', target: 'datasource' },
+    ],
+  })));
+  const importWith = (f: any, values: Record<string, string>) => f.inject({
+    method: 'POST',
+    url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify(values))}`,
+    headers: { ...H, 'content-type': 'application/octet-stream' },
+    payload: DS_TEMPLATE,
+  });
+
+  it('the filled URL becomes a real git data source — deploy key stored, not in paramValues or files', async () => {
+    const { store, f, secrets } = await world();
+    const res = await importWith(f, { building: 'Maple Court', docs_repo: 'https://github.com/acme/maple-court-docs' });
+    expect(res.statusCode).toBe(201);
+    const id = res.json().id as string;
+    const sources = store.listDataSources(id);
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toMatchObject({
+      kind: 'git', access: 'ro', mountName: 'maple-court-docs',
+      repoUrl: 'git@github.com:acme/maple-court-docs.git',
+    });
+    expect(sources[0]!.pubKey).toMatch(/^ssh-ed25519 /);
+    await expect(secrets.get(sources[0]!.secretRef!)).resolves.toMatch(/PRIVATE KEY/);
+    // split off like env: the binding record is the truth, not a setup value
+    expect(store.getAgent(id)!.paramValues).toEqual({ building: 'Maple Court' });
+    expect(JSON.stringify(store.getAgentSeed(id))).not.toContain('maple-court');
+  });
+
+  it('an unparsable URL, a reserved repo name, and a missing required binding all refuse before creating anything', async () => {
+    const { store, f } = await world();
+    for (const [values, msg] of [
+      [{ building: 'B', docs_repo: 'not a repo' }, /recognizable git repo/],
+      [{ building: 'B', docs_repo: 'git@github.com:acme/skills.git' }, /reserved/],
+      [{ building: 'B' }, /Document repo/],
+    ] as const) {
+      const res = await importWith(f, values as Record<string, string>);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(msg);
+    }
+    expect(store.listAgents(OWNER)).toHaveLength(1); // only the pre-seeded a1
+  });
+
+  it('two bindings resolving to the same clone directory are refused', async () => {
+    const { f } = await world();
+    const TWO = gzipSync(Buffer.from(JSON.stringify({
+      format: 'agentclaw-template', version: 1, exportedAt: 'now',
+      agent: { name: 'Two Repos', persona: 'p', sharedMemory: false },
+      files: { 'SOUL.md': 's', 'AGENTS.md': '# A' },
+      ai: { vendor: 'anthropic' }, dataNeeds: [], envNeeds: [],
+      parameters: [
+        { key: 'repo_a', label: 'Repo A', required: true, type: 'text', target: 'datasource' },
+        { key: 'repo_b', label: 'Repo B', required: true, type: 'text', target: 'datasource' },
+      ],
+    })));
+    const res = await f.inject({
+      method: 'POST',
+      url: `/v1/agents/import?values=${encodeURIComponent(JSON.stringify({
+        repo_a: 'git@github.com:one/docs.git', repo_b: 'git@github.com:two/docs.git',
+      }))}`,
+      headers: { ...H, 'content-type': 'application/octet-stream' },
+      payload: TWO,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/both named "docs"/);
+  });
+
+  it('declaring a datasource field that is not plain text, or that has a default, is refused', async () => {
+    const { f } = await world();
+    for (const param of [
+      { key: 'r', label: 'R', required: true, type: 'choice', options: ['a'], target: 'datasource' },
+      { key: 'r', label: 'R', required: true, type: 'text', default: 'git@github.com:me/mine.git', target: 'datasource' },
+    ]) {
+      const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { parameters: [param] } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/datasource-target/);
+    }
+  });
+});
+
 describe('inbox with parameters', () => {
   it('lists a share with its parameters, and accept substitutes values', async () => {
     const { store, f } = await world();

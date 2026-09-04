@@ -8,6 +8,7 @@ import { listCrons } from './crons.js';
 import { createAgentRecord } from './provision.js';
 import { TransferError } from './transfer.js';
 import { reservedEnvProblem } from './envPolicy.js';
+import { normalizeGitUrl } from './gitSource.js';
 
 /**
  * A "template" is a SHAREABLE copy of an agent — its training (SOUL.md +
@@ -50,9 +51,11 @@ export const TemplateParamSchema = z
     default: z.string().max(2000).optional(),
     options: z.array(z.string().min(1).max(120)).max(12).optional(),
     /** Where the value lands: substituted into a file's {{key}} placeholder,
-     *  or (Phase 2b) as an agent env var named KEY-uppercased — a write-only
-     *  secret, never stored in paramValues. */
-    target: z.enum(['soul', 'agents', 'env']),
+     *  (Phase 2b) as an agent env var named KEY-uppercased — a write-only
+     *  secret, never stored in paramValues — or `datasource`: the value is a
+     *  git repo URL that becomes a real git data source on the imported copy
+     *  (each derived child brings its own document repo). */
+    target: z.enum(['soul', 'agents', 'env', 'datasource']),
   })
   // An option-less choice renders an empty, unfillable <select>; a required
   // one makes the copy unconfigurable. Catch it at declaration, everywhere
@@ -74,6 +77,12 @@ export const TemplateParamSchema = z
   })
   .refine((p) => p.target !== 'env' || !reservedEnvProblem(p.key.toUpperCase()), {
     message: 'that key maps to a reserved env variable name',
+  })
+  // Datasource targets take a pasted git URL — free text is the only shape
+  // that fits, and a default URL would silently bind every child to the
+  // author's repo, which defeats the per-child binding this exists for.
+  .refine((p) => p.target !== 'datasource' || (p.type === 'text' && p.default === undefined), {
+    message: 'datasource-target fields must be type "text" with no default',
   });
 
 export interface TemplateManifest {
@@ -320,6 +329,16 @@ export interface ImportTemplateResult {
    * values are never persisted in paramValues (they're credentials).
    */
   envValues: Array<{ name: string; value: string }>;
+  /**
+   * Filled datasource-target setup fields: each is a git repo URL (already
+   * validated + normalized here) the caller must materialize as a git data
+   * source — deploy key + SecretStore write, the same async pair the env
+   * values need — BEFORE provisioning, so the first build clones it. Split
+   * off like env values (no file substitution, not stored in paramValues):
+   * after import the data source record is the single source of truth, and
+   * the Data tab is where the binding is managed.
+   */
+  dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }>;
 }
 
 export function importTemplate(
@@ -345,7 +364,42 @@ export function importTemplate(
   const envValues = [...envKeys]
     .filter((k) => resolved[k] !== undefined && resolved[k] !== '')
     .map((k) => ({ name: k.toUpperCase(), value: resolved[k]! }));
-  const values = Object.fromEntries(Object.entries(resolved).filter(([k]) => !envKeys.has(k)));
+  // Datasource-target fields: validate every pasted repo URL BEFORE creating
+  // anything (same no-half-made-agent rule as resolveParamValues above). The
+  // reserved-name and clash rules mirror the data-sources route — a template
+  // must not be a way around them.
+  const RESERVED_MOUNTS = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace']);
+  const dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }> = [];
+  const dsProblems: string[] = [];
+  for (const p of manifest.parameters) {
+    if (p.target !== 'datasource') continue;
+    const v = resolved[p.key];
+    if (v === undefined || v === '') continue; // optional and unfilled
+    const git = normalizeGitUrl(v);
+    if (!git) {
+      dsProblems.push(`"${p.label}" is not a recognizable git repo — use git@host:owner/repo.git or https://host/owner/repo`);
+      continue;
+    }
+    if (RESERVED_MOUNTS.has(git.repoName) || git.repoName.startsWith('.')) {
+      dsProblems.push(`"${p.label}": the repo name "${git.repoName}" is reserved — it would collide with the agent's own files`);
+      continue;
+    }
+    if (dataSourceValues.some((d) => d.repoName === git.repoName)) {
+      dsProblems.push(`"${p.label}": two fields point at repos both named "${git.repoName}" — they would clone to the same place`);
+      continue;
+    }
+    dataSourceValues.push({ key: p.key, sshUrl: git.sshUrl, repoName: git.repoName });
+  }
+  if (dsProblems.length) {
+    throw new TransferError(`This template needs setup values — ${dsProblems.join('; ')}.`);
+  }
+  // Both split-off kinds (env creds, repo URLs) leave the substitution set:
+  // their materialized records — env vars, data sources — are the truth, so
+  // neither lands in files or paramValues.
+  const dsKeys = new Set(manifest.parameters.filter((p) => p.target === 'datasource').map((p) => p.key));
+  const values = Object.fromEntries(
+    Object.entries(resolved).filter(([k]) => !envKeys.has(k) && !dsKeys.has(k)),
+  );
 
   // The importer's OWN profile, vendor-matched — same rule as a full Load, so a
   // template never silently bills someone else's shared subscription.
@@ -411,5 +465,5 @@ export function importTemplate(
   if (manifest.schedules?.length) store.setPendingSchedules(agent.id, manifest.schedules);
 
   deps.log?.('template.imported', { agentId: agent.id });
-  return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds }, envValues };
+  return { agent, needs: { dataSources: manifest.dataNeeds, envVars: manifest.envNeeds }, envValues, dataSourceValues };
 }

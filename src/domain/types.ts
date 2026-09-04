@@ -237,7 +237,10 @@ export interface TemplateParam {
   type: 'text' | 'longtext' | 'choice' | 'multichoice' | 'boolean';
   default?: string;
   options?: string[];
-  target: 'soul' | 'agents' | 'env';
+  /** soul/agents: {{key}} file substitution. env: write-only env var named
+   *  KEY-uppercased. datasource: a git repo URL that becomes the imported
+   *  copy's own git data source. */
+  target: 'soul' | 'agents' | 'env' | 'datasource';
 }
 
 /**

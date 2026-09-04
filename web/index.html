@@ -442,6 +442,7 @@
     <button class="tab" id="tabEditSnap" role="tab" aria-selected="false" onclick="showEditTab('snap')">Snapshots</button>
     <button class="tab" id="tabEditAi" role="tab" aria-selected="false" onclick="showEditTab('ai')">AI</button>
     <button class="tab" id="tabEditData" role="tab" aria-selected="false" onclick="showEditTab('data')">Data</button>
+    <button class="tab" id="tabEditConn" role="tab" aria-selected="false" onclick="showEditTab('conn')">Connections</button>
     <button class="tab" id="tabEditTg" role="tab" aria-selected="false" onclick="showEditTab('tg')">Telegram</button>
     <button class="tab" id="tabEditEnv" role="tab" aria-selected="false" onclick="showEditTab('env')">Environment</button>
   </div>
@@ -496,10 +497,11 @@
           <option value="multichoice">multichoice</option>
           <option value="boolean">boolean</option>
         </select>
-        <select id="paramTarget" style="width:auto" title="Where the value lands: a {{key}} placeholder in a file, or an env var named KEY (uppercased) — a write-only credential">
+        <select id="paramTarget" style="width:auto" title="Where the value lands: a {{key}} placeholder in a file, an env var named KEY (uppercased) — a write-only credential — or a git repo URL that becomes the copy's own data source">
           <option value="soul">soul</option>
           <option value="agents">agents</option>
           <option value="env">env var</option>
+          <option value="datasource">data repo</option>
         </select>
         <label style="display:flex;gap:4px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
           <input type="checkbox" id="paramRequired" style="width:auto;flex:none">required</label>
@@ -609,6 +611,30 @@
       (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild.
     </div>
     <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+  </section>
+
+  <section id="paneEditConn" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      Accounts this agent is signed into. Google connections (Gmail, Calendar,
+      Drive, Sheets, …) are made by the agent itself — ask it in chat to connect
+      an account (it knows the steps). This panel shows what's connected and can
+      cut one off.
+    </div>
+    <div class="sub" style="margin-bottom:10px;padding:8px 10px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">
+      ⚠ <b>Every member of this agent can use these connections.</b> Anyone on
+      its allowlist can ask it to read mail, calendars, or files on these
+      accounts — and to send mail as them unless the account was added with
+      <code>--gmail-no-send</code>. Connect only accounts you'd hand the whole
+      member list.
+    </div>
+    <label>Google accounts <span style="color:var(--dim)">— via the agent's gog tool</span></label>
+    <div id="connList" class="sub">Loading…</div>
+    <div class="sub" style="margin-top:10px">
+      Disconnecting removes the stored refresh token — the agent loses access
+      immediately; the Google account itself is untouched. Other kinds of access
+      live in their own tabs: repos &amp; folders under <b>Data</b>, API
+      credentials under <b>Environment</b>.
+    </div>
   </section>
 
   <section id="paneEditTg" role="tabpanel" hidden>
@@ -3277,6 +3303,7 @@ const EDIT_TABS = {
   snap: { btn: 'tabEditSnap', pane: 'paneEditSnap' },
   ai: { btn: 'tabEditAi', pane: 'paneEditAi' },
   data: { btn: 'tabEditData', pane: 'paneEditData' },
+  conn: { btn: 'tabEditConn', pane: 'paneEditConn' },
   tg: { btn: 'tabEditTg', pane: 'paneEditTg' },
   env: { btn: 'tabEditEnv', pane: 'paneEditEnv' },
 };
@@ -3286,6 +3313,34 @@ function showEditTab(name) {
     $(t.pane).hidden = !on;
     $(t.btn).setAttribute('aria-selected', String(on));
   }
+  // Lazy: listing connections is a container exec — only pay for it when the
+  // tab is actually opened, not on every Settings open.
+  if (name === 'conn' && editAgentId) void renderConnections();
+}
+
+async function renderConnections() {
+  const el = $('connList'), forId = editAgentId;
+  el.innerHTML = 'Checking the agent…';
+  try {
+    const { accounts } = await api(`/v1/agents/${forId}/connections`);
+    if (editAgentId !== forId) return; // dialog moved on while we fetched
+    el.innerHTML = accounts.length
+      ? accounts.map(a => `<div class="pair"><span class="grow"><b>${esc(a.email)}</b>
+          <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span></span>
+          <button class="danger" onclick="disconnectAccount('${jsq(a.email)}')">Disconnect</button></div>`).join('')
+      : 'No Google accounts connected. Ask the agent in chat to connect one — e.g. “connect my Google account for calendar and mail”.';
+  } catch (e) {
+    if (editAgentId === forId) el.innerHTML = esc(e.message);
+  }
+}
+
+async function disconnectAccount(email) {
+  if (!confirm(`Disconnect ${email}?\n\nThe agent loses access to this Google account immediately. Reconnecting means redoing the sign-in with the agent in chat.`)) return;
+  try {
+    await api(`/v1/agents/${editAgentId}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
+    toast(`${email} disconnected.`);
+    await renderConnections();
+  } catch (e) { toast(e.message, 10000); }
 }
 
 async function openEdit(id, name, tab = 'def') {
@@ -3651,7 +3706,7 @@ function renderParamList() {
   $('paramList').innerHTML = editParams.length
     ? editParams.map((p, i) => `<div class="pair"><span class="grow">${esc(p.label || p.key)} <code>{{${esc(p.key)}}}</code>
         <span class="sub">${esc(p.type)}${(p.type === 'choice' || p.type === 'multichoice') && p.options?.length ? ' (' + esc(p.options.join(', ')) + ')' : ''}
-          · ${p.target === 'env' ? `env: ${esc(p.key.toUpperCase())}` : p.target === 'agents' ? 'AGENTS.md' : 'SOUL.md'}${p.required ? ' · <b>required</b>' : ''}${p.default != null && p.default !== '' ? ' · default: ' + esc(String(p.default)) : ''}</span></span>
+          · ${p.target === 'env' ? `env: ${esc(p.key.toUpperCase())}` : p.target === 'datasource' ? 'data repo' : p.target === 'agents' ? 'AGENTS.md' : 'SOUL.md'}${p.required ? ' · <b>required</b>' : ''}${p.default != null && p.default !== '' ? ' · default: ' + esc(String(p.default)) : ''}</span></span>
         <button class="danger" onclick="removeSetupField(${i})">×</button></div>`).join('')
     : '<div class="sub">None declared — sharing still asks for any <code>{{placeholder}}</code> it finds in the files.</div>';
 }
@@ -3669,6 +3724,8 @@ function addSetupField() {
   const type = $('paramType').value;
   const target = $('paramTarget').value;
   if (target === 'env' && type !== 'text') { toast('Env-var fields must be type "text" — the value is a credential, not a choice.'); return; }
+  if (target === 'datasource' && type !== 'text') { toast('Data-repo fields must be type "text" — the value is a pasted git URL.'); return; }
+  if (target === 'datasource' && $('paramDefault').value.trim()) { toast('Data-repo fields take no default — a default URL would bind every copy to the same repo.'); return; }
   const f = {
     key,
     label: $('paramLabel').value.trim() || key,
@@ -3713,15 +3770,19 @@ function renderSetupValues(a) {
   // Any RUNNING agent with declared fields is editable: imported copies carry
   // their raw layer already, and on a master the server seeds the layer from
   // the live files on the first Apply (so authors never need Send→Import).
-  const fileParams = (a?.parameters ?? []).filter(p => p.target !== 'env');
+  const fileParams = (a?.parameters ?? []).filter(p => p.target !== 'env' && p.target !== 'datasource');
   const envParams = (a?.parameters ?? []).filter(p => p.target === 'env');
+  const dsParams = (a?.parameters ?? []).filter(p => p.target === 'datasource');
   const editable = !!(fileParams.length && a?.state === 'RUNNING');
   row.hidden = !editable;
   if (!editable) return;
   const envNote = envParams.length
     ? `<div class="sub">🔑 ${envParams.map(p => esc(p.key.toUpperCase())).join(', ')} — credential${envParams.length > 1 ? 's' : ''}; change under the Environment tab.</div>`
     : '';
-  $('setupValuesList').innerHTML = envNote + fileParams.map(p => {
+  const dsNote = dsParams.length
+    ? `<div class="sub">📚 ${dsParams.map(p => esc(p.label || p.key)).join(', ')} — repo binding${dsParams.length > 1 ? 's' : ''}; manage under the Data tab.</div>`
+    : '';
+  $('setupValuesList').innerHTML = envNote + dsNote + fileParams.map(p => {
     const cur = (a.paramValues ?? {})[p.key] ?? p.default ?? '';
     const help = p.help ? `<div class="sub">${esc(p.help)}</div>` : '';
     let input;
@@ -4700,6 +4761,11 @@ function collectParamValues(parameters, title) {
       // write-only, never shown again, never inside the shared files.
       input = `<input type="password" id="${id}" autocomplete="off"
         placeholder="stored as env var ${esc(p.key.toUpperCase())} — write-only">`;
+    } else if (p.target === 'datasource') {
+      // A git URL: becomes this copy's own git data source (deploy key and
+      // all), cloned on first build — managed under Settings → Data after.
+      input = `<input type="text" id="${id}" autocomplete="off" spellcheck="false"
+        placeholder="git@github.com:owner/repo.git — becomes this copy's own data repo">`;
     } else if (p.type === 'longtext') {
       input = `<textarea id="${id}" rows="3">${esc(p.default ?? '')}</textarea>`;
     } else if (p.type === 'choice') {
@@ -5019,7 +5085,9 @@ async function deriveChild(id, masterName) {
   }
   try {
     await api(`/v1/agents/${id}/derive`, { method: 'POST', body: { name: name.trim(), values } });
-    toast(`Child "${name.trim()}" is being created — it'll nest under ${masterName}.`);
+    const boundRepo = (a?.parameters ?? []).some(p => p.target === 'datasource' && values?.[p.key]);
+    toast(`Child "${name.trim()}" is being created — it'll nest under ${masterName}.` +
+      (boundRepo ? ' Its repo binding got a fresh deploy key: add it to the repo via 🔑 Deploy key on the child card (private repos won\'t clone until you do).' : ''), boundRepo ? 15000 : undefined);
     setTimeout(() => refresh(false), 800);
   } catch (e) { toast(e.message, 10000); }
 }

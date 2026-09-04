@@ -51,8 +51,8 @@ const SETUP_FIELD = {
     options: { type: 'array', maxItems: 12, items: { type: 'string', minLength: 1, maxLength: 120 } },
     target: {
       type: 'string',
-      enum: ['soul', 'agents', 'env'],
-      description: 'default soul; env = the value becomes an env var named KEY uppercased (text type only)',
+      enum: ['soul', 'agents', 'env', 'datasource'],
+      description: 'default soul; env = the value becomes an env var named KEY uppercased (text type only); datasource = the value is a git repo URL that becomes a git data source on the imported copy (text type only, no default)',
     },
   },
   required: ['key', 'label', 'type'],

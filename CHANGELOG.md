@@ -2,6 +2,34 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.105.0] — 2026-09-04
+
+### Added
+- **Settings → Connections tab.** Shows the Google accounts an agent is
+  signed into via its gog tool (`gog auth list --json` in the container —
+  the control plane lists and revokes, it never reads a token), with a
+  per-account **Disconnect** (removes the stored refresh token; strict
+  email-shape gate before anything reaches a shell). Loaded lazily on tab
+  open. Carries the member-access warning up front: every allowlisted member
+  can use these connections, including sending mail unless the account was
+  added with `--gmail-no-send`. New: GET /v1/agents/:id/connections,
+  DELETE /v1/agents/:id/connections/:email (owner-only, RUNNING-only).
+- **`datasource` setup-field target — per-child repo bindings.** A master
+  can declare a text field (e.g. `docs_repo`) whose value is a git repo URL;
+  deriving/importing/accepting a copy turns it into a REAL git data source
+  on the new agent — own deploy key generated, private half in the
+  SecretStore, cloned on first build (best-effort: a private repo waits for
+  its key to be added, then clones on rebuild). Split off like env fields:
+  never substituted into files, never in paramValues — after import the
+  Data tab owns the binding. URLs are validated before the agent is created
+  (shape, reserved clone names, same-name clash), and a failed
+  materialization rolls the fresh agent back whole. Declared datasource
+  fields take no default (a default URL would bind every child to the same
+  repo) and are excluded from Apply-values/push-definition resolution, so a
+  required repo binding can't block later re-renders. The Condo pattern
+  end-to-end: declare `docs_repo` on the master, derive "Condo B Advisor",
+  paste Condo B's repo — the child arrives wired.
+
 ## [0.104.0] — 2026-09-04
 
 ### Added

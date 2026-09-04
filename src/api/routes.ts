@@ -2317,12 +2317,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         });
       }
       // Env-target fields (Phase 2b) are write-only credentials managed under
-      // Settings → Environment — they never live in paramValues and must not
-      // block (as "required") the re-render of the file-target fields.
-      const editableParams = agent.parameters.filter((p) => p.target !== 'env');
+      // Settings → Environment, and datasource-target fields materialized as
+      // git sources managed under Settings → Data — neither lives in
+      // paramValues, and neither may block (as "required") the re-render of
+      // the file-target fields.
+      const editableParams = agent.parameters.filter((p) => p.target !== 'env' && p.target !== 'datasource');
       if (!editableParams.length) {
         return reply.code(400).send({
-          error: "All of this agent's setup fields are env credentials — change those under ⚙ Settings → Environment.",
+          error: "All of this agent's setup fields are env credentials or repo bindings — change those under ⚙ Settings → Environment / Data.",
         });
       }
       if (agent.state !== 'RUNNING') {
@@ -3312,6 +3314,64 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { rooms };
   });
 
+  // ---- connections (gog: Google accounts the agent is signed into) --------
+  // The credentials live on the agent's volume (GOG_HOME), managed by the
+  // agent itself in chat — the control plane only LISTS and REVOKES, it never
+  // reads a token. Owner-only, both ways: what accounts an agent can act as
+  // is the owner's business, and so is cutting one off.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/connections', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (!agent.runtimeRef || agent.state !== 'RUNNING') {
+      return reply.code(409).send({ error: 'Start the agent to view its connections.' });
+    }
+    const res = await providerFor(agent.hostId).execShell(
+      agent.runtimeRef,
+      'gog auth list --json 2>/dev/null || true',
+    );
+    let accounts: Array<{ email: string; client: string; auth: string }> = [];
+    try {
+      const parsed = JSON.parse(res.stdout) as {
+        accounts?: Array<{ email?: string; client?: string; auth?: string }>;
+      };
+      accounts = (parsed.accounts ?? [])
+        .filter((a) => typeof a.email === 'string' && a.email)
+        // The listing also reports a per-account token-read warning when run
+        // without a TTY — that's about THIS probe's shell, not the account's
+        // health, so it is deliberately not surfaced.
+        .map((a) => ({ email: a.email!, client: a.client || 'default', auth: a.auth || 'oauth' }));
+    } catch {
+      /* gog absent or output unparsable → no connections to show */
+    }
+    return { accounts };
+  });
+
+  app.delete<{ Params: { id: string; email: string } }>(
+    '/v1/agents/:id/connections/:email',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (!agent.runtimeRef || agent.state !== 'RUNNING') {
+        return reply.code(409).send({ error: 'Start the agent to disconnect an account.' });
+      }
+      // Strict shape gate — the email is interpolated into a shell line, so
+      // only unambiguous mailbox characters may pass (no $, backticks, quotes).
+      const email = req.params.email;
+      if (!/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/.test(email) || email.length > 254) {
+        return reply.code(400).send({ error: 'Not a recognizable account email.' });
+      }
+      const res = await providerFor(agent.hostId).execShell(
+        agent.runtimeRef,
+        `gog auth remove "${email}"`,
+      );
+      if (res.code !== 0) {
+        return reply.code(502).send({ error: `Couldn't remove it: ${(res.stderr || res.stdout || 'gog gave no reason').slice(0, 200)}` });
+      }
+      trace(agent.id)('connection.removed', { email });
+      return { removed: true };
+    },
+  );
+
   app.get<{ Params: { id: string } }>('/v1/agents/:id/bot-token', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
@@ -3978,12 +4038,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
       try {
-        const { agent, needs, envValues } = importTemplate(
+        const { agent, needs, envValues, dataSourceValues } = importTemplate(
           { store, provider: providerFor((body.hostId ?? host?.id)!), log: trace() },
           share.blob,
           { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id, values: vals.data },
         );
         await materializeEnvValues(agent.id, envValues);
+        await materializeDataSources(agent, dataSourceValues);
         // Lineage: if the master still lives on this installation, record it —
         // the fleet view groups children under it and the master's push-
         // definition flow targets them.
@@ -4028,6 +4089,42 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAgentState(agentId, 'DELETED');
       } catch { /* rollback is best-effort; the import error below is what the user sees */ }
       throw new TransferError(`Couldn't store the setup credentials: ${String((err as Error).message ?? err).slice(0, 200)}`);
+    }
+  };
+
+  /**
+   * Filled datasource-target setup fields become real git data sources —
+   * deploy key generated here, private half in the SecretStore — BEFORE
+   * provisioning, so the first build clones the repo. importTemplate already
+   * validated the URLs (shape, reserved names, self-clash); this is the async
+   * half it can't do. Same whole-agent rollback as the env materializer: a
+   * child without the repo it was derived FOR is not a usable import.
+   */
+  const materializeDataSources = async (
+    agent: Agent,
+    dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }>,
+  ): Promise<void> => {
+    const created: string[] = [];
+    try {
+      for (const d of dataSourceValues) {
+        const id = randomUUID();
+        const key = generateDeployKey(`agentclaw-${agent.slug}-${d.repoName}-deploy`);
+        const secretRef = `data-source/${id}`;
+        await secrets.put(secretRef, key.privateKey);
+        created.push(secretRef);
+        store.insertDataSource({
+          id, agentId: agent.id, kind: 'git', access: 'ro', mountName: d.repoName,
+          repoUrl: d.sshUrl, secretRef, pubKey: key.publicKey, createdAt: new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      for (const ref of created) await secrets.delete(ref).catch(() => {});
+      try {
+        store.scrubAgentResidue(agent.id);
+        store.setAgentState(agent.id, 'DELETING');
+        store.setAgentState(agent.id, 'DELETED');
+      } catch { /* rollback is best-effort; the import error below is what the user sees */ }
+      throw new TransferError(`Couldn't set up the repo binding: ${String((err as Error).message ?? err).slice(0, 200)}`);
     }
   };
 
@@ -4088,10 +4185,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const deps2 = { store, provider: providerFor(agent.hostId), log: trace() };
       try {
         const { data } = await exportTemplate(deps2, agent.id, { includeMemory: false });
-        const { agent: child, envValues } = importTemplate(deps2, data, {
+        const { agent: child, envValues, dataSourceValues } = importTemplate(deps2, data, {
           ownerId: ownerIdOf(req), name, values: vals.data,
         });
         await materializeEnvValues(child.id, envValues);
+        await materializeDataSources(child, dataSourceValues);
         store.setAgentParent(child.id, agent.id);
         trace(child.id)('agent.derived', { parentAgentId: agent.id, parentName: agent.name });
         kickProvision(child.id);
@@ -4138,8 +4236,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         continue;
       }
       try {
+        // Same split as the /params route: env creds and datasource repo
+        // bindings never live in paramValues, so a required one must not
+        // fail the resolve and block the push.
         const values = resolveParamValues(
-          (child.parameters ?? []).filter((p) => p.target !== 'env'),
+          (child.parameters ?? []).filter((p) => p.target !== 'env' && p.target !== 'datasource'),
           child.paramValues ?? {},
         );
         await whileBusy(child.id, async () => {
@@ -4334,12 +4435,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         // bot, importer as sole owner); anything else is a full copy (a Download)
         // that restores the SAME agent, carrying its bot token and members.
         if (peekFormat(body) === TEMPLATE_FORMAT) {
-          const { agent, needs, envValues } = importTemplate(
+          const { agent, needs, envValues, dataSourceValues } = importTemplate(
             { store, provider: providerFor(host.id), log: trace() },
             body,
             { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, name: req.query.name, values },
           );
           await materializeEnvValues(agent.id, envValues);
+          await materializeDataSources(agent, dataSourceValues);
           // Fresh agent → provision its own bot the normal way (pool or paste).
           kickProvision(agent.id);
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });

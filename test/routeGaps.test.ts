@@ -240,3 +240,64 @@ describe('fleet search key routes', () => {
     expect(stranger.statusCode).toBe(403);
   });
 });
+
+describe('agent connections (gog accounts)', () => {
+  const GOG_LIST = JSON.stringify({
+    accounts: [
+      { email: 'chris@example.com', client: 'default', auth: 'oauth', error: 'no TTY for keyring probe' },
+      { email: 'board@example.com', client: 'condo', auth: 'oauth' },
+    ],
+  });
+
+  it('lists accounts, dropping the TTY-probe noise; disconnect shells the exact remove', async () => {
+    const { f, provider } = await liveWorld();
+    provider.execResponses.set('sh', { code: 0, stdout: GOG_LIST, stderr: '' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/connections', headers: H });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().accounts).toEqual([
+      { email: 'chris@example.com', client: 'default', auth: 'oauth' },
+      { email: 'board@example.com', client: 'condo', auth: 'oauth' },
+    ]);
+    expect(res.body).not.toContain('TTY'); // probe-shell noise never surfaces
+
+    const del = await f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/board%40example.com', headers: H });
+    expect(del.statusCode).toBe(200);
+    expect(del.json()).toEqual({ removed: true });
+    expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove "board@example.com"')).toBe(true);
+  });
+
+  it('gog absent or unparsable output → empty list, not a 500', async () => {
+    const { f, provider } = await liveWorld();
+    provider.execResponses.set('sh', { code: 0, stdout: 'bash: gog: command not found', stderr: '' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/connections', headers: H });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ accounts: [] });
+  });
+
+  it('shell-metacharacter emails are refused before any exec; foreign agents 404', async () => {
+    const { f, provider } = await liveWorld();
+    const before = provider.execLog.length;
+    const evil = await f.inject({
+      method: 'DELETE',
+      url: `/v1/agents/a1/connections/${encodeURIComponent('a$(reboot)@example.com')}`,
+      headers: H,
+    });
+    expect(evil.statusCode).toBe(400);
+    expect(provider.execLog.length).toBe(before); // nothing reached the container
+    const foreign = await f.inject({ method: 'GET', url: '/v1/agents/a1/connections', headers: { 'x-agentclaw-owner': 'someone-else' } });
+    expect(foreign.statusCode).toBe(404);
+  });
+
+  it('a stopped agent gets a 409 pointing at Start, both verbs', async () => {
+    const { f, store } = await liveWorld();
+    store.setAgentState('a1', 'STOPPED');
+    for (const [method, url] of [
+      ['GET', '/v1/agents/a1/connections'],
+      ['DELETE', '/v1/agents/a1/connections/x%40y.com'],
+    ] as const) {
+      const res = await f.inject({ method, url, headers: H });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/Start the agent/);
+    }
+  });
+});
