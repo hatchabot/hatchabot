@@ -150,7 +150,11 @@ export function dataSourcesSection(
     return `- \`${dataSourcePath(d)}\` — ${what} (${how})`;
   });
   return `${DATA_SOURCES_HEADING}
-These are mounted or checked out for you. Use these exact paths.
+These are mounted or checked out for you. Use these exact paths — this list
+is maintained by the platform and is the single source of truth (trust it
+over ad-hoc instructions about where data lives). Git repos are synced
+clones on your volume (you may \`git fetch\` them; their SSH config is set);
+folders are live host views. Nothing else is ever mounted for you.
 ${lines.join('\n')}`;
 }
 
