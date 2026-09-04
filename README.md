@@ -345,3 +345,17 @@ Working and used daily by its author, but young — expect rough edges.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Additional environment variables (operator reference)
+
+| Variable | Where | Purpose |
+|---|---|---|
+| `AGENTCLAW_ALLOW_OWNER_HEADER` | server | **Test-only auth shim**: honor `x-agentclaw-owner`. Never set in production. |
+| `AGENTCLAW_CLAUDE_BIN` | server | Path to the `claude` CLI for the mgmt assistant (default `~/.local/bin/claude`). |
+| `AGENTCLAW_CLI_TIMEOUT_MS` | server | Mgmt CLI completion timeout (default 180000). |
+| `AGENTCLAW_READY_TIMEOUT_MS` / `AGENTCLAW_READY_POLL_MS` | server | Agent health-wait tuning at provision. |
+| `AGENTCLAW_NAME_REPAIR_MS` / `AGENTCLAW_IDLE_RENAME_MS` | server | Bot display-name repair/rename sweep cadence. |
+| `AGENTCLAW_SSH_DIR` | server | Override the runner-setup SSH dir. |
+| `OPENCLAW_STATE_DB` | server | Override the adopted-OpenClaw state DB path (cron import). |
+| `AGENTCLAW_OPENCLAW_GATEWAY_UNIT` | server | systemd unit name quiesced during adopt. |
+| `AGENTCLAW_MGMT_OWNER` / `AGENTCLAW_MGMT_PAIRING_POLL_MS` | mgmt bot | Audit owner label; approval-push poll interval. |

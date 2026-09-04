@@ -926,6 +926,11 @@ export class Store {
 
   /** Keep the newest `keep` events per agent; older ones are pruned on write. */
   recordEvent(agentId: string, event: string, detail?: Record<string, unknown>, keep = 200): void {
+    // A timer firing after deletion (claim windows, notifiers) must not write
+    // onto a tombstone — the residue class the v0.90 scrub cleaned up
+    // (audit 2026-09-04 #7). Unknown agents are refused for the same reason.
+    const state = (this.db.prepare(`SELECT state FROM agents WHERE id = ?`).get(agentId) as any)?.state;
+    if (!state || state === 'DELETED') return;
     // Never let a log line become a way to store secrets or unbounded data.
     // Truncation must stay valid JSON: one raw .slice() mid-string made every
     // listEvents() call throw until the row aged out — the activity feed

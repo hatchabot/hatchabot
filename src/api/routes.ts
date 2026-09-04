@@ -106,6 +106,7 @@ import {
   autoSnapshot,
   captureSnapshot,
   CORE_FILES,
+  MAX_FILE_BYTES,
   restoreSnapshot,
   SnapshotError,
 } from '../orchestrator/snapshots.js';
@@ -2234,10 +2235,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to edit its files.' });
       }
+      // Same cap the snapshot path enforces — an unbounded cat of a corrupt
+      // multi-MB file would balloon responses (audit 2026-09-04 #3).
       const res = await providerFor(agent.hostId).execShell(
         agent.runtimeRef,
-        `cat ${JSON.stringify(workspacePath(agent.slug, req.params.name))} 2>/dev/null || true`,
+        `head -c ${MAX_FILE_BYTES + 1} ${JSON.stringify(workspacePath(agent.slug, req.params.name))} 2>/dev/null || true`,
       );
+      if (res.stdout.length > MAX_FILE_BYTES) {
+        return reply.code(413).send({ error: `${req.params.name} is over ${MAX_FILE_BYTES / 1024}KB — edit it in chat instead.` });
+      }
       return { name: req.params.name, content: res.stdout };
     },
   );
@@ -2250,6 +2256,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       if (!EDITABLE_FILES.has(req.params.name)) return reply.code(400).send({ error: 'Not editable' });
       const content = (req.body as { content?: string } | null)?.content;
       if (typeof content !== 'string') return reply.code(400).send({ error: 'content required' });
+      if (Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) {
+        return reply.code(413).send({ error: `Too large — core files cap at ${MAX_FILE_BYTES / 1024}KB.` });
+      }
       if (agent.state !== 'RUNNING') {
         return reply.code(409).send({ error: 'Start the agent to edit its files.' });
       }
