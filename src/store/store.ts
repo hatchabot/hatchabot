@@ -250,6 +250,10 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN param_files TEXT`,
       // Telegram group-chat access (domain/types.ts GroupAccess), JSON.
       `ALTER TABLE agents ADD COLUMN group_access TEXT`,
+      // Lineage: the master this agent was derived from (same installation).
+      `ALTER TABLE agents ADD COLUMN parent_agent_id TEXT`,
+      // Which agent a share was cut from — lets an accepted copy record lineage.
+      `ALTER TABLE agent_shares ADD COLUMN source_agent_id TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -804,17 +808,20 @@ export class Store {
     message?: string;
     blob: Buffer;
     createdAt: string;
+    /** Lineage: which agent this share was cut from (same installation). */
+    sourceAgentId?: string;
   }): void {
     this.db
       .prepare(
         `INSERT INTO agent_shares
-           (id, from_owner, from_email, to_email, to_owner, agent_name, message, blob, status, created_at)
-         VALUES (@id, @fromOwner, @fromEmail, @toEmail, @toOwner, @agentName, @message, @blob, 'pending', @createdAt)`,
+           (id, from_owner, from_email, to_email, to_owner, agent_name, message, blob, status, created_at, source_agent_id)
+         VALUES (@id, @fromOwner, @fromEmail, @toEmail, @toOwner, @agentName, @message, @blob, 'pending', @createdAt, @sourceAgentId)`,
       )
       .run({
         id: s.id, fromOwner: s.fromOwner, fromEmail: s.fromEmail ?? null,
         toEmail: s.toEmail, toOwner: s.toOwner ?? null, agentName: s.agentName,
         message: s.message ?? null, blob: s.blob, createdAt: s.createdAt,
+        sourceAgentId: s.sourceAgentId ?? null,
       });
   }
 
@@ -836,15 +843,21 @@ export class Store {
   }
 
   /** A share the given owner may act on (theirs by owner or unclaimed email). */
-  getShareFor(id: string, ownerId: string, email?: string): { blob: Buffer; agentName: string } | undefined {
+  getShareFor(
+    id: string,
+    ownerId: string,
+    email?: string,
+  ): { blob: Buffer; agentName: string; sourceAgentId?: string } | undefined {
     const r = this.db
       .prepare(
-        `SELECT blob, agent_name, to_owner, to_email, status FROM agent_shares WHERE id = ?`,
+        `SELECT blob, agent_name, to_owner, to_email, status, source_agent_id FROM agent_shares WHERE id = ?`,
       )
       .get(id) as any;
     if (!r || r.status !== 'pending') return undefined;
     const mine = r.to_owner === ownerId || (r.to_owner == null && email && r.to_email?.toLowerCase() === email.toLowerCase());
-    return mine ? { blob: r.blob as Buffer, agentName: r.agent_name } : undefined;
+    return mine
+      ? { blob: r.blob as Buffer, agentName: r.agent_name, sourceAgentId: r.source_agent_id ?? undefined }
+      : undefined;
   }
 
   setShareStatus(id: string, status: 'accepted' | 'dismissed', ownerId: string): void {
@@ -1439,6 +1452,21 @@ export class Store {
 
   /** A configured copy's editable state: current values + the raw template
    *  layer they render into. Set at import; values updated on later edits. */
+  setAgentParent(id: string, parentAgentId: string | null): void {
+    this.db
+      .prepare(`UPDATE agents SET parent_agent_id = ? WHERE id = ?`)
+      .run(parentAgentId, id);
+  }
+
+  /** Live children derived from this master (same installation). */
+  listChildren(parentAgentId: string): Agent[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM agents WHERE parent_agent_id = ? AND state != 'DELETED'`)
+        .all(parentAgentId) as any[]
+    ).map(rowToAgent);
+  }
+
   setAgentGroupAccess(id: string, ga: GroupAccess | null): void {
     this.db
       .prepare(`UPDATE agents SET group_access = ?, updated_at = ? WHERE id = ?`)
@@ -1884,6 +1912,7 @@ function rowToAgent(r: any): Agent {
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,
     paramFiles: r.param_files ? safeJson(r.param_files, undefined) : undefined,
     groupAccess: r.group_access ? safeJson(r.group_access, undefined) : undefined,
+    parentAgentId: r.parent_agent_id ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

@@ -351,3 +351,75 @@ describe('PUT /v1/agents/:id/params (edit values later)', () => {
     expect(store.getAgent('a1')!.paramFiles).toBeUndefined(); // nothing persisted
   });
 });
+
+describe('master ⇄ child lineage (condo-fleet pattern)', () => {
+  async function masterWorld() {
+    const { store, f, provider, secrets } = await world();
+    // make a1 a RUNNING master with fields + placeholder-bearing files
+    const { runtimeRef } = await provider.provision({
+      agentId: 'a1', slug: 'mine',
+      workspace: { files: {}, configPatch: { agentId: 'mine', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    await f.inject({
+      method: 'PATCH', url: '/v1/agents/a1', headers: H,
+      payload: { parameters: [{ key: 'style', label: 'Style', required: true, type: 'choice', options: ['value', 'growth'], target: 'soul' }] },
+    });
+    provider.execResponses.set('sh', { code: 0, stdout: 'A {{style}} advisor at work.\n', stderr: '' });
+    return { store, f, provider, secrets };
+  }
+
+  it('derive creates a child with its own values, lineage recorded, no memory carried', async () => {
+    const { store, f } = await masterWorld();
+    const res = await f.inject({
+      method: 'POST', url: '/v1/agents/a1/derive', headers: H,
+      payload: { name: 'Condo B', values: { style: 'growth' } },
+    });
+    expect(res.statusCode).toBe(201);
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Condo B')!;
+    expect(child.parentAgentId).toBe('a1');
+    expect(child.paramValues).toEqual({ style: 'growth' });
+    expect(store.getAgentSeed(child.id)['SOUL.md']).toContain('growth advisor');
+    expect(store.getAgentSeed(child.id)['MEMORY.md']).toBeUndefined(); // fresh memory
+    expect(store.listChildren('a1').map((c) => c.id)).toEqual([child.id]);
+  });
+
+  it('push-definition re-renders each child from the master, keeping child values; memory untouched', async () => {
+    const { store, f, provider } = await masterWorld();
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Condo B', values: { style: 'growth' } } });
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Condo B')!;
+    // bring the child up (background provision fails on the stub channel)
+    await new Promise((r) => setTimeout(r, 30));
+    const { runtimeRef } = await provider.provision({
+      agentId: child.id, slug: 'condo-b',
+      workspace: { files: {}, configPatch: { agentId: 'condo-b', authMode: 'api-key' } }, env: {},
+    } as any);
+    store.setAgentRuntimeRef(child.id, runtimeRef);
+    if (store.getAgent(child.id)!.state === 'FAILED') store.setAgentState(child.id, 'PROVISIONING');
+    store.setAgentState(child.id, 'RUNNING');
+
+    // master's files evolved since the derive
+    provider.execResponses.set('sh', { code: 0, stdout: 'IMPROVED {{style}} playbook v2.\n', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().pushed).toBe(1);
+    const after = store.getAgent(child.id)!;
+    expect(after.paramFiles?.soul).toContain('IMPROVED {{style}}'); // new layer stored raw
+    expect(after.paramValues).toEqual({ style: 'growth' }); // child's answers kept
+    expect(store.listSnapshots(child.id).some((s) => s.reason === 'pre-params')).toBe(true);
+  });
+
+  it('push refuses when there are no children; a non-running child is skipped by name', async () => {
+    const { store, f } = await masterWorld();
+    const none = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(none.statusCode).toBe(400);
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/derive', headers: H, payload: { name: 'Condo B', values: { style: 'value' } } });
+    const child = store.listAgents(OWNER).find((x) => x.name === 'Condo B')!;
+    await new Promise((r) => setTimeout(r, 30)); // child stays non-RUNNING (stub provision failed)
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/push-definition', headers: H, payload: {} });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().pushed).toBe(0);
+    expect(res.json().results[0]).toMatchObject({ name: 'Condo B', ok: false });
+    expect(store.getAgent(child.id)!.paramValues).toEqual({ style: 'value' }); // untouched
+  });
+});

@@ -3156,6 +3156,8 @@ function agentCard(a) {
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
       ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
+      ${a.state === 'RUNNING' && a.parameters?.length && !a.parentAgentId ? `<button onclick="deriveChild('${a.id}', '${jsq(a.name)}')" title="Create a child agent from this master: same training, its own setup values and bot, fresh memory. Children nest under this card.">👪 New child</button>` : ''}
+      ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
       ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
         ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
       <!-- lifecycle -->
@@ -4967,6 +4969,41 @@ async function restoreAgent(id, name) {
  * rename quota runs to hours, and a button that silently does nothing is worse
  * than one that says why.
  */
+// ---- master ⇄ child flows (lineage) ------------------------------------------
+
+async function deriveChild(id, masterName) {
+  const a = agents.find(x => x.id === id);
+  const name = prompt(`Name the new child of "${masterName}":`, '');
+  if (!name?.trim()) return;
+  // The master's setup fields become the child's own answers — env-target
+  // fields included (each child brings its OWN credentials; that's the point).
+  let values;
+  if (a?.parameters?.length) {
+    values = await collectParamValues(a.parameters, `${name} (child of ${masterName})`);
+    if (values === null) return; // cancelled
+  }
+  try {
+    await api(`/v1/agents/${id}/derive`, { method: 'POST', body: { name: name.trim(), values } });
+    toast(`Child "${name.trim()}" is being created — it'll nest under ${masterName}.`);
+    setTimeout(() => refresh(false), 800);
+  } catch (e) { toast(e.message, 10000); }
+}
+
+async function pushDefinition(id, masterName) {
+  const kids = agents.filter(k => k.parentAgentId === id).map(k => k.name);
+  if (!confirm(
+    `Push "${masterName}"'s current SOUL.md/AGENTS.md to ${kids.length} child agent${kids.length === 1 ? '' : 's'}?\n\n` +
+    `${kids.join(', ')}\n\n` +
+    `Each child keeps its own setup values (they re-render into the new files) and its own MEMORY.md. ` +
+    `A snapshot is taken per child first, so this is undoable.`
+  )) return;
+  try {
+    const r = await api(`/v1/agents/${id}/push-definition`, { method: 'POST', body: {} });
+    const bad = r.results.filter(x => !x.ok);
+    toast(`Pushed to ${r.pushed}/${r.results.length} children${bad.length ? ` — skipped: ${bad.map(b => `${b.name} (${b.error})`).join(', ')}` : ''}.`, 10000);
+  } catch (e) { toast(e.message, 10000); }
+}
+
 async function syncBotName(id, name) {
   try {
     const r = await api(`/v1/agents/${id}/bot-name/sync`, { method: 'POST' });
@@ -5071,7 +5108,12 @@ function renderAgents() {
   // Archived ones come out of that flow entirely — they hold no bot and do no
   // work, so mixing them into the sections you actually run just adds noise.
   let html = '', lastGroup = null;
-  for (const a of liveAgents()) {
+  const live = liveAgents();
+  const liveIds = new Set(live.map(x => x.id));
+  for (const a of live) {
+    // A child renders INDENTED under its master, not in the main flow —
+    // lineage is the visual grouping (Chris, condo-fleet pattern).
+    if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
     const g = a.group || '';
     if (g && g !== lastGroup) html += `<div class="group-header">
       <span class="grow">${esc(g)}</span>
@@ -5080,6 +5122,11 @@ function renderAgents() {
     </div>`;
     lastGroup = g;
     html += agentCard(a);
+    const kids = live.filter(k => k.parentAgentId === a.id);
+    if (kids.length) {
+      html += `<div style="margin-left:26px;border-left:3px solid var(--line);padding-left:10px">
+        ${kids.map(agentCard).join('')}</div>`;
+    }
   }
   const parked = archivedAgents();
   if (parked.length) {

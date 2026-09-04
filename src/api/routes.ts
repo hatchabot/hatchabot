@@ -3922,6 +3922,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           message: message?.slice(0, 500),
           blob: data,
           createdAt: new Date().toISOString(),
+          sourceAgentId: agent.id, // lineage: an accepted copy records its master
         });
         return reply.code(201).send({ sent: true, to: toEmail });
       } catch (err) {
@@ -3974,6 +3975,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           { ownerId: me.ownerId, name: body.name?.trim(), aiProfileId: body.aiProfileId, hostId: body.hostId ?? host?.id, values: vals.data },
         );
         await materializeEnvValues(agent.id, envValues);
+        // Lineage: if the master still lives on this installation, record it —
+        // the fleet view groups children under it and the master's push-
+        // definition flow targets them.
+        if (share.sourceAgentId && store.getAgent(share.sourceAgentId)?.state !== 'DELETED' && store.getAgent(share.sourceAgentId)) {
+          store.setAgentParent(agent.id, share.sourceAgentId);
+        }
         store.setShareStatus(req.params.id, 'accepted', me.ownerId);
         kickProvision(agent.id);
         return reply.code(201).send({ ...publicAgent(agent), needs });
@@ -4038,6 +4045,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         const { data } = await exportTemplate(deps, agent.id, { includeMemory: true });
         const name = (req.body as { name?: string } | null)?.name?.trim() || `${agent.name} (copy)`;
         const { agent: clone } = importTemplate(deps, data, { ownerId: ownerIdOf(req), name });
+        store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
         kickProvision(clone.id);
         return reply.code(201).send(publicAgent(clone));
       } catch (err) {
@@ -4046,6 +4054,111 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     },
   );
+
+  /**
+   * Derive a CHILD from a master (the condo-fleet pattern): template export
+   * (no memory — a child starts life fresh), import with the child's own
+   * setup values, lineage recorded. The fleet view groups children under the
+   * master; push-definition below is the master→children update channel.
+   */
+  app.post<{ Params: { id: string }; Body: { name?: string; values?: Record<string, string> } }>(
+    '/v1/agents/:id/derive',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (busyNow(agent, reply)) return reply;
+      const body = (req.body ?? {}) as { name?: string; values?: Record<string, string> };
+      const name = body.name?.trim();
+      if (!name) return reply.code(400).send({ error: 'Name the child agent.' });
+      const vals = z
+        .record(z.string().max(64), z.string().max(2000))
+        .refine((r) => Object.keys(r).length <= 24)
+        .optional()
+        .safeParse(body.values);
+      if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
+      const deps2 = { store, provider: providerFor(agent.hostId), log: trace() };
+      try {
+        const { data } = await exportTemplate(deps2, agent.id, { includeMemory: false });
+        const { agent: child, envValues } = importTemplate(deps2, data, {
+          ownerId: ownerIdOf(req), name, values: vals.data,
+        });
+        await materializeEnvValues(child.id, envValues);
+        store.setAgentParent(child.id, agent.id);
+        trace(child.id)('agent.derived', { parentAgentId: agent.id, parentName: agent.name });
+        kickProvision(child.id);
+        return reply.code(201).send(publicAgent(store.getAgent(child.id)!));
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  /**
+   * Master → children definition push: re-render every RUNNING child's
+   * SOUL/AGENTS from the master's CURRENT files, keeping each child's own
+   * setup values. Snapshot-first per child, so any push is reversible; the
+   * child's MEMORY.md (its lived history) is never touched.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/push-definition', async (req, reply) => {
+    const master = ownedAgent(req, req.params.id);
+    if (!master?.runtimeRef || master.state !== 'RUNNING') {
+      return reply.code(409).send({ error: 'Start the master to push its definition.' });
+    }
+    const children = store.listChildren(master.id).filter((c) => c.ownerId === ownerIdOf(req));
+    if (!children.length) return reply.code(400).send({ error: 'This agent has no derived children.' });
+    const readMaster = async (nameF: string) =>
+      (
+        await providerFor(master.hostId).execShell(
+          master.runtimeRef!,
+          `cat ${JSON.stringify(workspacePath(master.slug, nameF))} 2>/dev/null || true`,
+        )
+      ).stdout;
+    const layer = {
+      soul: (await readMaster('SOUL.md')) || undefined,
+      agents: (await readMaster('AGENTS.md')) || undefined,
+      persona: master.persona || undefined,
+    };
+    if (!layer.soul && !layer.agents) {
+      return reply.code(502).send({ error: "Couldn't read the master's files." });
+    }
+    const results: Array<{ id: string; name: string; ok: boolean; error?: string }> = [];
+    for (const child of children) {
+      if (child.state !== 'RUNNING' || !child.runtimeRef) {
+        results.push({ id: child.id, name: child.name, ok: false, error: `not running (${child.state})` });
+        continue;
+      }
+      try {
+        const values = resolveParamValues(
+          (child.parameters ?? []).filter((p) => p.target !== 'env'),
+          child.paramValues ?? {},
+        );
+        await whileBusy(child.id, async () => {
+          await autoSnapshot(snapshotDeps(child), child.id, 'pre-params');
+          for (const [nameF, text] of [['SOUL.md', layer.soul], ['AGENTS.md', layer.agents]] as const) {
+            if (typeof text !== 'string') continue;
+            const b64 = Buffer.from(applyParamValues(text, values), 'utf8').toString('base64');
+            const r = await providerFor(child.hostId).execShell(
+              child.runtimeRef!,
+              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(workspacePath(child.slug, nameF))}`,
+            );
+            if (r.code !== 0) throw new Error('write failed');
+          }
+        });
+        if (typeof layer.persona === 'string') {
+          store.setAgentPersona(child.id, applyParamValues(layer.persona, values));
+        }
+        // The pushed files become the child's new template layer, so its own
+        // Setup-values edits keep working against the CURRENT definition.
+        store.setAgentParamState(child.id, values, layer);
+        trace(child.id)('definition.pushed', { from: master.id });
+        results.push({ id: child.id, name: child.name, ok: true });
+      } catch (err) {
+        results.push({ id: child.id, name: child.name, ok: false, error: String((err as Error).message ?? err).slice(0, 120) });
+      }
+    }
+    return { pushed: results.filter((r) => r.ok).length, results };
+  });
 
   // Import: one entry point for any .agentclaw file. It sniffs the archive's
   // format and does the right thing — a template becomes a fresh agent, a full

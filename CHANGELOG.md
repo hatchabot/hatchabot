@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.102.0] — 2026-09-04
+
+### Added
+- **Master → child lineage** (the condo/productization pattern). Agents
+  record which same-installation master they were derived from
+  (`agents.parent_agent_id`; captured by Clone, by 📨 Send→accept via the
+  share's new `source_agent_id`, and by the new derive flow). The fleet view
+  nests children **indented under the master's card**. Two new master-card
+  buttons: **👪 New child** (`POST /v1/agents/:id/derive` — template export
+  with NO memory, the child's own setup values incl. env credentials, own
+  bot, lineage set) and **⬇ Push to children**
+  (`POST /v1/agents/:id/push-definition` — re-renders every RUNNING child's
+  SOUL/AGENTS from the master's current files with the child's own values,
+  snapshot-first per child, memory untouched; the pushed files become the
+  child's new template layer so its Setup values keep working). Non-running
+  children are skipped by name, never half-updated. Child→master
+  distillation remains the designed next step.
+
 ## [0.101.1] — 2026-09-04
 
 ### Changed

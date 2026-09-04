@@ -143,6 +143,16 @@ Values stay editable afterwards: 📖 Definition → **Setup values** edits or
 resets any answer in place (snapshot first), on imported copies AND on the
 master itself (its layer seeds from the live files on first Apply).
 
+**Master → child agents** (the productization pattern): on a master (an
+agent with setup fields), **👪 New child** derives a copy — same training,
+the child's own setup answers and credentials, its own bot, fresh memory —
+and children render **indented under the master's card**. **⬇ Push to
+children** re-renders every child's SOUL/AGENTS from the master's *current*
+files, keeping each child's own values (snapshot per child; MEMORY.md never
+touched). Lineage is also recorded when you Clone, or when a 📨 Send is
+accepted on the same server. Child→master distillation ("propose this
+learning back to the master") is the designed next step.
+
 **Web search is on for every agent** (keyless DuckDuckGo baseline; the
 config is written explicitly on every rebuild). Upgrade the whole fleet to
 Brave with one **Fleet search key** (⚙ Settings → Media — write-only, same
