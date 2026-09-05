@@ -3449,11 +3449,26 @@ async function loadConnections() {
         <summary style="cursor:pointer"><b>One-time setup (server owner):</b> create this server's Google OAuth client</summary>
         <div class="sub" style="margin-top:8px">
           Done once per installation — after this, everyone just clicks Connect.
+          Use a personal account you'll keep (not a Workspace account — its
+          domain rules would lock family gmail.com accounts out).
           <ol style="margin:6px 0 6px 18px;padding:0">
-            <li>Open <b>console.cloud.google.com</b> → create (or pick) a project.</li>
-            <li><b>APIs &amp; Services → Library</b>: enable <i>Gmail API</i>, <i>Google Calendar API</i>, <i>Google Drive API</i> (+ Sheets/Docs/People if you'll use them).</li>
-            <li><b>OAuth consent screen</b>: External · fill the two required fields · add your household's Gmail addresses as <b>Test users</b>.</li>
-            <li><b>Credentials → Create credentials → OAuth client ID</b> → type <b>Web application</b> → add this exact redirect URI:</li>
+            <li><b>Create a project.</b> Open <b>console.cloud.google.com</b> (agree to
+              the terms if it's your first visit) → click the <b>project picker</b> at
+              the very top of the page (next to the "Google Cloud" logo — it shows a
+              project name or "Select a project") → <b>NEW PROJECT</b> → name it e.g.
+              <i>AgentClaw</i> → Create, then make sure the picker now shows it.</li>
+            <li><b>Enable the APIs.</b> Left menu → <b>APIs &amp; Services → Library</b>:
+              search and <b>Enable</b> <i>Gmail API</i>, <i>Google Calendar API</i>,
+              <i>Google Drive API</i> (+ Sheets/Docs/People if you'll use them).</li>
+            <li><b>Consent screen.</b> APIs &amp; Services → <b>OAuth consent screen</b> →
+              user type <b>External</b> → fill the app name + your email (the two
+              required fields) → under <b>Test users</b>, add every household email
+              that will connect (including any Workspace addresses like a condo
+              account). Later, press <b>Publish app</b> here — Testing mode expires
+              everyone's tokens after 7 days.</li>
+            <li><b>Create the client.</b> APIs &amp; Services → <b>Credentials → Create
+              credentials → OAuth client ID</b> → application type <b>Web
+              application</b> → under <b>Authorized redirect URIs</b>, add exactly:</li>
           </ol>
           <div style="display:flex;gap:8px;align-items:center;margin:4px 0">
             <code id="connRedirectUri" style="flex:1;padding:6px 8px;background:var(--panel-2);border-radius:6px;font-size:12px;word-break:break-all">${esc(cs.redirectUri)}</code>
