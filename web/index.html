@@ -1731,7 +1731,12 @@ async function loadBotInventory() {
         <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : 'Telegram unreachable — unknown'}">
           ${b.alive === true ? '✅' : b.alive === false ? '❌' : '❓'}</span>
       </div>`).join('') || '<div class="sub">No bots known to this server.</div>';
-    $('botInvStatus').textContent = `${bots.length} bots · ${bots.filter(b => b.alive === false).length} dead token(s) · ${bots.filter(b => b.where === 'orphan-token').length} orphaned`;
+    const n = (f) => bots.filter(f).length;
+    $('botInvStatus').innerHTML =
+      `<b>${bots.length}</b> bots — ✅ ${n(b => b.alive === true)} working` +
+      `${n(b => b.alive === false) ? ` · ❌ ${n(b => b.alive === false)} dead` : ''}` +
+      `${n(b => b.alive === undefined) ? ` · ❓ ${n(b => b.alive === undefined)} unknown` : ''}` +
+      ` <span class="sub">(${n(b => b.where === 'agent')} on agents · ${n(b => b.where.startsWith('pool'))} pool · ${n(b => b.where === 'mgmt-bot')} mgmt${n(b => b.where === 'orphan-token') ? ` · ⚠ ${n(b => b.where === 'orphan-token')} orphaned` : ''})</span>`;
   } catch (e) { $('botInvStatus').textContent = e.message; }
   finally { $('botInvBtn').disabled = false; }
 }
