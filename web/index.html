@@ -140,6 +140,11 @@
   .archive-drawer[open] > summary::before { content: '▾'; }
   .archive-drawer > summary:hover { color: var(--text); }
   .archive-note { color: var(--dim); font-size: 12px; margin: 2px 2px 10px; }
+  /* Settings sections that are mostly prose: a bordered drawer keeps the tab
+     scannable — controls visible, explainers one click away. */
+  .sec-drawer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 14px; }
+  .sec-drawer > summary { cursor: pointer; }
+  .sec-drawer[open] > summary { margin-bottom: 4px; }
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
@@ -648,58 +653,25 @@
   </section>
 
   <section id="paneEditTg" role="tabpanel" hidden>
-    <div class="sub" style="margin-bottom:10px">
-      The Telegram bot is this agent's identity — members reach it there, and
-      the token below <i>is</i> that identity. Reveal it only to recycle the bot
-      into a future agent or to move this one by hand; treat it like a password.
-    </div>
-    <label>Bot token <span style="color:var(--dim)">(for recycling the bot into a future agent)</span></label>
+    <label>👤 Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
+    <div id="tgMemberList" style="margin-bottom:6px"></div>
     <div style="display:flex;gap:8px;align-items:center">
-      <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
-      <button id="botTokenBtn" onclick="showBotToken()">Show</button>
+      <button onclick="invite(editAgentId, $('editName')?.value || '')">Invite…</button>
+      <span class="sub">DM pairing is how someone new gets in — Invite mints them the link.</span>
     </div>
 
-    <div style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
-      <label>👥 Group chats <span style="color:var(--dim)">— letting this bot join and read a group</span></label>
-      <div class="sub" style="margin:0 0 8px">
-        Two <b>@BotFather</b> settings control this, and neither can be changed by
-        API — message @BotFather in Telegram:
-        <ol style="margin:6px 0 6px 18px;padding:0">
-          <li><code>/setjoingroups</code> → pick this bot → <b>Enable</b> (may it be added to groups)</li>
-          <li><code>/setprivacy</code> → pick this bot → <b>Disable</b> (may it read <i>all</i> group messages —
-            left on, it only sees /commands and @mentions, which reads as "the bot ignores the group")</li>
-        </ol>
-        Then add the bot to the group like any member. <b>If it was already in the
-        group when you changed privacy, remove and re-add it</b> — Telegram doesn't
-        apply the change retroactively. The agent still answers only admitted
-        members, so pair everyone in the group first.
-        ♻️ <b>Recycled pool bots keep these BotFather settings from their previous
-        life</b> — the check below always shows the live state, so run it rather
-        than assuming defaults.
-      </div>
-      <div style="display:flex;gap:8px;align-items:center">
-        <button id="tgGroupBtn" onclick="checkGroupReadiness()">Check this bot's settings</button>
-        <span id="tgGroupStatus" class="sub"></span>
-      </div>
-      <div id="tgGroupResult" style="margin-top:6px"></div>
+    <label style="margin-top:14px">✨ Rich messages <span style="color:var(--dim)">— formatting in replies</span></label>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="tgRichMessages" style="width:auto" onchange="saveRichMessages()">
+        <option value="on">On (default)</option>
+        <option value="off">Off — plain text</option>
+      </select>
+      <span class="sub">bold, code blocks, links render properly · applies on the next <b>Rebuild</b></span>
+    </div>
 
-      <label style="margin-top:12px">Rich messages <span style="color:var(--dim)">— Telegram formatting in replies</span></label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <select id="tgRichMessages" style="width:auto" onchange="saveRichMessages()">
-          <option value="on">On (default)</option>
-          <option value="off">Off — plain text</option>
-        </select>
-        <span class="sub">bold, code blocks, links render properly instead of raw markdown · applies on the next <b>Rebuild</b></span>
-      </div>
-
-      <label style="margin-top:12px">Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
-      <div id="tgMemberList" style="margin-bottom:6px"></div>
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
-        <button onclick="invite(editAgentId, $('editName')?.value || '')">Invite…</button>
-        <span class="sub">DM pairing is how someone new gets in — Invite mints them the link.</span>
-      </div>
-
-      <label style="margin-top:12px">Who may talk to it in groups</label>
+    <details class="sec-drawer" id="tgGroupDrawer">
+      <summary><b>👥 Group chats</b> <span class="sub">— who it answers in groups, and the BotFather setup</span></summary>
+      <label style="margin-top:10px">Who may talk to it in groups</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <select id="tgGroupMode" style="width:auto" onchange="onGroupModeChange()">
           <option value="members">Members only (default) — people you've admitted</option>
@@ -711,7 +683,43 @@
         <button class="primary" onclick="saveGroupAccess()">Save</button>
       </div>
       <div class="sub" id="tgGroupModeHelp" style="margin-top:4px"></div>
-    </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+        <button id="tgGroupBtn" onclick="checkGroupReadiness()">Check this bot's settings</button>
+        <span id="tgGroupStatus" class="sub"></span>
+      </div>
+      <div id="tgGroupResult" style="margin-top:6px"></div>
+      <details style="margin-top:8px">
+        <summary class="sub" style="cursor:pointer">How to enable groups at @BotFather (one-time, per bot)</summary>
+        <div class="sub" style="margin-top:6px">
+          Two <b>@BotFather</b> settings control this, and neither can be changed by
+          API — message @BotFather in Telegram:
+          <ol style="margin:6px 0 6px 18px;padding:0">
+            <li><code>/setjoingroups</code> → pick this bot → <b>Enable</b> (may it be added to groups)</li>
+            <li><code>/setprivacy</code> → pick this bot → <b>Disable</b> (may it read <i>all</i> group messages —
+              left on, it only sees /commands and @mentions, which reads as "the bot ignores the group")</li>
+          </ol>
+          Then add the bot to the group like any member. <b>If it was already in the
+          group when you changed privacy, remove and re-add it</b> — Telegram doesn't
+          apply the change retroactively. The agent still answers only admitted
+          members, so pair everyone in the group first.
+          ♻️ <b>Recycled pool bots keep these BotFather settings from their previous
+          life</b> — the check above always shows the live state, so run it rather
+          than assuming defaults.
+        </div>
+      </details>
+    </details>
+
+    <details class="sec-drawer">
+      <summary><b>🔑 Bot token</b> <span class="sub">— reveal only to recycle or move the bot; it IS this agent's identity</span></summary>
+      <div class="sub" style="margin-top:8px">
+        Members reach this agent through its bot, and the token <i>is</i> that
+        identity — treat it like a password.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
+        <button id="botTokenBtn" onclick="showBotToken()">Show</button>
+      </div>
+    </details>
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
@@ -4542,6 +4550,9 @@ function renderGroupAccess(a) {
   }
   onGroupModeChange();
   $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
+  // A non-default group setting is live state the owner should SEE — open
+  // the drawer for it; the default keeps the tab compact.
+  $('tgGroupDrawer').open = ga.mode !== 'members';
 }
 
 async function saveRichMessages() {
