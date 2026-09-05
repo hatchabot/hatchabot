@@ -4,6 +4,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# npm may live off the non-interactive PATH (macOS launchd/ssh quirk).
+command -v npm >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+# Self-heal "pulled but never installed": a dependency added upstream crashes
+# the service on import with nothing on screen but a dead port (the Mac peer
+# sat broken exactly this way, 2026-09-05). Install when the lockfile no
+# longer matches the last installed one; the stamp lives in node_modules so a
+# wiped tree also reinstalls.
+STAMP="node_modules/.agentclaw-lock-stamp"
+LOCK_HASH="$(cksum package-lock.json 2>/dev/null | cut -d' ' -f1 || true)"
+if [ -n "$LOCK_HASH" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" != "$LOCK_HASH" ]; then
+  echo "Dependencies changed since the last install — running npm install…"
+  npm install --no-audit --no-fund
+  echo "$LOCK_HASH" > "$STAMP"
+fi
+
 if [ "$(uname -s)" = "Darwin" ]; then
   PLIST="$HOME/Library/LaunchAgents/com.agentclaw.control-plane.plist"
   launchctl unload -w "$PLIST" 2>/dev/null || true
