@@ -299,7 +299,7 @@ describe('inbox with parameters', () => {
     // Identity mode isn't on in this harness; insert the share directly, bound
     // to the owner — the routes under test are list + accept.
     store.insertShare({
-      id: 's1', fromOwner: 'user-other', fromEmail: 'o@example.com', toEmail: 'me@example.com',
+      id: 's1', fromOwner: 'user-other', fromEmail: 'other@example.com', toEmail: 'me@example.com',
       toOwner: OWNER, agentName: 'Stock Advisor', message: 'try it', blob: TEMPLATE,
       createdAt: new Date().toISOString(),
     });
@@ -603,7 +603,7 @@ describe('10th audit regressions', () => {
     store.insertAIProfile({ id: 'p-foreign', ownerId: 'user-other', name: 'Their Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p-foreign', createdAt: 'now' });
     store.insertHost({ id: 'h-foreign', ownerId: 'user-other', kind: 'cloud', provider: 'mock', name: 'their-laptop', settings: {}, createdAt: 'now' });
     store.insertShare({
-      id: 'sh-x', agentName: 'Advisor', fromOwner: 'sender', fromEmail: 's@example.com',
+      id: 'sh-x', agentName: 'Advisor', fromOwner: 'sender', fromEmail: 'sender@example.com',
       toEmail: 'me@example.com', toOwner: OWNER, blob: TEMPLATE, message: 'hi', createdAt: new Date().toISOString(),
     } as any);
     for (const [payload, msg] of [

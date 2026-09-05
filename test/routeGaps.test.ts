@@ -293,7 +293,7 @@ describe('agent connections (gog accounts)', () => {
     store.setAgentState('a1', 'STOPPED');
     for (const [method, url] of [
       ['GET', '/v1/agents/a1/connections'],
-      ['DELETE', '/v1/agents/a1/connections/x%40y.com'],
+      ['DELETE', '/v1/agents/a1/connections/x%40example.com'],
     ] as const) {
       const res = await f.inject({ method, url, headers: H });
       expect(res.statusCode).toBe(409);
@@ -318,7 +318,7 @@ describe('10th audit: file cap counts bytes, gog remove hardened', () => {
     });
     expect(evil.statusCode).toBe(400);
     provider.execResponses.set('sh', { code: 0, stdout: '', stderr: '' });
-    await f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/ok%40x.com', headers: H });
+    await f.inject({ method: 'DELETE', url: '/v1/agents/a1/connections/ok%40example.com', headers: H });
     expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove --force -- "ok@example.com"')).toBe(true);
   });
 });

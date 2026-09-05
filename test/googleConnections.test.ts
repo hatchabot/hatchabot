@@ -192,7 +192,7 @@ describe('attach / detach / remove', () => {
 
   it("someone else's connection cannot be attached (404, no exec)", async () => {
     const { f, provider, store } = await connectedWorld();
-    store.insertConnection({ id: 'c-x', ownerId: 'user-other', kind: 'google', email: 'x@example.org', services: [], secretRef: 's/x' });
+    store.insertConnection({ id: 'c-x', ownerId: 'user-other', kind: 'google', email: 'somebody@example.org', services: [], secretRef: 's/x' });
     const before = provider.execLog.length;
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/connections/attach', headers: H, payload: { connectionId: 'c-x' } });
     expect(res.statusCode).toBe(404);
