@@ -34,9 +34,21 @@ PORT="$(sed -n 's/^PORT=//p' .env 2>/dev/null \
   | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' \
   | tail -n1 || true)"
 PORT="${PORT:-8080}"
-for _ in $(seq 1 30); do
+# The health probe is loopback on purpose — TLS terminates in front (e.g.
+# tailscale serve), so localhost:PORT is the listener, not the front door.
+# Report the PUBLIC https URL when configured; the loopback one is a detail.
+PUBLIC_URL="$( { sed -n 's/^AGENTCLAW_PUBLIC_URL=//p' "$HOME/.config/agentclaw/env" 2>/dev/null; sed -n 's/^AGENTCLAW_PUBLIC_URL=//p' .env 2>/dev/null; } \
+  | sed -e 's/[[:space:]]*#.*$//' -e 's/[[:space:]]*$//' -e 's/^["'\'']//' -e 's/["'\'']$//' | tail -n1 || true)"
+# 60s, not 30: the DGX control plane takes ~40s to serve, and the old cap
+# printed a scary failure for a boot that was going fine.
+for _ in $(seq 1 60); do
   if curl -sf -o /dev/null "http://localhost:${PORT}/healthz"; then
-    echo "AgentClaw is up on http://localhost:${PORT}"
+    if [ -n "$PUBLIC_URL" ]; then
+      echo "AgentClaw is up — ${PUBLIC_URL}  (listener: http://localhost:${PORT})"
+    else
+      echo "AgentClaw is up on http://localhost:${PORT}"
+      echo "Tip: set AGENTCLAW_PUBLIC_URL in ~/.config/agentclaw/env to your https address — invites and Google OAuth redirect URIs use it."
+    fi
     exit 0
   fi
   sleep 1
