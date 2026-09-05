@@ -129,18 +129,31 @@ describe('the consent round-trip', () => {
     expect(list.body).not.toContain('rt-secret-1');
   });
 
-  it('a spent, foreign, or missing state never reaches Google', async () => {
+  it('the callback needs NO session (cross-site redirect drops the strict cookie) — the state alone binds it to the starter', async () => {
+    const { fetchImpl } = googleMock();
+    const { f, store } = await world(fetchImpl);
+    await configureClient(f);
+    const start = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
+    const state = new URL(start.json().url).searchParams.get('state')!;
+    // NO auth headers at all — exactly how the browser arrives from Google.
+    const cb = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` });
+    expect(cb.statusCode).toBe(200);
+    // ...and the vault entry lands under the STARTER, not some default owner.
+    expect(store.listConnections(OWNER)).toHaveLength(1);
+  });
+
+  it('a spent or made-up state never reaches Google', async () => {
     const { calls, fetchImpl } = googleMock();
     const { f } = await world(fetchImpl);
     await configureClient(f);
     const start = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
     const state = new URL(start.json().url).searchParams.get('state')!;
-    // another owner replays the state
-    const foreign = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: { 'x-agentclaw-owner': 'someone-else' } });
-    expect(foreign.statusCode).toBe(400);
-    // the replay CONSUMED it — the rightful owner's late arrival also refuses
-    const late = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: H });
-    expect(late.statusCode).toBe(400);
+    await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` }); // consumes it
+    calls.length = 0;
+    const replay = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` });
+    expect(replay.statusCode).toBe(400);
+    const junk = await f.inject({ method: 'GET', url: '/v1/connections/google/callback?code=c&state=nope' });
+    expect(junk.statusCode).toBe(400);
     expect(calls.filter((c) => c.url.includes('/token'))).toHaveLength(0);
   });
 

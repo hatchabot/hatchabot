@@ -191,6 +191,11 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
+    // Google's OAuth redirect is a CROSS-SITE top-level navigation: the
+    // strict-SameSite session cookie deliberately stays home, so this one
+    // path authenticates by its single-use state token instead (issued to an
+    // authenticated owner at /start; consumed exactly once in the handler).
+    if (path === '/v1/connections/google/callback') return;
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
@@ -284,6 +289,9 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    // Cross-site OAuth redirect: strict-SameSite keeps the session cookie
+    // home, so the single-use state token is this path's credential.
+    if (path === '/v1/connections/google/callback') return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {

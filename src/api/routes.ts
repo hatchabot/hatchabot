@@ -3475,9 +3475,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         reply.type('text/html').code(ok ? 200 : 400).send(
           `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;max-width:480px;margin:15vh auto;padding:0 16px;text-align:center"><h2>${title}</h2><p style="color:#556">${body}</p></body>`,
         );
+      // This path is auth-exempt (the cross-site redirect can't carry the
+      // strict-SameSite session cookie) — the single-use state token IS the
+      // credential, and claim.ownerId names whose vault the result joins.
       const claim = req.query.state ? stateJar.consume(req.query.state) : null;
-      if (!claim || claim.ownerId !== ownerIdOf(req)) {
-        return page('That didn\'t match', 'This consent link expired or belongs to a different session — go back to AgentClaw and press Connect again.', false);
+      if (!claim) {
+        return page("That didn't match", 'This consent link expired or was already used — go back to AgentClaw and press Connect again.', false);
       }
       if (req.query.error || !req.query.code) {
         return page('Not connected', `Google reported: ${escapeHtml(req.query.error ?? 'no code returned')}. Nothing was stored.`, false);
