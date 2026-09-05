@@ -1544,6 +1544,17 @@ export class Store {
     );
   }
 
+  /** Secret refs by LIKE pattern — names only, never values (bot inventory).
+   *  The table belongs to SqliteSecretStore; a harness with a memory store
+   *  has none, and that just means no orphaned tokens to report. */
+  listSecretRefs(likePattern: string): string[] {
+    try {
+      return (this.db.prepare(`SELECT ref FROM secrets WHERE ref LIKE ?`).all(likePattern) as any[]).map((r) => r.ref);
+    } catch {
+      return [];
+    }
+  }
+
   // ---- platform-managed connections (Google via gog) ----------------------
 
   insertConnection(c: { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string }): void {

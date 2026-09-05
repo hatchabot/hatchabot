@@ -3427,6 +3427,51 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     log: (e: string, d: Record<string, unknown>) => trace()(e, d), // trace reads agentId from detail
   });
 
+  /**
+   * Bot inventory — every Telegram bot this installation holds a token for,
+   * with a LIVE getMe verdict. Built for the BotFather ~40-bots-per-account
+   * ceiling: diffing /mybots against this list is how stale mints are found
+   * (Chris hit the cap with 5 unaccounted bots, 2026-09-05). Host-owner
+   * gated: it decrypts every bot token to ask Telegram about it.
+   */
+  app.get('/v1/bot-inventory', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const botFetch = deps.oauthFetch ?? fetch;
+    // username → {ref, where}: channels first (live agents), then pool rows,
+    // then any telegram/bot/* secret nothing references (orphaned tokens).
+    const rows = new Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string }>();
+    for (const a of store.listAllActiveAgents()) {
+      const ch = store.getChannelForAgent(a.id);
+      if (ch) rows.set(ch.accountId.toLowerCase(), { secretRef: ch.secretRef, where: 'agent', agentName: a.name, agentState: a.state });
+    }
+    for (const p of deps.channel.pool.list?.() ?? []) {
+      const u = p.username.toLowerCase();
+      if (!rows.has(u)) rows.set(u, { secretRef: p.secretRef, where: p.leasedTo ? 'pool-leased' : 'pool-free' });
+    }
+    for (const ref of store.listSecretRefs('telegram/bot/%')) {
+      const u = ref.split('/')[2]!.toLowerCase();
+      if (!rows.has(u)) rows.set(u, { secretRef: ref, where: 'orphan-token' });
+    }
+    const out: Array<Record<string, unknown>> = [];
+    for (const [username, r] of [...rows.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      let alive: boolean | undefined;
+      let displayName: string | undefined;
+      const token = await secrets.get(r.secretRef).catch(() => null);
+      if (token) {
+        try {
+          const res = await botFetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(6000) });
+          const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { first_name?: string } };
+          alive = body.ok === true;
+          displayName = body.result?.first_name;
+        } catch { alive = undefined; /* Telegram unreachable ≠ bot dead */ }
+      } else {
+        alive = false;
+      }
+      out.push({ username, ...r, secretRef: undefined, alive, displayName });
+    }
+    return { bots: out };
+  });
+
   /** Status any account may read; the secret half never leaves the vault. */
   app.get('/v1/google-oauth/client', async (req) => {
     const client = await getOAuthClient();

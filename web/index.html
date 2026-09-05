@@ -921,6 +921,22 @@
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="poolAddBtn" onclick="addPoolBot()">Add to pool</button>
     </div>
+
+    <details class="sec-drawer" id="botInvDrawer">
+      <summary><b>🔎 Bot inventory</b> <span class="sub">— every bot this server holds a token for, live-checked (for the ~40-bots BotFather cap)</span></summary>
+      <div class="sub" style="margin-top:6px">
+        BotFather's <code>/mybots</code> is the full list of bots YOUR Telegram
+        account minted. Anything there that is <i>not</i> below is a stray from
+        an old install or experiment — safe to <code>/deletebot</code> once
+        you've confirmed nothing else uses it. A ❌ token here means AgentClaw's
+        copy was revoked; the bot may still exist (and count) at BotFather.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+        <button id="botInvBtn" onclick="loadBotInventory()">Run the live check</button>
+        <span class="sub" id="botInvStatus"></span>
+      </div>
+      <div id="botInvList"></div>
+    </details>
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
@@ -1694,6 +1710,29 @@ async function removeSearchKey() {
   if (!confirm('Remove the fleet search key? Agents fall back to DuckDuckGo on their next Rebuild.')) return;
   try { await api('/v1/search-key', { method: 'DELETE' }); loadSearchKey(); }
   catch (e) { toast(e.message, 10000); }
+}
+
+async function loadBotInventory() {
+  $('botInvBtn').disabled = true;
+  $('botInvStatus').textContent = 'asking Telegram about each bot…';
+  try {
+    const { bots } = await api('/v1/bot-inventory');
+    const WHERE = {
+      'agent': b => `serving <b>${esc(b.agentName)}</b>${b.agentState !== 'RUNNING' ? ` (${esc(b.agentState)})` : ''}`,
+      'pool-leased': () => 'pool (leased)',
+      'pool-free': () => 'pool — free stock',
+      'orphan-token': () => '⚠ orphaned token — nothing references it',
+    };
+    $('botInvList').innerHTML = bots.map(b => `
+      <div class="pair" style="gap:8px">
+        <span class="grow"><code>@${esc(b.username)}</code>
+          <span class="sub">${b.displayName ? `“${esc(b.displayName)}” · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span></span>
+        <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : 'Telegram unreachable — unknown'}">
+          ${b.alive === true ? '✅' : b.alive === false ? '❌' : '❓'}</span>
+      </div>`).join('') || '<div class="sub">No bots known to this server.</div>';
+    $('botInvStatus').textContent = `${bots.length} bots · ${bots.filter(b => b.alive === false).length} dead token(s) · ${bots.filter(b => b.where === 'orphan-token').length} orphaned`;
+  } catch (e) { $('botInvStatus').textContent = e.message; }
+  finally { $('botInvBtn').disabled = false; }
 }
 
 async function loadPool() {

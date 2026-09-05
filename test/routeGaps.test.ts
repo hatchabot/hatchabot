@@ -334,3 +334,16 @@ describe('PATCH richMessages (telegram formatting opt-out)', () => {
     expect(store.getAgent('a1')!.richMessages).toBeUndefined(); // managed default (on)
   });
 });
+
+describe('GET /v1/bot-inventory', () => {
+  it('host-owner gated; lists every known bot with a live verdict, no tokens', async () => {
+    const { f } = await liveWorld();
+    const stranger = await f.inject({ method: 'GET', url: '/v1/bot-inventory', headers: { 'x-agentclaw-owner': 'someone-else' } });
+    expect(stranger.statusCode).toBe(403);
+    const res = await f.inject({ method: 'GET', url: '/v1/bot-inventory', headers: H });
+    expect(res.statusCode).toBe(200);
+    const bots = res.json().bots;
+    expect(bots.some((b: any) => b.username === 'kitchenbot' && b.where === 'agent' && b.agentName === 'Kitchen')).toBe(true);
+    expect(res.body).not.toContain('secretRef');
+  });
+});

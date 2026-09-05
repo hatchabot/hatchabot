@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.111.0] — 2026-09-05
+
+### Added
+- **🔎 Bot inventory** (⚙ Settings → Bot pool): every Telegram bot this
+  server holds a token for — serving which agent / free pool stock /
+  orphaned token — each live-checked against Telegram (✅ working /
+  ❌ revoked / ❓ unreachable). Built for the ~40-bots-per-account BotFather
+  ceiling: diff `/mybots` against this list to find strays from old
+  installs (which is how 2 of Chris's 5 unaccounted bots were found in the
+  retired manual install). Host-owner gated; token values never leave the
+  vault. New: GET /v1/bot-inventory.
+- Telegram settings tab restructured: Members and Rich messages visible on
+  top; Group chats and Bot token are drawers (non-default group modes
+  auto-open theirs).
+
 ## [0.110.0] — 2026-09-05
 
 ### Added
