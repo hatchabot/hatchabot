@@ -110,6 +110,9 @@ export interface OpenClawConfigPatch {
     allowFrom?: string[];
     /** Group-chat access. Absent converges to members-only on rebuild. */
     groupAccess?: GroupAccess;
+    /** Rich Telegram formatting; written unconditionally (true unless the
+     *  owner turned it off), so the fleet converges on rebuild. */
+    richMessages?: boolean;
   };
 }
 

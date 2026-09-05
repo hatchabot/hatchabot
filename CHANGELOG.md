@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.110.0] — 2026-09-05
+
+### Added
+- **Telegram rich messages, on by default.** OpenClaw's `richMessages` was
+  unset fleet-wide (= plain text: raw markdown asterisks in chat). The
+  control plane now writes `channels.telegram.richMessages` convergently at
+  provision — ON unless the owner opts out via the new select in ⚙ Settings
+  → Telegram ("On (default)" / "Off — plain text"; `PATCH {richMessages}`;
+  applies on the next Rebuild). This is gateway config, not an image change
+  — and it's the managed-path answer to a setting agents themselves are
+  (correctly) blocked from touching.
+
+## [0.109.1] — 2026-09-04
+
+### Fixed
+- OAuth callback authenticates by its single-use state token (the
+  SameSite=strict session cookie never rides Google's cross-site redirect).
+
 ## [0.109.0] — 2026-09-04
 
 ### Added

@@ -2012,6 +2012,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             })
             .nullable()
             .optional(),
+          /** Telegram rich formatting. Applied on the next rebuild. `null`
+           *  clears back to the managed default (on). */
+          richMessages: z.boolean().nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -2027,7 +2030,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         group === undefined &&
         parsed.data.image === undefined &&
         parsed.data.parameters === undefined &&
-        parsed.data.groupAccess === undefined
+        parsed.data.groupAccess === undefined &&
+        parsed.data.richMessages === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
@@ -2038,6 +2042,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
       if (parsed.data.groupAccess !== undefined) {
         store.setAgentGroupAccess(agent.id, parsed.data.groupAccess);
+      }
+
+      if (parsed.data.richMessages !== undefined) {
+        store.setAgentRichMessages(agent.id, parsed.data.richMessages);
       }
 
       if (persona !== undefined) {

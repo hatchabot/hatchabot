@@ -303,3 +303,20 @@ describe('web search is always on (mandatory baseline)', () => {
     expect(argFor(cmds, 'tools.web.search.enabled')).toBe('true');
   });
 });
+
+describe('telegram rich messages (managed default ON)', () => {
+  const base = { agentId: 'a1', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
+  const tg = (richMessages?: boolean) => ({
+    ...base,
+    telegram: { accountId: 'b', botToken: 't', dmPolicy: 'pairing' as const, allowFrom: ['1'], richMessages },
+  });
+
+  it('unset and true both write true — OpenClaw\'s own default is plain text, ours is rich', () => {
+    expect(argFor(buildConfigCommands(tg(undefined)), 'channels.telegram.richMessages')).toBe('true');
+    expect(argFor(buildConfigCommands(tg(true)), 'channels.telegram.richMessages')).toBe('true');
+  });
+
+  it('an explicit opt-out writes false — and the write always happens (convergent)', () => {
+    expect(argFor(buildConfigCommands(tg(false)), 'channels.telegram.richMessages')).toBe('false');
+  });
+});

@@ -140,6 +140,9 @@ export interface Agent {
   paramFiles?: { soul?: string; agents?: string; persona?: string };
   /** Telegram group-chat access; absent = OpenClaw's default (members-only). */
   groupAccess?: GroupAccess;
+  /** Telegram rich-message formatting. Absent = AgentClaw's managed default
+   *  (ON — OpenClaw's own unset default is off); false = plain text. */
+  richMessages?: boolean;
   /** Lineage: the same-installation master this agent was derived from. */
   parentAgentId?: string;
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */

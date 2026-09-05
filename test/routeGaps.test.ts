@@ -322,3 +322,15 @@ describe('10th audit: file cap counts bytes, gog remove hardened', () => {
     expect(provider.execLog.some((c) => c[0] === 'sh' && c[1] === 'gog auth remove --force -- "ok@example.com"')).toBe(true);
   });
 });
+
+describe('PATCH richMessages (telegram formatting opt-out)', () => {
+  it('false persists, null clears back to the managed default', async () => {
+    const { f, store } = await liveWorld();
+    const off = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { richMessages: false } });
+    expect(off.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.richMessages).toBe(false);
+    const clear = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { richMessages: null } });
+    expect(clear.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.richMessages).toBeUndefined(); // managed default (on)
+  });
+});

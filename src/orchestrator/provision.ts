@@ -445,6 +445,7 @@ export async function buildRuntimeSpec(
           dmPolicy: 'pairing',
           allowFrom,
           groupAccess: agent.groupAccess,
+          richMessages: agent.richMessages !== false,
         },
       },
     },

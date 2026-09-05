@@ -302,8 +302,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   }
 
   if (patch.telegram) {
-    const { accountId, botToken, dmPolicy, allowFrom, groupAccess } = patch.telegram;
+    const { accountId, botToken, dmPolicy, allowFrom, groupAccess, richMessages } = patch.telegram;
     cmds.push({ argv: ['config', 'set', 'channels.telegram.enabled', 'true'] });
+    // Rich formatting — written UNCONDITIONALLY (convergent, same rule as
+    // groupPolicy below): OpenClaw's own unset default is plain text, and
+    // AgentClaw's managed default is ON; only an explicit per-agent opt-out
+    // writes false. Missing from the patch (older caller) also lands true.
+    cmds.push({ argv: ['config', 'set', 'channels.telegram.richMessages', richMessages === false ? 'false' : 'true'] });
     // One JSON set for the whole account object keeps the command count down
     // and matches the shape observed in a live 2026.6.11 config.
     const account: Record<string, unknown> = {

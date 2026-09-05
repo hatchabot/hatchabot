@@ -279,6 +279,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN group_access TEXT`,
       // Lineage: the master this agent was derived from (same installation).
       `ALTER TABLE agents ADD COLUMN parent_agent_id TEXT`,
+      // Telegram rich formatting: NULL = managed default (on), 0 = opt-out.
+      `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
       // Template-carried schedules awaiting the gateway (applied on RUNNING).
       `ALTER TABLE agents ADD COLUMN pending_schedules TEXT`,
       // Which agent a share was cut from — lets an accepted copy record lineage.
@@ -1647,6 +1649,13 @@ export class Store {
       .run(ga ? JSON.stringify(ga) : null, new Date().toISOString(), id);
   }
 
+  /** null = back to the managed default (rich ON). */
+  setAgentRichMessages(id: string, on: boolean | null): void {
+    this.db
+      .prepare(`UPDATE agents SET rich_messages = ?, updated_at = ? WHERE id = ?`)
+      .run(on === null ? null : on ? 1 : 0, new Date().toISOString(), id);
+  }
+
   setAgentParamState(
     id: string,
     values: Record<string, string> | null,
@@ -2086,6 +2095,7 @@ function rowToAgent(r: any): Agent {
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,
     paramFiles: r.param_files ? safeJson(r.param_files, undefined) : undefined,
     groupAccess: r.group_access ? safeJson(r.group_access, undefined) : undefined,
+    richMessages: r.rich_messages === null || r.rich_messages === undefined ? undefined : !!r.rich_messages,
     parentAgentId: r.parent_agent_id ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,

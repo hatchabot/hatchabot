@@ -683,6 +683,15 @@
       </div>
       <div id="tgGroupResult" style="margin-top:6px"></div>
 
+      <label style="margin-top:12px">Rich messages <span style="color:var(--dim)">— Telegram formatting in replies</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="tgRichMessages" style="width:auto" onchange="saveRichMessages()">
+          <option value="on">On (default)</option>
+          <option value="off">Off — plain text</option>
+        </select>
+        <span class="sub">bold, code blocks, links render properly instead of raw markdown · applies on the next <b>Rebuild</b></span>
+      </div>
+
       <label style="margin-top:12px">Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
       <div id="tgMemberList" style="margin-bottom:6px"></div>
       <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
@@ -4532,6 +4541,17 @@ function renderGroupAccess(a) {
     $('tgGroupRoom').innerHTML = `<option value="${esc(ga.roomId)}">room ${esc(ga.roomId)}</option>`;
   }
   onGroupModeChange();
+  $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
+}
+
+async function saveRichMessages() {
+  const off = $('tgRichMessages').value === 'off';
+  try {
+    // null = clear back to the managed default (on) instead of pinning true.
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { richMessages: off ? false : null } });
+    toast(off ? 'Plain text — applies on the next Rebuild.' : 'Rich messages on (default) — applies on the next Rebuild.');
+    await refresh(false);
+  } catch (e) { toast(e.message, 10000); }
 }
 
 async function findGroupRooms() {
