@@ -182,3 +182,27 @@ host's `~/.config/gogcli`, not the workspace. The adopt flow should detect
 known connection dirs referenced by the agent's skills/crons and offer:
 "copy this credential store onto the agent's volume (recommended — it will
 then move with the agent), or re-connect fresh in chat afterwards."
+
+## Phase 2 — SHIPPED 2026-09-04 (v0.109.0): platform-managed connections
+
+The chat-driven gog flow proved to be the #1 adoption wall (Chris). The
+control plane now owns the OAuth dance:
+
+- One per-installation OAuth client (owner creates it once in Google's
+  console via the guided wizard in ⚙ Settings → Connections; stored as
+  secret `google-oauth/client`). Redirect URI = `AGENTCLAW_PUBLIC_URL` +
+  `/v1/connections/google/callback` — keep that env var set or the URI
+  drifts with however the owner happens to browse.
+- Connect = browser consent (`prompt=consent access_type=offline`, state
+  jar, authenticated callback) → refresh token in the SecretStore
+  (`connection/<id>`), row in `connections` (per-owner, upsert by email).
+- Attach to an agent (`agent_connections`) → materialized immediately when
+  RUNNING and at every provision step 7.6 via `gog auth import
+  --refresh-token-stdin`, with the keyring-password + ~/.local/bin/gog
+  wrapper bootstrap (the condo agent's proven pattern). `gmail_no_send` per
+  attachment. Detach/vault-removal dematerializes (`gog auth remove
+  --force`) and vault-removal also revokes at Google.
+- What stays manual by design: the consent click (Google requires a human),
+  and the one-time console setup. Retail-grade zero-setup = shipping a
+  verified AgentClaw OAuth client (CASA assessment for Gmail scopes) —
+  deliberate product-stage investment, parked.

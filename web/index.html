@@ -627,7 +627,17 @@
       <code>--gmail-no-send</code>. Connect only accounts you'd hand the whole
       member list.
     </div>
-    <label>Google accounts <span style="color:var(--dim)">— via the agent's gog tool</span></label>
+    <label>Attach a connected account <span style="color:var(--dim)">— from ⚙ Settings → Connections</span></label>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select id="connAttachPick" style="flex:1;min-width:180px"></select>
+      <label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer"
+             title="The agent can read mail but never send it — recommended unless sending is the point">
+        <input type="checkbox" id="connNoSend" checked style="width:auto;flex:none"> no send</label>
+      <button id="connAttachBtn" onclick="attachConnection()">Attach</button>
+    </div>
+    <div class="sub" style="margin:4px 0 10px">Applies immediately on a running agent, and again on every rebuild.
+      No account connected yet? Connect one under ⚙ Settings → Connections first — one consent, reusable across agents.</div>
+    <label>Google accounts on this agent <span style="color:var(--dim)">— via its gog tool</span></label>
     <div id="connList" class="sub">Loading…</div>
     <div class="sub" style="margin-top:10px">
       Disconnecting removes the stored refresh token — the agent loses access
@@ -743,6 +753,7 @@
     <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Runners</button>
     <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Bot pool</button>
     <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Cluster servers</button>
+    <button class="tab" id="tabConn" role="tab" aria-selected="false" onclick="showTab('conn')">Connections</button>
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
@@ -911,6 +922,29 @@
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="peerAddBtn" onclick="addPeer()">Add cluster server</button>
     </div>
+  </section>
+
+  <section id="paneConn" role="tabpanel" hidden>
+    <div class="sub">
+      Google accounts connected to this server — connect once here, then attach
+      an account to any agent under its ⚙ Settings → Connections. The consent
+      happens in your browser with Google; AgentClaw holds only the resulting
+      token, and agents receive it when you attach them.
+    </div>
+
+    <div id="connClientBox" style="margin-top:12px"></div>
+
+    <h4 style="margin:16px 0 4px">Connect a Google account</h4>
+    <div class="sub" style="margin-bottom:6px">What the agent side may use — fewer is safer; you can reconnect with more later.</div>
+    <div id="connServices" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:8px"></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="primary" id="connGoBtn" onclick="startGoogleConnect()">Connect Google account…</button>
+      <span class="sub">opens Google in a new tab; come back and press ⟳ when done</span>
+      <button onclick="loadConnections()" title="Refresh the list">⟳</button>
+    </div>
+
+    <h4 style="margin:16px 0 4px">Connected accounts</h4>
+    <div id="connVault" class="sub">Loading…</div>
   </section>
 
   <section id="paneAccess" role="tabpanel" hidden>
@@ -1565,7 +1599,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
+const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -1574,6 +1608,7 @@ function showTab(name) {
     $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
   }
   if (name === 'access') refreshMgmtBotStatus();
+  if (name === 'conn') loadConnections();
   if (name === 'hosts') loadHosts();
   if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
@@ -3347,6 +3382,15 @@ function showEditTab(name) {
 async function renderConnections() {
   const el = $('connList'), forId = editAgentId;
   el.innerHTML = 'Checking the agent…';
+  // The attach picker: the caller's vault, minus accounts already on this agent.
+  api('/v1/connections').then(({ connections }) => {
+    if (editAgentId !== forId) return;
+    const open = connections.filter(c => !c.attachedTo.some(a => a.id === forId));
+    $('connAttachPick').innerHTML = open.length
+      ? open.map(c => `<option value="${c.id}">${esc(c.email)}</option>`).join('')
+      : '<option value="">— no unattached accounts; connect one in ⚙ Settings → Connections —</option>';
+    $('connAttachBtn').disabled = !open.length;
+  }).catch(() => {});
   try {
     const { accounts } = await api(`/v1/agents/${forId}/connections`);
     if (editAgentId !== forId) return; // dialog moved on while we fetched
@@ -3354,16 +3398,134 @@ async function renderConnections() {
       ? accounts.map(a => `<div class="pair"><span class="grow"><b>${esc(a.email)}</b>
           <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span></span>
           <button class="danger" onclick="disconnectAccount('${jsq(a.email)}')">Disconnect</button></div>`).join('')
-      : 'No Google accounts connected. Ask the agent in chat to connect one — e.g. “connect my Google account for calendar and mail”.';
+      : 'No Google accounts on this agent yet — attach one above, or ask the agent in chat to connect one itself.';
   } catch (e) {
     if (editAgentId === forId) el.innerHTML = esc(e.message);
   }
 }
 
-async function disconnectAccount(email) {
-  if (!confirm(`Disconnect ${email}?\n\nThe agent loses access to this Google account immediately. Reconnecting means redoing the sign-in with the agent in chat.`)) return;
+async function attachConnection() {
+  const id = $('connAttachPick').value;
+  if (!id) return;
+  $('connAttachBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
+    const r = await api(`/v1/agents/${editAgentId}/connections/attach`, {
+      method: 'POST', body: { connectionId: id, gmailNoSend: $('connNoSend').checked },
+    });
+    toast(r.live ? 'Attached — the agent can use it now.'
+      : r.error ? `Attached, but not live yet: ${r.error}` : 'Attached — lands on the next rebuild/start.', 8000);
+    await renderConnections();
+  } catch (e) { toast(e.message, 10000); }
+  finally { $('connAttachBtn').disabled = false; }
+}
+
+// ---- platform connections (main Settings → Connections) --------------------
+
+const CONN_SERVICES = [
+  ['gmail', 'Gmail', true], ['calendar', 'Calendar', true], ['drive', 'Drive', true],
+  ['sheets', 'Sheets', false], ['docs', 'Docs', false], ['contacts', 'Contacts', false],
+];
+let platformConnections = [];
+
+function renderConnServices() {
+  const box = $('connServices');
+  if (box.childElementCount) return; // static — render once
+  box.innerHTML = CONN_SERVICES.map(([key, label, on]) => `
+    <label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer">
+      <input type="checkbox" data-svc="${key}"${on ? ' checked' : ''} style="width:auto;flex:none"> ${label}</label>`).join('');
+}
+
+async function loadConnections() {
+  renderConnServices();
+  try {
+    const cs = await api('/v1/google-oauth/client');
+    $('connClientBox').innerHTML = cs.configured ? `
+      <div class="pair" style="flex-wrap:wrap;gap:6px">
+        <span class="grow">🔑 OAuth client <code style="font-size:12px">${esc(cs.clientId.slice(0, 24))}…</code>
+          <span class="sub">the one-time Google Cloud setup is done for this server</span></span>
+        <button onclick="removeOAuthClient()" class="danger">Remove</button>
+      </div>` : `
+      <details style="border:1px solid var(--warn);border-radius:10px;padding:10px 12px" open>
+        <summary style="cursor:pointer"><b>One-time setup (server owner):</b> create this server's Google OAuth client</summary>
+        <div class="sub" style="margin-top:8px">
+          Done once per installation — after this, everyone just clicks Connect.
+          <ol style="margin:6px 0 6px 18px;padding:0">
+            <li>Open <b>console.cloud.google.com</b> → create (or pick) a project.</li>
+            <li><b>APIs &amp; Services → Library</b>: enable <i>Gmail API</i>, <i>Google Calendar API</i>, <i>Google Drive API</i> (+ Sheets/Docs/People if you'll use them).</li>
+            <li><b>OAuth consent screen</b>: External · fill the two required fields · add your household's Gmail addresses as <b>Test users</b>.</li>
+            <li><b>Credentials → Create credentials → OAuth client ID</b> → type <b>Web application</b> → add this exact redirect URI:</li>
+          </ol>
+          <div style="display:flex;gap:8px;align-items:center;margin:4px 0">
+            <code id="connRedirectUri" style="flex:1;padding:6px 8px;background:var(--panel-2);border-radius:6px;font-size:12px;word-break:break-all">${esc(cs.redirectUri)}</code>
+            <button onclick="navigator.clipboard.writeText($('connRedirectUri').textContent).then(()=>toast('Copied'))">Copy</button>
+          </div>
+          <div class="sub" style="margin:2px 0 8px">5. Paste the client ID and secret it gives you:</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <input type="text" id="connClientId" placeholder="…apps.googleusercontent.com" style="flex:2;min-width:220px">
+            <input type="password" id="connClientSecret" placeholder="Client secret" autocomplete="off" style="flex:1;min-width:160px">
+            <button class="primary" onclick="saveOAuthClient()">Save</button>
+          </div>
+          <div class="sub" style="margin-top:6px">⚠ While the consent screen is in <b>Testing</b> mode, Google expires tokens
+            after 7 days unless you publish the app (unverified-publish works for a household — users click through one
+            "unverified" warning at connect time, once).</div>
+        </div>
+      </details>`;
+  } catch (e) { $('connClientBox').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  try {
+    const { connections } = await api('/v1/connections');
+    platformConnections = connections;
+    $('connVault').innerHTML = connections.length ? connections.map(c => `
+      <div class="pair" style="flex-wrap:wrap;gap:6px">
+        <span class="grow"><b>${esc(c.email)}</b>
+          <span class="sub">${esc((c.services ?? []).join(', ') || 'default services')}
+            · ${c.attachedTo.length ? `attached to ${c.attachedTo.map(a => esc(a.name)).join(', ')}` : 'not attached to any agent yet'}</span></span>
+        <button class="danger" onclick="removeConnection('${jsq(c.id)}','${jsq(c.email)}')">Remove</button>
+      </div>`).join('')
+      : 'None yet — press Connect above. Each person connects their own accounts from their own login.';
+  } catch (e) { $('connVault').innerHTML = esc(e.message); }
+}
+
+async function saveOAuthClient() {
+  try {
+    await api('/v1/google-oauth/client', { method: 'PUT', body: { clientId: $('connClientId').value.trim(), clientSecret: $('connClientSecret').value.trim() } });
+    toast('OAuth client saved — Connect now works for everyone on this server.');
+    await loadConnections();
+  } catch (e) { toast(e.message, 10000); }
+}
+
+async function removeOAuthClient() {
+  if (!confirm('Remove the Google OAuth client?\n\nNew connects stop working until one is configured again; already-connected accounts keep working until their tokens expire.')) return;
+  try { await api('/v1/google-oauth/client', { method: 'DELETE' }); await loadConnections(); } catch (e) { toast(e.message, 10000); }
+}
+
+async function startGoogleConnect() {
+  const services = [...$('connServices').querySelectorAll('input:checked')].map(i => i.dataset.svc);
+  try {
+    const { url } = await api('/v1/connections/google/start', { method: 'POST', body: { services } });
+    window.open(url, '_blank', 'noopener');
+    toast('Finish the consent in the new tab, then press ⟳ here.', 10000);
+  } catch (e) { toast(e.message, 10000); }
+}
+
+async function removeConnection(id, email) {
+  if (!confirm(`Remove ${email} from this server?\n\nEvery agent it's attached to loses access, and the token is revoked at Google.`)) return;
+  try {
+    await api(`/v1/connections/${id}`, { method: 'DELETE' });
+    toast(`${email} removed and revoked.`);
+    await loadConnections();
+  } catch (e) { toast(e.message, 10000); }
+}
+
+async function disconnectAccount(email) {
+  if (!confirm(`Disconnect ${email} from this agent?\n\nThe agent loses access immediately. The account itself stays connected to the server (⚙ Settings → Connections) for other agents.`)) return;
+  try {
+    // A platform-attached account must be DETACHED (removing only the
+    // container copy would re-materialize it on the next rebuild); anything
+    // else is an agent-made connection and gets the raw container remove.
+    const { connections } = await api('/v1/connections').catch(() => ({ connections: [] }));
+    const plat = connections.find(c => c.email === email && c.attachedTo.some(a => a.id === editAgentId));
+    if (plat) await api(`/v1/agents/${editAgentId}/connections/detach`, { method: 'POST', body: { connectionId: plat.id } });
+    else await api(`/v1/agents/${editAgentId}/connections/${encodeURIComponent(email)}`, { method: 'DELETE' });
     toast(`${email} disconnected.`);
     await renderConnections();
   } catch (e) { toast(e.message, 10000); }

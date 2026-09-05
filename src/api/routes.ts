@@ -74,6 +74,11 @@ import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
+import {
+  DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
+  dematerializeConnection, exchangeGoogleCode, googleAuthUrl, materializeConnection,
+  parseOAuthClient, revokeGoogleToken, type OAuthClient,
+} from '../orchestrator/googleConnections.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -128,6 +133,8 @@ export interface ApiDeps {
    * invitee's phone.
    */
   publicUrl?: string;
+  /** Test seam for the Google OAuth round-trip (token exchange, userinfo, revoke). */
+  oauthFetch?: typeof fetch;
   /** Drives the login screen the unauthenticated page renders. */
   authMode?: 'password' | 'identity';
   /** Set in identity mode: lets the join flow bind a membership to an account. */
@@ -3385,6 +3392,191 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
       trace(agent.id)('connection.removed', { email });
       return { removed: true };
+    },
+  );
+
+  // ---- platform-managed Google connections (Phase 2) ----------------------
+  // The control plane owns the OAuth dance: one per-installation client, a
+  // normal browser consent redirect, refresh tokens in the SecretStore, and
+  // per-agent attachment materialized via `gog auth import`. See
+  // orchestrator/googleConnections.ts for the design note.
+  const escapeHtml = (s: string) =>
+    s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+  const oauthFetch = deps.oauthFetch ?? fetch;
+  const stateJar = new OAuthStateJar();
+  const oauthRedirectUri = (req: { headers: Record<string, unknown>; protocol: string }): string => {
+    const origin =
+      deps.publicUrl?.replace(/\/$/, '') ??
+      `${typeof req.headers['x-forwarded-proto'] === 'string' ? req.headers['x-forwarded-proto'] : req.protocol}://${String(req.headers.host ?? '')}`;
+    return `${origin}/v1/connections/google/callback`;
+  };
+  const getOAuthClient = async (): Promise<OAuthClient | null> => {
+    const raw = await secrets.get(GOOGLE_CLIENT_REF).catch(() => null);
+    return raw ? parseOAuthClient(raw) : null;
+  };
+  const connSyncDeps = (hostId: string) => ({
+    store, secrets, provider: providerFor(hostId),
+    log: (e: string, d: Record<string, unknown>) => trace()(e, d), // trace reads agentId from detail
+  });
+
+  /** Status any account may read; the secret half never leaves the vault. */
+  app.get('/v1/google-oauth/client', async (req) => {
+    const client = await getOAuthClient();
+    return {
+      configured: !!client,
+      clientId: client?.clientId,
+      redirectUri: oauthRedirectUri(req as any),
+    };
+  });
+
+  // The client is an installation resource, like the runtime image — only
+  // the machine owner sets or clears it.
+  app.put<{ Body: { clientId?: string; clientSecret?: string } }>('/v1/google-oauth/client', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const parsed = z
+      .object({ clientId: z.string().trim().min(10).max(200), clientSecret: z.string().trim().min(10).max(200) })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Both the client ID and client secret are required.' });
+    await secrets.put(GOOGLE_CLIENT_REF, JSON.stringify(parsed.data));
+    return { configured: true, clientId: parsed.data.clientId };
+  });
+
+  app.delete('/v1/google-oauth/client', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    await secrets.delete(GOOGLE_CLIENT_REF).catch(() => {});
+    return { configured: false };
+  });
+
+  /** Begin the consent round-trip: returns the Google URL to open. */
+  app.post<{ Body: { services?: string[] } }>('/v1/connections/google/start', async (req, reply) => {
+    const client = await getOAuthClient();
+    if (!client) {
+      return reply.code(409).send({ error: 'No Google OAuth client configured yet — the server owner sets it up under ⚙ Settings → Connections.' });
+    }
+    const body = (req.body ?? {}) as { services?: string[] };
+    const services = (body.services?.length ? body.services : DEFAULT_SERVICES)
+      .filter((s) => s in GOOGLE_SERVICES)
+      .slice(0, 8);
+    if (!services.length) return reply.code(400).send({ error: 'Pick at least one service.' });
+    const state = stateJar.issue(ownerIdOf(req), services);
+    return { url: googleAuthUrl(client.clientId, oauthRedirectUri(req as any), state, services) };
+  });
+
+  /**
+   * Google's redirect lands here in the SAME browser session (the cookie
+   * rides along, so this stays behind auth); `state` additionally binds the
+   * code to whoever started the flow. Replies with a tiny page, not JSON —
+   * a human is looking at this tab.
+   */
+  app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
+    '/v1/connections/google/callback',
+    async (req, reply) => {
+      const page = (title: string, body: string, ok: boolean) =>
+        reply.type('text/html').code(ok ? 200 : 400).send(
+          `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;max-width:480px;margin:15vh auto;padding:0 16px;text-align:center"><h2>${title}</h2><p style="color:#556">${body}</p></body>`,
+        );
+      const claim = req.query.state ? stateJar.consume(req.query.state) : null;
+      if (!claim || claim.ownerId !== ownerIdOf(req)) {
+        return page('That didn\'t match', 'This consent link expired or belongs to a different session — go back to AgentClaw and press Connect again.', false);
+      }
+      if (req.query.error || !req.query.code) {
+        return page('Not connected', `Google reported: ${escapeHtml(req.query.error ?? 'no code returned')}. Nothing was stored.`, false);
+      }
+      const client = await getOAuthClient();
+      if (!client) return page('Not connected', 'The OAuth client was removed mid-flow.', false);
+      try {
+        const { refreshToken, email } = await exchangeGoogleCode(client, oauthRedirectUri(req as any), req.query.code, oauthFetch);
+        // Upsert: reconnecting the same account refreshes its token in place
+        // (and every agent it's attached to picks the new token up on its
+        // next rebuild/materialization).
+        const existing = store.findConnection(claim.ownerId, 'google', email);
+        const id = existing?.id ?? randomUUID();
+        const secretRef = existing?.secretRef ?? `connection/${id}`;
+        await secrets.put(secretRef, refreshToken);
+        store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: claim.services, secretRef });
+        trace()('connection.linked', { email, services: claim.services });
+        return page(`✅ ${escapeHtml(email)} connected`,
+          'You can close this tab. Back in AgentClaw, attach this account to any agent under its ⚙ Settings → Connections.', true);
+      } catch (err) {
+        return page('Not connected', escapeHtml(String((err as Error).message ?? err).slice(0, 300)), false);
+      }
+    },
+  );
+
+  /** The caller's connection vault, with where each one reaches. */
+  app.get('/v1/connections', async (req) => {
+    const mine = store.listConnections(ownerIdOf(req));
+    return {
+      connections: mine.map((c) => ({
+        ...c,
+        attachedTo: store
+          .listAgentsForConnection(c.id)
+          .map((aid) => store.getAgent(aid))
+          .filter((a) => a && a.state !== 'DELETED')
+          .map((a) => ({ id: a!.id, name: a!.name })),
+      })),
+    };
+  });
+
+  app.delete<{ Params: { id: string } }>('/v1/connections/:id', async (req, reply) => {
+    const conn = store.getConnection(req.params.id);
+    if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+    // Pull it off every RUNNING agent first, then revoke at Google, then
+    // drop the vault entry — so a half-failure errs toward less access.
+    for (const aid of store.listAgentsForConnection(conn.id)) {
+      const a = store.getAgent(aid);
+      if (a?.state === 'RUNNING' && a.runtimeRef) {
+        await dematerializeConnection(connSyncDeps(a.hostId), { id: a.id, runtimeRef: a.runtimeRef }, conn.email);
+      }
+    }
+    const token = await secrets.get(conn.secretRef).catch(() => null);
+    if (token) await revokeGoogleToken(token, oauthFetch);
+    await secrets.delete(conn.secretRef).catch(() => {});
+    store.deleteConnection(conn.id);
+    trace()('connection.unlinked', { email: conn.email });
+    return { removed: true };
+  });
+
+  /** Attach a vault connection to an agent — live immediately when RUNNING,
+   *  and re-materialized on every future provision/rebuild. */
+  app.post<{ Params: { id: string }; Body: { connectionId?: string; gmailNoSend?: boolean } }>(
+    '/v1/agents/:id/connections/attach',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const body = (req.body ?? {}) as { connectionId?: string; gmailNoSend?: boolean };
+      const conn = body.connectionId ? store.getConnection(body.connectionId) : undefined;
+      // The connection must be the CALLER's: attaching someone else's Gmail
+      // to your agent is exactly the cross-owner grant this vault must not
+      // allow (sharing, if ever, is an explicit owner opt-in like AI sources).
+      if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such connection.' });
+      store.attachConnection(agent.id, conn.id, body.gmailNoSend === true);
+      let live = false;
+      let error: string | undefined;
+      if (agent.state === 'RUNNING' && agent.runtimeRef) {
+        const r = await materializeConnection(connSyncDeps(agent.hostId), { id: agent.id, slug: agent.slug, runtimeRef: agent.runtimeRef }, conn.id);
+        live = r.ok;
+        error = r.ok ? undefined : r.error;
+      }
+      trace(agent.id)('connection.attached', { email: conn.email, live });
+      return { attached: true, live, error };
+    },
+  );
+
+  app.post<{ Params: { id: string }; Body: { connectionId?: string } }>(
+    '/v1/agents/:id/connections/detach',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const body = (req.body ?? {}) as { connectionId?: string };
+      const conn = body.connectionId ? store.getConnection(body.connectionId) : undefined;
+      if (!conn || conn.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such connection.' });
+      store.detachConnection(agent.id, conn.id);
+      if (agent.state === 'RUNNING' && agent.runtimeRef) {
+        await dematerializeConnection(connSyncDeps(agent.hostId), { id: agent.id, runtimeRef: agent.runtimeRef }, conn.email);
+      }
+      trace(agent.id)('connection.detached', { email: conn.email });
+      return { detached: true };
     },
   );
 

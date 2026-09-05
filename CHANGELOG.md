@@ -2,6 +2,24 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.109.0] — 2026-09-04
+
+### Added
+- **Platform-managed Google connections** — the gog consent flow leaves the
+  chat. ⚙ Settings → Connections: a one-time guided OAuth-client setup
+  (server owner, exact console clicks + copyable redirect URI), then
+  **Connect Google account** runs a normal browser consent — no URL
+  copy-pasting, no `--step 2`, no keyring incantations. Refresh tokens live
+  in the SecretStore; each person's accounts are their own vault. On any
+  agent's ⚙ Settings → Connections, **Attach** puts an account on that
+  agent (optionally send-blocked): live immediately when running,
+  re-materialized on every rebuild via `gog auth import`, with the
+  non-interactive keyring plumbing bootstrapped automatically. Disconnect
+  is detach-aware; removing an account from the vault pulls it off every
+  agent and revokes the token at Google. The consent click itself stays
+  human — that's Google's floor, and now it's the ONLY step left.
+  `AGENTCLAW_PUBLIC_URL` pins the redirect URI (set on this install).
+
 ## [0.108.0] — 2026-09-04
 
 ### Fixed

@@ -10,6 +10,7 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
+import { syncConnections } from './googleConnections.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
 
 /**
@@ -242,6 +243,11 @@ async function runProvisionStepsInner(
     // Step 7.5: clone/refresh git data sources onto the volume, then tell the
     // agent where they landed (AGENTS.md "## Data sources").
     await syncGitDataSources(deps, agentId, runtimeRef, log);
+    // Step 7.6: attached platform connections (Google via gog) land on the
+    // volume — best-effort per connection; a Google hiccup never fails a
+    // build, and import is idempotent so the next provision heals it.
+    await syncConnections({ store, secrets: deps.secrets, provider, log }, agentId, runtimeRef)
+      .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
@@ -601,6 +607,11 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // been used the most.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     await syncGitDataSources(deps, agentId, runtimeRef, log);
+    // Step 7.6: attached platform connections (Google via gog) land on the
+    // volume — best-effort per connection; a Google hiccup never fails a
+    // build, and import is idempotent so the next provision heals it.
+    await syncConnections({ store, secrets: deps.secrets, provider, log }, agentId, runtimeRef)
+      .catch((err) => log('connection.sync_failed', { agentId, error: String(err).slice(0, 200) }));
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);

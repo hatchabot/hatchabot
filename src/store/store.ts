@@ -107,6 +107,23 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS proposals_master ON agent_proposals (master_agent_id, status);
 
+      -- Platform-managed external-service connections (Phase 2 of
+      -- docs/connections-design.md): the refresh token is a credential, so
+      -- only its SecretStore ref is here. Per-owner; attached to agents via
+      -- agent_connections and materialized onto the volume at provision.
+      CREATE TABLE IF NOT EXISTS connections (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, kind TEXT NOT NULL,
+        email TEXT NOT NULL, services TEXT, secret_ref TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS connections_owner_email
+        ON connections (owner_id, kind, email);
+      CREATE TABLE IF NOT EXISTS agent_connections (
+        agent_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+        gmail_no_send INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_id, connection_id)
+      );
+
       -- Other AgentClaw installations this owner can move agents to. The
       -- access token is a credential, so it lives in the SecretStore and only
       -- its ref is here.
@@ -360,6 +377,7 @@ export class Store {
     // the household — same tombstone-hygiene rule as the rows above. Child-
     // side rows stay: a live master's owner can still review them.
     this.db.prepare(`DELETE FROM agent_proposals WHERE master_agent_id = ?`).run(agentId);
+    this.db.prepare(`DELETE FROM agent_connections WHERE agent_id = ?`).run(agentId);
   }
 
   /**
@@ -1522,6 +1540,71 @@ export class Store {
         .prepare(`UPDATE agent_proposals SET status = ? WHERE id = ? AND master_agent_id = ? AND status = 'pending'`)
         .run(status, id, masterAgentId).changes === 1
     );
+  }
+
+  // ---- platform-managed connections (Google via gog) ----------------------
+
+  insertConnection(c: { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO connections (id, owner_id, kind, email, services, secret_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_id, kind, email) DO UPDATE
+           SET services = excluded.services, secret_ref = excluded.secret_ref`,
+      )
+      .run(c.id, c.ownerId, c.kind, c.email, JSON.stringify(c.services), c.secretRef, new Date().toISOString());
+  }
+
+  getConnection(id: string): { id: string; ownerId: string; kind: string; email: string; services: string[]; secretRef: string; createdAt: string } | undefined {
+    const r = this.db.prepare(`SELECT * FROM connections WHERE id = ?`).get(id) as any;
+    if (!r) return undefined;
+    return {
+      id: r.id, ownerId: r.owner_id, kind: r.kind, email: r.email,
+      services: JSON.parse(r.services ?? '[]'), secretRef: r.secret_ref, createdAt: r.created_at,
+    };
+  }
+
+  /** A re-connect of the same account upserts — this finds the surviving row. */
+  findConnection(ownerId: string, kind: string, email: string): { id: string; secretRef: string } | undefined {
+    const r = this.db
+      .prepare(`SELECT id, secret_ref FROM connections WHERE owner_id = ? AND kind = ? AND email = ?`)
+      .get(ownerId, kind, email) as any;
+    return r ? { id: r.id, secretRef: r.secret_ref } : undefined;
+  }
+
+  listConnections(ownerId: string): Array<{ id: string; kind: string; email: string; services: string[]; createdAt: string }> {
+    return (this.db.prepare(`SELECT * FROM connections WHERE owner_id = ? ORDER BY email`).all(ownerId) as any[]).map((r) => ({
+      id: r.id, kind: r.kind, email: r.email, services: JSON.parse(r.services ?? '[]'), createdAt: r.created_at,
+    }));
+  }
+
+  deleteConnection(id: string): void {
+    this.db.prepare(`DELETE FROM agent_connections WHERE connection_id = ?`).run(id);
+    this.db.prepare(`DELETE FROM connections WHERE id = ?`).run(id);
+  }
+
+  attachConnection(agentId: string, connectionId: string, gmailNoSend: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_connections (agent_id, connection_id, gmail_no_send) VALUES (?, ?, ?)
+         ON CONFLICT(agent_id, connection_id) DO UPDATE SET gmail_no_send = excluded.gmail_no_send`,
+      )
+      .run(agentId, connectionId, gmailNoSend ? 1 : 0);
+  }
+
+  detachConnection(agentId: string, connectionId: string): void {
+    this.db.prepare(`DELETE FROM agent_connections WHERE agent_id = ? AND connection_id = ?`).run(agentId, connectionId);
+  }
+
+  listAgentConnections(agentId: string): Array<{ connectionId: string; gmailNoSend: boolean }> {
+    return (this.db.prepare(`SELECT * FROM agent_connections WHERE agent_id = ?`).all(agentId) as any[]).map((r) => ({
+      connectionId: r.connection_id, gmailNoSend: !!r.gmail_no_send,
+    }));
+  }
+
+  /** Which agents a connection is attached to — the vault list shows reach. */
+  listAgentsForConnection(connectionId: string): string[] {
+    return (this.db.prepare(`SELECT agent_id FROM agent_connections WHERE connection_id = ?`).all(connectionId) as any[]).map((r) => r.agent_id);
   }
 
   /** Undo a merge claim whose file write failed — the proposal must stay
