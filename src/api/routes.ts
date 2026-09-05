@@ -3452,7 +3452,28 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const u = ref.split('/')[2]!.toLowerCase();
       if (!rows.has(u)) rows.set(u, { secretRef: ref, where: 'orphan-token' });
     }
+    // The management bot's token lives OUTSIDE the DB (.env.mgmt) — the one
+    // bot every earlier count missed (2026-09-05: it was one of Chris's five
+    // "unaccounted" bots at the BotFather ceiling).
+    const mgmtToken =
+      process.env.AGENTCLAW_MGMT_BOT_TOKEN ??
+      (() => {
+        try {
+          const m = /AGENTCLAW_MGMT_BOT_TOKEN='([^']+)'/.exec(readFileSync('.env.mgmt', 'utf8'));
+          return m?.[1];
+        } catch { return undefined; }
+      })();
     const out: Array<Record<string, unknown>> = [];
+    if (mgmtToken) {
+      try {
+        const res = await botFetch(`https://api.telegram.org/bot${mgmtToken}/getMe`, { signal: AbortSignal.timeout(6000) });
+        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { username?: string; first_name?: string } };
+        out.push({
+          username: body.result?.username?.toLowerCase() ?? '(mgmt bot)',
+          where: 'mgmt-bot', alive: body.ok === true, displayName: body.result?.first_name,
+        });
+      } catch { out.push({ username: '(mgmt bot)', where: 'mgmt-bot', alive: undefined }); }
+    }
     for (const [username, r] of [...rows.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       let alive: boolean | undefined;
       let displayName: string | undefined;

@@ -1722,6 +1722,7 @@ async function loadBotInventory() {
       'pool-leased': () => 'pool (leased)',
       'pool-free': () => 'pool — free stock',
       'orphan-token': () => '⚠ orphaned token — nothing references it',
+      'mgmt-bot': () => 'the management bot (token in .env.mgmt)',
     };
     $('botInvList').innerHTML = bots.map(b => `
       <div class="pair" style="gap:8px">
