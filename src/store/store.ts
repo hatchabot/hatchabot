@@ -124,6 +124,18 @@ export class Store {
         PRIMARY KEY (agent_id, connection_id)
       );
 
+      -- Daily fleet-usage snapshots per owner, so the usage view can show a
+      -- trend (live usage is otherwise a point-in-time read with no history —
+      -- and a trend is what makes active-memory's per-turn cost visible over
+      -- time). Upserted by day; total_tokens is the cumulative fleet figure at
+      -- capture, by_billing a JSON split {included, api, local}.
+      CREATE TABLE IF NOT EXISTS usage_snapshots (
+        owner_id TEXT NOT NULL, day TEXT NOT NULL,
+        total_tokens INTEGER NOT NULL, by_billing TEXT NOT NULL,
+        cost_low REAL, cost_high REAL, captured_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, day)
+      );
+
       -- Other AgentClaw installations this owner can move agents to. The
       -- access token is a credential, so it lives in the SecretStore and only
       -- its ref is here.
@@ -1542,6 +1554,39 @@ export class Store {
         .prepare(`UPDATE agent_proposals SET status = ? WHERE id = ? AND master_agent_id = ? AND status = 'pending'`)
         .run(status, id, masterAgentId).changes === 1
     );
+  }
+
+  // ---- usage snapshots (fleet cost/usage trend) ---------------------------
+
+  upsertUsageSnapshot(ownerId: string, s: {
+    day: string; totalTokens: number; byBilling: Record<string, number>;
+    costLow?: number | null; costHigh?: number | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO usage_snapshots (owner_id, day, total_tokens, by_billing, cost_low, cost_high, captured_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_id, day) DO UPDATE SET
+           total_tokens = excluded.total_tokens, by_billing = excluded.by_billing,
+           cost_low = excluded.cost_low, cost_high = excluded.cost_high, captured_at = excluded.captured_at`,
+      )
+      .run(ownerId, s.day, Math.round(s.totalTokens), JSON.stringify(s.byBilling),
+        s.costLow ?? null, s.costHigh ?? null, new Date().toISOString());
+  }
+
+  listUsageSnapshots(ownerId: string, limit = 30): Array<{
+    day: string; totalTokens: number; byBilling: Record<string, number>;
+    costLow: number | null; costHigh: number | null;
+  }> {
+    return (this.db
+      .prepare(`SELECT * FROM usage_snapshots WHERE owner_id = ? ORDER BY day DESC LIMIT ?`)
+      .all(ownerId, Math.min(Math.max(limit, 1), 365)) as any[])
+      .map((r) => ({
+        day: r.day, totalTokens: r.total_tokens,
+        byBilling: (() => { try { return JSON.parse(r.by_billing); } catch { return {}; } })(),
+        costLow: r.cost_low, costHigh: r.cost_high,
+      }))
+      .reverse(); // oldest → newest for charting
   }
 
   /** Secret refs by LIKE pattern — names only, never values (bot inventory).

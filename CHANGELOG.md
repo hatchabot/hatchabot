@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.115.0] — 2026-09-06
+
+### Added
+- **Template gallery** (📋 Templates, top bar): browse your agents as starting
+  points and **Start from this** to stand up your own copy — a discovery
+  surface over the existing clone flow, with each showing its description and
+  what it wires up (setup fields, data sources, credentials). The seed of the
+  retail "pick an agent and go" on-ramp.
+- **Usage trend + by-source split** in Fleet usage: a daily snapshot is
+  recorded each time you open the view, so a **tokens-per-day chart** builds
+  over time — the way to actually watch active-memory's per-turn cost — plus a
+  bar showing how fleet tokens split across subscription / API-billed / local.
+  New: GET /v1/usage/history; usage_snapshots table.
+
 ## [0.114.0] — 2026-09-06
 
 ### Fixed / Changed

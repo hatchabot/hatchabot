@@ -3087,21 +3087,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // STOPPED agents have no session data to report and are counted as `skipped`
   // rather than shown as zero. One flaky container never sinks the list: its
   // read is caught and it drops to `skipped` too.
-  app.get('/v1/usage', async (req) => {
-    const running = store
-      .listVisibleAgents(ownerIdOf(req))
-      .filter((a) => a.state === 'RUNNING' && a.runtimeRef);
-    const skipped = store
-      .listVisibleAgents(ownerIdOf(req))
-      .filter((a) => a.state !== 'RUNNING' || !a.runtimeRef).length;
+  // The rollup as a function, so both the route and the daily snapshot job can
+  // call it. Records today's snapshot (upsert by day) as a side effect — so a
+  // usage trend accrues from normal use, no dedicated expensive job required.
+  const computeFleetUsage = async (ownerId: string) => {
+    const visible = store.listVisibleAgents(ownerId);
+    const running = visible.filter((a) => a.state === 'RUNNING' && a.runtimeRef);
+    const skipped0 = visible.filter((a) => a.state !== 'RUNNING' || !a.runtimeRef).length;
     const results = await Promise.all(
       running.map(async (a) => {
         try {
           const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug);
-          // Billing context drives the cost estimate: a subscription (Max) is
-          // included, a local model is free, only an API key has a per-token
-          // cost. We bracket it as a range — OpenClaw reports combined in+out
-          // tokens, so an exact figure is impossible (see pricing.ts).
           const p = store.getAIProfile(a.aiProfileId);
           const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
           const cost = billing === 'api' ? estimateCost(u.byModel) : null;
@@ -3114,8 +3110,6 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agentsUsage = results
       .filter((r): r is NonNullable<typeof r> => r !== null)
       .sort((x, y) => y.totalTokens - x.totalTokens);
-    // Fleet cost = the summed range over API-keyed agents only. `partial` if any
-    // priced agent used a model with no known price.
     const billed = agentsUsage.filter((a) => a.cost);
     const cost = billed.length
       ? {
@@ -3125,14 +3119,45 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           agents: billed.length,
         }
       : null;
+    const totalTokens = agentsUsage.reduce((s, a) => s + a.totalTokens, 0);
+    // Tokens split by billing category — the "where does the fleet run" view.
+    const byBilling = { included: 0, api: 0, local: 0 } as Record<string, number>;
+    for (const a of agentsUsage) byBilling[a.billing] = (byBilling[a.billing] ?? 0) + a.totalTokens;
+    // Persist today's snapshot (only when we actually measured something, so a
+    // transient all-unreachable read can't zero the day). Best-effort.
+    if (agentsUsage.length) {
+      try {
+        store.upsertUsageSnapshot(ownerId, {
+          day: new Date().toISOString().slice(0, 10),
+          totalTokens, byBilling, costLow: cost?.low ?? null, costHigh: cost?.high ?? null,
+        });
+      } catch { /* trend is a nicety; never break the view */ }
+    }
     return {
       agents: agentsUsage,
-      totalTokens: agentsUsage.reduce((s, a) => s + a.totalTokens, 0),
+      totalTokens,
       totalSessions: agentsUsage.reduce((s, a) => s + a.sessions, 0),
       counted: agentsUsage.length,
-      skipped: skipped + (results.length - agentsUsage.length),
+      skipped: skipped0 + (results.length - agentsUsage.length),
+      byBilling,
       cost,
     };
+  };
+
+  app.get('/v1/usage', async (req) => computeFleetUsage(ownerIdOf(req)));
+
+  /** Daily fleet-usage snapshots for the trend chart, oldest → newest, with a
+   *  day-over-day delta (cumulative counter, so the delta approximates that
+   *  day's consumption; a session reset can make it dip, hence never negative). */
+  app.get('/v1/usage/history', async (req) => {
+    const snaps = store.listUsageSnapshots(ownerIdOf(req), 30);
+    let prev: number | undefined;
+    const points = snaps.map((s) => {
+      const delta = prev === undefined ? undefined : Math.max(0, s.totalTokens - prev);
+      prev = s.totalTokens;
+      return { day: s.day, totalTokens: s.totalTokens, delta, byBilling: s.byBilling, costHigh: s.costHigh };
+    });
+    return { points };
   });
 
   // Live health probe of the agent's own gateway (event loop, Telegram

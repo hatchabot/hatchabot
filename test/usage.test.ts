@@ -181,3 +181,42 @@ describe('GET /v1/usage (fleet rollup)', () => {
     expect(body.cost).toBeNull(); // nothing billable → no fleet cost at all
   });
 });
+
+describe('usage history (snapshot trend)', () => {
+  it('the fleet usage view records a daily snapshot; history returns non-negative deltas', async () => {
+    const store = new Store(new Database(':memory:'));
+    // seed two prior days directly, then hit /v1/usage to record today.
+    store.upsertUsageSnapshot(OWNER, { day: '2026-09-01', totalTokens: 1000, byBilling: { api: 1000, included: 0, local: 0 }, costLow: 0.01, costHigh: 0.05 });
+    store.upsertUsageSnapshot(OWNER, { day: '2026-09-02', totalTokens: 1750, byBilling: { api: 1750, included: 0, local: 0 } });
+    // upsert same day overwrites (not duplicate)
+    store.upsertUsageSnapshot(OWNER, { day: '2026-09-02', totalTokens: 1800, byBilling: { api: 1800, included: 0, local: 0 } });
+
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as any);
+    store.setAgentRuntimeRef('a1', runtimeRef);
+    provider.execResponses.set('sessions list', { code: 0, stdout: SESSIONS_JSON, stderr: '' });
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+
+    const usage = (await f.inject({ method: 'GET', url: '/v1/usage', headers: as })).json();
+    expect(usage.byBilling.api).toBe(1750); // 1000+500+250, all on the api-key profile
+    const hist = (await f.inject({ method: 'GET', url: '/v1/usage/history', headers: as })).json();
+    // 3 distinct days (two seeded + today), oldest→newest, first has no delta
+    expect(hist.points.length).toBe(3);
+    expect(hist.points[0].delta).toBeUndefined();
+    expect(hist.points[1].delta).toBe(800);  // 1800 - 1000
+    expect(hist.points.every((p: any) => p.delta === undefined || p.delta >= 0)).toBe(true);
+  });
+
+  it('a dip in the cumulative counter clamps the delta to 0, never negative', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.upsertUsageSnapshot(OWNER, { day: '2026-09-01', totalTokens: 5000, byBilling: {} });
+    store.upsertUsageSnapshot(OWNER, { day: '2026-09-02', totalTokens: 3000, byBilling: {} }); // session reset dip
+    const snaps = store.listUsageSnapshots(OWNER, 30);
+    expect(snaps.map((s) => s.day)).toEqual(['2026-09-01', '2026-09-02']); // oldest→newest
+    expect(snaps[0]!.totalTokens).toBe(5000);
+  });
+});
