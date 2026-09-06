@@ -564,14 +564,17 @@
       <button id="profileBtn" onclick="switchProfile()">Use this</button>
     </div>
     <div class="sub">Each agent can use a different AI. Add sources in <b>⚙ Settings</b>.</div>
-    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:8px 0 0">
-      <input type="checkbox" id="editCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
-      <span><b>Save conversation to memory before switching</b>
-        <div class="sub" style="margin-top:2px">Changing AI source restarts the agent on a different engine, which
-          ends the current Telegram conversation. With this on, the agent first writes a short summary of what you've
-          been discussing into its memory (~20s), so it doesn't forget the context. Durable notes it already saved are
-          kept either way — this is only about the <i>current</i> chat.</div></span>
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:400;margin:8px 0 0">
+      <input type="checkbox" id="editCheckpoint" checked style="width:auto;flex:none">
+      <span><b>Save conversation to memory before switching</b> <span class="sub">— keeps the current chat's context</span></span>
     </label>
+    <details style="margin-top:2px">
+      <summary class="sub" style="cursor:pointer">Why switching resets the chat</summary>
+      <div class="sub" style="margin-top:4px">Changing AI source restarts the agent on a different engine, which
+        ends the current Telegram conversation. With this on, the agent first writes a short summary of what you've
+        been discussing into its memory (~20s), so it doesn't forget the context. Durable notes it already saved are
+        kept either way — this is only about the <i>current</i> chat.</div>
+    </details>
     <div id="modelRow" style="display:none">
       <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -605,20 +608,24 @@
       about their contents — and for <b>writable</b> folders, change or delete them, so grant that
       sparingly.
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-      <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git" style="flex:1;min-width:0">
-      <select id="repoAccess" style="width:auto">
-        <option value="ro">Read-only</option>
-        <option value="rw">Read-write</option>
-      </select>
-      <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
-    </div>
-    <div class="sub">
-      A git repo, cloned into the agent's own space (not your disk). <b>AgentClaw generates a
-      deploy key</b> — you don't paste your own. After adding, copy that key into the repo
-      (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild.
-    </div>
-    <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+
+    <details class="sec-drawer">
+      <summary><b>📦 Add a git repo</b> <span class="sub">— cloned into the agent's own space, with a generated deploy key</span></summary>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git" style="flex:1;min-width:0">
+        <select id="repoAccess" style="width:auto">
+          <option value="ro">Read-only</option>
+          <option value="rw">Read-write</option>
+        </select>
+        <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
+      </div>
+      <div class="sub" style="margin-top:6px">
+        Cloned into the agent's own space (not your disk). <b>AgentClaw generates a
+        deploy key</b> — you don't paste your own. After adding, copy that key into the repo
+        (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild.
+      </div>
+      <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+    </details>
   </section>
 
   <section id="paneEditConn" role="tabpanel" hidden>
@@ -787,7 +794,9 @@
     </div>
     <div id="aiList"></div>
 
-    <h4 style="margin:16px 0 4px">Add another AI source</h4>
+    <details class="sec-drawer">
+      <summary><b>➕ Add another AI source</b> <span class="sub">— a subscription, API key, or local model server</span></summary>
+      <div style="margin-top:8px"></div>
     <select id="aiKind" onchange="aiKindChanged()">
       <option value="subscription">Claude subscription (login on this machine)</option>
       <option value="api_key">API key</option>
@@ -828,51 +837,58 @@
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" id="aiAddBtn" onclick="addAiProfile()">Add source</button>
     </div>
-    <h4 style="margin:18px 0 4px">Voice &amp; media understanding</h4>
-    <div class="sub">
-      With a <b>Gemini API key</b> (free tier at
-      <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>),
-      every agent can <b>transcribe Telegram voice notes</b> — audio is sent to
-      Gemini for transcription, then answered by the agent's own AI as usual.
-      Applies to each agent on its next <b>Rebuild</b>. <b>This is a shared
-      credential:</b> it's injected into every agent on the server, so anyone
-      who owns an agent here can use it (and a technical user could read it). Use
-      a key scoped to this purpose, not a personal all-services one.
-    </div>
-    <div id="mediaKeyStatus" style="margin-top:8px;font-size:14px"></div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
-      <input type="password" id="mediaKey" placeholder="Gemini API key" autocomplete="off" style="flex:1;min-width:0">
-      <button id="mediaKeySaveBtn" onclick="saveMediaKey()">Save</button>
-      <button id="mediaKeyDelBtn" onclick="removeMediaKey()" style="display:none">Remove</button>
-    </div>
+    </details>
 
-    <label style="margin-top:18px">Fleet search key</label>
-    <div class="sub">
-      Every agent has web search built in (keyless DuckDuckGo). Paste one
-      <a href="https://brave.com/search/api/" target="_blank" rel="noopener">Brave Search API key</a>
-      here and the whole fleet upgrades to Brave on each agent's next
-      <b>Rebuild</b> — better results, proper rate limits. A per-agent
-      <code>BRAVE_API_KEY</code> env var overrides it (its own quota).
-      <b>Shared credential</b> — same caveats as the media key above.
-    </div>
-    <div id="searchKeyStatus" style="margin-top:8px;font-size:14px"></div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
-      <input type="password" id="searchKey" placeholder="Brave Search API key" autocomplete="off" style="flex:1;min-width:0">
-      <button id="searchKeySaveBtn" onclick="saveSearchKey()">Save</button>
-      <button id="searchKeyDelBtn" onclick="removeSearchKey()" style="display:none">Remove</button>
-    </div>
+    <details class="sec-drawer" id="mediaKeyDrawer">
+      <summary><b>🎙 Voice &amp; media</b> <span class="sub">— a Gemini key lets every agent transcribe voice notes</span></summary>
+      <div class="sub" style="margin-top:8px">
+        With a <b>Gemini API key</b> (free tier at
+        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com</a>),
+        every agent can <b>transcribe Telegram voice notes</b> — audio is sent to
+        Gemini for transcription, then answered by the agent's own AI as usual.
+        Applies to each agent on its next <b>Rebuild</b>. <b>Shared credential:</b>
+        injected into every agent on the server, so anyone who owns an agent here
+        can use it (and a technical user could read it). Use a key scoped to this
+        purpose, not a personal all-services one.
+      </div>
+      <div id="mediaKeyStatus" style="margin-top:8px;font-size:14px"></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input type="password" id="mediaKey" placeholder="Gemini API key" autocomplete="off" style="flex:1;min-width:0">
+        <button id="mediaKeySaveBtn" onclick="saveMediaKey()">Save</button>
+        <button id="mediaKeyDelBtn" onclick="removeMediaKey()" style="display:none">Remove</button>
+      </div>
+    </details>
+
+    <details class="sec-drawer" id="searchKeyDrawer">
+      <summary><b>🔎 Fleet search key</b> <span class="sub">— a Brave key upgrades every agent from DuckDuckGo</span></summary>
+      <div class="sub" style="margin-top:8px">
+        Every agent has web search built in (keyless DuckDuckGo). Paste one
+        <a href="https://brave.com/search/api/" target="_blank" rel="noopener">Brave Search API key</a>
+        here and the whole fleet upgrades to Brave on each agent's next
+        <b>Rebuild</b> — better results, proper rate limits. A per-agent
+        <code>BRAVE_API_KEY</code> env var overrides it (its own quota).
+        <b>Shared credential</b> — same caveats as the media key.
+      </div>
+      <div id="searchKeyStatus" style="margin-top:8px;font-size:14px"></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+        <input type="password" id="searchKey" placeholder="Brave Search API key" autocomplete="off" style="flex:1;min-width:0">
+        <button id="searchKeySaveBtn" onclick="saveSearchKey()">Save</button>
+        <button id="searchKeyDelBtn" onclick="removeSearchKey()" style="display:none">Remove</button>
+      </div>
+    </details>
   </section>
 
   <section id="paneHosts" role="tabpanel" hidden>
     <div class="sub">
       The machines this cluster runs agents on. <b>This machine</b> is the
-      built-in runner — agents here can use your <b>Claude Max</b> login. Add a
-      <b>runner</b> (a remote Docker endpoint — one AgentClaw, many machines) to
-      run agents elsewhere; a runner agent uses an <b>API-key</b> source or a
-      <b>Claude Max setup-token</b> (<code>claude setup-token</code>) — the
-      machine-login Max source is desktop-only. Move an agent between runners
-      with <b>Move</b> on its card; <b>Move to another cluster</b> (in the
-      card's ⋯ menu) sends it to a different AgentClaw server entirely.
+      built-in runner; add a <b>runner</b> to run agents on other machines under
+      this dashboard.
+      <details style="margin-top:4px"><summary style="cursor:pointer">How runners &amp; moves work</summary>
+      <div style="margin-top:4px">A runner is a remote Docker endpoint — one AgentClaw, many machines.
+      Agents here can use your <b>Claude Max</b> login; a runner agent uses an <b>API-key</b> source or a
+      <b>Claude Max setup-token</b> (<code>claude setup-token</code>) — the machine-login Max source is
+      desktop-only. Move an agent between runners with <b>Move</b> on its card; <b>Move to another cluster</b>
+      (in the card's ⋯ menu) sends it to a different AgentClaw server entirely.</div></details>
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
@@ -1018,15 +1034,14 @@
 
   <section id="paneBackups" role="tabpanel" hidden>
     <div class="sub">
-      A nightly job saves each agent's <b>entire</b> memory, the control-plane
-      registry, and the key to decrypt it — one dated set per run, kept
-      <b id="bkKeep">14</b> days. <b>Restore</b> rolls a single agent's whole
-      volume back to that night (more than a snapshot, which only reverts
-      SOUL/AGENTS/MEMORY) — it overwrites live memory, so the agent is stopped
-      for the swap and restarted after. Each set holds bot tokens and the
-      decryption key in the clear, so it lives in
-      <code id="bkDir" style="word-break:break-all"></code> at <code>0700</code>
-      and is never downloadable from here.
+      A nightly job saves each agent's <b>entire</b> memory plus the control-plane
+      registry — one dated set per run, kept <b id="bkKeep">14</b> days.
+      <details style="margin-top:4px"><summary style="cursor:pointer">What Restore does &amp; where sets live</summary>
+      <div style="margin-top:4px"><b>Restore</b> rolls a single agent's whole volume back to that night (more than a
+      snapshot, which only reverts SOUL/AGENTS/MEMORY) — it overwrites live memory, so the agent is stopped for
+      the swap and restarted after. Each set holds bot tokens and the decryption key in the clear, so it lives in
+      <code id="bkDir" style="word-break:break-all"></code> at <code>0700</code> and is never downloadable from
+      here.</div></details>
     </div>
     <div class="actions" style="justify-content:flex-start;margin:12px 0 4px">
       <button class="primary" id="bkRunBtn" onclick="runBackupNow()">Back up now</button>
@@ -1037,16 +1052,15 @@
 
   <section id="paneRuntime" role="tabpanel" hidden>
     <div class="sub">
-      The shared runtime image every agent runs. It bakes in the OpenClaw version,
-      the Claude CLI, the <b>gog</b> Google Workspace CLI, the local embedding model
-      (semantic memory search), the <b>PDF/OCR stack</b> (tesseract, ocrmypdf,
-      poppler, qpdf — so scanned pages are read, never silently skipped), and
-      <b>PDF creation</b> (pandoc + weasyprint — agents turn markdown/HTML into
-      real PDFs: meeting packages, notices, reports). Every
-      agent picks changes up on its next <b>Rebuild</b>. Upgrading the OpenClaw
-      version is a deliberate, separate command-line step — image packages can be
-      rebuilt without touching it. Web search is always on (keyless DuckDuckGo);
-      one <b>Fleet search key</b> in the Media tab upgrades everyone to Brave.
+      The shared runtime image every agent runs; each agent picks up changes on its
+      next <b>Rebuild</b>. The live capability list below is probed from the image itself.
+      <details style="margin-top:4px"><summary style="cursor:pointer">What's baked in, and the upgrade rule</summary>
+      <div style="margin-top:4px">The image bakes in the OpenClaw version, the Claude CLI, the <b>gog</b> Google
+      Workspace CLI, the local embedding model (semantic memory search), the <b>PDF/OCR stack</b>
+      (tesseract, ocrmypdf, poppler, qpdf — so scanned pages are read, never silently skipped), and
+      <b>PDF creation</b> (pandoc + weasyprint — markdown/HTML into real PDFs). Upgrading the OpenClaw version is
+      a deliberate, separate command-line step — image packages can be rebuilt without touching it. Web search is
+      always on (keyless DuckDuckGo); one <b>Fleet search key</b> in AI sources upgrades everyone to Brave.</div></details>
     </div>
     <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
     <h4 style="margin:18px 0 4px">What agents can do</h4>
@@ -1688,6 +1702,7 @@ async function loadMediaKey() {
       $('mediaKey').placeholder = 'Gemini API key';
     }
     $('mediaKeyDelBtn').style.display = r.set ? '' : 'none';
+    if (r.set) $('mediaKeyDrawer')?.setAttribute('open', ''); // don't hide a live key
   } catch { /* not the host owner — leave the section inert */ }
 }
 async function saveMediaKey() {
@@ -1720,6 +1735,7 @@ async function loadSearchKey() {
       $('searchKey').placeholder = 'Brave Search API key';
     }
     $('searchKeyDelBtn').style.display = r.set ? '' : 'none';
+    if (r.set) $('searchKeyDrawer')?.setAttribute('open', ''); // don't hide a live key
   } catch { /* not the host owner — leave inert */ }
 }
 async function saveSearchKey() {
@@ -3888,6 +3904,7 @@ function showDeployKey(id) { showDeployKeyForSource(editData.find(d => d.id === 
 function showDeployKeyForSource(src) {
   if (!src || !src.pubKey) return;
   const el = $('gitKeyOut');
+  el.closest('details')?.setAttribute('open', ''); // the key lives in the git drawer
   el.style.display = '';
   const write = src.access === 'rw';
   // Derive the "add deploy key" page from git@host:owner/repo.git — direct link

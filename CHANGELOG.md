@@ -14,8 +14,14 @@ All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
   GET /v1/agents/:id/inspect (+ /file/:name, /transcript).
 
 ### Changed
-- Agent-card Definition tab tidied: the shared-memory explainer and setup-
-  field authoring collapse into drawers, matching the Telegram tab.
+- **Settings tabs tidied throughout**, extending the Telegram-tab pattern —
+  controls stay visible, prose and advanced/occasional actions collapse into
+  drawers. Agent card: Definition (shared-memory explainer, setup fields),
+  AI (checkpoint explainer), Data (git-repo add). Primary Settings: AI
+  sources splits into ➕ Add source / 🎙 Voice &amp; media / 🔎 Fleet search
+  drawers (a set key auto-opens its drawer so live config is never hidden);
+  Runners, Backups, and Runtime get a one-line lead with the detail one
+  click away.
 
 ## [0.111.0] — 2026-09-05
 
