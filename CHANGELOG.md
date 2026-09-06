@@ -2,6 +2,21 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.112.0] — 2026-09-06
+
+### Added
+- **🔍 Inspect an archived agent** (read-only). Archiving still releases the
+  scarce thing — the Telegram bot goes back to the pool — but the volume was
+  always kept whole, and now you can read it back: MEMORY.md and the other
+  key files, plus the chat history rendered as readable turns, months later
+  without restoring the agent or spending a bot. Reads the volume through a
+  one-shot mount (execShellOnVolume); nothing is started or changed. New:
+  GET /v1/agents/:id/inspect (+ /file/:name, /transcript).
+
+### Changed
+- Agent-card Definition tab tidied: the shared-memory explainer and setup-
+  field authoring collapse into drawers, matching the Telegram tab.
+
 ## [0.111.0] — 2026-09-05
 
 ### Added

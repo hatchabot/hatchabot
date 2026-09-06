@@ -145,6 +145,9 @@
   .sec-drawer { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 14px; }
   .sec-drawer > summary { cursor: pointer; }
   .sec-drawer[open] > summary { margin-bottom: 4px; }
+  .inspfile { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+              padding: 6px 10px; color: var(--text); cursor: pointer; font-size: 13px; }
+  .inspfile:hover { border-color: var(--accent); }
   .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .name { font-weight: 650; font-size: 16px; }
@@ -469,26 +472,26 @@
       <button id="descBtn" onclick="saveDescription()">Save</button>
     </div>
     <div class="sub" style="margin:-4px 0 4px">Cosmetic — this is the card label only. To change how the agent actually behaves, edit <b>SOUL.md</b> below.</div>
-    <label>Shared memory <span style="color:var(--dim)">— who this agent's MEMORY.md belongs to</span></label>
-    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
-      <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;margin-top:3px;flex:none">
-      <span>
-        <b>Share memory across everyone who uses this agent</b>
-        <div class="sub" style="margin-top:2px">
-          <b>On</b> — MEMORY.md is a common log for every member: entries are tagged with who
-          said them, and anything written may surface to other members.
-          <b>Off</b> — memory is private to you, untagged, and never surfaced to anyone else.
-          Applies on new conversations. You can only change this while you're the only member.
-        </div>
-      </span>
+    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:400;margin:10px 0 0">
+      <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;flex:none">
+      <span><b>Share memory</b> across everyone who uses this agent</span>
     </label>
     <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
+    <details style="margin-top:2px">
+      <summary class="sub" style="cursor:pointer">What sharing memory means</summary>
+      <div class="sub" style="margin-top:4px">
+        <b>On</b> — MEMORY.md is a common log for every member: entries are tagged with who
+        said them, and anything written may surface to other members.
+        <b>Off</b> — memory is private to you, untagged, and never surfaced to anyone else.
+        Applies on new conversations. You can only change this while you're the only member.
+      </div>
+    </details>
     <!-- Collapsed by default: the everyday surface is Setup VALUES below;
          this drawer is the author's field-definition editor, and showing both
          expanded listed every field twice. -->
-    <details id="setupFieldsRow">
-      <summary style="cursor:pointer;margin:10px 0 4px"><b>Setup fields</b> <span class="sub" style="color:var(--dim)">— field definitions (open to add or edit)</span></summary>
-      <div class="sub" style="margin:0 0 6px">Fields someone importing a shared copy fills in — write
+    <details class="sec-drawer" id="setupFieldsRow">
+      <summary><b>Setup fields</b> <span class="sub" style="color:var(--dim)">— field definitions (open to add or edit)</span></summary>
+      <div class="sub" style="margin:6px 0 6px">Fields someone importing a shared copy fills in — write
         <code>{{key}}</code> where the value should land in SOUL.md/AGENTS.md; sharing asks for any
         <code>{{placeholder}}</code> automatically even without declaring it.</div>
       <div id="paramList"></div>
@@ -1104,6 +1107,29 @@
     <b>full</b> content — nothing happens until you press Confirm on it.</div>
   <div class="actions" style="justify-content:flex-end;margin-top:10px">
     <button onclick="mgmtChatDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="inspectDlg" style="width:min(820px,94vw)">
+  <h3 style="margin:0 0 4px">🔍 <span id="inspectAgent"></span> <span class="sub" style="font-weight:400">— archived, read-only</span></h3>
+  <div class="sub" style="margin-bottom:10px">Read back what this agent knew and discussed. Nothing is started or changed —
+    its bot stays in the pool. To make it live again, use <b>📤 Restore</b> on the card.</div>
+  <div class="tabs" role="tablist">
+    <button class="tab" id="inspTabFiles" role="tab" aria-selected="true" onclick="showInspTab('files')">📄 Files</button>
+    <button class="tab" id="inspTabChat" role="tab" aria-selected="false" onclick="showInspTab('chat')">💬 Chat history</button>
+  </div>
+  <section id="inspPaneFiles" role="tabpanel" style="margin-top:10px">
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <div id="inspFileList" style="min-width:150px;display:flex;flex-direction:column;gap:4px"></div>
+      <pre id="inspFileBody" style="flex:1;min-width:0;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--panel-2);border-radius:8px;padding:12px;margin:0;font-size:13px">Pick a file.</pre>
+    </div>
+  </section>
+  <section id="inspPaneChat" role="tabpanel" hidden style="margin-top:10px">
+    <div class="sub" id="inspChatMeta" style="margin-bottom:6px"></div>
+    <div id="inspChatBody" style="max-height:60vh;overflow:auto;display:flex;flex-direction:column;gap:8px"></div>
+  </section>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px">
+    <button class="primary" onclick="inspectDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -3333,6 +3359,7 @@ function agentCard(a) {
       ${a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
         ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
       ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
+      ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${a.id}', '${jsq(a.name)}')" title="Read its memory, key files, and chat history — without restoring it or its bot">🔍 Inspect</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
       ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
       ${cardMenu(a)}
@@ -5340,6 +5367,63 @@ async function archiveAgent(id, name) {
     toast(`"${name}" archived — its bot is back in the pool.`);
     await refresh(false);
   } catch (e) { toast(e.message); }
+}
+
+// ---- archived-agent inspector (read-only, from the volume) -----------------
+
+let inspectId = null;
+function showInspTab(which) {
+  const chat = which === 'chat';
+  $('inspPaneFiles').hidden = chat;
+  $('inspPaneChat').hidden = !chat;
+  $('inspTabFiles').setAttribute('aria-selected', String(!chat));
+  $('inspTabChat').setAttribute('aria-selected', String(chat));
+  if (chat && !$('inspChatBody').childElementCount) loadInspectChat();
+}
+
+async function openInspect(id, name) {
+  inspectId = id;
+  $('inspectAgent').textContent = name;
+  $('inspFileBody').textContent = 'Pick a file.';
+  $('inspFileList').innerHTML = 'Loading…';
+  $('inspChatBody').innerHTML = '';
+  $('inspChatMeta').textContent = '';
+  showInspTab('files');
+  inspectDlg.showModal();
+  try {
+    const info = await api(`/v1/agents/${id}/inspect`);
+    const KB = b => b < 1024 ? `${b} B` : `${(b / 1024).toFixed(b < 10240 ? 1 : 0)} KB`;
+    $('inspFileList').innerHTML = info.files.length
+      ? info.files.map(f => `<button class="inspfile" data-name="${esc(f.name)}" onclick="loadInspectFile('${jsq(f.name)}')" style="text-align:left">${esc(f.name)} <span class="sub">${KB(f.bytes)}</span></button>`).join('')
+      : '<span class="sub">No readable files.</span>';
+    $('inspTabChat').textContent = `💬 Chat history${info.transcriptTurns ? ` (${info.transcriptTurns})` : ''}`;
+    // Auto-open MEMORY.md — the "what did we discuss" file.
+    if (info.files.some(f => f.name === 'MEMORY.md')) loadInspectFile('MEMORY.md');
+  } catch (e) { $('inspFileList').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
+}
+
+async function loadInspectFile(name) {
+  for (const b of document.querySelectorAll('#inspFileList .inspfile'))
+    b.style.borderColor = b.dataset.name === name ? 'var(--accent)' : '';
+  $('inspFileBody').textContent = 'Loading…';
+  try {
+    const f = await api(`/v1/agents/${inspectId}/inspect/file/${encodeURIComponent(name)}`);
+    $('inspFileBody').textContent = (f.content || '(empty)') + (f.truncated ? '\n\n… (truncated — too large to show in full)' : '');
+  } catch (e) { $('inspFileBody').textContent = e.message; }
+}
+
+async function loadInspectChat() {
+  $('inspChatBody').innerHTML = '<span class="sub">Reading the transcript…</span>';
+  try {
+    const t = await api(`/v1/agents/${inspectId}/inspect/transcript?maxTurns=400`);
+    $('inspChatMeta').textContent = t.turns.length
+      ? `${t.turns.length} shown${t.totalTurns > t.turns.length ? ` of ${t.totalTurns} (most recent)` : ''}`
+      : 'No conversation found on the volume.';
+    $('inspChatBody').innerHTML = t.turns.map(turn => {
+      const me = turn.role === 'user';
+      return `<div style="align-self:${me ? 'flex-end' : 'flex-start'};max-width:80%;background:${me ? 'var(--accent)' : 'var(--panel-2)'};color:${me ? '#fff' : 'var(--text)'};border-radius:10px;padding:7px 11px;font-size:13px;white-space:pre-wrap;word-break:break-word">${esc(turn.text)}</div>`;
+    }).join('');
+  } catch (e) { $('inspChatBody').innerHTML = `<span class="sub">${esc(e.message)}</span>`; }
 }
 
 async function restoreAgent(id, name) {
