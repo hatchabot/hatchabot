@@ -179,6 +179,41 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   cmds.push({
     argv: ['config', 'set', 'agents.defaults.memorySearch.local.modelPath', EMBED_MODEL_PATH],
   });
+
+  // Session continuity (Chris, 2026-09-06 — a Cross Country conversation was
+  // abruptly forgotten). OpenClaw's default idle reset rolled a conversation
+  // to a blank session after an overnight gap, mid-task. Two convergent
+  // changes, written unconditionally:
+  //
+  // 1. A 30-day idle window (was ~a day) so a normal multi-hour/overnight gap
+  //    RESUMES the thread instead of resetting it — the continuous-session
+  //    behavior we confirmed live (an actively-used agent ran one session for
+  //    weeks). A genuinely abandoned thread still eventually rolls (cost).
+  cmds.push({ argv: ['config', 'set', 'session.reset', JSON.stringify({ mode: 'idle', idleMinutes: 43200 })] });
+  // 2. active-memory: a bundled plugin that runs a bounded memory-recall
+  //    sub-agent BEFORE each reply, so a fresh session immediately surfaces
+  //    the relevant standing facts from MEMORY.md — a reset (or a brand-new
+  //    thread) stops being a blank slate. Scoped to THIS agent and to direct
+  //    chats; recall model inherits the session's own model. Owner opted into
+  //    the per-turn token cost for the quality. Combined with the AGENTS.md
+  //    memory-hygiene habit (workspace.ts), the abrupt-forget class is closed.
+  cmds.push({
+    argv: ['config', 'set', 'plugins.entries.active-memory', JSON.stringify({
+      enabled: true,
+      config: {
+        enabled: true,
+        agents: [patch.agentId],
+        allowedChatTypes: ['direct'],
+        queryMode: 'recent',
+        promptStyle: 'balanced',
+        timeoutMs: 15000,
+        maxSummaryChars: 300,
+        persistTranscripts: false,
+        logging: false,
+      },
+    })],
+  });
+
   if (patch.gatewayToken) {
     cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'token'] });
     cmds.push({

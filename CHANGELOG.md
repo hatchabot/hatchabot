@@ -2,6 +2,26 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.114.0] — 2026-09-06
+
+### Fixed / Changed
+- **Sessions stop abruptly forgetting.** OpenClaw's default idle reset rolled a
+  conversation to a blank session after an overnight gap, mid-task (a Cross
+  Country trip plan vanished this way). Three convergent changes, fleet-wide on
+  each agent's next rebuild:
+  - **30-day idle window** (was ~a day) so a normal multi-hour/overnight gap
+    RESUMES the thread instead of resetting — the continuous-session behavior
+    confirmed live on an actively-used agent.
+  - **active-memory plugin on** (scoped per agent, direct chats): a bounded
+    memory-recall sub-agent runs before each reply, so even a fresh session
+    surfaces the relevant standing facts from MEMORY.md — a reset stops being a
+    blank slate. Recall model inherits the session model (per-turn token cost,
+    opted into for quality).
+  - **AGENTS.md memory habit**: agents are told to write standing facts to
+    MEMORY.md as they're settled, and — on a fresh session — to read memory and
+    recent daily notes before ever claiming they have no context, instead of the
+    jarring "this is a fresh session, I have no memory".
+
 ## [0.113.0] — 2026-09-06
 
 ### Fixed (11th audit — the v0.106→v0.112 surface; full record in docs/audit-2026-09-06.md)

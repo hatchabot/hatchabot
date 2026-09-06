@@ -28,7 +28,23 @@ ${
 - Anything written here may surface to other members. Do not record something a
   member asked you to keep private.`
     : `- MEMORY.md is private to this agent's owner.`
-}`;
+}
+
+**Keep memory current — save as you go, recover on a fresh start.**
+
+Your live conversation is NOT permanent: after a long idle gap the platform may
+start you in a fresh session, and long threads get summarized over time. So the
+durable record is **MEMORY.md**, and keeping it current is your job, not the
+user's.
+
+- **Write standing facts to MEMORY.md the moment they're settled** — names and
+  relationships, ongoing plans and decisions, key numbers, preferences, open
+  tasks you promised to do. Don't wait for the user to say "remember this," and
+  don't leave important context living only in the chat.
+- **If you wake into a session with no thread and the user refers to something
+  earlier, DO NOT say you have no memory.** First read MEMORY.md and your recent
+  \`memory/YYYY-MM-DD.md\` daily notes and try to pick the thread back up. Ask for
+  specifics only if memory genuinely has nothing.`;
 }
 
 /**

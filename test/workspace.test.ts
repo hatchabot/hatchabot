@@ -35,6 +35,14 @@ describe('replaceMemoryPolicy', () => {
     const out = replaceMemoryPolicy('# A\n\ncustom\n', memoryPolicySection(true));
     expect(out).toMatch(/custom\n\n## Memory policy/);
   });
+
+  it('carries the save-as-you-go + graceful-recovery habit in both modes', () => {
+    for (const shared of [true, false]) {
+      const s = memoryPolicySection(shared);
+      expect(s).toMatch(/save.*as you go|Write standing facts/i);
+      expect(s).toMatch(/DO NOT say you have no memory|recover on a fresh start/i);
+    }
+  });
 });
 
 describe('dataSourcePath', () => {

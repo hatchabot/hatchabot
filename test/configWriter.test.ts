@@ -320,3 +320,20 @@ describe('telegram rich messages (managed default ON)', () => {
     expect(argFor(buildConfigCommands(tg(false)), 'channels.telegram.richMessages')).toBe('false');
   });
 });
+
+describe('session continuity (idle window + active-memory)', () => {
+  const base = { agentId: 'cross-country-agent', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
+  it('writes a 30-day idle reset window so overnight gaps resume, not reset', () => {
+    const v = argFor(buildConfigCommands(base), 'session.reset');
+    expect(JSON.parse(v!)).toEqual({ mode: 'idle', idleMinutes: 43200 });
+  });
+  it('enables active-memory scoped to THIS agent and direct chats', () => {
+    const v = JSON.parse(argFor(buildConfigCommands(base), 'plugins.entries.active-memory')!);
+    expect(v.enabled).toBe(true);
+    expect(v.config.enabled).toBe(true);
+    expect(v.config.agents).toEqual(['cross-country-agent']); // the slug, not "main"
+    expect(v.config.allowedChatTypes).toEqual(['direct']);
+    // no pinned recall model → inherits the session model
+    expect(v.config.model).toBeUndefined();
+  });
+});
