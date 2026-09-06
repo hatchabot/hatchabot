@@ -11,7 +11,7 @@ import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { syncConnections } from './googleConnections.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
 
 /**
  * Fleet-wide search key (Brave), following the media-key pattern: stored
@@ -740,16 +740,19 @@ async function syncDataSourceDocs(
     })),
     ...store.listDataSources(agentId),
   ];
-  const section = dataSourcesSection(sources);
   const path = `/home/node/.openclaw/agents/${agent.slug}/agent/AGENTS.md`;
   const q = JSON.stringify(path);
   try {
-    // Read → compute HERE → write. The rewrite logic used to be duplicated as
-    // an embedded `node -e` script, which drifted from replaceSection and is
-    // the harder half to test; now there is one implementation.
+    // Read → compute HERE → write, applying BOTH platform-managed AGENTS.md
+    // sections in ONE read-modify-write: the data-sources list AND the
+    // memory-policy habit. Folding memory-policy in here (rather than a second
+    // sync) means a single write, and it reaches EXISTING agents on rebuild —
+    // not just freshly-seeded ones (2026-09-06: the memory-save/recover
+    // instruction otherwise never landed on agents already created).
     const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
     if (read.code !== 0 || !read.stdout.trim()) return; // no file yet — seed owns it
-    const next = replaceSection(read.stdout, DATA_SOURCES_HEADING, section);
+    let next = replaceSection(read.stdout, DATA_SOURCES_HEADING, dataSourcesSection(sources));
+    next = replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory));
     if (next === read.stdout) return; // already current: never churn the user's file
     const b64 = Buffer.from(next, 'utf8').toString('base64');
     // tmp+mv so a failure can't leave AGENTS.md truncated.
@@ -757,10 +760,10 @@ async function syncDataSourceDocs(
       runtimeRef,
       `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`,
     );
-    if (res.code !== 0) log('datasource.docs_failed', { agentId, stderr: res.stderr.slice(0, 300) });
-    else log('datasource.docs_synced', { agentId, sources: sources.length });
+    if (res.code !== 0) log('agentsmd.sync_failed', { agentId, stderr: res.stderr.slice(0, 300) });
+    else log('agentsmd.synced', { agentId, sources: sources.length });
   } catch (e) {
-    log('datasource.docs_error', { agentId, error: String((e as Error).message ?? e) });
+    log('agentsmd.sync_error', { agentId, error: String((e as Error).message ?? e) });
   }
 }
 

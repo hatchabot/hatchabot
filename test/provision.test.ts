@@ -8,6 +8,7 @@ import {
   runProvisionSteps,
 } from '../src/orchestrator/provision.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
+import { dataSourcesSection, memoryPolicySection, replaceSection, DATA_SOURCES_HEADING } from '../src/openclaw/workspace.js';
 import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
@@ -570,8 +571,16 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
   it('writes nothing when the section is already current (no churn on rebuild)', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);
-    // No data sources → the section reads "None"; hand back a doc already saying so.
-    const current = '# K\n\n## Data sources\n- None. You can only see your own workspace.\n';
+    // Both managed sections already current → the single AGENTS.md sync writes
+    // nothing. Build the doc as the sync's FIXED POINT: applying both section
+    // replacements twice (the second pass settles the blank-line the first
+    // append leaves before the following heading), so the sync then no-ops.
+    const shared = w.store.getAgent(agent.id)!.sharedMemory;
+    const applyBoth = (doc: string) => {
+      let n = replaceSection(doc, DATA_SOURCES_HEADING, dataSourcesSection([]));
+      return replaceSection(n, '## Memory policy', memoryPolicySection(shared));
+    };
+    const current = applyBoth(applyBoth('# K\n'));
     (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: current, stderr: '' });
     (w.provider as MockProvider).execLog.length = 0;
     await rebuildAgent(w.deps, agent.id);
