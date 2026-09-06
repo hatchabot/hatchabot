@@ -2,6 +2,33 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.113.0] — 2026-09-06
+
+### Fixed (11th audit — the v0.106→v0.112 surface; full record in docs/audit-2026-09-06.md)
+- **Medium:** `defaultSource` (the installation-wide default AI source) was
+  settable by any profile-owner — a co-tenant could override the household
+  default and redirect where everyone's new agents land. Now host-owner-gated.
+- **Hardening:** `materializeConnection` validates the account email before it
+  reaches the `gog auth import` shell line (defense-in-depth); the OAuth
+  callback `page()` helper escapes its own arguments; `/connections/google/start`
+  shape-checks `services` (was a 500 on a non-array); the state jar gained a
+  hard cap.
+- **Latency:** bot-inventory getMe and the recycled-bot announcement/surface-
+  reset now run concurrently instead of serially — neither can stall an admin
+  request or a rebuild for minutes when Telegram is slow.
+- **Inspector:** byte-accurate file cap (was JS-char), integer `maxTurns`, and a
+  stale-render guard so opening two archived agents in turn can't cross-paint.
+
+Both dedicated security reviewers cleared the OAuth subsystem, the auth-
+exemption, the token-decrypting inventory, and the volume-reading inspector with
+no critical/major defects; the UI diff had no XSS and no dead buttons.
+
+## [0.112.1] — 2026-09-06
+
+### Changed
+- Settings tabs restructured throughout (drawer pattern), extending the
+  Telegram-tab layout to the agent-card and primary Settings tabs.
+
 ## [0.112.0] — 2026-09-06
 
 ### Added

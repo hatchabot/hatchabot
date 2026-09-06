@@ -5409,6 +5409,7 @@ async function openInspect(id, name) {
   inspectDlg.showModal();
   try {
     const info = await api(`/v1/agents/${id}/inspect`);
+    if (inspectId !== id) return; // dialog moved to another agent while we fetched
     const KB = b => b < 1024 ? `${b} B` : `${(b / 1024).toFixed(b < 10240 ? 1 : 0)} KB`;
     $('inspFileList').innerHTML = info.files.length
       ? info.files.map(f => `<button class="inspfile" data-name="${esc(f.name)}" onclick="loadInspectFile('${jsq(f.name)}')" style="text-align:left">${esc(f.name)} <span class="sub">${KB(f.bytes)}</span></button>`).join('')

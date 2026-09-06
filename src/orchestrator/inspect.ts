@@ -54,7 +54,11 @@ export async function readInspectableFile(
   const path = `${agentDir(slug)}/${name}`;
   const res = await provider.execShellOnVolume(runtimeRef, `head -c ${MAX_FILE_BYTES + 1} ${q(path)} 2>/dev/null || true`);
   const truncated = Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES;
-  const content = truncated ? res.stdout.slice(0, MAX_FILE_BYTES) : res.stdout;
+  // Slice on BYTES, not JS chars, so a multibyte file caps at the real budget
+  // and doesn't split a codepoint (matches the files route's byte handling).
+  const content = truncated
+    ? Buffer.from(res.stdout, 'utf8').subarray(0, MAX_FILE_BYTES).toString('utf8')
+    : res.stdout;
   return { name, content, truncated };
 }
 
@@ -81,7 +85,7 @@ export async function readTranscript(
   // Pick the biggest jsonl (the main thread accumulates the most), then tail
   // it — a long history's tail is what "remind me what we discussed" wants,
   // and it bounds the transfer.
-  const maxTurns = Math.min(Math.max(opts.maxTurns ?? 400, 1), 2000);
+  const maxTurns = Math.floor(Math.min(Math.max(opts.maxTurns ?? 400, 1), 2000)); // integer for `tail -n`
   const pick = await provider.execShellOnVolume(
     runtimeRef,
     `ls -S ${q(dir)}/*.jsonl 2>/dev/null | head -1`,

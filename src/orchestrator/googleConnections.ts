@@ -131,6 +131,9 @@ export class OAuthStateJar {
     // Occasional sweep so abandoned flows don't accumulate.
     const now = Date.now();
     for (const [k, v] of this.#jar) if (v.expires < now) this.#jar.delete(k);
+    // Hard cap on top of the TTL sweep: a looping caller can't grow this
+    // unboundedly within the 10-min window — evict oldest first.
+    while (this.#jar.size >= 256) this.#jar.delete(this.#jar.keys().next().value!);
     const state = randomBytes(24).toString('base64url');
     this.#jar.set(state, { ownerId, services, expires: now + 10 * 60_000 });
     return state;
@@ -205,6 +208,13 @@ export async function materializeConnection(
       redirect_uris: ['http://localhost'],
     },
   });
+  // JSON.stringify does NOT neutralize $ / backtick / " for a shell — the
+  // email reaches a double-quoted bash context, so validate its shape first
+  // (Google-verified emails are safe, but that assumption must not be the
+  // only defense; matches dematerializeConnection's gate — audit 2026-09-06).
+  if (!/^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9.-]+$/.test(conn.email) || conn.email.length > 254) {
+    return { ok: false, error: 'connection email has an unexpected shape' };
+  }
   const b64Client = Buffer.from(clientJson, 'utf8').toString('base64');
   const b64Token = Buffer.from(refreshToken, 'utf8').toString('base64');
   const noSend = attach?.gmailNoSend ? ' --gmail-no-send' : '';
@@ -214,7 +224,7 @@ export async function materializeConnection(
     `echo ${JSON.stringify(b64Client)} | base64 -d > ${GOG_HOME}/.client_secret.json`,
     `~/.local/bin/gog auth credentials ${GOG_HOME}/.client_secret.json >/dev/null`,
     `rm -f ${GOG_HOME}/.client_secret.json`,
-    `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email ${JSON.stringify(conn.email)} --refresh-token-stdin --no-input${noSend}`,
+    `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${conn.email}" --refresh-token-stdin --no-input${noSend}`,
   ].join('\n');
   const res = await provider.execShell(agent.runtimeRef, script);
   if (res.code !== 0) {

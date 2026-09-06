@@ -1320,6 +1320,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         else if (profile.mgmtLlm) store.setAIProfileMgmtLlm(ownerIdOf(req), null);
       }
       if (parsed.data.defaultSource !== undefined) {
+        // Installation-wide single flag (one row across the whole DB): only
+        // the host owner sets it, or any co-tenant could clear/override the
+        // household default and redirect where new agents silently land
+        // (audit 2026-09-06). Contrast mgmtLlm/shared above, which are
+        // legitimately per-owner.
+        if (!ownsLocalHost(req)) {
+          return reply.code(403).send({ error: 'Only the server owner sets the default AI source.' });
+        }
         if (parsed.data.defaultSource) store.setAIProfileDefault(profile.id);
         else if (profile.defaultSource) store.setAIProfileDefault(null);
       }
@@ -3475,21 +3483,28 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         });
       } catch { out.push({ username: '(mgmt bot)', where: 'mgmt-bot', alive: undefined }); }
     }
-    for (const [username, r] of [...rows.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    // getMe each bot CONCURRENTLY (bounded): serial × 6s timeout could stall
+    // this admin request for minutes with a slow Telegram and ~40 bots
+    // (audit 2026-09-06). A verdict per bot: ✅ alive / ❌ dead / ❓ unknown.
+    const entries = [...rows.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const probe = async ([username, r]: [string, typeof rows extends Map<string, infer V> ? V : never]) => {
       let alive: boolean | undefined;
       let displayName: string | undefined;
       const token = await secrets.get(r.secretRef).catch(() => null);
       if (token) {
         try {
           const res = await botFetch(`https://api.telegram.org/bot${token}/getMe`, { signal: AbortSignal.timeout(6000) });
-          const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { first_name?: string } };
-          alive = body.ok === true;
-          displayName = body.result?.first_name;
+          const b = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { first_name?: string } };
+          alive = b.ok === true;
+          displayName = b.result?.first_name;
         } catch { alive = undefined; /* Telegram unreachable ≠ bot dead */ }
       } else {
         alive = false;
       }
-      out.push({ username, ...r, secretRef: undefined, alive, displayName });
+      return { username, ...r, secretRef: undefined, alive, displayName };
+    };
+    for (let i = 0; i < entries.length; i += 8) {
+      out.push(...(await Promise.all(entries.slice(i, i + 8).map(probe))));
     }
     return { bots: out };
   });
@@ -3528,10 +3543,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!client) {
       return reply.code(409).send({ error: 'No Google OAuth client configured yet — the server owner sets it up under ⚙ Settings → Connections.' });
     }
-    const body = (req.body ?? {}) as { services?: string[] };
-    const services = (body.services?.length ? body.services : DEFAULT_SERVICES)
-      .filter((s) => s in GOOGLE_SERVICES)
-      .slice(0, 8);
+    const body = (req.body ?? {}) as { services?: unknown };
+    // Guard the shape: a non-array `services` with a truthy `.length` (e.g. a
+    // string) used to TypeError → 500 (audit 2026-09-06).
+    const requested = Array.isArray(body.services) && body.services.length ? body.services : DEFAULT_SERVICES;
+    const services = requested.filter((s) => typeof s === 'string' && s in GOOGLE_SERVICES).slice(0, 8);
     if (!services.length) return reply.code(400).send({ error: 'Pick at least one service.' });
     const state = stateJar.issue(ownerIdOf(req), services);
     return { url: googleAuthUrl(client.clientId, oauthRedirectUri(req as any), state, services) };
@@ -3546,9 +3562,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get<{ Querystring: { code?: string; state?: string; error?: string } }>(
     '/v1/connections/google/callback',
     async (req, reply) => {
+      // Escapes its OWN arguments — callers pass raw values, so a future
+      // caller can't reintroduce an XSS by forgetting to escape (audit
+      // 2026-09-06 hardening; the args are already trusted/static today).
       const page = (title: string, body: string, ok: boolean) =>
         reply.type('text/html').code(ok ? 200 : 400).send(
-          `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;max-width:480px;margin:15vh auto;padding:0 16px;text-align:center"><h2>${title}</h2><p style="color:#556">${body}</p></body>`,
+          `<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:system-ui;max-width:480px;margin:15vh auto;padding:0 16px;text-align:center"><h2>${escapeHtml(title)}</h2><p style="color:#556">${escapeHtml(body)}</p></body>`,
         );
       // This path is auth-exempt (the cross-site redirect can't carry the
       // strict-SameSite session cookie) — the single-use state token IS the
@@ -3558,7 +3577,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         return page("That didn't match", 'This consent link expired or was already used — go back to AgentClaw and press Connect again.', false);
       }
       if (req.query.error || !req.query.code) {
-        return page('Not connected', `Google reported: ${escapeHtml(req.query.error ?? 'no code returned')}. Nothing was stored.`, false);
+        return page('Not connected', `Google reported: ${req.query.error ?? 'no code returned'}. Nothing was stored.`, false);
       }
       const client = await getOAuthClient();
       if (!client) return page('Not connected', 'The OAuth client was removed mid-flow.', false);
@@ -3573,10 +3592,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         await secrets.put(secretRef, refreshToken);
         store.insertConnection({ id, ownerId: claim.ownerId, kind: 'google', email, services: claim.services, secretRef });
         trace()('connection.linked', { email, services: claim.services });
-        return page(`✅ ${escapeHtml(email)} connected`,
+        return page(`✅ ${email} connected`,
           'You can close this tab. Back in AgentClaw, attach this account to any agent under its ⚙ Settings → Connections.', true);
       } catch (err) {
-        return page('Not connected', escapeHtml(String((err as Error).message ?? err).slice(0, 300)), false);
+        return page('Not connected', String((err as Error).message ?? err).slice(0, 300), false);
       }
     },
   );

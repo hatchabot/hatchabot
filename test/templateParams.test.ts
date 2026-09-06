@@ -741,6 +741,26 @@ describe('default AI source (household default for new agents)', () => {
     expect(store.getAIProfile('p1')!.defaultSource).toBe(false);
   });
 
+  it('only the host owner may set the default — a co-tenant is refused (installation-wide flag)', async () => {
+    const { store, f } = await world();
+    // A second account that owns a profile but NOT the local host.
+    store.insertAIProfile({
+      id: 'p-co', ownerId: 'user-cotenant', name: 'Their Key', vendor: 'anthropic',
+      kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p-co', createdAt: 'now',
+    } as any);
+    // Host owner sets a default first.
+    store.setAIProfileDefault('p1');
+    // The co-tenant PATCHes their OWN profile (passes the ownership check) but
+    // the installation-wide flag is host-owner-only → 403, and A's default holds.
+    const res = await f.inject({
+      method: 'PATCH', url: '/v1/ai-profiles/p-co',
+      headers: { 'x-agentclaw-owner': 'user-cotenant' }, payload: { defaultSource: true },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(store.getAIProfile('p1')!.defaultSource).toBe(true);
+    expect(store.getAIProfile('p-co')!.defaultSource).toBe(false);
+  });
+
   it('an UNSHARED default never reaches another account silently', async () => {
     const { store, f } = await world();
     store.insertAIProfile({

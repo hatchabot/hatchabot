@@ -371,15 +371,21 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
         'was a previous agent and no longer applies.\n\n' +
         'If you had archived this chat, this message just brought it back — ' +
         'unarchive it to keep the new agent handy.';
-      for (const id of prior) {
-        if (!/^\d{1,32}$/.test(id)) continue;
-        await (this.opts.fetchImpl ?? fetch)(`https://api.telegram.org/bot${token}/sendMessage`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ chat_id: id, text }),
-          signal: AbortSignal.timeout(5000),
-        }).catch(() => {});
-      }
+      // Sends run CONCURRENTLY: this is on the awaited lease/provision path,
+      // and up to 64 sequential 5s-timeout sends could stall a rebuild for
+      // minutes during a Telegram slowdown (audit 2026-09-06). Parallel bounds
+      // the worst case to one timeout; each is already best-effort.
+      const send = (this.opts.fetchImpl ?? fetch);
+      await Promise.all(
+        prior.filter((id) => /^\d{1,32}$/.test(id)).map((id) =>
+          send(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ chat_id: id, text }),
+            signal: AbortSignal.timeout(5000),
+          }).catch(() => {}),
+        ),
+      );
       // Consumed: the next release captures a fresh list for the next lease.
       this.db
         .prepare(`UPDATE telegram_pool SET prior_chat_ids = NULL WHERE username = ? COLLATE NOCASE`)
@@ -400,18 +406,18 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     try {
       const token = await this.secrets.get(secretRef);
       const f = this.opts.fetchImpl ?? fetch;
-      for (const [method, body] of [
+      // Concurrent, same lease-path reasoning as #announceReassignment.
+      await Promise.all(([
         ['setMyDescription', { description: '' }],
         ['setMyShortDescription', { short_description: '' }],
         ['deleteMyCommands', {}],
-      ] as const) {
-        await f(`https://api.telegram.org/bot${token}/${method}`, {
+      ] as const).map(([method, body]) =>
+        f(`https://api.telegram.org/bot${token}/${method}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(5000),
-        }).catch(() => {});
-      }
+        }).catch(() => {})));
     } catch {
       /* cosmetic — never blocks a lease */
     }
