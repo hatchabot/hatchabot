@@ -651,6 +651,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         .type('text/javascript; charset=utf-8')
         .send(readFileSync(join(webDir, 'sw.js'), 'utf8')),
     );
+    // Public privacy policy + terms — required on the authorized domain to
+    // publish the Google OAuth consent screen (Gmail is a sensitive scope),
+    // and reachable without login by design (no data). Auth hook exempts them.
+    for (const page of ['privacy', 'terms'] as const) {
+      app.get(`/${page}`, async (_req, reply) => {
+        const p = join(webDir, `${page}.html`);
+        if (!existsSync(p)) return reply.code(404).send({ error: 'Not found' });
+        return reply.type('text/html; charset=utf-8').header('cache-control', 'public, max-age=3600').send(readFileSync(p, 'utf8'));
+      });
+    }
     app.get<{ Params: { name: string } }>('/icons/:name', async (req, reply) => {
       // Whitelist the filename shape — no path traversal reaches the disk read.
       if (!/^[a-z0-9-]+\.png$/.test(req.params.name)) return reply.code(404).send({ error: 'Not found' });

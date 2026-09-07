@@ -188,6 +188,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     if (path === '/v1/logout') return;
     // PWA shell assets carry no data — reachable before login so the app can install.
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    if (path === '/privacy' || path === '/terms') return; // public legal pages (Google OAuth consent screen)
     // Invitees don't have the LAN password — their invite code is their
     // credential. The join surface validates codes itself.
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
@@ -289,6 +290,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    if (path === '/privacy' || path === '/terms') return; // public legal pages (Google OAuth consent screen)
     // Cross-site OAuth redirect: strict-SameSite keeps the session cookie
     // home, so the single-use state token is this path's credential.
     if (path === '/v1/connections/google/callback') return;
