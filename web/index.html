@@ -5111,10 +5111,16 @@ async function openGateway(id, slug) {
   // connect", which is a genuinely baffling thing to hand someone, so say it
   // up front instead.
   if (!window.isSecureContext) {
+    // WebCrypto (device identity) is exposed only in a secure context, which
+    // the browser judges by the page's URL scheme — you're on plain http.
+    const httpsHere = location.protocol === 'http:' && location.hostname !== 'localhost'
+      ? `https://${location.host}` : null;
     toast(
-      "OpenClaw's console needs a secure context (https:// or localhost) — it uses WebCrypto for device identity. " +
-      'Open AgentClaw at http://localhost:8080 on the host, or via an SSH tunnel, and this will work.',
-      14000,
+      "OpenClaw's console needs a secure context — this tab is on plain http. " +
+      (httpsHere
+        ? `Reopen AgentClaw at ${httpsHere} (the https version of this address) and it'll work.`
+        : 'Open AgentClaw at its https Tailscale address (or http://localhost on the host itself), then try again.'),
+      16000,
     );
     return;
   }
