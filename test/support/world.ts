@@ -6,6 +6,14 @@
  */
 import Fastify, { type FastifyInstance } from 'fastify';
 import Database from 'better-sqlite3';
+
+// Route-driven flows that wait for the runtime to settle (rebuild, move,
+// import) use the real 3s poll interval by default — far too slow for the
+// route tests, which run a MockProvider that settles immediately. Shrink the
+// poll/timeout so those waits resolve in milliseconds (??= keeps any explicit
+// override a test sets).
+process.env.AGENTCLAW_READY_POLL_MS ??= '1';
+process.env.AGENTCLAW_READY_TIMEOUT_MS ??= '2000';
 import { Store } from '../../src/store/store.js';
 import { MockProvider } from '../../src/providers/mockProvider.js';
 import { registerRoutes } from '../../src/api/routes.js';

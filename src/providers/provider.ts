@@ -173,7 +173,7 @@ export interface RuntimeProvider {
    * safe against concurrent reads). The volume is mounted at the same path
    * the agent sees it, so scripts use the same file paths either way.
    */
-  execShellOnVolume(runtimeRef: string, script: string): Promise<ExecResult>;
+  execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean }): Promise<ExecResult>;
 
   /** What this runtime is actually running (image identity, OpenClaw version). */
   info(runtimeRef: string): Promise<RuntimeInfo>;

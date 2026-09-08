@@ -57,17 +57,36 @@ user's.
  * fenced code block — rewriting the wrong place and deleting the text between
  * it and the next heading.
  */
+/**
+ * Map each line to whether it sits inside a fenced code block. A fence is closed
+ * only by a delimiter of the SAME type that opened it (``` vs ~~~) — so a ~~~
+ * line quoted inside a ``` example doesn't flip parity for the rest of the file,
+ * which would hide a managed heading below it and make replaceSection append a
+ * duplicate section on every rebuild (audit 2026-09-08).
+ */
+function fenceMask(lines: string[]): boolean[] {
+  const inFence: boolean[] = [];
+  let open: string | null = null;
+  for (const l of lines) {
+    const m = /^\s*(```|~~~)/.exec(l);
+    if (m) {
+      const ch = m[1]![0]!; // '`' or '~'
+      if (open === null) { inFence.push(false); open = ch; }
+      else if (ch === open) { inFence.push(true); open = null; }
+      else inFence.push(true); // a non-matching fence line inside a block is content
+    } else {
+      inFence.push(open !== null);
+    }
+  }
+  return inFence;
+}
+
 export function replaceSection(content: string, heading: string, section: string): string {
   const lines = content.split('\n');
-  // Track fenced code blocks: a ``` region can legitimately CONTAIN the heading
-  // text (docs showing an example AGENTS.md), and rewriting there both mangles
-  // the fence and orphans the real section.
-  const inFence: boolean[] = [];
-  let fence = false;
-  for (const l of lines) {
-    if (/^\s*(```|~~~)/.test(l)) { inFence.push(fence); fence = !fence; continue; }
-    inFence.push(fence);
-  }
+  // A ``` region can legitimately CONTAIN the heading text (docs showing an
+  // example AGENTS.md); rewriting there mangles the fence and orphans the real
+  // section, so heading detection skips fenced lines.
+  const inFence = fenceMask(lines);
   const isHeading = (i: number) => !inFence[i] && /^#{1,6} /.test(lines[i]!);
   const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
   if (start === -1) return `${content.trimEnd()}\n\n${section}\n`;
@@ -95,12 +114,7 @@ export function replaceMemoryPolicy(content: string, section: string): string {
  */
 export function extractSection(content: string, heading: string): string {
   const lines = content.split('\n');
-  const inFence: boolean[] = [];
-  let fence = false;
-  for (const l of lines) {
-    if (/^\s*(```|~~~)/.test(l)) { inFence.push(fence); fence = !fence; continue; }
-    inFence.push(fence);
-  }
+  const inFence = fenceMask(lines);
   const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
   if (start === -1) return '';
   let end = lines.length;

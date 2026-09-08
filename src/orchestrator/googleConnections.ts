@@ -221,9 +221,12 @@ export async function materializeConnection(
   const script = [
     bootstrapScript(),
     `umask 077`,
+    // Guarantee the plaintext client_secret is removed on ANY exit — under the
+    // inherited `set -e`, a failing `gog auth credentials` would otherwise abort
+    // before an explicit rm and leave it on the durable volume (rides backups).
+    `trap 'rm -f ${GOG_HOME}/.client_secret.json' EXIT`,
     `echo ${JSON.stringify(b64Client)} | base64 -d > ${GOG_HOME}/.client_secret.json`,
     `~/.local/bin/gog auth credentials ${GOG_HOME}/.client_secret.json >/dev/null`,
-    `rm -f ${GOG_HOME}/.client_secret.json`,
     `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${conn.email}" --refresh-token-stdin --no-input${noSend}`,
   ].join('\n');
   const res = await provider.execShell(agent.runtimeRef, script);

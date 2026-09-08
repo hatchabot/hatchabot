@@ -32,7 +32,7 @@ export async function listInspectableFiles(
   const dir = agentDir(slug);
   // `wc -c` each candidate; missing files print an error we drop.
   const script = INSPECTABLE_FILES.map((f) => `wc -c ${q(`${dir}/${f}`)} 2>/dev/null || true`).join('\n');
-  const res = await provider.execShellOnVolume(runtimeRef, script);
+  const res = await provider.execShellOnVolume(runtimeRef, script, { readOnly: true });
   const out: Array<{ name: string; bytes: number }> = [];
   for (const line of res.stdout.split('\n')) {
     const m = /^\s*(\d+)\s+(.+)$/.exec(line);
@@ -52,7 +52,7 @@ export async function readInspectableFile(
 ): Promise<{ name: string; content: string; truncated: boolean } | null> {
   if (!(INSPECTABLE_FILES as readonly string[]).includes(name)) return null;
   const path = `${agentDir(slug)}/${name}`;
-  const res = await provider.execShellOnVolume(runtimeRef, `head -c ${MAX_FILE_BYTES + 1} ${q(path)} 2>/dev/null || true`);
+  const res = await provider.execShellOnVolume(runtimeRef, `head -c ${MAX_FILE_BYTES + 1} ${q(path)} 2>/dev/null || true`, { readOnly: true });
   const truncated = Buffer.byteLength(res.stdout, 'utf8') > MAX_FILE_BYTES;
   // Slice on BYTES, not JS chars, so a multibyte file caps at the real budget
   // and doesn't split a codepoint (matches the files route's byte handling).
@@ -89,15 +89,17 @@ export async function readTranscript(
   const pick = await provider.execShellOnVolume(
     runtimeRef,
     `ls -S ${q(dir)}/*.jsonl 2>/dev/null | head -1`,
+    { readOnly: true },
   );
   const sessionFile = pick.stdout.trim().split('\n')[0]?.trim();
   if (!sessionFile) return { turns: [], totalTurns: 0 };
-  const countRes = await provider.execShellOnVolume(runtimeRef, `wc -l ${q(sessionFile)} 2>/dev/null || true`);
+  const countRes = await provider.execShellOnVolume(runtimeRef, `wc -l ${q(sessionFile)} 2>/dev/null || true`, { readOnly: true });
   const totalTurns = Number(/^\s*(\d+)/.exec(countRes.stdout)?.[1] ?? 0);
   const res = await provider.execShellOnVolume(
     runtimeRef,
     // Cap the byte transfer too: a huge session shouldn't balloon the response.
     `tail -n ${maxTurns} ${q(sessionFile)} 2>/dev/null | head -c ${4 * 1024 * 1024} || true`,
+    { readOnly: true },
   );
   const turns: TranscriptTurn[] = [];
   for (const line of res.stdout.split('\n')) {

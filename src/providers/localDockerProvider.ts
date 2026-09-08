@@ -387,12 +387,15 @@ export class LocalDockerProvider implements RuntimeProvider {
     return this.#docker(['exec', container, 'bash', '-c', script]);
   }
 
-  async execShellOnVolume(runtimeRef: string, script: string): Promise<ExecResult> {
+  async execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean }): Promise<ExecResult> {
     const { volume } = this.#names(runtimeRef);
     // The runtime image (has bash + node, runs as uid 1000 like the files on
-    // the volume), mounted at the path the agent itself sees.
+    // the volume), mounted at the path the agent itself sees. Read-only callers
+    // (archive inspection) get a :ro mount so the guarantee is enforced by
+    // Docker, not just by which commands the script happens to run.
+    const mount = opts?.readOnly ? `${volume}:/home/node:ro` : `${volume}:/home/node`;
     return this.#docker([
-      'run', '--rm', '-v', `${volume}:/home/node`, this.image,
+      'run', '--rm', '-v', mount, this.image,
       'bash', '-c', script,
     ]);
   }

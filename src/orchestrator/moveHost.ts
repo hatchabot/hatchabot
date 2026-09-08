@@ -5,6 +5,7 @@ import {
   buildRuntimeSpec,
   recordApplied,
   waitForHealthy,
+  waitForSkillsSettled,
   type ProvisionDeps,
 } from './provision.js';
 import { TransferError } from './transfer.js';
@@ -144,6 +145,9 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       await target.start(newRef);
       // Cold image / imported sessions: give it the import path's 2 minutes.
       await waitForHealthy(target, newRef, sleep, 120);
+      // Settle skills/gateway before RUNNING so an early message doesn't start a
+      // fresh session and archive the moved conversation (audit 2026-09-08).
+      await waitForSkillsSettled(target, newRef, agent.slug, sleep, log);
       store.setAgentState(agentId, 'RUNNING');
     }
   } catch (err) {

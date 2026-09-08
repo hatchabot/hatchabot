@@ -326,6 +326,9 @@ export class Store {
     // Indexes on ALTER-added columns must come AFTER the additive loop — on a
     // fresh DB the CREATE TABLE block doesn't have the column yet.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agents_image ON agents (image)`);
+    // The vault health view looks up attachments by connection_id (not the PK's
+    // leading agent_id column), so give that its own index.
+    this.db.exec(`CREATE INDEX IF NOT EXISTS agent_connections_conn ON agent_connections (connection_id)`);
     // The one-management-source-per-owner invariant, enforced by the schema
     // instead of living only in setAIProfileMgmtLlm's clear-then-set.
     this.db.exec(
@@ -1615,7 +1618,8 @@ export class Store {
         `INSERT INTO connections (id, owner_id, kind, email, services, secret_ref, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(owner_id, kind, email) DO UPDATE
-           SET services = excluded.services, secret_ref = excluded.secret_ref`,
+           SET services = excluded.services, secret_ref = excluded.secret_ref,
+               created_at = excluded.created_at`,
       )
       .run(c.id, c.ownerId, c.kind, c.email, JSON.stringify(c.services), c.secretRef, new Date().toISOString());
   }

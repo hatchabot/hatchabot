@@ -7,6 +7,7 @@ import {
   recordApplied,
   slugify,
   waitForHealthy,
+  waitForSkillsSettled,
   type ProvisionDeps,
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
@@ -480,6 +481,10 @@ async function importAgentInner(
       deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
       120,
     );
+    // Let the skills/gateway settle before flipping to RUNNING, or a message
+    // landing in the first ~30s starts a fresh session and archives the
+    // imported conversation thread — the same guard rebuild uses (audit 2026-09-08).
+    await waitForSkillsSettled(provider, runtimeRef, agent.slug, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))), log);
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
     return store.setAgentState(agent.id, 'RUNNING');
   } catch (err) {

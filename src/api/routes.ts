@@ -2585,6 +2585,21 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { port: agent.gatewayPort };
   };
 
+  // The agent gateway is the least-trusted component (it runs AI-authored tool
+  // and MCP code) and authenticates via its own bearer token carried in the URL
+  // fragment — it never needs, and must never receive, the owner's AgentClaw
+  // session cookie. Strip only that cookie from proxied headers; keep any
+  // gateway-set cookies and the Authorization bearer intact (audit 2026-09-08).
+  const stripSessionCookie = (headers: Record<string, string | string[] | undefined>) => {
+    const h = { ...headers };
+    if (typeof h.cookie === 'string') {
+      const kept = h.cookie.split(';').map((s) => s.trim()).filter((c) => c && !/^agentclaw_session=/.test(c));
+      if (kept.length) h.cookie = kept.join('; ');
+      else delete h.cookie;
+    }
+    return h;
+  };
+
   app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui', async (req, reply) => {
     // The UI is a SPA served from a directory; without the trailing slash its
     // relative asset paths would resolve one level too high.
@@ -2605,7 +2620,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             path: path + qs,
             method: req.method,
             // Drop hop-by-hop and our own host header; keep auth/content ones.
-            headers: { ...req.headers, host: `127.0.0.1:${target.port}`, connection: 'close' },
+            // The owner's session cookie is stripped — the gateway must not see it.
+            headers: { ...stripSessionCookie(req.headers), host: `127.0.0.1:${target.port}`, connection: 'close' },
           },
           (res) => {
             const chunks: Buffer[] = [];
@@ -2664,7 +2680,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       port: agent.gatewayPort,
       path: `/${m[2] ?? ''}${qs}`,
       method: 'GET',
-      headers: { ...rawReq.headers, host: `127.0.0.1:${agent.gatewayPort}` },
+      headers: { ...stripSessionCookie(rawReq.headers), host: `127.0.0.1:${agent.gatewayPort}` },
     });
     up.on('upgrade', (upRes, upSocket, upHead) => {
       socket.write(

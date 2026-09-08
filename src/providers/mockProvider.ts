@@ -115,7 +115,7 @@ export class MockProvider implements RuntimeProvider {
     return this.execResponses.get('sh') ?? { code: 0, stdout: '', stderr: '' };
   }
 
-  async execShellOnVolume(runtimeRef: string, script: string): Promise<ExecResult> {
+  async execShellOnVolume(runtimeRef: string, script: string, _opts?: { readOnly?: boolean }): Promise<ExecResult> {
     this.#require(runtimeRef);
     this.execLog.push(['sh-volume', script]);
     return this.execResponses.get('sh-volume') ?? { code: 0, stdout: '', stderr: '' };

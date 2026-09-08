@@ -2629,6 +2629,7 @@ function moveAgentsToSource(profileId, profileName) {
         <span class="sub">· now on ${esc(src ? src.name : 'another source')}</span></span>
     </label>`;
   }).join('');
+  $('moveSourceCheckpoint').checked = true; // shared control — reset so a prior uncheck doesn't silently skip saving conversations to memory before the switch
   refreshMoveCount();
   moveSourceDlg.showModal();
 }
@@ -2848,6 +2849,7 @@ async function addAiProfile() {
 
 $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
+  $('agentPrivate').checked = false; // shared control — reset so a prior tick doesn't silently make the next agent's memory private
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   // The ⭐ default source (if any, and visible to this account) is preselected;
   // the picker still offers everything.
@@ -3707,6 +3709,7 @@ async function openEdit(id, name, tab = 'def') {
   void renderEditMembers();
   renderParamList();
   $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
+  $('editCheckpoint').checked = true; // shared control — reset to safe default so a prior card's uncheck doesn't silently drop this agent's conversation on switch
   $('editShared').checked = !!cur?.sharedMemory;
   $('editShared').disabled = otherMembers.length > 0;
   $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
