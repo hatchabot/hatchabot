@@ -14,6 +14,7 @@ import { registerRoutes } from './api/routes.js';
 import { authModeFromEnv, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
 import { reconcileAgents, startReconcileLoop } from './orchestrator/reconcile.js';
+import { runPostureSweep } from './orchestrator/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
@@ -215,6 +216,21 @@ const nameRepair = setInterval(() => {
     .catch((err) => app.log.warn({ err: String(err) }, 'channel.name_repair_failed'));
 }, Number(process.env.AGENTCLAW_NAME_REPAIR_MS ?? 120_000));
 nameRepair.unref();
+
+// Daily security-posture sweep: snapshot each owner's config-risk set and log
+// anything that newly appeared (a shared machine-login source, an agent that
+// gained send-email while reachable by a group). Runs once shortly after boot,
+// then daily — a cheap DB-only pass. The UI's "Run check" button shows the same.
+const postureSweep = () => {
+  try {
+    runPostureSweep(store, { authMode: authModeFromEnv(), log: (e, d) => app.log.info(d, e) });
+  } catch (err) {
+    app.log.warn({ err: String(err) }, 'security.posture_sweep_failed');
+  }
+};
+setTimeout(postureSweep, 60_000).unref();
+const postureDaily = setInterval(postureSweep, Number(process.env.AGENTCLAW_POSTURE_SWEEP_MS ?? 86_400_000));
+postureDaily.unref();
 
 await app.listen({ port: PORT, host: bindHost });
 app.log.info(

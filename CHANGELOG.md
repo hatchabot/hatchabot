@@ -2,6 +2,32 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.120.0] — 2026-09-08
+
+### Added
+- **Security posture check** (⚙ → 🛡 Security → Run check). A read-only
+  config-risk check, safe to run anytime and run automatically once a day.
+  Centres on a per-agent **Telegram exposure score** — audience (how many people
+  can reach an agent) × capability (send-email connection, read-write host
+  folder, shared memory) — flagging the high-audience × high-capability agents
+  where a hostile message does damage. Install-level checks for the host owner:
+  identity mode, owner-header spoof, **a shared machine-login source** (the
+  headline family risk), the agent cap, and shared fleet keys. The daily sweep
+  logs anything that newly appeared (`security.posture_changed`).
+- `scripts/agent-disk-check.mjs`: agent volume sizes vs a soft warn threshold
+  (`AGENTCLAW_AGENT_DISK_WARN_GB`, default 10) — a hard quota isnt available on
+  overlay2+ext4.
+
+### Changed / Hardened (family-member readiness)
+- **Refuse sharing a machine-login Max source**, and block cross-owner selection
+  of one at create/switch, plus restore the owner-match guard on the ~/.claude
+  mount — closing the one true cross-owner data breach.
+- `--security-opt=no-new-privileges` on the agent container runtime.
+- The **agent cap excludes archived agents** (they hold no bot/container/port);
+  `/v1/config` exposes it and the New-agent dialog shows "N of M agents used".
+- The move-agents-here picker **labels archived agents** ("applies when
+  unarchived") instead of looking like a silent no-op.
+
 ## [0.119.0] — 2026-09-08
 
 ### Added

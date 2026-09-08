@@ -80,6 +80,7 @@ import {
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
+import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -698,6 +699,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           }
         : undefined,
   }));
+
+  // ---- security posture (config-risk check, runnable on demand) ------------
+  app.get('/v1/security/posture', async (req) => {
+    const ownerId = ownerIdOf(req);
+    const report = computePosture(store, {
+      ownerId,
+      isHostOwner: ownsLocalHost(req),
+      authMode: deps.authMode ?? 'password',
+    });
+    // Diff today's active risks against this owner's most recent prior snapshot,
+    // then record today's — so the UI (and the daily job) can flag what changed.
+    const today = new Date().toISOString().slice(0, 10);
+    const keys = riskKeys(report);
+    const previous = store.latestPostureSnapshotBefore(ownerId, today);
+    const changes = previous ? diffRisks(keys, previous) : { added: [], removed: [] };
+    store.upsertPostureSnapshot(ownerId, today, keys);
+    return { report, changes, comparedToPrior: previous !== undefined };
+  });
 
   // ---- profiles & hosts ----------------------------------------------------
 

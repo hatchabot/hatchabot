@@ -786,6 +786,7 @@
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
+    <button class="tab" id="tabSecurity" role="tab" aria-selected="false" onclick="showTab('security')">🛡 Security</button>
   </div>
 
   <section id="paneAi" role="tabpanel">
@@ -1094,6 +1095,15 @@
       </details>
       <pre id="derivedBuildOut" hidden style="margin-top:10px;max-height:280px;overflow:auto;background:#0b0b0b;color:#ddd;padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap"></pre>
     </div>
+  </section>
+
+  <section id="paneSecurity" role="tabpanel" hidden>
+    <div class="pair" style="align-items:center">
+      <span class="grow"><b>Security posture</b>
+        <span class="sub">A config-risk check — safe to run anytime, especially after adding an agent or a person. Runs automatically once a day too.</span></span>
+      <button class="primary" id="postureRunBtn" onclick="loadPosture()">Run check</button>
+    </div>
+    <div id="postureOut" class="sub" style="margin-top:10px">Press <b>Run check</b>.</div>
   </section>
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
@@ -1690,7 +1700,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime' };
+const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -1704,6 +1714,47 @@ function showTab(name) {
   if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
   if (name === 'runtime') loadRuntime();
+  if (name === 'security') loadPosture();
+}
+
+const POSTURE_DOT = { ok: '🟢', info: '🔵', warn: '🟡', critical: '🔴' };
+const EXPOSURE_DOT = { high: '🔴', medium: '🟡', low: '🟢' };
+async function loadPosture() {
+  const el = $('postureOut');
+  $('postureRunBtn').disabled = true;
+  el.textContent = 'Checking…';
+  try {
+    const { report, changes, comparedToPrior } = await api('/v1/security/posture');
+    const chg = (changes.added?.length || changes.removed?.length)
+      ? `<div class="pair" style="border:1px solid var(--warn);border-radius:8px;padding:8px 10px;margin-bottom:10px;color:var(--warn)">
+           ⚠ <span class="grow"><b>Changes since the last check:</b>
+           ${changes.added.length ? `<div>appeared: ${changes.added.map(esc).join(', ')}</div>` : ''}
+           ${changes.removed.length ? `<div>resolved: ${changes.removed.map(esc).join(', ')}</div>` : ''}</span></div>`
+      : (comparedToPrior ? '<div class="sub" style="margin-bottom:10px">No change since the last check.</div>' : '');
+
+    const install = report.install.length
+      ? report.install.map(c => `<div class="pair" style="align-items:baseline;gap:6px${c.level === 'critical' || c.level === 'warn' ? ';color:var(--warn)' : ''}">
+          <span>${POSTURE_DOT[c.level] ?? '•'}</span>
+          <span class="grow"><b>${esc(c.title)}</b><span class="sub"> — ${esc(c.detail)}</span></span></div>`).join('')
+      : '<div class="sub">(install-level checks are shown to the host owner)</div>';
+
+    const agents = report.agents.length
+      ? report.agents.map(a => `<div class="pair" style="align-items:baseline;gap:6px${a.exposure === 'high' ? ';color:var(--warn)' : ''}">
+          <span>${EXPOSURE_DOT[a.exposure]}</span>
+          <span class="grow"><b>${esc(a.name)}</b> <span class="sub">— ${a.exposure} exposure${a.reasons.length ? ': ' + a.reasons.map(esc).join(' + ') : ''}${a.capabilities.length ? `<br>can: ${a.capabilities.map(esc).join(', ')}` : ''}</span></span></div>`).join('')
+      : '<div class="sub">No live agents.</div>';
+
+    const lim = report.limits;
+    el.innerHTML = `${chg}
+      <div style="margin:6px 0"><b>Install</b></div>${install}
+      <div style="margin:14px 0 6px"><b>Agent exposure</b> <span class="sub">(who can reach it × what it can do)</span></div>${agents}
+      <div style="margin:14px 0 6px"><b>Limits</b></div>
+      <div class="sub">Agents: ${lim.liveAgents}${lim.agentCap ? ` / ${lim.agentCap}` : ' (no cap set)'} · Disk warn threshold: ${lim.diskWarnGB} GB/agent</div>`;
+  } catch (e) {
+    el.textContent = e.message;
+  } finally {
+    $('postureRunBtn').disabled = false;
+  }
 }
 
 async function loadMediaKey() {

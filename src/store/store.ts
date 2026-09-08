@@ -136,6 +136,15 @@ export class Store {
         PRIMARY KEY (owner_id, day)
       );
 
+      -- Daily security-posture risk snapshots per owner: the set of active risk
+      -- keys, so a run can be diffed against the previous one to flag what newly
+      -- appeared (e.g. an agent gained send-email while reachable by a group).
+      CREATE TABLE IF NOT EXISTS posture_snapshots (
+        owner_id TEXT NOT NULL, day TEXT NOT NULL,
+        risk_keys TEXT NOT NULL, captured_at TEXT NOT NULL,
+        PRIMARY KEY (owner_id, day)
+      );
+
       -- Other AgentClaw installations this owner can move agents to. The
       -- access token is a credential, so it lives in the SecretStore and only
       -- its ref is here.
@@ -1602,6 +1611,38 @@ export class Store {
   /** Secret refs by LIKE pattern — names only, never values (bot inventory).
    *  The table belongs to SqliteSecretStore; a harness with a memory store
    *  has none, and that just means no orphaned tokens to report. */
+  /** Upsert today's posture risk-key set for an owner. */
+  upsertPostureSnapshot(ownerId: string, day: string, riskKeys: string[]): void {
+    this.db
+      .prepare(
+        `INSERT INTO posture_snapshots (owner_id, day, risk_keys, captured_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(owner_id, day) DO UPDATE SET risk_keys = excluded.risk_keys, captured_at = excluded.captured_at`,
+      )
+      .run(ownerId, day, JSON.stringify(riskKeys), new Date().toISOString());
+  }
+
+  /** The most recent posture risk-key set strictly before `day` (for diffing). */
+  latestPostureSnapshotBefore(ownerId: string, day: string): string[] | undefined {
+    const r = this.db
+      .prepare(`SELECT risk_keys FROM posture_snapshots WHERE owner_id = ? AND day < ? ORDER BY day DESC LIMIT 1`)
+      .get(ownerId, day) as { risk_keys: string } | undefined;
+    return r ? (JSON.parse(r.risk_keys) as string[]) : undefined;
+  }
+
+  /** Distinct owners that currently have a non-deleted agent — the daily job
+   *  iterates these to snapshot each owner's posture. */
+  ownersWithAgents(): string[] {
+    return (this.db.prepare(`SELECT DISTINCT owner_id FROM agents WHERE state != 'DELETED'`).all() as any[]).map((r) => r.owner_id);
+  }
+
+  /** The owner of the shared local host — the operator, who sees install-level
+   *  posture checks. undefined if no local host is registered. */
+  localHostOwnerId(): string | undefined {
+    const r = this.db.prepare(`SELECT owner_id FROM hosts WHERE kind = 'local' LIMIT 1`).get() as { owner_id: string } | undefined;
+    return r?.owner_id;
+  }
+
   listSecretRefs(likePattern: string): string[] {
     try {
       return (this.db.prepare(`SELECT ref FROM secrets WHERE ref LIKE ?`).all(likePattern) as any[]).map((r) => r.ref);
