@@ -686,6 +686,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // authorise anything on its own.
   app.get('/v1/config', async () => ({
     authMode: deps.authMode ?? 'password',
+    // Surfaced so the UI can show "N of M agents" instead of only revealing the
+    // ceiling as a 429 at create time. 0 = no limit. Archived agents don't count.
+    maxAgentsPerAccount: Number(process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT ?? 0),
     identity:
       deps.authMode === 'identity'
         ? {

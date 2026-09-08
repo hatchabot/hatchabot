@@ -362,6 +362,7 @@
 <dialog id="createDlg">
   <h3 style="margin:0 0 4px">New agent</h3>
   <div class="sub">It boots on this machine and lives on Telegram.</div>
+  <div class="sub" id="agentCountNote" style="margin-top:2px"></div>
   <label>Name</label>
   <input type="text" id="agentName" placeholder="Kitchen Helper" maxlength="64">
   <label>What is it for? <span style="color:var(--dim)">(optional — becomes its persona)</span></label>
@@ -2623,10 +2624,15 @@ function moveAgentsToSource(profileId, profileName) {
   $('moveSourceErr').textContent = '';
   $('moveSourceList').innerHTML = candidates.map(a => {
     const src = profiles.find(p => p.id === a.aiProfileId);
+    // Archived agents stay selectable — you must be able to move them off a
+    // source to retire it — but they don't rebuild now; the switch applies when
+    // they're unarchived. Label them so that isn't a surprise.
+    const archived = a.state === 'ARCHIVED'
+      ? ' · <span style="color:var(--warn)">archived — applies when unarchived</span>' : '';
     return `<label class="pair" style="padding:5px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
       <input type="checkbox" class="moveSourceCb" data-id="${esc(a.id)}" onchange="refreshMoveCount()" style="width:auto;flex:none">
       <span class="grow"><b>${esc(a.name)}</b>
-        <span class="sub">· now on ${esc(src ? src.name : 'another source')}</span></span>
+        <span class="sub">· now on ${esc(src ? src.name : 'another source')}${archived}</span></span>
     </label>`;
   }).join('');
   $('moveSourceCheckpoint').checked = true; // shared control — reset so a prior uncheck doesn't silently skip saving conversations to memory before the switch
@@ -2850,6 +2856,13 @@ async function addAiProfile() {
 $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   $('agentPrivate').checked = false; // shared control — reset so a prior tick doesn't silently make the next agent's memory private
+  // Show usage against the per-account cap up front, so hitting it isn't a
+  // surprise 429. Archived agents don't count (server-side rule).
+  const cap = appConfig?.maxAgentsPerAccount || 0;
+  const live = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED').length;
+  $('agentCountNote').innerHTML = cap
+    ? `${live} of ${cap} agents used${live >= cap ? ' — <span style="color:var(--warn)">at the limit; delete or archive one first</span>' : ''}`
+    : '';
   $('agentProfileRow').style.display = profiles.length > 1 ? '' : 'none';
   // The ⭐ default source (if any, and visible to this account) is preselected;
   // the picker still offers everything.
