@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.119.0] — 2026-09-08
+
+### Added
+- **Management-bot role tiers.** The mgmt allowlist is now the *operator* set
+  (full authority, unchanged); a new **AGENTCLAW_MGMT_VIEWERS** env adds a
+  read-only tier — those ids can query the fleet (/list, /logs, /usage, …) but
+  cannot mutate, arm /mode, /pause, /resume, or approve joiners. Enforced at the
+  broker (keyed on the caller, so it also blocks a viewer natural-language
+  request from riding an operator's armed mode) and at the bot for the control
+  verbs. Backward-compatible: with no viewers set, every allowlisted id remains
+  a full operator.
+
 ## [0.118.2] — 2026-09-08
 
 ### Fixed

@@ -134,6 +134,7 @@ export type ErrCode =
   | 'AMBIGUOUS'
   | 'INVALID_INPUT'
   | 'READ_ONLY_MODE'
+  | 'FORBIDDEN_ROLE'
   | 'RATE_LIMITED'
   | 'FORBIDDEN_TOOL'
   | 'UPSTREAM_ERROR';
@@ -147,6 +148,10 @@ export interface Proposer {
   ownerId: string;
   chatId: number;
   fromUserId: number;
+  /** Caller's authority tier. Viewers may run read tools but never mutates.
+   *  Optional for back-compat (undefined = operator — the historical behavior
+   *  where every allowlisted user had full authority). */
+  role?: 'operator' | 'viewer';
 }
 
 export interface BrokerOptions {
@@ -223,6 +228,12 @@ export class Broker {
         return { ok: true, tool: name, data };
       }
 
+      // mutate: a viewer may never mutate, regardless of the global mode — the
+      // per-caller check (not just the shared #readWrite flag) is what stops a
+      // viewer's natural-language request from riding an operator's armed mode.
+      if (who.role === 'viewer') {
+        throw new BrokerError('FORBIDDEN_ROLE', 'Read-only viewer — ask an operator to make changes.');
+      }
       // mutate: gate, resolve, validate, then park a confirmation — never act.
       if (!this.#readWrite) {
         throw new BrokerError('READ_ONLY_MODE', 'Read-only. Send /mode readwrite to arm mutations.');
@@ -303,6 +314,7 @@ export class Broker {
     who: Proposer,
   ): Promise<{ ok: true } | { ok: false; message: string }> {
     if (this.#paused) return { ok: false, message: 'Management is paused.' };
+    if (who.role === 'viewer') return { ok: false, message: 'Read-only viewer — only an operator can admit or turn away joiners.' };
     if (!/^[A-Za-z0-9]{4,16}$/.test(code)) return { ok: false, message: 'Invalid pairing code.' };
     try {
       this.#rateGate();

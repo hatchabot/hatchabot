@@ -12,9 +12,11 @@
  * Required env:
  *   AGENTCLAW_MGMT_BOT_TOKEN   BotFather token for the management bot
  *   AGENTCLAW_MGMT_TOKEN       a cli-token (POST /v1/cli-tokens) — the bearer
- *   AGENTCLAW_MGMT_ALLOWLIST   comma-separated Telegram user ids allowed to control
+ *   AGENTCLAW_MGMT_ALLOWLIST   comma-separated Telegram user ids with FULL control (operators)
  * Optional:
  *   AGENTCLAW_URL                    control plane base URL (default http://localhost:8080)
+ *   AGENTCLAW_MGMT_VIEWERS           comma-separated Telegram user ids with READ-ONLY access
+ *                                    (query the fleet, but no mutations/mode/pause/join approvals)
  *   AGENTCLAW_MGMT_OWNER             owner id for audit/proposer records (default "local")
  *   AGENTCLAW_MGMT_ANTHROPIC_KEY     dedicated LLM credential — overrides the proxy path
  *                                    (an ambient ANTHROPIC_API_KEY does the same — unset
@@ -68,10 +70,16 @@ const ownerId = process.env.AGENTCLAW_MGMT_OWNER ?? 'local';
 // A management bot with NO allowlist would accept nobody (bot.ts rejects
 // unknown ids), which is a silent misconfiguration. Refuse to start instead, so
 // the operator sets it — never accidentally ship an open control bot.
-const allowlist = (process.env.AGENTCLAW_MGMT_ALLOWLIST ?? '')
-  .split(',')
-  .map((s) => Number(s.trim()))
-  .filter((n) => Number.isFinite(n) && n > 0);
+const parseIds = (raw: string | undefined) =>
+  (raw ?? '')
+    .split(',')
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n > 0);
+// The allowlist is the OPERATOR set (full authority) — unchanged. Viewers are
+// an optional read-only tier: they can query the fleet but never mutate, arm
+// mode, pause, or approve joiners.
+const allowlist = parseIds(process.env.AGENTCLAW_MGMT_ALLOWLIST);
+const viewers = parseIds(process.env.AGENTCLAW_MGMT_VIEWERS).filter((n) => !allowlist.includes(n));
 if (allowlist.length === 0) {
   console.error('AGENTCLAW_MGMT_ALLOWLIST is empty — set the Telegram id(s) allowed to control the fleet.');
   process.exit(1);
@@ -97,7 +105,7 @@ const llm = anthropicKey
 
 const bot = new Bot(botToken);
 const transport = new GrammyTransport(bot.api);
-const mgmt = new ManagementBot(broker, transport, { ownerId, allowlist, llm });
+const mgmt = new ManagementBot(broker, transport, { ownerId, allowlist, viewers, llm });
 
 // Approval push: DM the owner a one-tap Approve card whenever an invitee
 // messages one of their agents' bots, so a Telegram-only invite needs no web UI.

@@ -24,14 +24,21 @@ export interface BotTransport {
 
 export interface ManagementBotOptions {
   ownerId: string;
-  /** Telegram user ids permitted to control the fleet. */
+  /** Telegram user ids with FULL authority — reads, mutates (armed via
+   *  /mode + confirm), and the control verbs /mode /pause /resume + join
+   *  approvals. This is the historical allowlist, unchanged. */
   allowlist: Iterable<number>;
+  /** Read-only Telegram user ids: every read tool, but no mutates, no
+   *  /mode/pause/resume, no join approvals. Optional — omit for the old
+   *  everyone-is-an-operator behavior. */
+  viewers?: Iterable<number>;
   /** Phase 2: if present, plain-text (non-slash) messages go to the LLM. */
   llm?: LlmAgent;
 }
 
 export class ManagementBot {
-  #allow: Set<number>;
+  #operators: Set<number>;
+  #allow: Set<number>; // operators ∪ viewers — "authorized to talk to the bot at all"
   #ownerId: string;
   #llm?: LlmAgent;
 
@@ -40,13 +47,18 @@ export class ManagementBot {
     private readonly tx: BotTransport,
     opts: ManagementBotOptions,
   ) {
-    this.#allow = new Set(opts.allowlist);
+    this.#operators = new Set(opts.allowlist);
+    this.#allow = new Set([...this.#operators, ...(opts.viewers ?? [])]);
     this.#ownerId = opts.ownerId;
     this.#llm = opts.llm;
   }
 
+  #roleOf(fromUserId: number): 'operator' | 'viewer' {
+    return this.#operators.has(fromUserId) ? 'operator' : 'viewer';
+  }
+
   #who(chatId: number, fromUserId: number): Proposer {
-    return { ownerId: this.#ownerId, chatId, fromUserId };
+    return { ownerId: this.#ownerId, chatId, fromUserId, role: this.#roleOf(fromUserId) };
   }
 
   /** A text message from a user. */
@@ -90,15 +102,18 @@ export class ManagementBot {
       case '/start':
         return void (await this.tx.sendMessage(chatId, HELP));
       case '/mode': {
+        if (this.#roleOf(fromUserId) !== 'operator') return void (await this.tx.sendMessage(chatId, '⛔ Only an operator can change mode.'));
         if (rest[0] === 'readwrite') this.broker.setMode(true);
         else if (rest[0] === 'readonly') this.broker.setMode(false);
         else return void (await this.tx.sendMessage(chatId, 'Usage: /mode readwrite|readonly'));
         return void (await this.tx.sendMessage(chatId, `Mode: ${this.broker.readWrite ? 'read-write' : 'read-only'}`));
       }
       case '/pause':
+        if (this.#roleOf(fromUserId) !== 'operator') return void (await this.tx.sendMessage(chatId, '⛔ Only an operator can pause management.'));
         this.broker.pause();
         return void (await this.tx.sendMessage(chatId, '⏸ Paused — all tools disabled.'));
       case '/resume':
+        if (this.#roleOf(fromUserId) !== 'operator') return void (await this.tx.sendMessage(chatId, '⛔ Only an operator can resume management.'));
         this.broker.resume();
         return void (await this.tx.sendMessage(chatId, '▶ Resumed.'));
       case '/list':

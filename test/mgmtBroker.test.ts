@@ -613,6 +613,55 @@ describe('ManagementBot dispatch', () => {
     expect(api.calls).toEqual([]);
   });
 
+  // --- viewer role (read-only tier) -----------------------------------------
+  const viewerBot = (rw = true) => {
+    const { broker, api } = make({ rw });
+    const tx = new FakeTx();
+    const b = new ManagementBot(broker, tx, { ownerId: 'o', allowlist: [555], viewers: [777] });
+    return { b, tx, api };
+  };
+
+  it('a viewer may run read commands', async () => {
+    const { b, tx } = viewerBot();
+    await b.onMessage(777, 777, '/list');
+    expect(tx.sent[0]!.text).not.toMatch(/viewer|not authorized/i); // the list rendered
+  });
+
+  it('a viewer is refused a mutate command (even with mode armed)', async () => {
+    const { b, tx, api } = viewerBot(true); // read-write mode ON
+    await b.onMessage(777, 777, '/stop a1');
+    expect(tx.sent.map((s) => s.text).join(' ')).toMatch(/viewer/i);
+    expect(api.calls).not.toContain('stop:a1');
+  });
+
+  it("a viewer's natural-language mutate is refused at the broker", async () => {
+    const { broker, api } = make({ rw: true });
+    const who = { ownerId: 'o', chatId: 777, fromUserId: 777, role: 'viewer' as const };
+    const res = await broker.handleTool('stop_agent', { agent: 'a1' }, who);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error.code).toBe('FORBIDDEN_ROLE');
+    expect(api.calls).not.toContain('stop:a1');
+  });
+
+  it('a viewer cannot change mode', async () => {
+    const { b, tx } = viewerBot();
+    await b.onMessage(777, 777, '/mode readwrite');
+    expect(tx.sent[0]!.text).toMatch(/operator/i);
+  });
+
+  it('a viewer cannot approve a joiner via the push button', async () => {
+    const { b, tx, api } = viewerBot();
+    await b.onCallback(777, 777, 'cb', 'apr:0123456789abcdef:CODE12', 5);
+    expect(tx.answers.join(' ')).toMatch(/viewer/i);
+    expect(api.calls.some((c) => c.startsWith('approve:'))).toBe(false);
+  });
+
+  it('an operator keeps full authority when viewers are configured', async () => {
+    const { b, tx } = viewerBot();
+    await b.onMessage(555, 555, '/mode readwrite');
+    expect(tx.sent[0]!.text).toMatch(/read-write/i);
+  });
+
   it('/stop posts a confirm card, and the button executes it', async () => {
     const { b, tx, api } = bot();
     await b.onMessage(100, 555, '/stop a1');
