@@ -51,6 +51,12 @@ export class ManagementBot {
 
   /** A text message from a user. */
   async onMessage(chatId: number, fromUserId: number, text: string): Promise<void> {
+    // Never operate in a group. Telegram group/supergroup chat ids are
+    // NEGATIVE; a private chat's id is the user's own positive id. An
+    // allowlisted user in a group would otherwise get replies (logs, members,
+    // SOUL.md) rendered where non-allowlisted members can read them, so ignore
+    // group chats silently rather than leak into them (audit 2026-09-08).
+    if (chatId < 0) return;
     if (!this.#allow.has(fromUserId)) {
       await this.tx.sendMessage(chatId, '⛔ Not authorized.');
       return;
@@ -195,6 +201,12 @@ export class ManagementBot {
     data: string,
     messageId: number,
   ): Promise<void> {
+    // Same rule as onMessage — never act on a tap from a group inline keyboard
+    // (negative chat id = group/supergroup) (audit 2026-09-08).
+    if (chatId < 0) {
+      await this.tx.answerCallback(callbackId, 'Use me in a private chat.');
+      return;
+    }
     if (!this.#allow.has(fromUserId)) {
       await this.tx.answerCallback(callbackId, 'Not authorized');
       return;

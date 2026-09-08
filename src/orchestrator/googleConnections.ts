@@ -267,6 +267,28 @@ export async function syncConnections(
   const agent = deps.store.getAgent(agentId);
   if (!agent) return;
   const attached = deps.store.listAgentConnections(agentId);
+  const attachedEmails = new Set(
+    attached.map((a) => deps.store.getConnection(a.connectionId)?.email).filter((e): e is string => !!e),
+  );
+  // Reconcile FIRST: pull off any platform account this agent still has
+  // materialized but is no longer attached to — e.g. it was detached while the
+  // agent was STOPPED, so the live detach never ran and the credential would
+  // otherwise outlive the attachment across a rebuild. Scope strictly to the
+  // owner's own vault emails, so an account the AGENT self-connected in chat
+  // (not a platform connection) is never touched (audit 2026-09-08).
+  try {
+    const vaultEmails = new Set(deps.store.listConnections(agent.ownerId).map((c) => c.email));
+    const res = await deps.provider.execShell(runtimeRef, 'gog auth list --json 2>/dev/null || true');
+    const parsed = JSON.parse(res.stdout) as { accounts?: Array<{ email?: string }> };
+    for (const acc of parsed.accounts ?? []) {
+      const email = acc.email;
+      if (email && vaultEmails.has(email) && !attachedEmails.has(email)) {
+        await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
+      }
+    }
+  } catch {
+    /* gog absent or output unparsable → nothing to reconcile */
+  }
   for (const a of attached) {
     await materializeConnection(deps, { id: agentId, slug: agent.slug, runtimeRef }, a.connectionId);
   }

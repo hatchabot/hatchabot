@@ -605,6 +605,14 @@ describe('ManagementBot dispatch', () => {
     expect(api.calls).toEqual([]);
   });
 
+  it('ignores a group chat silently — never renders fleet data where non-members can read it', async () => {
+    const { b, tx, api } = bot();
+    // Negative chat id = a Telegram group/supergroup, even from an allowlisted user.
+    await b.onMessage(-1001234567890, 555, '/list');
+    expect(tx.sent).toEqual([]); // no reply leaked into the group
+    expect(api.calls).toEqual([]);
+  });
+
   it('/stop posts a confirm card, and the button executes it', async () => {
     const { b, tx, api } = bot();
     await b.onMessage(100, 555, '/stop a1');

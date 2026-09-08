@@ -5,7 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
-import { OAuthStateJar, googleAuthUrl, parseOAuthClient } from '../src/orchestrator/googleConnections.js';
+import { OAuthStateJar, googleAuthUrl, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
 
 /**
  * Platform-managed Google connections: the control plane owns the OAuth
@@ -192,6 +192,38 @@ describe('attach / detach / remove', () => {
     expect(attached[0]).toMatchObject({ connectionId: connId, gmailNoSend: true });
     expect(attached[0]!.attachedAt).toBeTruthy();
     expect(attached[0]!.materializedAt).toBeTruthy(); // materialize stamped the pull
+  });
+
+  it('syncConnections reconciles away a vault account no longer attached (detached while stopped)', async () => {
+    const { provider, store, secrets } = await connectedWorld();
+    // chris@example.com is in the owner's vault but is NOT attached to a1.
+    // Simulate the container still having it materialized (a detach that
+    // happened while the agent was stopped, so the live remove never ran).
+    provider.execResponses.set('sh', {
+      code: 0,
+      stdout: JSON.stringify({ accounts: [{ email: 'chris@example.com' }] }),
+      stderr: '',
+    });
+    const ref = store.getAgent('a1')!.runtimeRef!;
+    await syncConnections({ store, secrets, provider, log: () => {} }, 'a1', ref);
+    expect(
+      provider.execLog.some((c) => c[0] === 'sh' && String(c[1] ?? '').includes('gog auth remove --force -- "chris@example.com"')),
+    ).toBe(true);
+  });
+
+  it('syncConnections leaves a SELF-connected account (not in the vault) alone', async () => {
+    const { provider, store, secrets } = await connectedWorld();
+    // An account the agent connected itself in chat — not an owner vault entry.
+    provider.execResponses.set('sh', {
+      code: 0,
+      stdout: JSON.stringify({ accounts: [{ email: 'self-connected@example.org' }] }),
+      stderr: '',
+    });
+    const ref = store.getAgent('a1')!.runtimeRef!;
+    await syncConnections({ store, secrets, provider, log: () => {} }, 'a1', ref);
+    expect(
+      provider.execLog.some((c) => c[0] === 'sh' && String(c[1] ?? '').includes('gog auth remove')),
+    ).toBe(false);
   });
 
   it("someone else's connection cannot be attached (404, no exec)", async () => {
