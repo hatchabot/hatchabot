@@ -1766,9 +1766,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
     // Optional per-account ceiling: on a shared box this bounds how many
     // agents (and pool bots, ports, containers) one account can consume.
-    // Unset = no limit, preserving the single-owner default.
+    // Unset = no limit, preserving the single-owner default. ARCHIVED agents
+    // are excluded — they hold no bot, container, or port, so they don't
+    // consume the resources this cap protects (an owner can keep old archives
+    // without eating their live-agent budget).
     const maxPerAccount = Number(process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT ?? 0);
-    if (maxPerAccount > 0 && store.listAgents(ownerId).length >= maxPerAccount) {
+    const liveCount = store.listAgents(ownerId).filter((a) => a.state !== 'ARCHIVED').length;
+    if (maxPerAccount > 0 && liveCount >= maxPerAccount) {
       return reply.code(429).send({
         error: `You've reached the limit of ${maxPerAccount} agents on this server. Delete one first.`,
       });

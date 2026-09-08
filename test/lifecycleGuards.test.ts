@@ -146,6 +146,23 @@ describe('per-account agent cap', () => {
       else process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT = prev;
     }
   });
+
+  it('does NOT count archived agents toward the cap (they hold no bot/container)', async () => {
+    const { f, store } = await world();
+    const prev = process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT;
+    process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT = '1';
+    store.setAgentState('a1', 'ARCHIVED'); // the one seeded agent is now archived
+    try {
+      const res = await f.inject({
+        method: 'POST', url: '/v1/agents', headers: as,
+        payload: { name: 'Second', aiProfileId: 'p1', hostId: 'h1' },
+      });
+      expect(res.statusCode).toBe(202); // created (async) — not 429; archived a1 doesn't consume the slot
+    } finally {
+      if (prev === undefined) delete process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT;
+      else process.env.AGENTCLAW_MAX_AGENTS_PER_ACCOUNT = prev;
+    }
+  });
 });
 
 describe('delete is 404 the second time, not a 500', () => {
