@@ -2,6 +2,83 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.118.1] — 2026-09-08
+
+### Changed
+- Packaging: CHANGELOG brought current (0.116.0–0.118.0) and `package.json`
+  version synced to the release.
+
+## [0.118.0] — 2026-09-08
+
+### Fixed
+- **Connection reconcile on rebuild.** `syncConnections` now enumerates the
+  container's actual gog accounts and **dematerializes any that are in the
+  owner's vault but no longer attached** — closing the case where detaching an
+  account while its agent was STOPPED left a live credential behind across a
+  rebuild. Strictly scoped to vault emails, so an account an agent connected
+  itself in chat is never touched.
+- **Management bot ignores group chats.** `onMessage`/`onCallback` now refuse
+  group/supergroup chats (negative Telegram chat id), so an allowlisted operator
+  in a group can no longer surface logs, members, or SOUL.md where non-members
+  can read them.
+- Removed the operator's personal email address from the public privacy page.
+
+## [0.117.0] — 2026-09-08
+
+### Fixed (12th comprehensive audit)
+- **Stale-token detection actually works now.** A plain re-Connect wasn't bumping
+  a connection's `created_at` ("last consent"), so the v0.116 stale badge could
+  never fire on that path.
+- **Session cookie no longer reaches the agent gateway.** The OpenClaw debug-UI
+  proxy was forwarding the owner's `agentclaw_session` cookie into the (untrusted)
+  agent gateway on both HTTP and WebSocket paths; now stripped.
+- **OAuth `client_secret.json` can't leak onto the volume.** A `trap … EXIT`
+  guarantees cleanup even when `gog auth credentials` fails under `set -e`
+  (previously it rode backups).
+- **AGENTS.md no longer grows a duplicate managed section.** `replaceSection`
+  treated ``` and `~~~` fences as interchangeable; mismatched fences flipped
+  parity and hid the managed heading, appending a fresh copy every rebuild.
+- **Archive inspection is truly read-only** — the volume is now mounted `:ro`,
+  not just "we only run read commands".
+- **Host move/import stopped losing conversations** — both now wait for skills to
+  settle before going RUNNING (the same guard rebuild had), closing the
+  session-reset race on those paths.
+- **Silent data-loss footguns:** the "save conversation before switch"
+  (`editCheckpoint`, `moveSourceCheckpoint`) and "keep memory private"
+  (`agentPrivate`) checkboxes now reset to their safe default each time a dialog
+  opens, instead of carrying the previous card's state.
+- Added an `agent_connections(connection_id)` index for the health view.
+- Full findings and remaining backlog: `docs/audit-2026-09-08.md`.
+
+## [0.116.1] — 2026-09-08
+
+### Fixed
+- Connection health: an attachment with no recorded materialization (pre-dating
+  the new bookkeeping) shows as "not tracked yet", not falsely "stale" — a
+  pre-migration fleet no longer lights up all-stale on first load.
+
+## [0.116.0] — 2026-09-08
+
+### Added
+- **Connections health view** (Settings → Connections): each account shows its
+  services, **last-consent date**, and every agent using it with a **fresh /
+  stale badge**, its **attach date**, and **last token-pull time**. New
+  `agent_connections.attached_at` + `materialized_at` columns; `GET
+  /v1/connections` returns per-agent state and a `staleCount`. Staleness =
+  an agent's token pulled before the account's latest consent.
+- **Public privacy & terms pages** (`/privacy`, `/terms`) served at the https
+  origin — the honest, Limited-Use-compliant pages needed to publish the Google
+  OAuth consent screen.
+
+### Fixed
+- The "no send" attach toggle resets to its safe default each time an agent's
+  Connections dialog opens (it was one shared control carrying the last card's
+  value).
+- The pending-model card no longer claims "will switch to X — still running X"
+  mid-rebuild when the model isn't actually changing.
+- The OpenClaw Control-UI secure-context notice now points at the https URL
+  instead of localhost/SSH.
+
 ## [0.115.0] — 2026-09-06
 
 ### Added
