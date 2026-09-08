@@ -5,6 +5,7 @@ import type { Agent, MemberRole } from '../domain/types.js';
 import {
   buildRuntimeSpec,
   recordApplied,
+  runRebuildHook,
   slugify,
   waitForHealthy,
   waitForSkillsSettled,
@@ -481,6 +482,10 @@ async function importAgentInner(
       deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
       120,
     );
+    // $HOME rode the archive, but tools installed OUTSIDE it (apt, /usr/local)
+    // come from the image — re-run the on-rebuild hook so an imported agent's
+    // system tools are reconstituted, as rebuild does (audit 2026-09-08).
+    await runRebuildHook(deps, agent.id, runtimeRef, log);
     // Let the skills/gateway settle before flipping to RUNNING, or a message
     // landing in the first ~30s starts a fresh session and archives the
     // imported conversation thread — the same guard rebuild uses (audit 2026-09-08).

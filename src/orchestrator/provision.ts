@@ -817,7 +817,7 @@ async function syncInstallDocs(
  * Best-effort and bounded: a broken or slow hook must never fail a rebuild or
  * hold the agent hostage, so failures are logged and the run is capped.
  */
-async function runRebuildHook(
+export async function runRebuildHook(
   deps: ProvisionDeps,
   agentId: string,
   runtimeRef: string,

@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.118.2] — 2026-09-08
+
+### Fixed
+- **Host move/import now reconstitute out-of-`$HOME` tools.** Both run the
+  agent's `~/.openclaw/on-rebuild.sh` on the new host after it's healthy, so
+  system packages / binaries the agent installed (which don't ride the volume)
+  are restored — matching what a rebuild does. (audit-2026-09-08 backlog)
+
+### Notes
+- Two audit-backlog items were assessed and found not exploitable (no change):
+  the telegram-pool lease "TOCTOU" (the critical section has no `await`, so the
+  synchronous better-sqlite3 path can't interleave in a single process), and the
+  mgmt join-approval callback (the owner-scoped API already rejects foreign
+  agentIds and unmatched codes; one-tap approval is intentional). Details in
+  `docs/audit-2026-09-08.md`.
+
 ## [0.118.1] — 2026-09-08
 
 ### Changed

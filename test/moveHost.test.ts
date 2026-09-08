@@ -44,6 +44,9 @@ describe('moveAgentToHost — across two daemons', () => {
     // The memory crossed daemons: the target's volume holds the snapshot.
     expect(target.stateStore.get(moved.runtimeRef!)?.toString()).toBe('precious-memory');
     expect((await target.status(moved.runtimeRef!)).phase).toBe('running');
+    // The agent's on-rebuild hook ran on the new host, so tools it installed
+    // outside $HOME (which don't ride the volume) are reconstituted.
+    expect(target.execLog.some((c) => c[0] === 'sh' && String(c[1] ?? '').includes('on-rebuild.sh'))).toBe(true);
     // The source runtime — container AND volume — was purged.
     expect((await w.provider.status(oldRef)).phase).toBe('absent');
   });

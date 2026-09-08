@@ -4,6 +4,7 @@ import { whileBusy } from './busy.js';
 import {
   buildRuntimeSpec,
   recordApplied,
+  runRebuildHook,
   waitForHealthy,
   waitForSkillsSettled,
   type ProvisionDeps,
@@ -145,6 +146,10 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       await target.start(newRef);
       // Cold image / imported sessions: give it the import path's 2 minutes.
       await waitForHealthy(target, newRef, sleep, 120);
+      // $HOME rode the volume, but tools the agent installed OUTSIDE it (apt,
+      // /usr/local) come from the image — re-run its on-rebuild hook on the new
+      // host to reconstitute them, as rebuild does (audit 2026-09-08).
+      await runRebuildHook(tdeps, agentId, newRef, log);
       // Settle skills/gateway before RUNNING so an early message doesn't start a
       // fresh session and archive the moved conversation (audit 2026-09-08).
       await waitForSkillsSettled(target, newRef, agent.slug, sleep, log);
