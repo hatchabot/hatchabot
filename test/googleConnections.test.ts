@@ -190,8 +190,8 @@ describe('attach / detach / remove', () => {
     const attached = store.listAgentConnections('a1');
     expect(attached).toHaveLength(1);
     expect(attached[0]).toMatchObject({ connectionId: connId, gmailNoSend: true });
-    expect(attached[0].attachedAt).toBeTruthy();
-    expect(attached[0].materializedAt).toBeTruthy(); // materialize stamped the pull
+    expect(attached[0]!.attachedAt).toBeTruthy();
+    expect(attached[0]!.materializedAt).toBeTruthy(); // materialize stamped the pull
   });
 
   it("someone else's connection cannot be attached (404, no exec)", async () => {

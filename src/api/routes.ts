@@ -3650,9 +3650,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
             attachedAt: at.attachedAt,
             materializedAt: at.materializedAt,
             // Stale = the agent's materialized token predates the connection's
-            // last consent (createdAt), or it never materialized at all — i.e.
-            // the account was reconnected but this agent didn't re-attach.
-            stale: !at.materializedAt || at.materializedAt < c.createdAt,
+            // last consent — the account was reconnected but this agent didn't
+            // re-attach. A NULL materializedAt means "not tracked yet" (the
+            // attachment predates this bookkeeping), NOT stale — asserting
+            // staleness needs a known pull time, or every pre-migration
+            // attachment would false-flag on first load.
+            stale: !!at.materializedAt && at.materializedAt < c.createdAt,
           }));
         return { ...c, attachedTo, staleCount: attachedTo.filter((x) => x.stale).length };
       }),

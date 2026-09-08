@@ -3617,11 +3617,17 @@ async function loadConnections() {
     platformConnections = connections;
     $('connVault').innerHTML = connections.length ? connections.map(c => {
       const agents = c.attachedTo ?? [];
-      const rows = agents.length ? agents.map(a => `
+      const rows = agents.length ? agents.map(a => {
+        const badge = a.stale ? '⚠' : (a.materializedAt ? '✓' : '·');
+        const when = a.attachedAt ? `attached ${esc(a.attachedAt.slice(0, 10))}` : 'attached before this was tracked';
+        const pull = a.materializedAt ? `, token pulled ${ago(a.materializedAt)}` : ', token pull not tracked yet';
+        const warn = a.stale ? ' · <b>stale — reconnect this account, then re-attach this agent to pull the new token</b>' : '';
+        return `
         <div class="sub" style="display:flex;gap:6px;align-items:baseline${a.stale ? ';color:var(--warn)' : ''}">
-          <span>${a.stale ? '⚠' : '✓'}</span>
-          <span class="grow"><b style="font-weight:600">${esc(a.name)}</b> — attached ${a.attachedAt ? esc(a.attachedAt.slice(0, 10)) : '—'}${a.materializedAt ? `, token pulled ${ago(a.materializedAt)}` : ', <i>never materialized</i>'}${a.stale ? ' · <b>stale — reconnect this account, then re-attach this agent to pull the new token</b>' : ''}</span>
-        </div>`).join('')
+          <span>${badge}</span>
+          <span class="grow"><b style="font-weight:600">${esc(a.name)}</b> — ${when}${pull}${warn}</span>
+        </div>`;
+      }).join('')
         : '<div class="sub">not attached to any agent yet</div>';
       return `
       <div class="pair" style="flex-wrap:wrap;gap:6px;align-items:flex-start">
