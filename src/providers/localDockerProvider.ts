@@ -128,6 +128,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       // orphan that outlives its parent would sit as a zombie for the whole
       // life of a long-lived agent. tini (docker's --init) reaps them.
       '--init',
+      // An agent runs AI-authored code reachable by anyone in its rooms — deny
+      // it privilege escalation via setuid binaries. Cheap, safe hardening for
+      // the shared multi-account box (family-member hardening 2026-09-08).
+      '--security-opt', 'no-new-privileges',
       // One misbehaving agent must not fill the disk or the box. Overridable
       // for hosts that want to run bigger agents.
       '--log-opt', 'max-size=10m',

@@ -188,3 +188,20 @@ describe('GET /v1/mgmt/status offline derivation', () => {
     expect(s).toMatchObject({ configured: true, online: false, botUsername: 'b' });
   });
 });
+
+describe('sharing a machine-login source is refused (family-member hardening)', () => {
+  it('PATCH shared=true on a machine-login profile → 400; setup-token profile → ok', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile(profile({ id: 'ml', name: 'Household Claude', kind: 'subscription', secretRef: undefined })); // machine login
+    store.insertAIProfile(profile({ id: 'st', name: 'Max Setup Token', kind: 'subscription' })); // setup-token (has secretRef)
+
+    const refused = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/ml', headers: H, payload: { shared: true } });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toMatch(/machine-login/i);
+    expect(store.getAIProfile('ml')!.shared).toBe(false); // not flipped
+
+    const ok = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/st', headers: H, payload: { shared: true } });
+    expect(ok.statusCode).toBe(200);
+    expect(store.getAIProfile('st')!.shared).toBe(true);
+  });
+});

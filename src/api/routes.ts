@@ -1318,6 +1318,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAIProfileModels(profile.id, parsed.data.models);
       }
       if (parsed.data.shared !== undefined) {
+        // A machine-login subscription profile (no stored token) IS the
+        // operator's ~/.claude, bind-mounted into an agent's container. Sharing
+        // it would mount that directory — OAuth token, transcripts, and
+        // hook-executing settings.json — into another account's container.
+        // Never shareable; only setup-token / API-key sources are (family-member
+        // hardening, docs/family-member-risk-assessment.md).
+        if (parsed.data.shared && profile.kind === 'subscription' && !profile.secretRef) {
+          return reply.code(400).send({
+            error:
+              "A machine-login Max source can't be shared — it would expose this machine's ~/.claude to " +
+              'other accounts. Run `claude setup-token` and share that source instead, or use an API-key source.',
+          });
+        }
         store.setAIProfileShared(profile.id, parsed.data.shared);
       }
       if (parsed.data.mgmtLlm !== undefined) {
@@ -1743,14 +1756,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!host || (host.ownerId !== ownerId && host.kind !== 'local')) {
       return reply.code(400).send({ error: 'Unknown host' });
     }
+    // A machine-login Max source (subscription, no stored token) IS the
+    // operator's ~/.claude. Another account selecting it would mount that
+    // directory into their container — refuse (family-member hardening). The
+    // owner's own agents still use it; only cross-owner selection is blocked.
+    if (profile.kind === 'subscription' && !profile.secretRef && profile.ownerId !== ownerId) {
+      return reply.code(400).send({
+        error:
+          'That Max source uses its owner\'s machine login and can\'t be used by another account. ' +
+          'Ask them to share a setup-token source instead, or use your own API-key source.',
+      });
+    }
     // A Claude Max profile reaches a runner only as a setup-token (secretRef
     // present) — that credential is injected as data. The machine-login flavour
     // mounts this box's ~/.claude, which a remote runner can't see.
-    // ⚠ ACCEPTED RISK — see docs/pre-production.md. A machine-login Max source
-    // is its owner's ~/.claude; letting another account select it mounts that
-    // directory into their container. Deliberately permitted on this trusted
-    // single-household installation. Re-add the owner check here (and in the
-    // profile-switch path below, and in buildRuntimeSpec) before production.
     if (profile.kind === 'subscription' && host.kind !== 'local' && !profile.secretRef) {
       return reply.code(400).send({
         error:
@@ -2148,8 +2167,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         if (!next || (next.ownerId !== ownerIdOf(req) && !next.shared)) {
           return reply.code(400).send({ error: 'Unknown AI profile' });
         }
-        // ⚠ ACCEPTED RISK — see docs/pre-production.md; the cross-owner check
-        // that belongs here is deliberately omitted for this trusted install.
+        // A machine-login Max source is its owner's ~/.claude; another account
+        // switching an agent onto it would mount that directory into their
+        // container. Block cross-owner selection (family-member hardening).
+        if (next.kind === 'subscription' && !next.secretRef && next.ownerId !== ownerIdOf(req)) {
+          return reply.code(400).send({
+            error:
+              'That Max source uses its owner\'s machine login and can\'t be used by another account. ' +
+              'Use a setup-token source or your own API key.',
+          });
+        }
         const host = store.getHost(agent.hostId);
         // Same rule as create/move: a setup-token Max profile (secretRef
         // present) rides to a runner; only the machine-login flavour is
