@@ -3639,14 +3639,23 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   app.get('/v1/connections', async (req) => {
     const mine = store.listConnections(ownerIdOf(req));
     return {
-      connections: mine.map((c) => ({
-        ...c,
-        attachedTo: store
-          .listAgentsForConnection(c.id)
-          .map((aid) => store.getAgent(aid))
-          .filter((a) => a && a.state !== 'DELETED')
-          .map((a) => ({ id: a!.id, name: a!.name })),
-      })),
+      connections: mine.map((c) => {
+        const attachedTo = store
+          .listConnectionAttachments(c.id)
+          .map((at) => ({ at, a: store.getAgent(at.agentId) }))
+          .filter((x) => x.a && x.a.state !== 'DELETED')
+          .map(({ at, a }) => ({
+            id: a!.id,
+            name: a!.name,
+            attachedAt: at.attachedAt,
+            materializedAt: at.materializedAt,
+            // Stale = the agent's materialized token predates the connection's
+            // last consent (createdAt), or it never materialized at all — i.e.
+            // the account was reconnected but this agent didn't re-attach.
+            stale: !at.materializedAt || at.materializedAt < c.createdAt,
+          }));
+        return { ...c, attachedTo, staleCount: attachedTo.filter((x) => x.stale).length };
+      }),
     };
   });
 

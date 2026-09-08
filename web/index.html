@@ -3504,6 +3504,10 @@ function showEditTab(name) {
 async function renderConnections() {
   const el = $('connList'), forId = editAgentId;
   el.innerHTML = 'Checking the agent…';
+  // Reset the attach-time "no send" toggle to its safe default every time the
+  // dialog opens — it's one shared control, not per-agent state, so without
+  // this it carries over whatever the previous agent card left it on.
+  $('connNoSend').checked = true;
   // The attach picker: the caller's vault, minus accounts already on this agent.
   api('/v1/connections').then(({ connections }) => {
     if (editAgentId !== forId) return;
@@ -3611,13 +3615,22 @@ async function loadConnections() {
   try {
     const { connections } = await api('/v1/connections');
     platformConnections = connections;
-    $('connVault').innerHTML = connections.length ? connections.map(c => `
-      <div class="pair" style="flex-wrap:wrap;gap:6px">
-        <span class="grow"><b>${esc(c.email)}</b>
-          <span class="sub">${esc((c.services ?? []).join(', ') || 'default services')}
-            · ${c.attachedTo.length ? `attached to ${c.attachedTo.map(a => esc(a.name)).join(', ')}` : 'not attached to any agent yet'}</span></span>
+    $('connVault').innerHTML = connections.length ? connections.map(c => {
+      const agents = c.attachedTo ?? [];
+      const rows = agents.length ? agents.map(a => `
+        <div class="sub" style="display:flex;gap:6px;align-items:baseline${a.stale ? ';color:var(--warn)' : ''}">
+          <span>${a.stale ? '⚠' : '✓'}</span>
+          <span class="grow"><b style="font-weight:600">${esc(a.name)}</b> — attached ${a.attachedAt ? esc(a.attachedAt.slice(0, 10)) : '—'}${a.materializedAt ? `, token pulled ${ago(a.materializedAt)}` : ', <i>never materialized</i>'}${a.stale ? ' · <b>stale — reconnect this account, then re-attach this agent to pull the new token</b>' : ''}</span>
+        </div>`).join('')
+        : '<div class="sub">not attached to any agent yet</div>';
+      return `
+      <div class="pair" style="flex-wrap:wrap;gap:6px;align-items:flex-start">
+        <span class="grow"><b>${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}
+          <span class="sub">${esc((c.services ?? []).join(', ') || 'default services')} · last consent ${esc((c.createdAt || '').slice(0, 10))}${c.createdAt ? ` (${ago(c.createdAt)})` : ''}</span>
+          <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px">${rows}</div></span>
         <button class="danger" onclick="removeConnection('${jsq(c.id)}','${jsq(c.email)}')">Remove</button>
-      </div>`).join('')
+      </div>`;
+    }).join('')
       : 'None yet — press Connect above. Each person connects their own accounts from their own login.';
   } catch (e) { $('connVault').innerHTML = esc(e.message); }
 }

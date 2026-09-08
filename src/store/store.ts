@@ -307,6 +307,13 @@ export class Store {
       // infer from membership rows — survives deleting every agent, and lets a
       // FRESH account link on its very first approval.
       `ALTER TABLE accounts ADD COLUMN telegram_user_id TEXT`,
+      // Connection health/provenance: when an agent was first attached to a
+      // connection, and when it last materialized (pulled) that connection's
+      // token into its container. materialized_at < the connection's
+      // created_at (last consent) means the agent is running a STALE token —
+      // e.g. the account was reconnected but the agent never re-attached.
+      `ALTER TABLE agent_connections ADD COLUMN attached_at TEXT`,
+      `ALTER TABLE agent_connections ADD COLUMN materialized_at TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -1642,27 +1649,46 @@ export class Store {
   }
 
   attachConnection(agentId: string, connectionId: string, gmailNoSend: boolean): void {
+    // attached_at is set on first link and preserved on re-attach (only
+    // gmail_no_send changes on conflict) — it records when this agent first
+    // gained the account, not the latest bookkeeping touch.
     this.db
       .prepare(
-        `INSERT INTO agent_connections (agent_id, connection_id, gmail_no_send) VALUES (?, ?, ?)
+        `INSERT INTO agent_connections (agent_id, connection_id, gmail_no_send, attached_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(agent_id, connection_id) DO UPDATE SET gmail_no_send = excluded.gmail_no_send`,
       )
-      .run(agentId, connectionId, gmailNoSend ? 1 : 0);
+      .run(agentId, connectionId, gmailNoSend ? 1 : 0, new Date().toISOString());
+  }
+
+  /** Record that an agent just pulled a connection's token into its container.
+   *  Compared against the connection's created_at to detect stale tokens. */
+  markConnectionMaterialized(agentId: string, connectionId: string): void {
+    this.db
+      .prepare(`UPDATE agent_connections SET materialized_at = ? WHERE agent_id = ? AND connection_id = ?`)
+      .run(new Date().toISOString(), agentId, connectionId);
   }
 
   detachConnection(agentId: string, connectionId: string): void {
     this.db.prepare(`DELETE FROM agent_connections WHERE agent_id = ? AND connection_id = ?`).run(agentId, connectionId);
   }
 
-  listAgentConnections(agentId: string): Array<{ connectionId: string; gmailNoSend: boolean }> {
+  listAgentConnections(agentId: string): Array<{ connectionId: string; gmailNoSend: boolean; attachedAt: string | null; materializedAt: string | null }> {
     return (this.db.prepare(`SELECT * FROM agent_connections WHERE agent_id = ?`).all(agentId) as any[]).map((r) => ({
       connectionId: r.connection_id, gmailNoSend: !!r.gmail_no_send,
+      attachedAt: r.attached_at ?? null, materializedAt: r.materialized_at ?? null,
     }));
   }
 
   /** Which agents a connection is attached to — the vault list shows reach. */
   listAgentsForConnection(connectionId: string): string[] {
     return (this.db.prepare(`SELECT agent_id FROM agent_connections WHERE connection_id = ?`).all(connectionId) as any[]).map((r) => r.agent_id);
+  }
+
+  /** Per-agent attach/materialize provenance for one connection (health view). */
+  listConnectionAttachments(connectionId: string): Array<{ agentId: string; attachedAt: string | null; materializedAt: string | null }> {
+    return (this.db.prepare(`SELECT * FROM agent_connections WHERE connection_id = ?`).all(connectionId) as any[]).map((r) => ({
+      agentId: r.agent_id, attachedAt: r.attached_at ?? null, materializedAt: r.materialized_at ?? null,
+    }));
   }
 
   /** Undo a merge claim whose file write failed — the proposal must stay

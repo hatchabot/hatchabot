@@ -232,6 +232,7 @@ export async function materializeConnection(
     deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error });
     return { ok: false, error };
   }
+  store.markConnectionMaterialized(agent.id, connectionId);
   deps.log?.('connection.materialized', { agentId: agent.id, email: conn.email });
   return { ok: true };
 }

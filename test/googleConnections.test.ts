@@ -187,7 +187,11 @@ describe('attach / detach / remove', () => {
     expect(script).toContain('gog auth import --email "chris@example.com" --refresh-token-stdin');
     expect(script).toContain('--gmail-no-send');
     expect(script).toContain('keyring_password'); // non-interactive plumbing bootstrapped
-    expect(store.listAgentConnections('a1')).toEqual([{ connectionId: connId, gmailNoSend: true }]);
+    const attached = store.listAgentConnections('a1');
+    expect(attached).toHaveLength(1);
+    expect(attached[0]).toMatchObject({ connectionId: connId, gmailNoSend: true });
+    expect(attached[0].attachedAt).toBeTruthy();
+    expect(attached[0].materializedAt).toBeTruthy(); // materialize stamped the pull
   });
 
   it("someone else's connection cannot be attached (404, no exec)", async () => {
