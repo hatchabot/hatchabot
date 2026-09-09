@@ -6075,12 +6075,18 @@ function renderToc() {
     const badge = waiting
       ? `<span class="toc-badge">👤${waiting > 1 ? waiting : ''}</span>`
       : '';
+    // Pending-action icons: a parked step waiting on you, and/or a change that
+    // only takes effect on the next rebuild (a source switch or a newer image).
+    const flags = [];
+    if (a.pendingAction) flags.push(['✋', 'a step is waiting on you']);
+    if ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable) flags.push(['🔄', 'rebuild to apply a pending change']);
+    const flagIcons = flags.map(([icon, why]) => `<span class="toc-badge" title="${esc(a.name + ' — ' + why)}">${icon}</span>`).join('');
     const tip = waiting
       ? `${a.name} — ${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`
-      : a.name;
+      : flags.length ? `${a.name} — ${flags.map((f) => f[1]).join('; ')}` : a.name;
     html += `<a class="toc-item" ${a.__depth ? `style="padding-left:${6 + 12 * a.__depth}px"` : ''} onclick="jumpToCard('${a.id}')" title="${esc(tip)}">
       <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
-      <span class="toc-name">${a.__depth ? '↳ ' : ''}${esc(a.name)}</span>${badge}</a>`;
+      <span class="toc-name">${a.__depth ? '↳ ' : ''}${esc(a.name)}</span>${badge}${flagIcons}</a>`;
   }
   // Archived agents keep their own names in the legend, under a section header
   // like any group. Collapsing them into a single counted line meant an agent

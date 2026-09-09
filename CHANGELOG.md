@@ -2,6 +2,14 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.126.1] — 2026-09-09
+
+### Added
+- **Pending-action icons in the 📑 Jump legend.** An agent shows a **🔄** when a
+  change is waiting for a rebuild (a source switch, or a newer image) and a **✋**
+  when a step is parked on you — so the legend surfaces what needs attention at a
+  glance, with a tooltip explaining each.
+
 ## [0.126.0] — 2026-09-09
 
 ### Added
