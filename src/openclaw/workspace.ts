@@ -137,6 +137,31 @@ export function dataSourcePath(d: {
 
 export const DATA_SOURCES_HEADING = '## Data sources';
 
+export const PEERS_HEADING = '## Peers';
+
+/**
+ * The AGENTS.md section listing the OTHER agents this one may consult, and how.
+ * Managed by AgentClaw (owner-granted peers). Uses indented code, not a fence,
+ * so it can't perturb fence parity in replaceSection.
+ */
+export function peerToolsSection(peers: Array<{ name: string }>): string {
+  const list = peers.map((p) => `- **${p.name}**`).join('\n');
+  return `${PEERS_HEADING}
+
+You can consult these other agents when a question is squarely in their domain —
+each answers with its own knowledge, memory, and accounts:
+
+${list}
+
+Consult one from a shell:
+
+    call-agent "<Peer Name>" "<your question>"
+
+It prints the peer's reply to stdout. Use it sparingly, for genuinely
+cross-domain questions, and summarise what you learn rather than relaying it
+verbatim.`;
+}
+
 export const INSTALL_HEADING = '## Installing tools (managed by AgentClaw)';
 
 /**

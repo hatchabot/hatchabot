@@ -11,7 +11,38 @@ import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { syncConnections } from './googleConnections.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, peerToolsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
+
+/**
+ * The `call-agent` tool installed on agents granted peers: consults a peer by
+ * name (resolved via ~/.openclaw/peers.json) through the control plane, using
+ * the agent's injected call token, and prints the reply. Node so JSON handling
+ * and fetch are clean; base64-shipped onto the volume.
+ */
+const CALL_AGENT_SCRIPT = `#!/usr/bin/env node
+const fs = require('fs');
+const [peer, msg] = process.argv.slice(2);
+if (!peer || !msg) { console.error('usage: call-agent "<peer name>" "<message>"'); process.exit(2); }
+const url = process.env.AGENTCLAW_INTERNAL_URL, tok = process.env.AGENTCLAW_AGENT_TOKEN;
+if (!url || !tok) { console.error('This agent has no peers configured.'); process.exit(1); }
+let peers = [];
+try { peers = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/peers.json', 'utf8')); } catch {}
+const q = peer.toLowerCase();
+const hit = peers.find((p) => p.name.toLowerCase() === q) || peers.find((p) => p.name.toLowerCase().includes(q));
+if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map((p) => p.name).join(', ')); process.exit(1); }
+(async () => {
+  try {
+    const r = await fetch(url + '/v1/agents/' + hit.id + '/message', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + tok, 'content-type': 'application/json' },
+      body: JSON.stringify({ text: msg }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { console.error('consult failed: ' + (j.error || r.status)); process.exit(1); }
+    console.log(j.reply || '(no reply)');
+  } catch (e) { console.error('consult error: ' + e.message); process.exit(1); }
+})();
+`;
 
 /**
  * Fleet-wide search key (Brave), following the media-key pattern: stored
@@ -410,6 +441,14 @@ export async function buildRuntimeSpec(
   for (const e of store.listAgentEnv(agentId)) {
     perAgentEnv[e.name] = await secrets.get(e.secretRef);
   }
+  // Agent-to-agent: an agent granted peers gets its call token + the address it
+  // reaches the control plane on, so its `call-agent` tool can consult them.
+  const peerIds = store.listAgentPeers(agentId);
+  const callToken = peerIds.length ? await secrets.get(`agent-call-token/${agentId}`).catch(() => undefined) : undefined;
+  if (callToken) {
+    perAgentEnv.AGENTCLAW_AGENT_TOKEN = callToken;
+    perAgentEnv.AGENTCLAW_INTERNAL_URL = process.env.AGENTCLAW_INTERNAL_URL ?? 'http://172.17.0.1:8080';
+  }
   return {
     agentId,
     slug: agent.slug,
@@ -748,6 +787,22 @@ async function syncDataSourceDocs(
     if (read.code !== 0 || !read.stdout.trim()) return; // no file yet — seed owns it
     let next = replaceSection(read.stdout, DATA_SOURCES_HEADING, dataSourcesSection(sources));
     next = replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory));
+    // Agent-to-agent: install the call-agent tool + peer manifest, and list the
+    // granted peers in AGENTS.md so the agent knows it can consult them.
+    const peers = store.listAgentPeers(agentId).map((id) => store.getAgent(id)).filter((a): a is Agent => !!a && a.state !== 'DELETED');
+    if (peers.length) {
+      next = replaceSection(next, '## Peers', peerToolsSection(peers.map((p) => ({ name: p.name }))));
+      const b64s = Buffer.from(CALL_AGENT_SCRIPT, 'utf8').toString('base64');
+      const b64m = Buffer.from(JSON.stringify(peers.map((p) => ({ name: p.name, id: p.id }))), 'utf8').toString('base64');
+      await provider
+        .execShell(
+          runtimeRef,
+          `set -e; mkdir -p ~/.local/bin ~/.openclaw; ` +
+            `echo ${JSON.stringify(b64s)} | base64 -d > ~/.local/bin/call-agent && chmod 755 ~/.local/bin/call-agent; ` +
+            `echo ${JSON.stringify(b64m)} | base64 -d > ~/.openclaw/peers.json`,
+        )
+        .catch((e) => log('peer_tools.failed', { agentId, error: String((e as Error).message ?? e) }));
+    }
     if (next === read.stdout) return; // already current: never churn the user's file
     const b64 = Buffer.from(next, 'utf8').toString('base64');
     // tmp+mv so a failure can't leave AGENTS.md truncated.

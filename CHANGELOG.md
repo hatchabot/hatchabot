@@ -2,6 +2,20 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.123.0] — 2026-09-09
+
+### Added
+- **Agents can consult each other (agent-to-agent).** In an agent's ⚙ → Data
+  tab, grant which of your *other* agents it may consult; it gets a `call-agent`
+  tool and can ask a peer a question and use the reply — e.g. Investing asks Tax
+  or Legal. Runs entirely on your box (no email, no Google): the caller holds an
+  agent-scoped token and hits a control-plane `/message` endpoint that runs a
+  turn on the peer and returns its answer. **Same-owner only**, explicitly
+  grant-gated, and depth-limited (a per-owner in-flight counter breaks
+  consult loops). The peer answers in its own main conversation (it remembers
+  being consulted). The agent-scoped token is scoped to `/message` only — it
+  cannot act as a general owner API bearer. Applies on the next rebuild.
+
 ## [0.122.0] — 2026-09-09
 
 ### Added

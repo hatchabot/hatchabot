@@ -124,6 +124,16 @@ export class Store {
         PRIMARY KEY (agent_id, connection_id)
       );
 
+      -- Agent-to-agent: which other agents this one may CONSULT (call and get a
+      -- reply from). Owner-granted, same-owner only (enforced in the route). The
+      -- caller agent holds a call token; the /message endpoint checks a grant
+      -- row exists before running a turn on the peer.
+      CREATE TABLE IF NOT EXISTS agent_peers (
+        agent_id TEXT NOT NULL, peer_id TEXT NOT NULL,
+        PRIMARY KEY (agent_id, peer_id)
+      );
+      CREATE INDEX IF NOT EXISTS agent_peers_peer ON agent_peers (peer_id);
+
       -- Daily fleet-usage snapshots per owner, so the usage view can show a
       -- trend (live usage is otherwise a point-in-time read with no history —
       -- and a trend is what makes active-memory's per-turn cost visible over
@@ -323,6 +333,9 @@ export class Store {
       // e.g. the account was reconnected but the agent never re-attached.
       `ALTER TABLE agent_connections ADD COLUMN attached_at TEXT`,
       `ALTER TABLE agent_connections ADD COLUMN materialized_at TEXT`,
+      // An agent-scoped cli-token: when set, this token authenticates a CALLER
+      // AGENT (not a user) to the agent-to-agent /message endpoint.
+      `ALTER TABLE cli_tokens ADD COLUMN agent_id TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -411,6 +424,9 @@ export class Store {
     // side rows stay: a live master's owner can still review them.
     this.db.prepare(`DELETE FROM agent_proposals WHERE master_agent_id = ?`).run(agentId);
     this.db.prepare(`DELETE FROM agent_connections WHERE agent_id = ?`).run(agentId);
+    // A2A residue: peer grants in BOTH directions, and this agent's call token.
+    this.db.prepare(`DELETE FROM agent_peers WHERE agent_id = ? OR peer_id = ?`).run(agentId, agentId);
+    this.db.prepare(`DELETE FROM cli_tokens WHERE agent_id = ?`).run(agentId);
   }
 
   /**
@@ -1140,8 +1156,10 @@ export class Store {
   ownerForCliToken(token: string): string | undefined {
     const row = this.db
       .prepare(
+        // agent_id IS NULL: an agent-scoped A2A call token must NOT authenticate
+        // as a full owner bearer — it only works on the A2A /message endpoint.
         `SELECT id, owner_id FROM cli_tokens
-         WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > ?)`,
+         WHERE token_hash = ? AND agent_id IS NULL AND (expires_at IS NULL OR expires_at > ?)`,
       )
       .get(hashToken(token), new Date().toISOString()) as
       | { id: string; owner_id: string }
@@ -1727,6 +1745,56 @@ export class Store {
   /** Which agents a connection is attached to — the vault list shows reach. */
   listAgentsForConnection(connectionId: string): string[] {
     return (this.db.prepare(`SELECT agent_id FROM agent_connections WHERE connection_id = ?`).all(connectionId) as any[]).map((r) => r.agent_id);
+  }
+
+  // ---- agent-to-agent peers -------------------------------------------------
+
+  /** Replace the set of agents this agent may consult (owner-validated upstream). */
+  setAgentPeers(agentId: string, peerIds: string[]): void {
+    this.transact(() => {
+      this.db.prepare(`DELETE FROM agent_peers WHERE agent_id = ?`).run(agentId);
+      const ins = this.db.prepare(`INSERT OR IGNORE INTO agent_peers (agent_id, peer_id) VALUES (?, ?)`);
+      for (const p of peerIds) if (p && p !== agentId) ins.run(agentId, p);
+    });
+  }
+
+  listAgentPeers(agentId: string): string[] {
+    return (this.db.prepare(`SELECT peer_id FROM agent_peers WHERE agent_id = ?`).all(agentId) as any[]).map((r) => r.peer_id);
+  }
+
+  /** True if `agentId` has been granted permission to consult `peerId`. */
+  agentMayCall(agentId: string, peerId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM agent_peers WHERE agent_id = ? AND peer_id = ?`).get(agentId, peerId);
+  }
+
+  /** Mint (replacing any prior) the agent-scoped token that authenticates this
+   *  agent as a CALLER to the A2A /message endpoint. Long-lived; rotated by a
+   *  fresh mint. The raw token is returned once — store it in the SecretStore
+   *  for injection; only its hash is kept here for lookup. */
+  createAgentCallToken(agentId: string, ownerId: string): string {
+    const token = `agentclaw_a2a_${randomBytes(32).toString('base64url')}`;
+    this.db.prepare(`DELETE FROM cli_tokens WHERE agent_id = ?`).run(agentId);
+    this.db
+      .prepare(
+        `INSERT INTO cli_tokens (id, owner_id, token_hash, label, created_at, expires_at, agent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(randomUUID(), ownerId, hashToken(token), 'a2a', new Date().toISOString(),
+        new Date(Date.now() + 3650 * 86_400_000).toISOString(), agentId);
+    return token;
+  }
+
+  /** Resolve an A2A caller token to its agent, or undefined. Records the use. */
+  agentForCallToken(token: string): { agentId: string; ownerId: string } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id, owner_id, agent_id FROM cli_tokens
+         WHERE token_hash = ? AND agent_id IS NOT NULL AND (expires_at IS NULL OR expires_at > ?)`,
+      )
+      .get(hashToken(token), new Date().toISOString()) as { id: string; owner_id: string; agent_id: string } | undefined;
+    if (!row) return undefined;
+    this.db.prepare(`UPDATE cli_tokens SET last_used_at = ? WHERE id = ?`).run(new Date().toISOString(), row.id);
+    return { agentId: row.agent_id, ownerId: row.owner_id };
   }
 
   /** Per-agent attach/materialize provenance for one connection (health view). */

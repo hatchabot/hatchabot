@@ -553,6 +553,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // POST /v1/agents returns in milliseconds; the slow steps (docker, health
   // check) run here. One in-flight run per agent; the app polls GET /v1/agents.
   const inflight = new Map<string, Promise<void>>();
+  // Live agent-to-agent consult depth per owner (consults nest synchronously in
+  // this process) — bounds a call chain and breaks cycles.
+  const a2aDepth = new Map<string, number>();
+  const A2A_MAX_DEPTH = Number(process.env.AGENTCLAW_A2A_MAX_DEPTH ?? 3);
   const kickProvision = (agentId: string): void => {
     if (inflight.has(agentId)) return;
     const task = (async () => {
@@ -3164,6 +3168,85 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     ).catch(() => 0);
     trace(agent.id)('memory.checkpoint_notified', { chats: notified });
     return { ok: true };
+  });
+
+  // ---- agent-to-agent consult ----------------------------------------------
+  // Owner sets which agents an agent may consult; the caller agent holds a
+  // call token and hits POST /message, which runs a turn on the peer and
+  // returns its reply. Same-owner only, grant-gated, depth-limited.
+
+  /** The owner's view: this agent's granted peers + the pickable candidates. */
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/peers', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const granted = new Set(store.listAgentPeers(agent.id));
+    const candidates = store
+      .listAgents(ownerIdOf(req))
+      .filter((a) => a.id !== agent.id && a.state !== 'ARCHIVED')
+      .map((a) => ({ id: a.id, name: a.name, granted: granted.has(a.id) }));
+    return { peers: candidates.filter((c) => c.granted), candidates };
+  });
+
+  /** Owner grants/revokes which agents this one may consult. */
+  app.put<{ Params: { id: string }; Body: { peerIds?: string[] } }>(
+    '/v1/agents/:id/peers',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const wanted = Array.isArray((req.body as any)?.peerIds) ? (req.body as { peerIds: string[] }).peerIds : [];
+      // Every peer must be the CALLER's own agent — never a cross-owner grant.
+      const valid = wanted.filter((pid) => {
+        const p = store.getAgent(pid);
+        return p && p.ownerId === ownerIdOf(req) && p.id !== agent.id && p.state !== 'DELETED';
+      });
+      store.setAgentPeers(agent.id, valid);
+      // Ensure the agent holds a call token (minted once, injected on rebuild).
+      if (valid.length) {
+        const ref = `agent-call-token/${agent.id}`;
+        const existing = await secrets.get(ref).catch(() => null);
+        if (!existing) await secrets.put(ref, store.createAgentCallToken(agent.id, ownerIdOf(req)));
+      }
+      return { peers: valid };
+    },
+  );
+
+  /** Agent-to-agent message: authenticated by the CALLER AGENT's call token
+   *  (auth-exempt at the hook; validated here). Runs a turn on the target and
+   *  returns its reply. */
+  app.post<{ Params: { id: string }; Body: { text?: string } }>('/v1/agents/:id/message', async (req, reply) => {
+    const bearer = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+    const caller = bearer ? store.agentForCallToken(bearer) : undefined;
+    if (!caller) return reply.code(401).send({ error: 'Agent call token required.' });
+    const target = store.getAgent(req.params.id);
+    if (!target || target.state === 'DELETED') return reply.code(404).send({ error: 'No such agent.' });
+    // Same owner AND an explicit grant that caller may consult target.
+    if (target.ownerId !== caller.ownerId || !store.agentMayCall(caller.agentId, target.id)) {
+      return reply.code(403).send({ error: 'Not allowed to consult that agent.' });
+    }
+    if (target.state !== 'RUNNING' || !target.runtimeRef) {
+      return reply.code(409).send({ error: 'That agent is not running.' });
+    }
+    const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim().slice(0, 8000);
+    if (!text) return reply.code(400).send({ error: 'Empty message.' });
+    // Depth guard: consults nest synchronously in this process, so a per-owner
+    // in-flight counter bounds a chain (X→Y→Z) and breaks cycles.
+    const depth = (a2aDepth.get(caller.ownerId) ?? 0) + 1;
+    if (depth > A2A_MAX_DEPTH) return reply.code(429).send({ error: 'Consult chain too deep — refusing to avoid a loop.' });
+    a2aDepth.set(caller.ownerId, depth);
+    try {
+      const fromName = store.getAgent(caller.agentId)?.name ?? 'another agent';
+      const framed = `[Consult from your peer agent "${fromName}"]\n\n${text}\n\n` +
+        '(Answer concisely for another agent. Do not take actions unless explicitly asked to.)';
+      const res = await providerFor(target.hostId).exec(target.runtimeRef, ['agent', '--agent', target.slug, '-m', framed]);
+      trace(target.id)('a2a.consulted', { from: caller.agentId, ok: res.code === 0 });
+      return { reply: (res.stdout || res.stderr || '').trim() || '(no reply)' };
+    } catch (err) {
+      return reply.code(502).send({ error: `Consult failed: ${String((err as Error).message ?? err).slice(0, 200)}` });
+    } finally {
+      const d = (a2aDepth.get(caller.ownerId) ?? 1) - 1;
+      if (d <= 0) a2aDepth.delete(caller.ownerId);
+      else a2aDepth.set(caller.ownerId, d);
+    }
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {

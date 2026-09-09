@@ -197,6 +197,9 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // path authenticates by its single-use state token instead (issued to an
     // authenticated owner at /start; consumed exactly once in the handler).
     if (path === '/v1/connections/google/callback') return;
+    // Agent-to-agent consult: authenticated by the CALLER AGENT's own call
+    // token inside the handler (not a user session), so it's exempt here.
+    if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
@@ -294,6 +297,9 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     // Cross-site OAuth redirect: strict-SameSite keeps the session cookie
     // home, so the single-use state token is this path's credential.
     if (path === '/v1/connections/google/callback') return;
+    // Agent-to-agent consult: authenticated by the CALLER AGENT's own call
+    // token inside the handler (not a user session), so it's exempt here.
+    if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
