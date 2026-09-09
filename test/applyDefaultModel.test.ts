@@ -56,7 +56,7 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     const { store, f } = await world();
     const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: ['a1'], rebuild: false });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({ applied: 1, held: 2, rebuilding: 0 });
+    expect(res.json()).toMatchObject({ applied: 1, held: 2, live: 1 });
 
     // Default moved.
     expect(store.getAIProfile('p1')!.model).toBe('claude-opus-5');
@@ -93,16 +93,19 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     expect(store.getAgent('a3')!.model).toBeUndefined(); // override cleared → follows opus-5
   });
 
-  it('rebuild:true kicks a background rebuild for each selected running agent', async () => {
-    const { f } = await world();
-    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: ['a1', 'a2'], rebuild: true });
-    expect(res.json().rebuilding).toBe(2);
+  it('applies the new default LIVE (models set, no rebuild) to each selected running agent', async () => {
+    const { f, provider } = await world();
+    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: ['a1', 'a2'] });
+    expect(res.json().live).toBe(2);
+    // it ran `openclaw models set` per switched agent — not a rebuild/provision
+    const sets = provider.execLog.filter((c) => Array.isArray(c) && c[0] === 'models' && c[1] === 'set');
+    expect(sets.length).toBe(2);
   });
 
   it('with apply:[] holds everyone and only changes the default (for new agents)', async () => {
     const { store, f } = await world();
-    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: [], rebuild: false });
-    expect(res.json()).toMatchObject({ applied: 0, held: 3, rebuilding: 0 });
+    const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: [] });
+    expect(res.json()).toMatchObject({ applied: 0, held: 3, live: 0 });
     expect(store.getAgent('a1')!.model).toBe('claude-opus-4-8'); // former follower pinned
     expect(store.getAgent('a2')!.model).toBe('claude-opus-4-8');
     expect(store.getAgent('a3')!.model).toBe('claude-sonnet-5');

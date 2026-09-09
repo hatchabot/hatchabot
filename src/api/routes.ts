@@ -1546,15 +1546,19 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // another owner's pin isn't ours to clear.
       store.clearStaleAgentModels(profile.id, menu, ownerIdOf(req));
 
-      let rebuilding = 0;
-      if (parsed.data.rebuild) {
-        for (const a of mine) {
-          if (!applyIds.has(a.id)) continue;
-          const fresh = store.getAgent(a.id);
-          if (!fresh?.runtimeRef || fresh.migratedTo) continue; // moved-away copy: never rebuild
-          if (fresh.state !== 'RUNNING' && fresh.state !== 'STOPPED') continue;
-          if (kickRebuild(a.id)) rebuilding++;
-        }
+      // Apply the new default LIVE to the switched agents that are RUNNING —
+      // OpenClaw reads the model per turn, so `models set` takes effect on the
+      // next message with no rebuild or downtime. Stopped/archived switched
+      // agents already had their override cleared, so they follow the new
+      // default when they next start (nothing to rebuild).
+      let live = 0;
+      for (const a of mine) {
+        if (!applyIds.has(a.id)) continue;
+        const fresh = store.getAgent(a.id);
+        if (!fresh?.runtimeRef || fresh.migratedTo || fresh.state !== 'RUNNING') continue;
+        const res = await providerFor(fresh.hostId).exec(fresh.runtimeRef, ['models', 'set', prefixedModelRef(fresh, profile)]);
+        if (res.code === 0) { recordApplied(store, a.id); live++; }
+        else trace(a.id)('model.live_set_failed', { stderr: (res.stderr || res.stdout).slice(0, 200) });
       }
 
       const { secretRef: _s, ...safe } = store.getAIProfile(profile.id)!;
@@ -1562,7 +1566,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // echoed applyIds.size, which over-reported when the caller passed ids
       // that aren't theirs (a shared profile's other users) — they're filtered
       // out of `mine`, so nothing happened to them.
-      return { profile: safe, applied, held, rebuilding };
+      return { profile: safe, applied, held, live };
     },
   );
 

@@ -1382,8 +1382,7 @@
   <div class="sub" id="applyModelErr" style="color:var(--bad);margin-top:8px"></div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
     <button onclick="applyModelDlg.close()">Cancel</button>
-    <button onclick="applyModelToSelected(false)" title="Ticked agents adopt this model on their next rebuild; un-ticked agents are held. No rebuild now.">Set, rebuild later</button>
-    <button class="primary" id="applyModelBtn" onclick="applyModelToSelected(true)">Apply &amp; rebuild</button>
+    <button class="primary" id="applyModelBtn" onclick="applyModelToSelected()" title="Ticked running agents switch on their next message (no rebuild); stopped/archived ones follow the new default when they next start.">Apply</button>
   </div>
 </dialog>
 
@@ -2655,7 +2654,7 @@ function openApplyModel(profileId, model, extras, onProfile, sourceName) {
       <span class="grow"><b>${esc(a.name)}</b>
         <span class="sub">${hasOwn
           ? `· its own: ${esc(now)} — keep unless ticked`
-          : (now && now !== model ? `· ${esc(now)} → ${esc(model)}` : `· ${esc(now)}`)}</span></span>
+          : (now && now !== model ? `· ${esc(now)} → ${esc(model)}` : `· ${esc(now)}`)}${a.state === 'ARCHIVED' ? ' · <span style="color:var(--warn)">archived — applies on restore</span>' : ''}</span></span>
     </label>`;
   }).join('') || '<div class="sub">No agents use this source yet.</div>';
   refreshApplyCount();
@@ -2671,22 +2670,26 @@ function refreshApplyCount() {
   $('applyModelCount').textContent = `${n} of ${cbs.length} selected`;
   $('applyModelAll').checked = n > 0 && n === cbs.length;
   $('applyModelBtn').disabled = n === 0;
-  $('applyModelBtn').textContent = n ? `Apply & rebuild ${n}` : 'Apply & rebuild';
+  $('applyModelBtn').textContent = n ? `Apply to ${n}` : 'Apply';
 }
-async function applyModelToSelected(rebuild) {
+async function applyModelToSelected() {
   if (!applyModelState) return;
   const apply = [...document.querySelectorAll('.applyModelCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
   const { profileId, model, extras } = applyModelState;
   $('applyModelBtn').disabled = true;
   try {
+    // Live: the model applies to running agents on the next message — no
+    // rebuild. Stopped/archived switched agents follow the new default when
+    // they next start.
     const r = await api(`/v1/ai-profiles/${profileId}/apply-default-model`, {
-      method: 'POST', body: { model, models: [model, ...extras], apply, rebuild },
+      method: 'POST', body: { model, models: [model, ...extras], apply },
     });
     const bits = [];
-    if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding}`);
-    else if (apply.length) bits.push(`${apply.length} will switch on next rebuild`);
-    if (r.held) bits.push(`${r.held} held on its current model`);
-    toast(`Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`);
+    if (r.live) bits.push(`${r.live} switched live`);
+    const later = (r.applied || 0) - (r.live || 0);
+    if (later > 0) bits.push(`${later} apply when they next start`);
+    if (r.held) bits.push(`${r.held} kept on their own model`);
+    toast(`Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`, 7000);
     applyModelDlg.close();
     await refresh(true); renderAiList();
   } catch (e) { $('applyModelErr').textContent = e.message; }

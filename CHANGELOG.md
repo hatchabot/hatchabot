@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.125.0] — 2026-09-09
+
+### Changed
+- **Changing a source's default model is now live too — no rebuild, no archived
+  question.** Applying a new default `models set`s each selected *running* agent
+  (effective next message); stopped/archived selected agents follow the new
+  default when they next start (labeled "applies on restore" in the picker, not
+  a separate prompt). The "Apply & rebuild" / "Set, rebuild later" buttons
+  collapse to one **Apply**. This is the fleet-wide version of the archived rule:
+  a change updates the record for everyone, live-applies to the running, and
+  never rebuilds an archived agent.
+
 ## [0.124.1] — 2026-09-09
 
 ### Added
