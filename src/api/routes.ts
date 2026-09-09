@@ -81,6 +81,7 @@ import {
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
 import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js';
+import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -3152,6 +3153,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // Runs an agent turn (~20s). Bounded and best-effort inside checkpointMemory;
     // it writes to memory and resets nothing, so failure just means "not saved".
     await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id));
+    // Confirm in Telegram — where the agent actually lives — so a checkpoint
+    // triggered from the web isn't invisible to someone watching the chat.
+    // Send to the OWNER's own DM (the person who clicked), not every member of
+    // a shared agent; best-effort, and a no-op if the owner hasn't linked
+    // Telegram (the web toast still confirms).
+    const ownerChat = store.accountTelegram(agent.ownerId);
+    if (ownerChat) {
+      await notifyAgentChat(store, secrets, agent.id, '📝 Saved our conversation to memory — it will survive a reset.', {
+        chatIds: [ownerChat],
+      }).catch(() => {});
+    }
     return { ok: true };
   });
 

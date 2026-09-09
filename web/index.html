@@ -5752,7 +5752,7 @@ async function checkpointAgent(id, name) {
   toast(`Saving "${name}"'s conversation to memory… (~20s)`, 6000);
   try {
     await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
-    toast(`Saved "${name}"'s conversation to memory.`);
+    toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its Telegram chat.`);
   } catch (e) { toast(e.message); }
 }
 

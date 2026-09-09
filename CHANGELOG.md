@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.121.0] — 2026-09-08
+
+### Added
+- **Chat → Memory now confirms in Telegram.** A checkpoint triggered from the
+  web posts "📝 Saved our conversation to memory" to the owners own Telegram
+  DM via the agents bot — the same send primitive archive uses — so the save
+  is visible where the agent actually lives, not just as a web toast. Best-effort
+  and a no-op if the owner hasnt linked Telegram.
+
 ## [0.120.0] — 2026-09-08
 
 ### Added
