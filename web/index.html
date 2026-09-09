@@ -453,6 +453,7 @@
     <button class="tab" id="tabEditAi" role="tab" aria-selected="false" onclick="showEditTab('ai')">AI</button>
     <button class="tab" id="tabEditData" role="tab" aria-selected="false" onclick="showEditTab('data')">Data</button>
     <button class="tab" id="tabEditConn" role="tab" aria-selected="false" onclick="showEditTab('conn')">Connections</button>
+    <button class="tab" id="tabEditPeers" role="tab" aria-selected="false" onclick="showEditTab('peers')">🔗 Peers</button>
     <button class="tab" id="tabEditTg" role="tab" aria-selected="false" onclick="showEditTab('tg')">Telegram</button>
     <button class="tab" id="tabEditEnv" role="tab" aria-selected="false" onclick="showEditTab('env')">Environment</button>
   </div>
@@ -628,11 +629,17 @@
       </div>
       <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
     </details>
+  </section>
 
-    <label style="margin-top:16px">Can consult other agents <span style="color:var(--dim)">— agent-to-agent</span></label>
-    <div class="sub" style="margin-bottom:6px">Tick your other agents this one may ask for help. It gets a <code>call-agent</code> tool and each peer answers with its own memory and accounts. Same-owner only; applies on the next <b>Rebuild</b>.</div>
+  <section id="paneEditPeers" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      Which of your <b>other</b> agents this one may consult. It gets a <code>call-agent</code> tool and can
+      ask a peer a question mid-task — each answers with its own memory and accounts (e.g. an investing
+      agent asking a tax or legal agent). Same-owner only; runs entirely on this machine.
+    </div>
+    <label>Can consult</label>
     <div id="peerList" class="sub">Loading…</div>
-    <div style="margin-top:8px"><button id="peerSaveBtn" onclick="savePeers()">Save peers</button></div>
+    <div style="margin-top:10px"><button id="peerSaveBtn" onclick="savePeers()">Save</button></div>
   </section>
 
   <section id="paneEditConn" role="tabpanel" hidden>
@@ -3577,6 +3584,7 @@ const EDIT_TABS = {
   ai: { btn: 'tabEditAi', pane: 'paneEditAi' },
   data: { btn: 'tabEditData', pane: 'paneEditData' },
   conn: { btn: 'tabEditConn', pane: 'paneEditConn' },
+  peers: { btn: 'tabEditPeers', pane: 'paneEditPeers' },
   tg: { btn: 'tabEditTg', pane: 'paneEditTg' },
   env: { btn: 'tabEditEnv', pane: 'paneEditEnv' },
 };
@@ -3589,7 +3597,7 @@ function showEditTab(name) {
   // Lazy: listing connections is a container exec — only pay for it when the
   // tab is actually opened, not on every Settings open.
   if (name === 'conn' && editAgentId) void renderConnections();
-  if (name === 'data' && editAgentId) void loadPeers();
+  if (name === 'peers' && editAgentId) void loadPeers();
 }
 
 async function loadPeers() {
@@ -3610,7 +3618,19 @@ async function savePeers() {
   $('peerSaveBtn').disabled = true;
   try {
     await api(`/v1/agents/${editAgentId}/peers`, { method: 'PUT', body: { peerIds: ids } });
-    toast(ids.length ? `Saved — this agent can consult ${ids.length} other${ids.length > 1 ? 's' : ''}. Rebuild to apply.` : 'Saved — no peers. Rebuild to apply.', 7000);
+    // The call-agent tool + peer manifest are installed on rebuild, so offer it.
+    if (ids.length) {
+      if (confirm(`Saved. Rebuild this agent now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {
+        await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
+        toast('Rebuilding so it can consult its peers…');
+        editDlg.close();
+      } else {
+        toast('Saved — Rebuild this agent before it can consult them.', 8000);
+      }
+    } else {
+      toast('Saved — no peers.');
+    }
+    await refresh(false);
   } catch (e) { toast(e.message, 9000); }
   finally { $('peerSaveBtn').disabled = false; }
 }
@@ -3964,14 +3984,12 @@ async function switchModel() {
   const model = $('editModel').value || null; // '' → null clears the override
   $('modelBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { model } });
-    if (confirm(`Saved. Rebuild now to run ${model ? `"${model}"` : 'the source default'}?\n\nThe agent restarts (memory kept) and is briefly offline.`)) {
-      await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
-      toast('Rebuilding with the new model');
-      editDlg.close();
-    } else {
-      toast('Saved — Rebuild to apply it');
-    }
+    // Live change: OpenClaw reads the model per turn, so a running agent picks
+    // it up on the next message — no rebuild, no restart, no downtime.
+    const r = await api(`/v1/agents/${editAgentId}/model`, { method: 'POST', body: { model } });
+    toast(r.live
+      ? `Now running ${r.model} — effective on the next message, no rebuild.`
+      : `Set to ${r.model} — applies when the agent next starts.`, 7000);
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('modelBtn').disabled = false; }

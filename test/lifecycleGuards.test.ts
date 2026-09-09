@@ -165,6 +165,19 @@ describe('per-account agent cap', () => {
   });
 });
 
+describe('live model change (no rebuild)', () => {
+  it('applies the model to a RUNNING agent via `models set`, no rebuild', async () => {
+    const { f, store, provider } = await world();
+    const before = provider.execLog.length;
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: as, payload: { model: null } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().live).toBe(true);
+    // it ran `openclaw models set <provider>/<model>` and no rebuild/provision
+    expect(provider.execLog.some((c) => Array.isArray(c) && c[0] === 'models' && c[1] === 'set')).toBe(true);
+    expect(store.getAgent('a1')!.appliedModel).toBeTruthy(); // card reflects it now
+  });
+});
+
 describe('delete is 404 the second time, not a 500', () => {
   it('answers 404 on a re-delete instead of an illegal DELETED->DELETING', async () => {
     const { f } = await world();

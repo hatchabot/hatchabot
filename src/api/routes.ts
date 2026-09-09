@@ -15,6 +15,8 @@ import {
   createAgentRecord,
   checkpointMemory,
   effectiveModel,
+  prefixedModelRef,
+  recordApplied,
   sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
@@ -3169,6 +3171,36 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     trace(agent.id)('memory.checkpoint_notified', { chats: notified });
     return { ok: true };
   });
+
+  // ---- live model change (no rebuild) --------------------------------------
+  // OpenClaw reads the model per turn, so `openclaw models set` takes effect on
+  // the very next message — no container rebuild or restart. Set the per-agent
+  // override in the store (so it's correct on a future rebuild), and apply it
+  // live when the agent is RUNNING; a STOPPED/ARCHIVED agent just records it and
+  // picks it up when it next starts.
+  app.post<{ Params: { id: string }; Body: { model?: string | null } }>(
+    '/v1/agents/:id/model',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const profile = store.getAIProfile(agent.aiProfileId);
+      if (!profile) return reply.code(409).send({ error: 'This agent has no AI source.' });
+      const model = ((req.body as { model?: string | null } | undefined)?.model ?? null) || null;
+      const problem = modelOverrideProblem(profile, model);
+      if (problem) return reply.code(400).send({ error: problem });
+      store.setAgentModel(agent.id, model);
+      const updated = store.getAgent(agent.id)!;
+      const applied = effectiveModel(updated, profile);
+      let live = false;
+      if (agent.state === 'RUNNING' && agent.runtimeRef) {
+        const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['models', 'set', prefixedModelRef(updated, profile)]);
+        live = res.code === 0;
+        if (live) recordApplied(store, agent.id); // card now reflects it, no rebuild
+        else trace(agent.id)('model.live_set_failed', { model: applied, stderr: (res.stderr || res.stdout).slice(0, 200) });
+      }
+      return { model: applied, live };
+    },
+  );
 
   // ---- agent-to-agent consult ----------------------------------------------
   // Owner sets which agents an agent may consult; the caller agent holds a

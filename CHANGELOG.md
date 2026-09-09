@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.124.0] — 2026-09-09
+
+### Changed
+- **Changing a model no longer rebuilds.** OpenClaw reads the model per turn, so
+  picking a new model for a running agent now takes effect on its **next
+  message** — instant, no restart, no downtime (was: save + full rebuild). The
+  per-agent override is still recorded, so a stopped/archived agent picks it up
+  when it next starts. New `POST /v1/agents/:id/model`.
+- **A2A peers moved to their own ⚙ → 🔗 Peers tab** (was tucked under Data), and
+  saving now offers to rebuild the agent right away — the `call-agent` tool is
+  installed on rebuild, so the grant alone doesn't enable consulting until then.
+
 ## [0.123.0] — 2026-09-09
 
 ### Added

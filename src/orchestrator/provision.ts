@@ -701,6 +701,16 @@ export function effectiveModel(
   return menu.includes(agent.model) ? agent.model : profile.model;
 }
 
+/** The `<provider>/<model>` ref OpenClaw wants — for a live `openclaw models
+ *  set`, matching how configWriter prefixes the model at provision. */
+export function prefixedModelRef(
+  agent: { model?: string },
+  profile: { vendor: string; model: string; models?: string[] },
+): string {
+  const provider = profile.vendor === 'local' ? 'ollama' : profile.vendor === 'google' ? 'google' : 'anthropic';
+  return `${provider}/${effectiveModel(agent, profile)}`;
+}
+
 /**
  * Clone (or refresh) each git data source inside the running container. Runs on
  * every provision and rebuild, and is idempotent (buildGitSyncScript only clones
