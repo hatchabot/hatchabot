@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.122.0] — 2026-09-09
+
+### Added
+- **Archive now offers "Save conversation to memory first"** (a checkbox on the
+  archive dialog, default on for a running agent). It checkpoints the live
+  conversation into MEMORY.md before stopping, so a long archive can restore
+  cleanly even into a fresh session. Shown only for RUNNING agents (a checkpoint
+  needs a live turn); durable notes already saved are kept regardless.
+
 ## [0.121.1] — 2026-09-08
 
 ### Fixed

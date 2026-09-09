@@ -1405,6 +1405,25 @@
   </div>
 </dialog>
 
+<dialog id="archiveDlg" style="width:min(520px,96vw)">
+  <h3 style="margin:0 0 4px">Archive <span id="archiveName"></span>?</h3>
+  <div class="sub" style="margin-bottom:10px">
+    It keeps what it has learned, plus its settings and members, and stops. Its Telegram bot goes back in
+    the pool for another agent to use, and members are told in the chat. When you restore it, it gets a
+    DIFFERENT bot with a new link to send to members; the current link stops working.
+  </div>
+  <label id="archiveCheckpointRow" style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:0">
+    <input type="checkbox" id="archiveCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
+    <span><b>Save conversation to memory first</b>
+      <div class="sub" style="margin-top:2px">The agent writes a short summary of its recent chat into memory before stopping
+        (~20s), so a long archive can restore cleanly even into a fresh session. Durable notes already saved are kept regardless.</div></span>
+  </label>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px">
+    <button onclick="archiveDlg.close()">Cancel</button>
+    <button class="primary" id="archiveBtn" onclick="confirmArchive()">Archive</button>
+  </div>
+</dialog>
+
 <dialog id="healthDlg" style="width:min(560px,94vw)">
   <h3 style="margin:0 0 4px">Health — <span id="healthAgent"></span></h3>
   <div class="sub">
@@ -3456,7 +3475,7 @@ function agentCard(a) {
            the ⋯ menu. The SAME slot becomes Restore once archived, so the
            button that put an agent away is the button that brings it back. -->
       ${a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
-        ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
+        ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}', '${a.state}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
       ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
       ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${a.id}', '${jsq(a.name)}')" title="Read its memory, key files, and chat history — without restoring it or its bot">🔍 Inspect</button>` : ''}
       <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
@@ -5555,13 +5574,29 @@ function rebuildableAgents() {
  * hand the bot to someone else. The confirm text leads with the part that can't
  * be undone quietly — the chat address changes.
  */
-async function archiveAgent(id, name) {
-  if (!confirm(`Archive "${name}"?\n\nIt keeps what it has learned, plus its settings and members, and stops. Its Telegram bot goes back in the pool for another agent to use, and members are told in the chat.\n\nWhen you restore it, it gets a DIFFERENT bot with a new link, which you'll need to send to members. Its current link stops working.`)) return;
+let archivePending = null;
+function archiveAgent(id, name, state) {
+  archivePending = { id, name };
+  $('archiveName').textContent = `"${name}"`;
+  // A checkpoint needs a live turn — only offer it for a RUNNING agent.
+  const running = state === 'RUNNING';
+  $('archiveCheckpointRow').style.display = running ? 'flex' : 'none';
+  $('archiveCheckpoint').checked = true; // shared control — reset to the safe default each open
+  archiveDlg.showModal();
+}
+async function confirmArchive() {
+  if (!archivePending) return;
+  const { id, name } = archivePending;
+  const checkpoint = $('archiveCheckpointRow').style.display !== 'none' && $('archiveCheckpoint').checked;
+  $('archiveBtn').disabled = true;
   try {
-    await api(`/v1/agents/${id}/archive`, { method: 'POST' });
+    if (checkpoint) toast(`Saving "${name}" to memory, then archiving…`, 8000);
+    await api(`/v1/agents/${id}/archive`, { method: 'POST', body: { checkpoint } });
+    archiveDlg.close();
     toast(`"${name}" archived — its bot is back in the pool.`);
     await refresh(false);
   } catch (e) { toast(e.message); }
+  finally { $('archiveBtn').disabled = false; }
 }
 
 // ---- archived-agent inspector (read-only, from the volume) -----------------

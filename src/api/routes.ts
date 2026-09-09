@@ -5309,7 +5309,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
   });
 
-  app.post<{ Params: { id: string } }>('/v1/agents/:id/archive', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { checkpoint?: boolean } }>('/v1/agents/:id/archive', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (movedAway(agent, reply)) return reply;
@@ -5322,6 +5322,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // pool and possibly already leased to somebody else.
     const running = inflight.get(agent.id);
     if (running) await running.catch(() => {});
+    // Optionally distil the live conversation into MEMORY.md BEFORE we stop it —
+    // a long archive may later restore into a fresh session that leans on
+    // MEMORY.md rather than the old transcript. Must run while still RUNNING;
+    // best-effort so it never blocks the archive itself.
+    if ((req.body as { checkpoint?: boolean } | undefined)?.checkpoint === true && agent.state === 'RUNNING' && agent.runtimeRef) {
+      await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef, agent.slug, trace(agent.id)).catch(() => {});
+    }
     try {
       await archiveAgent(
         { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id) },
