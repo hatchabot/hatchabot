@@ -4499,7 +4499,7 @@ function renderFleetUsage(f) {
     return `<div class="pair" style="padding:6px 0;align-items:flex-start" title="${esc((a.byModel || []).map(m => m.model + ': ' + fmtTokens(m.tokens)).join('\n'))}">
       <span class="grow">
         <span class="sub" style="display:inline-block;width:1.4em">${i + 1}.</span> <b>${esc(a.name)}</b>
-        <span class="sub"> · ${a.sessions} session${a.sessions > 1 ? 's' : ''}${a.lastActive ? ' · ' + ago(a.lastActive) : ''}${modelDesc ? ' · ' + modelDesc : ''}</span>
+        <span class="sub"> · ${a.sessions} session${a.sessions > 1 ? 's' : ''}${a.lastActive ? ' · ' + ago(a.lastActive) : ''} · <a href="#" onclick="event.preventDefault(); fleetUsageDlg.close(); openEdit('${a.id}','${jsq(a.name)}','ai')" title="Change this agent's model — applies instantly, no rebuild" style="color:var(--accent);text-decoration:none">${modelDesc || 'set model'} ✎</a></span>
         <div style="height:5px;border-radius:3px;background:var(--accent);opacity:.85;width:${pct}%;margin-top:5px;min-width:6px"></div>
       </span>
       <span style="text-align:right;margin-left:10px;white-space:nowrap">

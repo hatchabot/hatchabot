@@ -2,6 +2,13 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.124.1] — 2026-09-09
+
+### Added
+- **Change a model straight from Fleet usage.** Each agent's model in the 📊
+  Usage list is now a link that opens its AI tab — where the change is instant
+  (no rebuild) — so you can spot a heavy agent and retune its model in a click.
+
 ## [0.124.0] — 2026-09-09
 
 ### Changed
