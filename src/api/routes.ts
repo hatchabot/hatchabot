@@ -3154,16 +3154,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // it writes to memory and resets nothing, so failure just means "not saved".
     await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id));
     // Confirm in Telegram — where the agent actually lives — so a checkpoint
-    // triggered from the web isn't invisible to someone watching the chat.
-    // Send to the OWNER's own DM (the person who clicked), not every member of
-    // a shared agent; best-effort, and a no-op if the owner hasn't linked
-    // Telegram (the web toast still confirms).
-    const ownerChat = store.accountTelegram(agent.ownerId);
-    if (ownerChat) {
-      await notifyAgentChat(store, secrets, agent.id, '📝 Saved our conversation to memory — it will survive a reset.', {
-        chatIds: [ownerChat],
-      }).catch(() => {});
-    }
+    // triggered from the web isn't invisible to someone watching the chat. Send
+    // to the agent's active members (the same audience archive's goodbye
+    // reaches, resolved from memberships — the account-level Telegram link is
+    // usually unset). Best-effort; a no-op if the agent has no bot.
+    const notified = await notifyAgentChat(
+      store, secrets, agent.id,
+      '📝 Saved our conversation to memory — it will survive a reset.',
+    ).catch(() => 0);
+    trace(agent.id)('memory.checkpoint_notified', { chats: notified });
     return { ok: true };
   });
 

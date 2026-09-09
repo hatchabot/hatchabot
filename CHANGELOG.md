@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.121.1] — 2026-09-08
+
+### Fixed
+- Chat → Memory's Telegram confirmation now actually sends. It was gated on the
+  account-level Telegram link (`accountTelegram`), which most owners never set,
+  so it silently sent nothing. It now notifies the agent's active members
+  (resolved from memberships — the same audience archive's goodbye reaches) and
+  logs how many chats were messaged.
+
 ## [0.121.0] — 2026-09-08
 
 ### Added
