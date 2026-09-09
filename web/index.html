@@ -313,6 +313,7 @@
       <button id="inboxBtn" class="hbtn" title="Agents other users have sent you" onclick="openInbox()">📥 Inbox<span id="inboxBadge" class="inbox-badge" hidden></span></button>
       <button id="mgmtChatBtn" class="hbtn" title="Management chat — ask in plain language; every change needs your Confirm" onclick="openMgmtChat()">💬 Manage</button>
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
+      <button id="helpBtn" class="hbtn" title="Good to know — key concepts worth remembering" onclick="helpDlg.showModal()">❔ Help</button>
       <span class="spacer"></span>
       <span class="sub pool-ready" id="poolInfo" hidden title="Bots parked in the pool — a new agent grabs one instantly, no BotFather trip. Manage them in ⚙ Settings → Bot pool."></span>
     </div>
@@ -1301,6 +1302,58 @@
   <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
     <button class="primary" onclick="fleetUsageDlg.close()">Close</button>
+  </div>
+</dialog>
+
+<dialog id="helpDlg" style="width:min(560px,96vw)">
+  <h3 style="margin:0 0 2px">Good to know</h3>
+  <div class="sub" style="margin-bottom:12px">A few concepts that aren't obvious at first.</div>
+
+  <div style="display:flex;flex-direction:column;gap:14px">
+    <div>
+      <b>Changing an agent</b>
+      <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
+        <li><b>Model changes are instant</b> — pick a model and it takes effect on the next message. No rebuild.</li>
+        <li><b>Most other changes apply on the next Rebuild</b> — AI source, data, environment, rich messages, peers. The agent's card says so.</li>
+        <li>A plain <b>Rebuild keeps your conversation</b> (it resumes). Only switching the AI <b>source</b> starts a fresh thread — and that offers "Save conversation to memory first."</li>
+      </ul>
+    </div>
+
+    <div>
+      <b>Memory &amp; the model command</b>
+      <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
+        <li>Agents write durable facts to memory <b>as they go</b>. <b>Chat → Memory</b> saves the current conversation on demand — handy before a source switch or a long archive.</li>
+        <li>Typing <code>/model</code> to the bot in Telegram is a <b>temporary</b> this-conversation switch — it reverts. Change models <b>in the app</b> to make it stick.</li>
+      </ul>
+    </div>
+
+    <div>
+      <b>Archive &amp; limits</b>
+      <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
+        <li><b>Archive</b> keeps everything the agent learned and hands its bot back to the pool. Restoring gives it a <b>new bot &amp; link</b> to reshare. Save to memory first before a <i>long</i> archive.</li>
+        <li><b>Archived agents don't count</b> toward your agent limit, and settings changes reach them when you restore.</li>
+      </ul>
+    </div>
+
+    <div>
+      <b>Google connections</b>
+      <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
+        <li><b>Reconnecting an account detaches its agents</b> — always reconnect, then re-attach it.</li>
+        <li>Each Google service (Sheets, Docs, Contacts…) must be <b>enabled once in your Cloud project</b> — separate from approving the scope.</li>
+      </ul>
+    </div>
+
+    <div>
+      <b>Talking &amp; safety</b>
+      <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
+        <li><b>Agents can consult each other</b> — ⚙ → 🔗 Peers (same-owner only; needs a rebuild, since it installs a tool).</li>
+        <li><b>Telegram is the open door</b>: anyone you admit to an agent can direct it. Be mindful of powerful agents (that send email or write files) with a wide audience — <b>⚙ → 🛡 Security</b> shows each agent's exposure.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:16px;padding-top:12px">
+    <button class="primary" onclick="helpDlg.close()">Got it</button>
   </div>
 </dialog>
 

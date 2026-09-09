@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.126.0] — 2026-09-09
+
+### Added
+- **❔ Help — a "Good to know" guide** in the top bar: a short, scannable dialog
+  of the non-obvious concepts — model changes are live vs. what needs a rebuild,
+  rebuild keeps the conversation (only a source switch resets it), archive &
+  restore, reconnect-detaches-agents + per-project API enablement, `/model` in
+  chat is temporary, agents consulting each other, and Telegram being the
+  exposed surface.
+
 ## [0.125.0] — 2026-09-09
 
 ### Changed
