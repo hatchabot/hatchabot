@@ -3160,20 +3160,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const agent = runningAgent(req, req.params.id, reply, 'save its conversation to memory');
     if (!agent) return reply;
     if (busyNow(agent, reply)) return reply;
-    // Runs an agent turn (~20s). Bounded and best-effort inside checkpointMemory;
-    // it writes to memory and resets nothing, so failure just means "not saved".
-    await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id));
-    // Confirm in Telegram — where the agent actually lives — so a checkpoint
-    // triggered from the web isn't invisible to someone watching the chat. Send
-    // to the agent's active members (the same audience archive's goodbye
-    // reaches, resolved from memberships — the account-level Telegram link is
-    // usually unset). Best-effort; a no-op if the agent has no bot.
+    // The checkpoint IS an agent turn, so it needs the AI source to run. If the
+    // source is out of credits / expired / unreachable, the turn fails and
+    // NOTHING is written — report that honestly instead of a false "Saved".
+    const r = await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id));
+    if (!r.ok) {
+      return reply.code(200).send({
+        ok: false, saved: false,
+        error: `Couldn't save to memory — the agent's AI source didn't complete the turn (out of credits, expired, or unreachable?). Nothing was lost; the summary just wasn't written. ${r.detail ?? ''}`.trim(),
+      });
+    }
+    // Confirm in Telegram (ONLY on a real save) — where the agent lives, so a
+    // web-triggered checkpoint isn't invisible to someone watching the chat.
+    // Sent to the agent's active members; best-effort, no-op if it has no bot.
     const notified = await notifyAgentChat(
       store, secrets, agent.id,
       '📝 Saved our conversation to memory — it will survive a reset.',
     ).catch(() => 0);
     trace(agent.id)('memory.checkpoint_notified', { chats: notified });
-    return { ok: true };
+    return { ok: true, saved: true };
   });
 
   // ---- live model change (no rebuild) --------------------------------------
@@ -5443,10 +5448,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (running) await running.catch(() => {});
     // Optionally distil the live conversation into MEMORY.md BEFORE we stop it —
     // a long archive may later restore into a fresh session that leans on
-    // MEMORY.md rather than the old transcript. Must run while still RUNNING;
-    // best-effort so it never blocks the archive itself.
+    // MEMORY.md rather than the old transcript. Must run while still RUNNING.
+    // The checkpoint is an agent turn, so it can fail if the AI source is out of
+    // credits — never block the archive on it, but surface a warning so the user
+    // knows the summary wasn't saved.
+    let checkpointWarning: string | undefined;
     if ((req.body as { checkpoint?: boolean } | undefined)?.checkpoint === true && agent.state === 'RUNNING' && agent.runtimeRef) {
-      await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef, agent.slug, trace(agent.id)).catch(() => {});
+      const r = await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef, agent.slug, trace(agent.id)).catch(() => ({ ok: false, detail: 'error' }));
+      if (!r.ok) checkpointWarning = "Archived, but couldn't save the conversation to memory first — the AI source didn't complete (out of credits, expired, or unreachable?).";
     }
     try {
       await archiveAgent(
@@ -5459,7 +5468,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       app.log.error({ agentId: agent.id, err: String(err) }, 'archive failed');
       return reply.code(502).send({ error: "Couldn't archive the agent — try again in a moment." });
     }
-    return publicAgent(store.getAgent(agent.id)!);
+    return { ...publicAgent(store.getAgent(agent.id)!), checkpointWarning };
   });
 
   /**

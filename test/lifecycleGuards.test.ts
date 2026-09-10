@@ -178,6 +178,24 @@ describe('live model change (no rebuild)', () => {
   });
 });
 
+describe('Chat → Memory reports honestly when the AI source cannot run', () => {
+  it('returns saved:false (not a false "Saved") when the checkpoint turn fails', async () => {
+    const { f, provider } = await world();
+    // Simulate an out-of-credits / unreachable source: the agent turn exits non-zero.
+    provider.execResponses.set('agent --agent kitchen', { code: 1, stdout: '', stderr: 'credit balance is too low' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/checkpoint', headers: as });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().saved).toBe(false);
+    expect(res.json().error).toMatch(/couldn't save/i);
+  });
+
+  it('returns saved:true when the checkpoint turn succeeds', async () => {
+    const { f } = await world(); // mock exec defaults to code 0
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/checkpoint', headers: as });
+    expect(res.json().saved).toBe(true);
+  });
+});
+
 describe('delete is 404 the second time, not a 500', () => {
   it('answers 404 on a re-delete instead of an illegal DELETED->DELETING', async () => {
     const { f } = await world();

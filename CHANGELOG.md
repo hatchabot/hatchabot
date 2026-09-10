@@ -2,6 +2,22 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.127.0] — 2026-09-10
+
+### Fixed
+- **Chat → Memory no longer claims success when it silently failed.** The
+  checkpoint is an agent turn, so it needs the AI source to run — an
+  out-of-credits / expired / rate-limited source makes the turn fail and NOTHING
+  is written. `checkpointMemory` now reports success/failure; the Chat → Memory
+  button and the archive "save first" both say so honestly (and the Telegram
+  confirmation only fires on a real save). The rebuild/source-switch checkpoint
+  stays best-effort (it's a background task) but its failure is logged clearly.
+
+### Added
+- **"Select all on source…"** in the Move-agents-here dialog: pick another AI
+  source and it ticks every listed agent currently on it — bulk-move a whole
+  source's agents in two clicks.
+
 ## [0.126.1] — 2026-09-09
 
 ### Added

@@ -1446,10 +1446,11 @@
     it are listed. Memory and everything on the volume are kept; a model an agent
     had chosen that this source doesn't offer falls back to the new default.
   </div>
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:8px;flex-wrap:wrap">
     <label class="sub" style="display:flex;gap:6px;align-items:center;cursor:pointer;margin:0">
       <input type="checkbox" id="moveSourceAll" onchange="toggleMoveAll(this.checked)" style="width:auto;flex:none"> Select all
     </label>
+    <select id="moveSourceFilter" onchange="selectMoveBySource(this.value)" title="Tick every listed agent currently on a chosen source" style="width:auto;max-width:60%"></select>
     <span class="sub" id="moveSourceCount"></span>
   </div>
   <div id="moveSourceList" style="max-height:320px;overflow:auto;border-top:1px solid var(--line);padding-top:4px"></div>
@@ -2768,17 +2769,33 @@ function moveAgentsToSource(profileId, profileName) {
     const archived = a.state === 'ARCHIVED'
       ? ' · <span style="color:var(--warn)">archived — applies when unarchived</span>' : '';
     return `<label class="pair" style="padding:5px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
-      <input type="checkbox" class="moveSourceCb" data-id="${esc(a.id)}" onchange="refreshMoveCount()" style="width:auto;flex:none">
+      <input type="checkbox" class="moveSourceCb" data-id="${esc(a.id)}" data-src="${esc(a.aiProfileId)}" onchange="refreshMoveCount()" style="width:auto;flex:none">
       <span class="grow"><b>${esc(a.name)}</b>
         <span class="sub">· now on ${esc(src ? src.name : 'another source')}${archived}</span></span>
     </label>`;
   }).join('');
+  // "Select all using source X" — pick a source and tick every candidate on it.
+  const srcIds = [...new Set(candidates.map(a => a.aiProfileId))];
+  $('moveSourceFilter').innerHTML = '<option value="">Select all on source…</option>' +
+    srcIds.map(id => {
+      const p = profiles.find(x => x.id === id);
+      const n = candidates.filter(a => a.aiProfileId === id).length;
+      return `<option value="${esc(id)}">${esc(p ? p.name : 'another source')} (${n})</option>`;
+    }).join('');
   $('moveSourceCheckpoint').checked = true; // shared control — reset so a prior uncheck doesn't silently skip saving conversations to memory before the switch
   refreshMoveCount();
   moveSourceDlg.showModal();
 }
 function toggleMoveAll(on) {
   document.querySelectorAll('.moveSourceCb').forEach(cb => { cb.checked = on; });
+  refreshMoveCount();
+}
+function selectMoveBySource(profileId) {
+  if (!profileId) return;
+  // Additive: tick every listed agent currently on the chosen source (leaves
+  // any you'd already ticked). Reset the dropdown so it reads as an action.
+  document.querySelectorAll('.moveSourceCb').forEach(cb => { if (cb.dataset.src === profileId) cb.checked = true; });
+  $('moveSourceFilter').value = '';
   refreshMoveCount();
 }
 function refreshMoveCount() {
@@ -5694,9 +5711,10 @@ async function confirmArchive() {
   $('archiveBtn').disabled = true;
   try {
     if (checkpoint) toast(`Saving "${name}" to memory, then archiving…`, 8000);
-    await api(`/v1/agents/${id}/archive`, { method: 'POST', body: { checkpoint } });
+    const r = await api(`/v1/agents/${id}/archive`, { method: 'POST', body: { checkpoint } });
     archiveDlg.close();
-    toast(`"${name}" archived — its bot is back in the pool.`);
+    if (r.checkpointWarning) toast(`"${name}" archived. ⚠ ${r.checkpointWarning}`, 12000);
+    else toast(`"${name}" archived — its bot is back in the pool.`);
     await refresh(false);
   } catch (e) { toast(e.message); }
   finally { $('archiveBtn').disabled = false; }
@@ -5889,8 +5907,9 @@ async function saveImagePin() {
 async function checkpointAgent(id, name) {
   toast(`Saving "${name}"'s conversation to memory… (~20s)`, 6000);
   try {
-    await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
-    toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its Telegram chat.`);
+    const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
+    if (r.saved) toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its Telegram chat.`);
+    else toast(r.error || `Couldn't save "${name}" to memory — its AI source didn't respond (out of credits?).`, 12000);
   } catch (e) { toast(e.message); }
 }
 

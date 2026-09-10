@@ -571,7 +571,7 @@ export async function checkpointMemory(
   runtimeRef: string,
   slug: string,
   log: (event: string, detail: Record<string, unknown>) => void,
-): Promise<void> {
+): Promise<{ ok: boolean; detail?: string }> {
   const prompt =
     'System note: please save anything from our recent conversation worth keeping — decisions, ' +
     'facts about the people you serve, ongoing tasks or context — into your memory (MEMORY.md, ' +
@@ -582,14 +582,22 @@ export async function checkpointMemory(
     // 60s default) — a summary is short; a model too slow to finish inside it
     // is one we'd rather abandon than let delay the rebuild.
     const res = await provider.exec(runtimeRef, ['agent', '--agent', slug, '-m', prompt]);
-    log('memory.checkpointed', {
-      slug,
-      ok: res.code === 0 && !res.timedOut,
-      timedOut: !!res.timedOut,
-      tail: (res.stdout || res.stderr).slice(-200),
-    });
+    // The checkpoint IS an agent turn, so it needs the AI source to actually
+    // run — an out-of-credits / expired / rate-limited source makes the turn
+    // fail (non-zero), and the summary is NOT written. Report that instead of
+    // pretending it saved, so callers can tell the user the truth.
+    const ok = res.code === 0 && !res.timedOut;
+    log('memory.checkpointed', { slug, ok, timedOut: !!res.timedOut, tail: (res.stdout || res.stderr).slice(-200) });
+    return {
+      ok,
+      detail: ok ? undefined
+        : res.timedOut ? 'the AI source did not finish in time'
+          : (res.stderr || res.stdout || 'the AI source could not complete the turn (out of credits, expired, or unreachable?)').trim().slice(-180),
+    };
   } catch (err) {
-    log('memory.checkpoint_failed', { slug, error: String((err as Error).message ?? err) });
+    const detail = String((err as Error).message ?? err);
+    log('memory.checkpoint_failed', { slug, error: detail });
+    return { ok: false, detail };
   }
 }
 
