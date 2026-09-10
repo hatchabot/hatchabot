@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.128.0] — 2026-09-10
+
+### Added
+- **⚡ Bulk actions** (top bar): apply one action to a selection of agents.
+  Pick the set with quick filters — All, by AI source, by group, by host, by
+  state (running/stopped), or "needs rebuild" — then adjust by hand. Actions:
+  **Switch model** (live, no rebuild — the first cross-source batch model
+  switch; offers only models common to the selected agents' sources, skips
+  local-model agents), **Rebuild**, **Stop**, **Start**. Per-agent results
+  (done / skipped / failed) after applying. Generalizes "Rebuild all".
+
 ## [0.127.0] — 2026-09-10
 
 ### Fixed
