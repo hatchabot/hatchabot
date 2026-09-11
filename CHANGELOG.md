@@ -2,6 +2,13 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.129.1] — 2026-09-10
+
+### Changed
+- **Top-bar order:** Settings now sits far-left, followed by Bulk actions,
+  Rebuild all, Inbox, Manage, Import, Templates, Health, Usage, Sources, Help
+  (Jump moved to the far right). Order only — no behavior change.
+
 ## [0.129.0] — 2026-09-10
 
 ### Added
