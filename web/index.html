@@ -3855,6 +3855,8 @@ function agentCard(a) {
           : `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" ${a.botDisplayName ? `style="border-color:var(--warn)" title="Bot is currently named '${esc(a.botDisplayName)}' — press to rename it to '${esc(a.name)}'. Members get a one-line heads-up DM."` : `title="Rename the Telegram bot's display name to match this agent."`}>🏷 Sync name</button>`
       ) : ''}
       ${a.state === 'RUNNING' ? `<button onclick="checkpointAgent('${a.id}', '${jsq(a.name)}')" title="Have the agent write the current conversation's key facts into MEMORY.md now (~20s), so they survive a reset or backend switch">📝 Chat → Memory</button>` : ''}
+      ${a.runtimeRef && ['RUNNING', 'STOPPED', 'ARCHIVED'].includes(a.state) ? `<button onclick="downloadHistory('${a.id}', '${jsq(a.name)}')" title="Download this agent's full chat history as a file — every conversation, including ones from before a reset (read from the agent's own transcripts; Telegram can't export bot chats)">💬 History</button>` : ''}
+      ${a.state === 'RUNNING' ? `<button onclick="recoverContext('${a.id}', '${jsq(a.name)}')" title="Lost context after a reset? Restore the agent's earlier conversations into its workspace and have it save the important parts to memory — no copy-pasting">📥 Recover context</button>` : ''}
       <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
       ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
       ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
@@ -6220,6 +6222,31 @@ async function saveImagePin() {
  * into MEMORY.md now. The manual form of the pre-switch checkpoint — for before
  * an archive, before /new, or any reset you see coming. Resets nothing.
  */
+async function downloadHistory(id, name) {
+  toast(`Reading "${name}"'s chat history…`, 5000);
+  try {
+    // Raw fetch (not api()): the body is a markdown file, not JSON. Same-origin,
+    // so the session cookie authenticates it.
+    const r = await fetch(`/v1/agents/${id}/transcript`, { credentials: 'same-origin' });
+    if (!r.ok) { let e = ''; try { e = (await r.json()).error; } catch {} throw new Error(e || `HTTP ${r.status}`); }
+    const blob = await r.blob();
+    const file = (r.headers.get('content-disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'chat-history.md';
+    const url = URL.createObjectURL(blob);
+    const link = Object.assign(document.createElement('a'), { href: url, download: file });
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    const n = r.headers.get('x-agentclaw-messages'), c = r.headers.get('x-agentclaw-conversations');
+    toast(`Downloaded ${file} — ${n} messages across ${c} conversation${c === '1' ? '' : 's'}.`, 7000);
+  } catch (e) { toast(`Couldn't download the history: ${e.message}`, 9000); }
+}
+async function recoverContext(id, name) {
+  if (!confirm(`Recover "${name}"'s earlier conversations?\n\nConversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its Telegram chat when done.`)) return;
+  try {
+    const r = await api(`/v1/agents/${id}/recover-context`, { method: 'POST' });
+    if (!r.started) { toast(r.reason || 'Nothing to recover.', 9000); return; }
+    toast(`Recovering ${r.messages} messages from ${r.conversations} earlier conversation${r.conversations > 1 ? 's' : ''} — "${name}" will confirm in Telegram when it's saved them.`, 10000);
+  } catch (e) { toast(e.message, 9000); }
+}
 async function checkpointAgent(id, name) {
   toast(`Saving "${name}"'s conversation to memory… (~20s)`, 6000);
   try {

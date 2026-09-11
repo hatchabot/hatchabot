@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.134.0] — 2026-09-11
+
+### Added
+- **💬 History — download an agent's full chat.** Telegram can't export bot chats,
+  but OpenClaw keeps every conversation on the agent's volume — including ones from
+  before a reset. The card's History button renders them oldest-first as a readable
+  markdown file (user/agent text only; cron runs and tool activity left out). Works
+  for running, stopped and archived agents.
+- **📥 Recover context.** After a reset lost context, one click writes the agent's
+  earlier conversations into its workspace and has it save the important parts to
+  memory — no Telegram copy-paste. Runs in the background; the agent confirms in its
+  own chat when done.
+
 ## [0.133.2] — 2026-09-11
 
 ### Fixed

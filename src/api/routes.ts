@@ -30,6 +30,7 @@ import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
+import { exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { addCron, listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
@@ -3305,6 +3306,46 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     ).catch(() => 0);
     trace(agent.id)('memory.checkpoint_notified', { chats: notified });
     return { ok: true, saved: true };
+  });
+
+  // ---- chat history (from the agent's own transcript store) ----------------
+  // The Telegram Bot API can't read past messages; OpenClaw's session files can,
+  // including conversations from before a reset. Owner only.
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/transcript', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (!['RUNNING', 'STOPPED', 'ARCHIVED'].includes(agent.state) || isBusy(agent.id)) {
+      return reply.code(409).send({ error: `Can't read the history while the agent is ${isBusy(agent.id) ? 'busy' : agent.state.toLowerCase()} — try again in a moment.` });
+    }
+    let t;
+    try { t = await exportTranscript(providerFor(agent.hostId), agent); }
+    catch (err) { return reply.code(502).send({ error: `Couldn't read the chat history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
+    if (!t.messages) return reply.code(404).send({ error: 'No chat history found for this agent yet.' });
+    trace(agent.id)('transcript.exported', { conversations: t.conversations, messages: t.messages });
+    const file = `${agent.slug}-chat-history-${new Date().toISOString().slice(0, 10)}.md`;
+    return reply
+      .header('content-type', 'text/markdown; charset=utf-8')
+      .header('content-disposition', `attachment; filename="${file}"`)
+      .header('x-agentclaw-conversations', String(t.conversations))
+      .header('x-agentclaw-messages', String(t.messages))
+      .send(t.text);
+  });
+
+  /** Restore what a reset made the agent lose: stage its earlier conversations
+   *  in its workspace and have it save the durable parts to memory (background;
+   *  it confirms in its own chat). */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/recover-context', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply, 'recover its earlier conversations');
+    if (!agent) return reply;
+    if (busyNow(agent, reply)) return reply;
+    let r;
+    try { r = await recoverContext(providerFor(agent.hostId), agent); }
+    catch (err) { return reply.code(502).send({ error: `Couldn't stage the history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
+    trace(agent.id)('transcript.recover_started', r);
+    if (!r.messages) {
+      return { started: false, reason: 'Nothing to recover — there are no conversations from before a reset; the current one is already in its context.' };
+    }
+    return reply.code(202).send({ started: true, ...r });
   });
 
   // ---- live model change (no rebuild) --------------------------------------
