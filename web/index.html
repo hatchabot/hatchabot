@@ -6614,17 +6614,17 @@ function renderToc() {
   // Planned agents — a launchpad. Click a name to start creating it (the name
   // is pre-filled); it drops off the list once an agent with that name exists.
   if (agentTodos === null) { agentTodos = []; void loadTodos(); }
-  html += `<div class="toc-group" title="Agents you plan to create later">Planned</div>`;
+  let planned = `<div class="toc-group" title="Agents you plan to create later">Planned</div>`;
   for (const t of agentTodos) {
-    html += `<a class="toc-item" onclick="createFromTodo('${t.id}')" title="${esc('Create "' + t.name + '" now' + (t.note ? ' — ' + t.note : ''))}">
+    planned += `<a class="toc-item" onclick="createFromTodo('${t.id}')" title="${esc('Create "' + t.name + '" now' + (t.note ? ' — ' + t.note : ''))}">
       <span class="toc-dot" style="background:var(--off);border:1px dashed var(--dim)"></span>
       <span class="toc-name">${esc(t.name)}</span>
       <span class="toc-badge" style="animation:none;cursor:pointer" title="Remove from the plan" onclick="event.stopPropagation(); removeTodo('${t.id}', '${jsq(t.name)}')">✕</span></a>`;
   }
-  html += `<div class="toc-item" style="cursor:default;gap:4px">
+  planned += `<div class="toc-item" style="cursor:default;gap:4px">
     <input id="todoNew" placeholder="Plan an agent…" maxlength="64" style="flex:1;min-width:0;font-size:12px;padding:2px 6px" onkeydown="if (event.key === 'Enter') addTodo()">
     <button class="hbtn" style="padding:1px 7px" title="Add to the plan" onclick="addTodo()">+</button></div>`;
-  $('tocList').innerHTML = html;
+  $('tocList').innerHTML = planned + html; // launchpad sits at the TOP of the stack
 }
 
 let agentTodos = null, pendingTodoName = null;

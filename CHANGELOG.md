@@ -2,6 +2,11 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.136.1] — 2026-09-11
+
+### Changed
+- Planned agents now sit at the **top** of the Jump legend, above the live agents.
+
 ## [0.136.0] — 2026-09-11
 
 ### Added
