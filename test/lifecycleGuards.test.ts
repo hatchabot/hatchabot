@@ -178,6 +178,30 @@ describe('live model change (no rebuild)', () => {
   });
 });
 
+describe('host-owner migrate-agents (retire a source other accounts still use)', () => {
+  it('moves other accounts\' agents to a SHARED source, then the old source can be deleted', async () => {
+    const { f, store } = await world(); // h1 is owned by OWNER → host owner
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Shared token', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p2', shared: true, createdAt: 'now' } as any);
+    store.insertAgent({ id: 'x1', ownerId: 'user-julieta', name: 'Kid Advisor', slug: 'kid', state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    // Refused while in use by another account…
+    let del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
+    expect(del.statusCode).toBe(400); expect(del.json().error).toMatch(/other accounts/);
+    // …a non-host-owner can't migrate…
+    expect((await f.inject({ method: 'POST', url: '/v1/ai-profiles/p1/migrate-agents', headers: { 'x-agentclaw-owner': 'user-julieta' }, payload: { toProfileId: 'p2' } })).statusCode).toBe(403);
+    // …the target must be shared when other accounts are on it…
+    store.insertAIProfile({ id: 'p3', ownerId: OWNER, name: 'Private', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p3', createdAt: 'now' });
+    expect((await f.inject({ method: 'POST', url: '/v1/ai-profiles/p1/migrate-agents', headers: as, payload: { toProfileId: 'p3' } })).statusCode).toBe(400);
+    // …and the host owner moves everyone (own + other accounts') onto the shared one.
+    const mig = await f.inject({ method: 'POST', url: '/v1/ai-profiles/p1/migrate-agents', headers: as, payload: { toProfileId: 'p2', rebuild: false } });
+    expect(mig.statusCode).toBe(200);
+    expect(mig.json()).toMatchObject({ switched: 2, agents: 2, otherAccounts: 1 });
+    expect(store.getAgent('x1')!.aiProfileId).toBe('p2');
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p2');
+    del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
+    expect(del.statusCode).toBe(200);
+  });
+});
+
 describe('audit 2026-09-11 follow-ups', () => {
   it('runs at most AGENTCLAW_REBUILD_CONCURRENCY rebuilds at once (default 3)', async () => {
     process.env.AGENTCLAW_READY_POLL_MS = '1'; process.env.AGENTCLAW_READY_TIMEOUT_MS = '2000';

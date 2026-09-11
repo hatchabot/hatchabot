@@ -1565,6 +1565,24 @@
   </div>
 </dialog>
 
+<dialog id="migrateDlg" style="width:min(560px,96vw)">
+  <h3 style="margin:0 0 4px">Migrate all agents off <span id="migrateFrom"></span></h3>
+  <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick and rebuilds (3 at a time). Then the old source can be deleted.</div>
+  <label>Move them to</label>
+  <select id="migrateTo"></select>
+  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:10px 0 0">
+    <input type="checkbox" id="migrateCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
+    <span>Save each conversation to memory first <span class="sub">— needs the OLD source to still answer</span></span></label>
+  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
+    <input type="checkbox" id="migrateRecover" style="width:auto;margin-top:3px;flex:none">
+    <span>Recover context after the switch <span class="sub">— re-read the pre-switch chat on the NEW source; use instead of the box above when the old source is dead</span></span></label>
+  <div class="sub" id="migrateErr" style="color:var(--bad);margin-top:8px"></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px">
+    <button onclick="migrateDlg.close()">Cancel</button>
+    <button class="primary" id="migrateBtn" onclick="runMigrate()">Migrate &amp; rebuild</button>
+  </div>
+</dialog>
+
 <dialog id="archiveDlg" style="width:min(520px,96vw)">
   <h3 style="margin:0 0 4px">Archive <span id="archiveName"></span>?</h3>
   <div class="sub" style="margin-bottom:10px">
@@ -2721,6 +2739,7 @@ function renderAiList() {
             ? `<button onclick="moveAgentsToSource('${p.id}', '${jsq(p.name)}')" title="Switch ${movable} of your agents onto this AI source">Move agents here…</button>`
             : `<button disabled title="Every one of your agents already uses this source">Move agents here…</button>`;
         })()}
+        ${myAccount.hostOwner && p.mine !== false ? `<button onclick="openMigrate('${p.id}', '${jsq(p.name)}')" title="Host-owner action: move EVERY agent on this source — other accounts' included — onto a shared source, so this one can be deleted">↪ Migrate all off…</button>` : ''}
         <button class="primary" onclick="saveAiProfile('${p.id}')">Save</button>
         <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">Delete</button>
       </div>
@@ -3238,7 +3257,37 @@ async function delAiProfile(id, name) {
     await api(`/v1/ai-profiles/${id}`, { method: 'DELETE' });
     toast('Removed');
     await refresh(true); renderAiList();
-  } catch (e) { $('aiErr').textContent = e.message; }
+  } catch (e) {
+    $('aiErr').textContent = e.message;
+    if (myAccount.hostOwner && /other accounts/.test(e.message) && confirm(`${e.message}\n\nAs the host owner you can move every agent on "${name}" (other accounts' included) to a shared source, then delete it. Open that now?`)) openMigrate(id, name);
+  }
+}
+let migrateState = null;
+function openMigrate(id, name) {
+  migrateState = { id, name };
+  $('migrateFrom').textContent = name;
+  const targets = profiles.filter(p => p.id !== id && p.shared);
+  $('migrateTo').innerHTML = targets.length
+    ? targets.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')
+    : '<option value="">— no shared source to move them to; share one first —</option>';
+  $('migrateBtn').disabled = !targets.length;
+  $('migrateCheckpoint').checked = true; $('migrateRecover').checked = false;
+  $('migrateErr').textContent = '';
+  migrateDlg.showModal();
+}
+async function runMigrate() {
+  const to = $('migrateTo').value; if (!to || !migrateState) return;
+  const toName = (profiles.find(p => p.id === to) || {}).name || 'that source';
+  if (!confirm(`Move EVERY agent on "${migrateState.name}" to "${toName}" and rebuild them?\n\nThis includes other accounts' agents; their chats restart on the new source (memory kept).`)) return;
+  $('migrateBtn').disabled = true;
+  try {
+    const r = await api(`/v1/ai-profiles/${migrateState.id}/migrate-agents`, { method: 'POST', body: {
+      toProfileId: to, rebuild: true, checkpoint: $('migrateCheckpoint').checked, recoverAfter: $('migrateRecover').checked } });
+    migrateDlg.close();
+    toast(`Moved ${r.switched} of ${r.agents} agent${r.agents === 1 ? '' : 's'} (${r.otherAccounts} other account${r.otherAccounts === 1 ? '' : 's'}) — rebuilding ${r.rebuilding}, 3 at a time. Delete "${migrateState.name}" once they're done.${(r.skipped || []).length ? ' Skipped: ' + r.skipped.map(s => s.name).join(', ') : ''}`, 12000);
+    await refresh(true); renderAiList();
+  } catch (e) { $('migrateErr').textContent = e.message; }
+  finally { $('migrateBtn').disabled = false; }
 }
 
 async function renderPeers() {
@@ -6577,11 +6626,14 @@ function renderToc() {
   for (const a of liveL) if (!seen.has(a.id)) ordered.push(a); // cycle fallback
   for (const a of ordered) {
     const g = a.group || '';
-    if (g && g !== lastGroup && !a.__depth) html += `<div class="toc-group">${esc(g)}</div>`;
+    // Ungrouped agents get a "Default" header so every section reads the same
+    // (the Planned launchpad above them now makes a header-less run look odd).
+    const label = g || 'Default';
+    if (label !== lastGroup && !a.__depth) html += `<div class="toc-group">${esc(label)}</div>`;
     // Children keep the surrounding group context: their own (usually empty)
     // group must not reset the dedupe, or the next master in the same group
     // prints a duplicate header (10th audit).
-    if (!a.__depth) lastGroup = g;
+    if (!a.__depth) lastGroup = label;
     // Someone knocking on this agent (pairing request), or the agent itself
     // waiting on a bot token — either way it needs you, so flag it here.
     const waiting = (pairings[a.id] ?? []).length;

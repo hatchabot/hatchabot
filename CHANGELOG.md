@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.138.0] — 2026-09-11
+
+### Added
+- **Migrate all agents off a source (host owner).** A source can't be deleted while agents use it —
+  and if those agents belong to other household accounts, you couldn't move them. The host
+  owner now can: **↪ Migrate all off…** on the source (or the offer that appears when Delete is
+  refused) moves every agent on it, other accounts' included, to a shared source and rebuilds
+  them (3 at a time). This is how the legacy machine-login "Household Claude" gets retired.
+- The Jump legend labels ungrouped agents **Default**, matching the other section headers.
+
 ## [0.137.0] — 2026-09-11
 
 ### Fixed

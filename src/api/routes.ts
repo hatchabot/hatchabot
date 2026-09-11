@@ -1664,6 +1664,85 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * the whole fleet off a machine-login Max profile onto a setup-token one to
    * close the ~/.claude mount (docs/pre-production.md #1).
    */
+  /**
+   * Move ONE agent onto `target`: write the source (dropping a model pin the
+   * new source lacks, detaching a drifted class), and optionally rebuild with a
+   * checkpoint first and/or a transcript recovery chained after the rebuild.
+   * Shared by the owner-scoped adopt-agents and the host-owner migrate.
+   */
+  const switchAgentToSource = (
+    a: Agent,
+    target: AIProfile,
+    opts: { rebuild?: boolean; checkpoint?: boolean; recoverAfter?: boolean },
+    tally: { switched: number; rebuilding: number; classDetached: number; skipped: Array<{ name: string; reason: string }> },
+  ): void => {
+    if (a.aiProfileId === target.id) return; // already here — nothing to do
+    // A machine-login Max source (no secretRef) can't reach a runner-hosted
+    // agent, exactly as create/move/PATCH enforce. Refuse per agent rather
+    // than fail the whole batch.
+    const host = store.getHost(a.hostId);
+    if (target.vendor !== 'local' && target.kind === 'subscription' && host?.kind !== 'local' && !target.secretRef) {
+      tally.skipped.push({ name: a.name, reason: "machine-login Max can't run on a runner — use a setup-token source" });
+      return;
+    }
+    store.setAgentAIProfile(a.id, target.id);
+    // Drop a model pin the new source doesn't offer, so the agent falls back
+    // to the new default instead of provisioning healthy and failing on use.
+    if (a.model && modelOverrideProblem(target, a.model)) store.setAgentModel(a.id, null);
+    tally.switched++;
+    if (detachClassIfDrifted(a.id)) tally.classDetached++;
+    if (opts.rebuild && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
+      // Checkpoint only a RUNNING agent — a stopped one has no live turn to
+      // summarise. Each runs as the first step of its own background rebuild.
+      const checkpoint = opts.checkpoint === true && a.state === 'RUNNING';
+      if (kickRebuild(a.id, { checkpoint })) {
+        tally.rebuilding++;
+        if (opts.recoverAfter) {
+          // Chain onto the rebuild's own task so recovery runs on the NEW
+          // source, after the container is healthy. Best-effort.
+          const id = a.id;
+          void inflight.get(id)?.then(async () => {
+            const fresh = store.getAgent(id);
+            // The slot was reserved below when the rebuild was kicked, so no
+            // has() check here — it would always see our own reservation.
+            if (!fresh?.runtimeRef || fresh.state !== 'RUNNING') { recovering.delete(id); return; }
+            setTimeout(() => recovering.delete(id), 15 * 60_000).unref();
+            const r = await recoverContext(providerFor(fresh.hostId), fresh, { includeLive: true }).catch(() => null);
+            trace(id)('transcript.recover_after_switch', r ?? { error: 'staging failed' });
+          }).catch(() => {});
+          recovering.add(a.id); // reserve the slot now so a manual click can't double up
+        }
+      }
+    }
+  };
+
+  /**
+   * HOST-OWNER admin: move EVERY agent on one of your sources — other accounts'
+   * included — onto a shared source, so the old source can be deleted. This is
+   * how a legacy machine-login Max profile (the ~/.claude mount) is retired when
+   * family members' agents still sit on it and they have no source of their own.
+   */
+  app.post<{ Params: { id: string }; Body: { toProfileId?: string; rebuild?: boolean; checkpoint?: boolean; recoverAfter?: boolean } }>(
+    '/v1/ai-profiles/:id/migrate-agents',
+    async (req, reply) => {
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      const from = store.getAIProfile(req.params.id);
+      if (!from || from.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+      const b = (req.body ?? {}) as { toProfileId?: string; rebuild?: boolean; checkpoint?: boolean; recoverAfter?: boolean };
+      const target = b.toProfileId ? store.getAIProfile(b.toProfileId) : undefined;
+      if (!target || target.id === from.id) return reply.code(400).send({ error: 'Pick a different target source.' });
+      // Other accounts' agents may only land on a SHARED source (or their own).
+      const onIt = store.listAllActiveAgents().filter((a) => a.aiProfileId === from.id);
+      if (!target.shared && onIt.some((a) => a.ownerId !== target.ownerId)) {
+        return reply.code(400).send({ error: 'The target must be a shared source — agents from other accounts are on this one.' });
+      }
+      const tally = { switched: 0, rebuilding: 0, classDetached: 0, skipped: [] as Array<{ name: string; reason: string }> };
+      for (const a of onIt) switchAgentToSource(a, target, b, tally);
+      trace('admin')('source.migrated', { from: from.id, to: target.id, ...tally, skipped: tally.skipped.length });
+      return { ...tally, agents: onIt.length, otherAccounts: new Set(onIt.filter((a) => a.ownerId !== ownerIdOf(req)).map((a) => a.ownerId)).size };
+    },
+  );
+
   app.post<{ Params: { id: string }; Body: { apply?: string[]; rebuild?: boolean; checkpoint?: boolean } }>(
     '/v1/ai-profiles/:id/adopt-agents',
     async (req, reply) => {
@@ -1697,56 +1776,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         ? mine.filter((a) => parsed.data.apply!.includes(a.id))
         : mine.filter((a) => a.aiProfileId !== target.id); // "all" = everything not already here
 
-      const switched: string[] = [];
-      const skipped: Array<{ name: string; reason: string }> = [];
-      let classDetached = 0;
-      let rebuilding = 0;
-      for (const a of requested) {
-        if (a.aiProfileId === target.id) continue; // already here — nothing to do
-        // A machine-login Max source (no secretRef) can't reach a runner-hosted
-        // agent, exactly as create/move/PATCH enforce. Refuse per agent rather
-        // than fail the whole batch.
-        const host = store.getHost(a.hostId);
-        if (
-          target.vendor !== 'local' &&
-          target.kind === 'subscription' &&
-          host?.kind !== 'local' &&
-          !target.secretRef
-        ) {
-          skipped.push({ name: a.name, reason: "machine-login Max can't run on a runner — use a setup-token source" });
-          continue;
-        }
-        store.setAgentAIProfile(a.id, target.id);
-        // Drop a model pin the new source doesn't offer, so the agent falls back
-        // to the new default instead of provisioning healthy and failing on use.
-        if (a.model && modelOverrideProblem(target, a.model)) store.setAgentModel(a.id, null);
-        switched.push(a.id);
-        if (detachClassIfDrifted(a.id)) classDetached++;
-        if (parsed.data.rebuild && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
-          // Checkpoint only a RUNNING agent — a stopped one has no live turn to
-          // summarise. Each runs as the first step of its own background rebuild.
-          const checkpoint = parsed.data.checkpoint === true && a.state === 'RUNNING';
-          if (kickRebuild(a.id, { checkpoint })) {
-            rebuilding++;
-            if (parsed.data.recoverAfter) {
-              // Chain onto the rebuild's own task so recovery runs on the NEW
-              // source, after the container is healthy. Best-effort.
-              const id = a.id;
-              void inflight.get(id)?.then(async () => {
-                const fresh = store.getAgent(id);
-                // The slot was reserved below when the rebuild was kicked, so no
-                // has() check here — it would always see our own reservation.
-                if (!fresh?.runtimeRef || fresh.state !== 'RUNNING') { recovering.delete(id); return; }
-                setTimeout(() => recovering.delete(id), 15 * 60_000).unref();
-                const r = await recoverContext(providerFor(fresh.hostId), fresh, { includeLive: true }).catch(() => null);
-                trace(id)('transcript.recover_after_switch', r ?? { error: 'staging failed' });
-              }).catch(() => {});
-              recovering.add(a.id); // reserve the slot now so a manual click can't double up
-            }
-          }
-        }
-      }
-      return { switched: switched.length, rebuilding, skipped, classDetached };
+      const tally = { switched: 0, rebuilding: 0, classDetached: 0, skipped: [] as Array<{ name: string; reason: string }> };
+      for (const a of requested) switchAgentToSource(a, target, parsed.data, tally);
+      return tally;
     },
   );
 
@@ -4856,6 +4888,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       email: me.email,
       /** Set by "That's me — link & approve" on a pairing card. */
       telegramUserId: store.accountTelegram(me.ownerId),
+      /** True for the account that owns this machine (admin actions in the UI). */
+      hostOwner: ownsLocalHost(req),
     };
   });
 
