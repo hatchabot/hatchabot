@@ -3810,16 +3810,17 @@ function agentCard(a) {
       <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
     </div>
     ${agentMeta(a)}
-    ${a.updateAvailable ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
+    ${recheckNote(a)}
+    ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
       <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
-    ${a.pendingModel && a.pendingModel !== a.model ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
+    ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
     ${botNameNote(a)}
     ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
-    ${(a.dataSources ?? []).filter(d => d.syncError).map(d => `
+    ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
       <div class="pair">
         <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
         ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
@@ -6367,11 +6368,32 @@ function tocDotColor(a) {
  * source for the Jump legend's icons (and the Bulk "Needs attention" filter),
  * so a new card warning only has to be added here to surface everywhere.
  */
+/**
+ * True while an operation that RE-CHECKS an agent's rebuild-fixable statuses is
+ * in flight (a rebuild marks the agent busy from the moment it's triggered; the
+ * git sync / applied-model snapshot that clear those statuses run near its END).
+ * While true we hide those statuses rather than show stale ones — the server
+ * re-evaluates them, so anything still wrong reappears once it finishes.
+ */
+function isRechecking(a) {
+  return !!a.busy || a.state === 'REBUILDING' || a.state === 'PROVISIONING';
+}
+/** How many rebuild-fixable issues are currently hidden by isRechecking(). */
+function recheckHiddenCount(a) {
+  return (a.updateAvailable ? 1 : 0) + (a.pendingModel && a.pendingModel !== a.model ? 1 : 0)
+    + (a.peersPending ? 1 : 0) + (a.dataSources || []).filter(d => d.syncError).length;
+}
+function recheckNote(a) {
+  const n = isRechecking(a) ? recheckHiddenCount(a) : 0;
+  return n ? `<div class="pair">🛠 <span class="grow sub">Working on it — ${n} issue${n > 1 ? 's' : ''} will be re-checked when this finishes; anything still wrong reappears here.</span></div>` : '';
+}
+
 function agentAttention(a) {
   const out = [];
   if (a.state === 'FAILED') out.push({ icon: '❗', why: `failed${a.stateReason ? ': ' + a.stateReason : ''}` });
   if (a.pendingAction) out.push({ icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
-  const unsynced = (a.dataSources || []).filter(d => d.syncError);
+  const rechecking = isRechecking(a);
+  const unsynced = rechecking ? [] : (a.dataSources || []).filter(d => d.syncError);
   if (unsynced.length) out.push({ icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
   if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ icon: '⚙', why: 'template setup values not filled in' });
   if (a.migratedTo) out.push({ icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
@@ -6379,7 +6401,7 @@ function agentAttention(a) {
   if (a.pendingModel && a.pendingModel !== a.model) rebuild.push(`switches to ${a.pendingModel} on rebuild`);
   if (a.updateAvailable) rebuild.push('a newer runtime image is available');
   if (a.peersPending) rebuild.push('peer changes need a rebuild');
-  if (rebuild.length) out.push({ icon: '🔄', why: rebuild.join('; ') });
+  if (rebuild.length && !rechecking) out.push({ icon: '🔄', why: rebuild.join('; ') });
   if (a.botNamePending) out.push({ icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
   return out;
 }

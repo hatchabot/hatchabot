@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.133.2] — 2026-09-11
+
+### Fixed
+- **Statuses a rebuild fixes no longer linger while it runs.** A rebuild marks the
+  agent busy immediately, but the git sync / applied-model snapshot that clear
+  those statuses run near its end — so e.g. a "repo didn't sync" warning stayed on
+  screen the whole rebuild. While an agent is rebuilding/busy, the card and legend
+  now hide the rebuild-fixable statuses (repo sync, needs-rebuild, update, model
+  switch) behind one "will be re-checked" line; whatever is still wrong reappears
+  when it finishes.
+
 ## [0.133.1] — 2026-09-11
 
 ### Changed
