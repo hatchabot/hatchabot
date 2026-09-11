@@ -96,7 +96,10 @@ export class MockProvider implements RuntimeProvider {
     return { phase: 'running', healthy };
   }
 
-  async exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult> {
+  /** Per-call exec options seen, in order (tests assert the timeouts long turns ask for). */
+  execOpts: Array<{ timeoutMs?: number } | undefined> = [];
+  async exec(runtimeRef: string, openclawArgv: string[], opts?: { timeoutMs?: number }): Promise<ExecResult> {
+    this.execOpts.push(opts);
     this.#require(runtimeRef);
     this.execLog.push(openclawArgv);
     // Longest-prefix match lets tests program `pairing list` and

@@ -381,9 +381,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { phase: 'error', message: `container state: ${state}` };
   }
 
-  async exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult> {
+  async exec(runtimeRef: string, openclawArgv: string[], opts?: { timeoutMs?: number }): Promise<ExecResult> {
     const { container } = this.#names(runtimeRef);
-    return this.#docker(['exec', container, 'openclaw', ...openclawArgv]);
+    return this.#docker(['exec', container, 'openclaw', ...openclawArgv], opts?.timeoutMs);
   }
 
   async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
@@ -584,12 +584,12 @@ export class LocalDockerProvider implements RuntimeProvider {
     });
   }
 
-  async #docker(args: string[]): Promise<ExecResult> {
+  async #docker(args: string[], timeoutMs?: number): Promise<ExecResult> {
     try {
       const { stdout, stderr } = await execFileP(this.docker, this.#argv(args), {
         maxBuffer: 8 * 1024 * 1024,
         // A hung daemon must fail this call, not freeze the control plane.
-        timeout: Number(process.env.AGENTCLAW_DOCKER_TIMEOUT_MS ?? 60_000),
+        timeout: timeoutMs ?? Number(process.env.AGENTCLAW_DOCKER_TIMEOUT_MS ?? 60_000),
         killSignal: 'SIGKILL',
       });
       return { code: 0, stdout, stderr };

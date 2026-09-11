@@ -157,7 +157,9 @@ export interface RuntimeProvider {
    * plane talks to a live agent (pairing list/approve, config nudges) without
    * caring where the runtime physically lives.
    */
-  exec(runtimeRef: string, openclawArgv: string[]): Promise<ExecResult>;
+  /** Run an `openclaw …` command in the agent's container. `timeoutMs` overrides
+   *  the provider's default for long turns (a memory checkpoint, a consult). */
+  exec(runtimeRef: string, openclawArgv: string[], opts?: { timeoutMs?: number }): Promise<ExecResult>;
 
   /**
    * Run a shell script inside the runtime. Escape hatch for the few state

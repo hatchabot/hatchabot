@@ -2,6 +2,17 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.137.0] — 2026-09-11
+
+### Fixed
+- **"Interrupted by a gateway restart" after moving agents with "save to memory first".** A bulk move
+  kicked every rebuild at once, so 15 checkpoint turns hit the old source together (13 failed on
+  its rate limit, one was cut by the 60 s exec timeout) and each container was stopped on a broken
+  turn — which OpenClaw announces on boot as if it were about your message. Now: rebuilds run at
+  most 3 at a time (`AGENTCLAW_REBUILD_CONCURRENCY`), the checkpoint turn gets its own 3-minute
+  budget (`AGENTCLAW_CHECKPOINT_TIMEOUT_MS`), agent-to-agent consults get 2 minutes, and when a
+  checkpoint does fail the agent posts one line after it is back explaining the notice.
+
 ## [0.136.1] — 2026-09-11
 
 ### Changed

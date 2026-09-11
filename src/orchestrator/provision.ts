@@ -8,6 +8,7 @@ import { ProviderError } from '../providers/provider.js';
 import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { whileBusy } from './busy.js';
+import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { syncConnections } from './googleConnections.js';
@@ -81,6 +82,9 @@ export interface ProvisionDeps {
    * summary is what survives the reset. Best-effort; never blocks the rebuild.
    */
   checkpointMemory?: boolean;
+  /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
+   *  Injectable so tests stay off the network. */
+  notify?: (agentId: string, text: string) => Promise<unknown>;
 }
 
 export interface ProvisionResult {
@@ -567,6 +571,8 @@ export async function buildRuntimeSpec(
  * logged and swallowed — a missed summary is a smaller harm than a blocked or
  * failed switch.
  */
+export const CHECKPOINT_TIMEOUT_MS = Number(process.env.AGENTCLAW_CHECKPOINT_TIMEOUT_MS ?? 180_000);
+
 export async function checkpointMemory(
   provider: RuntimeProvider,
   runtimeRef: string,
@@ -582,7 +588,10 @@ export async function checkpointMemory(
     // Bounded by the provider's own exec timeout (AGENTCLAW_DOCKER_TIMEOUT_MS,
     // 60s default) — a summary is short; a model too slow to finish inside it
     // is one we'd rather abandon than let delay the rebuild.
-    const res = await provider.exec(runtimeRef, ['agent', '--agent', slug, '-m', prompt]);
+    // A summary turn that writes memory can legitimately take >60s under load;
+    // cutting it mid-turn leaves the container stopped on a broken turn (the
+    // "interrupted by a gateway restart" notice). 3 minutes, its own budget.
+    const res = await provider.exec(runtimeRef, ['agent', '--agent', slug, '-m', prompt], { timeoutMs: CHECKPOINT_TIMEOUT_MS });
     // The checkpoint IS an agent turn, so it needs the AI source to actually
     // run — an out-of-credits / expired / rate-limited source makes the turn
     // fail (non-zero), and the summary is NOT written. Report that instead of
@@ -615,6 +624,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
     throw new Error(`Cannot rebuild from state ${agent.state}`);
   }
+  let checkpointResult: { ok: boolean; detail?: string } | undefined;
   // Cheap insurance before we replace the container. This runs HERE (inside the
   // background task) rather than in the route so the POST returns immediately —
   // the ~1-2s docker-exec snapshot was what made "Rebuild all" sit silent. It
@@ -626,12 +636,24 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // the old AI backend still answers — a source switch resets the thread on
     // first message under the new backend, and this is what survives it.
     if (deps.checkpointMemory) {
-      await checkpointMemory(provider, agent.runtimeRef, agent.slug, log);
+      checkpointResult = await checkpointMemory(provider, agent.runtimeRef, agent.slug, log);
     }
   }
   // Visible immediately: the chip must not read RUNNING while the container
   // is being replaced.
   store.setAgentState(agentId, 'REBUILDING');
+  // A checkpoint that failed (rate-limited / dead source) ended its turn
+  // abnormally right before the stop; OpenClaw then posts "interrupted by a
+  // gateway restart — send that last request again" on boot, which reads as
+  // if it were about the USER's message. Explain it once the agent is back.
+  const explainFailedCheckpoint = async () => {
+    if (!checkpointResult || checkpointResult.ok) return;
+    const send = deps.notify ?? ((id: string, text: string) => notifyAgentChat(store, deps.secrets, id, text));
+    await send(agentId,
+      'ℹ️ Before this restart I tried to save our conversation to memory, but the previous AI source didn\'t finish ' +
+      '(rate-limited or out of tokens). If there is an "interrupted by a gateway restart" note above, ignore it — ' +
+      'that was the save attempt, not your message. Nothing you sent was lost.').catch(() => {});
+  };
 
   try {
     await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
@@ -662,7 +684,9 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await runRebuildHook(deps, agentId, runtimeRef, log);
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
-    return store.setAgentState(agentId, 'RUNNING');
+    const live = store.setAgentState(agentId, 'RUNNING');
+    void explainFailedCheckpoint();
+    return live;
   } catch (err) {
     const reason = userMessageFor(err);
     log('rebuild.failed', { agentId, reason, error: String(err) });

@@ -520,6 +520,25 @@ describe('per-agent env injection', () => {
   });
 });
 
+describe('a rebuild whose checkpoint failed explains the "interrupted" notice', () => {
+  it('posts one explanatory line to the chat after the agent is back (and nothing when the checkpoint succeeded)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const sent: string[] = [];
+    const deps = { ...w.deps, checkpointMemory: true, notify: async (_id: string, text: string) => { sent.push(text); } };
+    (w.provider as MockProvider).execResponses.set('agent --agent', { code: 1, stdout: '', stderr: 'FailoverError: API rate limit reached' });
+    await rebuildAgent(deps, agent.id);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatch(/interrupted by a gateway restart/);
+    // Success path: silent.
+    (w.provider as MockProvider).execResponses.set('agent --agent', { code: 0, stdout: 'DONE', stderr: '' });
+    await rebuildAgent(deps, agent.id);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe('AGENTS.md "## Data sources" stays in step with reality', () => {
   /** The base64 payload written to ONE file, decoded. The install-conventions
    *  sync writes TOOLS.md on the same path, so "the last write" is ambiguous —

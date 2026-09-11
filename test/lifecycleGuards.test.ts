@@ -179,6 +179,46 @@ describe('live model change (no rebuild)', () => {
 });
 
 describe('audit 2026-09-11 follow-ups', () => {
+  it('runs at most AGENTCLAW_REBUILD_CONCURRENCY rebuilds at once (default 3)', async () => {
+    process.env.AGENTCLAW_READY_POLL_MS = '1'; process.env.AGENTCLAW_READY_TIMEOUT_MS = '2000';
+    let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
+    let started = 0, armed = false; // gate only the REBUILD provisions, not the seeding ones
+    class GatedProvider extends MockProvider {
+      override async provision(spec: any) { if (armed) { started++; await gate; } return super.provision(spec); }
+    }
+    const provider = new GatedProvider();
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'p1', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    const secrets = new MemSecrets(); await secrets.put('ai/p1', 'k');
+    for (const id of ['r1', 'r2', 'r3', 'r4', 'r5']) {
+      const { runtimeRef } = await provider.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } as any }, env: {} });
+      await provider.start(runtimeRef);
+      store.insertAgent({ id, ownerId: OWNER, name: id, slug: id, state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+      store.insertChannel({ id: `c-${id}`, agentId: id, kind: 'telegram', accountId: `bot_${id}`, secretRef: `chan/${id}`, deepLink: `https://t.me/bot_${id}`, createdAt: 'now' });
+      await secrets.put(`chan/${id}`, '123:tok');
+    }
+    armed = true;
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {}, syncDisplayName: async () => {} } as any });
+    for (const id of ['r1', 'r2', 'r3', 'r4', 'r5']) expect((await f.inject({ method: 'POST', url: `/v1/agents/${id}/rebuild`, headers: as, payload: {} })).statusCode).toBe(202);
+    await new Promise((r) => setTimeout(r, 150));
+    expect(started).toBe(3); // r4, r5 are queued, not running
+    release();
+    const deadline = Date.now() + 25_000;
+    while (Date.now() < deadline && ['r1', 'r2', 'r3', 'r4', 'r5'].some((id) => store.getAgent(id)!.state !== 'RUNNING')) await new Promise((r) => setTimeout(r, 25));
+    expect(started).toBe(5);
+    expect(['r1', 'r2', 'r3', 'r4', 'r5'].map((id) => store.getAgent(id)!.state)).toEqual(Array(5).fill('RUNNING'));
+  }, 30000);
+
+  it('a checkpoint turn gets its own long timeout (not the 60s docker default)', async () => {
+    const { f, provider } = await world();
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/checkpoint', headers: as });
+    const i = provider.execLog.findIndex((c) => Array.isArray(c) && c[0] === 'agent' && c[1] === '--agent');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(provider.execOpts.filter(Boolean).some((o) => (o?.timeoutMs ?? 0) >= 180_000)).toBe(true);
+  });
+
   it('adopt-agents with recoverAfter runs a recovery (includeLive) once the rebuild completes', async () => {
     // Self-contained: a rebuild needs a channel row + the bot/AI secrets, which
     // the shared world() doesn't seed (it only ever asserts the 202).

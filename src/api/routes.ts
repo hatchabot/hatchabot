@@ -580,6 +580,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const a2aOwnerLive = new Map<string, number>();
   const A2A_MAX_CONCURRENT = Math.max(1, envNum('AGENTCLAW_A2A_MAX_CONCURRENT', 8));
   const A2A_PER_HOUR = Math.max(1, envNum('AGENTCLAW_A2A_PER_HOUR', 60));
+  const A2A_TIMEOUT_MS = Math.max(10_000, envNum('AGENTCLAW_A2A_TIMEOUT_MS', 120_000));
   const a2aBucket = new Map<string, number[]>();
   const a2aRateOk = (callerId: string): boolean => {
     const now = Date.now();
@@ -635,17 +636,38 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * this returns at once). Returns false if the agent is already changing or
    * has no runtime — callers turn that into a 409 or just skip it in a batch.
    */
+  // Rebuilds run at most N at a time. A bulk move kicked 15 at once, each
+  // starting with a checkpoint turn on the SAME source — a self-inflicted rate
+  // limit (13/15 failed) plus 15 container recreations thrashing the box. The
+  // inflight entry is set immediately (busy checks / double-kick refusal hold);
+  // the work itself waits for a slot.
+  const REBUILD_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.AGENTCLAW_REBUILD_CONCURRENCY) || 3));
+  let rebuildSlots = 0;
+  const rebuildWaiters: Array<() => void> = [];
+  const acquireRebuildSlot = (): Promise<void> => {
+    if (rebuildSlots < REBUILD_CONCURRENCY) { rebuildSlots++; return Promise.resolve(); }
+    return new Promise((resolve) => rebuildWaiters.push(resolve));
+  };
+  const releaseRebuildSlot = (): void => {
+    const next = rebuildWaiters.shift();
+    if (next) next(); else rebuildSlots--;
+  };
   const kickRebuild = (agentId: string, opts: { checkpoint?: boolean } = {}): boolean => {
     if (inflight.has(agentId)) return false;
     const agent = store.getAgent(agentId);
     if (!agent?.runtimeRef) return false;
-    const task = rebuildAgent(
-      {
-        store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-        log: trace(agentId), checkpointMemory: opts.checkpoint,
-      },
-      agentId,
-    );
+    const task = (async () => {
+      await acquireRebuildSlot();
+      try {
+        await rebuildAgent(
+          {
+            store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
+            log: trace(agentId), checkpointMemory: opts.checkpoint,
+          },
+          agentId,
+        );
+      } finally { releaseRebuildSlot(); }
+    })();
     inflight.set(
       agentId,
       task
@@ -3586,7 +3608,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Full text in the timeline: a consult that steers or drains a peer must be
       // reconstructible by the household, not a bare {from, ok}.
       trace(target.id)('a2a.consult', { from: caller.agentId, fromName, text: text.slice(0, 1000), chars: text.length });
-      const res = await providerFor(target.hostId).exec(target.runtimeRef, ['agent', '--agent', target.slug, '-m', framed]);
+      const res = await providerFor(target.hostId).exec(target.runtimeRef, ['agent', '--agent', target.slug, '-m', framed], { timeoutMs: A2A_TIMEOUT_MS });
       trace(target.id)('a2a.consulted', { from: caller.agentId, ok: res.code === 0 && !res.timedOut, timedOut: !!res.timedOut });
       if (res.code !== 0 || res.timedOut) {
         // Never hand the caller a docker/openclaw error as if it were the peer's
