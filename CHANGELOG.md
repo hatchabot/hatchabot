@@ -2,6 +2,19 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.139.0] — 2026-09-11
+
+### Fixed
+- **Interval tasks couldn't be edited** (e.g. Meeting Scheduler's 90-second inbox poll): the task
+  list read the gateway's schedule with the wrong key names, so intervals showed nothing and the
+  form was cron-expression-only. Tasks now show their interval, and the form has an **Every N
+  minutes** mode (decimals allowed — 1.5 = every 90 s) for creating and editing them.
+
+### Changed
+- **Usage trend chart rebuilt**: a real chart with y-axis token gridlines, bars stacked by
+  subscription / API / local, value labels, a 7-day average line, per-day API cost, hover
+  details, and a summary line (total, average, peak).
+
 ## [0.138.0] — 2026-09-11
 
 ### Added

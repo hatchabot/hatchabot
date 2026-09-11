@@ -42,8 +42,11 @@ function normalizeCron(j: Record<string, any>): Cron {
     scheduleKind: s.kind,
     scheduleExpr: s.expr,
     scheduleTz: s.tz,
-    everyMs: typeof s.every_ms === 'number' ? s.every_ms : undefined,
-    atMs: typeof s.at_ms === 'number' ? s.at_ms : undefined,
+    // The gateway's JSON is camelCase ({kind:'every', everyMs, anchorMs} /
+    // {kind:'at', at}); the snake_case reads never matched, so interval jobs
+    // showed no interval and couldn't be edited (2026-09-11).
+    everyMs: typeof s.everyMs === 'number' ? s.everyMs : typeof s.every_ms === 'number' ? s.every_ms : undefined,
+    atMs: typeof s.at === 'number' ? s.at : typeof s.atMs === 'number' ? s.atMs : typeof s.at_ms === 'number' ? s.at_ms : undefined,
     payloadKind: p.kind,
     message:
       typeof p.message === 'string' ? p.message

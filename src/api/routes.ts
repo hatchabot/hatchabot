@@ -3321,7 +3321,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         name: z.string().trim().min(1).max(80),
         message: z.string().trim().min(1).max(4000),
         cron: z.string().trim().min(9).max(64).optional(),
-        everyMinutes: z.number().int().min(1).max(60 * 24 * 30).optional(),
+        everyMinutes: z.number().min(0.25).max(60 * 24 * 30).optional(), // 15s floor; 1.5 = every 90s
         tz: z.string().trim().max(64).optional(),
         announce: z.boolean().optional(),
       })
@@ -3332,7 +3332,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       name: parsed.data.name,
       message: parsed.data.message,
       cron: parsed.data.cron,
-      everyMs: parsed.data.everyMinutes ? parsed.data.everyMinutes * 60_000 : undefined,
+      everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
       tz: parsed.data.tz,
       announce: parsed.data.announce,
     });

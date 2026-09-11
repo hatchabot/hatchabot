@@ -203,6 +203,17 @@ describe('host-owner migrate-agents (retire a source other accounts still use)',
 });
 
 describe('audit 2026-09-11 follow-ups', () => {
+  it('a task can be created on a fractional-minute interval (1.5 = every 90s)', async () => {
+    const { f, provider } = await world();
+    provider.execResponses.set('cron add', { code: 0, stderr: '', stdout: JSON.stringify({ id: 'j1' }) });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'poll', message: 'Inbox poll.', everyMinutes: 1.5 } });
+    expect(res.statusCode).toBe(201);
+    const add = provider.execLog.find((c) => Array.isArray(c) && c[0] === 'cron' && c[1] === 'add') as string[];
+    const every = add[add.indexOf('--every') + 1];
+    expect(every).toMatch(/90s|1\.5m|1m30s/); // not the old integer-only 1m or a rejected 0m
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'p', message: 'm', everyMinutes: 0.1 } })).statusCode).toBe(400);
+  });
+
   it('runs at most AGENTCLAW_REBUILD_CONCURRENCY rebuilds at once (default 3)', async () => {
     process.env.AGENTCLAW_READY_POLL_MS = '1'; process.env.AGENTCLAW_READY_TIMEOUT_MS = '2000';
     let release!: () => void; const gate = new Promise<void>((r) => { release = r; });

@@ -1261,7 +1261,12 @@
     <div class="sub" id="cronEditNote" style="display:none;color:var(--warn);margin-bottom:4px"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <input type="text" id="cronName" maxlength="80" placeholder="Name (e.g. Pre-market briefing)" style="flex:1;min-width:160px">
+      <select id="cronMode" onchange="cronModeChanged()" style="width:auto" title="Run on a cron schedule, or every N minutes">
+        <option value="cron">On a schedule</option>
+        <option value="every">Every N minutes</option>
+      </select>
       <input type="text" id="cronExpr" maxlength="64" placeholder="Cron (e.g. 0 8 * * 1-5)" style="width:150px;font-family:ui-monospace,monospace" title="minute hour day month weekday — e.g. 0 8 * * 1-5 is 8:00 on weekdays">
+      <input type="number" id="cronEvery" min="0.25" step="0.25" placeholder="Minutes (e.g. 1.5)" style="width:150px;display:none" title="Interval in minutes — decimals allowed (1.5 = every 90 seconds; minimum 0.25)">
       <input type="text" id="cronTz" maxlength="64" placeholder="Timezone" style="width:170px" title="IANA zone the schedule runs in, e.g. America/New_York">
     </div>
     <textarea id="cronMsg" maxlength="4000" rows="2" placeholder="What to tell the agent when it fires — e.g. Post the pre-market briefing: commodities, index futures, rates, crypto." style="margin-top:6px"></textarea>
@@ -5088,21 +5093,70 @@ async function renderUsageTrend() {
   if (!el) return;
   try {
     const { points } = await api('/v1/usage/history');
-    const withDelta = points.filter(p => p.delta !== undefined && p.delta !== null);
-    if (withDelta.length < 2) {
+    const pts = points.filter(p => p.delta !== undefined && p.delta !== null);
+    if (pts.length < 2) {
       el.innerHTML = `<div class="sub" style="margin:0 0 12px">📈 Daily-use trend builds here as you check usage — one point per day (${points.length} so far).</div>`;
       return;
     }
-    const max = Math.max(...withDelta.map(p => p.delta)) || 1;
-    const bars = withDelta.map(p => {
-      const h = Math.max(3, Math.round(p.delta / max * 44));
+    // A real chart: stacked bars per day by billing (same colours as the split
+    // above), y-axis gridlines with token values, value labels, a 7-day average
+    // line, and the day's estimated API cost under the bar. All SVG, no library.
+    const COLORS = { included: 'var(--ok)', api: 'var(--warn)', local: '#6b8fb5' };
+    const W = 640, H = 180, L = 52, R = 12, T = 22, B = 34;
+    const iw = W - L - R, ih = H - T - B;
+    const n = pts.length, slot = iw / n, bw = Math.max(4, Math.min(28, slot * 0.66));
+    // Per-day split: scale the fleet-wide byBilling share of that day's total onto the delta.
+    const split = pts.map(p => {
+      const bb = p.byBilling || {}; const tot = (bb.included || 0) + (bb.api || 0) + (bb.local || 0);
+      const f = tot > 0 ? (k) => (bb[k] || 0) / tot * p.delta : (k) => (k === 'included' ? p.delta : 0);
+      return { included: f('included'), api: f('api'), local: f('local') };
+    });
+    const max = Math.max(...pts.map(p => p.delta), 1);
+    // Nice y ticks: 4 steps at a round token count.
+    const rawStep = max / 4, mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(v => v >= rawStep) || rawStep;
+    const yMax = Math.ceil(max / step) * step;
+    const y = v => T + ih - (v / yMax) * ih;
+    let svg = '';
+    for (let v = 0; v <= yMax + 1e-9; v += step) {
+      svg += `<line x1="${L}" x2="${W - R}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}" stroke="var(--line)" stroke-width="1"/>` +
+        `<text x="${L - 6}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end" font-size="10" fill="var(--dim)">${fmtTokens(v)}</text>`;
+    }
+    // 7-day trailing average line.
+    const avg = pts.map((p, i) => { const w = pts.slice(Math.max(0, i - 6), i + 1); return w.reduce((s, q) => s + q.delta, 0) / w.length; });
+    const cx = i => L + slot * i + slot / 2;
+    const labelEvery = n > 16 ? Math.ceil(n / 12) : 1;
+    pts.forEach((p, i) => {
+      const x = cx(i) - bw / 2; let yTop = T + ih;
       const d = new Date(p.day + 'T00:00:00');
-      return `<div title="${p.day}: ${fmtTokens(p.delta)} tokens used" style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px;min-width:8px">
-        <div style="width:70%;max-width:16px;height:${h}px;background:var(--accent);opacity:.85;border-radius:3px 3px 0 0"></div>
-        <span class="sub" style="font-size:9px">${d.getMonth() + 1}/${d.getDate()}</span></div>`;
-    }).join('');
-    el.innerHTML = `<div class="sub" style="margin-bottom:4px">Tokens used per day <span style="opacity:.7">(day-over-day change)</span></div>
-      <div style="display:flex;align-items:flex-end;gap:2px;height:60px;margin-bottom:12px;padding:0 2px">${bars}</div>`;
+      const title = `${d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}: ${fmtTokens(p.delta)} tokens` +
+        ` (subscription ${fmtTokens(split[i].included)}, API ${fmtTokens(split[i].api)}, local ${fmtTokens(split[i].local)})` +
+        (p.costHigh ? ` · est. API cost up to ${fmtCostRange({ low: 0, high: p.costHigh }).replace(/^\$0(\.00)? ?– ?/, '')}` : '');
+      svg += `<g><title>${esc(title)}</title>`;
+      for (const k of ['included', 'api', 'local']) {
+        const h = split[i][k] / yMax * ih; if (h <= 0) continue;
+        yTop -= h;
+        svg += `<rect x="${x.toFixed(1)}" y="${yTop.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(h, 0.8).toFixed(1)}" fill="${COLORS[k]}" opacity=".9" rx="1.5"/>`;
+      }
+      if (p.delta > 0 && (n <= 20 || i % labelEvery === 0)) svg += `<text x="${cx(i).toFixed(1)}" y="${(yTop - 3).toFixed(1)}" text-anchor="middle" font-size="9" fill="var(--fg)">${fmtTokens(p.delta)}</text>`;
+      if (i % labelEvery === 0 || i === n - 1) svg += `<text x="${cx(i).toFixed(1)}" y="${H - B + 12}" text-anchor="middle" font-size="9.5" fill="var(--dim)">${d.getMonth() + 1}/${d.getDate()}</text>`;
+      if (p.costHigh > 0.005) svg += `<text x="${cx(i).toFixed(1)}" y="${H - B + 24}" text-anchor="middle" font-size="9" fill="var(--warn)">${p.costHigh < 1 ? '$' + p.costHigh.toFixed(2) : '$' + Math.round(p.costHigh)}</text>`;
+      svg += '</g>';
+    });
+    svg += `<polyline fill="none" stroke="var(--fg)" stroke-opacity=".55" stroke-width="1.5" stroke-dasharray="4 3" points="${avg.map((v, i) => cx(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ')}"/>`;
+    const total = pts.reduce((s, p) => s + p.delta, 0), peak = pts.reduce((m, p) => p.delta > m.delta ? p : m, pts[0]);
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:2px">
+        <span class="sub"><b>Tokens used per day</b> · last ${n} days: ${fmtTokens(total)} total, avg ${fmtTokens(Math.round(total / n))}/day, peak ${fmtTokens(peak.delta)} on ${new Date(peak.day + 'T00:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+        <span class="sub" style="display:inline-flex;gap:10px;flex-wrap:wrap">
+          <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${COLORS.included};vertical-align:-1px"></span> subscription</span>
+          <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${COLORS.api};vertical-align:-1px"></span> API</span>
+          <span><span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${COLORS.local};vertical-align:-1px"></span> local</span>
+          <span><span style="display:inline-block;width:14px;border-top:2px dashed var(--fg);opacity:.6;vertical-align:3px"></span> 7-day avg</span>
+        </span>
+      </div>
+      <div style="overflow-x:auto;margin-bottom:10px"><svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:420px;max-width:${W}px;display:block;font-family:inherit">${svg}</svg></div>
+      <div class="sub" style="margin:-6px 0 12px">Hover a bar for the split. Orange figures under a day are that day's estimated API cost (API-keyed agents only). Days accrue as usage is checked or by the daily job.</div>`;
   } catch { el.innerHTML = ''; }
 }
 
@@ -5571,16 +5625,25 @@ async function loadCrons() {
   } catch (e) { $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
 }
 let cronEditingId = null, cronCache = [];
+function cronModeChanged() {
+  const every = $('cronMode').value === 'every';
+  $('cronExpr').style.display = every ? 'none' : '';
+  $('cronEvery').style.display = every ? '' : 'none';
+  $('cronTz').style.display = every ? 'none' : '';
+}
 function editCronJob(id) {
   const c = cronCache.find(x => x.id === id);
   if (!c) return;
   if (c.payloadKind === 'command') { toast('Shell-command tasks are edited by asking the agent (they carry scripts, not messages).'); return; }
-  // The form is cron-expression only; loading an interval/one-shot task
-  // prefilled an empty schedule and saving silently converted it (10th
-  // audit). Those are edited by asking the agent, same as shell tasks.
-  if (!c.scheduleExpr) { toast('This task runs on an interval, not a cron expression — edit it by asking the agent, or delete and re-add.'); return; }
+  // Cron-expression AND interval tasks load into the form (the form used to be
+  // cron-only, so an interval task like a 90s inbox poll couldn't be edited).
+  // One-shot ("at") tasks are still edited by asking the agent.
+  if (!c.scheduleExpr && !c.everyMs) { toast('This is a one-shot task — edit it by asking the agent, or delete and re-add.'); return; }
   cronEditingId = id;
   $('cronName').value = c.name || '';
+  $('cronMode').value = c.everyMs && !c.scheduleExpr ? 'every' : 'cron';
+  cronModeChanged();
+  $('cronEvery').value = c.everyMs ? String(Math.round(c.everyMs / 600) / 100) : '';
   $('cronExpr').value = c.scheduleExpr || '';
   $('cronTz').value = c.scheduleTz || '';
   $('cronMsg').value = c.message || '';
@@ -5590,12 +5653,15 @@ function editCronJob(id) {
   note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <a style="cursor:pointer;text-decoration:underline" onclick="cancelCronEdit()">cancel</a>`;
 }
 async function addCronJob() {
-  const name = $('cronName').value.trim(), cron = $('cronExpr').value.trim();
-  const tz = $('cronTz').value.trim(), message = $('cronMsg').value.trim();
-  if (!name || !cron || !message) { $('cronErr').textContent = 'Name, cron expression, and message are all needed.'; return; }
+  const name = $('cronName').value.trim(), message = $('cronMsg').value.trim();
+  const every = $('cronMode').value === 'every';
+  const cron = every ? '' : $('cronExpr').value.trim();
+  const everyMinutes = every ? Number($('cronEvery').value) : 0;
+  const tz = every ? '' : $('cronTz').value.trim();
+  if (!name || !message || (every ? !(everyMinutes >= 0.25) : !cron)) { $('cronErr').textContent = every ? 'Name, an interval (≥ 0.25 min), and message are all needed.' : 'Name, cron expression, and message are all needed.'; return; }
   $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
   try {
-    await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: { name, cron, message, tz: tz || undefined } });
+    await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message } : { name, cron, message, tz: tz || undefined } });
     // Editing = replace: the new task exists before the old one is removed,
     // so a failed create can never lose the original.
     if (cronEditingId) {
