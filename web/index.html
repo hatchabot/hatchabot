@@ -108,6 +108,7 @@
   .inbox-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px;
     height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; font-size: 11px;
     font-weight: 700; background: var(--accent); color: var(--accent-ink); }
+  #faFilters .hbtn.fa-on { background: var(--accent); color: #fff; border-color: var(--accent); }
   .toc-badge { flex: none; display: inline-flex; align-items: center; gap: 2px;
     padding: 0 6px; height: 17px; border-radius: 999px; font-size: 11px;
     font-weight: 700; color: var(--warn); border: 1px solid var(--warn);
@@ -1492,12 +1493,19 @@
   </div>
   <div id="moveSourceList" style="max-height:320px;overflow:auto;border-top:1px solid var(--line);padding-top:4px"></div>
   <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:10px 0 0">
-    <input type="checkbox" id="moveSourceCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
+    <input type="checkbox" id="moveSourceCheckpoint" style="width:auto;margin-top:3px;flex:none">
     <span><b>Save each conversation to memory first</b>
       <div class="sub" style="margin-top:2px">Switching source restarts each agent on a different engine, ending its
         current Telegram conversation. With this on, each agent writes a short summary of its recent chat into memory
         before rebuilding, so the context isn't lost. Adds about <b>20 seconds per agent</b>, and only applies when you
         rebuild now. Durable notes already saved are kept regardless.</div></span>
+  </label>
+  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:8px 0 0">
+    <input type="checkbox" id="moveSourceRecover" checked style="width:auto;margin-top:3px;flex:none">
+    <span><b>Recover context after the switch</b>
+      <div class="sub" style="margin-top:2px">Once each agent is back up on the NEW source, it re-reads the conversation it was
+      having before the switch and saves the important parts to memory — so nothing is lost even when the old source
+      can't answer any more. It confirms in its chat when done.</div></span>
   </label>
   <div class="sub" id="moveSourceErr" style="color:var(--bad);margin-top:8px"></div>
   <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px;flex-wrap:wrap">
@@ -1527,6 +1535,7 @@
     <select id="faAction" onchange="faRenderAction()" style="width:auto">
       <option value="model">Switch model (live, no rebuild)</option>
       <option value="class">Set class</option>
+      <option value="source">Switch AI source (rebuild)</option>
       <option value="checkpoint">Chat → Memory (save conversation)</option>
       <option value="rebuild">Rebuild</option>
       <option value="stop">Stop</option>
@@ -1534,6 +1543,17 @@
     </select>
     <select id="faModel" style="width:auto;min-width:180px"></select>
     <select id="faClass" style="width:auto;min-width:160px;display:none"></select>
+    <select id="faSource" style="width:auto;min-width:160px;display:none"></select>
+  </div>
+  <div id="faSourceOpts" style="display:none;margin-top:6px">
+    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
+      <input type="checkbox" id="faSourceCheckpoint" style="width:auto;margin-top:3px;flex:none">
+      <span>Save each conversation to memory first <span class="sub">— needs the OLD source to still answer; skip this if it's out of tokens</span></span></label>
+    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
+      <input type="checkbox" id="faSourceRecover" checked style="width:auto;margin-top:3px;flex:none">
+      <span><b>Recover context after the switch</b> <span class="sub">— once each agent is back on the NEW source it re-reads its pre-switch conversation and saves it to memory. Works even when the old source is dead.</span></span></label>
+  </div>
+  <div style="display:none">
   </div>
   <div class="sub" id="faActionNote" style="margin-top:6px"></div>
 
@@ -2936,6 +2956,7 @@ let moveSourceState = null;
  * Mirrors the apply-model dialog. Only offers agents not already on the source.
  */
 function moveAgentsToSource(profileId, profileName) {
+  if ($('moveSourceRecover')) $('moveSourceRecover').checked = true;
   const candidates = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== profileId);
   if (!candidates.length) { toast('Every one of your agents already uses this source.'); return; }
   moveSourceState = { profileId };
@@ -2962,7 +2983,7 @@ function moveAgentsToSource(profileId, profileName) {
       const n = candidates.filter(a => a.aiProfileId === id).length;
       return `<option value="${esc(id)}">${esc(p ? p.name : 'another source')} (${n})</option>`;
     }).join('');
-  $('moveSourceCheckpoint').checked = true; // shared control — reset so a prior uncheck doesn't silently skip saving conversations to memory before the switch
+  $('moveSourceCheckpoint').checked = false; // off by default: a checkpoint needs the OLD source to answer, which is exactly what's often dead when you're moving
   refreshMoveCount();
   moveSourceDlg.showModal();
 }
@@ -3026,12 +3047,12 @@ async function openFleetActions() {
   const attn = list.filter(a => agentAttention(a).length).length;
   if (attn) chips.push(['attention', `Needs attention (${attn})`]);
   $('faFilters').innerHTML = chips.map(([key, label]) =>
-    `<button class="hbtn" onclick="faSelect('${jsq(key)}')">${esc(label)}</button>`).join('');
+    `<button class="hbtn" data-key="${esc(key)}" onclick="faSelect('${jsq(key)}')">${esc(label)}</button>`).join('');
   // The agent list (owner-set, live ordering).
   $('faList').innerHTML = list.map(a => {
     const p = profiles.find(x => x.id === a.aiProfileId);
     return `<label class="pair" style="padding:4px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
-      <input type="checkbox" class="faCb" data-id="${esc(a.id)}" data-src="${esc(a.aiProfileId)}" data-state="${esc(a.state)}" onchange="faCount()" style="width:auto;flex:none">
+      <input type="checkbox" class="faCb" data-id="${esc(a.id)}" data-src="${esc(a.aiProfileId)}" data-state="${esc(a.state)}" onchange="faManual()" style="width:auto;flex:none">
       <span class="grow"><b>${esc(a.name)}</b>
         <span class="sub">· ${esc(p ? p.name : 'source')} · ${esc((a.model || '').replace(/^.*\//, '') || '—')} · ${esc(a.state.toLowerCase())}</span></span>
     </label>`;
@@ -3041,6 +3062,8 @@ async function openFleetActions() {
   faCount();
 }
 function faSelect(key) {
+  // Highlight the chip that produced the current selection; hand-edits clear it.
+  document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.toggle('fa-on', b.dataset.key === key));
   const test = key === 'all' ? () => true
     : key === 'running' ? (cb) => cb.dataset.state === 'RUNNING'
     : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED'
@@ -3058,6 +3081,7 @@ function faSelect(key) {
   document.querySelectorAll('.faCb').forEach(cb => { cb.checked = test(cb); });
   faCount();
 }
+function faManual() { document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.remove('fa-on')); faCount(); }
 function faToggleAll(on) { document.querySelectorAll('.faCb').forEach(cb => { cb.checked = on; }); faCount(); }
 function faSelected() { return [...document.querySelectorAll('.faCb:checked')]; }
 function faCount() {
@@ -3076,8 +3100,18 @@ function faRenderAction() {
   const keep = (el, prev) => { if (prev && [...el.options].some(o => o.value === prev)) el.value = prev; };
   $('faModel').style.display = isModel ? '' : 'none';
   $('faClass').style.display = action === 'class' ? '' : 'none';
+  $('faSource').style.display = action === 'source' ? '' : 'none';
+  $('faSourceOpts').style.display = action === 'source' ? '' : 'none';
   const sel = faSelected().map(cb => agents.find(a => a.id === cb.dataset.id)).filter(Boolean);
   let note = '';
+  if (action === 'source') {
+    const prevSrc = $('faSource').value;
+    $('faSource').innerHTML = profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+    keep($('faSource'), prevSrc);
+    $('faApplyBtn').disabled = !sel.length;
+    $('faActionNote').textContent = 'Moves the selected agents onto the chosen source and rebuilds each (memory kept, brief downtime). Agents already on it are skipped. A class that pins a different source is detached.';
+    return;
+  }
   if (action === 'class') {
     $('faClass').innerHTML = '<option value="">— none (clear class) —</option>' +
       (agentClasses || []).map(c => `<option value="${esc(c.id)}">${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}${c.aiProfileId ? ' · ' + esc((profiles.find(p => p.id === c.aiProfileId) || {}).name || 'source') : ''}</option>`).join('');
@@ -3120,6 +3154,25 @@ async function faApply() {
   const ids = faSelected().map(cb => cb.dataset.id);
   if (!ids.length) return;
   const model = $('faModel').value;
+  if (action === 'source') {
+    const profileId = $('faSource').value;
+    if (!profileId) return;
+    const p = profiles.find(x => x.id === profileId);
+    if (!confirm(`Move ${ids.length} agent${ids.length > 1 ? 's' : ''} to "${p ? p.name : 'that source'}" and rebuild each?`)) return;
+    $('faApplyBtn').disabled = true; $('faResults').innerHTML = 'Switching…';
+    try {
+      const r = await api(`/v1/ai-profiles/${profileId}/adopt-agents`, { method: 'POST', body: {
+        apply: ids, rebuild: true, checkpoint: $('faSourceCheckpoint').checked, recoverAfter: $('faSourceRecover').checked } });
+      const bits = [`${r.switched} switched`, `rebuilding ${r.rebuilding}`];
+      if (r.classDetached) bits.push(`${r.classDetached} detached from a class`);
+      if ((r.skipped || []).length) bits.push(`${r.skipped.length} skipped`);
+      $('faResults').innerHTML = `✓ ${esc(bits.join(' · '))}.`;
+      $('faErr').textContent = (r.skipped || []).slice(0, 3).map(s => `${s.name}: ${s.reason}`).join(' · ');
+      if ($('faSourceRecover').checked && r.rebuilding) toast('Each agent will recover its pre-switch conversation once it is back up, and confirm in its chat.', 9000);
+    } catch (e) { $('faErr').textContent = e.message; }
+    finally { $('faApplyBtn').disabled = false; await refresh(false); }
+    return;
+  }
   if (action === 'rebuild' && !confirm(`Rebuild ${ids.length} agent${ids.length > 1 ? 's' : ''}? Each briefly goes offline (memory kept).`)) return;
   if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
   $('faApplyBtn').disabled = true;
@@ -3166,7 +3219,7 @@ async function moveAgentsApply(rebuild) {
   $('moveSourceBtn').disabled = true;
   try {
     const r = await api(`/v1/ai-profiles/${moveSourceState.profileId}/adopt-agents`, {
-      method: 'POST', body: { apply, rebuild, checkpoint: rebuild && $('moveSourceCheckpoint').checked },
+      method: 'POST', body: { apply, rebuild, checkpoint: rebuild && $('moveSourceCheckpoint').checked, recoverAfter: rebuild && $('moveSourceRecover').checked },
     });
     const bits = [`${r.switched} switched`];
     if (r.rebuilding) bits.push(`rebuilding ${r.rebuilding} now`);
@@ -3394,6 +3447,7 @@ $('fabBtn').onclick = () => {
   $('agentUsePool').checked = true;
   $('agentPoolCount').textContent = poolAvail > 0 ? `(${poolAvail} ready)` : '';
   createDlg.showModal();
+  if (pendingTodoName) { $('agentName').value = pendingTodoName; pendingTodoName = null; }
   $('agentName').focus();
 };
 
@@ -4427,7 +4481,9 @@ async function switchModel() {
     toast(r.live
       ? `Now running ${r.model} — effective on the next message, no rebuild.`
       : r.staged ? `Set to ${r.model} — written to the stopped agent; applies when it next starts.`
-      : `Set to ${r.model} — applies on its next rebuild.`, 7000);
+      : r.rebuild ? `Saved — this agent also has an AI-source switch waiting, so both apply on its next Rebuild.`
+      : `Set to ${r.model} — applies on its next rebuild.`, 8000);
+    if (r.classDetached) toast('Detached from its class (the class pins a different model).', 6000);
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('modelBtn').disabled = false; }
@@ -6291,7 +6347,8 @@ async function downloadHistory(id, name) {
 async function recoverContext(id, name) {
   if (!confirm(`Recover "${name}"'s earlier conversations?\n\nConversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its Telegram chat when done.`)) return;
   try {
-    const r = await api(`/v1/agents/${id}/recover-context`, { method: 'POST' });
+    const includeLive = confirm('Also include the CURRENT conversation?\n\nOK — yes, I just switched this agent\'s AI source (its current chat is about to be reset on the next message).\nCancel — no, only conversations from before earlier resets.');
+    const r = await api(`/v1/agents/${id}/recover-context`, { method: 'POST', body: { includeLive } });
     if (!r.started) { toast(r.reason || 'Nothing to recover.', 9000); return; }
     toast(`Recovering ${r.messages} messages from ${r.conversations} earlier conversation${r.conversations > 1 ? 's' : ''} — "${name}" will confirm in Telegram when it's saved them.`, 10000);
   } catch (e) { toast(e.message, 9000); }
@@ -6554,7 +6611,48 @@ function renderToc() {
         <span class="toc-name">${esc(a.name)}</span></a>`;
     }
   }
+  // Planned agents — a launchpad. Click a name to start creating it (the name
+  // is pre-filled); it drops off the list once an agent with that name exists.
+  if (agentTodos === null) { agentTodos = []; void loadTodos(); }
+  html += `<div class="toc-group" title="Agents you plan to create later">Planned</div>`;
+  for (const t of agentTodos) {
+    html += `<a class="toc-item" onclick="createFromTodo('${t.id}')" title="${esc('Create "' + t.name + '" now' + (t.note ? ' — ' + t.note : ''))}">
+      <span class="toc-dot" style="background:var(--off);border:1px dashed var(--dim)"></span>
+      <span class="toc-name">${esc(t.name)}</span>
+      <span class="toc-badge" style="animation:none;cursor:pointer" title="Remove from the plan" onclick="event.stopPropagation(); removeTodo('${t.id}', '${jsq(t.name)}')">✕</span></a>`;
+  }
+  html += `<div class="toc-item" style="cursor:default;gap:4px">
+    <input id="todoNew" placeholder="Plan an agent…" maxlength="64" style="flex:1;min-width:0;font-size:12px;padding:2px 6px" onkeydown="if (event.key === 'Enter') addTodo()">
+    <button class="hbtn" style="padding:1px 7px" title="Add to the plan" onclick="addTodo()">+</button></div>`;
   $('tocList').innerHTML = html;
+}
+
+let agentTodos = null, pendingTodoName = null;
+async function loadTodos() {
+  try { agentTodos = (await api('/v1/agent-todos')).todos || []; } catch { agentTodos = []; }
+  // Created since? An agent now carrying a planned name retires the plan.
+  const live = new Set(agents.filter(a => a.state !== 'DELETED').map(a => a.name.trim().toLowerCase()));
+  for (const t of agentTodos.filter(t => live.has(t.name.trim().toLowerCase()))) {
+    try { await api(`/v1/agent-todos/${t.id}`, { method: 'DELETE' }); } catch {}
+    agentTodos = agentTodos.filter(x => x.id !== t.id);
+  }
+  renderToc();
+}
+async function addTodo() {
+  const name = ($('todoNew')?.value || '').trim();
+  if (!name) return;
+  try { await api('/v1/agent-todos', { method: 'POST', body: { name } }); await loadTodos(); }
+  catch (e) { toast(e.message); }
+}
+async function removeTodo(id, name) {
+  if (!confirm(`Remove "${name}" from the plan?`)) return;
+  try { await api(`/v1/agent-todos/${id}`, { method: 'DELETE' }); await loadTodos(); } catch (e) { toast(e.message); }
+}
+function createFromTodo(id) {
+  const t = (agentTodos || []).find(x => x.id === id);
+  if (!t) return;
+  pendingTodoName = t.name;
+  $('fabBtn').click(); // opens the create dialog; the name is pre-filled there
 }
 
 function jumpToCard(id) {

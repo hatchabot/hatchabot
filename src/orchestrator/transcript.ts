@@ -55,7 +55,9 @@ convs.sort((a, b) => (Date.parse(a.started) || 0) - (Date.parse(b.started) || 0)
 // Recovery wants only what the agent LOST: drop the live conversation (the
 // newest one not ended by a reset) — it's already in the agent's context.
 let pick = convs;
-if (mode === 'recover') {
+// INCLUDE_LIVE: right after an AI-source switch the "current" file is the
+// conversation that is ABOUT to be reset on the first message — include it.
+if (mode === 'recover' && env.INCLUDE_LIVE !== '1') {
   const live = [...convs].reverse().find((c) => !c.reset);
   pick = convs.filter((c) => c !== live);
 }
@@ -135,15 +137,16 @@ export async function exportTranscript(provider: RuntimeProvider, agent: Agent):
 export async function recoverContext(
   provider: RuntimeProvider,
   agent: Agent,
+  opts: { includeLive?: boolean } = {},
 ): Promise<{ conversations: number; messages: number; file?: string }> {
   const rel = `recovered/chat-history-${new Date().toISOString().slice(0, 10)}.md`;
   const out = `/home/node/.openclaw/agents/${agent.slug}/agent/${rel}`;
-  const res = await provider.execShell(agent.runtimeRef!, script(agent, { MODE: 'recover', OUT: out }));
+  const res = await provider.execShell(agent.runtimeRef!, script(agent, { MODE: 'recover', OUT: out, ...(opts.includeLive ? { INCLUDE_LIVE: '1' } : {}) }));
   if (res.code !== 0) throw new Error((res.stderr || res.stdout || 'recovery staging failed').slice(-300));
   const j = JSON.parse(res.stdout || '{}') as { conversations?: number; messages?: number };
   if (!j.messages) return { conversations: 0, messages: 0 };
   const prompt =
-    `System note: your earlier conversations — including ones from before a reset, which are no longer ` +
+    `System note: your earlier conversations — including ones from before a reset${opts.includeLive ? ' and the one that was current before your AI engine was switched' : ''}, which are no longer ` +
     `in your context — have been restored to the file ${rel} in your workspace (${j.messages} messages). ` +
     `Read it (it may be long; read it in parts) and save anything worth keeping — decisions, facts about ` +
     `the people you serve, ongoing tasks and context — into your memory (MEMORY.md, or today's file under ` +

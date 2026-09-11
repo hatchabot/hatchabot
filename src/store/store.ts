@@ -56,6 +56,14 @@ export class Store {
         owner_id TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT NOT NULL
       );
 
+      -- "Agents to create later": an owner's launchpad of planned agents (name
+      -- + note). Purely a to-do list; creating one turns it into a real agent.
+      CREATE TABLE IF NOT EXISTS agent_todos (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
+        note TEXT, created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS agent_todos_owner ON agent_todos (owner_id);
+
       CREATE TABLE IF NOT EXISTS hosts (
         id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, kind TEXT NOT NULL,
         provider TEXT NOT NULL, name TEXT NOT NULL, settings TEXT NOT NULL,
@@ -614,6 +622,20 @@ export class Store {
     return (this.db.prepare(`SELECT * FROM agents WHERE class_id = ? AND state != 'DELETED'`).all(classId) as any[]).map(rowToAgent);
   }
 
+  // ---- planned agents (launchpad) --------------------------------------------
+  listAgentTodos(ownerId: string): Array<{ id: string; name: string; note?: string; createdAt: string }> {
+    return (this.db.prepare(`SELECT id, name, note, created_at FROM agent_todos WHERE owner_id = ? ORDER BY created_at`).all(ownerId) as any[])
+      .map((r) => ({ id: r.id, name: r.name, note: r.note ?? undefined, createdAt: r.created_at }));
+  }
+  addAgentTodo(ownerId: string, name: string, note?: string): { id: string; name: string; note?: string; createdAt: string } {
+    const id = randomUUID(); const createdAt = new Date().toISOString();
+    this.db.prepare(`INSERT INTO agent_todos (id, owner_id, name, note, created_at) VALUES (?, ?, ?, ?, ?)`).run(id, ownerId, name, note ?? null, createdAt);
+    return { id, name, note, createdAt };
+  }
+  deleteAgentTodo(ownerId: string, id: string): boolean {
+    return this.db.prepare(`DELETE FROM agent_todos WHERE id = ? AND owner_id = ?`).run(id, ownerId).changes === 1;
+  }
+
   // ---- operator identity profile --------------------------------------------
   getOperatorProfile(ownerId: string): string {
     const r = this.db.prepare(`SELECT content FROM operator_profile WHERE owner_id = ?`).get(ownerId) as { content: string } | undefined;
@@ -1103,6 +1125,7 @@ export class Store {
         `UPDATE agent_classes SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE operator_profile SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE posture_snapshots SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE agent_todos SET owner_id = ? WHERE owner_id = ?`,
       ]) {
         rows += this.db.prepare(sql).run(owner, localOwner).changes;
       }

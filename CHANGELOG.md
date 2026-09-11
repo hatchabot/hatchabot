@@ -2,6 +2,32 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.136.0] — 2026-09-11
+
+### Added
+- **Planned agents (launchpad)** at the bottom of the 📑 Jump legend: jot agents to
+  create later; click one to start creating it (name pre-filled); it drops off once
+  an agent with that name exists.
+- **Bulk actions → Switch AI source**, with "save to memory first" (needs the old
+  source alive) and **Recover context after the switch** (default on).
+- **Recover context after a source switch** — the Move-agents dialog and the bulk
+  switch can chain a recovery onto each rebuild: once the agent is up on the NEW
+  source it re-reads the conversation it was having (including the current one)
+  and saves it to memory. This is the path when a source runs out of tokens and
+  can't checkpoint. The manual 📥 Recover button now asks whether to include the
+  current conversation.
+- Bulk-action filter chips highlight the active filter.
+
+### Fixed
+- A live model change after a declined source-switch rebuild stamped the new source
+  as applied — the 🔄 vanished though the rebuild was still needed. The model now
+  waits for that rebuild and the flag stays.
+- Changing an agent's source or model by hand (card or bulk) now detaches it from
+  a class that pins something else, so a later class edit can't silently yank it
+  back. Toasts say so.
+- "Save to memory first" is now off by default when moving agents (it needs the
+  source you're moving away from to answer).
+
 ## [0.135.0] — 2026-09-11
 
 ### Fixed (13th audit — see docs/audit-2026-09-11.md)

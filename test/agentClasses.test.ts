@@ -108,6 +108,21 @@ describe('agent classes', () => {
     expect(store.getAgent('a1')!.model).toBe('claude-sonnet-5'); // untouched while archived
   });
 
+  it('changing the model by hand detaches a class that pins a different one (no silent yank-back later)', async () => {
+    const { store, f } = await world();
+    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Light', model: 'claude-sonnet-5' } })).json().class.id;
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
+    expect(store.getAgent('a1')!.classId).toBe(classId);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: H, payload: { model: 'claude-fable-5' } });
+    expect(res.json().classDetached).toBe(true);
+    expect(store.getAgent('a1')!.classId).toBeUndefined();
+    // Setting the SAME model the class pins keeps the tag.
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
+    const same = await f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: H, payload: { model: 'claude-sonnet-5' } });
+    expect(same.json().classDetached).toBe(false);
+    expect(store.getAgent('a1')!.classId).toBe(classId);
+  });
+
   it('rejects a class model the agent’s source cannot run', async () => {
     const { f } = await world();
     // local source can't take an anthropic model override

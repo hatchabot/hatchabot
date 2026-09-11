@@ -84,6 +84,15 @@ describe('transcript renderer (in-container script)', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('recover with INCLUDE_LIVE also takes the current conversation (post source-switch)', () => {
+    const root = fixture();
+    const out = join(root, 'agent', 'recovered', 'h.md');
+    const r = render(root, { MODE: 'recover', OUT: out, INCLUDE_LIVE: '1' });
+    expect(r).toMatchObject({ conversations: 3, messages: 8 });
+    expect(readFileSync(out, 'utf8')).toContain('RESP'); // the live one is in
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('recover mode writes only what was LOST (not the live conversation) to the file', () => {
     const root = fixture();
     const out = join(root, 'agent', 'recovered', 'h.md');
@@ -164,6 +173,15 @@ describe('POST /v1/agents/:id/recover-context', () => {
     expect(turn?.[1]).toMatch(/nohup/);          // no exec timeout applies
     expect(turn?.[1]).toMatch(/--deliver/);      // agent confirms in its own chat
     expect(turn?.[1]).toMatch(/--timeout 900/);
+  });
+
+  it('includeLive is passed through to the renderer and named in the prompt', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 2, messages: 9 }) });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/recover-context', headers: H, payload: { includeLive: true } });
+    expect(res.statusCode).toBe(202);
+    const stage = provider.execLog.find((c) => c[0] === 'sh' && String(c[1]).includes("MODE='recover'"));
+    expect(String(stage?.[1])).toContain("INCLUDE_LIVE='1'");
   });
 
   it('reports nothing to recover when there is no earlier conversation', async () => {

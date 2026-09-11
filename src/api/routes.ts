@@ -563,6 +563,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // POST /v1/agents returns in milliseconds; the slow steps (docker, health
   // check) run here. One in-flight run per agent; the app polls GET /v1/agents.
   const inflight = new Map<string, Promise<void>>();
+  const recovering = new Set<string>(); // agents with a background recovery turn in flight
   // Agent-to-agent guards. Consults nest synchronously in this process, so:
   //  - a2aInFlight: targets currently answering a consult. Refusing a consult
   //    to an agent that is itself mid-consult breaks A→B→A cycles at depth 2
@@ -763,10 +764,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * place when it next starts (a plain start does NOT re-provision config).
    * Records the applied model on success. Returns how it was applied.
    */
-  const applyModelToRuntime = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed'> => {
+  const applyModelToRuntime = async (agentId: string): Promise<'live' | 'staged' | 'none' | 'failed' | 'rebuild'> => {
     const a = store.getAgent(agentId);
     const p = a && store.getAIProfile(a.aiProfileId);
     if (!a || !p || !a.runtimeRef || a.migratedTo) return 'none';
+    // A source switch is waiting for a rebuild: the container still runs the OLD
+    // source's auth/config, so don't touch it and — crucially — don't
+    // recordApplied, which would stamp the new source as applied and hide the
+    // rebuild the agent still needs. The model lands with that rebuild.
+    if (a.appliedProfileId && a.appliedProfileId !== a.aiProfileId) return 'rebuild';
     const ref = prefixedModelRef(a, p);
     const provider = providerFor(a.hostId);
     let res;
@@ -776,6 +782,25 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (res.code !== 0) { trace(agentId)('model.live_set_failed', { model: ref, stderr: (res.stderr || res.stdout).slice(0, 200) }); return 'failed'; }
     recordApplied(store, agentId);
     return a.state === 'RUNNING' ? 'live' : 'staged';
+  };
+
+  /**
+   * Q4 of the 2026-09-11 review: a class is a "set" action plus a tag, and a
+   * later class edit re-applies to every tagged agent. So when an agent's
+   * source or model is changed by hand (card or bulk) to something the class
+   * doesn't pin, drop the tag — otherwise the next class edit would silently
+   * yank the agent back. Returns true when it detached.
+   */
+  const detachClassIfDrifted = (agentId: string): boolean => {
+    const a = store.getAgent(agentId);
+    if (!a?.classId) return false;
+    const c = store.getAgentClass(a.classId);
+    if (!c) { store.setAgentClass(agentId, null); return true; }
+    const p = store.getAIProfile(a.aiProfileId);
+    const drifted = (c.aiProfileId && c.aiProfileId !== a.aiProfileId) ||
+      (c.model && p && effectiveModel(a, p) !== c.model);
+    if (drifted) store.setAgentClass(agentId, null);
+    return !!drifted;
   };
 
   // ---- agent classes (model/source tiers) ----------------------------------
@@ -815,6 +840,20 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     if (!switching && cls.model) await applyModelToRuntime(agent.id);
     return { rebuild: switching };
   };
+
+  // ---- planned agents: a launchpad of agents to create later -----------------
+  app.get('/v1/agent-todos', async (req) => ({ todos: store.listAgentTodos(ownerIdOf(req)) }));
+  app.post<{ Body: { name?: string; note?: string } }>('/v1/agent-todos', async (req, reply) => {
+    const b = (req.body ?? {}) as { name?: string; note?: string };
+    const name = (b.name ?? '').trim().slice(0, 64);
+    if (!name) return reply.code(400).send({ error: 'Give the planned agent a name.' });
+    if (store.listAgentTodos(ownerIdOf(req)).length >= 100) return reply.code(400).send({ error: 'That is a lot of plans — create or remove some first.' });
+    return { todo: store.addAgentTodo(ownerIdOf(req), name, (b.note ?? '').trim().slice(0, 500) || undefined) };
+  });
+  app.delete<{ Params: { id: string } }>('/v1/agent-todos/:id', async (req, reply) => {
+    if (!store.deleteAgentTodo(ownerIdOf(req), req.params.id)) return reply.code(404).send({ error: 'Not found' });
+    return { removed: true };
+  });
 
   // ---- operator identity profile --------------------------------------------
   app.get('/v1/operator-profile', async (req) => ({ content: store.getOperatorProfile(ownerIdOf(req)) }));
@@ -1622,6 +1661,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
            *  rebuild — the source switch resets the thread, this is what
            *  survives it. Only acts on a RUNNING agent being rebuilt now. */
           checkpoint: z.boolean().optional(),
+          /** After each rebuild finishes, restore the pre-switch conversation
+           *  from the transcript (including the one that was current) and have
+           *  the agent save it to memory — on the NEW source. This is the path
+           *  when the old source is out of tokens and can't checkpoint. */
+          recoverAfter: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -1633,6 +1677,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
       const switched: string[] = [];
       const skipped: Array<{ name: string; reason: string }> = [];
+      let classDetached = 0;
       let rebuilding = 0;
       for (const a of requested) {
         if (a.aiProfileId === target.id) continue; // already here — nothing to do
@@ -1654,14 +1699,32 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         // to the new default instead of provisioning healthy and failing on use.
         if (a.model && modelOverrideProblem(target, a.model)) store.setAgentModel(a.id, null);
         switched.push(a.id);
+        if (detachClassIfDrifted(a.id)) classDetached++;
         if (parsed.data.rebuild && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           // Checkpoint only a RUNNING agent — a stopped one has no live turn to
           // summarise. Each runs as the first step of its own background rebuild.
           const checkpoint = parsed.data.checkpoint === true && a.state === 'RUNNING';
-          if (kickRebuild(a.id, { checkpoint })) rebuilding++;
+          if (kickRebuild(a.id, { checkpoint })) {
+            rebuilding++;
+            if (parsed.data.recoverAfter) {
+              // Chain onto the rebuild's own task so recovery runs on the NEW
+              // source, after the container is healthy. Best-effort.
+              const id = a.id;
+              void inflight.get(id)?.then(async () => {
+                const fresh = store.getAgent(id);
+                // The slot was reserved below when the rebuild was kicked, so no
+                // has() check here — it would always see our own reservation.
+                if (!fresh?.runtimeRef || fresh.state !== 'RUNNING') { recovering.delete(id); return; }
+                setTimeout(() => recovering.delete(id), 15 * 60_000).unref();
+                const r = await recoverContext(providerFor(fresh.hostId), fresh, { includeLive: true }).catch(() => null);
+                trace(id)('transcript.recover_after_switch', r ?? { error: 'staging failed' });
+              }).catch(() => {});
+              recovering.add(a.id); // reserve the slot now so a manual click can't double up
+            }
+          }
         }
       }
-      return { switched: switched.length, rebuilding, skipped };
+      return { switched: switched.length, rebuilding, skipped, classDetached };
     },
   );
 
@@ -1735,9 +1798,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // applyModelToRuntime re-reads agent + profile from the store, so it sees
       // the NEW default (the local `profile` object above is stale after
       // setAIProfileModel — using it applied the OLD model to every agent).
-      let live = 0, staged = 0;
+      let live = 0, staged = 0, classDetached = 0;
       for (const a of mine) {
         if (!applyIds.has(a.id)) continue;
+        if (detachClassIfDrifted(a.id)) classDetached++;
         const how = await applyModelToRuntime(a.id);
         if (how === 'live') live++; else if (how === 'staged') staged++;
       }
@@ -1747,7 +1811,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // echoed applyIds.size, which over-reported when the caller passed ids
       // that aren't theirs (a shared profile's other users) — they're filtered
       // out of `mine`, so nothing happened to them.
-      return { profile: safe, applied, held, live, staged };
+      return { profile: safe, applied, held, live, staged, classDetached };
     },
   );
 
@@ -2514,8 +2578,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         store.setAgentModel(agent.id, null);
       }
       if (flippingMemory) store.setAgentSharedMemory(agent.id, shared!);
+      const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
 
-      return publicAgent(store.getAgent(agent.id)!);
+      return publicAgent(store.getAgent(agent.id)!, { classDetached });
     },
   );
 
@@ -3368,8 +3433,6 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return { ok: true, saved: true };
   });
 
-  const recovering = new Set<string>(); // agents with a background recovery turn in flight
-
   // ---- chat history (from the agent's own transcript store) ----------------
   // The Telegram Bot API can't read past messages; OpenClaw's session files can,
   // including conversations from before a reset. Owner only.
@@ -3396,7 +3459,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   /** Restore what a reset made the agent lose: stage its earlier conversations
    *  in its workspace and have it save the durable parts to memory (background;
    *  it confirms in its own chat). */
-  app.post<{ Params: { id: string } }>('/v1/agents/:id/recover-context', async (req, reply) => {
+  app.post<{ Params: { id: string }; Body: { includeLive?: boolean } }>('/v1/agents/:id/recover-context', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'recover its earlier conversations');
     if (!agent) return reply;
     if (busyNow(agent, reply)) return reply;
@@ -3404,11 +3467,13 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     recovering.add(agent.id);
     setTimeout(() => recovering.delete(agent.id), 15 * 60_000).unref(); // the turn's own --timeout is 900s
     let r;
-    try { r = await recoverContext(providerFor(agent.hostId), agent); }
+    const includeLive = (req.body as { includeLive?: boolean } | undefined)?.includeLive === true;
+    try { r = await recoverContext(providerFor(agent.hostId), agent, { includeLive }); }
     catch (err) { return reply.code(502).send({ error: `Couldn't stage the history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     trace(agent.id)('transcript.recover_started', r);
     if (!r.messages) {
-      return { started: false, reason: 'Nothing to recover — there are no conversations from before a reset; the current one is already in its context.' };
+      recovering.delete(agent.id);
+      return { started: false, reason: includeLive ? 'Nothing to recover — no chat history found.' : 'Nothing to recover — there are no conversations from before a reset; the current one is already in its context (tick "include the current conversation" right after a source switch).' };
     }
     return reply.code(202).send({ started: true, ...r });
   });
@@ -3430,9 +3495,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       const problem = modelOverrideProblem(profile, model);
       if (problem) return reply.code(400).send({ error: problem });
       store.setAgentModel(agent.id, model);
+      const classDetached = detachClassIfDrifted(agent.id);
       const applied = effectiveModel(store.getAgent(agent.id)!, profile);
       const how = await applyModelToRuntime(agent.id);
-      return { model: applied, live: how === 'live', staged: how === 'staged' };
+      return { model: applied, live: how === 'live', staged: how === 'staged', rebuild: how === 'rebuild', classDetached };
     },
   );
 

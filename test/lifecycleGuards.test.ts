@@ -179,6 +179,61 @@ describe('live model change (no rebuild)', () => {
 });
 
 describe('audit 2026-09-11 follow-ups', () => {
+  it('adopt-agents with recoverAfter runs a recovery (includeLive) once the rebuild completes', async () => {
+    // Self-contained: a rebuild needs a channel row + the bot/AI secrets, which
+    // the shared world() doesn't seed (it only ever asserts the 202).
+    process.env.AGENTCLAW_READY_POLL_MS = '1'; process.env.AGENTCLAW_READY_TIMEOUT_MS = '2000';
+    const store = new Store(new Database(':memory:')); const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    for (const id of ['p1', 'p2']) store.insertAIProfile({ id, ownerId: OWNER, name: id, vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: `ai/${id}`, createdAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } as any }, env: {} });
+    await provider.start(runtimeRef);
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    store.insertChannel({ id: 'c-a1', agentId: 'a1', kind: 'telegram', accountId: 'bot_a1', secretRef: 'chan/a1', deepLink: 'https://t.me/bot_a1', createdAt: 'now' });
+    const secrets = new MemSecrets(); await secrets.put('ai/p1', 'k'); await secrets.put('ai/p2', 'k'); await secrets.put('chan/a1', '123:tok');
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets, providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {}, syncDisplayName: async () => {} } as any });
+    provider.execResponses.set('sh', { code: 0, stderr: '', stdout: JSON.stringify({ conversations: 1, messages: 5 }) });
+    const res = await f.inject({ method: 'POST', url: '/v1/ai-profiles/p2/adopt-agents', headers: as, payload: { apply: ['a1'], rebuild: true, recoverAfter: true } });
+    expect(res.json()).toMatchObject({ switched: 1, rebuilding: 1 });
+    const deadline = Date.now() + 12000;
+    let turn;
+    while (!turn && Date.now() < deadline) {
+      turn = provider.execLog.find((c) => c[0] === 'sh' && String(c[1]).includes('openclaw agent') && String(c[1]).includes('--deliver'));
+      if (!turn) await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(store.getAgent('a1')!.state).toBe('RUNNING');
+    expect(turn).toBeTruthy();                                   // recovery started after the rebuild, on the new source
+    const stage = provider.execLog.find((c) => c[0] === 'sh' && String(c[1]).includes("MODE='recover'"));
+    expect(String(stage?.[1])).toContain("INCLUDE_LIVE='1'");   // the pre-switch (current) chat is included
+  }, 15000);
+
+  it('planned agents: add / list / remove, owner-scoped', async () => {
+    const { f } = await world();
+    const add = await f.inject({ method: 'POST', url: '/v1/agent-todos', headers: as, payload: { name: 'Home Cybersecurity', note: 'later' } });
+    expect(add.statusCode).toBe(200);
+    const id = add.json().todo.id;
+    expect((await f.inject({ method: 'GET', url: '/v1/agent-todos', headers: as })).json().todos.map((t: any) => t.name)).toEqual(['Home Cybersecurity']);
+    expect((await f.inject({ method: 'GET', url: '/v1/agent-todos', headers: { 'x-agentclaw-owner': 'user-other' } })).json().todos).toEqual([]);
+    expect((await f.inject({ method: 'DELETE', url: `/v1/agent-todos/${id}`, headers: { 'x-agentclaw-owner': 'user-other' } })).statusCode).toBe(404);
+    expect((await f.inject({ method: 'DELETE', url: `/v1/agent-todos/${id}`, headers: as })).statusCode).toBe(200);
+    expect((await f.inject({ method: 'POST', url: '/v1/agent-todos', headers: as, payload: { name: '  ' } })).statusCode).toBe(400);
+  });
+
+  it('a live model change does NOT clear a pending source switch (rebuild still flagged)', async () => {
+    const { f, store, provider } = await world();
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Other', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });
+    store.setAgentApplied('a1', 'p1', 'claude-opus-4-8');   // container runs p1
+    store.setAgentAIProfile('a1', 'p2');                     // owner switched, declined the rebuild
+    const before = provider.execLog.length;
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: as, payload: { model: null } });
+    expect(res.json()).toMatchObject({ live: false, staged: false, rebuild: true });
+    expect(provider.execLog.length).toBe(before);           // nothing exec'd against the old-source container
+    expect(store.getAgent('a1')!.appliedProfileId).toBe('p1'); // still honest: the switch is pending
+    const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as })).json();
+    expect(list.find((a: any) => a.id === 'a1').pendingModel).toBeTruthy(); // the 🔄 stays
+  });
+
   it('POST /model on a STOPPED agent stages the model on its volume (staged:true)', async () => {
     const { f, store, provider } = await world();
     store.setAgentState('a1', 'STOPPED');
