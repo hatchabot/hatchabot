@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.131.0] — 2026-09-10
+
+### Added
+- **Tokens/hour in Fleet usage.** Each agent now shows an average `~N/hr`
+  alongside its total (lifetime rate = total tokens ÷ time since its first
+  session), and the header shows a fleet-wide rate. Makes a heavy burner obvious
+  at a glance rather than only via a big cumulative total. Omitted when an
+  agent's span is under 10 min (a rate over seconds is noise).
+
 ## [0.130.0] — 2026-09-10
 
 ### Added

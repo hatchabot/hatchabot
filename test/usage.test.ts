@@ -48,6 +48,35 @@ describe('agentUsage aggregation', () => {
     expect(p.execLog).toContainEqual(['sessions', 'list', '--agent', 'kitchen', '--json']);
   });
 
+  it('computes tokens/hour from the session span (start → last activity)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    const HOUR = 3_600_000;
+    // 6000 tokens over a 2-hour span → 3000/hr.
+    p.execResponses.set('sessions list', {
+      code: 0, stderr: '',
+      stdout: JSON.stringify({ sessions: [
+        { totalTokens: 4000, model: 'm', sessionStartedAt: 0, updatedAt: HOUR },
+        { totalTokens: 2000, model: 'm', sessionStartedAt: HOUR, updatedAt: 2 * HOUR },
+      ] }),
+    });
+    const u = await agentUsage(p, ref, 'kitchen');
+    expect(u.totalTokens).toBe(6000);
+    expect(u.spanMs).toBe(2 * HOUR);
+    expect(u.tokensPerHour).toBe(3000);
+  });
+
+  it('omits tokens/hour when the span is too short to be meaningful (< 10 min)', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('sessions list', {
+      code: 0, stderr: '',
+      stdout: JSON.stringify({ sessions: [{ totalTokens: 5000, model: 'm', sessionStartedAt: 0, updatedAt: 60_000 }] }),
+    });
+    const u = await agentUsage(p, ref, 'kitchen');
+    expect(u.tokensPerHour).toBeUndefined();
+  });
+
   it('returns an empty usage on a nonzero exit or bad json', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);

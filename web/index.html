@@ -4751,6 +4751,7 @@ function renderFleetUsage(f) {
       </span>
       <span style="text-align:right;margin-left:10px;white-space:nowrap">
         <b>${fmtTokens(a.totalTokens)}</b>
+        ${a.tokensPerHour != null ? `<div class="sub" title="Lifetime average — total tokens ÷ time since this agent's first session">~${fmtTokens(a.tokensPerHour)}/hr</div>` : ''}
         ${cost.text ? `<div class="sub"${cost.dim ? '' : ' style="color:var(--warn)"'}>${cost.text}</div>` : ''}
       </span>
     </div>`;
@@ -4772,9 +4773,10 @@ function renderFleetUsage(f) {
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
       ${legend('included', 'Subscription', 'var(--ok)')}${legend('api', 'API-billed', 'var(--warn)')}${legend('local', 'Local', '#6b8fb5')}
     </div>` : '';
+  const fleetRate = f.agents.reduce((s, a) => s + (a.tokensPerHour || 0), 0);
   $('fleetUsageBody').innerHTML =
     `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:8px;flex-wrap:wrap">
-       <span><span style="font-size:22px;font-weight:700">${fmtTokens(f.totalTokens)}</span> <span class="sub">tokens · ${f.counted} running agent${f.counted > 1 ? 's' : ''}</span> ${totalCost}</span>
+       <span><span style="font-size:22px;font-weight:700">${fmtTokens(f.totalTokens)}</span> <span class="sub">tokens${fleetRate > 0 ? ` · ~${fmtTokens(fleetRate)}/hr` : ''} · ${f.counted} running agent${f.counted > 1 ? 's' : ''}</span> ${totalCost}</span>
        ${f.skipped ? `<span class="sub">${f.skipped} not counted (live-only)</span>` : ''}
      </div>
      ${breakdown}
