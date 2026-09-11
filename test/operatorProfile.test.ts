@@ -25,6 +25,11 @@ describe('operatorSection (managed AGENTS.md block)', () => {
     expect(s).toContain('Secret plans'); // heading text kept
     expect(s).not.toContain('## Secret plans'); // but the heading marker stripped
   });
+  it('neutralises fence delimiters so an unbalanced \`\`\` cannot swallow later managed sections', () => {
+    const s = operatorSection('code:\n```\nnot closed');
+    expect(s).not.toMatch(/^\s*```/m); // no line starts a fence any more
+    expect(s).toContain('not closed');
+  });
   it('shows a "not set" placeholder when empty', () => {
     expect(operatorSection('   ')).toContain('Not set');
   });
@@ -47,8 +52,8 @@ describe('operator-profile endpoint', () => {
   it('stores the content and reports pushing it to running agents', async () => {
     const { store, f } = await world();
     const put = await f.inject({ method: 'PUT', url: '/v1/operator-profile', headers: H, payload: { content: 'I am Chris, Toronto, 3 kids.' } });
-    expect(put.statusCode).toBe(200);
-    expect(put.json()).toMatchObject({ pushed: 1 });
+    expect(put.statusCode).toBe(202); // fan-out runs in the background now
+    expect(put.json()).toMatchObject({ pushing: 1 });
     expect(store.getOperatorProfile(OWNER)).toBe('I am Chris, Toronto, 3 kids.');
     const get = await f.inject({ method: 'GET', url: '/v1/operator-profile', headers: H });
     expect(get.json().content).toBe('I am Chris, Toronto, 3 kids.');

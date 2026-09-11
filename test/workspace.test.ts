@@ -1,15 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  buildWorkspaceSeed,
-  dataSourcePath,
-  dataSourcesSection,
-  memoryPolicySection,
-  replaceMemoryPolicy,
-  replaceSection,
-  DATA_SOURCES_HEADING,
-  installConventionsSection,
-  INSTALL_HEADING,
-} from '../src/openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcePath, dataSourcesSection, memoryPolicySection, replaceMemoryPolicy, replaceSection, DATA_SOURCES_HEADING, installConventionsSection, INSTALL_HEADING, removeSection } from '../src/openclaw/workspace.js';
 
 describe('replaceMemoryPolicy', () => {
   it('swaps the seeded policy for the other mode, round-trip', () => {
@@ -157,5 +147,14 @@ describe('installConventionsSection: the rules of the house, told to the agent',
     // Idempotent: a second sync with unchanged content is a no-op, which is
     // what lets provisioning skip the write entirely.
     expect(replaceSection(once, INSTALL_HEADING, installConventionsSection())).toBe(once);
+  });
+});
+
+describe('removeSection', () => {
+  it('drops a managed section and its leading blank lines; no-op when absent', () => {
+    const doc = '# K\n\nMine.\n\n## Peers\n\n- **Tax**\n\n## Memory policy\n- keep\n';
+    const out = removeSection(doc, '## Peers');
+    expect(out).toBe('# K\n\nMine.\n\n## Memory policy\n- keep\n');
+    expect(removeSection(out, '## Peers')).toBe(out);
   });
 });

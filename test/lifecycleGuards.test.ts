@@ -178,6 +178,23 @@ describe('live model change (no rebuild)', () => {
   });
 });
 
+describe('audit 2026-09-11 follow-ups', () => {
+  it('POST /model on a STOPPED agent stages the model on its volume (staged:true)', async () => {
+    const { f, store, provider } = await world();
+    store.setAgentState('a1', 'STOPPED');
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/model', headers: as, payload: { model: null } });
+    expect(res.json()).toMatchObject({ live: false, staged: true });
+    expect(provider.execLog.some((c) => c[0] === 'sh-volume' && String(c[1]).includes('models set'))).toBe(true);
+  });
+
+  it('GET /v1/security/posture is read-only (does not record the day\'s baseline)', async () => {
+    const { f, store } = await world();
+    const res = await f.inject({ method: 'GET', url: '/v1/security/posture', headers: as });
+    expect(res.statusCode).toBe(200);
+    expect(store.latestPostureSnapshotBefore(OWNER, '9999-12-31')).toBeUndefined();
+  });
+});
+
 describe('Chat → Memory reports honestly when the AI source cannot run', () => {
   it('returns saved:false (not a false "Saved") when the checkpoint turn fails', async () => {
     const { f, provider } = await world();

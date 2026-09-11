@@ -568,6 +568,31 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     expect(out).not.toContain('- stale');
   });
 
+  it('installs the consult tool + "## Peers" for a grant, and REMOVES them when the grant is revoked (audit 2026-09-11)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertAgent({ id: 'peer1', ownerId: 'o', name: 'Peer', slug: 'peer', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'docker://peer', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    const p = w.provider as MockProvider;
+    // Grant → rebuild: section written, tool installed, applied snapshot taken.
+    w.store.setAgentPeers(agent.id, ['peer1']);
+    p.execResponses.set('sh', { code: 0, stdout: '# K\n', stderr: '' });
+    p.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id);
+    expect(written(p)).toContain('## Peers');
+    expect(written(p)).toContain('**Peer**');
+    expect(p.execLog.some((c) => c[0] === 'sh' && String(c[1]).includes('call-agent'))).toBe(true);
+    expect(w.store.agentsWithPeersPending('o').has(agent.id)).toBe(false);
+    // Revoke → rebuild: section gone, tool + manifest removed.
+    w.store.setAgentPeers(agent.id, []);
+    expect(w.store.agentsWithPeersPending('o').has(agent.id)).toBe(true); // flagged until the rebuild
+    p.execResponses.set('sh', { code: 0, stdout: '# K\n\n## Peers\n\n- **Peer**\n', stderr: '' });
+    p.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id);
+    expect(written(p)).not.toContain('## Peers');
+    expect(p.execLog.some((c) => c[0] === 'sh' && String(c[1]).includes('rm -f ~/.local/bin/call-agent'))).toBe(true);
+    expect(w.store.agentsWithPeersPending('o').has(agent.id)).toBe(false);
+  });
+
   it('writes nothing when the section is already current (no churn on rebuild)', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);

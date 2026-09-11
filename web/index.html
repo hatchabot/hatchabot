@@ -580,6 +580,13 @@
         been discussing into its memory (~20s), so it doesn't forget the context. Durable notes it already saved are
         kept either way — this is only about the <i>current</i> chat.</div>
     </details>
+    <div id="classRow" style="margin-bottom:10px">
+      <label>Class <span style="color:var(--dim)">— a reusable model/source tier (manage them in ⚙ Settings → AI sources → Agent classes)</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="editClass" style="flex:1;min-width:0"></select>
+        <button id="editClassBtn" onclick="assignClass()">Set class</button>
+      </div>
+    </div>
     <div id="modelRow" style="display:none">
       <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -640,8 +647,8 @@
       agent asking a tax or legal agent). Same-owner only; runs entirely on this machine.
     </div>
     <label>Can consult</label>
-    <div id="peerList" class="sub">Loading…</div>
-    <div style="margin-top:10px"><button id="peerSaveBtn" onclick="savePeers()">Save</button></div>
+    <div id="agentPeerList" class="sub">Loading…</div>
+    <div style="margin-top:10px"><button id="peerSaveBtn" onclick="savePeers()" disabled>Save</button></div>
   </section>
 
   <section id="paneEditConn" role="tabpanel" hidden>
@@ -897,7 +904,7 @@
 
     <details class="sec-drawer">
       <summary><b>🏷 Agent classes</b> <span class="sub">— reusable model/source tiers (e.g. Light→Sonnet, Heavy→Fable) you assign to agents</span></summary>
-      <div class="sub" style="margin:8px 0">Give a class a model and/or an AI source. Assign it to agents (⚡ Bulk actions → Set class, or an agent's AI tab). Editing a class re-applies to every agent in it — model live, a source change needs a rebuild.</div>
+      <div class="sub" style="margin:8px 0">Give a class a model and/or an AI source. Assign it to agents (⚡ Bulk actions → Set class, or an agent's ⚙ → AI tab). Editing a class re-applies to every agent in it — model live, a source change needs a rebuild.</div>
       <div id="classList" style="margin-bottom:10px"></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
         <input type="text" id="className" placeholder="Class name (e.g. Heavy)" maxlength="48" style="flex:1;min-width:120px">
@@ -1142,7 +1149,7 @@
       whatever's useful: name, where you live, family, how you like to be addressed,
       standing preferences. Applies to running agents immediately (no rebuild).
     </div>
-    <textarea id="operatorText" rows="10" style="width:100%;box-sizing:border-box;font:inherit"
+    <textarea id="operatorText" rows="10" maxlength="8000" style="width:100%;box-sizing:border-box;font:inherit"
       placeholder="e.g. I'm Chris, 47, in Toronto. Three kids (8, 11, 14). Prefer concise answers and metric units. Partner: Julieta."></textarea>
     <div class="sub" id="operatorErr" style="color:var(--bad);margin-top:6px"></div>
     <div style="margin-top:8px"><button class="primary" id="operatorSaveBtn" onclick="saveOperator()">Save &amp; apply to all my agents</button></div>
@@ -1879,7 +1886,8 @@ async function saveOperator() {
   $('operatorSaveBtn').disabled = true; $('operatorErr').textContent = '';
   try {
     const r = await api('/v1/operator-profile', { method: 'PUT', body: { content: $('operatorText').value } });
-    toast(`Saved — applied to ${r.pushed} running agent${r.pushed === 1 ? '' : 's'}${r.pushed === 0 ? ' (stopped agents get it on next start)' : ''}.`, 7000);
+    $('operatorText').value = r.content;
+    toast(`Saved — applying to ${r.pushing} running agent${r.pushing === 1 ? '' : 's'} in the background${r.pushing === 0 ? ' (stopped agents get it on next start)' : ''}.`, 7000);
   } catch (e) { $('operatorErr').textContent = e.message; }
   finally { $('operatorSaveBtn').disabled = false; }
 }
@@ -2627,6 +2635,26 @@ async function deleteClass(id, name) {
   catch (e) { toast(e.message, 9000); }
 }
 
+async function renderClassPicker(cur) {
+  const sel = $('editClass');
+  sel.innerHTML = '<option value="">— none —</option>';
+  try { agentClasses = (await api('/v1/agent-classes')).classes || []; } catch { /* keep last */ }
+  if (editAgentId !== cur?.id) return;
+  sel.innerHTML = '<option value="">— none —</option>' + (agentClasses || []).map(c =>
+    `<option value="${esc(c.id)}"${c.id === cur?.classId ? ' selected' : ''}>${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}</option>`).join('');
+}
+async function assignClass() {
+  const classId = $('editClass').value || null;
+  $('editClassBtn').disabled = true;
+  try {
+    const r = await api(`/v1/agents/${editAgentId}/class`, { method: 'POST', body: { classId } });
+    toast(classId ? (r.rebuild ? 'Class set — it changes the AI source, so Rebuild to apply.' : 'Class set — model applied.') : 'Class cleared.', 7000);
+    await refresh(false);
+    renderModelPickerForAgent(agents.find(x => x.id === editAgentId));
+  } catch (e) { $('editErr').textContent = e.message; }
+  finally { $('editClassBtn').disabled = false; }
+}
+
 function renderAiList() {
   $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
@@ -2891,8 +2919,9 @@ async function applyModelToSelected() {
     });
     const bits = [];
     if (r.live) bits.push(`${r.live} switched live`);
-    const later = (r.applied || 0) - (r.live || 0);
-    if (later > 0) bits.push(`${later} apply when they next start`);
+    if (r.staged) bits.push(`${r.staged} stopped agent${r.staged > 1 ? 's' : ''} updated for next start`);
+    const later = (r.applied || 0) - (r.live || 0) - (r.staged || 0);
+    if (later > 0) bits.push(`${later} apply on next rebuild`);
     if (r.held) bits.push(`${r.held} kept on their own model`);
     toast(`Default is now ${model}${bits.length ? ' — ' + bits.join(', ') : ''}.`, 7000);
     applyModelDlg.close();
@@ -2965,9 +2994,11 @@ function faAgents() {
 }
 async function openFleetActions() {
   $('faErr').textContent = ''; $('faResults').innerHTML = '';
-  // Classes power the "Set class" action + the class filter chips — make sure
-  // they're loaded even if the Settings dialog was never opened this session.
-  try { if (!agentClasses.length) agentClasses = (await api('/v1/agent-classes')).classes || []; } catch { /* non-fatal */ }
+  // Classes power the "Set class" action + the class filter chips. Always
+  // refetched (a class deleted in Settings must not linger), and the dialog
+  // opens before the fetch so the button never looks dead.
+  fleetActionsDlg.showModal();
+  try { agentClasses = (await api('/v1/agent-classes')).classes || []; } catch { /* non-fatal */ }
   // Filter chips: quick ways to tick a subset. Each sets the tick-list.
   const list = faAgents();
   const chips = [['all', `All (${list.length})`]];
@@ -2989,7 +3020,8 @@ async function openFleetActions() {
   }
   chips.push(['running', `Running (${list.filter(a => a.state === 'RUNNING').length})`]);
   chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED').length})`]);
-  const needs = list.filter(a => (a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending).length;
+  const needsRebuild = (a) => !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
+  const needs = list.filter(needsRebuild).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
   const attn = list.filter(a => agentAttention(a).length).length;
   if (attn) chips.push(['attention', `Needs attention (${attn})`]);
@@ -3007,7 +3039,6 @@ async function openFleetActions() {
   $('faAction').value = 'model';
   faRenderAction();
   faCount();
-  fleetActionsDlg.showModal();
 }
 function faSelect(key) {
   const test = key === 'all' ? () => true
@@ -3015,7 +3046,7 @@ function faSelect(key) {
     : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED'
     : key === 'needs-rebuild' ? (cb) => {
         const a = agents.find(x => x.id === cb.dataset.id);
-        return a && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
+        return !!a && !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
       }
     : key === 'attention' ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && agentAttention(a).length > 0; }
     : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
@@ -3039,6 +3070,10 @@ function faCount() {
 function faRenderAction() {
   const action = $('faAction').value;
   const isModel = action === 'model';
+  // Re-rendering the option lists on every tick must not lose the user's pick —
+  // a reset "Set class" select silently became "clear class" for the whole selection.
+  const prevClass = $('faClass').value, prevModel = $('faModel').value;
+  const keep = (el, prev) => { if (prev && [...el.options].some(o => o.value === prev)) el.value = prev; };
   $('faModel').style.display = isModel ? '' : 'none';
   $('faClass').style.display = action === 'class' ? '' : 'none';
   const sel = faSelected().map(cb => agents.find(a => a.id === cb.dataset.id)).filter(Boolean);
@@ -3046,6 +3081,7 @@ function faRenderAction() {
   if (action === 'class') {
     $('faClass').innerHTML = '<option value="">— none (clear class) —</option>' +
       (agentClasses || []).map(c => `<option value="${esc(c.id)}">${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}${c.aiProfileId ? ' · ' + esc((profiles.find(p => p.id === c.aiProfileId) || {}).name || 'source') : ''}</option>`).join('');
+    keep($('faClass'), prevClass);
     $('faApplyBtn').disabled = !sel.length;
     note = !agentClasses.length ? 'No classes defined yet — add them in ⚙ Settings → AI sources → Agent classes.'
       : 'Assigns the class and applies its model/source: model live on running agents; a source change needs a rebuild (those get the 🔄 flag). Local-source agents skip an incompatible model.';
@@ -3064,6 +3100,7 @@ function faRenderAction() {
       ? common.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
       : '<option value="">— no model common to all selected sources —</option>';
     $('faModel').disabled = !common.length;
+    keep($('faModel'), prevModel);
     if (!sel.length) note = 'Select agents to see the models their sources share.';
     else if (!common.length) note = 'The selected agents are on sources with no model in common — filter by one source first.';
     else note = `Applies live to running agents (next message); stopped ones apply when they next start.${localCount ? ` ${localCount} local-model agent(s) will be skipped.` : ''}`;
@@ -3087,7 +3124,7 @@ async function faApply() {
   if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
   $('faApplyBtn').disabled = true;
   $('faResults').innerHTML = `Working on ${ids.length}…`;
-  let ok = 0, skipped = 0, failed = 0, notSaved = 0;
+  let ok = 0, skipped = 0, failed = 0, notSaved = 0; const reasons = [];
   for (const id of ids) {
     const a = agents.find(x => x.id === id);
     try {
@@ -3096,6 +3133,8 @@ async function faApply() {
         await api(`/v1/agents/${id}/model`, { method: 'POST', body: { model } });
       } else if (action === 'class') {
         const classId = $('faClass').value || null;
+        const cls = classId ? agentClasses.find(c => c.id === classId) : null;
+        if (cls?.model && !(a?.profileModels || []).length && !cls.aiProfileId) { skipped++; continue; } // local source: no switchable model
         await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
       } else if (action === 'checkpoint') {
         if (a?.state !== 'RUNNING') { skipped++; continue; } // needs a live turn
@@ -3112,11 +3151,13 @@ async function faApply() {
         await api(`/v1/agents/${id}/start`, { method: 'POST', body: {} });
       }
       ok++;
-    } catch { failed++; }
+    } catch (e) { failed++; if (reasons.length < 3) reasons.push(`${a?.name || id}: ${e.message}`); }
   }
+  $('faErr').textContent = reasons.join(' · ');
   $('faApplyBtn').disabled = false;
   $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${notSaved ? ` · <span style="color:var(--warn)">${notSaved} not saved (AI source didn't respond)</span>` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
   await refresh(false);
+  if ($('classList').childElementCount) renderClassList(); // Settings may still be open: keep its counts honest
 }
 async function moveAgentsApply(rebuild) {
   if (!moveSourceState) return;
@@ -3815,6 +3856,8 @@ function agentCard(a) {
       <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
     ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
       <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
+    ${a.peersPending && !isRechecking(a) ? `<div class="pair">🔗 <span class="grow">Peer changes apply on the next rebuild — that's what installs its consult tool.</span>
+      <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
       <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
     ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
@@ -3989,12 +4032,14 @@ function showEditTab(name) {
   if (name === 'peers' && editAgentId) void loadPeers();
 }
 
+let peersLoadedFor = null; // Save is armed only after the list loaded for this agent
 async function loadPeers() {
-  const el = $('peerList'), forId = editAgentId;
-  el.innerHTML = 'Loading…';
+  const el = $('agentPeerList'), forId = editAgentId;
+  el.innerHTML = 'Loading…'; peersLoadedFor = null; $('peerSaveBtn').disabled = true;
   try {
     const { candidates } = await api(`/v1/agents/${forId}/peers`);
     if (editAgentId !== forId) return;
+    peersLoadedFor = forId; $('peerSaveBtn').disabled = false;
     el.innerHTML = candidates.length
       ? candidates.map(c => `<label class="pair" style="padding:3px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
           <input type="checkbox" class="peerCb" data-id="${esc(c.id)}"${c.granted ? ' checked' : ''} style="width:auto;flex:none">
@@ -4003,6 +4048,8 @@ async function loadPeers() {
   } catch (e) { if (editAgentId === forId) el.innerHTML = esc(e.message); }
 }
 async function savePeers() {
+  // Never PUT from an unloaded/failed list: that would silently revoke every grant.
+  if (peersLoadedFor !== editAgentId) { toast('Peer list not loaded yet — reopen the tab.'); return; }
   const ids = [...document.querySelectorAll('.peerCb:checked')].map(cb => cb.dataset.id);
   $('peerSaveBtn').disabled = true;
   try {
@@ -4221,6 +4268,7 @@ async function openEdit(id, name, tab = 'def') {
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
+  renderClassPicker(cur);
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
   $('editImage').value = cur?.image ?? '';
   populateDerivedDatalist();
@@ -4378,7 +4426,8 @@ async function switchModel() {
     const r = await api(`/v1/agents/${editAgentId}/model`, { method: 'POST', body: { model } });
     toast(r.live
       ? `Now running ${r.model} — effective on the next message, no rebuild.`
-      : `Set to ${r.model} — applies when the agent next starts.`, 7000);
+      : r.staged ? `Set to ${r.model} — written to the stopped agent; applies when it next starts.`
+      : `Set to ${r.model} — applies on its next rebuild.`, 7000);
     await refresh(false);
   } catch (e) { $('editErr').textContent = e.message; }
   finally { $('modelBtn').disabled = false; }

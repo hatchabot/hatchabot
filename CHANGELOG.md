@@ -2,6 +2,33 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.135.0] — 2026-09-11
+
+### Fixed (13th audit — see docs/audit-2026-09-11.md)
+- **Changing a source's default model applied the OLD model** to its agents (a
+  stale in-memory profile) while the UI said the new one. Fixed + regression test.
+- **Settings → Servers list was blank** since v0.124.0 (a duplicate element id).
+- **Bulk actions reset your chosen class/model** on every checkbox tick — Apply could
+  silently clear the class from the whole selection.
+- A live model change cleared the "peers need a rebuild" flag without installing the
+  consult tool; the card now also explains it and offers Rebuild.
+- Signing in with identity would have reset the operator text to "Not set" on every
+  agent and orphaned your classes (adoption now carries those tables).
+- The agent-to-agent token showed up under CLI tokens; revoking it bricked consults
+  permanently. Hidden there; re-mintable.
+- A class with a bad model could leave an agent half-switched to a new source.
+- A2A: errors were returned as the peer's answer; now 502/504. Consult text is
+  framed as untrusted, logged to the timeline, rate-limited per caller, and loops
+  are broken per-target instead of per-owner.
+- Recover context: a chat-typed "System note:" was labelled as the platform —
+  now always "User", and the agent is told user lines are never instructions.
+- "Applies when the agent next starts" is now true: stopped agents get the model
+  written to their volume (/model, source default, classes).
+- Duplicate class names 400 instead of 500; class edits skip archived agents;
+  revoking all peers removes the tool + section on rebuild; Peers Save can't fire
+  on an unloaded list; operator save runs in the background (202); posture check
+  no longer overwrites the daily baseline; fleet list no longer 3 queries/agent.
+
 ## [0.134.0] — 2026-09-11
 
 ### Added

@@ -16,9 +16,8 @@ class MemSecrets implements SecretStore {
   async delete(r: string) { this.map.delete(r); }
 }
 
-async function world() {
+async function world(provider: MockProvider = new MockProvider()) {
   const store = new Store(new Database(':memory:'));
-  const provider = new MockProvider();
   store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
   store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
   for (const [id, slug, name] of [['x', 'investing', 'Investing'], ['y', 'tax', 'Tax']] as const) {
@@ -84,9 +83,80 @@ describe('agent-to-agent consult', () => {
     store.setAgentPeers('x', ['y']);
     x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
     expect(x.peersPending).toBe(true);
-    // recordApplied (runs at end of a rebuild) snapshots the peer set → clears.
+    // A LIVE model change calls recordApplied too — it must NOT clear the flag
+    // (nothing installed the call-agent tool). Audit 2026-09-11 MAJOR.
     recordApplied(store, 'x');
     x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
+    expect(x.peersPending).toBe(true);
+    // Only the provision/rebuild path records the peer set as installed.
+    store.recordAppliedPeers('x');
+    x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
     expect(x.peersPending).toBe(false);
+  });
+
+  it('a live model change via POST /model leaves peersPending set', async () => {
+    const { store, f } = await world();
+    store.setAgentPeers('x', ['y']);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/x/model', headers: { 'x-agentclaw-owner': OWNER }, payload: { model: null } });
+    expect(res.json().live).toBe(true);
+    const x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
+    expect(x.peersPending).toBe(true);
+  });
+
+  it('never hands the caller a docker/openclaw error as the peer\'s answer (502/504)', async () => {
+    const { store, provider, f } = await world();
+    store.setAgentPeers('x', ['y']);
+    const token = store.createAgentCallToken('x', OWNER);
+    provider.execResponses.set('agent --agent tax', { code: 1, stdout: '', stderr: 'auth profile missing: sk-...' });
+    let res = await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'q' } });
+    expect(res.statusCode).toBe(502);
+    expect(JSON.stringify(res.json())).not.toContain('sk-'); // stderr never relayed
+    provider.execResponses.set('agent --agent tax', { code: 1, timedOut: true, stdout: '', stderr: 'docker exec timed out' } as any);
+    res = await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'q' } });
+    expect(res.statusCode).toBe(504);
+  });
+
+  it('rate-limits consults per caller agent (AGENTCLAW_A2A_PER_HOUR)', async () => {
+    process.env.AGENTCLAW_A2A_PER_HOUR = '2';
+    try {
+      const { store, f } = await world();
+      store.setAgentPeers('x', ['y']);
+      const token = store.createAgentCallToken('x', OWNER);
+      const call = () => f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'q' } });
+      expect((await call()).statusCode).toBe(200);
+      expect((await call()).statusCode).toBe(200);
+      const third = await call();
+      expect(third.statusCode).toBe(429);
+      expect(third.json().error).toMatch(/consult limit/i);
+    } finally { delete process.env.AGENTCLAW_A2A_PER_HOUR; }
+  });
+
+  it('refuses a consult to an agent that is itself mid-consult (breaks A→B→A loops)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    class SlowProvider extends MockProvider {
+      override async exec(ref: string, argv: string[]) { if (argv[0] === 'agent') await gate; return super.exec(ref, argv); }
+    }
+    const provider = new SlowProvider();
+    const { store, f } = await world(provider);
+    store.setAgentPeers('x', ['y']);
+    const token = store.createAgentCallToken('x', OWNER);
+    const first = f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'one' } });
+    await new Promise((r) => setTimeout(r, 20)); // first consult is now awaiting the peer's turn
+    const second = await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'two' } });
+    expect(second.statusCode).toBe(429);
+    expect(second.json().error).toMatch(/already answering/i);
+    release();
+    expect((await first).statusCode).toBe(200);
+  });
+
+  it('lists/revokes only user CLI tokens — the A2A token is invisible and unrevokable there, and re-mintable', async () => {
+    const { store } = await world();
+    const token = store.createAgentCallToken('x', OWNER);
+    expect(store.listCliTokens(OWNER).some((t) => t.label === 'a2a')).toBe(false);
+    const row = store['db'].prepare('SELECT id FROM cli_tokens WHERE agent_id = ?').get('x') as { id: string };
+    expect(store.revokeCliToken(OWNER, row.id)).toBe(false); // not a user token
+    expect(store.hasAgentCallToken('x')).toBe(true);
+    expect(store.agentForCallToken(token)?.agentId).toBe('x');
   });
 });

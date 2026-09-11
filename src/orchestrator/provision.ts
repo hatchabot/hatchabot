@@ -11,7 +11,7 @@ import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { syncConnections } from './googleConnections.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 
 /**
  * The `call-agent` tool installed on agents granted peers: consults a peer by
@@ -252,6 +252,7 @@ async function runProvisionStepsInner(
     // Step 4: runtime + persistent volume.
     const { runtimeRef } = await provider.provision(spec);
     recordApplied(store, agentId);
+    store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     // Purge ONLY storage this run created. On a retry, spec.previousRef makes
     // provision() reuse the existing volume — purging it there destroys the
     // agent's memory permanently, turning a transient failure (slow boot,
@@ -644,6 +645,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     }
     const { runtimeRef } = await provider.provision(spec);
     recordApplied(store, agentId);
+    store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     await provider.start(runtimeRef);
     // As generous as a retry's health wait: a rebuild boots an agent with its
     // whole history to load, and 30s used to fail exactly the agents that had
@@ -822,6 +824,12 @@ export async function syncDataSourceDocs(
             `echo ${JSON.stringify(b64m)} | base64 -d > ~/.openclaw/peers.json`,
         )
         .catch((e) => log('peer_tools.failed', { agentId, error: String((e as Error).message ?? e) }));
+    } else {
+      // No grant: make sure a previous one isn't still advertised/installed.
+      next = removeSection(next, '## Peers');
+      await provider
+        .execShell(runtimeRef, 'rm -f ~/.local/bin/call-agent ~/.openclaw/peers.json')
+        .catch(() => {});
     }
     if (next === read.stdout) return; // already current: never churn the user's file
     const b64 = Buffer.from(next, 'utf8').toString('base64');

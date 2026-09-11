@@ -102,6 +102,23 @@ describe('POST /v1/ai-profiles/:id/apply-default-model', () => {
     expect(sets.length).toBe(2);
   });
 
+  it('live-applies the NEW default, not the stale in-memory old one (audit 2026-09-11 CRITICAL)', async () => {
+    const { provider, f } = await world();
+    await apply(f, 'p1', { model: 'claude-sonnet-5', apply: ['a1'] });
+    const sets = provider.execLog.filter((c) => Array.isArray(c) && c[0] === 'models' && c[1] === 'set').map((c) => c[2]);
+    expect(sets).toEqual(['anthropic/claude-sonnet-5']); // was anthropic/claude-opus-4-8 (the OLD default)
+  });
+
+  it('stages the new default onto a STOPPED agent\'s volume so it applies on next start', async () => {
+    const { store, provider, f } = await world();
+    store.setAgentState('a2', 'STOPPED');
+    const res = await apply(f, 'p1', { model: 'claude-sonnet-5', apply: ['a1', 'a2'] });
+    expect(res.json()).toMatchObject({ live: 1, staged: 1 });
+    const vol = provider.execLog.find((c) => c[0] === 'sh-volume');
+    expect(String(vol?.[1])).toContain("models set 'anthropic/claude-sonnet-5'");
+    expect(store.getAgent('a2')!.appliedModel).toBe('claude-sonnet-5');
+  });
+
   it('with apply:[] holds everyone and only changes the default (for new agents)', async () => {
     const { store, f } = await world();
     const res = await apply(f, 'p1', { model: 'claude-opus-5', apply: [] });

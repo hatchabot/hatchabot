@@ -391,6 +391,7 @@ export class Store {
     // insertion sequence, so this preserves the old created-at order. Runs once
     // (new agents get an explicit sort_order); idempotent via the NULL guard.
     this.db.exec(`UPDATE agents SET sort_order = rowid WHERE sort_order IS NULL`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS agents_class ON agents (class_id)`);
 
     // Agents provisioned before applied-tracking existed were configured with
     // whatever profile they still point at. Backfill, so the "will switch on
@@ -463,6 +464,7 @@ export class Store {
     // A2A residue: peer grants in BOTH directions, and this agent's call token.
     this.db.prepare(`DELETE FROM agent_peers WHERE agent_id = ? OR peer_id = ?`).run(agentId, agentId);
     this.db.prepare(`DELETE FROM cli_tokens WHERE agent_id = ?`).run(agentId);
+    this.db.prepare(`UPDATE agents SET class_id = NULL WHERE id = ?`).run(agentId);
   }
 
   /**
@@ -1095,6 +1097,12 @@ export class Store {
         // Without this a CLI token keeps working as the old owner and returns
         // an EMPTY fleet — "all my agents are gone" instead of "log in again".
         `UPDATE cli_tokens SET owner_id = ? WHERE owner_id = ?`,
+        // Newer owner-keyed tables: without these the operator identity text
+        // silently reverts to "Not set" on every agent and classes become
+        // uneditable orphans after the first identity sign-in.
+        `UPDATE agent_classes SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE operator_profile SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE posture_snapshots SET owner_id = ? WHERE owner_id = ?`,
       ]) {
         rows += this.db.prepare(sql).run(owner, localOwner).changes;
       }
@@ -1260,7 +1268,9 @@ export class Store {
   ): Array<{ id: string; label: string; createdAt: string; lastUsedAt?: string; expiresAt?: string }> {
     return (
       this.db
-        .prepare(`SELECT id, label, created_at, last_used_at, expires_at FROM cli_tokens WHERE owner_id = ? ORDER BY created_at DESC`)
+        // agent_id IS NULL: the agent-scoped A2A call tokens are infrastructure,
+        // not user CLI tokens — listing/revoking them here bricked consults.
+        .prepare(`SELECT id, label, created_at, last_used_at, expires_at FROM cli_tokens WHERE owner_id = ? AND agent_id IS NULL ORDER BY created_at DESC`)
         .all(ownerId) as any[]
     ).map((r) => ({
       id: r.id,
@@ -1273,7 +1283,7 @@ export class Store {
 
   revokeCliToken(ownerId: string, id: string): boolean {
     return (
-      this.db.prepare(`DELETE FROM cli_tokens WHERE id = ? AND owner_id = ?`).run(id, ownerId).changes === 1
+      this.db.prepare(`DELETE FROM cli_tokens WHERE id = ? AND owner_id = ? AND agent_id IS NULL`).run(id, ownerId).changes === 1
     );
   }
 
@@ -2042,12 +2052,48 @@ export class Store {
   }
 
   setAgentApplied(id: string, aiProfileId: string, model: string): void {
-    // Snapshot the peer set too (sorted csv), since a rebuild is what installs
-    // the call-agent tool for the current grant. Matches the migration backfill.
-    const peers = this.listAgentPeers(id).slice().sort().join(',');
     this.db
-      .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ?, applied_peers = ? WHERE id = ?`)
-      .run(aiProfileId, model, peers, id);
+      .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ? WHERE id = ?`)
+      .run(aiProfileId, model, id);
+  }
+
+  /** Record the current peer grant as installed. ONLY a provision/rebuild may
+   *  call this — that's what writes the call-agent tool; a live model change
+   *  calling it would clear "rebuild needed" without installing anything. */
+  recordAppliedPeers(id: string): void {
+    const peers = this.listAgentPeers(id).slice().sort().join(',');
+    this.db.prepare(`UPDATE agents SET applied_peers = ? WHERE id = ?`).run(peers, id);
+  }
+
+  /** True if the agent holds an (unexpired) A2A call token row. */
+  hasAgentCallToken(agentId: string): boolean {
+    return !!this.db
+      .prepare(`SELECT 1 FROM cli_tokens WHERE agent_id = ? AND (expires_at IS NULL OR expires_at > ?)`)
+      .get(agentId, new Date().toISOString());
+  }
+
+  /** Owner-wide: which agents have a peer grant that differs from what was
+   *  installed at their last rebuild. One query pair instead of two per agent. */
+  agentsWithPeersPending(ownerId: string): Set<string> {
+    const applied = new Map<string, string>();
+    for (const r of this.db.prepare(`SELECT id, applied_peers FROM agents WHERE owner_id = ? AND state != 'DELETED'`).all(ownerId) as any[]) {
+      applied.set(r.id, r.applied_peers ?? '');
+    }
+    const cur = new Map<string, string[]>();
+    for (const r of this.db.prepare(`SELECT p.agent_id, p.peer_id FROM agent_peers p JOIN agents a ON a.id = p.agent_id WHERE a.owner_id = ?`).all(ownerId) as any[]) {
+      (cur.get(r.agent_id) ?? cur.set(r.agent_id, []).get(r.agent_id)!).push(r.peer_id);
+    }
+    const out = new Set<string>();
+    for (const [id, csv] of applied) {
+      if ((cur.get(id) ?? []).slice().sort().join(',') !== csv) out.add(id);
+    }
+    return out;
+  }
+
+  /** A class of this owner by (case-insensitive) name, for uniqueness checks. */
+  agentClassByName(ownerId: string, name: string): AgentClass | undefined {
+    const r = this.db.prepare(`SELECT * FROM agent_classes WHERE owner_id = ? AND name = ? COLLATE NOCASE`).get(ownerId, name) as any;
+    return r ? this.#rowToClass(r) : undefined;
   }
 
   /** The peer csv that was live at last provision/rebuild (for the "peers

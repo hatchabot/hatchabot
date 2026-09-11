@@ -81,6 +81,21 @@ function fenceMask(lines: string[]): boolean[] {
   return inFence;
 }
 
+/** Drop a managed section (heading through the line before the next heading). No-op if absent. */
+export function removeSection(content: string, heading: string): string {
+  const lines = content.split('\n');
+  const inFence = fenceMask(lines);
+  const start = lines.findIndex((l, i) => !inFence[i] && l.trimEnd() === heading);
+  if (start === -1) return content;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (!inFence[i] && /^#{1,6} /.test(lines[i]!)) { end = i; break; }
+  }
+  // Cutting the block leaves the blank line before it AND the one that ended
+  // it back-to-back; collapse that to one separator.
+  return [...lines.slice(0, start), ...lines.slice(end)].join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
 export function replaceSection(content: string, heading: string, section: string): string {
   const lines = content.split('\n');
   // A ``` region can legitimately CONTAIN the heading text (docs showing an
@@ -147,8 +162,11 @@ export const OPERATOR_HEADING = '## About the operator';
  */
 export function operatorSection(content: string): string {
   const body = (content ?? '').trim();
+  // Neutralise fence delimiters too: an unbalanced \`\`\` in free text would put
+  // every later managed heading "inside a fence" for replaceSection, which then
+  // appends a fresh copy of that section on every sync (unbounded growth).
   const safe = body
-    ? body.split('\n').map((l) => l.replace(/^\s*#{1,6}\s+/, '')).join('\n')
+    ? body.split('\n').map((l) => l.replace(/^\s*#{1,6}\s+/, '').replace(/^(\s*)(```|~~~)/, '$1\u200b$2')).join('\n')
     : '_Not set — the operator can fill this in under ⚙ Settings → You._';
   return `${OPERATOR_HEADING}
 

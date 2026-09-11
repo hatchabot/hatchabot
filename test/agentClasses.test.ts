@@ -65,6 +65,49 @@ describe('agent classes', () => {
     expect(store.listAgentClasses(OWNER)).toHaveLength(0);
   });
 
+  it('refuses a duplicate class name (case-insensitive) on create and rename', async () => {
+    const { f } = await world();
+    const a = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Light' } });
+    expect(a.statusCode).toBe(200);
+    const dup = await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'light' } });
+    expect(dup.statusCode).toBe(400); // was an unhandled SQLITE_CONSTRAINT → 500
+    const b = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Heavy' } })).json().class.id;
+    const ren = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${b}`, headers: H, payload: { name: 'Light' } });
+    expect(ren.statusCode).toBe(400);
+  });
+
+  it('a class whose model the target source cannot run leaves the agent UNTOUCHED (no half-switch)', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Local', vendor: 'local', kind: 'api_key', model: 'gpt-oss', secretRef: 'ai/p2', createdAt: 'now' });
+    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'Bad', model: 'claude-sonnet-5', aiProfileId: 'p2' } })).json().class.id;
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
+    expect(res.statusCode).toBe(400);
+    const a = store.getAgent('a1')!;
+    expect(a.aiProfileId).toBe('p1');      // source NOT switched
+    expect(a.model).toBeUndefined();       // override NOT written
+    expect(a.classId).toBeUndefined();
+  });
+
+  it('refuses a class that would put the agent on another account\'s machine-login source', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile({ id: 'p-ml', ownerId: 'user-other', name: 'Their Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', shared: true, createdAt: 'now' } as any);
+    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'ML', aiProfileId: 'p-ml' } })).json().class.id;
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/machine-login/i);
+    expect(store.getAgent('a1')!.aiProfileId).toBe('p1');
+  });
+
+  it('editing a class skips ARCHIVED members', async () => {
+    const { store, f } = await world();
+    const classId = (await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: H, payload: { name: 'T', model: 'claude-sonnet-5' } })).json().class.id;
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: H, payload: { classId } });
+    store.setAgentState('a1', 'STOPPED'); store.setAgentState('a1', 'ARCHIVED');
+    const edit = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${classId}`, headers: H, payload: { model: 'claude-fable-5' } });
+    expect(edit.json().applied).toBe(0);
+    expect(store.getAgent('a1')!.model).toBe('claude-sonnet-5'); // untouched while archived
+  });
+
   it('rejects a class model the agent’s source cannot run', async () => {
     const { f } = await world();
     // local source can't take an anthropic model override
