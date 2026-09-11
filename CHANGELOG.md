@@ -2,6 +2,18 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.132.0] — 2026-09-10
+
+### Added
+- **Agent classes — reusable model/source tiers.** Define classes (e.g.
+  Light→Sonnet, Heavy→Fable; custom names welcome) in ⚙ Settings → AI sources →
+  Agent classes, each carrying an optional model and/or AI source. Assign a
+  class to agents (⚡ Bulk actions → **Set class**, filterable by class), and it
+  applies the class model/source — model live (no rebuild), a source change
+  flags a rebuild. **Editing a class re-applies to every agent in it**, so you
+  retune a whole tier in one place. Agents show a 🏷 class badge. Deleting a
+  class keeps each agent's current model, just drops the tag.
+
 ## [0.131.0] — 2026-09-10
 
 ### Added

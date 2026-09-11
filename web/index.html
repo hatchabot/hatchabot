@@ -893,6 +893,20 @@
         <button id="searchKeyDelBtn" onclick="removeSearchKey()" style="display:none">Remove</button>
       </div>
     </details>
+
+    <details class="sec-drawer">
+      <summary><b>🏷 Agent classes</b> <span class="sub">— reusable model/source tiers (e.g. Light→Sonnet, Heavy→Fable) you assign to agents</span></summary>
+      <div class="sub" style="margin:8px 0">Give a class a model and/or an AI source. Assign it to agents (⚡ Bulk actions → Set class, or an agent's AI tab). Editing a class re-applies to every agent in it — model live, a source change needs a rebuild.</div>
+      <div id="classList" style="margin-bottom:10px"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <input type="text" id="className" placeholder="Class name (e.g. Heavy)" maxlength="48" style="flex:1;min-width:120px">
+        <select id="classModel" style="width:auto;min-width:150px"><option value="">— model (optional) —</option></select>
+        <select id="classSource" style="width:auto;min-width:150px"><option value="">— source: leave as-is —</option></select>
+        <button id="classAddBtn" onclick="addClass()">Add class</button>
+      </div>
+      <div class="sub" id="classErr" style="color:var(--bad);margin-top:6px"></div>
+      <div class="sub" style="margin-top:6px">Suggested starters: <a href="#" onclick="event.preventDefault();quickClass('Light')">Light</a> · <a href="#" onclick="event.preventDefault();quickClass('Standard')">Standard</a> · <a href="#" onclick="event.preventDefault();quickClass('Heavy')">Heavy</a> (adds the name — set its model/source after).</div>
+    </details>
   </section>
 
   <section id="paneHosts" role="tabpanel" hidden>
@@ -1490,12 +1504,14 @@
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
     <select id="faAction" onchange="faRenderAction()" style="width:auto">
       <option value="model">Switch model (live, no rebuild)</option>
+      <option value="class">Set class</option>
       <option value="checkpoint">Chat → Memory (save conversation)</option>
       <option value="rebuild">Rebuild</option>
       <option value="stop">Stop</option>
       <option value="start">Start</option>
     </select>
     <select id="faModel" style="width:auto;min-width:180px"></select>
+    <select id="faClass" style="width:auto;min-width:160px;display:none"></select>
   </div>
   <div class="sub" id="faActionNote" style="margin-top:6px"></div>
 
@@ -2431,6 +2447,7 @@ async function openAiDlg(tab) {
   renderAiList();       // instant paint (dropdowns fall back to text until models load)
   loadMediaKey();
   loadSearchKey();
+  loadClasses();
   renderPeers();
   // Fetch what each of your sources offers, then re-render so the model fields
   // become dropdowns instead of text boxes. Refetched EVERY time this opens (no
@@ -2511,6 +2528,73 @@ function sourceUsage(p) {
     <summary class="sub" style="cursor:pointer">${ags.length} agent${ags.length === 1 ? '' : 's'} · ${breakdown}</summary>
     <div style="padding:4px 0 4px 14px">${rows}</div>
   </details>`;
+}
+
+// ---- agent classes (model/source tiers) -----------------------------------
+let agentClasses = [];
+function classModelOptions(selected) {
+  // Union of models across the owner's sources; the server validates a chosen
+  // model against the agent's actual source when a class is applied.
+  const models = [...new Set(profiles.flatMap(p => [p.model, ...(p.models || [])]).filter(Boolean))].sort();
+  if (selected && !models.includes(selected)) models.unshift(selected);
+  return `<option value="">— model: leave as-is —</option>` +
+    models.map(m => `<option value="${esc(m)}"${m === selected ? ' selected' : ''}>${esc(m)}</option>`).join('');
+}
+function classSourceOptions(selected) {
+  return `<option value="">— source: leave as-is —</option>` +
+    profiles.map(p => `<option value="${esc(p.id)}"${p.id === selected ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+}
+async function loadClasses() {
+  $('classModel').innerHTML = classModelOptions('');
+  $('classSource').innerHTML = classSourceOptions('');
+  $('classErr').textContent = '';
+  try {
+    agentClasses = (await api('/v1/agent-classes')).classes || [];
+    renderClassList();
+  } catch (e) { $('classList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+function renderClassList() {
+  if (!agentClasses.length) { $('classList').innerHTML = '<div class="sub">No classes yet.</div>'; return; }
+  $('classList').innerHTML = agentClasses.map(c => {
+    const n = agents.filter(a => a.classId === c.id).length;
+    return `<div class="pair" style="align-items:center;gap:6px;flex-wrap:wrap;padding:4px 0">
+      <span class="grow"><b>${esc(c.name)}</b> <span class="sub">· ${n} agent${n === 1 ? '' : 's'}</span></span>
+      <select onchange="updateClass('${c.id}','model',this.value)" style="width:auto;min-width:140px">${classModelOptions(c.model || '')}</select>
+      <select onchange="updateClass('${c.id}','aiProfileId',this.value)" style="width:auto;min-width:140px">${classSourceOptions(c.aiProfileId || '')}</select>
+      <button class="danger" onclick="deleteClass('${c.id}','${jsq(c.name)}')">Delete</button>
+    </div>`;
+  }).join('');
+}
+async function addClass() {
+  const name = $('className').value.trim();
+  if (!name) { $('classErr').textContent = 'Give the class a name.'; return; }
+  $('classAddBtn').disabled = true; $('classErr').textContent = '';
+  try {
+    await api('/v1/agent-classes', { method: 'POST', body: { name, model: $('classModel').value || undefined, aiProfileId: $('classSource').value || undefined } });
+    $('className').value = ''; $('classModel').value = ''; $('classSource').value = '';
+    await loadClasses();
+    toast(`Class "${name}" added.`);
+  } catch (e) { $('classErr').textContent = e.message; }
+  finally { $('classAddBtn').disabled = false; }
+}
+function quickClass(name) { $('className').value = name; $('className').focus(); }
+async function updateClass(id, field, value) {
+  try {
+    const r = await api(`/v1/agent-classes/${id}`, { method: 'PUT', body: { [field]: value } });
+    agentClasses = agentClasses.map(c => c.id === id ? r.class : c);
+    const bits = [];
+    if (r.applied) bits.push(`applied to ${r.applied}`);
+    if (r.needRebuild) bits.push(`${r.needRebuild} need a rebuild (source change)`);
+    if ((r.skipped || []).length) bits.push(`${r.skipped.length} skipped`);
+    toast(`Class updated${bits.length ? ' — ' + bits.join(', ') : ''}.`, 7000);
+    renderClassList();
+    await refresh(false);
+  } catch (e) { toast(e.message, 9000); loadClasses(); }
+}
+async function deleteClass(id, name) {
+  if (!confirm(`Delete class "${name}"?\n\nAgents in it keep their current model/source — they just lose the class tag.`)) return;
+  try { await api(`/v1/agent-classes/${id}`, { method: 'DELETE' }); await loadClasses(); await refresh(false); }
+  catch (e) { toast(e.message, 9000); }
 }
 
 function renderAiList() {
@@ -2849,8 +2933,11 @@ function faAgents() {
   // Owner's own, non-archived — the set bulk actions operate on.
   return agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED');
 }
-function openFleetActions() {
+async function openFleetActions() {
   $('faErr').textContent = ''; $('faResults').innerHTML = '';
+  // Classes power the "Set class" action + the class filter chips — make sure
+  // they're loaded even if the Settings dialog was never opened this session.
+  try { if (!agentClasses.length) agentClasses = (await api('/v1/agent-classes')).classes || []; } catch { /* non-fatal */ }
   // Filter chips: quick ways to tick a subset. Each sets the tick-list.
   const list = faAgents();
   const chips = [['all', `All (${list.length})`]];
@@ -2861,6 +2948,10 @@ function openFleetActions() {
   }
   const groups = [...new Set(list.map(a => a.group).filter(Boolean))];
   for (const g of groups) chips.push([`grp:${g}`, `${g} (${list.filter(a => a.group === g).length})`]);
+  for (const c of (agentClasses || [])) {
+    const n = list.filter(a => a.classId === c.id).length;
+    if (n) chips.push([`cls:${c.id}`, `class: ${c.name} (${n})`]);
+  }
   const hostIds = [...new Set(list.map(a => a.hostId))];
   if (hostIds.length > 1) for (const h of hostIds) {
     const host = hosts.find(x => x.id === h);
@@ -2897,6 +2988,7 @@ function faSelect(key) {
     : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
     : key.startsWith('grp:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.group || '') === key.slice(4)
     : key.startsWith('host:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.hostId) === key.slice(5)
+    : key.startsWith('cls:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.classId) === key.slice(4)
     : () => false;
   // A filter REPLACES the selection (so chips are predictable); Select-all is additive via its own control.
   document.querySelectorAll('.faCb').forEach(cb => { cb.checked = test(cb); });
@@ -2915,8 +3007,18 @@ function faRenderAction() {
   const action = $('faAction').value;
   const isModel = action === 'model';
   $('faModel').style.display = isModel ? '' : 'none';
+  $('faClass').style.display = action === 'class' ? '' : 'none';
   const sel = faSelected().map(cb => agents.find(a => a.id === cb.dataset.id)).filter(Boolean);
   let note = '';
+  if (action === 'class') {
+    $('faClass').innerHTML = '<option value="">— none (clear class) —</option>' +
+      (agentClasses || []).map(c => `<option value="${esc(c.id)}">${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}${c.aiProfileId ? ' · ' + esc((profiles.find(p => p.id === c.aiProfileId) || {}).name || 'source') : ''}</option>`).join('');
+    $('faApplyBtn').disabled = !sel.length;
+    note = !agentClasses.length ? 'No classes defined yet — add them in ⚙ Settings → AI sources → Agent classes.'
+      : 'Assigns the class and applies its model/source: model live on running agents; a source change needs a rebuild (those get the 🔄 flag). Local-source agents skip an incompatible model.';
+    $('faActionNote').textContent = note;
+    return;
+  }
   if (isModel) {
     // Offer only models EVERY selected agent's source supports (intersection),
     // so we never set a model an agent can't run. Local-source agents have no
@@ -2959,6 +3061,9 @@ async function faApply() {
       if (action === 'model') {
         if (!(a?.profileModels || []).length) { skipped++; continue; } // local: no menu
         await api(`/v1/agents/${id}/model`, { method: 'POST', body: { model } });
+      } else if (action === 'class') {
+        const classId = $('faClass').value || null;
+        await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
       } else if (action === 'checkpoint') {
         if (a?.state !== 'RUNNING') { skipped++; continue; } // needs a live turn
         const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST', body: {} });
@@ -3642,6 +3747,7 @@ function agentMeta(a) {
   if (a.modelWarm === false) bits.push('warming up');
   if (a.dataSummary) bits.push(esc(a.dataSummary));
   if (a.sharedMemory) bits.push('shared memory');
+  if (a.className) bits.push(`🏷 ${esc(a.className)}`);
   if (a.image) bits.push(`📌 ${esc(a.image)}`);
   const debug = esc(a.runtimeRef.replace('docker://', '')) + (a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : '');
   return `<div class="runtime" title="${debug}">${bits.join(' · ') || '—'}</div>`;

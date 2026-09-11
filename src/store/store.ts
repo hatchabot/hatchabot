@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type {
   Agent,
+  AgentClass,
   AgentEnvVar,
   AgentState,
   AIProfile,
@@ -37,6 +38,16 @@ export class Store {
         vendor TEXT NOT NULL, kind TEXT NOT NULL, model TEXT NOT NULL,
         secret_ref TEXT, created_at TEXT NOT NULL
       );
+
+      -- Agent classes: owner-defined tiers that carry a model and/or AI source,
+      -- so agents can be tagged by complexity ("Light"→sonnet, "Heavy"→fable)
+      -- and retuned as a group. Assigning a class writes the agent's source +
+      -- model (via the normal fields); editing a class re-applies to its agents.
+      CREATE TABLE IF NOT EXISTS agent_classes (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, name TEXT NOT NULL,
+        model TEXT, ai_profile_id TEXT, created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS agent_classes_owner_name ON agent_classes (owner_id, name);
 
       CREATE TABLE IF NOT EXISTS hosts (
         id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, kind TEXT NOT NULL,
@@ -340,6 +351,8 @@ export class Store {
       // last provisioned/rebuilt — the call-agent tool is installed on rebuild,
       // so a grant that differs from this needs a rebuild to take effect.
       `ALTER TABLE agents ADD COLUMN applied_peers TEXT`,
+      // The agent class (model/source tier) this agent belongs to, if any.
+      `ALTER TABLE agents ADD COLUMN class_id TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -556,6 +569,40 @@ export class Store {
       .prepare(`SELECT * FROM ai_profiles WHERE owner_id = ? OR shared = 1 ORDER BY created_at`)
       .all(ownerId) as any[];
     return rows.map(rowToAIProfile);
+  }
+
+  // ---- agent classes (model/source tiers) -----------------------------------
+  #rowToClass = (r: any): AgentClass => ({
+    id: r.id, ownerId: r.owner_id, name: r.name,
+    model: r.model ?? undefined, aiProfileId: r.ai_profile_id ?? undefined, createdAt: r.created_at,
+  });
+  listAgentClasses(ownerId: string): AgentClass[] {
+    return (this.db.prepare(`SELECT * FROM agent_classes WHERE owner_id = ? ORDER BY name`).all(ownerId) as any[]).map(this.#rowToClass);
+  }
+  getAgentClass(id: string): AgentClass | undefined {
+    const r = this.db.prepare(`SELECT * FROM agent_classes WHERE id = ?`).get(id) as any;
+    return r ? this.#rowToClass(r) : undefined;
+  }
+  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id`,
+      )
+      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, new Date().toISOString());
+  }
+  deleteAgentClass(id: string): void {
+    this.transact(() => {
+      this.db.prepare(`UPDATE agents SET class_id = NULL WHERE class_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM agent_classes WHERE id = ?`).run(id);
+    });
+  }
+  setAgentClass(agentId: string, classId: string | null): void {
+    this.db.prepare(`UPDATE agents SET class_id = ? WHERE id = ?`).run(classId, agentId);
+  }
+  listAgentsInClass(classId: string): Agent[] {
+    return (this.db.prepare(`SELECT * FROM agents WHERE class_id = ? AND state != 'DELETED'`).all(classId) as any[]).map(rowToAgent);
   }
 
   // ---- Hosts -------------------------------------------------------------
@@ -2311,6 +2358,7 @@ function rowToAgent(r: any): Agent {
     gatewayPort: r.gateway_port ?? undefined,
     gatewayToken: r.gateway_token ?? undefined,
     group: r.group_name ?? undefined,
+    classId: r.class_id ?? undefined,
     sortOrder: r.sort_order ?? undefined,
     parameters: r.params ? safeJson(r.params, undefined) : undefined,
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,

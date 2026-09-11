@@ -426,6 +426,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
        *  last rebuild — the call-agent tool is (re)installed on rebuild, so this
        *  agent needs one before it can consult its current peers. */
       peersPending: store.listAgentPeers(agent.id).slice().sort().join(',') !== store.appliedPeersCsv(agent.id),
+      /** The agent's class name (for display/filter), resolved from classId. */
+      className: agent.classId ? store.getAgentClass(agent.classId)?.name : undefined,
       /** The models this agent could switch to (its profile's menu), so the
        *  app can offer a per-agent picker without another round-trip. */
       profileModels: desired && desired.vendor !== 'local'
@@ -730,6 +732,101 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   });
 
   // ---- profiles & hosts ----------------------------------------------------
+
+  // ---- agent classes (model/source tiers) ----------------------------------
+  // Assigning a class writes the agent's source and/or model (via the normal
+  // fields) and applies it — model live, a source change needs a rebuild. Shared
+  // by the assign route and the class-edit propagation.
+  const applyClassToAgent = async (
+    agent: Agent,
+    cls: { model?: string; aiProfileId?: string },
+  ): Promise<{ rebuild: boolean; error?: string }> => {
+    let needsRebuild = false;
+    if (cls.aiProfileId && cls.aiProfileId !== agent.aiProfileId) {
+      const src = store.getAIProfile(cls.aiProfileId);
+      if (!src || (src.ownerId !== agent.ownerId && !src.shared)) return { rebuild: false, error: 'class source unavailable' };
+      store.setAgentAIProfile(agent.id, cls.aiProfileId);
+      if (agent.model && modelOverrideProblem(src, agent.model)) store.setAgentModel(agent.id, null);
+      needsRebuild = true;
+    }
+    if (cls.model) {
+      const src = store.getAIProfile(store.getAgent(agent.id)!.aiProfileId);
+      if (!src) return { rebuild: needsRebuild, error: 'agent has no AI source' };
+      const prob = modelOverrideProblem(src, cls.model);
+      if (prob) return { rebuild: needsRebuild, error: prob }; // e.g. local source, or model not on this source
+      store.setAgentModel(agent.id, cls.model);
+      // Live-apply only when the source didn't change (a source change rebuilds
+      // and picks up the model then).
+      if (!needsRebuild && agent.state === 'RUNNING' && agent.runtimeRef) {
+        const fresh = store.getAgent(agent.id)!;
+        const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['models', 'set', prefixedModelRef(fresh, src)]);
+        if (res.code === 0) recordApplied(store, agent.id);
+      }
+    }
+    return { rebuild: needsRebuild };
+  };
+
+  app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
+
+  app.post<{ Body: { name?: string; model?: string; aiProfileId?: string } }>('/v1/agent-classes', async (req, reply) => {
+    const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string };
+    const name = (b.name ?? '').trim().slice(0, 48);
+    if (!name) return reply.code(400).send({ error: 'A class needs a name.' });
+    // A source, if given, must be the caller's own or shared.
+    if (b.aiProfileId) {
+      const src = store.getAIProfile(b.aiProfileId);
+      if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
+    }
+    const id = randomUUID();
+    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined });
+    return { class: store.getAgentClass(id) };
+  });
+
+  app.put<{ Params: { id: string }; Body: { name?: string; model?: string; aiProfileId?: string } }>(
+    '/v1/agent-classes/:id',
+    async (req, reply) => {
+      const cls = store.getAgentClass(req.params.id);
+      if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string };
+      const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
+      const model = b.model !== undefined ? (b.model.trim() || undefined) : cls.model;
+      const aiProfileId = b.aiProfileId !== undefined ? (b.aiProfileId || undefined) : cls.aiProfileId;
+      if (aiProfileId) {
+        const src = store.getAIProfile(aiProfileId);
+        if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
+      }
+      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId });
+      // Propagate the (possibly changed) model/source to every agent in the class.
+      let applied = 0, needRebuild = 0; const skipped: string[] = [];
+      for (const a of store.listAgentsInClass(cls.id)) {
+        const r = await applyClassToAgent(a, { model, aiProfileId });
+        if (r.error) skipped.push(`${a.name}: ${r.error}`);
+        else { applied++; if (r.rebuild) needRebuild++; }
+      }
+      return { class: store.getAgentClass(cls.id), applied, needRebuild, skipped };
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>('/v1/agent-classes/:id', async (req, reply) => {
+    const cls = store.getAgentClass(req.params.id);
+    if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+    store.deleteAgentClass(cls.id); // also clears class_id on its agents (their models are left as-is)
+    return { removed: true };
+  });
+
+  /** Assign (or clear, with classId=null) an agent's class, applying its model/source. */
+  app.post<{ Params: { id: string }; Body: { classId?: string | null } }>('/v1/agents/:id/class', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const classId = (req.body as { classId?: string | null } | undefined)?.classId ?? null;
+    if (classId === null) { store.setAgentClass(agent.id, null); return { classId: null, rebuild: false }; }
+    const cls = store.getAgentClass(classId);
+    if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such class.' });
+    const r = await applyClassToAgent(agent, cls);
+    if (r.error) return reply.code(400).send({ error: r.error });
+    store.setAgentClass(agent.id, cls.id);
+    return { classId: cls.id, rebuild: r.rebuild };
+  });
 
   app.get('/v1/ai-profiles', async (req) => {
     // `mine` tells the app which rows the caller may edit/share/delete —

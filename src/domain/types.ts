@@ -37,6 +37,21 @@ export type AIProfileKind = 'api_key' | 'subscription';
  */
 export type AIVendor = 'anthropic' | 'google' | 'local';
 
+/**
+ * An owner-defined agent class: a reusable tier that carries a model and/or an
+ * AI source. Assigning a class to an agent writes those onto the agent (via its
+ * normal aiProfileId/model fields); editing a class re-applies to its members.
+ * Either field may be blank (a model-only class leaves the source per-agent).
+ */
+export interface AgentClass {
+  id: string;
+  ownerId: string;
+  name: string;
+  model?: string;
+  aiProfileId?: string;
+  createdAt: string;
+}
+
 export interface AIProfile {
   id: string;
   ownerId: string;
@@ -129,6 +144,8 @@ export interface Agent {
   /** Owner-defined organization: an optional group label, and a manual order
    *  (ascending) used within the group. Absent group = "ungrouped". */
   group?: string;
+  /** The agent class (model/source tier) this agent belongs to, if any. */
+  classId?: string;
   sortOrder?: number;
   /** Setup fields this agent's shares/templates ask the importer to fill. */
   parameters?: TemplateParam[];
