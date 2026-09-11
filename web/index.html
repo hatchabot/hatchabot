@@ -2991,6 +2991,8 @@ async function openFleetActions() {
   chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED').length})`]);
   const needs = list.filter(a => (a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
+  const attn = list.filter(a => agentAttention(a).length).length;
+  if (attn) chips.push(['attention', `Needs attention (${attn})`]);
   $('faFilters').innerHTML = chips.map(([key, label]) =>
     `<button class="hbtn" onclick="faSelect('${jsq(key)}')">${esc(label)}</button>`).join('');
   // The agent list (owner-set, live ordering).
@@ -3015,6 +3017,7 @@ function faSelect(key) {
         const a = agents.find(x => x.id === cb.dataset.id);
         return a && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
       }
+    : key === 'attention' ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && agentAttention(a).length > 0; }
     : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
     : key.startsWith('grp:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.group || '') === key.slice(4)
     : key.startsWith('host:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.hostId) === key.slice(5)
@@ -6358,6 +6361,29 @@ function tocDotColor(a) {
   if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') return 'var(--warn)';
   return { RUNNING: 'var(--ok)', STOPPED: 'var(--dim)', ARCHIVED: 'var(--dim)', FAILED: 'var(--bad)' }[a.state] || 'var(--off)';
 }
+/**
+ * Every status on an agent that wants the owner's attention, as {icon, why} —
+ * one entry per KIND (same-kind reasons merged), in priority order. The single
+ * source for the Jump legend's icons (and the Bulk "Needs attention" filter),
+ * so a new card warning only has to be added here to surface everywhere.
+ */
+function agentAttention(a) {
+  const out = [];
+  if (a.state === 'FAILED') out.push({ icon: '❗', why: `failed${a.stateReason ? ': ' + a.stateReason : ''}` });
+  if (a.pendingAction) out.push({ icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
+  const unsynced = (a.dataSources || []).filter(d => d.syncError);
+  if (unsynced.length) out.push({ icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
+  if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ icon: '⚙', why: 'template setup values not filled in' });
+  if (a.migratedTo) out.push({ icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
+  const rebuild = [];
+  if (a.pendingModel && a.pendingModel !== a.model) rebuild.push(`switches to ${a.pendingModel} on rebuild`);
+  if (a.updateAvailable) rebuild.push('a newer runtime image is available');
+  if (a.peersPending) rebuild.push('peer changes need a rebuild');
+  if (rebuild.length) out.push({ icon: '🔄', why: rebuild.join('; ') });
+  if (a.botNamePending) out.push({ icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
+  return out;
+}
+
 function renderToc() {
   const nav = $('toc');
   // Shown from the FIRST agent, not the second: the legend doubles as the
@@ -6407,15 +6433,12 @@ function renderToc() {
     const badge = waiting
       ? `<span class="toc-badge">👤${waiting > 1 ? waiting : ''}</span>`
       : '';
-    // Pending-action icons: a parked step waiting on you, and/or a change that
-    // only takes effect on the next rebuild (a source switch or a newer image).
-    const flags = [];
-    if (a.pendingAction) flags.push(['✋', 'a step is waiting on you']);
-    if ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending) flags.push(['🔄', a.peersPending ? 'rebuild to apply peer changes' : 'rebuild to apply a pending change']);
-    const flagIcons = flags.map(([icon, why]) => `<span class="toc-badge" title="${esc(a.name + ' — ' + why)}">${icon}</span>`).join('');
-    const tip = waiting
-      ? `${a.name} — ${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`
-      : flags.length ? `${a.name} — ${flags.map((f) => f[1]).join('; ')}` : a.name;
+    // Every attention-worthy status the card shows, as compact icons — one per
+    // kind, the tooltip spelling out each reason. Single source: agentAttention().
+    const flags = agentAttention(a);
+    const flagIcons = flags.map(f => `<span class="toc-badge" title="${esc(a.name + ' — ' + f.why)}">${f.icon}</span>`).join('');
+    const reasons = [...(waiting ? [`${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`] : []), ...flags.map(f => f.why)];
+    const tip = reasons.length ? `${a.name} — ${reasons.join('; ')}` : a.name;
     html += `<a class="toc-item" ${a.__depth ? `style="padding-left:${6 + 12 * a.__depth}px"` : ''} onclick="jumpToCard('${a.id}')" title="${esc(tip)}">
       <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
       <span class="toc-name">${a.__depth ? '↳ ' : ''}${esc(a.name)}</span>${badge}${flagIcons}</a>`;

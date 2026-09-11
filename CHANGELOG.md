@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.133.1] — 2026-09-11
+
+### Changed
+- **The Jump legend now shows every attention status the card does**, via one
+  agentAttention() helper: ❗ failed (with reason) · ✋ waiting on you · ⚠ a repo/data
+  source didn't sync (e.g. deploy key rejected) · ⚙ template not filled in · 📦 moved-away
+  leftover · 🔄 needs rebuild (model/source switch, newer image, peer change — merged) ·
+  🏷 Telegram rename pending · 👤 pairing request. Tooltips spell out each reason. New
+  **Needs attention** filter in ⚡ Bulk actions.
+
 ## [0.133.0] — 2026-09-10
 
 ### Added
