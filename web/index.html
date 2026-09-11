@@ -2867,7 +2867,7 @@ function openFleetActions() {
   }
   chips.push(['running', `Running (${list.filter(a => a.state === 'RUNNING').length})`]);
   chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED').length})`]);
-  const needs = list.filter(a => (a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable).length;
+  const needs = list.filter(a => (a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
   $('faFilters').innerHTML = chips.map(([key, label]) =>
     `<button class="hbtn" onclick="faSelect('${jsq(key)}')">${esc(label)}</button>`).join('');
@@ -2891,7 +2891,7 @@ function faSelect(key) {
     : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED'
     : key === 'needs-rebuild' ? (cb) => {
         const a = agents.find(x => x.id === cb.dataset.id);
-        return a && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable);
+        return a && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
       }
     : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
     : key.startsWith('grp:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.group || '') === key.slice(4)
@@ -6265,7 +6265,7 @@ function renderToc() {
     // only takes effect on the next rebuild (a source switch or a newer image).
     const flags = [];
     if (a.pendingAction) flags.push(['✋', 'a step is waiting on you']);
-    if ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable) flags.push(['🔄', 'rebuild to apply a pending change']);
+    if ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending) flags.push(['🔄', a.peersPending ? 'rebuild to apply peer changes' : 'rebuild to apply a pending change']);
     const flagIcons = flags.map(([icon, why]) => `<span class="toc-badge" title="${esc(a.name + ' — ' + why)}">${icon}</span>`).join('');
     const tip = waiting
       ? `${a.name} — ${waiting} ${waiting > 1 ? 'people are' : 'person is'} waiting to be let in`

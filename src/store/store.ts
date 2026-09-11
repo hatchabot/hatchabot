@@ -336,6 +336,10 @@ export class Store {
       // An agent-scoped cli-token: when set, this token authenticates a CALLER
       // AGENT (not a user) to the agent-to-agent /message endpoint.
       `ALTER TABLE cli_tokens ADD COLUMN agent_id TEXT`,
+      // The peer set (sorted csv of peer ids) that was live when this agent was
+      // last provisioned/rebuilt — the call-agent tool is installed on rebuild,
+      // so a grant that differs from this needs a rebuild to take effect.
+      `ALTER TABLE agents ADD COLUMN applied_peers TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -376,6 +380,18 @@ export class Store {
         applied_profile_id = ai_profile_id,
         applied_model = (SELECT model FROM ai_profiles WHERE id = agents.ai_profile_id)
       WHERE applied_profile_id IS NULL AND state != 'DELETED'
+    `);
+    // Same idea for peers: assume any existing agent's CURRENT peer set is the
+    // applied one, so the new "peers changed — rebuild" flag doesn't fire for
+    // agents already running. GROUP_CONCAT over an ordered subquery gives a
+    // deterministic csv matching what setAgentApplied writes (JS-sorted). Only
+    // rows still NULL (pre-migration) are touched.
+    this.db.exec(`
+      UPDATE agents SET applied_peers = COALESCE(
+        (SELECT GROUP_CONCAT(peer_id) FROM (
+           SELECT peer_id FROM agent_peers WHERE agent_id = agents.id ORDER BY peer_id
+        )), '')
+      WHERE applied_peers IS NULL AND state != 'DELETED'
     `);
 
     // CLI tokens minted before expires_at existed carry NULL — which
@@ -1958,9 +1974,19 @@ export class Store {
   }
 
   setAgentApplied(id: string, aiProfileId: string, model: string): void {
+    // Snapshot the peer set too (sorted csv), since a rebuild is what installs
+    // the call-agent tool for the current grant. Matches the migration backfill.
+    const peers = this.listAgentPeers(id).slice().sort().join(',');
     this.db
-      .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ? WHERE id = ?`)
-      .run(aiProfileId, model, id);
+      .prepare(`UPDATE agents SET applied_profile_id = ?, applied_model = ?, applied_peers = ? WHERE id = ?`)
+      .run(aiProfileId, model, peers, id);
+  }
+
+  /** The peer csv that was live at last provision/rebuild (for the "peers
+   *  changed — rebuild" signal). '' when none; undefined only pre-backfill. */
+  appliedPeersCsv(id: string): string {
+    const r = this.db.prepare(`SELECT applied_peers FROM agents WHERE id = ?`).get(id) as { applied_peers: string | null } | undefined;
+    return r?.applied_peers ?? '';
   }
 
   setAgentAIProfile(id: string, aiProfileId: string): void {

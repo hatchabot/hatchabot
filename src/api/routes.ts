@@ -422,6 +422,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       model: agent.appliedModel ?? desiredModel,
       /** What it WILL run after a rebuild, when that differs from now. */
       pendingModel: switched ? desiredModel : undefined,
+      /** True when the granted peer set differs from what was installed at the
+       *  last rebuild — the call-agent tool is (re)installed on rebuild, so this
+       *  agent needs one before it can consult its current peers. */
+      peersPending: store.listAgentPeers(agent.id).slice().sort().join(',') !== store.appliedPeersCsv(agent.id),
       /** The models this agent could switch to (its profile's menu), so the
        *  app can offer a per-agent picker without another round-trip. */
       profileModels: desired && desired.vendor !== 'local'

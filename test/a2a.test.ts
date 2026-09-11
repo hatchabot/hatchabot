@@ -4,6 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
+import { recordApplied } from '../src/orchestrator/provision.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 const OWNER = 'user-o';
@@ -72,5 +73,20 @@ describe('agent-to-agent consult', () => {
     const { store } = await world();
     const token = store.createAgentCallToken('x', OWNER);
     expect(store.ownerForCliToken(token)).toBeUndefined(); // scoped to /message only
+  });
+
+  it('granting peers marks the agent peersPending until a rebuild snapshots them', async () => {
+    const { store, f } = await world();
+    // No peers yet → not pending.
+    let x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
+    expect(x.peersPending).toBe(false);
+    // Grant a peer → pending (call-agent tool isn't installed until a rebuild).
+    store.setAgentPeers('x', ['y']);
+    x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
+    expect(x.peersPending).toBe(true);
+    // recordApplied (runs at end of a rebuild) snapshots the peer set → clears.
+    recordApplied(store, 'x');
+    x = (await f.inject({ method: 'GET', url: '/v1/agents', headers: { 'x-agentclaw-owner': OWNER } })).json().find((a: any) => a.id === 'x');
+    expect(x.peersPending).toBe(false);
   });
 });

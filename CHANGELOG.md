@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.129.0] — 2026-09-10
+
+### Added
+- **Peers-changed now flags a needed rebuild.** Granting or changing an agent's
+  A2A peers installs the call-agent tool on the next rebuild — the agent now
+  shows the 🔄 "rebuild to apply peer changes" icon in the Jump legend (and is
+  caught by the Bulk-actions "needs rebuild" filter) until you rebuild it. New
+  applied_peers snapshot on the agent; peersPending on the agent payload.
+
 ## [0.128.0] — 2026-09-10
 
 ### Added
