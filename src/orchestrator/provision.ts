@@ -11,7 +11,7 @@ import { whileBusy } from './busy.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { syncConnections } from './googleConnections.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, peerToolsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 
 /**
  * The `call-agent` tool installed on agents granted peers: consults a peer by
@@ -773,7 +773,7 @@ async function syncGitDataSources(
  * rest of the file is the user's. Best-effort: a failure here must never fail a
  * provision or rebuild.
  */
-async function syncDataSourceDocs(
+export async function syncDataSourceDocs(
   deps: ProvisionDeps,
   agentId: string,
   runtimeRef: string,
@@ -805,6 +805,8 @@ async function syncDataSourceDocs(
     if (read.code !== 0 || !read.stdout.trim()) return; // no file yet — seed owns it
     let next = replaceSection(read.stdout, DATA_SOURCES_HEADING, dataSourcesSection(sources));
     next = replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory));
+    // The operator identity: injected so every agent already knows who it serves.
+    next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
     // Agent-to-agent: install the call-agent tool + peer manifest, and list the
     // granted peers in AGENTS.md so the agent knows it can consult them.
     const peers = store.listAgentPeers(agentId).map((id) => store.getAgent(id)).filter((a): a is Agent => !!a && a.state !== 'DELETED');

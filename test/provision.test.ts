@@ -8,7 +8,7 @@ import {
   runProvisionSteps,
 } from '../src/orchestrator/provision.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
-import { dataSourcesSection, memoryPolicySection, replaceSection, DATA_SOURCES_HEADING } from '../src/openclaw/workspace.js';
+import { dataSourcesSection, memoryPolicySection, operatorSection, replaceSection, DATA_SOURCES_HEADING, OPERATOR_HEADING } from '../src/openclaw/workspace.js';
 import { Store } from '../src/store/store.js';
 import { ChannelSetupRequired } from '../src/channels/channel.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
@@ -578,7 +578,8 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     const shared = w.store.getAgent(agent.id)!.sharedMemory;
     const applyBoth = (doc: string) => {
       let n = replaceSection(doc, DATA_SOURCES_HEADING, dataSourcesSection([]));
-      return replaceSection(n, '## Memory policy', memoryPolicySection(shared));
+      n = replaceSection(n, '## Memory policy', memoryPolicySection(shared));
+      return replaceSection(n, OPERATOR_HEADING, operatorSection(w.store.getOperatorProfile(agent.ownerId)));
     };
     const current = applyBoth(applyBoth('# K\n'));
     (w.provider as MockProvider).execResponses.set('sh', { code: 0, stdout: current, stderr: '' });

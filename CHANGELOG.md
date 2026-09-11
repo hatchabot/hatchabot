@@ -2,6 +2,16 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.133.0] — 2026-09-10
+
+### Added
+- **Operator identity file.** ⚙ Settings → **👤 You**: write about yourself once
+  (name, location, family, preferences) and it's injected into every one of your
+  agents as a managed "About the operator" section in their AGENTS.md — so no
+  agent needs you to re-introduce yourself. Saving applies to running agents
+  immediately (no rebuild); stopped agents pick it up on next start. Private
+  per-owner (each household member has their own).
+
 ## [0.132.0] — 2026-09-10
 
 ### Added

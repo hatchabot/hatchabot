@@ -20,6 +20,7 @@ import {
   sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
+  syncDataSourceDocs,
   skipPoolOnce,
   slugify,
   MEDIA_KEY_REF,
@@ -765,6 +766,30 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     }
     return { rebuild: needsRebuild };
   };
+
+  // ---- operator identity profile --------------------------------------------
+  app.get('/v1/operator-profile', async (req) => ({ content: store.getOperatorProfile(ownerIdOf(req)) }));
+
+  app.put<{ Body: { content?: string } }>('/v1/operator-profile', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const content = String((req.body as { content?: string } | undefined)?.content ?? '').slice(0, 8000);
+    store.setOperatorProfile(ownerId, content);
+    // Push the new identity into the operator's RUNNING agents now (rewrites the
+    // managed AGENTS.md section live — no rebuild); stopped agents pick it up on
+    // their next provision. Best-effort per agent.
+    let pushed = 0;
+    for (const a of store.listAgents(ownerId)) {
+      if (a.state !== 'RUNNING' || !a.runtimeRef) continue;
+      try {
+        await syncDataSourceDocs(
+          { store, secrets, provider: providerFor(a.hostId), channel: deps.channel, log: trace(a.id) },
+          a.id, a.runtimeRef, trace(a.id),
+        );
+        pushed++;
+      } catch { /* best-effort */ }
+    }
+    return { content, pushed };
+  });
 
   app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
 

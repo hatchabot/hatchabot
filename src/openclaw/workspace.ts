@@ -137,6 +137,27 @@ export function dataSourcePath(d: {
 
 export const DATA_SOURCES_HEADING = '## Data sources';
 
+export const OPERATOR_HEADING = '## About the operator';
+
+/**
+ * The owner's identity text, as a managed AGENTS.md section every agent reads.
+ * User content is free text; strip any markdown heading markers from it so a
+ * stray `##` can't prematurely end this section on the next section-sync read
+ * (replaceSection ends a section at the next heading of any level).
+ */
+export function operatorSection(content: string): string {
+  const body = (content ?? '').trim();
+  const safe = body
+    ? body.split('\n').map((l) => l.replace(/^\s*#{1,6}\s+/, '')).join('\n')
+    : '_Not set — the operator can fill this in under ⚙ Settings → You._';
+  return `${OPERATOR_HEADING}
+
+The person who runs you (your operator). Treat this as background you already
+know — don't ask them to re-introduce themselves.
+
+${safe}`;
+}
+
 export const PEERS_HEADING = '## Peers';
 
 /**

@@ -801,6 +801,7 @@
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
     <button class="tab" id="tabSecurity" role="tab" aria-selected="false" onclick="showTab('security')">🛡 Security</button>
+    <button class="tab" id="tabOperator" role="tab" aria-selected="false" onclick="showTab('operator')">👤 You</button>
   </div>
 
   <section id="paneAi" role="tabpanel">
@@ -1132,6 +1133,20 @@
       <button class="primary" id="postureRunBtn" onclick="loadPosture()">Run check</button>
     </div>
     <div id="postureOut" class="sub" style="margin-top:10px">Press <b>Run check</b>.</div>
+  </section>
+
+  <section id="paneOperator" role="tabpanel" hidden>
+    <div class="sub" style="margin-bottom:10px">
+      About you, the operator. This is injected into <b>every one of your agents</b> so
+      they already know who they're serving — no more re-introducing yourself. Write
+      whatever's useful: name, where you live, family, how you like to be addressed,
+      standing preferences. Applies to running agents immediately (no rebuild).
+    </div>
+    <textarea id="operatorText" rows="10" style="width:100%;box-sizing:border-box;font:inherit"
+      placeholder="e.g. I'm Chris, 47, in Toronto. Three kids (8, 11, 14). Prefer concise answers and metric units. Partner: Julieta."></textarea>
+    <div class="sub" id="operatorErr" style="color:var(--bad);margin-top:6px"></div>
+    <div style="margin-top:8px"><button class="primary" id="operatorSaveBtn" onclick="saveOperator()">Save &amp; apply to all my agents</button></div>
+    <div class="sub" style="margin-top:6px">Private to your account — other household members have their own operator profile.</div>
   </section>
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
@@ -1837,7 +1852,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity' };
+const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
 function showTab(name) {
   for (const [key, pane] of Object.entries(TABS)) {
@@ -1852,6 +1867,21 @@ function showTab(name) {
   if (name === 'backups') loadBackups();
   if (name === 'runtime') loadRuntime();
   if (name === 'security') loadPosture();
+  if (name === 'operator') loadOperator();
+}
+
+async function loadOperator() {
+  $('operatorErr').textContent = '';
+  try { $('operatorText').value = (await api('/v1/operator-profile')).content || ''; }
+  catch (e) { $('operatorErr').textContent = e.message; }
+}
+async function saveOperator() {
+  $('operatorSaveBtn').disabled = true; $('operatorErr').textContent = '';
+  try {
+    const r = await api('/v1/operator-profile', { method: 'PUT', body: { content: $('operatorText').value } });
+    toast(`Saved — applied to ${r.pushed} running agent${r.pushed === 1 ? '' : 's'}${r.pushed === 0 ? ' (stopped agents get it on next start)' : ''}.`, 7000);
+  } catch (e) { $('operatorErr').textContent = e.message; }
+  finally { $('operatorSaveBtn').disabled = false; }
 }
 
 const POSTURE_DOT = { ok: '🟢', info: '🔵', warn: '🟡', critical: '🔴' };

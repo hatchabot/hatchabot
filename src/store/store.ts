@@ -49,6 +49,13 @@ export class Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS agent_classes_owner_name ON agent_classes (owner_id, name);
 
+      -- The owner's "About the operator" identity text, injected into every one
+      -- of their agents' AGENTS.md so each agent already knows who it serves.
+      -- One row per owner; private to that owner.
+      CREATE TABLE IF NOT EXISTS operator_profile (
+        owner_id TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS hosts (
         id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, kind TEXT NOT NULL,
         provider TEXT NOT NULL, name TEXT NOT NULL, settings TEXT NOT NULL,
@@ -603,6 +610,20 @@ export class Store {
   }
   listAgentsInClass(classId: string): Agent[] {
     return (this.db.prepare(`SELECT * FROM agents WHERE class_id = ? AND state != 'DELETED'`).all(classId) as any[]).map(rowToAgent);
+  }
+
+  // ---- operator identity profile --------------------------------------------
+  getOperatorProfile(ownerId: string): string {
+    const r = this.db.prepare(`SELECT content FROM operator_profile WHERE owner_id = ?`).get(ownerId) as { content: string } | undefined;
+    return r?.content ?? '';
+  }
+  setOperatorProfile(ownerId: string, content: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO operator_profile (owner_id, content, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
+      )
+      .run(ownerId, content, new Date().toISOString());
   }
 
   // ---- Hosts -------------------------------------------------------------
