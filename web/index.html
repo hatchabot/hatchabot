@@ -1490,6 +1490,7 @@
   <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">
     <select id="faAction" onchange="faRenderAction()" style="width:auto">
       <option value="model">Switch model (live, no rebuild)</option>
+      <option value="checkpoint">Chat → Memory (save conversation)</option>
       <option value="rebuild">Rebuild</option>
       <option value="stop">Stop</option>
       <option value="start">Start</option>
@@ -2936,7 +2937,9 @@ function faRenderAction() {
     $('faApplyBtn').disabled = !sel.length;
     note = action === 'rebuild' ? 'Rebuilds each selected agent (memory kept, brief downtime). Stopped agents are skipped.'
       : action === 'stop' ? 'Stops each selected running agent. It keeps its bot.'
-      : 'Starts each selected stopped agent.';
+      : action === 'start' ? 'Starts each selected stopped agent.'
+      : action === 'checkpoint' ? 'Each running agent writes its current conversation into memory (~20s and some tokens per agent — runs one at a time). Stopped agents are skipped; an agent whose AI source is out of credits will report "not saved".'
+      : '';
   }
   $('faActionNote').textContent = note;
 }
@@ -2946,15 +2949,20 @@ async function faApply() {
   if (!ids.length) return;
   const model = $('faModel').value;
   if (action === 'rebuild' && !confirm(`Rebuild ${ids.length} agent${ids.length > 1 ? 's' : ''}? Each briefly goes offline (memory kept).`)) return;
+  if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
   $('faApplyBtn').disabled = true;
   $('faResults').innerHTML = `Working on ${ids.length}…`;
-  let ok = 0, skipped = 0, failed = 0;
+  let ok = 0, skipped = 0, failed = 0, notSaved = 0;
   for (const id of ids) {
     const a = agents.find(x => x.id === id);
     try {
       if (action === 'model') {
         if (!(a?.profileModels || []).length) { skipped++; continue; } // local: no menu
         await api(`/v1/agents/${id}/model`, { method: 'POST', body: { model } });
+      } else if (action === 'checkpoint') {
+        if (a?.state !== 'RUNNING') { skipped++; continue; } // needs a live turn
+        const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST', body: {} });
+        if (!r.saved) { notSaved++; continue; } // soft fail (e.g. AI source out of credits)
       } else if (action === 'rebuild') {
         if (a?.state !== 'RUNNING' && a?.state !== 'STOPPED') { skipped++; continue; }
         await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
@@ -2969,7 +2977,7 @@ async function faApply() {
     } catch { failed++; }
   }
   $('faApplyBtn').disabled = false;
-  $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
+  $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${notSaved ? ` · <span style="color:var(--warn)">${notSaved} not saved (AI source didn't respond)</span>` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
   await refresh(false);
 }
 async function moveAgentsApply(rebuild) {

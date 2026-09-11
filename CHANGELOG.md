@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.130.0] — 2026-09-10
+
+### Added
+- **Chat → Memory as a bulk action.** The ⚡ Bulk actions panel can now save the
+  conversation to memory across a selection of agents (e.g. before a batch
+  rebuild). Runs one ~20s turn per running agent; stopped agents are skipped,
+  and an agent whose AI source is out of credits is reported as "not saved"
+  rather than a false success.
+
 ## [0.129.1] — 2026-09-10
 
 ### Changed
