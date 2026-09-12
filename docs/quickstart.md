@@ -98,3 +98,50 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 - **"Couldn't reach the AI"** → check the AI source in ⚙ Settings; a setup token can expire — run `claude setup-token` again and paste the new one.
 - **Local model agents can't connect** → the model server must listen on an address containers can reach (not `localhost`); the README's "Running on your own hardware" section has the exact settings.
 - **Something looks stale** → the app is a PWA; pull to refresh or reopen it.
+
+## Advanced: reach it from anywhere with Tailscale (recommended once it works)
+
+Out of the box, AgentClaw's web app is reachable on your home network only.
+That's fine for chatting — **Telegram works from anywhere regardless** — but
+three things want the *app* reachable off-LAN: opening it from your phone on
+cellular, invite links that work when the invitee isn't on your wifi, and
+adding a **runner** (a second machine that hosts agents). The wrong way to get
+that is opening a port on your router. The right way is **Tailscale**: a
+private network between your own devices, encrypted end to end, with nothing
+exposed to the internet.
+
+**Why Tailscale specifically**
+- **Nothing is opened to the internet.** Your machine gets a stable private address (`<machine>.<tailnet>.ts.net`) that only devices you've admitted can reach.
+- **The people you choose, and only them.** Family members install the Tailscale app, you invite them (or share just this machine), and the app works on their phones from anywhere. The free plan covers a household.
+- **Runners just work.** A laptop on the tailnet can host agents; AgentClaw moves them over the private link.
+- **Real HTTPS in one command** (optional) — `tailscale serve` puts a certificate in front of the app so the browser stops treating it as insecure.
+
+**Install (5 min)**
+
+1. On the AgentClaw machine:
+   ```sh
+   # Linux
+   curl -fsSL https://tailscale.com/install.sh | sh
+   sudo tailscale up
+   # macOS: install Tailscale from the App Store, sign in, toggle it on
+   ```
+   Sign in with Google/Apple/GitHub; that account owns your tailnet.
+2. In the Tailscale admin console → **DNS**, make sure **MagicDNS** is on. Your machine now has a name like `dgx-spark.tail1234.ts.net`.
+3. Tell AgentClaw its public address so invite links use it. In `agentclaw/.env` add:
+   ```
+   AGENTCLAW_PUBLIC_URL=http://<machine>.<tailnet>.ts.net:8080
+   ```
+   then `systemctl --user restart agentclaw` (macOS: `agentclaw restart`).
+4. Install the Tailscale app on your phone, sign in with the same account, toggle on. Open `http://<machine>.<tailnet>.ts.net:8080` — add it to your home screen.
+5. To let a family member in: admin console → **Users → Invite users** (or **Machines → your machine → Share** to share only this box). They install the app, accept, and your invite links open on their phone.
+
+**Optional: HTTPS without owning a certificate**
+```sh
+sudo tailscale set --operator=$USER      # once: let your user manage serve
+tailscale serve --bg http://localhost:8080
+```
+If it asks you to enable HTTPS certificates, do that in the admin console under **DNS**, then rerun. The app is now at `https://<machine>.<tailnet>.ts.net` (no port) — update `AGENTCLAW_PUBLIC_URL` to match. If you use Google sign-in, add that `https://…ts.net` origin to your OAuth client's authorized JavaScript origins.
+
+**Don't** use `tailscale funnel` for this — it would publish the app to the open internet behind one shared password. The whole point is that nothing is.
+
+Details and the reasoning behind each choice: [docs/tailscale.md](tailscale.md).
