@@ -1,0 +1,15 @@
+# Hatchabot nightly backup — oneshot driven by hatchabot-backup.timer.
+# Installed by scripts/install-service.sh into ~/.config/systemd/user/.
+[Unit]
+Description=Hatchabot nightly volume backup
+
+[Service]
+Type=oneshot
+WorkingDirectory=__HATCHABOT_DIR__
+# So HATCHABOT_BACKUP_DIR / HATCHABOT_PREFIX overrides apply to timed runs
+# the same way they do to manual ones.
+EnvironmentFile=__HATCHABOT_DIR__/.env
+# systemd user managers start with a minimal PATH; node (nvm) and docker can
+# live outside it, so install-service.sh bakes their real locations in here.
+Environment=PATH=__HATCHABOT_PATH__
+ExecStart=__HATCHABOT_DIR__/scripts/backup-volumes.sh

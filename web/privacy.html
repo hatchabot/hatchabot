@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hatchabot — Privacy Policy</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      max-width: 720px; margin: 0 auto; padding: 48px 20px 80px; color: #1c1f24; background: #fbfaf8; }
+    @media (prefers-color-scheme: dark) { body { color: #e6e8ec; background: #14161a; } a { color: #ef7a5e; } code { background:#262a31; } }
+    h1 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 4px; }
+    h2 { font-size: 19px; margin: 32px 0 8px; letter-spacing: -.01em; }
+    .sub { color: #656b73; margin: 0 0 8px; }
+    a { color: #d95f42; }
+    code { background: #eee6dd; padding: 1px 5px; border-radius: 4px; font-size: 14px; }
+    ul { padding-left: 22px; } li { margin: 4px 0; }
+    .box { border: 1px solid #d95f42; border-radius: 10px; padding: 14px 16px; margin: 20px 0; background: rgba(217,95,66,.06); }
+  </style>
+</head>
+<body>
+  <h1>Hatchabot — Privacy Policy</h1>
+  <p class="sub">Last updated: 2026-09-07</p>
+
+  <p>Hatchabot is a self-hosted personal assistant platform. Each installation is
+  operated privately by the individual or household that runs it on their own
+  hardware. This policy describes how a Hatchabot installation handles data,
+  including data accessed through Google APIs.</p>
+
+  <h2>Who operates this installation</h2>
+  <p>This installation is run by its owner on their own server. The operator — not
+  Hatchabot as a product — is the party you connect your accounts to. Questions
+  about this specific installation go to its operator.</p>
+
+  <h2>What Google data we access, and why</h2>
+  <p>Only when you explicitly connect a Google account, and only for the services
+  you approve during Google's consent screen, a Hatchabot agent may access:</p>
+  <ul>
+    <li><b>Gmail</b> — to read and, where you enable it, send email on your behalf,
+      so an assistant can triage your inbox or send messages you ask it to.</li>
+    <li><b>Google Calendar</b> — to read and manage events you ask it to schedule.</li>
+    <li><b>Google Drive / Sheets / Docs</b> — to read or edit documents you point it at.</li>
+  </ul>
+  <p>Access is used solely to perform the tasks you direct your agent to do. It is
+  never used for advertising, and your Google data is not sold or shared with third
+  parties.</p>
+
+  <div class="box">
+    <b>Google API Services — Limited Use.</b> Hatchabot's use and transfer of
+    information received from Google APIs adheres to the
+    <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google
+    API Services User Data Policy</a>, including its Limited Use requirements. Google
+    user data is used only to provide the assistant features you request, is not
+    transferred to others except as needed to provide those features or as required
+    by law, is not used for advertising, and no human reads it except with your
+    explicit consent or for security/legal purposes.
+  </div>
+
+  <h2>Where your data lives</h2>
+  <p>Hatchabot is self-hosted: your data and the OAuth tokens for your connected
+  accounts are stored on the operator's own server, not on any Hatchabot-operated
+  cloud. Refresh tokens are held in an encrypted secret store on that server and are
+  used only to obtain short-lived access tokens when your agent acts. Agents run in
+  isolated containers on the same server.</p>
+
+  <h2>Retention and deletion</h2>
+  <p>You can revoke access at any time:</p>
+  <ul>
+    <li>Disconnect the account in Hatchabot (Settings → Connections). This deletes the
+      stored token, removes it from every agent, and revokes it with Google.</li>
+    <li>Or revoke Hatchabot's access directly from your Google Account at
+      <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">myaccount.google.com/permissions</a>.</li>
+  </ul>
+  <p>Once revoked, the installation can no longer access that account's Google data.</p>
+
+  <h2>Changes</h2>
+  <p>This policy may be updated as the software changes; the date above reflects the
+  current version.</p>
+
+  <p style="margin-top:32px"><a href="/">← Hatchabot</a> · <a href="/terms">Terms of Service</a></p>
+</body>
+</html>

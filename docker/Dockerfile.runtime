@@ -1,0 +1,158 @@
+# Hatchabot runtime image: one container = one OpenClaw agent (§5.2).
+#
+# All durable state lives on the volume mounted at /home/node/.openclaw; this
+# image is cattle. The OpenClaw version is pinned to what the host runs today —
+# bump deliberately, since openclaw.json's schema moves between releases.
+#
+# The Claude Code CLI is included because OpenClaw's Anthropic path drives it
+# as the model runtime (agentRuntime: claude-cli). Subscription auth arrives
+# via a bind mount of the owner's ~/.claude — never baked into the image.
+#
+# Runs as the non-root `node` user (uid 1000):
+#   1. Claude Code refuses --dangerously-skip-permissions as root, and
+#      OpenClaw's claude-cli backend passes that flag.
+#   2. uid 1000 matches the typical owner of the host's ~/.claude, so the
+#      bind-mounted credential is readable/refreshable without chown games.
+FROM node:22-slim
+
+# Keep this in step with scripts/build-runtime-image.sh's default, so a bare
+# `docker build` (no --build-arg) produces the same version the build script
+# ships rather than a silently older one.
+ARG OPENCLAW_VERSION=2026.7.1-2
+# Pinned, not "latest": docker caches this layer per OPENCLAW_VERSION, so
+# "latest" silently means "whatever was latest the FIRST time this host
+# built it" — two hosts building the same tag got different claude-code
+# versions, undermining the candidate → smoke → promote flow. Bump it here
+# (with the openclaw version or alone) to actually ship a new one.
+ARG CLAUDE_CODE_VERSION=2.1.224
+
+# Local memory embeddings (docs/embedding-and-images.md). OpenClaw's memory_search
+# does semantic (vector) recall only when a `local` embedding provider is present;
+# that provider is the external @openclaw/llama-cpp-provider plugin plus a GGUF
+# model. Both are BAKED here — outside /home/node — so every agent shares one copy
+# from the image. See the two RUN blocks below the gog install.
+#
+# Keep the plugin version in step with OPENCLAW_VERSION: the plugin declares
+# openclaw as a peerDependency and is linked against the global install.
+ARG LLAMA_CPP_PROVIDER_VERSION=2026.7.1
+# embeddinggemma-300m (QAT, Q8_0) — ~314MB, no API key, no network at query time.
+# GitHub/HF release blobs are mutable → pin sha256 and verify BEFORE it ships into
+# the image every agent's memory search depends on.
+ARG EMBED_MODEL_URL=https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf
+ARG EMBED_MODEL_SHA256=6fa0c02a9c302be6f977521d399b4de3a46310a4f2621ee0063747881b673f67
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client curl procps \
+      python3 python3-pip python3-venv \
+      # PDF ingestion with OCR (base, not derived, ON PURPOSE): image-only
+      # pages in scanned PDFs have no text layer, and without local OCR an
+      # agent silently drops them and reports "nothing new" — a silent-fail
+      # class, proven live when the condo agent missed 7 pages of vendor
+      # approvals. Every agent gets handed PDFs eventually.
+      poppler-utils qpdf tesseract-ocr ocrmypdf \
+      # PDF CREATION (Chris, 2026-09-04): agents produce documents, not just
+      # read them — meeting packages, notices, reports. pandoc converts
+      # markdown/HTML/docx; weasyprint is its LaTeX-free PDF engine
+      # (HTML/CSS → PDF): `pandoc doc.md -o doc.pdf --pdf-engine=weasyprint`.
+      # fonts-liberation gives metric-compatible Times/Arial/Courier looks.
+      # weasyprint itself comes from pip below — Debian's package hard-drags
+      # gcc/boost/scipy/sympy (+1GB, measured); the wheel needs only these
+      # pango/cairo runtime libs.
+      pandoc fonts-liberation \
+      libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 shared-mime-info \
+ && rm -rf /var/lib/apt/lists/*
+
+# PEP 668: bookworm's python is "externally managed"; these are app-level
+# tools, not Debian-managed libs, and the image is single-purpose.
+RUN pip3 install --break-system-packages --no-cache-dir weasyprint markdown
+
+RUN npm install -g "openclaw@${OPENCLAW_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && npm cache clean --force
+
+# gog: Google Workspace CLI (gmail/calendar/drive/sheets/docs) — the
+# "connections" tool for advanced agents (docs/connections-design.md). One
+# static Go binary; credentials NEVER live in the image — GOG_HOME points at
+# the agent's volume, and auth happens per agent (chat-based --remote flow).
+ARG GOG_VERSION=0.22.0
+# GitHub release assets are mutable — pin sha256 per arch and verify BEFORE
+# extracting, so a replaced upstream tarball can't silently ship into the image
+# every agent (holding Gmail/Drive creds via GOG_HOME) shares.
+ARG GOG_SHA256_arm64=f46a167cb06e4a9658f674e34086c38456f36c94c6d69ccc94294efdce2b0db6
+ARG GOG_SHA256_amd64=535be211bd35c94bb1be5f6e98f40eae6ce51fc91da845de1bef6d669c84690f
+RUN ARCH="$(dpkg --print-architecture)" \
+ && case "$ARCH" in \
+      arm64) SHA="${GOG_SHA256_arm64}" ;; \
+      amd64) SHA="${GOG_SHA256_amd64}" ;; \
+      *) echo "unsupported arch $ARCH for gog" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /tmp/gog.tgz "https://github.com/steipete/gogcli/releases/download/v${GOG_VERSION}/gogcli_${GOG_VERSION}_linux_${ARCH}.tar.gz" \
+ && echo "${SHA}  /tmp/gog.tgz" | sha256sum -c - \
+ && tar -xz -C /usr/local/bin -f /tmp/gog.tgz gog \
+ && rm /tmp/gog.tgz \
+ && chmod +x /usr/local/bin/gog \
+ && gog --version
+
+# --- Local embedding provider: shared plugin + model, baked outside /home/node ---
+#
+# Why not `openclaw plugins install` per agent? That writes the 71MB plugin (with
+# node-llama-cpp's native addon) to the agent's VOLUME, and first use downloads the
+# 314MB model to the volume too — ×N agents. Instead the plugin lives in the IMAGE
+# and each agent's volume holds only a tiny `--link` registry pointer (proven: a
+# fully-indexed agent's ~/.openclaw stayed ~4MB). The model is a single image file
+# every agent points `memorySearch.local.modelPath` at.
+#
+# The plugin package is self-contained (it bundles node-llama-cpp and the arch's
+# llama-addon.node). We install it into a throwaway HOME with openclaw's own
+# installer — which resolves the exact pinned dep tree — then relocate just the
+# package dir. The peerDependency symlink targets the global openclaw, which stays
+# put after the move, so the link keeps resolving.
+RUN export HOME=/tmp/ocbuild \
+ && mkdir -p "$HOME" && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
+ && openclaw plugins install "@openclaw/llama-cpp-provider@${LLAMA_CPP_PROVIDER_VERSION}" --acknowledge-clawhub-risk \
+ && mkdir -p /opt/agentclaw/llama-cpp \
+ && cp -a "$HOME"/.openclaw/npm/projects/openclaw-llama-cpp-provider-*/node_modules/@openclaw/llama-cpp-provider \
+      /opt/agentclaw/llama-cpp/llama-cpp-provider \
+ && test -f /opt/agentclaw/llama-cpp/llama-cpp-provider/dist/index.js \
+ && find /opt/agentclaw/llama-cpp/llama-cpp-provider/node_modules -name llama-addon.node -print -quit | grep -q . \
+ && rm -rf /tmp/ocbuild
+
+# The GGUF model — verified against its pinned digest before it can ship.
+RUN mkdir -p /opt/agentclaw/models \
+ && curl -fsSL -o /opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf "${EMBED_MODEL_URL}" \
+ && echo "${EMBED_MODEL_SHA256}  /opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf" | sha256sum -c - \
+ && chmod -R a+rX /opt/agentclaw
+
+# Well-known paths the control plane links/points at when it enables local
+# embeddings (src/openclaw/configWriter.ts). Exposed as ENV so a running agent —
+# and anything inspecting the image — can discover them without hardcoding.
+ENV HATCHABOT_EMBED_PLUGIN=/opt/agentclaw/llama-cpp/llama-cpp-provider \
+    HATCHABOT_EMBED_MODEL=/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf
+
+# Python 3 + pip are in the base so agents whose workspaces carry scripts can
+# run them (`python3 script.py`, as their cron jobs do). The base stays lean:
+# it ships NO third-party packages. An agent that needs libraries installs them
+# onto its OWN volume — `pip install --target /home/node/.openclaw/pylibs <pkg>`
+# — and the entrypoint puts that dir on PYTHONPATH. That keeps app-specific,
+# heavy stacks (pandas/numpy/yfinance for a market agent) out of the image every
+# other agent shares, while surviving rebuilds because the volume is durable.
+
+# Read back at runtime by the control plane (update-available detection).
+LABEL org.agentclaw.openclaw-version="${OPENCLAW_VERSION}"
+
+COPY entrypoint.sh /usr/local/bin/agentclaw-entrypoint
+RUN chmod +x /usr/local/bin/agentclaw-entrypoint \
+ && mkdir -p /home/node/.openclaw \
+ && chown -R node:node /home/node
+
+USER node
+ENV HOME=/home/node
+
+# NO `VOLUME` declaration. The agent's whole HOME is the mounted volume, and a
+# declared VOLUME at ~/.openclaw makes Docker auto-create an ANONYMOUS volume
+# there whenever the home volume is mounted at the parent — which shadows the
+# real workspace with an empty directory and the gateway starts with no state.
+# Ownership still comes out right: the home volume is seeded from the image's
+# /home/node (already chown'd to node above) on first use.
+
+ENTRYPOINT ["agentclaw-entrypoint"]
+CMD ["openclaw", "gateway"]

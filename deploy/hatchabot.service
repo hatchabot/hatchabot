@@ -1,0 +1,23 @@
+# Hatchabot control plane — user-level systemd unit.
+# Installed by scripts/install-service.sh into ~/.config/systemd/user/.
+#
+# Runs as your user (so it can reach docker and ~/.claude), restarts on crash,
+# and starts at boot once lingering is enabled for the account.
+[Unit]
+Description=Hatchabot control plane
+
+[Service]
+WorkingDirectory=__HATCHABOT_DIR__
+# Holds HATCHABOT_SECRET_KEY (and PORT). Never committed — see .gitignore.
+EnvironmentFile=__HATCHABOT_DIR__/.env
+# systemd user managers start with a minimal PATH; node (nvm) and docker can
+# live outside it, so install-service.sh bakes their real locations in here.
+Environment=PATH=__HATCHABOT_PATH__
+ExecStart=__HATCHABOT_DIR__/node_modules/.bin/tsx src/index.ts
+Restart=always
+RestartSec=3
+# tsx exits 143 on SIGTERM; that's a clean shutdown, not a failure.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target
