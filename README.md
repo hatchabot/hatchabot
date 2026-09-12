@@ -98,6 +98,8 @@ adopting, backing up, and operating a fleet of agents.
 
 ## Quick start
 
+> New here? **[docs/quickstart.md](docs/quickstart.md)** is the 15-minute path to a first agent (Telegram + Claude included). **[docs/why-agentclaw.md](docs/why-agentclaw.md)** explains the philosophy and how this differs from a chat app; **[docs/pitch.md](docs/pitch.md)** is the short pitch.
+
 ```sh
 git clone https://github.com/cksci/agentclaw-ai.git agentclaw
 cd agentclaw
