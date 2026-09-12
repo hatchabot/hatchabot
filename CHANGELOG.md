@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.0.3] — 2026-09-12
+
+### Changed
+- New app icon: a hatching egg replaces the AgentClaw paw (`scripts/gen-pwa-icons.mjs`). Service-worker cache bumped so open tabs pick up the renamed shell; an installed PWA must be removed and re-added to the home screen to change its name and icon.
+
 ## [1.0.2] — 2026-09-12
 
 ### Fixed

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Generates the PWA icons from code — no image dependency. Draws an on-brand
-// paw (accent #e8a33d ground, ink #14161a mark) and encodes PNGs by hand
+// hatching egg (accent #e8a33d ground, ink #14161a mark) and encodes PNGs by hand
 // (zlib + CRC32). Re-run after changing the design:  node scripts/gen-pwa-icons.mjs
 import { deflateSync } from 'node:zlib';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -12,25 +12,29 @@ const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'icons');
 const BG = [232, 163, 61]; // --accent
 const INK = [20, 22, 26]; // --accent-ink / --bg
 
-// Paw in normalized [0,1] coords: a pad + four toes.
-const PAD = { x: 0.5, y: 0.63, rx: 0.2, ry: 0.17 };
-const TOES = [
-  { x: 0.27, y: 0.43, r: 0.076 },
-  { x: 0.42, y: 0.31, r: 0.088 },
-  { x: 0.58, y: 0.31, r: 0.088 },
-  { x: 0.73, y: 0.43, r: 0.076 },
-];
-
+// A hatching egg in normalized [0,1] coords: an egg outline (narrower at
+// the top) with a zigzag crack across its upper third — the "hatch" in Hatchabot.
+const EGG = { cx: 0.5, cy: 0.53, rx: 0.29, ry: 0.36 };
+const CRACK = { y: 0.42, amp: 0.035, period: 0.11, half: 0.02, x0: 0.24, x1: 0.76 };
+function inEgg(px, py) {
+  const t = (py - EGG.cy) / EGG.ry;
+  if (t < -1 || t > 1) return false;
+  const w = EGG.rx * Math.sqrt(1 - t * t) * (1 - 0.18 * t); // smaller on top (t<0)
+  return Math.abs(px - EGG.cx) <= w;
+}
+function inCrack(px, py) {
+  if (px < CRACK.x0 || px > CRACK.x1) return false;
+  const phase = ((px - CRACK.x0) / CRACK.period) % 1;
+  const zig = phase < 0.5 ? phase * 2 : 2 - phase * 2; // triangle wave 0..1
+  const cy = CRACK.y + (zig - 0.5) * 2 * CRACK.amp;
+  return Math.abs(py - cy) <= CRACK.half;
+}
 function inPaw(nx, ny, scale) {
   // Shrink the mark about the centre for maskable/safe-zone variants.
   const px = (nx - 0.5) / scale + 0.5;
   const py = (ny - 0.5) / scale + 0.5;
-  const dp = ((px - PAD.x) / PAD.rx) ** 2 + ((py - PAD.y) / PAD.ry) ** 2;
-  if (dp <= 1) return true;
-  for (const t of TOES) if ((px - t.x) ** 2 + (py - t.y) ** 2 <= t.r ** 2) return true;
-  return false;
+  return inEgg(px, py) && !inCrack(px, py);
 }
-
 function insideRounded(nx, ny, rr) {
   const qx = Math.abs(nx - 0.5) - (0.5 - rr);
   const qy = Math.abs(ny - 0.5) - (0.5 - rr);

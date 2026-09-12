@@ -9,7 +9,7 @@
 // Bumped to evict a shell cached before the app was served no-store: an old
 // copy of index.html made shipped fixes invisible. `activate` deletes every
 // cache whose name isn't this one.
-const CACHE = 'hatchabot-shell-v2';
+const CACHE = 'hatchabot-shell-v3';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {
