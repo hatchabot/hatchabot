@@ -63,6 +63,9 @@ systemctl --user enable --now hatchabot.service hatchabot-backup.timer
 
 say "6. CLI wrapper"
 mkdir -p "$HOME/.local/bin"
+if [ -f "$HOME/.config/agentclaw/env" ] && [ ! -f "$HOME/.config/hatchabot/env" ]; then
+  mkdir -p "$HOME/.config/hatchabot"; sed 's/^AGENTCLAW_/HATCHABOT_/' "$HOME/.config/agentclaw/env" > "$HOME/.config/hatchabot/env"; chmod 600 "$HOME/.config/hatchabot/env"; echo "   ~/.config/hatchabot/env"
+fi
 printf '#!/usr/bin/env bash\ncd "%s" && exec node_modules/.bin/tsx src/cli.ts "$@"\n' "$NEW" > "$HOME/.local/bin/hatchabot"; chmod +x "$HOME/.local/bin/hatchabot"
 ln -sf "$HOME/.local/bin/hatchabot" "$HOME/.local/bin/agentclaw"
 

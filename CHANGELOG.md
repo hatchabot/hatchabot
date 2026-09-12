@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.0.1] — 2026-09-12
+
+### Fixed
+- CLI ignored a pre-rename `~/.config/agentclaw/env` (its `AGENTCLAW_*` keys were read but never aliased) and asked to log in again; keys are now aliased on read, and `migrate-rename-host.sh` writes `~/.config/hatchabot/env` too.
+
 ## [1.0.0] — 2026-09-12
 
 ### Changed

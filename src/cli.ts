@@ -29,7 +29,7 @@ function configDefaults(): Record<string, string> {
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith('#') && l.includes('='))
-        .map((l) => [l.slice(0, l.indexOf('=')), unquoteEnvValue(l.slice(l.indexOf('=') + 1))]),
+        .map((l) => [l.slice(0, l.indexOf('=')].replace(/^AGENTCLAW_/, 'HATCHABOT_'), unquoteEnvValue(l.slice(l.indexOf('=') + 1))]), // pre-rename config files
     );
   } catch {
     return {};
