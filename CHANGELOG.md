@@ -2,6 +2,14 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.140.0] — 2026-09-11
+
+### Added
+- **Event-triggered tasks (per agent).** In an agent's Tasks dialog, *Allow event-triggered
+  tasks* turns on OpenClaw's `cron.triggers.enabled`, so the agent can attach a headless,
+  zero-token condition script to a task — e.g. an inbox poll that only wakes the model when
+  unread mail exists. Applies live and is re-asserted on rebuilds. Off by default.
+
 ## [0.139.2] — 2026-09-11
 
 ### Fixed
