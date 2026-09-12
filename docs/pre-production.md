@@ -111,14 +111,14 @@ Every member who DMs the bot writes into that one transcript, and the session's
 chats get their own key (`agent:<slug>:telegram:group:<id>`), so the shape is one
 shared DM thread plus one per group.
 
-Verified on this installation: **Test Sophie** has three active members, one
+Verified on this installation: **a test agent** has three active members, one
 session file, and 223 user messages in it — 3 flagged `senderIsOwner: true`, 220
 `false`. Two people's conversations, one thread.
 
 **What this means.** Anything a member says is context for the agent's replies to
 every other member. Nobody is quoted verbatim to anyone else, but the agent
 answers each person carrying what the others told it, and a member can simply ask
-it what was discussed. For the Krueger Family Agent that is arguably the point;
+it what was discussed. For a family agent that is arguably the point;
 for a health, legal, or money agent shared between two people it is not what
 either would assume.
 

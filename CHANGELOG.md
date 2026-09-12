@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.140.2] — 2026-09-11
+
+### Changed
+- **Release readiness.** Added SECURITY.md, CODE_OF_CONDUCT.md, issue and PR templates,
+  `docs/releasing.md` (versioning, branches, cutting a release, running production from a
+  tagged checkout separate from the dev tree) and `scripts/deploy-release.sh`. `tsx` is now a
+  runtime dependency (the service runs it). Example names and hostnames in docs, tests and the
+  operator-profile placeholder are generic.
+
 ## [0.140.1] — 2026-09-11
 
 ### Fixed
@@ -1550,7 +1559,7 @@ Same-day fixes:
 ## [0.68.1] — 2026-08-30
 
 ### Changed
-- **Agent cards name the machine they run on**, e.g. `on dgx-spark` instead of
+- **Agent cards name the machine they run on**, e.g. `on studio-mini` instead of
   `on this machine`. The phrase was ambiguous the moment a second host existed,
   and on a phone it reads as the phone. `GET /v1/hosts` now carries the local
   host's live `hostname` alongside its stored label, so the card stays right if

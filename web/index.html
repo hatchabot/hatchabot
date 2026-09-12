@@ -1151,7 +1151,7 @@
       standing preferences. Applies to running agents immediately (no rebuild).
     </div>
     <textarea id="operatorText" rows="10" maxlength="8000" style="width:100%;box-sizing:border-box;font:inherit"
-      placeholder="e.g. I'm Chris, 47, in Toronto. Three kids (8, 11, 14). Prefer concise answers and metric units. Partner: Julieta."></textarea>
+      placeholder="e.g. I'm Sam, 42, in Lisbon. Two kids (9 and 13). Prefer concise answers and metric units. Partner: Alex."></textarea>
     <div class="sub" id="operatorErr" style="color:var(--bad);margin-top:6px"></div>
     <div style="margin-top:8px"><button class="primary" id="operatorSaveBtn" onclick="saveOperator()">Save &amp; apply to all my agents</button></div>
     <div class="sub" style="margin-top:6px">Private to your account — other household members have their own operator profile.</div>
@@ -3947,7 +3947,7 @@ function agentMeta(a) {
   // locally, the runner's name in Cluster mode. "this machine" was ambiguous
   // the moment a second host existed — and on a phone, "this machine" reads as
   // the phone. The local host's stored NAME is a label ("This machine
-  // (dgx-spark)"); `hostname` is the machine, served live by GET /v1/hosts.
+  // (studio-mini)"); `hostname` is the machine, served live by GET /v1/hosts.
   if (host) bits.push(`on ${esc(host.kind === 'local' ? (host.hostname || host.name) : host.name)}`);
   if (a.lastActiveAt) bits.push(`active ${ago(a.lastActiveAt)}`);
   if (a.modelWarm === false) bits.push('warming up');

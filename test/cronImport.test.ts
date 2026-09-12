@@ -43,7 +43,7 @@ describe('cronAddArgs', () => {
     // (no route → fail-closed, or the isolated agent's reply leaking to the owner).
     const args = cronAddArgs(
       {
-        name: 'TSCC 2405 check', scheduleKind: 'cron', scheduleExpr: '0 9 * * *',
+        name: 'Board check', scheduleKind: 'cron', scheduleExpr: '0 9 * * *',
         payloadKind: 'agentTurn', payloadMessage: 'scan',
         sessionTarget: 'isolated', deliveryMode: 'announce',
         deliveryChannel: 'telegram', deliveryTo: 'telegram:1000000001',

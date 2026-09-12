@@ -126,7 +126,7 @@ exposed to the internet.
    # macOS: install Tailscale from the App Store, sign in, toggle it on
    ```
    Sign in with Google/Apple/GitHub; that account owns your tailnet.
-2. In the Tailscale admin console → **DNS**, make sure **MagicDNS** is on. Your machine now has a name like `dgx-spark.tail1234.ts.net`.
+2. In the Tailscale admin console → **DNS**, make sure **MagicDNS** is on. Your machine now has a name like `studio-mini.tail1234.ts.net`.
 3. Tell AgentClaw its public address so invite links use it. In `agentclaw/.env` add:
    ```
    AGENTCLAW_PUBLIC_URL=http://<machine>.<tailnet>.ts.net:8080

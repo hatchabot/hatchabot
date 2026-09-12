@@ -128,9 +128,9 @@ describe('container and volume shape', () => {
   });
 
   it('sets the container hostname when the spec carries one (the where-am-I compass)', async () => {
-    await provider.provision(spec({ hostname: 'kitchen-helper.dgx-spark' }) as any);
+    await provider.provision(spec({ hostname: 'kitchen-helper.studio-mini' }) as any);
     const create = argv().split('\n').find((l) => l.startsWith('create '));
-    expect(create).toContain('--hostname kitchen-helper.dgx-spark');
+    expect(create).toContain('--hostname kitchen-helper.studio-mini');
   });
 
   it('mounts the volume as the agent\'s HOME, not just ~/.openclaw', async () => {

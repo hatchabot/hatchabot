@@ -181,12 +181,12 @@ describe('live model change (no rebuild)', () => {
 describe('AI source list reports who is on each source', () => {
   it('counts your agents and other accounts\' agents (count only) on sources you own', async () => {
     const { f, store } = await world();
-    store.insertAgent({ id: 'x1', ownerId: 'user-julieta', name: 'Kid', slug: 'kid', state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    store.insertAgent({ id: 'x1', ownerId: 'user-other', name: 'Kid', slug: 'kid', state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
     const mine = (await f.inject({ method: 'GET', url: '/v1/ai-profiles', headers: as })).json().find((p: any) => p.id === 'p1');
     expect(mine.inUse).toEqual({ mine: 1, others: 1 });
     // A non-owner viewing a shared source sees only their own count.
     store['db'].prepare('UPDATE ai_profiles SET shared = 1 WHERE id = ?').run('p1');
-    const theirs = (await f.inject({ method: 'GET', url: '/v1/ai-profiles', headers: { 'x-agentclaw-owner': 'user-julieta' } })).json().find((p: any) => p.id === 'p1');
+    const theirs = (await f.inject({ method: 'GET', url: '/v1/ai-profiles', headers: { 'x-agentclaw-owner': 'user-other' } })).json().find((p: any) => p.id === 'p1');
     expect(theirs.inUse).toEqual({ mine: 1, others: undefined });
   });
 });
@@ -195,12 +195,12 @@ describe('host-owner migrate-agents (retire a source other accounts still use)',
   it('moves other accounts\' agents to a SHARED source, then the old source can be deleted', async () => {
     const { f, store } = await world(); // h1 is owned by OWNER → host owner
     store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Shared token', vendor: 'anthropic', kind: 'subscription', model: 'claude-opus-4-8', secretRef: 'ai/p2', shared: true, createdAt: 'now' } as any);
-    store.insertAgent({ id: 'x1', ownerId: 'user-julieta', name: 'Kid Advisor', slug: 'kid', state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    store.insertAgent({ id: 'x1', ownerId: 'user-other', name: 'Kid Advisor', slug: 'kid', state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
     // Refused while in use by another account…
     let del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
     expect(del.statusCode).toBe(400); expect(del.json().error).toMatch(/other accounts/);
     // …a non-host-owner can't migrate…
-    expect((await f.inject({ method: 'POST', url: '/v1/ai-profiles/p1/migrate-agents', headers: { 'x-agentclaw-owner': 'user-julieta' }, payload: { toProfileId: 'p2' } })).statusCode).toBe(403);
+    expect((await f.inject({ method: 'POST', url: '/v1/ai-profiles/p1/migrate-agents', headers: { 'x-agentclaw-owner': 'user-other' }, payload: { toProfileId: 'p2' } })).statusCode).toBe(403);
     // …the target must be shared when other accounts are on it…
     store.insertAIProfile({ id: 'p3', ownerId: OWNER, name: 'Private', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p3', createdAt: 'now' });
     expect((await f.inject({ method: 'POST', url: '/v1/ai-profiles/p1/migrate-agents', headers: as, payload: { toProfileId: 'p3' } })).statusCode).toBe(400);

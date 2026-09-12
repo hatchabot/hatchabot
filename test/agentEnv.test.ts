@@ -75,7 +75,7 @@ describe('POST /v1/agents/:id/env', () => {
   it('still allows a benign, non-credential variable', async () => {
     const { store, f } = await world();
     expect((await addEnv(f, { name: 'MARKETDATA_API_KEY', value: 'ok' })).statusCode).toBe(200);
-    expect((await addEnv(f, { name: 'TZ', value: 'America/Toronto' })).statusCode).toBe(200);
+    expect((await addEnv(f, { name: 'TZ', value: 'Europe/Lisbon' })).statusCode).toBe(200);
     expect(store.listAgentEnv('a1').map((e) => e.name).sort()).toEqual(['MARKETDATA_API_KEY', 'TZ']);
   });
 

@@ -8,7 +8,7 @@ import { fmtBots } from '../src/cli.js';
  */
 const hosts = [
   {
-    host: 'dgx-spark',
+    host: 'studio-mini',
     mgmtBotConfigured: true,
     bots: [
       { username: 'aReallyLongHandleBot', cls: 'in-use', source: 'agent', agentName: 'Tech', state: 'RUNNING', valid: true },
@@ -40,9 +40,9 @@ describe('fmtBots', () => {
 
   it('flags a bot present on two hosts with a ⇄ marker on both, and counts it', () => {
     const text = fmtBots(hosts, false).join('\n');
-    // @shrt is on dgx-spark (STOPPED) and Laptop (STOPPED)
+    // @shrt is on studio-mini (STOPPED) and Laptop (STOPPED)
     expect(text).toContain('⇄ also Laptop:History[STOPPED]');
-    expect(text).toContain('⇄ also dgx-spark:History[STOPPED]');
+    expect(text).toContain('⇄ also studio-mini:History[STOPPED]');
     // summary: 2 reclaimable, 1 dead, 1 shared bot
     expect(text).toMatch(/2 reclaimable · 1 dead · 1 bot\(s\) shared/);
   });
