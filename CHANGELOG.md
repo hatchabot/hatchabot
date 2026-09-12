@@ -2,6 +2,15 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.139.1] — 2026-09-11
+
+### Fixed
+- **Deleting an in-use AI source looked like it silently did nothing.** The refusal was written
+  below the whole source list (off-screen), and the row said "No agents on this source" because
+  it only counted *your* agents. Each source now shows how many of your agents use it **and how
+  many agents on other accounts** do; Delete explains the reason right at the button (and as a
+  toast) and offers the right next step — Move agents, or ↪ Migrate all off… for the host owner.
+
 ## [0.139.0] — 2026-09-11
 
 ### Fixed

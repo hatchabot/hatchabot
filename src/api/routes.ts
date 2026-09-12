@@ -978,9 +978,16 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // itself): the two subscription flavours are indistinguishable in the
     // UI otherwise, and "did I paste a setup-token or is this the machine
     // login?" is a question the owner should not need the database for.
+    // Who is on each source — the number that decides whether Delete can work.
+    // Other accounts' agents are a COUNT only (never named) and only for the
+    // profiles you own; for someone else's shared source you see just yours.
+    const active = store.listAllActiveAgents();
     return store.listAIProfiles(ownerIdOf(req)).map(({ secretRef, ownerId, baseUrl, ...safe }) => {
       const mine = ownerId === ownerIdOf(req);
+      const on = active.filter((a) => a.aiProfileId === safe.id);
+      const inUse = { mine: on.filter((a) => a.ownerId === ownerIdOf(req)).length, others: mine ? on.filter((a) => a.ownerId !== ownerIdOf(req)).length : undefined };
       return {
+        inUse,
         ...safe,
         mine,
         // Don't leak another account's identifier or their internal model-

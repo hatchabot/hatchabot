@@ -2593,7 +2593,11 @@ function defaultModelControl(p) {
  *  you manage sources. */
 function sourceUsage(p) {
   const ags = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId === p.id);
-  if (!ags.length) return '<div class="sub" style="width:100%">No agents on this source.</div>';
+  const others = p.inUse?.others || 0;
+  const othersNote = others
+    ? `<div class="sub" style="width:100%;color:var(--warn)">Also used by <b>${others} agent${others === 1 ? '' : 's'} on other accounts</b> — it can't be deleted until they move${myAccount.hostOwner ? ' (↪ Migrate all off… below does that)' : ''}.</div>`
+    : '';
+  if (!ags.length) return `<div class="sub" style="width:100%">${others ? 'None of your agents are on this source.' : 'No agents on this source.'}</div>` + othersNote;
   const byModel = {};
   for (const a of ags) { const m = a.model || '(no model)'; (byModel[m] = byModel[m] || []).push(a); }
   const breakdown = Object.entries(byModel).sort((x, y) => y[1].length - x[1].length)
@@ -2605,7 +2609,7 @@ function sourceUsage(p) {
     return `<div style="padding:2px 0"><span class="grow">${esc(a.name)}</span>
       <span class="sub">${esc(a.model || '(no model)')}</span>${pin}${soon}</div>`;
   }).join('');
-  return `<details style="width:100%">
+  return othersNote + `<details style="width:100%">
     <summary class="sub" style="cursor:pointer">${ags.length} agent${ags.length === 1 ? '' : 's'} · ${breakdown}</summary>
     <div style="padding:4px 0 4px 14px">${rows}</div>
   </details>`;
@@ -2746,8 +2750,9 @@ function renderAiList() {
         })()}
         ${myAccount.hostOwner && p.mine !== false ? `<button onclick="openMigrate('${p.id}', '${jsq(p.name)}')" title="Host-owner action: move EVERY agent on this source — other accounts' included — onto a shared source, so this one can be deleted">↪ Migrate all off…</button>` : ''}
         <button class="primary" onclick="saveAiProfile('${p.id}')">Save</button>
-        <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')">Delete</button>
+        <button class="danger" onclick="delAiProfile('${p.id}', '${jsq(p.name)}')" title="${(p.inUse?.mine || 0) + (p.inUse?.others || 0) ? esc(`In use by ${p.inUse.mine} of your agents${p.inUse.others ? ' and ' + p.inUse.others + ' on other accounts' : ''} — move them first`) : 'Remove this AI source'}">Delete</button>
       </div>
+      <div class="sub" id="aiRowErr-${p.id}" style="width:100%;color:var(--bad);text-align:right"></div>
     </div>`).join('') || '<div class="sub">No AI sources yet.</div>';
   // Populate the switchable-model bubbles for each owned profile.
   profiles.filter(p => p.mine !== false).forEach(p => renderExtras(p.id));
@@ -3257,13 +3262,26 @@ async function moveAgentsApply(rebuild) {
 }
 
 async function delAiProfile(id, name) {
+  const p = profiles.find(x => x.id === id);
+  const rowErr = $(`aiRowErr-${id}`);
+  const explain = (msg) => { if (rowErr) rowErr.textContent = msg; toast(msg, 12000); };
+  // Refuse locally with the reason AT the button — the server would refuse too,
+  // but its message used to land in #aiErr below the whole list (invisible).
+  const mine = p?.inUse?.mine || 0, others = p?.inUse?.others || 0;
+  if (mine + others) {
+    const msg = `Can't delete "${name}" — still in use by ${mine ? mine + ' of your agent' + (mine === 1 ? '' : 's') : ''}${mine && others ? ' and ' : ''}${others ? others + ' agent' + (others === 1 ? '' : 's') + ' on other accounts' : ''}. Move them to another source first.`;
+    explain(msg);
+    if (others && myAccount.hostOwner && confirm(`${msg}\n\nAs the host owner you can move every agent on it (other accounts' included) to a shared source, then delete it. Open that now?`)) openMigrate(id, name);
+    else if (mine && !others && confirm(`${msg}\n\nOpen "Move agents" to pick where they go?`)) { const t = profiles.find(x => x.id !== id && (x.mine !== false || x.shared)); if (t) moveAgentsToSource(t.id, t.name); }
+    return;
+  }
   if (!confirm(`Remove AI source "${name}"?`)) return;
   try {
     await api(`/v1/ai-profiles/${id}`, { method: 'DELETE' });
     toast('Removed');
     await refresh(true); renderAiList();
   } catch (e) {
-    $('aiErr').textContent = e.message;
+    explain(e.message);
     if (myAccount.hostOwner && /other accounts/.test(e.message) && confirm(`${e.message}\n\nAs the host owner you can move every agent on "${name}" (other accounts' included) to a shared source, then delete it. Open that now?`)) openMigrate(id, name);
   }
 }
