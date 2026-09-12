@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.0.2] — 2026-09-12
+
+### Fixed
+- 1.0.1 shipped with a syntax error in `src/cli.ts` (the CLI would not start; the server was unaffected). Do not deploy 1.0.1.
+
 ## [1.0.1] — 2026-09-12
 
 ### Fixed
