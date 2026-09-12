@@ -2,6 +2,12 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.139.2] — 2026-09-11
+
+### Fixed
+- Settings re-reads your account flags each time it opens, so admin buttons (↪ Migrate all
+  off…) appear without a full reload after an update.
+
 ## [0.139.1] — 2026-09-11
 
 ### Fixed

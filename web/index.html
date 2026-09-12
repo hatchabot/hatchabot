@@ -2525,6 +2525,9 @@ async function openAiDlg(tab) {
   showTab(tab || 'ai');
   aiDlg.showModal();
   aiKindChanged();      // populate the model dropdown + prefill for the current kind
+  // Re-read account flags (hostOwner etc.) — they gate admin buttons in this
+  // dialog and a page opened before a deploy would otherwise carry stale ones.
+  await loadMyAccount().catch(() => {});
   renderAiList();       // instant paint (dropdowns fall back to text until models load)
   loadMediaKey();
   loadSearchKey();
