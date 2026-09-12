@@ -64,6 +64,44 @@ happened to which agent, usage reported as tokens rather than a made-up bill,
 and health probes that distinguish "listed as running" from "actually
 answering".
 
+## Versus plain OpenClaw
+
+AgentClaw doesn't replace OpenClaw — every agent *is* an OpenClaw gateway. What
+it adds is the layer OpenClaw deliberately doesn't have: many installs, run as
+a fleet, by more than one person.
+
+- **One install per agent, so agents can't hurt each other.** Plain OpenClaw is
+  one gateway, one process, one `openclaw.json`, one workspace and credential
+  set shared by every agent in it. AgentClaw gives each agent its own container,
+  volume, bot token, tool policy and secrets. A runaway task, a bad config edit,
+  a rate-limited source, a compromised agent, or a crash touches one agent —
+  the other thirty keep answering. Upgrades work the same way: the runtime image
+  is pinned and rolled out per agent (candidate first), never "upgrade the
+  gateway and hope every agent survives".
+- **Lifecycle instead of hand-editing.** Create, clone, rebuild, archive,
+  restore, delete, move between machines — with a snapshot before every change
+  and a rollback if a move fails. In plain OpenClaw that's you, a shell, and a
+  directory.
+- **Credentials managed once, injected per agent.** One Claude setup-token
+  serves every agent; Google accounts attach per agent with "read but never
+  send"; per-agent secrets are write-only. No keyrings to hand-copy into each
+  install.
+- **More than one human.** Owners, members, invites by link or QR, pairing
+  approvals, group rooms, shared-vs-private memory that people are told about,
+  per-owner isolation for a household. OpenClaw's allowlist is a config line.
+- **Fleet operations.** One app for the whole fleet: health probes, usage per
+  agent per day, an audit timeline, a daily security posture with diffs, classes
+  to retune model tiers, bulk actions, planned agents.
+- **Continuity across the things that reset a thread.** Save-to-memory before a
+  source switch or archive, full chat export, one-click recovery of lost
+  context, an operator profile injected into every agent.
+- **Agents that consult each other across installs** — with owner-granted,
+  scoped tokens, loop guards and rate limits — instead of everything sharing one
+  process.
+
+If you run one agent for yourself, plain OpenClaw is fine. AgentClaw is for
+when there are several, they matter, and other people talk to them.
+
 ## What you can do that you can't do with a chat app
 
 | Capability | What it means in practice |
