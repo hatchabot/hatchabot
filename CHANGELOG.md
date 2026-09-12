@@ -2,6 +2,12 @@
 
 All notable changes to AgentClaw are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [0.140.1] — 2026-09-11
+
+### Fixed
+- v0.140.0 shipped only the type for event-triggered tasks (the patch aborted midway and the
+  release gate didn't notice). This release contains the actual feature described below.
+
 ## [0.140.0] — 2026-09-11
 
 ### Added

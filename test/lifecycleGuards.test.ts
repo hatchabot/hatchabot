@@ -216,6 +216,16 @@ describe('host-owner migrate-agents (retire a source other accounts still use)',
 });
 
 describe('audit 2026-09-11 follow-ups', () => {
+  it('PATCH cronTriggers stores the flag and sets cron.triggers.enabled live on a running agent', async () => {
+    const { f, store, provider } = await world();
+    const res = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { cronTriggers: true } });
+    expect(res.statusCode).toBe(200);
+    expect(store.getAgent('a1')!.cronTriggers).toBe(true);
+    expect(provider.execLog).toContainEqual(['config', 'set', 'cron.triggers.enabled', 'true']);
+    await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { cronTriggers: false } });
+    expect(provider.execLog).toContainEqual(['config', 'set', 'cron.triggers.enabled', 'false']);
+  });
+
   it('a task can be created on a fractional-minute interval (1.5 = every 90s)', async () => {
     const { f, provider } = await world();
     provider.execResponses.set('cron add', { code: 0, stderr: '', stdout: JSON.stringify({ id: 'j1' }) });

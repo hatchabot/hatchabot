@@ -477,6 +477,7 @@ export async function buildRuntimeSpec(
         model: effectiveModel(agent, profile),
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
+        cronTriggers: agent.cronTriggers === true,
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
         provider: local ? 'ollama' : profile.vendor === 'google' ? 'google' : 'anthropic',

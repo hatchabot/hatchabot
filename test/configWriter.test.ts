@@ -312,6 +312,8 @@ describe('telegram rich messages (managed default ON)', () => {
   });
 
   it('unset and true both write true — OpenClaw\'s own default is plain text, ours is rich', () => {
+    expect(argFor(buildConfigCommands(tg(undefined)), 'cron.triggers.enabled')).toBe('false'); // off unless opted in
+    expect(argFor(buildConfigCommands({ ...tg(undefined), cronTriggers: true }), 'cron.triggers.enabled')).toBe('true');
     expect(argFor(buildConfigCommands(tg(undefined)), 'channels.telegram.richMessages')).toBe('true');
     expect(argFor(buildConfigCommands(tg(true)), 'channels.telegram.richMessages')).toBe('true');
   });

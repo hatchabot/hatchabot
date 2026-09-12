@@ -336,6 +336,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     });
   }
 
+  // Event-triggered tasks: convergent like richMessages — an explicit opt-in
+  // writes true, everything else re-asserts false on every provision/rebuild.
+  cmds.push({ argv: ['config', 'set', 'cron.triggers.enabled', patch.cronTriggers === true ? 'true' : 'false'] });
+
   if (patch.telegram) {
     const { accountId, botToken, dmPolicy, allowFrom, groupAccess, richMessages } = patch.telegram;
     cmds.push({ argv: ['config', 'set', 'channels.telegram.enabled', 'true'] });

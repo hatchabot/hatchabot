@@ -98,6 +98,8 @@ export interface OpenClawConfigPatch {
    * provider can publish its port — the per-agent Control UI debug door.
    */
   gatewayToken?: string;
+  /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
+  cronTriggers?: boolean;
   telegram?: {
     accountId: string;
     botToken: string;

@@ -2402,6 +2402,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           /** Telegram rich formatting. Applied on the next rebuild. `null`
            *  clears back to the managed default (on). */
           richMessages: z.boolean().nullable().optional(),
+          cronTriggers: z.boolean().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -2418,7 +2419,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
         parsed.data.image === undefined &&
         parsed.data.parameters === undefined &&
         parsed.data.groupAccess === undefined &&
-        parsed.data.richMessages === undefined
+        parsed.data.richMessages === undefined &&
+        parsed.data.cronTriggers === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
@@ -2433,6 +2435,15 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
 
       if (parsed.data.richMessages !== undefined) {
         store.setAgentRichMessages(agent.id, parsed.data.richMessages);
+      }
+      if (parsed.data.cronTriggers !== undefined) {
+        store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
+        // OpenClaw applies this key without a gateway restart — set it live so
+        // the agent can wire a trigger script right away; rebuilds re-assert it.
+        if (agent.state === 'RUNNING' && agent.runtimeRef) {
+          await providerFor(agent.hostId).exec(agent.runtimeRef, ['config', 'set', 'cron.triggers.enabled', parsed.data.cronTriggers ? 'true' : 'false']).catch(() => {});
+        }
+        trace(agent.id)('cron.triggers', { enabled: parsed.data.cronTriggers });
       }
 
       if (persona !== undefined) {

@@ -1255,6 +1255,9 @@
     Turn one on or off, <b>run one now</b> to test it, or delete it. Its result
     arrives as a message in the agent's chat.
   </div>
+  <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:10px 0 0">
+    <input type="checkbox" id="cronTriggers" onchange="saveCronTriggers(this.checked)" style="width:auto;margin-top:3px;flex:none">
+    <span><b>Allow event-triggered tasks</b> <span class="sub">— lets the agent attach a headless, zero-token condition script to a task (e.g. "fire only when unread mail exists"), so a frequent poll costs nothing while idle. The script runs inside this agent's own container with its normal tool access. Applies immediately.</span></span></label>
   <div id="cronList" style="margin-top:12px"></div>
   <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
     <label>New task</label>
@@ -5622,6 +5625,7 @@ function cronScheduleLabel(c) {
 }
 async function openCrons(id, name) {
   cronAgentId = id;
+  $('cronTriggers').checked = !!(agents.find(x => x.id === id) || {}).cronTriggers;
   // A leftover edit armed from a previous open silently DELETED an unrelated
   // task on the next add (10th audit) — every open starts in add mode.
   cancelCronEdit();
@@ -5646,6 +5650,13 @@ async function loadCrons() {
   } catch (e) { $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
 }
 let cronEditingId = null, cronCache = [];
+async function saveCronTriggers(on) {
+  try {
+    await api(`/v1/agents/${cronAgentId}`, { method: 'PATCH', body: { cronTriggers: on } });
+    toast(on ? 'Event-triggered tasks allowed — tell the agent it can wire its trigger script now.' : 'Event-triggered tasks disabled.', 7000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 9000); $('cronTriggers').checked = !on; }
+}
 function cronModeChanged() {
   const every = $('cronMode').value === 'every';
   $('cronExpr').style.display = every ? 'none' : '';
