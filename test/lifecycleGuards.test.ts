@@ -185,7 +185,7 @@ describe('AI source list reports who is on each source', () => {
     const mine = (await f.inject({ method: 'GET', url: '/v1/ai-profiles', headers: as })).json().find((p: any) => p.id === 'p1');
     expect(mine.inUse).toEqual({ mine: 1, others: 1 });
     // A non-owner viewing a shared source sees only their own count.
-    store.db.prepare('UPDATE ai_profiles SET shared = 1 WHERE id = ?').run('p1');
+    store['db'].prepare('UPDATE ai_profiles SET shared = 1 WHERE id = ?').run('p1');
     const theirs = (await f.inject({ method: 'GET', url: '/v1/ai-profiles', headers: { 'x-agentclaw-owner': 'user-julieta' } })).json().find((p: any) => p.id === 'p1');
     expect(theirs.inUse).toEqual({ mine: 1, others: undefined });
   });
