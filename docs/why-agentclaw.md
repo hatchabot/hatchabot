@@ -41,6 +41,23 @@ repo, a Google account — with "read mail but never send" if you like) and
 nothing else. The security posture check tells you, every day, which agents
 have both a wide audience and a powerful capability.
 
+**Claude Max, on purpose.** A Max subscription is consumer pricing — a flat
+monthly plan — and `claude setup-token` turns it into an API-like credential
+AgentClaw can inject into every agent. So a household of always-on agents
+(schedulers polling inboxes, advisors reading mail, a dozen personas) runs on
+one flat fee instead of per-token metering from any lab. For this kind of
+fleet that's the difference between "affordable" and "a bill you watch".
+Usage limits still apply (a burst of simultaneous turns can hit them), and the
+setup-token is exactly what makes the credential portable: one token per
+account, injected per agent, revocable, never a shared login directory.
+
+**Telegram, on purpose.** It's free, it's on every platform, and bots are a
+first-class part of it: BotFather creates one in a minute, a free account can
+own 20, Telegram Premium raises that to 40 — and more accounts in the household
+add more. Every agent gets a real, separate identity people already know how to
+message, with deep links, group chats and per-agent allowlists for free. No app
+to ship, no accounts to run, no notification system to build.
+
 **Every operation is reversible or honest about not being.** Snapshots before
 edits and rebuilds, rollback on a failed move, a full audit timeline of what
 happened to which agent, usage reported as tokens rather than a made-up bill,
