@@ -61,7 +61,7 @@ export function parseSshEndpoint(
   // Exclude whitespace from user/host so the parser is safe standalone — a
   // caller that skips the route's zod validation still can't smuggle a newline
   // + ssh_config directive into ~/.ssh/config.
-  const m = /^ssh:\/\/(?:([^@/\s]+)@)?([^@:/\s]+)(?::(\d+))?\/?$/.exec(endpoint.trim());
+  const m = /^ssh:\/\/(?:([A-Za-z0-9._-]+)@)?([A-Za-z0-9._-]+)(?::(\d+))?\/?$/.exec(endpoint.trim()); // hostname/IPv4 chars only — no ssh_config globs
   if (!m || !m[2]) return undefined;
   return { user: m[1], host: m[2], port: m[3] };
 }

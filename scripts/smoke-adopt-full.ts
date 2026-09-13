@@ -1,5 +1,4 @@
-import { applyLegacyEnv } from '../src/envCompat.js';
-applyLegacyEnv();
+import '../src/envCompat.js'; // first import: aliases AGENTCLAW_* env on load
 /**
  * Isolated, full live end-to-end smoke test of the adopt flow.
  *

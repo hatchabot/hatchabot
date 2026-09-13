@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { defaultDbPath } from '../envCompat.js';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -150,7 +151,7 @@ export async function completeViaCli(
   //    stricter but sever the CLI's login state (measured 2026-09-04) —
   //    the residual is the host user's OWN settings hooks, which is their
   //    own config, not an attacker surface.
-  const dataDir = dirname(process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite');
+  const dataDir = dirname(process.env.HATCHABOT_DB ?? defaultDbPath());
   const scratch = join(dataDir, 'mgmt-cli-home');
   mkdirSync(scratch, { recursive: true, mode: 0o700 });
   const env: NodeJS.ProcessEnv = {

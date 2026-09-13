@@ -10,8 +10,7 @@
  * Config: HATCHABOT_URL (default http://localhost:8080) and
  * HATCHABOT_PASSWORD, or --url/--password flags.
  */
-import { applyLegacyEnv } from './envCompat.js';
-applyLegacyEnv();
+import './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -22,18 +21,20 @@ import { execFileSync } from 'node:child_process';
 // Flags > environment > ~/.config/hatchabot/env (KEY=VALUE lines, chmod 600 —
 // keeps the password out of shell history and .bashrc).
 function configDefaults(): Record<string, string> {
-  try {
-    const text = readFileSync(existingConfigPath(), 'utf8');
-    return Object.fromEntries(
-      text
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l && !l.startsWith('#') && l.includes('='))
-        .map((l) => [l.slice(0, l.indexOf('=')).replace(/^AGENTCLAW_/, 'HATCHABOT_'), unquoteEnvValue(l.slice(l.indexOf('=') + 1))]), // pre-rename config files
-    );
-  } catch {
-    return {};
+  // Pre-rename ~/.config/agentclaw/env first, then the current file on top —
+  // a fresh `login` writes only the token to the new file and must not hide
+  // the URL that still lives in the old one. Keys are aliased on read.
+  const out: Record<string, string> = {};
+  for (const file of [join(homedir(), '.config', 'agentclaw', 'env'), configPath()]) {
+    let text: string;
+    try { text = readFileSync(file, 'utf8'); } catch { continue; }
+    for (const raw of text.split('\n')) {
+      const l = raw.trim();
+      if (!l || l.startsWith('#') || !l.includes('=')) continue;
+      out[l.slice(0, l.indexOf('=')).replace(/^AGENTCLAW_/, 'HATCHABOT_')] = unquoteEnvValue(l.slice(l.indexOf('=') + 1));
+    }
   }
+  return out;
 }
 
 /**

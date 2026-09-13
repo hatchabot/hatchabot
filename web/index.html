@@ -6038,7 +6038,7 @@ async function importAgentFile(file) {
       const text = await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text();
       tpl = JSON.parse(text);
     } catch { /* not a peekable template — the server sorts it out */ }
-    if (tpl?.format === 'hatchabot-template' && tpl.parameters?.length) {
+    if (['hatchabot-template', 'agentclaw-template'].includes(tpl?.format) && tpl.parameters?.length) {
       const values = await collectParamValues(tpl.parameters, tpl.name || file.name);
       if (values === null) return; // cancelled — don't upload
       query = `?values=${encodeURIComponent(JSON.stringify(values))}`;
@@ -7056,7 +7056,7 @@ async function refresh(withMeta) {
  * terminator. Using esc() alone here is a script-injection sink.
  */
 function jsq(v) {
-  return esc(String(v ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+  return esc(String(v ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029'));
 }
 
 function esc(s) {

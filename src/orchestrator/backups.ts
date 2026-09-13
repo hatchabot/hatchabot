@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
@@ -23,7 +24,7 @@ const SCRIPT = resolve(fileURLToPath(import.meta.url), '../../../scripts/backup-
 
 /** Where the script writes, mirroring its own `BASE=` default exactly. */
 export function backupsDir(): string {
-  return process.env.HATCHABOT_BACKUP_DIR || join(homedir(), 'hatchabot-backups');
+  return process.env.HATCHABOT_BACKUP_DIR || defaultBackupsDir();
 }
 
 /** Retention the script enforces, surfaced so the panel can say how long a

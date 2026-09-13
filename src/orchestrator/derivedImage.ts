@@ -37,7 +37,7 @@ export function derivedNameProblem(name: string): string | null {
 }
 
 /**
- * The base must be an hatchabot-runtime tag — a derived image is a thin layer on
+ * The base must be a hatchabot-runtime tag — a derived image is a thin layer on
  * the fleet base, not an arbitrary FROM. This both scopes the feature and stops
  * a snippet from smuggling extra build args via the base field. `derived-*` is
  * refused so images can't chain into an unrebuildable tower.
@@ -61,6 +61,22 @@ export function baseProblem(base: string, repo = 'hatchabot-runtime'): string | 
  * trailing USER node is a guardrail, not just convenience: an image that ended
  * as root would break every agent that ran on it.
  */
+/**
+ * The snippet is meant to be a thin layer on the base. Reject directives that
+ * would escape that: a second FROM (last stage wins), bind/secret mounts of
+ * other local images, host networking during the build, or a USER of its own.
+ */
+export function dockerfileProblem(snippet: string): string | null {
+  for (const raw of snippet.split('\n')) {
+    const line = raw.trim();
+    if (/^FROM\b/i.test(line)) return 'A derived image cannot contain its own FROM — the base field sets it.';
+    if (/--mount=/i.test(line)) return 'RUN --mount is not allowed in a derived image.';
+    if (/--network=/i.test(line)) return 'RUN --network is not allowed in a derived image.';
+    if (/^USER\b/i.test(line)) return 'USER is managed for you (root during your lines, node at the end).';
+  }
+  return null;
+}
+
 export function renderDockerfile(base: string, snippet: string): string {
   return `FROM ${base}\nUSER root\n${snippet}\nUSER node\n`;
 }

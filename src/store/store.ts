@@ -1127,8 +1127,25 @@ export class Store {
         `UPDATE operator_profile SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE posture_snapshots SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE agent_todos SET owner_id = ? WHERE owner_id = ?`,
+        // Audit 2026-09-13: the rest of the owner-keyed tables. Without these
+        // Google connections vanish from the vault, parked pool bots become
+        // unleasable, and usage/group-order/shares/heartbeat/images orphan.
+        `UPDATE connections SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE telegram_pool SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE usage_snapshots SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE agent_group_order SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE agent_shares SET from_owner = ? WHERE from_owner = ?`,
+        `UPDATE agent_shares SET to_owner = ? WHERE to_owner = ?`,
+        `UPDATE mgmt_heartbeat SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE derived_images SET created_by = ? WHERE created_by = ?`,
       ]) {
-        rows += this.db.prepare(sql).run(owner, localOwner).changes;
+        try {
+          rows += this.db.prepare(sql).run(owner, localOwner).changes;
+        } catch (err) {
+          // telegram_pool is created lazily by the pool module; a store that
+          // never leased a bot has no such table yet.
+          if (!/no such table/.test(String(err))) throw err;
+        }
       }
       return rows;
     });

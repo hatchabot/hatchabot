@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deploy a tagged release into the PRODUCTION checkout and restart the service.
 #
-#   scripts/deploy-release.sh v0.141.0           # deploy that tag
-#   scripts/deploy-release.sh v0.140.1           # …or roll back to an earlier one
+#   scripts/deploy-release.sh v1.2.0             # deploy that tag
+#   scripts/deploy-release.sh v1.1.0             # …or roll back to an earlier one
 #
 # The production checkout is separate from wherever you develop (see
 # docs/releasing.md). Override the defaults with env vars:
@@ -20,8 +20,10 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not fo
 [ -z "$(git status --porcelain)" ] || { echo "$PROD has local changes — production must never be edited by hand. Refusing."; exit 1; }
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
+rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && npm ci --silent && systemctl --user restart "$SVC"; }
 git checkout --quiet "$TAG"
-npm ci --silent
+# A failed install must not leave prod checked out at a tag it can't run.
+npm ci --silent || { rollback; exit 1; }
 systemctl --user restart "$SVC"
 WANT="$(node -e 'console.log(require("./package.json").version)')"
 URL="${HATCHABOT_HEALTH_URL:-http://127.0.0.1:${PORT:-8080}/}"
@@ -30,4 +32,4 @@ for i in $(seq 1 30); do
   [ "$GOT" = "$WANT" ] && { echo "Serving $GOT."; exit 0; }
   sleep 2
 done
-echo "Service restarted but is not serving $WANT yet — check: journalctl --user -u $SVC -n 50"; exit 1
+echo "Service restarted but is not serving $WANT — check: journalctl --user -u $SVC -n 50"; rollback; exit 1

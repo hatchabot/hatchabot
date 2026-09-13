@@ -174,7 +174,7 @@ names refused at propose time — use `rebuild_image`), `rebuild_image` (name +
 optional newer base → `POST /v1/images/:name/rebuild`), and `remove_image`
 (`DELETE /v1/images/:name`; refused BEFORE a card when any agent pins the
 image). The BASE image is read-only to the bot (`get_runtime` reports it);
-base builds are a host operation (`scripts/build-runtime.sh`).
+base builds are a host operation (`scripts/build-runtime-image.sh`).
 
 **Forbidden** (never in the tool array — the model literally cannot call them):
 `add_ai_key`, set/paste bot token, set password, edit `MEMORY.md`,

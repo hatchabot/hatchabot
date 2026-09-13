@@ -1,5 +1,4 @@
-import { applyLegacyEnv } from './envCompat.js';
-applyLegacyEnv();
+import { defaultDbPath } from './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { hostname } from 'node:os';
@@ -20,7 +19,7 @@ import { runPostureSweep } from './orchestrator/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
 import type { RuntimeProvider } from './providers/provider.js';
 
-const DB_PATH = process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite';
+const DB_PATH = process.env.HATCHABOT_DB ?? defaultDbPath();
 const PORT = Number(process.env.PORT ?? 8080);
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -114,7 +113,12 @@ const app = Fastify(serverOptions);
 
 // Mend any state drift from reboots/crashes before serving a single request —
 // containers auto-restart with the box, the DB doesn't know that.
-await reconcileAgents(store, providers, (e, d) => app.log.info(d, e));
+// Time-boxed: a stalled daemon must not keep the API (and /healthz) down for
+// the whole sweep — the periodic loop below finishes whatever this didn't.
+await Promise.race([
+  reconcileAgents(store, providers, (e, d) => app.log.info(d, e)),
+  new Promise<void>((r) => setTimeout(r, Number(process.env.HATCHABOT_BOOT_RECONCILE_MS ?? 30_000)).unref()),
+]);
 
 // Bot-token secrets no table references anymore are dead weight holding a live
 // credential (a failed best-effort pool release on delete leaks them). All

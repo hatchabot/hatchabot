@@ -32,4 +32,4 @@ release; the CHANGELOG credits reporters who want credit.
 - Denial of service against your own installation.
 
 See `docs/family-member-risk-assessment.md` for the threat model this project
-is designed against, and `docs/audit-*.md` for the review history.
+is designed against, and `the CHANGELOG (audit findings ship as fixes with a note)` for the review history.

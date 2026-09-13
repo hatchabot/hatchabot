@@ -1,5 +1,4 @@
-import { applyLegacyEnv } from '../src/envCompat.js';
-applyLegacyEnv();
+import '../src/envCompat.js'; // first import: aliases AGENTCLAW_* env on load
 /**
  * Drives the whole §11.1 flow in-process against the mock provider:
  *

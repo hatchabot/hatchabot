@@ -10,6 +10,45 @@ import {
 } from './identity.js';
 
 const COOKIE = 'hatchabot_session';
+
+/**
+ * Optional allowlist for identity mode: HATCHABOT_ALLOWED_EMAILS="a@x.com, b@y.org".
+ * Unset = anyone the identity provider accepts may sign in (the household
+ * default). Set = only these addresses become tenants; everyone else is 403.
+ */
+function allowedEmailProblem(email: string | undefined): string | undefined {
+  const raw = process.env.HATCHABOT_ALLOWED_EMAILS?.trim();
+  if (!raw) return undefined;
+  const allowed = new Set(raw.split(/[\s,]+/).filter(Boolean).map((e) => e.toLowerCase()));
+  if (email && allowed.has(email.toLowerCase())) return undefined;
+  return 'This installation only admits listed accounts.';
+}
+
+/**
+ * Per-client throttle for the credential endpoints: after LIMIT failures in
+ * the window a client gets 429 until it expires. The old flat 400 ms sleep
+ * was defeated by parallel connections.
+ */
+const failLimit = () => Number(process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10); // read per call (tests tune it)
+const FAIL_WINDOW_MS = Number(process.env.HATCHABOT_LOGIN_WINDOW_MS ?? 15 * 60_000);
+const failures = new Map<string, { n: number; until: number }>();
+function throttleKey(req: FastifyRequest): string { return req.ip || 'unknown'; }
+function throttled(req: FastifyRequest): boolean {
+  const f = failures.get(throttleKey(req));
+  if (!f) return false;
+  if (Date.now() > f.until) { failures.delete(throttleKey(req)); return false; }
+  return f.n >= failLimit();
+}
+function noteFailure(req: FastifyRequest): void {
+  const k = throttleKey(req);
+  const f = failures.get(k);
+  if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
+  else f.n += 1;
+  if (failures.size > 10_000) failures.clear(); // bounded; a flood just resets everyone's count
+}
+/** Test hook. */
+export function _resetLoginThrottle(): void { failures.clear(); }
+const LEGACY_COOKIE = 'agentclaw_session'; // set by pre-rename servers; cleared on logout, never read
 /**
  * Mark the session cookie `secure` only when the request actually arrived over
  * HTTPS (directly or via a terminating proxy). Setting it unconditionally
@@ -136,6 +175,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
 
   app.post<{ Body: { password?: string } }>('/v1/login', async (req, reply) => {
     if (!opts.password) return { ok: true }; // auth disabled
+    if (throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const given = (req.body as { password?: string } | null)?.password ?? '';
     const a = Buffer.from(given, 'utf8');
     const b = Buffer.from(opts.password, 'utf8');
@@ -143,6 +183,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     if (!match) {
       // Flat-rate the brute-force path a little; real rate limiting can come
       // with real identity.
+      noteFailure(req);
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong password' });
     }
@@ -166,6 +207,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   // dead session must succeed, not 401.
   app.post('/v1/logout', async (_req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
+    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
     return { ok: true };
   });
 
@@ -254,8 +296,11 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   app.post<{ Body: { idToken?: string } }>('/v1/session', async (req, reply) => {
     const idToken = (req.body as { idToken?: string } | null)?.idToken;
     if (!idToken) return reply.code(400).send({ error: 'idToken required' });
+    if (throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     try {
       const token = await verifier.verify(idToken);
+      const denied = allowedEmailProblem(token.email);
+      if (denied) return reply.code(403).send({ error: denied });
       // Sessions never outlive the token that created them by much.
       const exp = Math.min(token.expMs, Date.now() + SESSION_TTL_MS);
       reply.setCookie(COOKIE, mintSession(token.sub, exp), {
@@ -269,6 +314,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       opts.onAuthenticated?.(principal);
       return { ok: true, ownerId: principal.ownerId, email: principal.email };
     } catch (err) {
+      noteFailure(req);
       if (err instanceof IdentityError) return reply.code(401).send({ error: err.userMessage });
       throw err;
     }
@@ -276,6 +322,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 
   app.post('/v1/logout', async (_req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
+    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
     return { ok: true };
   });
 
@@ -311,7 +358,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     const authz = req.headers.authorization;
     if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
       try {
-        req.principal = principalFor(await verifier.verify(authz.slice(7)));
+        const token = await verifier.verify(authz.slice(7));
+        const denied = allowedEmailProblem(token.email);
+        if (denied) return reply.code(403).send({ error: denied });
+        req.principal = principalFor(token);
         opts.onAuthenticated?.(req.principal);
         return;
       } catch (err) {
@@ -332,7 +382,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 
 
 /**
- * An `hatchabot_…` bearer is a long-lived token this installation minted, not
+ * A `hatchabot_…` bearer is a long-lived token this installation minted, not
  * an identity-provider token — resolve it locally.
  */
 function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {

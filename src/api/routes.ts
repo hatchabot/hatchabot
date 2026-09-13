@@ -103,6 +103,7 @@ import {
   buildLogPath,
   deriveTag,
   derivedNameProblem,
+  dockerfileProblem,
   removeDerivedImage,
 } from '../orchestrator/derivedImage.js';
 import {
@@ -564,7 +565,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // POST /v1/agents returns in milliseconds; the slow steps (docker, health
   // check) run here. One in-flight run per agent; the app polls GET /v1/agents.
   const inflight = new Map<string, Promise<void>>();
-  const recovering = new Set<string>(); // agents with a background recovery turn in flight
+  const operatorFanout = new Map<string, Promise<void>>(); // per-owner chain for the operator-profile push
+const recovering = new Set<string>(); // agents with a background recovery turn in flight
   // Agent-to-agent guards. Consults nest synchronously in this process, so:
   //  - a2aInFlight: targets currently answering a consult. Refusing a consult
   //    to an agent that is itself mid-consult breaks A→B→A cycles at depth 2
@@ -893,7 +895,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     // Fire the fan-out and return; busy agents are skipped (their rebuild writes
     // the section anyway) so we never interleave with a rebuild's own sync.
     const targets = store.listAgents(ownerId).filter((a) => a.state === 'RUNNING' && a.runtimeRef && !isBusy(a.id));
-    void (async () => {
+    // Chain per owner: two saves seconds apart must not race their writes
+    // (the later fan-out could otherwise commit the OLDER text on some agents).
+    const prev = operatorFanout.get(ownerId) ?? Promise.resolve();
+    const run = prev.then(async () => {
       for (const a of targets) {
         try {
           await syncDataSourceDocs(
@@ -902,7 +907,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           );
         } catch { /* best-effort */ }
       }
-    })();
+    });
+    operatorFanout.set(ownerId, run.catch(() => undefined));
     return reply.code(202).send({ content, pushing: targets.length });
   });
 
@@ -1118,12 +1124,14 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
           name: z.string().trim().min(1).max(40),
           // The owner's Dockerfile lines, appended verbatim after the FROM.
           dockerfile: z.string().min(1).max(20000),
-          // Defaults to the fleet base; must be an hatchabot-runtime:* tag.
+          // Defaults to the fleet base; must be a hatchabot-runtime:* tag.
           base: z.string().trim().min(1).max(160).optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const { name, dockerfile } = parsed.data;
+      const dfProblem = dockerfileProblem(dockerfile);
+      if (dfProblem) return reply.code(400).send({ error: dfProblem });
       const base = parsed.data.base ?? DEFAULT_BASE;
 
       const nameErr = derivedNameProblem(name);
@@ -2982,10 +2990,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   const stripSessionCookie = (headers: Record<string, string | string[] | undefined>) => {
     const h = { ...headers };
     if (typeof h.cookie === 'string') {
-      const kept = h.cookie.split(';').map((s) => s.trim()).filter((c) => c && !/^hatchabot_session=/.test(c));
+      const kept = h.cookie.split(';').map((s) => s.trim()).filter((c) => c && !/^(hatchabot|agentclaw)_session=/.test(c));
       if (kept.length) h.cookie = kept.join('; ');
       else delete h.cookie;
     }
+    // Our long-lived bearer tokens are for /v1/*, never for the gateway.
+    if (typeof h.authorization === 'string' && /^Bearer (hatchabot|agentclaw)_/.test(h.authorization)) delete h.authorization;
     return h;
   };
 
@@ -3028,7 +3038,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     ).catch(() => undefined as never);
     if (!upstream) return reply.code(502).send({ error: "The agent's gateway did not answer." });
     for (const [k, v] of Object.entries(upstream.headers)) {
-      if (v !== undefined && !/^(transfer-encoding|connection|content-length)$/i.test(k)) reply.header(k, v);
+      // set-cookie: the gateway is the least-trusted component; it must not plant cookies on our origin.
+      if (v !== undefined && !/^(transfer-encoding|connection|content-length|set-cookie)$/i.test(k)) reply.header(k, v);
     }
     return reply.code(upstream.status).send(upstream.body);
   });
@@ -3542,7 +3553,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     let r;
     const includeLive = (req.body as { includeLive?: boolean } | undefined)?.includeLive === true;
     try { r = await recoverContext(providerFor(agent.hostId), agent, { includeLive }); }
-    catch (err) { return reply.code(502).send({ error: `Couldn't stage the history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
+    catch (err) { recovering.delete(agent.id); return reply.code(502).send({ error: `Couldn't stage the history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     trace(agent.id)('transcript.recover_started', r);
     if (!r.messages) {
       recovering.delete(agent.id);

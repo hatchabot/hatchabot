@@ -2,6 +2,31 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.1.0] — 2026-09-13
+
+14th audit (rename correctness, security surface now that the repo is public, correctness/ops). Three reviewers, every finding verified against the code before fixing.
+
+### Upgrading
+- Re-render your systemd units from `deploy/` (`scripts/install-service.sh`, or copy the `EnvironmentFile=` line into `hatchabot-backup.service`): a backup unit without it cannot find a database that lives outside the checkout, and the nightly backup silently fails.
+- Optional: `HATCHABOT_ALLOWED_EMAILS="you@x.com, partner@y.org"` restricts identity-mode sign-in to listed accounts. Unset keeps today's behaviour (anyone the identity provider accepts).
+
+### Fixed
+- **Backups/upgrade safety.** Default DB and backup paths fall back to the pre-rename names when only those exist, so an in-place `git pull` upgrade of an AgentClaw install opens its real registry instead of an empty one. Bash scripts alias `AGENTCLAW_*` env themselves (systemd loads env files verbatim); backup and restore-drill accept both secret-key names and both DB filenames; restore-drill checks the current `` volume layout.
+- **Env aliasing ran too late** — ESM hoists imports, so modules evaluated before `applyLegacyEnv()` missed `AGENTCLAW_*`; it now runs on import, first. `.env.mgmt` keys are aliased after loading; the CLI merges the old and new config files instead of shadowing.
+- **A2A after the rename:** the in-container `call-agent` tool reads both env spellings, so pre-rename containers keep working when the tool is re-synced without a rebuild.
+- **Runtime image on pre-rename daemons and runners:** `hatchabot-runtime:<tag>` is tagged from `agentclaw-runtime:<tag>` on demand.
+- Pre-slug legacy container refs map to the legacy prefix; the pre-rename session cookie is cleared on logout and stripped from the gateway proxy; legacy `.agentclaw` templates get the setup form.
+- `scripts/migrate-rename-host.sh` handles any checkout location (`--old`), any DB location, pins `HATCHABOT_DB`, renders units from `deploy/` templates, leaves the old DB filename as a symlink so the old checkout still boots, warns about referenced TLS files, refuses macOS up front.
+- `scripts/deploy-release.sh` rolls back to the previous tag if `npm ci` or the health check fails.
+- `recover-context` released its reservation only after 15 minutes when staging failed; operator-profile pushes are serialised per owner so the newest text always lands last; boot reconcile is time-boxed (30 s) so `/healthz` comes up on a stalled daemon; volume import/export and seeding have a 15-minute timeout instead of none.
+- Owner adoption on first identity sign-in now carries connections, pool bots, usage, group order, shares, heartbeat and derived images.
+
+### Security
+- Shared-folder deny list judges the real path (symlinks refused), refuses ancestors of protected paths (`/var`, your home), and adds the Docker socket, the data dir, the installation, backups and credential folders.
+- Password login and identity session minting are throttled per client (10 failures / 15 min → 429).
+- Derived-image snippets may not contain `FROM`, `RUN --mount`, `RUN --network` or `USER`.
+- The Agent Control UI proxy drops upstream `set-cookie` headers and never forwards Hatchabot bearer tokens; pinned image refs are validated; runner hostnames are restricted to hostname characters; inline handlers escape line separators.
+
 ## [1.0.5] — 2026-09-13
 
 ### Fixed

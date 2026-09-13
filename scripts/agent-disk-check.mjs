@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 for (const [k, v] of Object.entries(process.env)) if (k.startsWith('AGENTCLAW_') && process.env['HATCHABOT_' + k.slice(10)] === undefined) process.env['HATCHABOT_' + k.slice(10)] = v; // pre-rename env files
+const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const VOL_RE = new RegExp(`^((?:hatchabot|agentclaw|${esc(process.env.HATCHABOT_PREFIX || 'hatchabot')})-\\S+-vol)\\s+\\S+\\s+([\\d.]+)\\s*([KMGT]?B)`);
 // Read-only disk monitor: agent volume sizes vs the soft warn threshold.
 // A hard per-container quota isn't available on overlay2+ext4, so this is the
 // visibility that keeps a runaway volume from being a mystery "disk full".
@@ -14,7 +16,7 @@ const sh = (c) => { try { return execSync(c, { stdio: ['ignore', 'pipe', 'ignore
 const lines = sh('docker system df -v').split('\n');
 const rows = [];
 for (const l of lines) {
-  const m = /^((?:hatchabot|agentclaw)-\S+-vol)\s+\S+\s+([\d.]+)\s*([KMGT]?B)/.exec(l.trim());
+  const m = VOL_RE.exec(l.trim());
   if (!m) continue;
   const [, name, num, unit] = m;
   const gb = Number(num) * ({ B: 1e-9, KB: 1e-6, MB: 1e-3, GB: 1, TB: 1e3 }[unit] ?? 0);

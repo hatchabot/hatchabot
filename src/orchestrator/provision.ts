@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
-import { basename, resolve } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
+import { basename, dirname, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
@@ -24,7 +25,7 @@ const CALL_AGENT_SCRIPT = `#!/usr/bin/env node
 const fs = require('fs');
 const [peer, msg] = process.argv.slice(2);
 if (!peer || !msg) { console.error('usage: call-agent "<peer name>" "<message>"'); process.exit(2); }
-const url = process.env.HATCHABOT_INTERNAL_URL, tok = process.env.HATCHABOT_AGENT_TOKEN;
+const url = process.env.HATCHABOT_INTERNAL_URL ?? process.env.AGENTCLAW_INTERNAL_URL, tok = process.env.HATCHABOT_AGENT_TOKEN ?? process.env.AGENTCLAW_AGENT_TOKEN; // pre-rename containers carry the old names
 if (!url || !tok) { console.error('This agent has no peers configured.'); process.exit(1); }
 let peers = [];
 try { peers = JSON.parse(fs.readFileSync(process.env.HOME + '/.openclaw/peers.json', 'utf8')); } catch {}
@@ -1049,8 +1050,16 @@ function requireRef(ref: string | undefined): string {
 export function sharePathProblem(p: string, opts: { home?: string } = {}): string | undefined {
   const home = opts.home ?? homedir();
   if (!p.startsWith('/')) return 'Use an absolute path.';
-  const norm = resolve(p).replace(/\/+$/, '') || '/';
+  let norm = resolve(p).replace(/\/+$/, '') || '/';
   if (norm === '/') return 'Sharing the whole filesystem is not allowed.';
+  // Judge the real location: a symlink inside an already-shared folder must
+  // not become a door to ~/.ssh. Non-existent paths are judged lexically.
+  try {
+    if (lstatSync(norm).isSymbolicLink()) return `Refusing ${norm}: it is a symlink — share the real folder instead.`;
+    norm = realpathSync(norm);
+  } catch { /* not there yet — lexical check below */ }
+  if (norm === home) return 'Sharing your whole home folder is not allowed — pick a folder inside it.';
+  const dataDir = dirname(resolve(process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite'));
   const forbidden = [
     [resolve(home, '.claude'), 'that holds your Claude credentials'],
     [resolve(home, '.ssh'), 'that holds your SSH keys'],
@@ -1061,9 +1070,22 @@ export function sharePathProblem(p: string, opts: { home?: string } = {}): strin
     ['/var/lib/docker', 'every agent volume, including other agents'],
     ['/proc', 'kernel state'],
     ['/sys', 'kernel state'],
+    ['/var/run/docker.sock', 'the Docker socket — root on this machine'],
+    ['/run/docker.sock', 'the Docker socket — root on this machine'],
+    [dataDir, 'the Hatchabot database and secret store'],
+    [resolve(home, 'hatchabot-prod'), 'the Hatchabot installation (.env holds the secret key)'],
+    [resolve(home, 'agentclaw-prod'), 'the Hatchabot installation (.env holds the secret key)'],
+    [resolve(home, 'hatchabot-backups'), 'every backup, including other agents'],
+    [resolve(home, 'agentclaw-backups'), 'every backup, including other agents'],
+    [resolve(home, '.docker'), 'Docker credentials'],
+    [resolve(home, '.aws'), 'cloud credentials'],
+    [resolve(home, '.gnupg'), 'your GPG keys'],
+    [resolve(home, '.kube'), 'cluster credentials'],
+    [resolve(home, '.config'), 'application credentials (share a folder inside it, not the whole thing)'],
   ] as const;
   for (const [bad, why] of forbidden) {
-    if (norm === bad || norm.startsWith(`${bad}/`)) return `Refusing ${norm}: ${why}.`;
+    // Inside a forbidden path, or an ANCESTOR of one (sharing /var hands over docker.sock).
+    if (norm === bad || norm.startsWith(`${bad}/`) || bad.startsWith(`${norm}/`)) return `Refusing ${norm}: ${why}.`;
   }
   return undefined;
 }

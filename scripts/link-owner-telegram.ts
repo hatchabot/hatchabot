@@ -1,6 +1,5 @@
 #!/usr/bin/env -S npx tsx
-import { applyLegacyEnv } from '../src/envCompat.js';
-applyLegacyEnv();
+import { defaultDbPath } from '../src/envCompat.js'; // first import: aliases AGENTCLAW_* env on load
 /**
  * Merge an owner who got listed as a "member" of their own agent back into
  * the owner seat.
@@ -25,7 +24,7 @@ applyLegacyEnv();
  */
 import Database from 'better-sqlite3';
 
-const dbPath = process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite';
+const dbPath = process.env.HATCHABOT_DB ?? defaultDbPath();
 const apply = process.argv.includes('--apply');
 const db = new Database(dbPath);
 

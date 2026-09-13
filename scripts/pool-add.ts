@@ -1,5 +1,4 @@
-import { applyLegacyEnv } from '../src/envCompat.js';
-applyLegacyEnv();
+import { defaultDbPath } from '../src/envCompat.js'; // first import: aliases AGENTCLAW_* env on load
 /**
  * Admin tool: add hand-minted BotFather bots to the instant pool.
  *
@@ -21,7 +20,7 @@ if (tokens.length === 0) {
   process.exit(1);
 }
 
-const DB_PATH = process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite';
+const DB_PATH = process.env.HATCHABOT_DB ?? defaultDbPath();
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 const secrets = new LocalSecretStore(db, LocalSecretStore.keyFromEnv());

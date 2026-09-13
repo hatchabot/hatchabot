@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 for (const [k, v] of Object.entries(process.env)) if (k.startsWith('AGENTCLAW_') && process.env['HATCHABOT_' + k.slice(10)] === undefined) process.env['HATCHABOT_' + k.slice(10)] = v; // pre-rename env files
+import { existsSync } from 'node:fs';
 // Read-only health report for managed Google connections and the agents they're
 // attached to. Cross-references the vault (DB) against each agent's container:
 //   - is the gog wrapper installed (can it unlock headlessly)?
@@ -9,7 +10,7 @@ for (const [k, v] of Object.entries(process.env)) if (k.startsWith('AGENTCLAW_')
 import Database from 'better-sqlite3';
 import { execSync } from 'node:child_process';
 
-const db = new Database(process.env.HATCHABOT_DB ?? 'data/hatchabot.sqlite', { readonly: true });
+const db = new Database(process.env.HATCHABOT_DB ?? (!existsSync('data/hatchabot.sqlite') && existsSync('data/agentclaw.sqlite') ? 'data/agentclaw.sqlite' : 'data/hatchabot.sqlite'), { readonly: true });
 const sh = (cmd) => { try { return execSync(cmd, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { return ''; } };
 const days = (iso) => iso ? Math.floor((Date.now() - Date.parse(iso)) / 86400000) : null;
 

@@ -17,3 +17,28 @@ export function applyLegacyEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   }
   return aliased;
 }
+
+// Runs on import so every module evaluated after this one sees the aliases —
+// entry points import this file FIRST (ESM hoists imports above any call).
+applyLegacyEnv();
+
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+/**
+ * Default DB path: the new name, unless only the pre-rename file exists — an
+ * in-place upgrade must open the registry it already has, never a fresh one.
+ */
+export function defaultDbPath(dataDir = 'data'): string {
+  const modern = join(dataDir, 'hatchabot.sqlite');
+  const legacy = join(dataDir, 'agentclaw.sqlite');
+  return !existsSync(modern) && existsSync(legacy) ? legacy : modern;
+}
+
+/** Default backups dir, same rule: prefer the old dir when only it exists. */
+export function defaultBackupsDir(): string {
+  const modern = join(homedir(), 'hatchabot-backups');
+  const legacy = join(homedir(), 'agentclaw-backups');
+  return !existsSync(modern) && existsSync(legacy) ? legacy : modern;
+}

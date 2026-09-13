@@ -21,7 +21,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
+for v in $(compgen -A variable AGENTCLAW_ 2>/dev/null); do n="HATCHABOT_${v#AGENTCLAW_}"; [ -n "${!n+x}" ] || export "$n=${!v}"; done
 BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
+[ -d "$BASE" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BASE="$HOME/agentclaw-backups"; }
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
 
 if [ $# -ge 1 ]; then
@@ -75,8 +78,8 @@ else
   # characters (keyFromEnv stretches any passphrase), so an unquoted
   # `env $(grep …)` would word-split or glob-expand it and test the wrong
   # string. Strip the KEY= prefix and any shell quoting, pass it as one arg.
-  key_line="$(grep -m1 '^HATCHABOT_SECRET_KEY=' "$BACKUP/secret-key.env" || true)"
-  key_val="${key_line#HATCHABOT_SECRET_KEY=}"
+  key_line="$(grep -m1 -E '^(HATCHABOT|AGENTCLAW)_SECRET_KEY=' "$BACKUP/secret-key.env" || true)"   # pre-rename sets use the old key name
+  key_val="${key_line#*=}"
   case "$key_val" in
     "'"*"'") key_val="${key_val#\'}"; key_val="${key_val%\'}" ;;   # strip single quotes
     '"'*'"') key_val="${key_val#\"}"; key_val="${key_val%\"}" ;;   # strip double quotes
@@ -149,7 +152,7 @@ if [ -n "$largest" ]; then
     # UNDER it (an empty agents/ dir is not a usable restore — require a file
     # inside, not merely the directory's existence).
     agent_files=$(docker run --rm -v "$DRILL_VOL:/data:ro" "$IMAGE" \
-      bash -c "find /data/agents -type f 2>/dev/null | wc -l")
+      bash -c "find /data/.openclaw/agents /data/agents -type f 2>/dev/null | wc -l")   # volume is $HOME (new) or /data/agents (old layout)
     if [ "$agent_files" -gt 0 ]; then
       echo "  ✓ $(basename "$largest") restores: $agent_files files under agents/"
     else

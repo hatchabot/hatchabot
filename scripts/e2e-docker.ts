@@ -1,5 +1,4 @@
-import { applyLegacyEnv } from '../src/envCompat.js';
-applyLegacyEnv();
+import '../src/envCompat.js'; // first import: aliases AGENTCLAW_* env on load
 /**
  * Real-runtime smoke test: provisions an actual OpenClaw container through
  * LocalDockerProvider, waits for the gateway to report healthy, exercises

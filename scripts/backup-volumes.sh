@@ -18,8 +18,11 @@ cd "$(dirname "$0")/.."
 
 # The server namespaces its volumes under HATCHABOT_PREFIX — back up whatever
 # namespace this installation actually uses, not a hardcoded one.
+# Pre-rename .env files: alias AGENTCLAW_* → HATCHABOT_* (existing HATCHABOT_* wins).
+for v in $(compgen -A variable AGENTCLAW_ 2>/dev/null); do n="HATCHABOT_${v#AGENTCLAW_}"; [ -n "${!n+x}" ] || export "$n=${!v}"; done
 PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
 BASE="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
+[ -d "$BASE" ] || [ -n "${HATCHABOT_BACKUP_DIR:-}" ] || { [ -d "$HOME/agentclaw-backups" ] && BASE="$HOME/agentclaw-backups"; }   # pre-rename hosts
 DEST="$BASE/$(date +%F)"
 IMAGE="${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"
 KEEP_DAYS="${HATCHABOT_BACKUP_KEEP_DAYS:-14}"
@@ -36,6 +39,7 @@ umask 077
 # but Hatchabot would forget every agent it ever made. Use SQLite's online
 # backup API — the DB is in WAL mode, so `cp` on a running server can tear.
 DB_PATH="${HATCHABOT_DB:-data/hatchabot.sqlite}"
+[ -f "$DB_PATH" ] || [ -n "${HATCHABOT_DB:-}" ] || { [ -f data/agentclaw.sqlite ] && DB_PATH=data/agentclaw.sqlite; }   # pre-rename default
 if [ ! -f "$DB_PATH" ]; then
   echo "✗ No database at $DB_PATH — a backup without the registry is not a backup." >&2
   exit 1
@@ -51,7 +55,7 @@ echo "  ✓ control plane database → $DEST/hatchabot.sqlite"
 # Without the key the backup's secrets are undecryptable, so keep a copy
 # beside it. Both are only as safe as this directory (0700).
 if [ -f .env ]; then
-  if grep '^HATCHABOT_SECRET_KEY=' .env > "$DEST/secret-key.env"; then
+  if grep -E '^(HATCHABOT|AGENTCLAW)_SECRET_KEY=' .env | sed 's/^AGENTCLAW_/HATCHABOT_/' > "$DEST/secret-key.env" && [ -s "$DEST/secret-key.env" ]; then
     chmod 600 "$DEST/secret-key.env"
   else
     # An empty secret-key.env would read as "key backed up" at restore time.

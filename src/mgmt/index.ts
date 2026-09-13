@@ -24,8 +24,7 @@
  *   HATCHABOT_MGMT_MODEL             model for the dedicated-key path (default claude-sonnet-5)
  *   HATCHABOT_MGMT_PAIRING_POLL_MS   approval-push poll interval (default 20000)
  */
-import { applyLegacyEnv } from '../envCompat.js';
-applyLegacyEnv();
+import { applyLegacyEnv } from '../envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { readFileSync } from 'node:fs';
 import { Bot } from 'grammy';
 import { HttpApiClient } from './apiClient.js';
@@ -54,6 +53,7 @@ try {
 } catch {
   /* no .env.mgmt — rely on the ambient environment */
 }
+applyLegacyEnv(); // a pre-rename .env.mgmt just loaded AGENTCLAW_* keys
 
 function required(name: string): string {
   const v = process.env[name];

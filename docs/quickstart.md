@@ -131,7 +131,7 @@ exposed to the internet.
    ```
    HATCHABOT_PUBLIC_URL=http://<machine>.<tailnet>.ts.net:8080
    ```
-   then `systemctl --user restart hatchabot` (macOS: `hatchabot restart`).
+   then `systemctl --user restart hatchabot` (macOS: `./scripts/restart.sh`).
 4. Install the Tailscale app on your phone, sign in with the same account, toggle on. Open `http://<machine>.<tailnet>.ts.net:8080` — add it to your home screen.
 5. To let a family member in: admin console → **Users → Invite users** (or **Machines → your machine → Share** to share only this box). They install the app, accept, and your invite links open on their phone.
 

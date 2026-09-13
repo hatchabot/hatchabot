@@ -2,9 +2,10 @@
 
 ## Versioning
 
-- **Semantic versioning, still 0.x.** `0.MINOR.PATCH`: a feature bumps MINOR, a
-  fix bumps PATCH. Until 1.0, a MINOR bump may change behaviour; the CHANGELOG
-  is the contract.
+- **Semantic versioning.** `MAJOR.MINOR.PATCH`: a feature bumps MINOR, a fix
+  bumps PATCH, a change that needs operator action (env, units, data layout)
+  bumps MAJOR. The CHANGELOG is the contract; "Upgrading" notes go at the top
+  of the entry that needs them.
 - **A tag is a release.** `vX.Y.Z` tags on `main` are the only things a user
   should install. `package.json` must carry the same version (the web app shows
   it at the bottom; the server stamps it at boot).

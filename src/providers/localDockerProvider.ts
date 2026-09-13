@@ -50,6 +50,10 @@ export interface LocalDockerOptions {
 /** Docker object prefix for new agents; `agentclaw` is what installs from before the rename used. */
 export const DEFAULT_PREFIX = 'hatchabot';
 export const LEGACY_PREFIXES = ['agentclaw'] as const;
+/** Docker image reference: repo[:tag] — no leading dash, so it can't parse as a flag. */
+const IMAGE_REF_RE = /^[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
+/** Bound for volume import/export and seeding (large tarballs, slow runners). */
+const IO_TIMEOUT_MS = Number(process.env.HATCHABOT_DOCKER_IO_TIMEOUT_MS ?? 15 * 60_000);
 
 export class LocalDockerProvider implements RuntimeProvider {
   readonly key: string;
@@ -96,8 +100,24 @@ export class LocalDockerProvider implements RuntimeProvider {
     if (name.startsWith(`${this.prefix}-`) || LEGACY_PREFIXES.some((p) => name.startsWith(`${p}-`))) {
       return { container: name, volume: `${name}-vol` };
     }
-    const short = name.slice(0, 12); // legacy: docker://<uuid-fragment>
-    return { container: `${this.prefix}-${short}`, volume: `${this.prefix}-vol-${short}` };
+    // legacy: docker://<uuid-fragment> — these predate the rename, so under the
+    // default prefix they live under the old one.
+    const short = name.slice(0, 12);
+    const p = this.prefix === DEFAULT_PREFIX ? LEGACY_PREFIXES[0] : this.prefix;
+    return { container: `${p}-${short}`, volume: `${p}-vol-${short}` };
+  }
+
+  /**
+   * Pre-rename daemons (this host or a runner loaded by `docker save|load`)
+   * hold the image as agentclaw-runtime:<tag>; make the new name exist there
+   * by tagging — a pointer, no rebuild. Only for the default repo name.
+   */
+  async #ensureImage(image: string): Promise<void> {
+    if (!image.startsWith('hatchabot-runtime:')) return;
+    if ((await this.#docker(['image', 'inspect', '--format', '{{.Id}}', image])).code === 0) return;
+    const legacy = image.replace(/^hatchabot-runtime:/, 'agentclaw-runtime:');
+    if ((await this.#docker(['image', 'inspect', '--format', '{{.Id}}', legacy])).code !== 0) return; // genuinely missing; docker will say so
+    await this.#docker(['tag', legacy, image]);
   }
 
   async provision(spec: RuntimeSpec): Promise<{ runtimeRef: string }> {
@@ -172,7 +192,10 @@ export class LocalDockerProvider implements RuntimeProvider {
     for (const [k, v] of Object.entries(spec.env)) {
       args.push('-e', `${k}=${v}`);
     }
-    args.push(spec.image ?? this.image, 'openclaw', 'gateway');
+    const image = spec.image ?? this.image;
+    if (!IMAGE_REF_RE.test(image)) throw new ProviderError(`bad image ref ${image}`, 'That image name is not valid.');
+    await this.#ensureImage(image);
+    args.push(image, 'openclaw', 'gateway');
     await this.#must(args, 'The agent runtime could not be created.');
 
     return { runtimeRef };
@@ -463,7 +486,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       const { stdout } = await execFileP(
         this.docker,
         this.#argv(['run', '--rm', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.']),
-        { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 },
+        { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: IO_TIMEOUT_MS, killSignal: 'SIGKILL' },
       );
       return stdout as Buffer;
     } catch (err) {
@@ -575,6 +598,10 @@ export class LocalDockerProvider implements RuntimeProvider {
   async #runStdin(args: string[], data: Buffer): Promise<ExecResult> {
     return new Promise<ExecResult>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(args));
+      // A stalled daemon/runner must fail the call, not pin the agent busy forever.
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new ProviderError('docker stdin op timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      timer.unref();
+      child.on('close', () => clearTimeout(timer));
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', (c) => (stdout += c));
