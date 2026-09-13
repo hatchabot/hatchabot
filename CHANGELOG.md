@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.2.2] — 2026-09-13
+
+### Changed
+- Settings → Runtime: the fleet default is listed as its own ⭐ row; every image gets a **Details** expander showing the build steps baked into it (from `docker history` — OpenClaw install, apt/pip layers), a **Delete** for version/candidate tags (refused for the default, for pinned tags, for class images, and by Docker while a container still runs on it), and roomier rows: tag, then facts (OpenClaw version vs the default, size, build date), then who is on it, then actions.
+
 ## [1.2.1] — 2026-09-13
 
 ### Changed

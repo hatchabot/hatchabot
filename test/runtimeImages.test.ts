@@ -41,13 +41,15 @@ async function world(buildBase?: (o: { version?: string; candidate: boolean; log
 }
 
 describe('GET /v1/runtime/images', () => {
-  it('lists every tag except the default, marks which share its image id, and who follows it', async () => {
+  it('lists every tag with the default first, marks which share its image id, and who follows it', async () => {
     const { f, store } = await world();
     store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
     const r = (await f.inject({ method: 'GET', url: '/v1/runtime/images', headers: as })).json();
     expect(r.default).toBe('hatchabot-runtime:latest');
     expect(r.latestImageId).toBe('img-A');
-    expect(r.tags.map((t: any) => t.tag).sort()).toEqual(['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:2026.9.4', 'hatchabot-runtime:derived-pdf']);
+    expect(r.tags[0].tag).toBe('hatchabot-runtime:latest'); expect(r.tags[0].isDefault).toBe(true);
+    expect(r.defaultInfo.resolvesTo).toEqual(['hatchabot-runtime:2026.7.1-2']);
+    expect(r.tags.slice(1).map((t: any) => t.tag).sort()).toEqual(['hatchabot-runtime:2026.7.1-2', 'hatchabot-runtime:2026.9.4', 'hatchabot-runtime:derived-pdf']);
     expect(r.tags.find((t: any) => t.tag === 'hatchabot-runtime:2026.7.1-2').isLatest).toBe(true);
     const cand = r.tags.find((t: any) => t.tag === 'hatchabot-runtime:2026.9.4');
     expect(cand.isLatest).toBe(false);
@@ -82,6 +84,23 @@ describe('POST /v1/runtime/images/promote', () => {
     expect((await post('hatchabot-runtime:derived-pdf')).statusCode).toBe(400);
     expect((await post('hatchabot-runtime:nope')).statusCode).toBe(404);
     expect((await post('--privileged')).statusCode).toBe(400);
+  });
+});
+
+describe('image history + delete', () => {
+  it('shows build steps and removes a tag only when nothing depends on it', async () => {
+    const { f, provider, store } = await world();
+    const hist = await f.inject({ method: 'GET', url: '/v1/runtime/images/' + encodeURIComponent('hatchabot-runtime:2026.9.4') + '/history', headers: as });
+    expect(hist.json().steps[0].step).toMatch(/openclaw/);
+    const del = (tag: string) => f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent(tag), headers: as });
+    expect((await del('hatchabot-runtime:latest')).statusCode).toBe(400);
+    expect((await del('hatchabot-runtime:derived-pdf')).statusCode).toBe(400);
+    store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
+    expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(409); // pinned
+    store.setAgentImage('a2', null);
+    expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(200);
+    expect(provider.removed).toEqual(['hatchabot-runtime:2026.9.4']);
+    expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(200); // mock rmi is idempotent; real docker would 409
   });
 });
 

@@ -496,6 +496,28 @@ export class LocalDockerProvider implements RuntimeProvider {
     await this.#must(['tag', from, to], `Couldn't tag ${from} as ${to}.`);
   }
 
+  async imageHistory(ref: string): Promise<{ step: string; size: string }[]> {
+    if (!IMAGE_REF_RE.test(ref)) throw new ProviderError(`bad image ref ${ref}`, 'That image name is not valid.');
+    const res = await this.#docker(['history', '--no-trunc', '--format', '{{.Size}}\t{{.CreatedBy}}', ref]);
+    if (res.code !== 0) return [];
+    return res.stdout.split('\n').filter(Boolean).map((l) => {
+      const i = l.indexOf('\t');
+      const size = l.slice(0, i); let step = l.slice(i + 1);
+      // Strip the shell/buildkit noise so a step reads like the Dockerfile line it came from.
+      step = step.replace(/^\/bin\/sh -c #\(nop\)\s*/, '').replace(/^\/bin\/sh -c /, 'RUN ').replace(/^RUN \|\d+ (?:[A-Z_]+=\S+ )*/, 'RUN ').replace(/\s*# buildkit$/, '').trim();
+      return { step, size };
+    }).filter((h) => h.step && !/^(LABEL|ARG|ENV|WORKDIR|SHELL|STOPSIGNAL|EXPOSE|VOLUME|MAINTAINER)\b/i.test(h.step) || /openclaw|apt|pip|npm|COPY|ADD/i.test(h.step));
+  }
+
+  async removeImageTag(ref: string): Promise<void> {
+    if (!IMAGE_REF_RE.test(ref)) throw new ProviderError(`bad image ref ${ref}`, 'That image name is not valid.');
+    const res = await this.#docker(['rmi', ref]);
+    if (res.code !== 0) {
+      const inUse = /conflict|being used|is using/i.test(res.stderr);
+      throw new ProviderError(`rmi failed: ${res.stderr.slice(0, 300)}`, inUse ? 'A container (possibly stopped or archived) still runs on that image — it cannot be removed until they are rebuilt or deleted.' : "Couldn't remove that image tag.");
+    }
+  }
+
   async logs(runtimeRef: string, lines: number): Promise<string> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker(['logs', '--tail', String(lines), container]);

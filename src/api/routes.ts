@@ -8,6 +8,7 @@ import { z } from 'zod';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
+import { ProviderError } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
@@ -1160,10 +1161,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       building: { base: baseBuild.running ? { version: baseBuild.version, candidate: baseBuild.candidate, startedAt: baseBuild.startedAt } : null },
       unpinned: active.filter((a) => !a.image).map(agentRow),
       tags: tags
-        .filter((t) => t.tag !== DEFAULT_BASE)
-        .sort((x, y) => (y.createdAt ?? '').localeCompare(x.createdAt ?? '') || x.tag.localeCompare(y.tag))
+        .sort((x, y) => (x.tag === DEFAULT_BASE ? -1 : y.tag === DEFAULT_BASE ? 1 : 0) || (y.createdAt ?? '').localeCompare(x.createdAt ?? '') || x.tag.localeCompare(y.tag))
         .map((t) => ({
           ...t,
+          isDefault: t.tag === DEFAULT_BASE,
           isLatest: !!latestId && t.imageId === latestId,
           exists: !!t.imageId,
           relation: relation(t),
@@ -1172,6 +1173,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           classes: store.listAgentClasses(me).filter((c) => c.image === t.tag).map((c) => ({ id: c.id, name: c.name })),
         })),
     };
+  });
+
+  /** What's baked into an image: the build steps, newest first. */
+  app.get<{ Params: { tag: string } }>('/v1/runtime/images/:tag/history', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const tag = decodeURIComponent(req.params.tag);
+    if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+    const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    if (!localHost) return reply.code(400).send({ error: 'No local host.' });
+    return { tag, steps: await providerFor(localHost.id).imageHistory(tag) };
+  });
+
+  /** Remove a version/candidate tag. The default, pinned tags and class images are refused; Docker refuses tags containers still use. */
+  app.delete<{ Params: { tag: string } }>('/v1/runtime/images/:tag', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const tag = decodeURIComponent(req.params.tag);
+    if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+    if (tag === DEFAULT_BASE) return reply.code(400).send({ error: 'That is the fleet default — promote another image first.' });
+    if (tag.includes(':derived-')) return reply.code(400).send({ error: 'Derived images are removed from their own row (it also forgets the Dockerfile).' });
+    const pinned = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && a.image === tag);
+    if (pinned.length) return reply.code(409).send({ error: `${pinned.length} agent${pinned.length === 1 ? ' is' : 's are'} pinned to it: ${pinned.map((a) => a.name).join(', ')}. Discard those trials first.` });
+    const cls = store.listAgentClasses(ownerIdOf(req)).filter((c) => c.image === tag);
+    if (cls.length) return reply.code(409).send({ error: `Class ${cls.map((c) => c.name).join(', ')} uses it — change the class image first.` });
+    const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    if (!localHost) return reply.code(400).send({ error: 'No local host.' });
+    try { await providerFor(localHost.id).removeImageTag(tag); }
+    catch (err) { return reply.code(409).send({ error: err instanceof ProviderError ? err.userMessage : String((err as Error).message) }); }
+    return { removed: tag };
   });
 
   /** Promote a built tag to the fleet default (:latest). Agents without a pin follow it on their next rebuild. */

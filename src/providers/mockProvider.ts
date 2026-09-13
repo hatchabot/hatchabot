@@ -136,6 +136,9 @@ export class MockProvider implements RuntimeProvider {
   tagged: [string, string][] = [];
   async listImageTags() { return this.tags; }
   async tagImage(from: string, to: string) { this.tagged.push([from, to]); }
+  removed: string[] = [];
+  async imageHistory() { return [{ step: 'RUN npm i -g openclaw@mock', size: '100MB' }]; }
+  async removeImageTag(ref: string) { this.removed.push(ref); this.tags = this.tags.filter((t) => t.tag !== ref); }
 
   async logs(): Promise<string> {
     return '';

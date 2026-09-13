@@ -195,6 +195,12 @@ export interface RuntimeProvider {
   /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
   tagImage(from: string, to: string): Promise<void>;
 
+  /** Build steps baked into an image (what's inside), newest layer first. */
+  imageHistory(ref: string): Promise<{ step: string; size: string }[]>;
+
+  /** Remove a tag. Throws a ProviderError when a container still uses the image. */
+  removeImageTag(ref: string): Promise<void>;
+
   /** Stable identity of the DAEMON this provider talks to. Two providers with
    *  equal daemonId() point at the same Docker daemon even if their endpoint
    *  strings differ (ssh://h vs ssh://h:22, IP vs hostname, local vs a runner
