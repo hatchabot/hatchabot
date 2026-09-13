@@ -6754,6 +6754,9 @@ function renderAgents() {
     if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
     emitted.add(a.id);
     const g = a.group || '';
+    // Ungrouped agents get a "Default" header too, so every section reads the
+    // same as the legend (no move buttons: ungrouped always come first).
+    if (!g && lastGroup === null) html += `<div class="group-header" data-group="Default"><span class="grow">Default</span></div>`;
     if (g && g !== lastGroup) html += `<div class="group-header" data-group="${esc(g)}">
       <span class="grow">${esc(g)}</span>
       <button class="movebtn" title="Move section up" onclick="moveGroup('${jsq(g)}','up')">▲</button>

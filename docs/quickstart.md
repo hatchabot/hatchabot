@@ -11,7 +11,7 @@ covers everything else.
 
 | | Why |
 |---|---|
-| **A computer that stays on** — Linux or macOS, with **Docker** and **Node.js 22+** | Agents run here, one container each. A Mac mini, a home server, a spare laptop that never sleeps. |
+| **A computer that stays on** — Linux or macOS, with **Docker** and **Node.js 22+** | Agents run here, one container each. A Mac mini, a home server, a spare laptop that never sleeps. Docker: [Engine on Linux](https://docs.docker.com/engine/install/) (then `sudo usermod -aG docker $USER`, log out and in) or [Docker Desktop on macOS](https://docs.docker.com/desktop/setup/install/mac-install/). Node: [nodejs.org](https://nodejs.org) LTS, or `brew install node`. |
 | **A Telegram account** (the app on your phone) | Telegram is the front door. Agents are Telegram bots you create. |
 | **An AI to think with** — recommended: a **Claude subscription** (Pro or Max) | One subscription powers every agent. Alternatives: an Anthropic or Google API key, or a local model server (Ollama) that needs no account at all. |
 
@@ -47,13 +47,19 @@ You can make more later (one per agent, ~60 seconds each), or pre-stock a pool s
 ```sh
 git clone https://github.com/hatchabot/hatchabot.git hatchabot
 cd hatchabot
+git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")"   # the latest release
 ./scripts/setup-host.sh
 ```
 
 The script checks Docker and Node, installs dependencies, asks you to choose an
-**app password**, builds the agent runtime image, installs a background service
-so Hatchabot starts with the machine, and links the `hatchabot` command. It is
-safe to re-run.
+**app password**, builds the agent runtime image (the slow part — 10–20 minutes
+the first time, it downloads OpenClaw, the Claude CLI and a local embedding
+model), installs a background service so Hatchabot starts with the machine, and
+links the `hatchabot` command. It is safe to re-run.
+
+> Releases are git tags (`v1.2.2`, …). Checking one out, as above, means you run
+> a version that passed its tests and has release notes — not whatever `main`
+> is at this minute.
 
 Open **http://localhost:8080** and unlock with your password. On a phone on the
 same network use the computer's address instead (e.g. `http://192.168.1.20:8080`) —
@@ -91,6 +97,20 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 - **Let agents consult each other** — the agent's **Peers** tab.
 - **Keep it cheap** — **Classes** (⚙ → AI sources) put simple agents on a cheaper model and demanding ones on the best, in one place.
 - **Back up / move / share** — every card: Download (a single file), Rehost (to another Hatchabot), Share (as a template with no secrets).
+
+## Upgrading
+
+```sh
+cd hatchabot
+git fetch --tags
+git checkout v1.2.2          # the release you want — see github.com/hatchabot/hatchabot/releases
+./scripts/restart.sh         # installs any new dependencies and restarts the service
+```
+
+Agents keep running throughout; only the control plane restarts (~10 s). If a
+release changes the runtime image, the app shows "newer image available" on each
+agent and you rebuild them when convenient (memory is kept). Release notes say
+when an upgrade needs anything more — see `CHANGELOG.md` → *Upgrading*.
 
 ## If something's off
 

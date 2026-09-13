@@ -103,13 +103,15 @@ adopting, backing up, and operating a fleet of agents.
 ```sh
 git clone https://github.com/hatchabot/hatchabot.git hatchabot
 cd hatchabot
+git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")"   # latest release
 ./scripts/setup-host.sh
 ```
 
 The script checks prerequisites, installs dependencies, generates a `.env`
 (asking you to choose an app password), builds the agent runtime image,
 installs a background service, and links the `hatchabot` CLI. It's safe to
-re-run.
+re-run. **Upgrade** with `git fetch --tags && git checkout vX.Y.Z && ./scripts/restart.sh`
+(releases: [github.com/hatchabot/hatchabot/releases](https://github.com/hatchabot/hatchabot/releases)).
 
 Then open **http://localhost:8080**, unlock with your password, and:
 

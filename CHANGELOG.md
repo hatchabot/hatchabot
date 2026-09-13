@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.2.3] — 2026-09-13
+
+### Changed
+- Ungrouped agents now sit under a **Default** header in the card list, matching the legend and the other groups.
+- Quick start and README: install pointers for Docker and Node, clone at the **latest release tag** rather than `main`, honest timing for the first image build, and an **Upgrading** section (`git fetch --tags && git checkout vX.Y.Z && ./scripts/restart.sh`).
+
 ## [1.2.2] — 2026-09-13
 
 ### Changed
