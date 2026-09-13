@@ -83,7 +83,7 @@ console.log(`\n  state:     ${result.agent.state}`);
 console.log(`  deep link: ${result.deepLink}`);
 console.log(`  elapsed:   ${Date.now() - started}ms (mock — no real provisioning)`);
 assert(result.agent.state === 'RUNNING', 'agent should be RUNNING');
-assert(result.deepLink.toLowerCase() === 'https://t.me/kitchenhelperbot', 'deep link should point at the bot'); // usernames are case-insensitive
+assert((result.deepLink ?? '').toLowerCase() === 'https://t.me/kitchenhelperbot', 'deep link should point at the bot'); // usernames are case-insensitive
 
 console.log('\n▸ OpenClaw config commands the provisioner would run on the runtime:');
 const spec = provider.runtimes.get(result.agent.runtimeRef!)!.spec;
