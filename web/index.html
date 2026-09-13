@@ -95,6 +95,8 @@
   .toc-toggle { margin-left: auto; background: none; border: 0; color: var(--dim);
     cursor: pointer; font-size: 13px; padding: 2px 4px; line-height: 1; }
   #tocList { overflow-y: auto; overflow-x: hidden; }
+  .toc-group { cursor: pointer; }
+  .toc-group:hover { color: var(--text); }
   .toc-group { font-weight: 600; color: var(--dim); font-size: 11px;
     text-transform: uppercase; letter-spacing: .04em; margin: 8px 4px 2px; }
   .toc-item { display: flex; align-items: center; gap: 7px; padding: 3px 6px;
@@ -6613,7 +6615,7 @@ function renderAgents() {
     if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
     emitted.add(a.id);
     const g = a.group || '';
-    if (g && g !== lastGroup) html += `<div class="group-header">
+    if (g && g !== lastGroup) html += `<div class="group-header" data-group="${esc(g)}">
       <span class="grow">${esc(g)}</span>
       <button class="movebtn" title="Move section up" onclick="moveGroup('${jsq(g)}','up')">▲</button>
       <button class="movebtn" title="Move section down" onclick="moveGroup('${jsq(g)}','down')">▼</button>
@@ -6741,7 +6743,7 @@ function renderToc() {
     // Ungrouped agents get a "Default" header so every section reads the same
     // (the Planned launchpad above them now makes a header-less run look odd).
     const label = g || 'Default';
-    if (label !== lastGroup && !a.__depth) html += `<div class="toc-group">${esc(label)}</div>`;
+    if (label !== lastGroup && !a.__depth) html += `<div class="toc-group" onclick="jumpToGroup('${jsq(label)}')" title="Jump to ${esc(label)}">${esc(label)}</div>`;
     // Children keep the surrounding group context: their own (usually empty)
     // group must not reset the dedupe, or the next master in the same group
     // prints a duplicate header (10th audit).
@@ -6768,7 +6770,7 @@ function renderToc() {
   // you go looking for it. jumpToCard opens the drawer on the way.
   const parked = archivedAgents();
   if (parked.length) {
-    html += `<div class="toc-group">Archived</div>`;
+    html += `<div class="toc-group" onclick="jumpToGroup('Archived')" title="Jump to Archived">Archived</div>`;
     for (const a of parked) {
       html += `<a class="toc-item" onclick="jumpToCard('${a.id}')" title="${esc(a.name)} — archived">
         <span class="toc-dot" style="background:${tocDotColor(a)}"></span>
@@ -6819,6 +6821,17 @@ function createFromTodo(id) {
   $('fabBtn').click(); // opens the create dialog; the name is pre-filled there
 }
 
+/** Legend section header → the matching section in the card list. */
+function jumpToGroup(label) {
+  let el = document.querySelector(`.group-header[data-group="${CSS.escape(label)}"]`);
+  if (!el && label === 'Archived') {
+    el = document.querySelector('.archive-drawer');
+    if (el && !el.open) { el.open = true; archiveOpen = true; }
+  }
+  // "Default" is the header-less run of ungrouped agents, always first in the list.
+  if (!el && label === 'Default') el = document.querySelector('#agents [id^="card-"]');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 function jumpToCard(id) {
   const card = document.getElementById('card-' + id);
   if (!card) return;

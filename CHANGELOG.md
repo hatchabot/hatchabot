@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.1.5] — 2026-09-13
+
+### Changed
+- Legend section headers are clickable: each jumps to its group in the card list ("Default" to the first ungrouped card, "Archived" opens the drawer).
+
 ## [1.1.4] — 2026-09-13
 
 ### Fixed
