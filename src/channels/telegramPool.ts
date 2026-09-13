@@ -67,6 +67,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     } catch (err) {
       if (!/duplicate column/i.test(String(err))) throw err;
     }
+    // Parked bots named before the rename keep asking Telegram for the old
+    // brand until their desired name is corrected; the repair loop then
+    // renames them at the next allowed moment.
+    this.db.exec(`UPDATE telegram_pool SET desired_name = replace(desired_name, 'AgentClaw', 'Hatchabot') WHERE desired_name LIKE '%AgentClaw%'`);
     // Telegram rate-limits setMyName by HOURS (observed: retry_after 11942s —
     // 3h19m). Retrying every two minutes against that is pointless and rude, so
     // the deadline it hands back is stored and respected.

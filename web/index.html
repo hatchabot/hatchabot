@@ -224,6 +224,7 @@
   .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .primary:hover { filter: brightness(1.08); }
   .danger { color: var(--bad); }
+  .fab-top { bottom: 90px; width: 44px; height: 44px; right: 27px; font-size: 20px; opacity: .85; }
   .fab {
     position: fixed; right: 20px; bottom: 20px; width: 58px; height: 58px;
     border-radius: 50%; font-size: 30px; line-height: 1;
@@ -323,7 +324,6 @@
   </header>
   <div id="setup"></div>
   <div id="mgmtStrip"></div>
-  <div id="agents"></div>
   <div class="card" id="activityCard" hidden>
     <div class="row">
       <span class="name grow">Recent activity</span>
@@ -332,8 +332,10 @@
     </div>
     <div id="activity" style="margin-top:8px;max-height:260px;overflow:auto"></div>
   </div>
+  <div id="agents"></div>
 </div>
 
+<button class="fab fab-top" id="topBtn" title="Back to top" hidden>↑</button>
 <button class="fab" id="fabBtn" title="New agent" hidden>+</button>
 
 <dialog id="loginDlg">
@@ -3501,6 +3503,8 @@ async function addAiProfile() {
 
 // ---- agent creation ---------------------------------------------------------
 
+$('topBtn').onclick = () => window.scrollTo({ top: 0, behavior: 'smooth' });
+window.addEventListener('scroll', () => { $('topBtn').hidden = window.scrollY < 400; }, { passive: true });
 $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
   $('agentPrivate').checked = false; // shared control — reset so a prior tick doesn't silently make the next agent's memory private

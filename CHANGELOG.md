@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.1.2] — 2026-09-13
+
+### Changed
+- Recent activity now sits above the agent cards; a ↑ back-to-top button appears above the + button once you have scrolled.
+- Parked pool bots still named "AgentClaw (unassigned)" get their desired name corrected on start; the repair loop renames them in Telegram at the next allowed moment.
+
 ## [1.1.1] — 2026-09-13
 
 ### Added
