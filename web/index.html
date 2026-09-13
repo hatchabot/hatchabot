@@ -1576,7 +1576,8 @@
 <dialog id="migrateDlg" style="width:min(560px,96vw)">
   <h3 style="margin:0 0 4px">Migrate all agents off <span id="migrateFrom"></span></h3>
   <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick and rebuilds (3 at a time). Then the old source can be deleted.</div>
-  <label>Move them to</label>
+  <div id="migrateAgents" class="sub" style="margin:0 0 10px;max-height:160px;overflow:auto"></div>
+  <label>Move them to <span class="sub">(only shared sources can take other accounts' agents)</span></label>
   <select id="migrateTo"></select>
   <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:10px 0 0">
     <input type="checkbox" id="migrateCheckpoint" checked style="width:auto;margin-top:3px;flex:none">
@@ -3302,7 +3303,15 @@ function openMigrate(id, name) {
   $('migrateBtn').disabled = !targets.length;
   $('migrateCheckpoint').checked = true; $('migrateRecover').checked = false;
   $('migrateErr').textContent = '';
+  $('migrateAgents').textContent = 'Loading agents…';
   migrateDlg.showModal();
+  // Show exactly who moves: every agent on this source, across accounts.
+  api('/v1/agents?all=1').then(all => {
+    const on = all.filter(a => a.aiProfileId === id);
+    $('migrateAgents').innerHTML = on.length
+      ? `<b>${on.length} agent${on.length === 1 ? '' : 's'}</b> will move:<br>` + on.map(a => `• ${esc(a.name)} <span style="color:var(--dim)">(${esc(a.state.toLowerCase())}${a.ownerId && a.ownerId !== myAccount.ownerId ? ', other account' : ''})</span>`).join('<br>')
+      : 'No agents are on this source.';
+  }).catch(() => { $('migrateAgents').textContent = ''; });
 }
 async function runMigrate() {
   const to = $('migrateTo').value; if (!to || !migrateState) return;

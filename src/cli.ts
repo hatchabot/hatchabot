@@ -66,6 +66,15 @@ Commands:
   users [--all]                Every Telegram user across your agents: which
                                agents they belong to, when they joined, and
                                when they were last heard from.
+  sources                      AI sources: kind, shared?, and how many agents use
+                               each (yours / other accounts).
+  migrate-source <from> --to <target> [--no-checkpoint] [--recover] [--yes]
+                               Host owner: move EVERY agent on source <from> —
+                               other accounts' included — to the SHARED source
+                               <target> and rebuild them. Lists the agents and
+                               asks first. Names or ids. --no-checkpoint skips
+                               Chat → Memory (use when the old source is dead);
+                               --recover restores lost context afterwards.
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
@@ -288,7 +297,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'no-checkpoint', 'recover']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1267,6 +1276,53 @@ async function main() {
         await api(ctx, `/v1/bots?consolidated=1&live=${live ? 1 : 0}`)
       ).json()) as { hosts: any[] };
       for (const line of fmtBots(hosts, live)) console.log(line);
+      return;
+    }
+    case 'sources': {
+      const list = (await (await api(ctx, '/v1/ai-profiles')).json()) as any[];
+      if (!list.length) return console.log('no AI sources');
+      const w = Math.max(...list.map((p) => p.name.length));
+      for (const p of list) {
+        const u = p.inUse ?? {};
+        console.log(`${p.name.padEnd(w)}  ${String(p.kind ?? '-').padEnd(13)} ${p.shared ? 'shared ' : 'private'}  agents: ${u.mine ?? 0} yours, ${u.others ?? 0} other accounts  ${p.id}`);
+      }
+      return;
+    }
+    case 'migrate-source': {
+      // Host-owner admin: the CLI twin of "↪ Migrate all off…" in the app. Shows
+      // exactly which agents (and whose) will move before doing anything.
+      const fromArg = rest[0] ?? fail('usage: hatchabot migrate-source <from> --to <target> [--no-checkpoint] [--recover] [--yes]');
+      const toArg = flags.get('to') ?? fail('--to <target source> is required');
+      const profiles = (await (await api(ctx, '/v1/ai-profiles')).json()) as any[];
+      const pick = (q: string, what: string) => {
+        const m = profiles.filter((p) => p.id === q || p.name.toLowerCase() === q.toLowerCase());
+        if (m.length === 1) return m[0];
+        fail(m.length ? `"${q}" matches several ${what} sources — use the id (hatchabot sources)` : `no AI source named "${q}" (hatchabot sources lists them)`);
+      };
+      const from = pick(fromArg, 'from'); const to = pick(toArg, 'target');
+      if (from.id === to.id) fail('from and target are the same source');
+      if (!to.shared) fail(`"${to.name}" is not shared — other accounts' agents can only move to a shared source. Share it in the app first, or pick one of: ${profiles.filter((p) => p.shared && p.id !== from.id).map((p) => p.name).join(', ') || '(none shared)'}`);
+      const agents = ((await (await api(ctx, '/v1/agents?all=1')).json()) as any[]).filter((a) => a.aiProfileId === from.id);
+      if (!agents.length) return console.log(`no agents on "${from.name}" — nothing to move (delete it in the app if you're done with it)`);
+      const w = Math.max(...agents.map((a) => a.name.length));
+      console.log(`Agents on "${from.name}" → "${to.name}":`);
+      for (const a of agents) console.log(`  ${a.name.padEnd(w)}  ${String(a.state).padEnd(10)} owner ${a.ownerId ?? '-'}`);
+      const others = new Set(agents.map((a) => a.ownerId)).size;
+      console.log(`${agents.length} agent(s) across ${others} account(s); each is rebuilt on the new source (memory kept, chat restarts)${flags.has('no-checkpoint') ? ', WITHOUT saving chats to memory first' : ', after Chat → Memory'}.`);
+      if (!flags.has('yes')) {
+        const { createInterface } = await import('node:readline');
+        const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
+        process.stderr.write('Proceed? [y/N] ');
+        const ans = await new Promise<string>((r) => rl.once('line', (l) => { rl.close(); r(l.trim().toLowerCase()); }));
+        if (ans !== 'y' && ans !== 'yes') return console.log('aborted');
+      }
+      const res = await api(ctx, `/v1/ai-profiles/${from.id}/migrate-agents`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ toProfileId: to.id, rebuild: true, checkpoint: !flags.has('no-checkpoint'), recoverAfter: flags.has('recover') }),
+      });
+      const r = (await res.json()) as any;
+      console.log(`moved ${r.switched} of ${r.agents}; rebuilding ${r.rebuilding} (3 at a time)${(r.skipped ?? []).length ? '; skipped: ' + r.skipped.map((s: any) => s.name).join(', ') : ''}`);
+      console.log(`watch: hatchabot list --all   ·  then delete "${from.name}" in the app once none remain on it`);
       return;
     }
     case 'users': {

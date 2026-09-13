@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.0.4] — 2026-09-13
+
+### Added
+- CLI `hatchabot sources` (every AI source with how many agents use it, yours vs other accounts) and `hatchabot migrate-source <from> --to <target> [--no-checkpoint] [--recover] [--yes]` — the host-owner twin of "↪ Migrate all off…", which lists every agent (and whose) before asking.
+- The Migrate-all-off dialog now lists the agents that will move and explains why only shared sources are offered as targets.
+
 ## [1.0.3] — 2026-09-12
 
 ### Changed
