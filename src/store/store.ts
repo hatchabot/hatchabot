@@ -339,6 +339,8 @@ export class Store {
       // Telegram rich formatting: NULL = managed default (on), 0 = opt-out.
       `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
       `ALTER TABLE agents ADD COLUMN cron_triggers INTEGER`,
+      // An "application" class = model + source + runtime image.
+      `ALTER TABLE agent_classes ADD COLUMN image TEXT`,
       // Template-carried schedules awaiting the gateway (applied on RUNNING).
       `ALTER TABLE agents ADD COLUMN pending_schedules TEXT`,
       // Which agent a share was cut from — lets an accepted copy record lineage.
@@ -592,7 +594,8 @@ export class Store {
   // ---- agent classes (model/source tiers) -----------------------------------
   #rowToClass = (r: any): AgentClass => ({
     id: r.id, ownerId: r.owner_id, name: r.name,
-    model: r.model ?? undefined, aiProfileId: r.ai_profile_id ?? undefined, createdAt: r.created_at,
+    model: r.model ?? undefined, aiProfileId: r.ai_profile_id ?? undefined,
+    image: r.image ?? undefined, createdAt: r.created_at,
   });
   listAgentClasses(ownerId: string): AgentClass[] {
     return (this.db.prepare(`SELECT * FROM agent_classes WHERE owner_id = ? ORDER BY name`).all(ownerId) as any[]).map(this.#rowToClass);
@@ -601,14 +604,14 @@ export class Store {
     const r = this.db.prepare(`SELECT * FROM agent_classes WHERE id = ?`).get(id) as any;
     return r ? this.#rowToClass(r) : undefined;
   }
-  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string }): void {
+  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string; image?: string }): void {
     this.db
       .prepare(
-        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id`,
+        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, image, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id, image = excluded.image`,
       )
-      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, new Date().toISOString());
+      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, c.image ?? null, new Date().toISOString());
   }
   deleteAgentClass(id: string): void {
     this.transact(() => {

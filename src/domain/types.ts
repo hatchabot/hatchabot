@@ -49,6 +49,8 @@ export interface AgentClass {
   name: string;
   model?: string;
   aiProfileId?: string;
+  /** Runtime image tag members run on (applied on rebuild); unset = fleet default. */
+  image?: string;
   createdAt: string;
 }
 

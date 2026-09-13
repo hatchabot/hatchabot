@@ -189,6 +189,12 @@ export interface RuntimeProvider {
    */
   currentImageInfo(): Promise<RuntimeInfo>;
 
+  /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string }[]>;
+
+  /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
+  tagImage(from: string, to: string): Promise<void>;
+
   /** Stable identity of the DAEMON this provider talks to. Two providers with
    *  equal daemonId() point at the same Docker daemon even if their endpoint
    *  strings differ (ssh://h vs ssh://h:22, IP vs hostname, local vs a runner

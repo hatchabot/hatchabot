@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.2.0] — 2026-09-13
+
+### Added
+- **Runtime images** (🧱 Runtime in the toolbar, host owner). One place for everything agents run on: the fleet default and what OpenClaw version it carries; every other tag on the machine — version builds, candidates, derived images — with who is pinned to each.
+  - **Try on one agent…** pins a single agent to an image and rebuilds it (memory kept). While it is on a pin its class does not prescribe, the legend shows 🧪; **✕ Discard** unpins and rebuilds it on the default.
+  - **Promote to fleet** points the default (`:latest`) at a built candidate; nothing restarts by itself — agents without a pin show "newer image available" and move over on rebuild (offers to open Bulk actions → Needs rebuild).
+  - **Build a base-image candidate** for a new OpenClaw version from the app, with the build log streamed; candidate-only by default so `:latest` is untouched until you promote.
+  - Derived images get Rebuild / Log / Delete here too; creating one still lives in Settings → Runtime.
+- **Classes carry an image.** A class is now model + source + runtime image ("PDF workers = Opus + Max + derived-pdf"). Assigning the class pins its members (applied on their next rebuild); changing the class image propagates and reports how many need a rebuild; a manual pin to something else detaches the class, like model/source drift.
+- API: `GET /v1/runtime/images`, `POST /v1/runtime/images/promote`, `POST/GET /v1/runtime/build`; `image` on agent classes; `imageTrial` on agent listings. CLI: `hatchabot image tags | try <agent> <tag> | promote <tag>`.
+
 ## [1.1.5] — 2026-09-13
 
 ### Changed

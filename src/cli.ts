@@ -180,6 +180,12 @@ Commands:
   image rm <name>              Delete it (refused while an agent pins it)
   image log <name>             Show the last build's output
   image pin <agent> <name-or-tag>       Pin an agent to an image (next rebuild)
+  image tags                   Every runtime image tag on this machine, who is
+                               pinned to each, which one is the fleet default.
+  image try <agent> <tag>      Pin ONE agent to a tag and rebuild it now (memory
+                               kept) — the safe way to test a candidate.
+  image promote <tag>          Make a built candidate the fleet default; agents
+                               without a pin adopt it on their next rebuild.
   image unpin <agent>          Return an agent to the fleet default image
 
 Global options:
@@ -1142,7 +1148,32 @@ async function main() {
         return;
       }
 
-      fail(`unknown: hatchabot image ${sub}\n  try: list | derive | rebuild | rm | log | pin | unpin`);
+      if (sub === 'tags') {
+        const r = (await (await api(ctx, '/v1/runtime/images')).json()) as any;
+        console.log(`fleet default: ${r.default}  (${r.unpinned.length} agents follow it)`);
+        for (const t of r.tags) {
+          const kind = t.derived ? `derived ${t.derived.status}` : t.isLatest ? 'same as default' : t.exists ? 'candidate' : 'NOT BUILT';
+          const pins = t.pinned.map((a: any) => a.name).join(', ');
+          console.log(`  ${t.tag}  [${kind}]${pins ? '  pinned: ' + pins : ''}${t.classes.length ? '  classes: ' + t.classes.map((c: any) => c.name).join(', ') : ''}`);
+        }
+        return;
+      }
+      if (sub === 'try') {
+        const agentRef = rest[1] ?? fail('usage: hatchabot image try <agent> <tag>');
+        const image = rest[2] ?? fail('usage: hatchabot image try <agent> <tag>');
+        const a = await resolveAgent(ctx, agentRef);
+        await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH');
+        await jsonPost(`/v1/agents/${a.id}/rebuild`, {}, 'POST');
+        console.log(`"${a.name}" is rebuilding on ${toTag(image)} (memory kept). Undo: hatchabot image unpin "${a.name}" && hatchabot rebuild "${a.name}"`);
+        return;
+      }
+      if (sub === 'promote') {
+        const tag = rest[1] ?? fail('usage: hatchabot image promote <tag>');
+        const r = (await jsonPost('/v1/runtime/images/promote', { tag: toTag(tag) }, 'POST')) as any;
+        console.log(`${r.promoted} is now ${r.now}. ${r.followers.length} agent(s) without a pin will adopt it on rebuild — hatchabot list shows "update available"; rebuild them via Bulk actions or: hatchabot rebuild <agent>`);
+        return;
+      }
+      fail(`unknown: hatchabot image ${sub}\n  try: list | tags | derive | rebuild | rm | log | pin | unpin | try | promote`);
     }
     case 'servers': {
       if (rest[0] === 'add') {

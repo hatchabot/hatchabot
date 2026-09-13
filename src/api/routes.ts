@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname as osHostname } from 'node:os';
@@ -154,6 +155,8 @@ export interface ApiDeps {
   /** Override the derived-image builder (tests). Defaults to the real
    *  `docker build`; tests inject a stub so no docker runs. */
   buildImage?: typeof buildDerivedImage;
+  /** Override the base-image build (tests). Default spawns scripts/build-runtime-image.sh. */
+  buildBase?: (opts: { version?: string; candidate: boolean; logPath: string }) => Promise<{ ok: boolean; error?: string }>;
   /** Override the mgmt-LLM proxy's Anthropic call (tests). */
   mgmtLlmComplete?: typeof completeWithProfile;
   /** Override the mgmt-LLM CLI path (tests — the real one spawns `claude`). */
@@ -823,7 +826,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!c) { store.setAgentClass(agentId, null); return true; }
     const p = store.getAIProfile(a.aiProfileId);
     const drifted = (c.aiProfileId && c.aiProfileId !== a.aiProfileId) ||
-      (c.model && p && effectiveModel(a, p) !== c.model);
+      (c.model && p && effectiveModel(a, p) !== c.model) ||
+      (c.image && a.image !== c.image);
     if (drifted) store.setAgentClass(agentId, null);
     return !!drifted;
   };
@@ -834,7 +838,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // by the assign route and the class-edit propagation.
   const applyClassToAgent = async (
     agent: Agent,
-    cls: { model?: string; aiProfileId?: string },
+    cls: { model?: string; aiProfileId?: string; image?: string },
   ): Promise<{ rebuild: boolean; error?: string }> => {
     // Validate the WHOLE class against the agent's TARGET source before writing
     // anything — a failed model check must not leave the agent half-switched.
@@ -853,17 +857,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const prob = modelOverrideProblem(target, cls.model);
       if (prob) return { rebuild: false, error: prob }; // e.g. local source, or model not on this source
     }
+    // The class image pins the agent (applied on its next rebuild); no class
+    // image leaves whatever pin the agent has.
+    const imageChange = !!cls.image && cls.image !== (agent.image ?? undefined);
     store.transact(() => {
       if (switching) {
         store.setAgentAIProfile(agent.id, cls.aiProfileId!);
         if (agent.model && !cls.model && modelOverrideProblem(target, agent.model)) store.setAgentModel(agent.id, null);
       }
       if (cls.model) store.setAgentModel(agent.id, cls.model);
+      if (imageChange) store.setAgentImage(agent.id, cls.image!);
     });
     // A source change is applied by a rebuild (auth/env are provision-time);
     // a model-only change applies now (live, or staged on the stopped volume).
     if (!switching && cls.model) await applyModelToRuntime(agent.id);
-    return { rebuild: switching };
+    return { rebuild: switching || imageChange };
   };
 
   // ---- planned agents: a launchpad of agents to create later -----------------
@@ -914,7 +922,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
 
-  app.post<{ Body: { name?: string; model?: string; aiProfileId?: string } }>('/v1/agent-classes', async (req, reply) => {
+  app.post<{ Body: { name?: string; model?: string; aiProfileId?: string; image?: string } }>('/v1/agent-classes', async (req, reply) => {
     const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string };
     const name = (b.name ?? '').trim().slice(0, 48);
     if (!name) return reply.code(400).send({ error: 'A class needs a name.' });
@@ -924,18 +932,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const src = store.getAIProfile(b.aiProfileId);
       if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
     }
+    const image = (b as { image?: string }).image?.trim() || undefined;
+    if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+    if (image && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     const id = randomUUID();
-    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined });
+    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined, image });
     return { class: store.getAgentClass(id) };
   });
 
-  app.put<{ Params: { id: string }; Body: { name?: string; model?: string; aiProfileId?: string } }>(
+  app.put<{ Params: { id: string }; Body: { name?: string; model?: string; aiProfileId?: string; image?: string | null } }>(
     '/v1/agent-classes/:id',
     async (req, reply) => {
       const cls = store.getAgentClass(req.params.id);
       if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
-      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string };
+      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null };
       const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
+      const image = b.image !== undefined ? (b.image?.trim() || undefined) : cls.image;
+      if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+      if (image && image !== cls.image && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
       const clash = store.agentClassByName(cls.ownerId, name);
       if (clash && clash.id !== cls.id) return reply.code(400).send({ error: `There's already a class called "${name}".` });
       const model = b.model !== undefined ? (b.model.trim() || undefined) : cls.model;
@@ -944,12 +958,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const src = store.getAIProfile(aiProfileId);
         if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
       }
-      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId });
-      // Propagate the (possibly changed) model/source to every agent in the class.
+      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image });
+      // Propagate the (possibly changed) model/source/image to every agent in the class.
       let applied = 0, needRebuild = 0; const skipped: string[] = [];
       for (const a of store.listAgentsInClass(cls.id)) {
         if (a.state === 'ARCHIVED') continue; // nothing to apply to; it keeps its tag
-        const r = await applyClassToAgent(a, { model, aiProfileId });
+        const r = await applyClassToAgent(a, { model, aiProfileId, image });
         if (r.error) skipped.push(`${a.name}: ${r.error}`);
         else { applied++; if (r.rebuild) needRebuild++; }
       }
@@ -1086,6 +1100,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).
   const buildingImages = new Set<string>();
+  const IMAGE_TAG_RE = /^[a-z0-9][a-z0-9._\/-]*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+  let baseBuild: { running: boolean; version?: string; candidate: boolean; startedAt?: string; ok?: boolean; error?: string } = { running: false, candidate: true };
+  /** Default base build: the same script an operator runs by hand, output to a log file. */
+  const buildBaseImage = (opts: { version?: string; candidate: boolean; logPath: string }): Promise<{ ok: boolean; error?: string }> =>
+    new Promise((resolve) => {
+      const out = createWriteStream(opts.logPath);
+      const child = spawn('bash', ['scripts/build-runtime-image.sh'], {
+        env: { ...process.env, ...(opts.version ? { OPENCLAW_VERSION: opts.version } : {}), NO_LATEST: opts.candidate ? '1' : '' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child.stdout.pipe(out, { end: false }); child.stderr.pipe(out, { end: false });
+      child.on('error', (err) => { out.end(); resolve({ ok: false, error: err.message }); });
+      child.on('close', (code) => { out.end(); resolve(code === 0 ? { ok: true } : { ok: false, error: `build exited ${code}` }); });
+    });
 
   const kickImageBuild = (name: string): void => {
     if (buildingImages.has(name)) return;
@@ -1104,6 +1132,81 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       })
       .finally(() => buildingImages.delete(name));
   };
+
+  /** Fleet runtime images: every tag on the local daemon, who is pinned where, what :latest points at. */
+  app.get('/v1/runtime/images', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    let tags: { tag: string; imageId: string; createdAt?: string }[] = [];
+    try { if (localHost) tags = await providerFor(localHost.id).listImageTags(); } catch { /* daemon hiccup: empty list, not a 500 */ }
+    const latestId = tags.find((t) => t.tag === DEFAULT_BASE)?.imageId;
+    const derived = new Map(store.listDerivedImages().map((d) => [d.tag, d]));
+    const me = ownerIdOf(req);
+    const active = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED');
+    const agentRow = (a: Agent) => ({ id: a.id, name: a.name, state: a.state, mine: a.ownerId === me, classId: a.classId ?? null });
+    const known = new Set(tags.map((t) => t.tag));
+    // Pins to tags that don't exist (yet) still show, so a typo or an unbuilt candidate is visible.
+    for (const a of active) if (a.image && !known.has(a.image)) { known.add(a.image); tags.push({ tag: a.image, imageId: '' }); }
+    return {
+      default: DEFAULT_BASE,
+      latestImageId: latestId,
+      building: { base: baseBuild.running ? { version: baseBuild.version, candidate: baseBuild.candidate, startedAt: baseBuild.startedAt } : null },
+      unpinned: active.filter((a) => !a.image).map(agentRow),
+      tags: tags
+        .filter((t) => t.tag !== DEFAULT_BASE)
+        .sort((x, y) => (y.createdAt ?? '').localeCompare(x.createdAt ?? '') || x.tag.localeCompare(y.tag))
+        .map((t) => ({
+          ...t,
+          isLatest: !!latestId && t.imageId === latestId,
+          exists: !!t.imageId,
+          derived: derived.get(t.tag) ? { name: derived.get(t.tag)!.name, status: derived.get(t.tag)!.status, base: derived.get(t.tag)!.base } : null,
+          pinned: active.filter((a) => a.image === t.tag).map(agentRow),
+          classes: store.listAgentClasses(me).filter((c) => c.image === t.tag).map((c) => ({ id: c.id, name: c.name })),
+        })),
+    };
+  });
+
+  /** Promote a built tag to the fleet default (:latest). Agents without a pin follow it on their next rebuild. */
+  app.post<{ Body: { tag?: string } }>('/v1/runtime/images/promote', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const tag = String((req.body as { tag?: string } | null)?.tag ?? '').trim();
+    if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+    if (tag === DEFAULT_BASE) return reply.code(400).send({ error: 'That is already the fleet default.' });
+    if (tag.includes(':derived-')) return reply.code(400).send({ error: 'A derived image is pinned per agent or per class, not promoted — every agent would inherit its packages.' });
+    const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
+    if (!localHost) return reply.code(400).send({ error: 'No local host.' });
+    const provider = providerFor(localHost.id);
+    const tags = await provider.listImageTags();
+    if (!tags.some((t) => t.tag === tag)) return reply.code(404).send({ error: `${tag} is not built on this machine.` });
+    await provider.tagImage(tag, DEFAULT_BASE);
+    const followers = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && !a.image);
+    return { promoted: tag, now: DEFAULT_BASE, followers: followers.map((a) => ({ id: a.id, name: a.name, mine: a.ownerId === ownerIdOf(req) })) };
+  });
+
+  /** Build the base runtime image for an OpenClaw version; candidate = don't touch :latest. */
+  app.post<{ Body: { version?: string; candidate?: boolean } }>('/v1/runtime/build', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (baseBuild.running) return reply.code(409).send({ error: 'A base image build is already running.' });
+    const b = (req.body ?? {}) as { version?: string; candidate?: boolean };
+    const version = b.version?.trim() || undefined;
+    if (version && !/^[A-Za-z0-9._-]{1,64}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
+    const candidate = b.candidate !== false;
+    const logPath = buildLogPath('_base');
+    mkdirSync(dirname(logPath), { recursive: true });
+    baseBuild = { running: true, version, candidate, startedAt: new Date().toISOString(), ok: undefined, error: undefined };
+    const run = deps.buildBase ?? buildBaseImage;
+    void run({ version, candidate, logPath })
+      .then((r) => { baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error }; })
+      .catch((err) => { baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) }; });
+    return reply.code(202).send({ building: true, version, candidate });
+  });
+
+  app.get('/v1/runtime/build', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    let log = '';
+    try { const full = readFileSync(buildLogPath('_base'), 'utf8'); log = full.slice(-16_000); } catch { /* no build yet */ }
+    return { ...baseBuild, log };
+  });
 
   app.get('/v1/images', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
@@ -2265,7 +2368,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Fleet-wide lookups once per request (publicAgent's per-agent versions are
     // for single-agent responses; on a 45-agent list they were 3 queries each).
     const peersPendingSet = store.agentsWithPeersPending(ownerIdOf(req));
-    const classNames = new Map(store.listAgentClasses(ownerIdOf(req)).map((c) => [c.id, c.name]));
+    const classes = new Map(store.listAgentClasses(ownerIdOf(req)).map((c) => [c.id, c]));
+    const classNames = new Map([...classes].map(([id, c]) => [id, c.name]));
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -2299,6 +2403,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return publicAgent(a, {
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
+          // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
+          imageTrial: !!a.image && (!a.classId || classes.get(a.classId)?.image !== a.image),
           /** What the viewer may do — drives which controls the app renders. */
           role,
           // The owner's applied setup ANSWERS are theirs — a member (or the
@@ -2498,6 +2604,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // pin is often an image that is about to exist (candidate being built).
         // A wrong name fails the next rebuild with a clear error and Retry.
         store.setAgentImage(agent.id, parsed.data.image);
+        detachClassIfDrifted(agent.id);
       }
 
       if (parsed.data.sharedPaths) {

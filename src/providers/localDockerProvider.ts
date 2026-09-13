@@ -472,6 +472,21 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { imageId, openclawVersion: openclawVersion || undefined };
   }
 
+  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string }[]> {
+    const repo = this.image.replace(/:[^:]*$/, '');
+    const res = await this.#docker(['images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedAt}}', repo]);
+    if (res.code !== 0) return [];
+    return res.stdout.split('\n').filter(Boolean).map((l) => {
+      const [tag, imageId, createdAt] = l.split('|');
+      return { tag: tag!, imageId: imageId!, createdAt };
+    }).filter((t) => !t.tag.endsWith(':<none>'));
+  }
+
+  async tagImage(from: string, to: string): Promise<void> {
+    for (const ref of [from, to]) if (!IMAGE_REF_RE.test(ref)) throw new ProviderError(`bad image ref ${ref}`, 'That image name is not valid.');
+    await this.#must(['tag', from, to], `Couldn't tag ${from} as ${to}.`);
+  }
+
   async logs(runtimeRef: string, lines: number): Promise<string> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker(['logs', '--tail', String(lines), container]);
