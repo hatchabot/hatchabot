@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.0.5] — 2026-09-13
+
+### Fixed
+- 1.0.4 added a second `sources` CLI command that the existing one shadowed; folded the new information (shared flag, other accounts' counts, id) into the original instead.
+
 ## [1.0.4] — 2026-09-13
 
 ### Added

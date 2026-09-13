@@ -66,8 +66,6 @@ Commands:
   users [--all]                Every Telegram user across your agents: which
                                agents they belong to, when they joined, and
                                when they were last heard from.
-  sources                      AI sources: kind, shared?, and how many agents use
-                               each (yours / other accounts).
   migrate-source <from> --to <target> [--no-checkpoint] [--recover] [--yes]
                                Host owner: move EVERY agent on source <from> —
                                other accounts' included — to the SHARED source
@@ -78,8 +76,9 @@ Commands:
   bots [--check]               Every Telegram bot this + your registered servers
                                use, flagging reclaimable/dead slots. --check adds
                                a live Telegram probe per bot.
-  sources                      Summary: which agents are on which AI source,
-                               and which models they run.
+  sources                      Summary: which agents are on which AI source
+                               (yours + other accounts' counts, shared flag,
+                               id), and which models they run.
   switch-source --to <id|name> [--agents a,b,c] [--rebuild]
                                Move agents onto one AI source in a single call
                                (default: all of yours). --rebuild applies now,
@@ -756,7 +755,8 @@ async function main() {
         const cred = p.kind === 'subscription'
           ? (p.credential === 'setup-token' ? 'subscription · setup-token' : 'subscription · machine-login')
           : p.kind === 'local' ? 'local' : `api key · ${p.vendor}`;
-        console.log(`  ${p.name}  [${cred}]  ${n} agent${n === 1 ? '' : 's'}`);
+        const others = p.inUse?.others ?? 0;
+        console.log(`  ${p.name}  [${cred}${p.shared ? ' · shared' : ''}]  ${n} agent${n === 1 ? '' : 's'}${others ? ` + ${others} on other accounts` : ''}  ${p.id}`);
       }
       const orphanIds = [...bySource.keys()].filter((id) => !profiles.some((p) => p.id === id));
       for (const id of orphanIds) console.log(`  (unknown source ${id.slice(0, 8)})  ${bySource.get(id)!.length} agents`);
@@ -1276,16 +1276,6 @@ async function main() {
         await api(ctx, `/v1/bots?consolidated=1&live=${live ? 1 : 0}`)
       ).json()) as { hosts: any[] };
       for (const line of fmtBots(hosts, live)) console.log(line);
-      return;
-    }
-    case 'sources': {
-      const list = (await (await api(ctx, '/v1/ai-profiles')).json()) as any[];
-      if (!list.length) return console.log('no AI sources');
-      const w = Math.max(...list.map((p) => p.name.length));
-      for (const p of list) {
-        const u = p.inUse ?? {};
-        console.log(`${p.name.padEnd(w)}  ${String(p.kind ?? '-').padEnd(13)} ${p.shared ? 'shared ' : 'private'}  agents: ${u.mine ?? 0} yours, ${u.others ?? 0} other accounts  ${p.id}`);
-      }
       return;
     }
     case 'migrate-source': {
