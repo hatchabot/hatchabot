@@ -1892,27 +1892,57 @@ function toast(msg, ms, cls) {
 
 function renderSetup() {
   const el = $('setup');
-  if (profiles.length > 0) { el.innerHTML = ''; $('fabBtn').hidden = false; return; }
-  $('fabBtn').hidden = true;
+  // First-run wizard: shown until the first agent exists. Three steps, each
+  // marked done from real state (an AI source, a parked bot, an agent).
+  if (agents.length > 0) { el.innerHTML = ''; $('fabBtn').hidden = false; return; }
+  const aiDone = profiles.length > 0, botDone = poolAvail > 0;
+  $('fabBtn').hidden = !aiDone;
+  const step = (n, done, title, body) => `
+    <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)${done ? ';opacity:.6' : ''}">
+      <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${done ? 'var(--ok)' : 'var(--accent)'};color:var(--accent-ink);font-weight:800;display:flex;align-items:center;justify-content:center">${done ? '✓' : n}</span>
+      <div class="grow"><div class="name" style="font-size:15px">${title}</div>${done ? '' : body}</div>
+    </div>`;
   el.innerHTML = `
     <div class="card">
-      <div class="name">Welcome 👋</div>
-      <p class="sub" style="margin:8px 0 4px">
-        One thing before your first agent: connect the AI. If you're logged into
-        Claude on this machine (Pro or Max plan), that's one tap.
-      </p>
-      <label>Model</label>
-      <select id="setupModel">
-        <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
-        <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
-      </select>
-      <label>On a Mac? <span style="color:var(--dim)">Run <code>claude setup-token</code> in a terminal and paste the token</span></label>
-      <input type="password" id="setupToken" placeholder="Optional — needed when the Claude login lives in the Keychain" autocomplete="off">
-      <div class="err" id="setupErr"></div>
-      <div class="actions">
-        <button class="primary" onclick="createSubscriptionProfile()">Use my Claude subscription</button>
-      </div>
+      <div class="name">Welcome 👋 — three steps to your first agent</div>
+      ${step(1, aiDone, aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', `
+        <p class="sub" style="margin:4px 0 6px">A Claude subscription (Pro or Max) powers every agent. On the machine running Hatchabot, run
+          <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.
+          Logged into Claude on this very machine (Linux)? Leave the token blank — it's one tap.</p>
+        <label>Model</label>
+        <select id="setupModel" style="width:auto">
+          <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
+          <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
+        </select>
+        <label>Setup token</label>
+        <input type="password" id="setupToken" placeholder="paste the token printed by: claude setup-token   (blank = use this machine's Claude login)" autocomplete="off">
+        <div class="err" id="setupErr"></div>
+        <div class="actions" style="justify-content:space-between;align-items:center">
+          <span class="sub">Using an API key or a local model instead? <a href="#" onclick="event.preventDefault();openAiDlg('ai')">⚙ AI sources</a></span>
+          <button class="primary" onclick="createSubscriptionProfile()">Use my Claude subscription</button>
+        </div>`)}
+      ${step(2, botDone, botDone ? `Telegram bot ready (${poolAvail} parked)` : 'Make your first Telegram bot', `
+        <p class="sub" style="margin:4px 0 6px">Each agent is a Telegram bot. In Telegram open <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a>,
+          send <code>/newbot</code>, give it a display name (e.g. <i>Kitchen Helper</i>) and a username ending in <code>bot</code>. BotFather replies with a token like
+          <code>123456789:AAH…</code> — paste it here. ${myAccount.hostOwner ? 'It is checked with Telegram and parked, so the next step grabs it instantly.' : 'You will paste it when creating the agent in step 3.'}</p>
+        ${myAccount.hostOwner ? `<div style="display:flex;gap:8px;flex-wrap:wrap"><input type="password" id="wizBotToken" placeholder="bot token from @BotFather" autocomplete="off" style="flex:1;min-width:220px"><button class="primary" id="wizBotBtn" onclick="wizardAddBot()">Check &amp; park it</button></div><div class="err" id="wizBotErr"></div>` : ''}`)}
+      ${step(3, false, 'Create the agent', `
+        <p class="sub" style="margin:4px 0 6px">A name and one paragraph about its job — that becomes its personality, which you can edit any time.
+          Then open the Telegram link on its card and say hi; your first message claims it as yours.</p>
+        <div class="actions" style="justify-content:flex-start"><button class="primary" ${aiDone ? '' : 'disabled title="Connect the AI first"'} onclick="$('fabBtn').click()">➕ Create my first agent</button></div>`)}
     </div>`;
+}
+
+async function wizardAddBot() {
+  const token = $('wizBotToken').value.trim();
+  if (!token) { $('wizBotErr').textContent = 'Paste the token BotFather sent you.'; return; }
+  $('wizBotBtn').disabled = true; $('wizBotErr').textContent = '';
+  try {
+    const r = await api('/v1/pool', { method: 'POST', body: { token, shared: false } });
+    poolAvail = r.availableBots;
+    toast(`@${r.username} is ready — it will be used by your first agent.`, 6000);
+    renderSetup();
+  } catch (e) { $('wizBotErr').textContent = e.message; $('wizBotBtn').disabled = false; }
 }
 
 async function createSubscriptionProfile() {

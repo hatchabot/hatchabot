@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.3.1] — 2026-09-13
+
+### Added
+- **First-run wizard.** Until the first agent exists, the home page walks through the three steps with real progress: connect the AI (setup-token instructions inline, one tap if Claude is logged in on the machine), make the first Telegram bot at @BotFather and paste its token (checked with Telegram and parked, so step three takes it instantly), create the agent.
+
 ## [1.3.0] — 2026-09-13
 
 ### Added — easier to deploy
