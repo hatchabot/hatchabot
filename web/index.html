@@ -224,13 +224,14 @@
   .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
   .primary:hover { filter: brightness(1.08); }
   .danger { color: var(--bad); }
-  .fab-top { bottom: 90px; width: 44px; height: 44px; right: 27px; font-size: 20px; opacity: .85; }
   .fab {
     position: fixed; right: 20px; bottom: 20px; width: 58px; height: 58px;
     border-radius: 50%; font-size: 30px; line-height: 1;
     background: var(--accent); color: var(--accent-ink); border: none;
     box-shadow: 0 6px 20px rgba(0,0,0,0.45);
   }
+  /* after .fab so its position wins: sits above the + button */
+  .fab-top { bottom: 90px; width: 44px; height: 44px; right: 27px; font-size: 20px; opacity: .85; }
   dialog {
     background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 20px; width: min(440px, 92vw);
