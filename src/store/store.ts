@@ -739,6 +739,11 @@ export class Store {
     return rows.map(rowToAgent);
   }
 
+  /** Live agents across every owner — what the fleet-wide cap counts. */
+  countLiveAgents(): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM agents WHERE state NOT IN ('ARCHIVED', 'DELETED')`).get() as { n: number }).n;
+  }
+
   listAgents(ownerId: string): Agent[] {
     const rows = this.db
       // Ungrouped first, then groups (order applied in JS), each by sort_order.

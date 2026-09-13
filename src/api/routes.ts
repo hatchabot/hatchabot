@@ -2144,6 +2144,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         error: `You've reached the limit of ${maxPerAccount} agents on this server. Delete one first.`,
       });
     }
+    // Defence in depth for shared hosts: a lower cap for accounts that aren't
+    // the host owner, and a ceiling on the whole fleet so N rogue sign-ups
+    // can't turn the box into N × cap containers.
+    const maxPerMember = Number(process.env.HATCHABOT_MAX_AGENTS_PER_MEMBER ?? 0);
+    if (maxPerMember > 0 && !ownsLocalHost(req) && liveCount >= maxPerMember) {
+      return reply.code(429).send({
+        error: `Members may run up to ${maxPerMember} agents on this server. Delete one first, or ask the host owner.`,
+      });
+    }
+    const maxTotal = Number(process.env.HATCHABOT_MAX_AGENTS_TOTAL ?? 0);
+    if (maxTotal > 0 && store.countLiveAgents() >= maxTotal) {
+      return reply.code(429).send({
+        error: `This server is at its capacity of ${maxTotal} agents. Ask the host owner to free one up.`,
+      });
+    }
 
     // The slug is derived from the name and is UNIQUE per owner — it becomes
     // a container name and a workspace path. Catch the collision here: letting

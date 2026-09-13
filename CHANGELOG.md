@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.1.1] — 2026-09-13
+
+### Added
+- `HATCHABOT_MAX_AGENTS_PER_MEMBER` (lower cap for accounts that are not the host owner) and `HATCHABOT_MAX_AGENTS_TOTAL` (fleet-wide ceiling on live agents) — defence in depth on a shared host; both unset = unchanged behaviour.
+- `.env.example` rewritten as a full reference: every variable the control plane reads, grouped, with defaults, and the three lines `setup-host.sh` fills in marked `[auto]`. New `.env.mgmt.example` for the management bot.
+
 ## [1.1.0] — 2026-09-13
 
 14th audit (rename correctness, security surface now that the repo is public, correctness/ops). Three reviewers, every finding verified against the code before fixing.

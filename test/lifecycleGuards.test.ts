@@ -147,6 +147,31 @@ describe('per-account agent cap', () => {
     }
   });
 
+  it('HATCHABOT_MAX_AGENTS_PER_MEMBER caps non-host-owner accounts only', async () => {
+    const { f, store } = await world();
+    store.insertAIProfile({ id: 'pm', ownerId: 'user-member', name: 'Theirs AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/pm', createdAt: 'now' });
+    store.insertAgent({ id: 'm1', ownerId: 'user-member', name: 'Theirs', slug: 'theirs', state: 'PROVISIONING', aiProfileId: 'pm', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentState('m1', 'RUNNING');
+    process.env.HATCHABOT_MAX_AGENTS_PER_MEMBER = '1';
+    try {
+      const member = await f.inject({ method: 'POST', url: '/v1/agents', headers: { 'x-hatchabot-owner': 'user-member' }, payload: { name: 'Second', aiProfileId: 'pm', hostId: 'h1' } });
+      expect(member.statusCode).toBe(429);
+      expect(member.json().error).toMatch(/Members may run up to 1/);
+      const owner = await f.inject({ method: 'POST', url: '/v1/agents', headers: as, payload: { name: 'Mine2', aiProfileId: 'p1', hostId: 'h1' } });
+      expect(owner.statusCode).toBe(202); // host owner is not subject to the member cap
+    } finally { delete process.env.HATCHABOT_MAX_AGENTS_PER_MEMBER; }
+  });
+
+  it('HATCHABOT_MAX_AGENTS_TOTAL caps the whole fleet, host owner included', async () => {
+    const { f } = await world(); // a1 exists
+    process.env.HATCHABOT_MAX_AGENTS_TOTAL = '1';
+    try {
+      const res = await f.inject({ method: 'POST', url: '/v1/agents', headers: as, payload: { name: 'Second', aiProfileId: 'p1', hostId: 'h1' } });
+      expect(res.statusCode).toBe(429);
+      expect(res.json().error).toMatch(/capacity of 1/);
+    } finally { delete process.env.HATCHABOT_MAX_AGENTS_TOTAL; }
+  });
+
   it('does NOT count archived agents toward the cap (they hold no bot/container)', async () => {
     const { f, store } = await world();
     const prev = process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT;
