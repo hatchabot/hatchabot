@@ -806,15 +806,15 @@
   <h3 style="margin:0 0 10px">Settings</h3>
   <div class="tabs" role="tablist">
     <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
-    <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Runners</button>
-    <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Bot pool</button>
-    <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Cluster servers</button>
+    <button class="tab" id="tabOperator" role="tab" aria-selected="false" onclick="showTab('operator')">👤 You</button>
     <button class="tab" id="tabConn" role="tab" aria-selected="false" onclick="showTab('conn')">Connections</button>
-    <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
+    <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Bot pool</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
     <button class="tab" id="tabSecurity" role="tab" aria-selected="false" onclick="showTab('security')">🛡 Security</button>
-    <button class="tab" id="tabOperator" role="tab" aria-selected="false" onclick="showTab('operator')">👤 You</button>
+    <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
+    <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Runners</button>
+    <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Cluster servers</button>
   </div>
 
   <section id="paneAi" role="tabpanel">
@@ -1109,6 +1109,7 @@
       always on (keyless DuckDuckGo); one <b>Fleet search key</b> in AI sources upgrades everyone to Brave.</div></details>
     </div>
     <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
+    <div id="runtimeSearch" class="sub" style="margin-top:6px"></div>
     <div id="rtPanel" hidden>
     <h4 style="margin:18px 0 4px">Images on this machine</h4>
     <div class="sub" style="margin-bottom:10px"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
@@ -2413,6 +2414,10 @@ async function loadRuntime() {
   loadRuntimeCaps();
   loadDerivedImages();
   $('rtPanel').hidden = !myAccount.hostOwner;
+  // Web search provider is decided per agent by the fleet key, not by the image — say which one applies.
+  if (myAccount.hostOwner) api('/v1/search-key').then(k => { $('runtimeSearch').innerHTML = k.set
+    ? '🔎 Web search: <b>Brave</b> — the fleet search key is set and injected into every agent at provision/rebuild (agents built before the key was set stay on DuckDuckGo until rebuilt).'
+    : '🔎 Web search: <b>DuckDuckGo</b> (keyless baseline). A <b>Fleet search key</b> in AI sources upgrades every agent to Brave on its next rebuild.'; }).catch(() => {});
   if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
   const el = $('runtimeStatus');
   try {

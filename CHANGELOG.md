@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.3.2] — 2026-09-13
+
+### Changed
+- Settings tabs reordered by how often they are used: AI sources · You · Connections · Bot pool · Backups · Runtime · Security · Access · Runners · Cluster servers.
+- Settings → Runtime now states the **live web-search provider** (Brave when the fleet search key is set, DuckDuckGo otherwise) instead of a static description of the baseline.
+
 ## [1.3.1] — 2026-09-13
 
 ### Added
