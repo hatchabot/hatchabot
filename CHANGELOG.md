@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.2.1] — 2026-09-13
+
+### Changed
+- Image management lives in **Settings → Runtime** (the toolbar 🧱 button is gone) — one place with the derived-image form.
+- Each image now says what is inside: OpenClaw version, size, build date, and how it relates to the fleet default (= same image / candidate newer than the default / older build / derived with its Dockerfile summary). The header says which version tag `:latest` resolves to.
+
 ## [1.2.0] — 2026-09-13
 
 ### Added

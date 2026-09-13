@@ -1137,9 +1137,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/runtime/images', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
-    let tags: { tag: string; imageId: string; createdAt?: string }[] = [];
+    let tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = [];
     try { if (localHost) tags = await providerFor(localHost.id).listImageTags(); } catch { /* daemon hiccup: empty list, not a 500 */ }
-    const latestId = tags.find((t) => t.tag === DEFAULT_BASE)?.imageId;
+    const latestRow = tags.find((t) => t.tag === DEFAULT_BASE);
+    const latestId = latestRow?.imageId;
+    // Human answer to "what does :latest point to?": the version tags sharing its image id.
+    const resolvesTo = tags.filter((t) => t.tag !== DEFAULT_BASE && t.imageId === latestId && !t.tag.includes(':derived-')).map((t) => t.tag);
     const derived = new Map(store.listDerivedImages().map((d) => [d.tag, d]));
     const me = ownerIdOf(req);
     const active = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED');
@@ -1147,9 +1150,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const known = new Set(tags.map((t) => t.tag));
     // Pins to tags that don't exist (yet) still show, so a typo or an unbuilt candidate is visible.
     for (const a of active) if (a.image && !known.has(a.image)) { known.add(a.image); tags.push({ tag: a.image, imageId: '' }); }
+    const relation = (t: { imageId: string; createdAt?: string; tag: string }) =>
+      !t.imageId ? 'missing' : t.imageId === latestId ? 'same' : t.tag.includes(':derived-') ? 'derived'
+        : latestRow?.createdAt && t.createdAt ? (t.createdAt > latestRow.createdAt ? 'newer' : 'older') : 'other';
     return {
       default: DEFAULT_BASE,
       latestImageId: latestId,
+      defaultInfo: latestRow ? { resolvesTo, openclawVersion: latestRow.openclawVersion, size: latestRow.size, createdAt: latestRow.createdAt } : null,
       building: { base: baseBuild.running ? { version: baseBuild.version, candidate: baseBuild.candidate, startedAt: baseBuild.startedAt } : null },
       unpinned: active.filter((a) => !a.image).map(agentRow),
       tags: tags
@@ -1159,7 +1166,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...t,
           isLatest: !!latestId && t.imageId === latestId,
           exists: !!t.imageId,
-          derived: derived.get(t.tag) ? { name: derived.get(t.tag)!.name, status: derived.get(t.tag)!.status, base: derived.get(t.tag)!.base } : null,
+          relation: relation(t),
+          derived: derived.get(t.tag) ? { name: derived.get(t.tag)!.name, status: derived.get(t.tag)!.status, base: derived.get(t.tag)!.base, summary: derived.get(t.tag)!.dockerfile.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).join(' ; ').slice(0, 160) } : null,
           pinned: active.filter((a) => a.image === t.tag).map(agentRow),
           classes: store.listAgentClasses(me).filter((c) => c.image === t.tag).map((c) => ({ id: c.id, name: c.name })),
         })),

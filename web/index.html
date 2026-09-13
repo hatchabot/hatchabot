@@ -310,7 +310,6 @@
     <div class="hrow">
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
       <button id="fleetActionsBtn" class="hbtn" title="Apply an action (switch model, rebuild, stop/start) to a selection of agents — pick by AI source, group, host, or state" onclick="openFleetActions()" hidden>⚡ Bulk actions</button>
-      <button id="runtimeBtn" class="hbtn" title="Runtime images — candidates, derived images, try one on a single agent, promote to the fleet" onclick="openRuntime()" hidden>🧱 Runtime</button>
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
       <button id="inboxBtn" class="hbtn" title="Agents other users have sent you" onclick="openInbox()">📥 Inbox<span id="inboxBadge" class="inbox-badge" hidden></span></button>
       <button id="mgmtChatBtn" class="hbtn" title="Management chat — ask in plain language; every change needs your Confirm" onclick="openMgmtChat()">💬 Manage</button>
@@ -1110,6 +1109,23 @@
       always on (keyless DuckDuckGo); one <b>Fleet search key</b> in AI sources upgrades everyone to Brave.</div></details>
     </div>
     <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
+    <div id="rtPanel" hidden>
+    <h4 style="margin:18px 0 4px">Images on this machine</h4>
+    <div class="sub" style="margin-bottom:10px"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
+    <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
+    <details id="rtBuild" style="margin-bottom:12px">
+      <summary style="cursor:pointer">🔨 Build a base-image candidate (new OpenClaw version)</summary>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+        <input type="text" id="rtBuildVersion" placeholder="OpenClaw version (blank = script default)" maxlength="64" style="flex:1;min-width:200px;font-family:ui-monospace,monospace">
+        <label style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" id="rtBuildCandidate" checked style="width:auto"> candidate only (don't touch :latest)</label>
+        <button class="primary" id="rtBuildBtn" onclick="startBaseBuild()">Build</button>
+      </div>
+      <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
+    </details>
+    <div id="rtList">Loading…</div>
+    <div class="sub" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
+    <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
+    </div>
     <h4 style="margin:18px 0 4px">What agents can do</h4>
     <div class="sub">Probed live from the image — this list can't drift from reality.</div>
     <div id="runtimeCaps" style="margin-top:8px">Loading…</div>
@@ -1228,24 +1244,6 @@
   </div>
 </dialog>
 
-<dialog id="runtimeDlg" style="width:min(760px,96vw)">
-  <h3 style="margin:0 0 4px">🧱 Runtime images</h3>
-  <div class="sub" style="margin-bottom:10px">What agents run on. <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
-  <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
-  <details id="rtBuild" style="margin-bottom:12px">
-    <summary style="cursor:pointer">🔨 Build a base-image candidate (new OpenClaw version)</summary>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
-      <input type="text" id="rtBuildVersion" placeholder="OpenClaw version (blank = script default)" maxlength="64" style="flex:1;min-width:200px;font-family:ui-monospace,monospace">
-      <label style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" id="rtBuildCandidate" checked style="width:auto"> candidate only (don't touch :latest)</label>
-      <button class="primary" id="rtBuildBtn" onclick="startBaseBuild()">Build</button>
-    </div>
-    <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
-  </details>
-  <div id="rtList">Loading…</div>
-  <div class="sub" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();runtimeDlg.close();openAiDlg('runtime').then(()=>{const d=$('derivedNew');if(d)d.open=true;})">New derived image…</a> — then pin it to an agent or a class here.</div>
-  <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
-  <div class="actions"><button onclick="runtimeDlg.close()">Close</button></div>
-</dialog>
 <dialog id="fleetDlg" style="width:min(720px,96vw)">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <h3 style="margin:0">Fleet health</h3>
@@ -2384,6 +2382,8 @@ async function loadRuntimeCaps() {
 async function loadRuntime() {
   loadRuntimeCaps();
   loadDerivedImages();
+  $('rtPanel').hidden = !myAccount.hostOwner;
+  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
   const el = $('runtimeStatus');
   try {
     const r = await api('/v1/runtime');
@@ -3086,19 +3086,15 @@ function faAgents() {
 }
 // ---- Runtime images dialog ---------------------------------------------------
 let rtData = null, rtBuildTimer = null;
-async function openRuntime() {
-  $('rtErr').textContent = ''; $('rtList').textContent = 'Loading…';
-  runtimeDlg.showModal();
-  await loadRuntimeImages();
-  pollBaseBuild();
-}
 async function loadRuntimeImages() {
   try {
     const [rt, imgs] = await Promise.all([api('/v1/runtime'), api('/v1/runtime/images')]);
     rtData = imgs;
     $('rtDefault').textContent = imgs.default;
-    $('rtBase').innerHTML = `Fleet default runs OpenClaw <b>${esc(rt.imageVersion || '?')}</b>${rt.npmLatest ? (rt.upgradeAvailable ? ` — ⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable; build it as a candidate below, try it on one agent, then promote.` : ` — ✓ latest stable.`) : ''}
-      · <b>${imgs.unpinned.length}</b> agent${imgs.unpinned.length === 1 ? '' : 's'} follow the default.`;
+    const di = imgs.defaultInfo;
+    $('rtBase').innerHTML = `<b>Fleet default</b> <code>${esc(imgs.default)}</code> → ${di && di.resolvesTo.length ? di.resolvesTo.map(t => `<code>${esc(t)}</code>`).join(', ') : '<i>no version tag shares its image</i>'}${di ? ` · OpenClaw <b>${esc(di.openclawVersion || rt.imageVersion || '?')}</b> · ${esc(di.size || '')} · built ${esc((di.createdAt || '').slice(0, 10))}` : ''}.
+      ${rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw — build it as a candidate, try it on one agent, then promote.` : `✓ OpenClaw is at the latest stable.`) : ''}
+      <b>${imgs.unpinned.length}</b> agent${imgs.unpinned.length === 1 ? '' : 's'} follow the default.`;
     renderRuntimeList();
   } catch (e) { $('rtList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -3106,14 +3102,19 @@ function renderRuntimeList() {
   const d = rtData; if (!d) return;
   if (!d.tags.length) { $('rtList').innerHTML = '<div class="sub">Only the fleet default exists. Build a candidate above, or a derived image.</div>'; return; }
   $('rtList').innerHTML = d.tags.map(t => {
-    const kind = t.derived ? `derived · ${esc(t.derived.status.toLowerCase())} · FROM ${esc(t.derived.base)}` : t.isLatest ? 'same image as the fleet default' : t.exists ? 'candidate' : 'not built on this machine';
+    const inside = t.exists ? [t.openclawVersion ? `OpenClaw ${esc(t.openclawVersion)}` : '', t.size ? esc(t.size) : '', t.createdAt ? `built ${esc(t.createdAt.slice(0, 10))}` : ''].filter(Boolean).join(' · ') : '';
+    const kind = t.derived ? `<b>derived</b> · ${esc(t.derived.status.toLowerCase())} · FROM ${esc(t.derived.base)}${t.derived.summary ? ` · <span title="${esc(t.derived.summary)}">${esc(t.derived.summary.slice(0, 60))}${t.derived.summary.length > 60 ? '…' : ''}</span>` : ''}`
+      : t.relation === 'same' ? '<b>= fleet default</b> (same image, another name)'
+      : t.relation === 'newer' ? '<b>candidate</b> — newer than the default'
+      : t.relation === 'older' ? 'older build — a previous default'
+      : t.exists ? 'candidate' : '<b>not built</b> on this machine';
     const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${esc(a.name)}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
     const cls = t.classes.map(c => `<span class="chip">🏷 ${esc(c.name)}</span>`).join(' ');
     const canPromote = t.exists && !t.isLatest && !t.derived;
     return `<div class="pair" style="flex-direction:column;align-items:stretch;gap:4px;padding:8px 0;border-top:1px solid var(--line)">
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <code class="grow" style="word-break:break-all">${esc(t.tag)}</code>
-        <span class="sub">${kind}</span>
+        <span class="sub">${kind}${inside ? ` · ${inside}` : ''}</span>
         ${t.exists ? `<button onclick="tryOnAgent('${jsq(t.tag)}')" title="Pin one agent to this image and rebuild it (memory kept)">🧪 Try on one agent…</button>` : ''}
         ${canPromote ? `<button class="primary" onclick="promoteImage('${jsq(t.tag)}')" title="Point the fleet default at this image; agents without a pin pick it up on their next rebuild">⬆ Promote to fleet</button>` : ''}
         ${t.derived ? `<button onclick="rebuildDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)">Rebuild</button><button onclick="showDerivedLog('${jsq(t.derived.name)}')">Log</button><button class="danger" onclick="deleteDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)">Delete</button>` : ''}
@@ -3151,7 +3152,7 @@ async function promoteImage(tag) {
     const r = await api('/v1/runtime/images/promote', { method: 'POST', body: { tag } });
     toast(`${r.promoted} is now the fleet default — ${r.followers.length} agent${r.followers.length === 1 ? '' : 's'} will adopt it on rebuild.`, 9000);
     await refresh(false); await loadRuntimeImages();
-    if (r.followers.length && confirm('Open Bulk actions with "Needs rebuild" selected?')) { runtimeDlg.close(); await openFleetActions(); faSelect('needs-rebuild'); }
+    if (r.followers.length && confirm('Open Bulk actions with "Needs rebuild" selected?')) { aiDlg.close(); await openFleetActions(); faSelect('needs-rebuild'); }
   } catch (e) { $('rtErr').textContent = e.message; }
 }
 async function startBaseBuild() {
@@ -3164,7 +3165,7 @@ async function startBaseBuild() {
 }
 async function pollBaseBuild() {
   clearTimeout(rtBuildTimer);
-  if (!runtimeDlg.open) return;
+  if (!aiDlg.open) return;
   try {
     const b = await api('/v1/runtime/build');
     if (b.running || b.log) { $('rtBuildLog').hidden = false; $('rtBuildLog').textContent = (b.running ? `⏳ building ${b.version || '(default version)'}${b.candidate ? ' as a candidate' : ''}…\n\n` : (b.ok === false ? `✗ ${b.error || 'failed'}\n\n` : b.ok ? '✓ done\n\n' : '')) + (b.log || ''); $('rtBuildLog').scrollTop = 1e9; }
@@ -6696,7 +6697,6 @@ function renderAgents() {
   // Show "Rebuild all" only when there's more than one agent to rebuild.
   $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
   $('fleetActionsBtn').hidden = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED').length < 2;
-  $('runtimeBtn').hidden = !myAccount.hostOwner;
   renderToc(); // keep the jump-to legend in sync with the list
   if (profiles.length && agents.length === 0) {
     el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;

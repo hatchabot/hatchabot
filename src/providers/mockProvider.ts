@@ -132,7 +132,7 @@ export class MockProvider implements RuntimeProvider {
     return { imageId: 'mock-image', openclawVersion: 'mock' };
   }
 
-  tags: { tag: string; imageId: string }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
+  tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
   tagged: [string, string][] = [];
   async listImageTags() { return this.tags; }
   async tagImage(from: string, to: string) { this.tagged.push([from, to]); }

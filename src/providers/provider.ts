@@ -190,7 +190,7 @@ export interface RuntimeProvider {
   currentImageInfo(): Promise<RuntimeInfo>;
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string }[]>;
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[]>;
 
   /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
   tagImage(from: string, to: string): Promise<void>;

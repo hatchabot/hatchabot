@@ -472,14 +472,23 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { imageId, openclawVersion: openclawVersion || undefined };
   }
 
-  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string }[]> {
+  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[]> {
     const repo = this.image.replace(/:[^:]*$/, '');
-    const res = await this.#docker(['images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedAt}}', repo]);
+    const res = await this.#docker(['images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedAt}}|{{.Size}}', repo]);
     if (res.code !== 0) return [];
-    return res.stdout.split('\n').filter(Boolean).map((l) => {
-      const [tag, imageId, createdAt] = l.split('|');
-      return { tag: tag!, imageId: imageId!, createdAt };
+    const tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = res.stdout.split('\n').filter(Boolean).map((l) => {
+      const [tag, imageId, createdAt, size] = l.split('|');
+      return { tag: tag!, imageId: imageId!, createdAt: createdAt?.slice(0, 19), size };
     }).filter((t) => !t.tag.endsWith(':<none>'));
+    // What's inside: the OpenClaw version label, one inspect for all distinct ids.
+    const ids = [...new Set(tags.map((t) => t.imageId))];
+    if (ids.length) {
+      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}', ...ids]);
+      const ver = new Map<string, string>();
+      for (const l of ins.stdout.split('\n')) { const [id, v] = l.split('|'); if (id && v) ver.set(id.replace(/^sha256:/, '').slice(0, 12), v); }
+      for (const t of tags) t.openclawVersion = ver.get(t.imageId);
+    }
+    return tags;
   }
 
   async tagImage(from: string, to: string): Promise<void> {
