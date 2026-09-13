@@ -74,3 +74,20 @@ is the same command with the previous tag.
 - Confirm `.env`, `data/` and `*.sqlite` are ignored (they are) and that no
   fixture in `test/` or `docs/` names real people or real identifiers.
 - Fill in the contact address in SECURITY.md.
+
+## Renamed install (AgentClaw → Hatchabot, pre-1.0 hosts)
+
+- **Linux / systemd:** `scripts/migrate-rename-host.sh vX.Y.Z --yes [--old <dir>]`
+  from the new checkout (see the script header). Re-runnable; nothing deleted.
+- **macOS / launchd:** there is no script. Do it by hand, in this order:
+  `launchctl unload ~/Library/LaunchAgents/com.agentclaw.*.plist`; clone the
+  Hatchabot repo beside the old checkout and `npm ci`; copy `.env`/`.env.mgmt`
+  across, renaming `AGENTCLAW_*` keys to `HATCHABOT_*` (values unchanged);
+  set `HATCHABOT_DB` to where your `agentclaw.sqlite` lives (or move it and
+  point at the new place); `docker tag agentclaw-runtime:latest
+  hatchabot-runtime:latest`; install the new plists from `deploy/` and load
+  them. The old checkout can stay until you're happy.
+- **In-place `git pull` (no script):** works — `AGENTCLAW_*` env is aliased,
+  the old DB/backup paths are found when the new ones don't exist, and old
+  containers, tokens and export files are recognised. You keep the old unit
+  and directory names until you migrate.
