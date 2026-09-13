@@ -42,7 +42,16 @@ You can make more later (one per agent, ~60 seconds each), or pre-stock a pool s
    ```
    Copy the token it prints. (If you'd rather use an API key or a local model, skip this — step 4 offers those too.)
 
-## 3. Install Hatchabot (5 min, mostly waiting)
+## 3. Install Hatchabot (3 min)
+
+One line — it checks git, Docker and Node (offering to install what's missing),
+fetches the latest release into `~/hatchabot`, and runs the setup:
+
+```sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"
+```
+
+Prefer to see every step? The same thing by hand:
 
 ```sh
 git clone https://github.com/hatchabot/hatchabot.git hatchabot
@@ -51,11 +60,12 @@ git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")"   #
 ./scripts/setup-host.sh
 ```
 
-The script checks Docker and Node, installs dependencies, asks you to choose an
-**app password**, builds the agent runtime image (the slow part — 10–20 minutes
-the first time, it downloads OpenClaw, the Claude CLI and a local embedding
-model), installs a background service so Hatchabot starts with the machine, and
-links the `hatchabot` command. It is safe to re-run.
+Setup asks you to choose an **app password**, pulls the agent runtime image
+(pre-built for arm64 and amd64 — about a minute; it only builds locally if the
+pull fails), installs a background service so Hatchabot starts with the
+machine, and links the `hatchabot` command. It is safe to re-run.
+
+Afterwards, `hatchabot doctor` checks the whole installation and says what to fix.
 
 > Releases are git tags (`v1.2.2`, …). Checking one out, as above, means you run
 > a version that passed its tests and has release notes — not whatever `main`

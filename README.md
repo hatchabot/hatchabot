@@ -101,15 +101,14 @@ adopting, backing up, and operating a fleet of agents.
 > New here? **[docs/quickstart.md](docs/quickstart.md)** is the 15-minute path to a first agent (Telegram + Claude included). **[docs/why-hatchabot.md](docs/why-hatchabot.md)** explains the philosophy and how this differs from a chat app; **[docs/pitch.md](docs/pitch.md)** is the short pitch.
 
 ```sh
-git clone https://github.com/hatchabot/hatchabot.git hatchabot
-cd hatchabot
-git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")"   # latest release
-./scripts/setup-host.sh
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"
 ```
 
+(or by hand: `git clone https://github.com/hatchabot/hatchabot.git hatchabot && cd hatchabot && git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")" && ./scripts/setup-host.sh`)
+
 The script checks prerequisites, installs dependencies, generates a `.env`
-(asking you to choose an app password), builds the agent runtime image,
-installs a background service, and links the `hatchabot` CLI. It's safe to
+(asking you to choose an app password), pulls the pre-built agent runtime image (or builds it if the pull fails),
+installs a background service, and links the `hatchabot` CLI. `hatchabot doctor` checks the result. It's safe to
 re-run. **Upgrade** with `git fetch --tags && git checkout vX.Y.Z && ./scripts/restart.sh`
 (releases: [github.com/hatchabot/hatchabot/releases](https://github.com/hatchabot/hatchabot/releases)).
 

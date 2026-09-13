@@ -28,6 +28,20 @@ IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
 # sanctioned upgrade flow only sets OPENCLAW_VERSION — pass the plugin pin
 # through when given, and warn when an OpenClaw bump leaves it implicit so the
 # stale-peer case is at least loud (audit 2026-09-02).
+# Prefer the published multi-arch image (built by .github/workflows/runtime-image.yml)
+# over a 20-minute local build: same Dockerfile, same pins. A version that isn't
+# published yet (a fresh candidate) — or BUILD_LOCAL=1 — falls through to the
+# local build below.
+PUBLISHED="${HATCHABOT_IMAGE_REGISTRY:-ghcr.io/hatchabot/runtime}"
+if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
+  echo "Trying the published image ${PUBLISHED}:${OPENCLAW_VERSION}…"
+  if docker pull "${PUBLISHED}:${OPENCLAW_VERSION}"; then
+    docker tag "${PUBLISHED}:${OPENCLAW_VERSION}" "${REPO}:${IMAGE_TAG}"
+    if [ "${NO_LATEST:-0}" != "1" ]; then docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"; echo "Pulled ${REPO}:${IMAGE_TAG} (promoted to :latest)"; else echo "Pulled ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"; fi
+    exit 0
+  fi
+  echo "Not published (or offline) — building locally instead."
+fi
 PLUGIN_ARG=()
 if [ -n "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
   PLUGIN_ARG=(--build-arg "LLAMA_CPP_PROVIDER_VERSION=${LLAMA_CPP_PROVIDER_VERSION}")

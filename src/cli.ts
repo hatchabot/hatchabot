@@ -61,6 +61,10 @@ Commands:
   login [--token <tok>]        Save an access token from the app (⚙ Settings → Access).
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
+  doctor                       Check this installation: Node, Docker, runtime
+                               image, .env, database, service, control plane,
+                               disk, backups, Tailscale — with the fix for
+                               anything wrong. Run it from the checkout.
   list [--all]                 Agents with state, model, and last activity.
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
@@ -681,6 +685,17 @@ async function main() {
   ).replace(/\/$/, '');
   const password =
     flags.get('password') ?? process.env.HATCHABOT_PASSWORD ?? defaults.HATCHABOT_PASSWORD ?? '';
+
+  // Diagnostics must work when the control plane is down — no handshake, no login.
+  if (cmd === 'doctor') {
+    const { doctorReport, gatherFacts } = await import('./doctor.js');
+    const lines = doctorReport(await gatherFacts(url));
+    for (const l of lines) console.log(`${l.level === 'ok' ? '✓' : l.level === 'warn' ? '⚠' : '✗'} ${l.text}${l.fix ? `\n    → ${l.fix}` : ''}`);
+    const fails = lines.filter((l) => l.level === 'fail').length, warns = lines.filter((l) => l.level === 'warn').length;
+    console.log(fails ? `\n${fails} problem${fails === 1 ? '' : 's'}, ${warns} warning${warns === 1 ? '' : 's'}.` : `\nAll good${warns ? ` (${warns} warning${warns === 1 ? '' : 's'})` : ''}.`);
+    if (fails) process.exitCode = 1;
+    return;
+  }
 
   const server = await serverConfig(url);
   if (cmd === 'login') {

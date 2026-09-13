@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.3.0] — 2026-09-13
+
+### Added — easier to deploy
+- **Pre-built runtime image.** `.github/workflows/runtime-image.yml` builds the agent image on GitHub's native arm64 and amd64 runners for every release tag and publishes one multi-arch tag to `ghcr.io/hatchabot/runtime:<openclaw-version>` (also `:<release>` and `:latest`). `scripts/build-runtime-image.sh` now **pulls that image first** and only builds locally when the pull fails (a not-yet-published candidate, offline, or `BUILD_LOCAL=1`). First install drops from 10–20 minutes to about one.
+- **One-line installer**: `bash -c "1000 4 27 29 30 46 100 122 983 988 1000curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"` — checks git, Docker and Node 22+ (offering to install what is missing on Linux/apt and macOS/Homebrew), fetches the latest release into `~/hatchabot`, runs the setup. Re-runnable; updates an existing clone.
+- **`hatchabot doctor`** — Node, Docker, runtime image, containers, `.env`, database, service, control plane, disk, backups, Tailscale — each ✓/⚠/✗ with the fix. Works with the control plane down; no login needed.
+- Quick start and README rewritten around the one-liner and `doctor`.
+
 ## [1.2.3] — 2026-09-13
 
 ### Changed

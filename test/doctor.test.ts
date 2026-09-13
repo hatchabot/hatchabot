@@ -1,0 +1,38 @@
+import { describe, expect, it } from 'vitest';
+import { doctorReport, type DoctorFacts } from '../src/doctor.js';
+
+const healthy: DoctorFacts = {
+  nodeVersion: 'v22.22.2', dockerCli: true, dockerDaemon: { ok: true, arch: 'arm64', version: '27.1' },
+  runtimeImage: { openclawVersion: '2026.7.1-2', sizeGb: 1.97 },
+  envFile: { present: true, secretKey: true, password: true, authMode: 'password', publicUrl: 'https://box.tail.ts.net' },
+  db: { path: '/x/hatchabot.sqlite', present: true, sizeMb: 10 },
+  service: { manager: 'systemd', active: true, enabled: true },
+  controlPlane: { url: 'http://localhost:8080', ok: true, version: '1.3.0' },
+  diskFreeGb: 120, backups: { dir: '/b', lastSet: '2026-09-13', ageDays: 0 },
+  tailscale: { installed: true, up: true, dns: 'box.tail.ts.net' }, containers: { running: 43, total: 53 },
+};
+
+describe('hatchabot doctor report', () => {
+  it('is all ✓ on a healthy install', () => {
+    const lines = doctorReport(healthy);
+    expect(lines.every((l) => l.level === 'ok')).toBe(true);
+    expect(lines.map((l) => l.text).join('\n')).toMatch(/Node v22.*Docker 27.1.*OpenClaw 2026.7.1-2.*43 running of 53.*Public URL.*Database.*Service running.*v1.3.0.*120 GB free.*last set 2026-09-13.*Tailscale up/s);
+  });
+  it('names the fix for each broken thing', () => {
+    const lines = doctorReport({ ...healthy, nodeVersion: 'v18.1.0', dockerDaemon: { ok: false, error: 'permission denied' }, runtimeImage: undefined,
+      envFile: { present: true, secretKey: false, password: false, authMode: 'password' }, service: { manager: 'systemd', active: false },
+      controlPlane: { url: 'http://localhost:8080', ok: false, error: 'ECONNREFUSED' }, diskFreeGb: 2, backups: { dir: '/b' }, tailscale: { installed: false } });
+    const fails = lines.filter((l) => l.level === 'fail');
+    expect(fails.map((l) => l.text)).toEqual(expect.arrayContaining([expect.stringMatching(/Node v18/), expect.stringMatching(/not reachable/), expect.stringMatching(/SECRET_KEY/), expect.stringMatching(/not running/), expect.stringMatching(/not answering/), expect.stringMatching(/2\.0 GB free/)]));
+    expect(fails.every((l) => l.fix)).toBe(true);
+    expect(lines.find((l) => /No app password/.test(l.text))?.level).toBe('warn');
+    expect(lines.find((l) => /Tailscale not installed/.test(l.text))?.level).toBe('warn');
+    // the image check is skipped when docker itself is down (no double-reporting)
+    expect(lines.some((l) => /Runtime image .* missing/.test(l.text))).toBe(false);
+  });
+  it('warns on stale backups and identity mode without a password is fine', () => {
+    const lines = doctorReport({ ...healthy, envFile: { ...healthy.envFile, password: false, authMode: 'identity' }, backups: { dir: '/b', lastSet: '2026-09-01', ageDays: 12 } });
+    expect(lines.some((l) => /No app password/.test(l.text))).toBe(false);
+    expect(lines.find((l) => /12 days old/.test(l.text))?.level).toBe('warn');
+  });
+});
