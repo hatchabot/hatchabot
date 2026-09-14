@@ -98,7 +98,7 @@ adopting, backing up, and operating a fleet of agents.
 
 ## Quick start
 
-> New here? **[docs/quickstart.md](docs/quickstart.md)** is the 15-minute path to a first agent (Telegram + Claude included). **[docs/why-hatchabot.md](docs/why-hatchabot.md)** explains the philosophy and how this differs from a chat app; **[docs/pitch.md](docs/pitch.md)** is the short pitch.
+> New here? **[docs/quickstart.md](docs/quickstart.md)** is the 15-minute path to a first agent (Telegram + Claude included). **[docs/why-hatchabot.md](docs/why-hatchabot.md)** explains the philosophy and how this differs from a chat app; **[docs/pitch.md](docs/pitch.md)** is the short pitch. **[docs/deck/hatchabot-deck.pdf](docs/deck/hatchabot-deck.pdf)** is the slide deck.
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"
