@@ -67,17 +67,20 @@ function envMap(file: string): Record<string, string> {
 }
 
 /** Probe this machine. `url` is where the control plane should answer. */
-export async function gatherFacts(url: string): Promise<DoctorFacts> {
+export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
+  let url = urlIn;
   const env = envMap('.env');
+  // A TLS install answers on https; the caller's default URL is plain http.
+  if (env.HATCHABOT_TLS_CERT && /^http:\/\/(localhost|127\.0\.0\.1)/.test(url)) url = url.replace(/^http:/, 'https:');
   const dockerCli = !!sh('docker', ['--version']);
   const info = dockerCli ? sh('docker', ['version', '--format', '{{.Server.Version}}|{{.Server.Arch}}']) : undefined;
   const dockerDaemon = info ? { ok: true, version: info.split('|')[0], arch: info.split('|')[1] } : { ok: false, error: dockerCli ? 'daemon not reachable' : undefined };
   let runtimeImage: DoctorFacts['runtimeImage'];
   if (dockerDaemon.ok) {
-    const img = sh('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{.Size}}', process.env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest']);
+    const img = sh('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{.Size}}', process.env.HATCHABOT_IMAGE ?? env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest']);
     if (img) runtimeImage = { openclawVersion: img.split('|')[0] || undefined, sizeGb: Number(img.split('|')[1]) / 1e9 };
   }
-  const prefix = process.env.HATCHABOT_PREFIX ?? 'hatchabot';
+  const prefix = process.env.HATCHABOT_PREFIX ?? env.HATCHABOT_PREFIX ?? 'hatchabot';
   const ps = dockerDaemon.ok ? sh('docker', ['ps', '-a', '--format', '{{.Names}}|{{.State}}']) : undefined;
   const rows = (ps ?? '').split('\n').filter((l) => l.startsWith(`${prefix}-`) || l.startsWith('agentclaw-'));
   const dbPath = process.env.HATCHABOT_DB ?? env.HATCHABOT_DB ?? defaultDbPath();
@@ -86,11 +89,13 @@ export async function gatherFacts(url: string): Promise<DoctorFacts> {
     : sh('systemctl', ['--user', 'cat', 'hatchabot.service']) ? { manager: 'systemd', active: sh('systemctl', ['--user', 'is-active', 'hatchabot']) === 'active', enabled: sh('systemctl', ['--user', 'is-enabled', 'hatchabot']) === 'enabled' } : { manager: 'none' };
   let controlPlane: DoctorFacts['controlPlane'] = { url, ok: false };
   try {
+    // Self-signed TLS is normal on a LAN install: verify the version marker, not the chain.
+    if (url.startsWith('https:')) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     const res = await fetch(`${url.replace(/\/$/, '')}/`, { signal: AbortSignal.timeout(5000) });
     const html = await res.text();
     controlPlane = { url, ok: res.ok, version: /HATCHABOT_VERSION="([^"]+)"/.exec(html)?.[1] };
   } catch (err) { controlPlane = { url, ok: false, error: String((err as Error).cause ?? (err as Error).message).slice(0, 80) }; }
-  const df = sh('df', ['-k', '.']);
+  const df = sh('df', ['-Pk', '.']); // -P: one line per filesystem on macOS too
   const diskFreeGb = df ? Number(df.split('\n').pop()!.split(/\s+/)[3]) / 1e6 : undefined;
   const bdir = process.env.HATCHABOT_BACKUP_DIR ?? env.HATCHABOT_BACKUP_DIR ?? defaultBackupsDir();
   let backups: DoctorFacts['backups'] = { dir: bdir };

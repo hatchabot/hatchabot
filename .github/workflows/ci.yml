@@ -22,6 +22,10 @@ jobs:
       - run: npm run typecheck
       # `npm test` also syntax-checks the single-file web app.
       - run: npm test
+      - name: release consistency (lock version, scripts parse)
+        run: |
+          node -e 'const p=require("./package.json"),l=require("./package-lock.json");if(l.version!==p.version||l.packages[""].version!==p.version){console.error(`package-lock.json says ${l.version}, package.json says ${p.version}`);process.exit(1)}'
+          for f in install.sh scripts/*.sh; do bash -n "$f"; done
       # Whole provision/rollback loop in-process against the mock provider —
       # sub-second, no docker, no network, no secrets.
       - run: npm run e2e

@@ -21,7 +21,7 @@ node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)
   || { echo "Node 22+ required (found $(node --version))."; exit 1; }
 
 say "Installing dependencies…"
-npm install
+npm ci
 
 if [ ! -f .env ]; then
   say "Creating .env…"

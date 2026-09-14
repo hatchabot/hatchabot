@@ -22,6 +22,7 @@ REPO="${HATCHABOT_IMAGE_REPO:-hatchabot-runtime}"
 # IMAGE_TAG=2026.7.1-2-emb1 (etc.) for a content revision; it defaults to the
 # OpenClaw version for the normal upgrade flow.
 IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
+case "$IMAGE_TAG" in latest|derived-*) echo "IMAGE_TAG=$IMAGE_TAG is reserved (:latest moves only via promote; derived-* via image derive)." >&2; exit 1;; esac
 
 # The embedding plugin declares openclaw as a peerDependency, so its pin must
 # move with OPENCLAW_VERSION (Dockerfile ARG LLAMA_CPP_PROVIDER_VERSION). The
@@ -34,9 +35,15 @@ IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
 # local build below.
 PUBLISHED="${HATCHABOT_IMAGE_REGISTRY:-ghcr.io/hatchabot/runtime}"
 if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
-  echo "Trying the published image ${PUBLISHED}:${OPENCLAW_VERSION}…"
-  if docker pull "${PUBLISHED}:${OPENCLAW_VERSION}"; then
-    docker tag "${PUBLISHED}:${OPENCLAW_VERSION}" "${REPO}:${IMAGE_TAG}"
+  # The per-release tag (vX.Y.Z) is never rewritten; the version tag moves with every release.
+  RELEASE_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
+  PULLED=""
+  for cand in ${RELEASE_TAG:+"${PUBLISHED}:${RELEASE_TAG}"} "${PUBLISHED}:${OPENCLAW_VERSION}"; do
+    echo "Trying the published image ${cand}…"
+    if docker pull "$cand"; then PULLED="$cand"; break; fi
+  done
+  if [ -n "$PULLED" ]; then
+    docker tag "$PULLED" "${REPO}:${IMAGE_TAG}"
     if [ "${NO_LATEST:-0}" != "1" ]; then docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"; echo "Pulled ${REPO}:${IMAGE_TAG} (promoted to :latest)"; else echo "Pulled ${REPO}:${IMAGE_TAG} (candidate — :latest untouched)"; fi
     exit 0
   fi

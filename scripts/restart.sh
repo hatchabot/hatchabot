@@ -15,8 +15,8 @@ command -v npm >/dev/null 2>&1 || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 STAMP="node_modules/.hatchabot-lock-stamp"
 LOCK_HASH="$(cksum package-lock.json 2>/dev/null | cut -d' ' -f1 || true)"
 if [ -n "$LOCK_HASH" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" != "$LOCK_HASH" ]; then
-  echo "Dependencies changed since the last install — running npm install…"
-  npm install --no-audit --no-fund
+  echo "Dependencies changed since the last install — running npm ci…"
+  npm ci --no-audit --no-fund
   echo "$LOCK_HASH" > "$STAMP"
 fi
 

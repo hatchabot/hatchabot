@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
+import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname as osHostname } from 'node:os';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -552,6 +553,24 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     const local = store.listHosts(ownerId).find((h) => h.kind === 'local');
     return !!local && local.ownerId === ownerId;
   };
+  /**
+   * Agent caps, checked by EVERY path that creates or revives a live agent
+   * (create, import, restore from file, clone, derive, accept a shared
+   * template, un-archive). ARCHIVED agents don't count — they hold no bot,
+   * container or port. Unset caps = no limit.
+   */
+  const capProblem = (req: FastifyRequest): string | undefined => {
+    const ownerId = ownerIdOf(req);
+    const liveCount = store.listAgents(ownerId).filter((a) => a.state !== 'ARCHIVED').length;
+    const maxPerAccount = Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0);
+    if (maxPerAccount > 0 && liveCount >= maxPerAccount) return `You've reached the limit of ${maxPerAccount} agents on this server. Delete one first.`;
+    const maxPerMember = Number(process.env.HATCHABOT_MAX_AGENTS_PER_MEMBER ?? 0);
+    if (maxPerMember > 0 && !ownsLocalHost(req) && liveCount >= maxPerMember) return `Members may run up to ${maxPerMember} agents on this server. Delete one first, or ask the host owner.`;
+    const maxTotal = Number(process.env.HATCHABOT_MAX_AGENTS_TOTAL ?? 0);
+    if (maxTotal > 0 && store.countLiveAgents() >= maxTotal) return `This server is at its capacity of ${maxTotal} agents. Ask the host owner to free one up.`;
+    return undefined;
+  };
+
 
   // Remote runner providers (Cluster mode) are built per host from its stored
   // Docker endpoint and kept for the process — this cache is that store.
@@ -964,6 +983,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       let applied = 0, needRebuild = 0; const skipped: string[] = [];
       for (const a of store.listAgentsInClass(cls.id)) {
         if (a.state === 'ARCHIVED') continue; // nothing to apply to; it keeps its tag
+        // Image cleared: members the class had pinned go back to the fleet default (needs a rebuild).
+        if (!image && cls.image && a.image === cls.image) { store.setAgentImage(a.id, null); applied++; needRebuild++; continue; }
         const r = await applyClassToAgent(a, { model, aiProfileId, image });
         if (r.error) skipped.push(`${a.name}: ${r.error}`);
         else { applied++; if (r.rebuild) needRebuild++; }
@@ -1098,6 +1119,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Dockerfile on this box — a privilege the local-host owner already has, and
   // one a co-tenant must never get, so EVERY route here is ownsLocalHost-gated.
   const DEFAULT_BASE = process.env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest';
+  const RUNTIME_REPO = DEFAULT_BASE.replace(/:[^:]*$/, '');
+  // Build logs live beside the database, not in the checkout (prod checkouts have no data/).
+  const buildDataDir = dirname(resolve(process.env.HATCHABOT_DB ?? defaultDbPath()));
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).
   const buildingImages = new Set<string>();
@@ -1122,7 +1146,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!rec) return;
     buildingImages.add(name);
     const build = deps.buildImage ?? buildDerivedImage;
-    void build({ name, base: rec.base, dockerfile: rec.dockerfile, tag: rec.tag })
+    void build({ name, base: rec.base, dockerfile: rec.dockerfile, tag: rec.tag, dataDir: buildDataDir })
       .then((res) => {
         store.setDerivedImageStatus(name, res.ok ? 'READY' : 'FAILED', res.ok ? null : res.error);
         app.log.info({ name, ok: res.ok }, 'derived image build finished');
@@ -1146,7 +1170,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const resolvesTo = tags.filter((t) => t.tag !== DEFAULT_BASE && t.imageId === latestId && !t.tag.includes(':derived-')).map((t) => t.tag);
     const derived = new Map(store.listDerivedImages().map((d) => [d.tag, d]));
     const me = ownerIdOf(req);
-    const active = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED');
+    const active = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && (!localHost || a.hostId === localHost.id)); // local daemon only
     const agentRow = (a: Agent) => ({ id: a.id, name: a.name, state: a.state, mine: a.ownerId === me, classId: a.classId ?? null });
     const known = new Set(tags.map((t) => t.tag));
     // Pins to tags that don't exist (yet) still show, so a typo or an unbuilt candidate is visible.
@@ -1178,8 +1202,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** What's baked into an image: the build steps, newest first. */
   app.get<{ Params: { tag: string } }>('/v1/runtime/images/:tag/history', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    const tag = decodeURIComponent(req.params.tag);
-    if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+    const tag = req.params.tag; // Fastify already URL-decodes params
+    if (!IMAGE_TAG_RE.test(tag) || !tag.startsWith(`${RUNTIME_REPO}:`)) return reply.code(400).send({ error: `Only ${RUNTIME_REPO}:* tags are managed here.` });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
     if (!localHost) return reply.code(400).send({ error: 'No local host.' });
     return { tag, steps: await providerFor(localHost.id).imageHistory(tag) };
@@ -1188,11 +1212,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Remove a version/candidate tag. The default, pinned tags and class images are refused; Docker refuses tags containers still use. */
   app.delete<{ Params: { tag: string } }>('/v1/runtime/images/:tag', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    const tag = decodeURIComponent(req.params.tag);
-    if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
+    const tag = req.params.tag;
+    if (!IMAGE_TAG_RE.test(tag) || !tag.startsWith(`${RUNTIME_REPO}:`)) return reply.code(400).send({ error: `Only ${RUNTIME_REPO}:* tags are managed here.` });
     if (tag === DEFAULT_BASE) return reply.code(400).send({ error: 'That is the fleet default — promote another image first.' });
     if (tag.includes(':derived-')) return reply.code(400).send({ error: 'Derived images are removed from their own row (it also forgets the Dockerfile).' });
-    const pinned = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && a.image === tag);
+    const pinned = store.listAllActiveAgents().filter((a) => a.image === tag); // archived pins count too: un-archiving would need the image
     if (pinned.length) return reply.code(409).send({ error: `${pinned.length} agent${pinned.length === 1 ? ' is' : 's are'} pinned to it: ${pinned.map((a) => a.name).join(', ')}. Discard those trials first.` });
     const cls = store.listAgentClasses(ownerIdOf(req)).filter((c) => c.image === tag);
     if (cls.length) return reply.code(409).send({ error: `Class ${cls.map((c) => c.name).join(', ')} uses it — change the class image first.` });
@@ -1216,7 +1240,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const tags = await provider.listImageTags();
     if (!tags.some((t) => t.tag === tag)) return reply.code(404).send({ error: `${tag} is not built on this machine.` });
     await provider.tagImage(tag, DEFAULT_BASE);
-    const followers = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && !a.image);
+    // Promote retags the LOCAL daemon only; agents on runners keep their runner's :latest.
+    const followers = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && !a.image && a.hostId === localHost.id);
     return { promoted: tag, now: DEFAULT_BASE, followers: followers.map((a) => ({ id: a.id, name: a.name, mine: a.ownerId === ownerIdOf(req) })) };
   });
 
@@ -1226,9 +1251,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (baseBuild.running) return reply.code(409).send({ error: 'A base image build is already running.' });
     const b = (req.body ?? {}) as { version?: string; candidate?: boolean };
     const version = b.version?.trim() || undefined;
-    if (version && !/^[A-Za-z0-9._-]{1,64}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
+    if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
+    if (version && (version === 'latest' || version.startsWith('derived-'))) return reply.code(400).send({ error: 'Build a specific OpenClaw version; :latest is set by Promote.' });
     const candidate = b.candidate !== false;
-    const logPath = buildLogPath('_base');
+    const logPath = buildLogPath('_base', buildDataDir);
     mkdirSync(dirname(logPath), { recursive: true });
     baseBuild = { running: true, version, candidate, startedAt: new Date().toISOString(), ok: undefined, error: undefined };
     const run = deps.buildBase ?? buildBaseImage;
@@ -1241,7 +1267,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/runtime/build', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     let log = '';
-    try { const full = readFileSync(buildLogPath('_base'), 'utf8'); log = full.slice(-16_000); } catch { /* no build yet */ }
+    try { const full = readFileSync(buildLogPath('_base', buildDataDir), 'utf8'); log = full.slice(-16_000); } catch { /* no build yet */ }
     return { ...baseBuild, log };
   });
 
@@ -1335,7 +1361,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     const rec = store.getDerivedImage(req.params.name);
     if (!rec) return reply.code(404).send({ error: 'Not found' });
-    const path = buildLogPath(rec.name);
+    const path = buildLogPath(rec.name, buildDataDir);
     const text = existsSync(path) ? readFileSync(path, 'utf8') : '';
     // Cap the payload; a build log can be large.
     return { status: rec.status, error: rec.error, log: text.slice(-20000) };
@@ -2277,28 +2303,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // are excluded — they hold no bot, container, or port, so they don't
     // consume the resources this cap protects (an owner can keep old archives
     // without eating their live-agent budget).
-    const maxPerAccount = Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0);
-    const liveCount = store.listAgents(ownerId).filter((a) => a.state !== 'ARCHIVED').length;
-    if (maxPerAccount > 0 && liveCount >= maxPerAccount) {
-      return reply.code(429).send({
-        error: `You've reached the limit of ${maxPerAccount} agents on this server. Delete one first.`,
-      });
-    }
-    // Defence in depth for shared hosts: a lower cap for accounts that aren't
-    // the host owner, and a ceiling on the whole fleet so N rogue sign-ups
-    // can't turn the box into N × cap containers.
-    const maxPerMember = Number(process.env.HATCHABOT_MAX_AGENTS_PER_MEMBER ?? 0);
-    if (maxPerMember > 0 && !ownsLocalHost(req) && liveCount >= maxPerMember) {
-      return reply.code(429).send({
-        error: `Members may run up to ${maxPerMember} agents on this server. Delete one first, or ask the host owner.`,
-      });
-    }
-    const maxTotal = Number(process.env.HATCHABOT_MAX_AGENTS_TOTAL ?? 0);
-    if (maxTotal > 0 && store.countLiveAgents() >= maxTotal) {
-      return reply.code(429).send({
-        error: `This server is at its capacity of ${maxTotal} agents. Ask the host owner to free one up.`,
-      });
-    }
+    const capErr = capProblem(req);
+    if (capErr) return reply.code(429).send({ error: capErr });
 
     // The slug is derived from the name and is UNIQUE per owner — it becomes
     // a container name and a workspace path. Catch the collision here: letting
@@ -5003,6 +5009,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Querystring: { aiProfileId?: string; hostId?: string } }>(
     '/v1/agents/restore',
     async (req, reply) => {
+      { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return reply.code(400).send({ error: 'Send the .hatchabot file as the request body.' });
@@ -5174,6 +5181,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string }; Body: { name?: string; aiProfileId?: string; hostId?: string } }>(
     '/v1/inbox/:id/accept',
     async (req, reply) => {
+      { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const me = principalOf(req);
       const share = store.getShareFor(req.params.id, me.ownerId, me.email);
       if (!share) return reply.code(404).send({ error: 'Not found' });
@@ -5277,6 +5285,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string }; Body: { name?: string } }>(
     '/v1/agents/:id/clone',
     async (req, reply) => {
+      { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       if (busyNow(agent, reply)) return reply;
@@ -5309,6 +5318,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string }; Body: { name?: string; values?: Record<string, string> } }>(
     '/v1/agents/:id/derive',
     async (req, reply) => {
+      { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
       if (busyNow(agent, reply)) return reply;
@@ -5594,6 +5604,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string; values?: string } }>(
     '/v1/agents/import',
     async (req, reply) => {
+      { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const body = req.body;
       if (!Buffer.isBuffer(body) || body.length === 0) {
         return reply.code(400).send({ error: 'Send the .hatchabot file as the request body.' });
@@ -6036,6 +6047,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * gets back will be a DIFFERENT bot with a different link.
    */
   app.post<{ Params: { id: string } }>('/v1/agents/:id/restore', async (req, reply) => {
+      { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     if (movedAway(agent, reply)) return reply;

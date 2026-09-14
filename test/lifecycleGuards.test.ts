@@ -172,6 +172,21 @@ describe('per-account agent cap', () => {
     } finally { delete process.env.HATCHABOT_MAX_AGENTS_TOTAL; }
   });
 
+  it('caps also guard clone and un-archive (audit 15: every path that creates a live agent)', async () => {
+    const { f, store } = await world(); // a1 RUNNING
+    process.env.HATCHABOT_MAX_AGENTS_TOTAL = '1';
+    try {
+      const clone = await f.inject({ method: 'POST', url: '/v1/agents/a1/clone', headers: as, payload: { name: 'Copy' } });
+      expect(clone.statusCode).toBe(429);
+      store.setAgentState('a1', 'ARCHIVED');
+      store.insertAgent({ id: 'a2', ownerId: OWNER, name: 'Other', slug: 'other', state: 'PROVISIONING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+      store.setAgentState('a2', 'RUNNING'); // fleet is at its cap of 1 again
+      const unarchive = await f.inject({ method: 'POST', url: '/v1/agents/a1/restore', headers: as });
+      expect(unarchive.statusCode).toBe(429);
+      expect(store.getAgent('a1')!.state).toBe('ARCHIVED');
+    } finally { delete process.env.HATCHABOT_MAX_AGENTS_TOTAL; }
+  });
+
   it('does NOT count archived agents toward the cap (they hold no bot/container)', async () => {
     const { f, store } = await world();
     const prev = process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT;

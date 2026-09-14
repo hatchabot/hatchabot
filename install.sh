@@ -18,7 +18,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # The setup script asks for a password: give it a terminal even when this
 # script arrived through a pipe.
 [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; } || true
-ask() { local a; read -r -p "$1 [y/N] " a </dev/tty 2>/dev/null || a=n; [ "${a,,}" = y ]; }
+ask() { local a; read -r -p "$1 [y/N] " a </dev/tty 2>/dev/null || a=n; [ "$(printf %s "$a" | tr "[:upper:]" "[:lower:]")" = y ]; }
 
 say "Hatchabot installer — $OS $(uname -m)"
 [ "$OS" = Linux ] || [ "$OS" = Darwin ] || die "Linux or macOS only (found $OS). On Windows, use WSL2 with Docker Desktop."
@@ -35,15 +35,15 @@ if ! have docker; then
   if [ "$OS" = Darwin ]; then die "Install Docker Desktop for Mac (https://docs.docker.com/desktop/setup/install/mac-install/), start it, then re-run."; fi
   if ask "Docker is missing. Install Docker Engine with the official script (get.docker.com)?"; then
     curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker "$USER" || true
+    sudo usermod -aG docker "${USER:-$(id -un)}" || true
     die "Docker installed. Log out and back in (so your user is in the docker group), then re-run this installer."
   else die "Install Docker (https://docs.docker.com/engine/install/), then re-run."; fi
 fi
 if ! docker info >/dev/null 2>&1; then
   if [ "$OS" = Darwin ]; then die "Docker Desktop isn't running. Start it, then re-run."; fi
-  if id -nG "$USER" | grep -qw docker; then die "Docker isn't reachable. Is the daemon running? (sudo systemctl start docker)"; fi
-  if ask "Your user isn't in the docker group. Add it now?"; then sudo usermod -aG docker "$USER"; die "Added. Log out and back in, then re-run this installer."; fi
-  die "Run: sudo usermod -aG docker $USER — then log out and back in."
+  if id -nG "${USER:-$(id -un)}" | grep -qw docker; then die "Docker isn't reachable. Is the daemon running? (sudo systemctl start docker)"; fi
+  if ask "Your user isn't in the docker group. Add it now?"; then sudo usermod -aG docker "${USER:-$(id -un)}"; die "Added. Log out and back in, then re-run this installer."; fi
+  die "Run: sudo usermod -aG docker $(id -un) — then log out and back in."
 fi
 echo "   docker $(docker version --format '{{.Server.Version}}' 2>/dev/null) ($(docker version --format '{{.Server.Arch}}' 2>/dev/null))"
 
@@ -64,7 +64,8 @@ if [ -d "$DIR/.git" ]; then
 else
   git clone --quiet "$REPO" "$DIR"
 fi
-LATEST="$(git -C "$DIR" describe --tags "$(git -C "$DIR" rev-list --tags --max-count=1)")"
+LATEST="$(git -C "$DIR" tag -l 'v[0-9]*' --sort=-v:refname | head -1)"
+[ -n "$LATEST" ] || die "No release tags found in $REPO."
 CUR="$(git -C "$DIR" describe --tags --exact-match 2>/dev/null || echo none)"
 if [ "$CUR" != "$LATEST" ]; then
   [ -z "$(git -C "$DIR" status --porcelain)" ] || die "$DIR has local changes — commit or stash them, then re-run."

@@ -688,6 +688,7 @@ async function main() {
 
   // Diagnostics must work when the control plane is down — no handshake, no login.
   if (cmd === 'doctor') {
+    process.chdir(repoDir()); // .env, data/ and the scripts live in the checkout, wherever doctor was typed
     const { doctorReport, gatherFacts } = await import('./doctor.js');
     const lines = doctorReport(await gatherFacts(url));
     for (const l of lines) console.log(`${l.level === 'ok' ? '✓' : l.level === 'warn' ? '⚠' : '✗'} ${l.text}${l.fix ? `\n    → ${l.fix}` : ''}`);

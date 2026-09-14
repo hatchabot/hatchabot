@@ -87,6 +87,16 @@ describe('POST /v1/runtime/images/promote', () => {
   });
 });
 
+describe('runtime guards (audit 15)', () => {
+  it('history/delete only touch the runtime repo; build refuses latest/derived versions', async () => {
+    const { f } = await world();
+    expect((await f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent('postgres:16'), headers: as })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'GET', url: '/v1/runtime/images/' + encodeURIComponent('postgres:16') + '/history', headers: as })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'latest', candidate: true } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'derived-x' } })).statusCode).toBe(400);
+  });
+});
+
 describe('image history + delete', () => {
   it('shows build steps and removes a tag only when nothing depends on it', async () => {
     const { f, provider, store } = await world();
@@ -139,6 +149,12 @@ describe('classes carry an image', () => {
     list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as })).json();
     const a1 = list.find((a: any) => a.id === 'a1');
     expect(a1.imageTrial).toBe(true); expect(a1.classId ?? null).toBeNull();
+    // Clearing the class image sends members it had pinned back to the fleet default (rebuild needed).
+    await f.inject({ method: 'POST', url: '/v1/agents/a1/class', headers: as, payload: { classId: cls.id } });
+    await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as, payload: { image: 'hatchabot-runtime:2026.9.4' } });
+    const cleared = await f.inject({ method: 'PUT', url: `/v1/agent-classes/${cls.id}`, headers: as, payload: { image: '' } });
+    expect(cleared.json().needRebuild).toBe(1);
+    expect(store.getAgent('a1')!.image ?? null).toBeNull();
     // Members can't set class images (that's a machine-owner call).
     expect((await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: { 'x-hatchabot-owner': 'user-other' }, payload: { name: 'X', image: 'hatchabot-runtime:2026.9.4' } })).statusCode).toBe(403);
   });

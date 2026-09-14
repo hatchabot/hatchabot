@@ -2,6 +2,23 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.3.3] — 2026-09-14
+
+15th audit (v1.1.0 → v1.3.2, three reviewers). No critical findings.
+
+### Fixed
+- **Agent caps apply everywhere an agent comes alive**: import, restore from file, clone, derive, accepting a shared template and un-archive now honour `HATCHABOT_MAX_AGENTS_*` like create does (one `capProblem` check).
+- **`package-lock.json` was stuck at 0.140.1** — every `npm install` rewrote it and dirtied the checkout, which broke re-running the installer and checking out a later tag. Lock synced; `setup-host.sh` and `restart.sh` use `npm ci`; CI now fails if the lock and `package.json` disagree or a shell script does not parse.
+- Runtime images: a candidate build named `latest` (or `derived-*`) is refused instead of silently retagging `:latest`; tag delete/history accept only `hatchabot-runtime:*`; `:tag` is no longer decoded twice (a stray `%` returned 500); promote's follower list and the pinned lists count local-daemon agents only (promote does not touch runners); archived pins block deleting a tag.
+- Clearing a class image returns the members it had pinned to the fleet default (reported as needing a rebuild) instead of leaving them as 🧪 trials.
+- Build logs are written beside the database (`<data dir>/derived-builds/`), not into the checkout.
+- `hatchabot doctor` runs from the checkout regardless of where it was typed, reads `HATCHABOT_IMAGE`/`HATCHABOT_PREFIX` from `.env`, and checks https when native TLS is configured.
+- `scripts/build-runtime-image.sh` pulls the immutable per-release tag (`ghcr.io/hatchabot/runtime:vX.Y.Z`) before the moving version tag.
+- `install.sh`: works on macOS's bash 3 (the `` lowercase was bash 4), picks the highest `v*` release rather than the newest tagged commit, tolerates an unset ``.
+- `scripts/deploy-release.sh`: reads `PORT` and TLS from the production `.env` for its health check (a non-8080 or https install rolled back every good deploy), rolls back if the restart itself fails, waits 90 s.
+- hatchabot.com's `install.sh` shim fails loudly when the download fails instead of exiting 0.
+- CHANGELOG 1.3.0: the one-line installer command had lost its `1000 4 27 29 30 46 100 122 983 988 1000`.
+
 ## [1.3.2] — 2026-09-13
 
 ### Changed
@@ -17,7 +34,7 @@ All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
 ### Added — easier to deploy
 - **Pre-built runtime image.** `.github/workflows/runtime-image.yml` builds the agent image on GitHub's native arm64 and amd64 runners for every release tag and publishes one multi-arch tag to `ghcr.io/hatchabot/runtime:<openclaw-version>` (also `:<release>` and `:latest`). `scripts/build-runtime-image.sh` now **pulls that image first** and only builds locally when the pull fails (a not-yet-published candidate, offline, or `BUILD_LOCAL=1`). First install drops from 10–20 minutes to about one.
-- **One-line installer**: `bash -c "1000 4 27 29 30 46 100 122 983 988 1000curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"` — checks git, Docker and Node 22+ (offering to install what is missing on Linux/apt and macOS/Homebrew), fetches the latest release into `~/hatchabot`, runs the setup. Re-runnable; updates an existing clone.
+- **One-line installer**: `bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"` — checks git, Docker and Node 22+ (offering to install what is missing on Linux/apt and macOS/Homebrew), fetches the latest release into `~/hatchabot`, runs the setup. Re-runnable; updates an existing clone.
 - **`hatchabot doctor`** — Node, Docker, runtime image, containers, `.env`, database, service, control plane, disk, backups, Tailscale — each ✓/⚠/✗ with the fix. Works with the control plane down; no login needed.
 - Quick start and README rewritten around the one-liner and `doctor`.
 
