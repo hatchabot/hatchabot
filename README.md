@@ -46,8 +46,10 @@ adopting, backing up, and operating a fleet of agents.
   to — so every change is a reviewable commit, not a write into your disk. A public
   repo needs no key at all: tick **Public repo** and it is cloned read-only over https. Pair
   it with a local model and nothing leaves the machine at all.
-- **Organize your fleet.** Sort agents into named groups and reorder them within
-  a group, so a large fleet stays legible.
+- **Organize your fleet.** Sort agents into named groups and arrange them: drag a
+  card by its ⠿ grip or a name in the left legend (drop it in another group to move
+  it there), Shift-click ▲/▼ to jump to the top or bottom, or sort a group — or
+  every group — A→Z.
 - **Manage scheduled tasks.** See an agent's cron jobs (⏰ Tasks), enable or
   disable them, run one now to test, or delete one — no shelling into the
   container. Tasks live on the agent's durable volume and survive rebuilds.

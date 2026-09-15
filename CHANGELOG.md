@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.0] — 2026-09-15
+
+### Added
+- **Drag to reorder.** Drag an agent card by its ⠿ grip (works with touch) or a name in the left legend, and drop it on another agent to place it just above or below — ten places in one move instead of ten clicks. Dropping onto an agent in another group moves it into that group; dropping on a group header puts it at the top. The page scrolls while you drag near the edge; Esc cancels; a plain click on a legend name still jumps to the card.
+- **Shift-click ▲ / ▼** jumps an agent to the top or bottom of its group.
+- **A→Z**: each group header can sort its agents alphabetically (case-insensitive, "Agent 2" before "Agent 10"); the legend's A→Z sorts every group at once (asks first, since it replaces the order you arranged).
+- API: `POST /v1/agents/:id/move` also takes `{ dir: "top" | "bottom" }` and `{ before: <agentId> | null, group? }`; new `POST /v1/groups/sort` `{ group }` or `{ all: true }`. Moves renumber the section, so old ties can't make positions depend on history.
+
 ## [1.4.1] — 2026-09-15
 
 ### Added

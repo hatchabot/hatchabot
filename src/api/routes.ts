@@ -3473,20 +3473,55 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   );
 
-  // Reorder within the agent's group section. Cosmetic, immediate, no rebuild.
-  app.post<{ Params: { id: string }; Body: { dir?: string } }>(
+  // Reorder an agent. Cosmetic, immediate, no rebuild. Three shapes:
+  //   { dir: 'up' | 'down' }       one place within its section
+  //   { dir: 'top' | 'bottom' }    to the edge of its section
+  //   { before: id | null, group? } drag-and-drop: just before another agent
+  //                                 (adopting that agent's section), or the end
+  //                                 of `group` ('' = ungrouped) when before is null
+  app.post<{ Params: { id: string }; Body: { dir?: string; before?: string | null; group?: string | null } }>(
     '/v1/agents/:id/move',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      const dir = (req.body as { dir?: string } | null)?.dir;
-      if (dir !== 'up' && dir !== 'down') {
-        return reply.code(400).send({ error: 'dir must be "up" or "down".' });
+      const b = (req.body ?? {}) as { dir?: string; before?: string | null; group?: string | null };
+      if (b.dir === 'up' || b.dir === 'down') { store.moveAgent(agent.id, b.dir); return { ok: true }; }
+      if (b.dir === 'top' || b.dir === 'bottom') { store.moveAgentToEdge(agent.id, b.dir); return { ok: true }; }
+      if ('before' in b) {
+        if (b.before !== null && typeof b.before !== 'string') return reply.code(400).send({ error: 'before must be an agent id or null.' });
+        if (b.before) {
+          if (!ownedAgent(req, b.before)) return reply.code(404).send({ error: 'No such agent to place it before.' });
+          store.moveAgentBefore(agent.id, b.before);
+        } else {
+          let group: string | null | undefined;
+          if (b.group !== undefined) {
+            if (b.group !== null && typeof b.group !== 'string') return reply.code(400).send({ error: 'group must be a name or null.' });
+            const g = (b.group ?? '').trim();
+            if (g.length > 48) return reply.code(400).send({ error: 'Group names are at most 48 characters.' });
+            group = g || null;
+          }
+          store.moveAgentBefore(agent.id, null, group);
+        }
+        return { ok: true, group: store.getAgent(agent.id)?.group ?? null };
       }
-      store.moveAgent(agent.id, dir);
-      return { ok: true };
+      return reply.code(400).send({ error: 'Send dir ("up" | "down" | "top" | "bottom") or before.' });
     },
   );
+
+  // Sort a section A→Z (group: a name, or '' / null for ungrouped), or every section.
+  app.post<{ Body: { group?: string | null; all?: boolean } }>('/v1/groups/sort', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const b = (req.body ?? {}) as { group?: string | null; all?: boolean };
+    if (b.all === true) {
+      let n = 0;
+      for (const g of store.sectionsOf(ownerId)) n += store.sortSectionByName(ownerId, g);
+      return { ok: true, sorted: n };
+    }
+    if (b.group === undefined || (b.group !== null && typeof b.group !== 'string')) {
+      return reply.code(400).send({ error: 'group (a name, or "" for ungrouped) or all: true is required.' });
+    }
+    return { ok: true, sorted: store.sortSectionByName(ownerId, (b.group ?? '').trim() || null) };
+  });
 
   // Reorder a whole group section up/down in the caller's list.
   app.post<{ Body: { group?: string; dir?: string } }>('/v1/groups/move', async (req, reply) => {

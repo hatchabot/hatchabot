@@ -2216,6 +2216,82 @@ export class Store {
       .run(group, this.nextSortOrder(agent.ownerId, group), new Date().toISOString(), id);
   }
 
+  /** Ids of one owner's section (a group, or ungrouped when null), in display order. */
+  private sectionOrder(ownerId: string, group: string | null): string[] {
+    return (this.db
+      .prepare(
+        `SELECT id FROM agents WHERE owner_id = ? AND state != 'DELETED'
+           AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)
+         ORDER BY sort_order, created_at`,
+      )
+      .all(ownerId, group, group) as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  /** Renumber a section 1..n in exactly this order (no ties, no gaps left behind). */
+  private writeSectionOrder(ids: string[]): void {
+    const now = new Date().toISOString();
+    const upd = this.db.prepare(`UPDATE agents SET sort_order = ?, updated_at = ? WHERE id = ?`);
+    ids.forEach((id, i) => upd.run(i + 1, now, id));
+  }
+
+  /**
+   * Put an agent just before `beforeId`, or at the END of `group` when beforeId
+   * is null (group omitted = its own section). Dropping it onto an agent in
+   * another section moves it into that section — the drag-and-drop gesture.
+   * False when either agent is missing, belongs to another owner, or is itself.
+   */
+  moveAgentBefore(id: string, beforeId: string | null, group?: string | null): boolean {
+    const agent = this.getAgent(id);
+    if (!agent) return false;
+    let target: string | null;
+    if (beforeId) {
+      const b = this.getAgent(beforeId);
+      if (!b || b.ownerId !== agent.ownerId || b.id === id || b.state === 'DELETED') return false;
+      target = b.group ?? null;
+    } else {
+      target = group === undefined ? (agent.group ?? null) : group;
+    }
+    this.db.transaction(() => {
+      if ((agent.group ?? null) !== target) {
+        this.db.prepare(`UPDATE agents SET group_name = ? WHERE id = ?`).run(target, id);
+      }
+      const ids = this.sectionOrder(agent.ownerId, target).filter((x) => x !== id);
+      const at = beforeId ? ids.indexOf(beforeId) : -1;
+      ids.splice(at < 0 ? ids.length : at, 0, id);
+      this.writeSectionOrder(ids);
+    })();
+    return true;
+  }
+
+  /** Jump an agent to the top or bottom of its own section. */
+  moveAgentToEdge(id: string, edge: 'top' | 'bottom'): boolean {
+    const agent = this.getAgent(id);
+    if (!agent) return false;
+    const others = this.sectionOrder(agent.ownerId, agent.group ?? null).filter((x) => x !== id);
+    return this.moveAgentBefore(id, edge === 'top' ? (others[0] ?? null) : null);
+  }
+
+  /** Sort one section A→Z by name — case-insensitive, "Agent 2" before "Agent 10". */
+  sortSectionByName(ownerId: string, group: string | null): number {
+    const rows = this.db
+      .prepare(
+        `SELECT id, name FROM agents WHERE owner_id = ? AND state != 'DELETED'
+           AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)`,
+      )
+      .all(ownerId, group, group) as Array<{ id: string; name: string }>;
+    const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    rows.sort((a, b) => byName.compare(a.name, b.name) || a.id.localeCompare(b.id));
+    this.db.transaction(() => this.writeSectionOrder(rows.map((r) => r.id)))();
+    return rows.length;
+  }
+
+  /** Every section an owner has (null = ungrouped). */
+  sectionsOf(ownerId: string): Array<string | null> {
+    return (this.db
+      .prepare(`SELECT DISTINCT group_name AS g FROM agents WHERE owner_id = ? AND state != 'DELETED'`)
+      .all(ownerId) as Array<{ g: string | null }>).map((r) => r.g);
+  }
+
   /**
    * Move an agent one place up or down WITHIN its group section, by swapping
    * sort_order with the adjacent sibling. Returns false at the section boundary
