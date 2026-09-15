@@ -15,6 +15,7 @@ Each source declares four things: **kind** (folder / git / …), **access** (`ro
 | **folder** | `ro` | host dir bind-mounted read-only at `/data/<name>` | kernel-enforced; blocklist refuses secrets/system paths |
 | **folder** | `rw` | same bind mount, writable | machine-owner only + blocklist; the app warns — the agent can change/delete those files |
 | **git** | `ro` / `rw` | repo cloned into the agent's volume, edited & committed there | repo-scoped deploy key (private in SecretStore); `rw` = write key. Never a host mount — every change is a reviewable commit |
+| **git, public** | `ro` only | repo cloned over **https with no credentials** | nothing to register on the git host, no key stored; prompts disabled and https-only, push URL disabled; a private repo fails with "isn't public — add it with a deploy key" |
 | **gdrive** *(Phase 2)* | `ro` / `rw` | rclone sync of a Drive folder ↔ the volume | Google OAuth, scope-limited to the chosen folder |
 
 ## Why git isn't a writable host mount
@@ -39,12 +40,16 @@ non-versioned data you're comfortable the agent editing.
 
 - `GET /v1/agents` / `GET /v1/agents/:id` → each agent carries `dataSources`
   (the unified list) and `dataSummary` (the one-liner).
-- `POST /v1/agents/:id/data-sources` `{ kind, access, path | repoUrl }` — add
+- `POST /v1/agents/:id/data-sources` `{ kind, access, path | repoUrl, public? }` — add
   (`path` for a folder, `repoUrl` for a git repo). Folder mounts
-  are gated to the machine owner and pass `sharePathProblem`.
+  are gated to the machine owner and pass `sharePathProblem`. `public: true`
+  (git, `ro` only) stores the https URL, generates no key, and — because there is
+  nothing to register first — clones immediately when the agent is running.
+  CLI: `hatchabot folders <agent> add-repo <url> --public`.
 - `PATCH /v1/agents/:id/data-sources/:dsId` `{ access }` — flip a source
   between read-only (`ro`) and read-write (`rw`), without remove-and-re-add;
-  applies on the next Rebuild.
+  applies on the next Rebuild. A public repo can't be made writable (no
+  credential to push with) — remove it and add it with a deploy key.
 - `DELETE /v1/agents/:id/data-sources/:dsId` — remove.
 - Legacy folders are still managed via `PATCH /v1/agents/:id { sharedPaths }`
   (the CLI `folders` command and old clients keep working).

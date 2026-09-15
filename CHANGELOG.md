@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.4.0] — 2026-09-15
+
+### Added
+- **Public git repos without a deploy key.** In an agent's Data tab, tick **Public repo** (CLI: `hatchabot folders <agent> add-repo <url> --public`; API: `public: true`) and the repo is cloned **read-only over https with no credentials** — nothing to add on GitHub, and no org has to allow deploy keys. Because there is nothing to register first, it is cloned immediately when the agent is running (and the agent's "Data sources" section updated live); otherwise on the next rebuild. Clones run with prompts disabled and https-only, and the push URL is disabled, so a private repo fails fast with "that repo isn't public — add it with a deploy key" and an accidental push fails clearly. Public repos show as 🌐 *public, read-only* and cannot be flipped to writable. Private and writable repos keep the deploy-key flow, unchanged.
+
 ## [1.3.4] — 2026-09-14
 
 ### Changed

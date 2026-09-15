@@ -43,7 +43,8 @@ adopting, backing up, and operating a fleet of agents.
 - **Give an agent your data.** Per-agent **data sources**: share a folder
   read-only (never system paths or credential directories), a writable folder,
   or a first-class **git repo** the agent clones onto its own volume and commits
-  to — so every change is a reviewable commit, not a write into your disk. Pair
+  to — so every change is a reviewable commit, not a write into your disk. A public
+  repo needs no key at all: tick **Public repo** and it is cloned read-only over https. Pair
   it with a local model and nothing leaves the machine at all.
 - **Organize your fleet.** Sort agents into named groups and reorder them within
   a group, so a large fleet stays legible.

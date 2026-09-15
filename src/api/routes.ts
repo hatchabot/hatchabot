@@ -24,12 +24,13 @@ import {
   rebuildAgent,
   runProvisionSteps,
   syncDataSourceDocs,
+  syncGitDataSources,
   skipPoolOnce,
   slugify,
   MEDIA_KEY_REF,
   SEARCH_KEY_REF,
 } from '../orchestrator/provision.js';
-import { generateDeployKey, normalizeGitUrl } from '../orchestrator/gitSource.js';
+import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
@@ -3273,7 +3274,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // clone happens on the next rebuild. Both apply on rebuild.
   app.post<{
     Params: { id: string };
-    Body: { kind?: string; access?: string; path?: string; repoUrl?: string; atHostPath?: boolean };
+    Body: { kind?: string; access?: string; path?: string; repoUrl?: string; atHostPath?: boolean; public?: boolean };
   }>('/v1/agents/:id/data-sources', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
@@ -3285,6 +3286,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         repoUrl: z.string().min(1).max(512).optional(),
         /** Adopted agents: bind at the original host path, not /data/<name>. */
         atHostPath: z.boolean().optional(),
+        /** git: a public repo, cloned over https with no credentials (read-only, no deploy key). */
+        public: z.boolean().optional(),
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -3339,6 +3342,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: `Another source is already named "${git.repoName}". Remove it first.` });
     }
     const id = randomUUID();
+    if (parsed.data.public) {
+      // Public repo: nothing to register on the git host, so clone it right away
+      // when the agent is up — no rebuild, no key. Read-only by construction.
+      if (access !== 'ro') return reply.code(400).send({ error: PUBLIC_REPO_READ_ONLY });
+      store.insertDataSource({
+        id, agentId: agent.id, kind: 'git', access: 'ro', mountName: git.repoName,
+        repoUrl: git.httpsUrl, createdAt: new Date().toISOString(),
+      });
+      if (agent.state === 'RUNNING' && agent.runtimeRef && !isBusy(agent.id)) {
+        const d = { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id) };
+        void (async () => {
+          try {
+            await syncGitDataSources(d, agent.id, agent.runtimeRef!, trace(agent.id));
+            await syncDataSourceDocs(d, agent.id, agent.runtimeRef!, trace(agent.id)); // AGENTS.md "Data sources" learns the path
+          } catch { /* best-effort; the next rebuild retries and the card shows any error */ }
+        })();
+      }
+      return publicAgent(store.getAgent(agent.id)!);
+    }
     let key: { privateKey: string; publicKey: string };
     try {
       key = generateDeployKey(`hatchabot-${agent.slug}-${git.repoName}-deploy`);
@@ -3373,6 +3395,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // is the machine owner's call, not any agent owner's.
       if (src.kind === 'folder' && parsed.data.access === 'rw' && !ownsLocalHost(req)) {
         return reply.code(403).send({ error: HOST_PATH_DENIED });
+      }
+      if (src.kind === 'git' && isPublicGitUrl(src.repoUrl) && parsed.data.access === 'rw') {
+        return reply.code(400).send({ error: PUBLIC_REPO_READ_ONLY });
       }
       store.setDataSourceAccess(agent.id, src.id, parsed.data.access);
       return publicAgent(store.getAgent(agent.id)!);

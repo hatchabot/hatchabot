@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildGitSyncScript, normalizeGitUrl, gitSyncReason } from '../src/orchestrator/gitSource.js';
+import { buildGitSyncScript, normalizeGitUrl, gitSyncReason, buildPublicGitSyncScript, isPublicGitUrl } from '../src/orchestrator/gitSource.js';
 
 describe('normalizeGitUrl', () => {
   it('normalizes ssh, ssh://, and https forms to the ssh clone URL', () => {
@@ -12,6 +12,7 @@ describe('normalizeGitUrl', () => {
     ]) {
       expect(normalizeGitUrl(input)).toEqual({
         sshUrl: 'git@github.com:cksci/portoml-ai-defs.git',
+        httpsUrl: 'https://github.com/cksci/portoml-ai-defs.git',
         host: 'github.com',
         repoName: 'portoml-ai-defs',
       });
@@ -84,5 +85,30 @@ describe('gitSyncReason', () => {
     expect(gitSyncReason('fatal: something odd happened')).toContain('something odd happened');
     expect(gitSyncReason('')).toBe('Clone failed.');
     expect(gitSyncReason('x'.repeat(500)).length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('public repos over https (no deploy key)', () => {
+  it('normalizeGitUrl also yields the https clone URL for every input shape', () => {
+    for (const u of ['git@github.com:hatchabot/hatchabot.git', 'ssh://git@github.com/hatchabot/hatchabot', 'https://github.com/hatchabot/hatchabot', 'http://github.com/hatchabot/hatchabot.git'])
+      expect(normalizeGitUrl(u)!.httpsUrl).toBe('https://github.com/hatchabot/hatchabot.git');
+    expect(isPublicGitUrl('https://github.com/a/b.git')).toBe(true);
+    expect(isPublicGitUrl('git@github.com:a/b.git')).toBe(false);
+    expect(isPublicGitUrl(undefined)).toBe(false);
+  });
+  it('clones over https only, with no key, no ssh setup, no prompts, and push disabled', () => {
+    const s = buildPublicGitSyncScript({ mountName: 'hatchabot', httpsUrl: 'https://github.com/hatchabot/hatchabot.git' }, { name: "O'Brien Bot", email: 'k@hatchabot.local' });
+    expect(s).toContain("git -c credential.helper= clone --quiet 'https://github.com/hatchabot/hatchabot.git' '/home/node/.openclaw/hatchabot'");
+    expect(s).toContain('GIT_TERMINAL_PROMPT=0 GIT_ALLOW_PROTOCOL=https');
+    expect(s).toContain("if [ ! -d '/home/node/.openclaw/hatchabot'/.git ]"); // idempotent
+    expect(s).toContain('remote.origin.pushurl');
+    expect(s).toContain("'O'\\''Brien Bot'"); // quoted
+    expect(s).not.toMatch(/ssh|base64|_deploy/);
+  });
+  it('explains a private repo reached as public in terms of the fix', () => {
+    expect(gitSyncReason("fatal: could not read Username for 'https://github.com': terminal prompts disabled", 'public')).toMatch(/isn't public.*deploy key/);
+    expect(gitSyncReason('remote: Repository not found.\nfatal: repository not found', 'public')).toMatch(/wasn't found.*deploy key/);
+    // the deploy-key wording is unchanged
+    expect(gitSyncReason('git@github.com: Permission denied (publickey).')).toMatch(/deploy key/);
   });
 });

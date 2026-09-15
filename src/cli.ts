@@ -130,7 +130,7 @@ Commands:
                                git repos), each at /data/<name>
   folders <agent> add <path> [--rw]
                                Share a host folder (read-only, or --rw writable)
-  folders <agent> add-repo <git-url> [--rw]
+  folders <agent> add-repo <git-url> [--rw | --public]
                                Clone a git repo onto the agent's volume; prints
                                the deploy key to add to the repo
   folders <agent> rm <name>    Stop sharing a folder or repo (by its /data/<name>)
@@ -307,7 +307,7 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'no-checkpoint', 'recover']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'no-checkpoint', 'recover', 'public']);
 
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -472,7 +472,7 @@ export async function runFolders(
   rest: string[],
   flags: { has(k: string): boolean },
 ): Promise<void> {
-  const usage = 'usage: hatchabot folders <agent> [add <path> [--rw] | add-repo <git-url> [--rw] | rm <name>]';
+  const usage = 'usage: hatchabot folders <agent> [add <path> [--rw] | add-repo <git-url> [--rw | --public] | rm <name>]';
   const a = await io.resolveAgent(rest[0] ?? io.fail(usage));
   const sub = rest[1];
 
@@ -493,11 +493,14 @@ export async function runFolders(
     return;
   }
   if (sub === 'add-repo') {
-    const url = rest[2] ?? io.fail('usage: hatchabot folders <agent> add-repo <git-url> [--rw]');
+    const url = rest[2] ?? io.fail('usage: hatchabot folders <agent> add-repo <git-url> [--rw | --public]');
+    const isPublic = flags.has('public');
+    if (isPublic && flags.has('rw')) io.fail('a public repo is cloned without credentials, so it can only be read-only — drop --rw, or add it with a deploy key (no --public)');
     const access = flags.has('rw') ? 'rw' : 'ro';
-    const up: any = await (await io.jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'git', access, repoUrl: url })).json();
+    const up: any = await (await io.jsonPost(`/v1/agents/${a.id}/data-sources`, { kind: 'git', access, repoUrl: url, ...(isPublic ? { public: true } : {}) })).json();
     const src = (up.dataSources ?? []).filter((d: any) => d.kind === 'git').slice(-1)[0];
-    io.log(`added ${access} git repo  →  /data/${src?.mountName ?? '?'} for "${a.name}".`);
+    io.log(`added ${isPublic ? 'public read-only' : access} git repo  →  /data/${src?.mountName ?? '?'} for "${a.name}".`);
+    if (isPublic) io.log(up.state === 'RUNNING' ? 'No deploy key needed — cloning it now.' : 'No deploy key needed — it is cloned on the next rebuild.');
     if (src?.pubKey) {
       io.log(`\nAdd this deploy key to the repo${access === 'rw' ? ' (tick "Allow write access")' : ''}, then rebuild:`);
       io.log(src.pubKey);

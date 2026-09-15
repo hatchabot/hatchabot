@@ -167,6 +167,37 @@ describe('git data sources (Slice B)', () => {
   });
 });
 
+describe('public git repos (https, no deploy key)', () => {
+  it('stores the https URL with no key and no secret; any agent owner may add one', async () => {
+    const { store, secrets, f } = await world('someone-else');
+    const res = await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'git@github.com:hatchabot/hatchabot.git', public: true });
+    expect(res.statusCode).toBe(200);
+    const src = store.listDataSources('a1')[0]!;
+    expect(src).toMatchObject({ kind: 'git', access: 'ro', mountName: 'hatchabot', repoUrl: 'https://github.com/hatchabot/hatchabot.git' });
+    expect(src.secretRef ?? null).toBeNull();
+    expect(src.pubKey ?? null).toBeNull();
+    expect(secrets.map.size).toBe(0);
+    expect(res.json().dataSources.find((d: any) => d.kind === 'git').pubKey ?? null).toBeNull();
+  });
+  it('refuses a writable public repo, and refuses flipping one to writable later', async () => {
+    const { f } = await world();
+    const rw = await addSource(f, { kind: 'git', access: 'rw', repoUrl: 'https://github.com/hatchabot/hatchabot', public: true });
+    expect(rw.statusCode).toBe(400);
+    expect(rw.json().error).toMatch(/read-only/);
+    const added = (await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'https://github.com/hatchabot/hatchabot', public: true })).json();
+    const id = added.dataSources.find((d: any) => d.kind === 'git').id;
+    const flip = await f.inject({ method: 'PATCH', url: `/v1/agents/a1/data-sources/${id}`, headers: as, payload: { access: 'rw' } });
+    expect(flip.statusCode).toBe(400);
+  });
+  it('the same URL without public:true still gets a deploy key (unchanged behaviour)', async () => {
+    const { store, f } = await world();
+    await addSource(f, { kind: 'git', access: 'ro', repoUrl: 'https://github.com/hatchabot/hatchabot' });
+    const src = store.listDataSources('a1')[0]!;
+    expect(src.repoUrl).toBe('git@github.com:hatchabot/hatchabot.git');
+    expect(src.pubKey).toMatch(/^ssh-ed25519 /);
+  });
+});
+
 describe('legacy sharedPaths vs data sources', () => {
   it('PATCH sharedPaths refuses a folder that would shadow an existing data source', async () => {
     const { f } = await world();

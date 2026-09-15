@@ -629,9 +629,12 @@
     </div>
 
     <details class="sec-drawer">
-      <summary><b>📦 Add a git repo</b> <span class="sub">— cloned into the agent's own space, with a generated deploy key</span></summary>
+      <summary><b>📦 Add a git repo</b> <span class="sub">— cloned into the agent's own space; public repos need no key</span></summary>
+      <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:8px 0 0">
+        <input type="checkbox" id="repoPublic" style="width:auto;margin-top:3px;flex:none" onchange="onRepoPublic()">
+        <span><b>Public repo</b> — read-only, cloned over https with no deploy key (nothing to add on GitHub)</span></label>
       <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
-        <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git" style="flex:1;min-width:0">
+        <input type="text" id="repoUrl" placeholder="git@github.com:owner/repo.git or https://github.com/owner/repo" style="flex:1;min-width:0">
         <select id="repoAccess" style="width:auto">
           <option value="ro">Read-only</option>
           <option value="rw">Read-write</option>
@@ -639,9 +642,10 @@
         <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
       </div>
       <div class="sub" style="margin-top:6px">
-        Cloned into the agent's own space (not your disk). <b>Hatchabot generates a
-        deploy key</b> — you don't paste your own. After adding, copy that key into the repo
-        (its <b>🔑 Deploy key</b> button below), add it on GitHub, then Rebuild.
+        Cloned into the agent's own space (not your disk). <b>Public repo</b>: that's it — it is
+        cloned right away if the agent is running, otherwise on its next Rebuild. <b>Private or writable</b>:
+        Hatchabot generates a deploy key (you don't paste your own) — copy it from the repo's
+        <b>🔑 Deploy key</b> button below, add it on GitHub, then Rebuild.
       </div>
       <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
     </details>
@@ -4794,13 +4798,16 @@ function renderDataList(sources) {
   const badge = d => d.access === 'rw'
     ? '<span style="color:var(--accent);font-weight:600">writable</span>'
     : '<span style="color:var(--dim)">read-only</span>';
-  const icon = d => d.kind === 'git' ? '🔧' : (d.access === 'rw' ? '✏️' : '📁');
-  const where = d => d.kind === 'git'
+  const isPublicRepo = d => d.kind === 'git' && /^https:\/\//.test(d.repoUrl || '');
+  const icon = d => isPublicRepo(d) ? '🌐' : d.kind === 'git' ? '🔧' : (d.access === 'rw' ? '✏️' : '📁');
+  const where = d => isPublicRepo(d)
+    ? `→ cloned in workspace · public, read-only`
+    : d.kind === 'git'
     ? `→ cloned in workspace · ${badge(d)}`
     : `→ ${d.mountAtHostPath ? esc(d.hostPath) + ' (same path)' : '/data/' + esc(d.mountName)} · ${badge(d)}`;
   // Legacy shared folders have no data-source row to update — they're managed
   // through sharedPaths, so they get no toggle.
-  const toggle = d => d.legacy ? '' :
+  const toggle = d => (d.legacy || isPublicRepo(d)) ? '' :
     `<button onclick="setDataAccess('${jsq(d.id)}','${d.access === 'rw' ? 'ro' : 'rw'}')"
              title="${d.access === 'rw' ? 'Make read-only' : 'Allow this agent to write here'} — applies on the next rebuild">
        ${d.access === 'rw' ? '→ read-only' : '→ writable'}</button>`;
@@ -4813,15 +4820,29 @@ function renderDataList(sources) {
     : '<div class="sub">None — this agent can only see its own workspace.</div>';
 }
 
+function onRepoPublic() {
+  // A public clone has no credential to push with: read-only is the only option.
+  const pub = $('repoPublic').checked;
+  if (pub) $('repoAccess').value = 'ro';
+  $('repoAccess').disabled = pub;
+}
+
 async function addGitSource() {
   const repoUrl = $('repoUrl').value.trim();
   if (!repoUrl) return;
-  const access = $('repoAccess').value;
+  const isPublic = $('repoPublic').checked;
+  const access = isPublic ? 'ro' : $('repoAccess').value;
   $('repoAddBtn').disabled = true;
   try {
-    const updated = await api(`/v1/agents/${editAgentId}/data-sources`, { method: 'POST', body: { kind: 'git', access, repoUrl } });
+    const updated = await api(`/v1/agents/${editAgentId}/data-sources`, { method: 'POST', body: { kind: 'git', access, repoUrl, public: isPublic } });
     $('repoUrl').value = '';
     renderDataList(updated.dataSources);
+    if (isPublic) {
+      $('repoPublic').checked = false; onRepoPublic();
+      toast(updated.state === 'RUNNING' ? 'Public repo added — cloning it now; no key needed' : 'Public repo added — it is cloned on the next Rebuild', 7000);
+      await refresh(false);
+      return;
+    }
     // Surface the new repo's deploy key straight away — it must be added to the
     // repo before the next Rebuild can clone it.
     showDeployKeyForSource(updated.dataSources.filter(d => d.kind === 'git').slice(-1)[0]);

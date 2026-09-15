@@ -567,6 +567,21 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     return w;
   }
 
+  it('a PUBLIC source clones over https at rebuild — no key read, no ssh — and is described as read-only', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertDataSource({ id: 'dsp', agentId: agent.id, kind: 'git', access: 'ro', mountName: 'hatchabot', repoUrl: 'https://github.com/hatchabot/hatchabot.git', createdAt: 'now' });
+    const p = w.provider as MockProvider;
+    p.execResponses.set('sh', { code: 0, stdout: '# K\n', stderr: '' });
+    p.execLog.length = 0;
+    await rebuildAgent(w.deps, agent.id);
+    const clone = p.execLog.map((a) => a[1]!).find((x) => x.includes('git -c credential.helper= clone'));
+    expect(clone).toContain("'https://github.com/hatchabot/hatchabot.git'");
+    expect(clone).not.toMatch(/ssh-keyscan|_deploy/);
+    expect(written(p)).toContain('public, read-only');
+    expect(w.store.listDataSources(agent.id)[0]!.syncError ?? null).toBeNull();
+  });
+
   it('writes the section back with each source at its real in-container path', async () => {
     const w = await withRepo('# Kitchen\n\n## Memory policy\n- shared\n');
     const out = written(w.provider as MockProvider)!;

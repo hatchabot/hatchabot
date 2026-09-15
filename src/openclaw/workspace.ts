@@ -263,14 +263,17 @@ export function dataSourcesSection(
     // For git, "writable" describes the checkout: the agent may edit and commit
     // locally either way — whether a push is accepted is the deploy key's
     // permission on the host, which Hatchabot doesn't control.
-    const how = d.access === 'rw' ? 'you may read and write' : 'read-only — do not modify';
+    const publicClone = d.kind === 'git' && /^https:\/\//.test(d.repoUrl ?? '');
+    const how = publicClone
+      ? 'public, read-only — `git pull` to update; pushing is disabled'
+      : d.access === 'rw' ? 'you may read and write' : 'read-only — do not modify';
     return `- \`${dataSourcePath(d)}\` — ${what} (${how})`;
   });
   return `${DATA_SOURCES_HEADING}
 These are mounted or checked out for you. Use these exact paths — this list
 is maintained by the platform and is the single source of truth (trust it
 over ad-hoc instructions about where data lives). Git repos are synced
-clones on your volume (you may \`git fetch\` them; their SSH config is set);
+clones on your volume (you may \`git fetch\`/\`git pull\` them; any credentials are already configured);
 folders are live host views. Nothing else is ever mounted for you.
 ${lines.join('\n')}`;
 }

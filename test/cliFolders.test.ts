@@ -65,6 +65,14 @@ describe('runFolders', () => {
     expect(logs.join('\n')).toMatch(/ssh-ed25519 AAAAKEY/);
   });
 
+  it('add-repo --public posts public:true and prints no key; --public with --rw is refused', async () => {
+    const { io, calls, logs, flags } = harness(AGENT);
+    await runFolders(io, ['Kitchen', 'add-repo', 'https://github.com/hatchabot/hatchabot'], flags('public'));
+    expect(calls).toContainEqual(['post', '/v1/agents/a1/data-sources', { kind: 'git', access: 'ro', repoUrl: 'https://github.com/hatchabot/hatchabot', public: true }, undefined]);
+    expect(logs.join('\n')).toMatch(/No deploy key needed/);
+    await expect(runFolders(io, ['Kitchen', 'add-repo', 'https://github.com/o/r'], flags('public', 'rw'))).rejects.toThrow(/read-only/);
+  });
+
   it('rm of a DATA SOURCE issues a DELETE by id', async () => {
     const { io, calls, flags } = harness(AGENT);
     await runFolders(io, ['Kitchen', 'rm', 'notes'], flags());

@@ -54,7 +54,7 @@ if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map
  * Verified in the runtime dist that OpenClaw reads this name (2026-09-04).
  */
 export const SEARCH_KEY_REF = 'media/brave-api-key';
-import { buildGitSyncScript, gitSyncReason } from './gitSource.js';
+import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
 import type { Agent, Host } from '../domain/types.js';
 
 export interface CreateAgentInput {
@@ -754,7 +754,7 @@ export function prefixedModelRef(
  * hasn't added yet fails to clone — that's theirs to fix (add the key, rebuild),
  * and it must never fail the whole boot. Errors land in the event log.
  */
-async function syncGitDataSources(
+export async function syncGitDataSources(
   deps: ProvisionDeps,
   agentId: string,
   runtimeRef: string,
@@ -764,22 +764,25 @@ async function syncGitDataSources(
   const agent = store.getAgent(agentId);
   if (!agent) return;
   for (const d of store.listDataSources(agentId)) {
-    if (d.kind !== 'git' || !d.secretRef || !d.repoUrl) continue;
+    if (d.kind !== 'git' || !d.repoUrl) continue;
+    const publicRepo = isPublicGitUrl(d.repoUrl);
     const host = /^git@([^:]+):/.exec(d.repoUrl)?.[1];
-    if (!host) continue;
+    if (!publicRepo && (!d.secretRef || !host)) continue;
     try {
-      const priv = await secrets.get(d.secretRef);
-      const script = buildGitSyncScript(
-        { mountName: d.mountName, sshUrl: d.repoUrl, host },
-        Buffer.from(priv, 'utf8').toString('base64'),
-        { name: agent.name, email: `${agent.slug}@hatchabot.local` },
-      );
+      const commit = { name: agent.name, email: `${agent.slug}@hatchabot.local` };
+      const script = publicRepo
+        ? buildPublicGitSyncScript({ mountName: d.mountName, httpsUrl: d.repoUrl }, commit)
+        : buildGitSyncScript(
+            { mountName: d.mountName, sshUrl: d.repoUrl, host: host! },
+            Buffer.from(await secrets.get(d.secretRef!), 'utf8').toString('base64'),
+            commit,
+          );
       const res = await provider.execShell(runtimeRef, script);
       if (res.code !== 0) {
         // Persist the reason on the source, not just in the audit log — a repo
         // that never cloned (nearly always: its deploy key isn't on the host
         // yet) has to be visible on the card, or it hides among the successes.
-        store.setDataSourceSync(agentId, d.id, gitSyncReason(res.stderr));
+        store.setDataSourceSync(agentId, d.id, gitSyncReason(res.stderr, publicRepo ? 'public' : 'deploy-key'));
         log('datasource.git_sync_failed', { agentId, mountName: d.mountName, stderr: res.stderr.slice(0, 300) });
       } else {
         store.setDataSourceSync(agentId, d.id); // success clears any old failure
