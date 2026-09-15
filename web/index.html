@@ -326,6 +326,7 @@
     <input type="file" id="importFile" accept=".hatchabot,.agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
+  <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
   <div id="mgmtStrip"></div>
   <div class="card" id="activityCard" hidden>
     <div class="row">
@@ -7224,6 +7225,7 @@ async function refresh(withMeta) {
       el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
     }).catch(() => {});
     agents = await api('/v1/agents');
+    $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
@@ -7239,7 +7241,12 @@ async function refresh(withMeta) {
       mres.forEach((r, i) => { if (r.status === 'fulfilled') members[agents[i].id] = r.value; });
     }
     renderSetup(); renderAgents();
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error(e);
+    // A failed refresh with a stale shell showing is silent and misleading (the
+    // old cached page has no way to know it's old). Say it, name the usual cause.
+    if (/fetch|network|Failed to fetch|Load failed/i.test(String(e.message || e))) $('offlineBanner').hidden = false;
+  }
   const busy = agents.some(a => a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
   pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);

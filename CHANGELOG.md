@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.3.4] — 2026-09-14
+
+### Changed
+- When the app cannot reach the server it now says so in a banner (naming the usual cause: Tailscale not connected on the device) instead of silently showing the last cached page — which is how an installed copy could still read "AgentClaw v0.112.0" days after the rename.
+
 ## [1.3.3] — 2026-09-14
 
 15th audit (v1.1.0 → v1.3.2, three reviewers). No critical findings.
