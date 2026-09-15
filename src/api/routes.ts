@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
+import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -1013,6 +1014,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (r.error) return reply.code(400).send({ error: r.error });
     store.setAgentClass(agent.id, cls.id);
     return { classId: cls.id, rebuild: r.rebuild };
+  });
+
+  // ---- AI-source usage: requests, tokens and rate-limit hits per source -------
+  // Sampled in the background from each agent's own logs (see sourceUsage.ts);
+  // the exact % of a Claude plan isn't readable with a setup-token.
+  let usageSampling: Promise<unknown> | null = null;
+  let usageSampledAt: string | undefined;
+  const runUsageSample = () => {
+    if (usageSampling) return usageSampling;
+    usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
+      .then((r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); return r; })
+      .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
+      .finally(() => { usageSampling = null; });
+    return usageSampling;
+  };
+  if (!process.env.VITEST) {
+    const every = Number(process.env.HATCHABOT_USAGE_SAMPLE_MS ?? 600_000);
+    if (every > 0) {
+      setTimeout(() => { void runUsageSample(); }, 90_000).unref();
+      setInterval(() => { void runUsageSample(); }, every).unref();
+    }
+  }
+  app.get('/v1/ai-profiles/usage', async (req) => ({
+    sampledAt: usageSampledAt, sampling: !!usageSampling,
+    sources: summarizeSourceUsage(store, ownerIdOf(req)),
+  }));
+  app.post('/v1/ai-profiles/usage/sample', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const r = await runUsageSample();
+    return { ok: true, result: r, sampledAt: usageSampledAt };
   });
 
   app.get('/v1/ai-profiles', async (req) => {

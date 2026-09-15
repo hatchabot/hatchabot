@@ -518,6 +518,32 @@ export class LocalDockerProvider implements RuntimeProvider {
     }
   }
 
+  async modelCallLog(runtimeRef: string, sinceIso: string): Promise<string> {
+    // Stream and filter: an agent that polls an inbox logs thousands of lines a
+    // day, so never buffer the whole log — keep only the model-call results.
+    const { container } = this.#names(runtimeRef);
+    return new Promise<string>((resolve) => {
+      const child = spawn(this.docker, this.#argv(['logs', '--since', sinceIso, '--timestamps', container]));
+      const keep: string[] = [];
+      let buf = '';
+      const eat = (chunk: Buffer) => {
+        buf += chunk.toString('utf8');
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl); buf = buf.slice(nl + 1);
+          if (line.includes('[model-fetch] response') && keep.length < 200_000) keep.push(line);
+        }
+        if (buf.length > 1_000_000) buf = ''; // a pathological line: drop it
+      };
+      child.stdout.on('data', eat);
+      child.stderr.on('data', eat);
+      const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
+      timer.unref();
+      child.on('error', () => { clearTimeout(timer); resolve(keep.join('\n')); });
+      child.on('close', () => { clearTimeout(timer); resolve(keep.join('\n')); });
+    });
+  }
+
   async logs(runtimeRef: string, lines: number): Promise<string> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker(['logs', '--tail', String(lines), container]);

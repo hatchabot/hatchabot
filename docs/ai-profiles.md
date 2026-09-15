@@ -117,6 +117,30 @@ refused — see `agent-environment.md`), but only share a profile with accounts 
 trust with the underlying key. Prefer a dedicated API key over your Max login for
 sharing where you can.
 
+## Usage and rate limits — see what your agents are spending
+
+Each source in **⚙ Settings → AI sources** shows what its agents have used:
+requests and tokens in the last 5 hours and the last 7 days, a 7-day chart
+(red bars mark hours where calls were refused), and the agents using it most.
+When the provider starts refusing calls, a red banner appears across the top of
+the page and the affected agents get ⛔ in the legend, until a call succeeds again.
+
+Where the numbers come from: every ~10 minutes the control plane reads each
+running agent's own record of its model calls (its container log) and its token
+counter. The first pass after an upgrade backfills the last 7 days of calls;
+token counts start from that first pass. A source you own also shows how many
+requests other accounts' agents made on it — they draw on the same limit — as
+counts only.
+
+What it can't show: the exact share of a Claude plan that's left. Anthropic
+only reports that to logins with the `user:profile` scope, and
+`claude setup-token` tokens don't carry it. Claude plans limit use per 5-hour
+window and per week, so the 5 h and 7 d figures here are the ones to watch;
+the Claude app's **/usage** shows the account's exact percentage.
+
+Set `HATCHABOT_USAGE_SAMPLE_MS` to change how often it samples (default
+600000, 10 minutes). The host owner can also press **Refresh usage**.
+
 ## Per-agent model — pick without switching sources
 
 One AI source can drive many agents on different models. A source has a

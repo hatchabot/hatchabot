@@ -64,7 +64,7 @@ describe('Share — GET /v1/agents/:id/export', () => {
     expect(tpl.format).toBe('hatchabot-template');
     // identity must never leak into a shareable file
     expect(JSON.stringify(tpl)).not.toContain('bot-token-123');
-    expect(JSON.stringify(tpl)).not.toContain('222'); // member telegram id
+    expect(JSON.stringify({ ...tpl, exportedAt: undefined })).not.toContain('222'); // member telegram id (timestamp excluded: it can contain 222 by chance)
     // memory is included by default
     expect(Object.keys(tpl.files)).toContain('MEMORY.md');
   });

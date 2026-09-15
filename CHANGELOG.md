@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.6.0] — 2026-09-15
+
+### Added
+- **AI source usage.** Each source in ⚙ Settings → AI sources now shows its agents' requests and tokens for the last 5 hours and 7 days, a 7-day chart with rate-limited hours in red, and the agents using it most. Sources you own also count requests from other accounts' agents on them, since those draw on the same limit.
+- **Rate-limit alerts.** When a provider refuses calls with a rate-limit error, a red banner appears across the top of the page and the affected agents get ⛔ in the legend until a call succeeds again.
+- Usage is measured every 10 minutes (`HATCHABOT_USAGE_SAMPLE_MS`) from each running agent's own model-call log and token counter. The first pass after upgrading backfills 7 days of calls. The host owner can press **Refresh usage** to measure now.
+
+### Fixed
+- A test that failed now and then when an export timestamp happened to contain the digits it checks for.
+
+### Notes
+- The exact share of a Claude plan that's left isn't available: Anthropic reports it only to logins with the `user:profile` scope, which `claude setup-token` tokens lack. The Claude app's /usage shows it.
+
 ## [1.5.6] — 2026-09-15
 
 ### Added

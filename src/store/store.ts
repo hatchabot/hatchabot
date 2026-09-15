@@ -172,6 +172,28 @@ export class Store {
         PRIMARY KEY (owner_id, day)
       );
 
+      -- AI-source usage (src/orchestrator/sourceUsage.ts): model calls per agent
+      -- per UTC hour (ok / 429 rate-limited / other failures), the log cursor per
+      -- agent, individual 429s, and sampled cumulative token counters. 8 days kept.
+      CREATE TABLE IF NOT EXISTS model_call_hours (
+        agent_id TEXT NOT NULL, profile_id TEXT, hour TEXT NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_id, hour)
+      );
+      CREATE INDEX IF NOT EXISTS model_call_hours_profile ON model_call_hours (profile_id, hour);
+      CREATE TABLE IF NOT EXISTS usage_cursor (
+        agent_id TEXT PRIMARY KEY, last_ts TEXT NOT NULL, last_ok TEXT, last_limited TEXT
+      );
+      CREATE TABLE IF NOT EXISTS limit_hits (
+        agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, model TEXT,
+        PRIMARY KEY (agent_id, at)
+      );
+      CREATE INDEX IF NOT EXISTS limit_hits_profile ON limit_hits (profile_id, at);
+      CREATE TABLE IF NOT EXISTS token_samples (
+        agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, total INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, at)
+      );
+
       -- Daily security-posture risk snapshots per owner: the set of active risk
       -- keys, so a run can be diffed against the previous one to flag what newly
       -- appeared (e.g. an agent gained send-email while reachable by a group).
@@ -463,7 +485,7 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET gateway_token = NULL, gateway_port = NULL WHERE id = ?`)
       .run(agentId);
-    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed'] as const) {
+    for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed', 'model_call_hours', 'usage_cursor', 'limit_hits', 'token_samples'] as const) {
       this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId);
     }
     // Proposals addressed TO a deleted master are unreachable (no route can
@@ -1752,6 +1774,81 @@ export class Store {
       )
       .run(ownerId, s.day, Math.round(s.totalTokens), JSON.stringify(s.byBilling),
         s.costLow ?? null, s.costHigh ?? null, new Date().toISOString());
+  }
+
+  // ---- AI-source usage ---------------------------------------------------------
+  usageCursor(agentId: string): { lastTs: string; lastOk?: string; lastLimited?: string } | undefined {
+    const r = this.db.prepare(`SELECT last_ts, last_ok, last_limited FROM usage_cursor WHERE agent_id = ?`).get(agentId) as
+      { last_ts: string; last_ok: string | null; last_limited: string | null } | undefined;
+    return r ? { lastTs: r.last_ts, lastOk: r.last_ok ?? undefined, lastLimited: r.last_limited ?? undefined } : undefined;
+  }
+  setUsageCursor(agentId: string, lastTs: string, lastOk?: string, lastLimited?: string): void {
+    this.db.prepare(
+      `INSERT INTO usage_cursor (agent_id, last_ts, last_ok, last_limited) VALUES (?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET last_ts = excluded.last_ts,
+         last_ok = COALESCE(excluded.last_ok, usage_cursor.last_ok),
+         last_limited = COALESCE(excluded.last_limited, usage_cursor.last_limited)`,
+    ).run(agentId, lastTs, lastOk ?? null, lastLimited ?? null);
+  }
+  addModelCallHours(agentId: string, profileId: string, buckets: Map<string, { ok: number; limited: number; failed: number }>): void {
+    const up = this.db.prepare(
+      `INSERT INTO model_call_hours (agent_id, profile_id, hour, ok, limited, failed) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id, hour) DO UPDATE SET profile_id = excluded.profile_id,
+         ok = ok + excluded.ok, limited = limited + excluded.limited, failed = failed + excluded.failed`,
+    );
+    this.db.transaction(() => { for (const [h, b] of buckets) up.run(agentId, profileId, h, b.ok, b.limited, b.failed); })();
+  }
+  addLimitHit(agentId: string, profileId: string, at: string, model: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO limit_hits (agent_id, profile_id, at, model) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, model || null);
+  }
+  addTokenSample(agentId: string, profileId: string, at: string, total: number): void {
+    this.db.prepare(`INSERT OR REPLACE INTO token_samples (agent_id, profile_id, at, total) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, total);
+  }
+  modelCallHoursFor(profileId: string, fromHour: string): Array<{ agentId: string; hour: string; ok: number; limited: number; failed: number }> {
+    return (this.db.prepare(`SELECT agent_id, hour, ok, limited, failed FROM model_call_hours WHERE profile_id = ? AND hour >= ?`).all(profileId, fromHour) as
+      Array<{ agent_id: string; hour: string; ok: number; limited: number; failed: number }>).map((r) => ({ agentId: r.agent_id, hour: r.hour, ok: r.ok, limited: r.limited, failed: r.failed }));
+  }
+  limitHitsFor(profileId: string, fromIso: string): Array<{ agentId: string; at: string; model?: string }> {
+    return (this.db.prepare(`SELECT agent_id, at, model FROM limit_hits WHERE profile_id = ? AND at >= ? ORDER BY at`).all(profileId, fromIso) as
+      Array<{ agent_id: string; at: string; model: string | null }>).map((r) => ({ agentId: r.agent_id, at: r.at, model: r.model ?? undefined }));
+  }
+  /** Tokens consumed since `fromIso` per agent on a source: the sum of each agent's counter
+   *  increases. A drop means the session was reset, so the new total is what was used since. */
+  tokenIncreasesByAgent(profileId: string, fromIso: string, agentIds: Set<string>): Map<string, number> {
+    const out = new Map<string, number>();
+    if (!agentIds.size) return out;
+    const rows = this.db.prepare(
+      `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
+         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ?), ?)
+       ORDER BY agent_id, at`,
+    ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
+    let prev: (typeof rows)[number] | undefined;
+    for (const r of rows) {
+      if (prev && prev.agent_id === r.agent_id && r.profile_id === profileId && r.at >= fromIso) {
+        out.set(r.agent_id, (out.get(r.agent_id) ?? 0) + (r.total >= prev.total ? r.total - prev.total : r.total));
+      }
+      prev = r;
+    }
+    return out;
+  }
+  tokenIncreases(profileId: string, fromIso: string, agentIds: Set<string>): number {
+    let n = 0;
+    for (const v of this.tokenIncreasesByAgent(profileId, fromIso, agentIds).values()) n += v;
+    return n;
+  }
+  /** When token counting began for these agents on a source (their earliest sample), if at all. */
+  firstTokenSampleAt(profileId: string, agentIds: Set<string>): string | undefined {
+    if (!agentIds.size) return undefined;
+    const r = this.db.prepare(`SELECT MIN(at) AS at FROM token_samples WHERE profile_id = ? AND agent_id IN (${[...agentIds].map(() => '?').join(',')})`)
+      .get(profileId, ...agentIds) as { at: string | null };
+    return r.at ?? undefined;
+  }
+  pruneSourceUsage(beforeIso: string): void {
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM model_call_hours WHERE hour < ?`).run(beforeIso.slice(0, 13));
+      this.db.prepare(`DELETE FROM limit_hits WHERE at < ?`).run(beforeIso);
+      this.db.prepare(`DELETE FROM token_samples WHERE at < ?`).run(beforeIso);
+    })();
   }
 
   listUsageSnapshots(ownerId: string, limit = 30): Array<{

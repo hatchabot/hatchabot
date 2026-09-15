@@ -212,6 +212,9 @@ export interface RuntimeProvider {
   /** Recent runtime output for the observability card. */
   logs(runtimeRef: string, lines: number): Promise<string>;
 
+  /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp. */
+  modelCallLog(runtimeRef: string, sinceIso: string): Promise<string>;
+
   /**
    * Snapshot the runtime's persistent state (the OpenClaw state dir) as a
    * gzipped tarball. The runtime should be stopped first for a consistent

@@ -125,6 +125,20 @@
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
     scroll-margin-top: 16px;
   }
+  /* AI-source usage */
+  .su { width:100%; border-top:1px dashed var(--line); padding-top:8px; margin-top:2px }
+  .su-status { font-weight:600; font-size:13px }
+  .su-status.limited { color:var(--bad) }
+  .su-stats { display:flex; flex-wrap:wrap; gap:4px 18px; font-size:12.5px; color:var(--dim); margin:4px 0 6px; font-variant-numeric:tabular-nums }
+  .su-stats b { color:var(--text); font-weight:600 }
+  .su-chart { display:block; width:100%; height:auto; margin:4px 0 2px }
+  .su-chart .bar { fill:var(--accent); opacity:.75 }
+  .su-chart .lim { fill:var(--bad) }
+  .su-chart .base { stroke:var(--line); stroke-width:1 }
+  .su-chart .peak { stroke:var(--line); stroke-width:1; stroke-dasharray:2 3 }
+  .su-cap { display:flex; justify-content:space-between; gap:8px; font-size:11px; color:var(--dim) }
+  .su-top { font-size:12px; color:var(--dim); margin-top:4px }
+  #limitBanner { background:color-mix(in srgb, var(--bad) 18%, transparent); border:1px solid var(--bad); color:var(--text); border-radius:10px; padding:10px 14px; margin:8px 0; font-size:14px }
   /* drag bar under a scrolling pane (recent activity) */
   .resize-bar { height:12px; margin:4px 0 -8px; cursor:ns-resize; touch-action:none; display:flex; align-items:center; justify-content:center }
   .resize-bar::before { content:""; width:40px; height:4px; border-radius:2px; background:var(--line); transition:background .15s }
@@ -363,6 +377,7 @@
     <input type="file" id="importFile" accept=".hatchabot,.agentclaw" hidden onchange="importAgentFile(this.files[0])">
   </header>
   <div id="setup"></div>
+  <div id="limitBanner" hidden></div>
   <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
   <div id="mgmtStrip"></div>
   <div class="card" id="activityCard" hidden>
@@ -2645,6 +2660,7 @@ async function openAiDlg(tab) {
   // rather than on a page you then have to hunt through.
   showTab(tab || 'ai');
   aiDlg.showModal();
+  void loadSourceUsage(); // fresh usage figures for the AI sources tab
   aiKindChanged();      // populate the model dropdown + prefill for the current kind
   // Re-read account flags (hostOwner etc.) — they gate admin buttons in this
   // dialog and a page opened before a deploy would otherwise carry stale ones.
@@ -2836,12 +2852,78 @@ async function assignClass() {
   finally { $('editClassBtn').disabled = false; }
 }
 
+// ---- AI-source usage (requests, tokens, rate limits) --------------------------
+let sourceUsageData = null; // { sampledAt, sources: [...] } from /v1/ai-profiles/usage
+async function loadSourceUsage() {
+  try { sourceUsageData = await api('/v1/ai-profiles/usage'); } catch { return; }
+  renderLimitBanner();
+  if ($('aiList')?.childElementCount) renderAiList();
+}
+function sourceUsageOf(id) { return sourceUsageData?.sources?.find(x => x.id === id); }
+const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
+const clock = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+function renderLimitBanner() {
+  const el = $('limitBanner'); if (!el) return;
+  const limited = (sourceUsageData?.sources || []).filter(s => s.status === 'limited' && s.agents);
+  el.hidden = !limited.length;
+  el.innerHTML = limited.map(s => `⛔ <b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — its ${s.agents} agent${s.agents === 1 ? '' : 's'} can't answer until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
+}
+/** 7-day activity as 84 two-hour bars; hours with a 429 in red. */
+function sourceUsageChart(hourly) {
+  const buckets = [];
+  for (let i = 0; i < hourly.length; i += 2) {
+    const a = hourly[i], b = hourly[i + 1] || { ok: 0, limited: 0 };
+    buckets.push({ hour: a.hour, ok: a.ok + b.ok, limited: a.limited + b.limited });
+  }
+  const max = Math.max(1, ...buckets.map(b => b.ok + b.limited));
+  // One 2-hour bar per slot; refusals stack in red on top of the answered calls.
+  const W = 7, H = 44, top = 1, w = buckets.length * W;
+  const bars = buckets.map((b, i) => {
+    const total = b.ok + b.limited, h = total ? Math.max(2, Math.round((total / max) * H)) : 0;
+    if (!h) return '';
+    const lh = b.limited ? Math.min(h, Math.max(2, Math.round((b.limited / max) * H))) : 0;
+    const when = new Date(b.hour + ':00:00Z').toLocaleString([], { weekday: 'short', hour: 'numeric' });
+    const tip = `${when}: ${total} request${total === 1 ? '' : 's'}${b.limited ? ` — ${b.limited} rate-limited` : ''}`;
+    return `<g><title>${esc(tip)}</title><rect class="bar" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${h - lh}"/>${lh ? `<rect class="lim" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${lh}"/>` : ''}</g>`;
+  }).join('');
+  // Captions are HTML, not SVG text, so they stay readable when the chart scales down on a phone.
+  return `<div class="su-cap"><span>Requests per 2 hours</span><span>peak ${fmtN(max)}</span></div>
+    <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="Requests over the last 7 days, in two-hour bars; red marks rate-limit refusals">
+    <line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>
+    ${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>
+    <div class="su-cap"><span>7 days ago</span><span>now</span></div>`;
+}
+function sourceUsagePanel(p) {
+  const u = sourceUsageOf(p.id);
+  if (!u) return '';
+  const status = u.status === 'limited'
+    ? `<div class="su-status limited">⛔ Rate-limited since ${esc(clock(u.limitedSince))} — calls through this source are being refused</div>`
+    : u.status === 'idle'
+      ? `<div class="su-status" style="color:var(--dim)">No calls measured yet in the last 7 days</div>`
+      : `<div class="su-status" style="color:var(--ok)">● Answering${u.lastOkAt ? ` — last call ${esc(ago(u.lastOkAt))}` : ''}${u.lastLimitAt ? ` <span class="sub" style="font-weight:400">· last rate-limited ${esc(clock(u.lastLimitAt))}</span>` : ''}</div>`;
+  // Tokens come from counter samples, so a window that started before counting began is partial.
+  const tokens = (x, hours) => !u.tokensSince || Date.parse(u.tokensSince) >= Date.now() - 15 * 60_000
+    ? `<span title="Token counts start after the next usage update">tokens: counting…</span>`
+    : `<b>${fmtN(x.tokens)}</b> tokens${Date.parse(u.tokensSince) > Date.now() - hours * 3_600_000 ? ` <span title="Token counting began then">(since ${esc(clock(u.tokensSince))})</span>` : ''}`;
+  const win = (label, x, hours) => `<span>${label}: <b>${fmtN(x.requests)}</b> requests · ${tokens(x, hours)}${x.limited ? ` · <b style="color:var(--bad)">${x.limited}</b> refused` : ''}</span>`;
+  const top = u.topAgents.length ? `<div class="su-top">Most use (7 d): ${u.topAgents.map(a => `${esc(a.name)} ${fmtN(a.requests)}${a.limited ? ` <span style="color:var(--bad)">(${a.limited} refused)</span>` : ''}`).join(' · ')}</div>` : '';
+  const others = u.others ? `<div class="su-top">+ ${u.others.agents} agent${u.others.agents === 1 ? '' : 's'} on other accounts: ${fmtN(u.others.requests5h)} requests in 5 h, ${fmtN(u.others.requests7d)} in 7 d — they draw on the same limit.</div>` : '';
+  return `<div class="su">${status}<div class="su-stats">${win('Last 5 h', u.window5h, 5)}${win('Last 7 d', u.window7d, 168)}</div>${u.status !== 'idle' ? sourceUsageChart(u.hourly) : ''}${top}${others}</div>`;
+}
+async function refreshSourceUsage(btn) {
+  if (btn) btn.disabled = true;
+  try { await api('/v1/ai-profiles/usage/sample', { method: 'POST', body: {} }); await loadSourceUsage(); toast('Usage refreshed'); }
+  catch (e) { toast(e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+
 function renderAiList() {
-  $('aiList').innerHTML = profiles.map(p => p.mine === false ? `
+  $('aiList').innerHTML = (sourceUsageData ? `<div class="sub" style="margin-bottom:8px">Usage is measured from your agents' own model calls${sourceUsageData.sampledAt ? ` (updated ${esc(ago(sourceUsageData.sampledAt))})` : ''}. Claude plans limit use per 5-hour window and per week; the exact share left isn't available to setup tokens — the Claude app's <b>/usage</b> shows it for the account.${myAccount.hostOwner ? ` <button onclick="refreshSourceUsage(this)" style="margin-left:6px">Refresh usage</button>` : ''}</div>` : '') + profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
       <span class="sub">shared by the server owner — usable for your agents, managed by them${p.defaultSource ? '; the default for new agents' : ''}</span>
+      ${sourceUsagePanel(p)}
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
       <div style="display:flex;align-items:center;gap:6px;width:100%">
@@ -2862,6 +2944,7 @@ function renderAiList() {
         </label>
       </div>
       ${sourceUsage(p)}
+      ${sourceUsagePanel(p)}
       <div style="display:flex;align-items:center;gap:10px;width:100%">
         <label class="sub" style="min-width:104px">Default model</label>
         ${defaultModelControl(p)}
@@ -7199,6 +7282,7 @@ function agentAttention(a) {
   if (unsynced.length) out.push({ icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
   if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ icon: '⚙', why: 'template setup values not filled in' });
   if (a.migratedTo) out.push({ icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
+  if (sourceUsageOf(a.aiProfileId)?.status === 'limited') out.push({ icon: '⛔', why: `its AI source is being rate-limited (since ${clock(sourceUsageOf(a.aiProfileId).limitedSince)})` });
   if (a.imageTrial) out.push({ icon: '🧪', why: `on trial image ${a.image} (Runtime → ✕ to discard)` });
   const rebuild = [];
   if (a.pendingModel && a.pendingModel !== a.model) rebuild.push(`switches to ${a.pendingModel} on rebuild`);
@@ -7559,7 +7643,7 @@ async function refresh(withMeta) {
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) void loadMgmtStatus();
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadMgmtStatus(); void loadSourceUsage(); }
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       const running = agents.filter(a => a.state === 'RUNNING');
