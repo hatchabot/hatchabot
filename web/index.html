@@ -125,8 +125,12 @@
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
     scroll-margin-top: 16px;
   }
+  /* card with a reorder rail: rail in its own full-height column at the far left */
+  .card.has-rail { display:flex; align-items:stretch; gap:14px; padding-left:10px }
+  .rail-col { flex:none; display:flex; align-items:flex-start; padding:2px 10px 0 0; border-right:1px solid var(--line) } /* top: stays beside the name as the card grows */
+  .card-body { flex:1; min-width:0 }
   /* the reorder rail: one segmented control, dim until the card is hovered */
-  .movecol { display:flex; flex-direction:column; width:24px; flex:none; align-self:center; border:1px solid var(--line); border-radius:9px; overflow:hidden; opacity:.5; transition:opacity .15s }
+  .movecol { display:flex; flex-direction:column; width:24px; flex:none; border:1px solid var(--line); border-radius:9px; overflow:hidden; opacity:.5; transition:opacity .15s }
   .card:hover .movecol, .movecol:focus-within { opacity:1 }
   @media (hover:none) { .movecol { opacity:1 } }
   .movecol .mv { display:flex; align-items:center; justify-content:center; height:19px; margin:0; padding:0; border:0; border-radius:0; background:transparent; color:var(--dim); cursor:pointer; min-width:0 }
@@ -4230,8 +4234,8 @@ function agentCard(a) {
   const pending = a.pendingAction?.type === 'bot_token';
   const pairs = pairings[a.id] ?? [];
   return `
-  <div class="card" id="card-${a.id}"${a.state !== 'ARCHIVED' ? ` data-agent-id="${a.id}" data-group="${esc(a.group || '')}" data-name="${esc(a.name)}"` : ''}>
-    <div class="row">
+  <div class="card has-rail" id="card-${a.id}"${a.state !== 'ARCHIVED' ? ` data-agent-id="${a.id}" data-group="${esc(a.group || '')}" data-name="${esc(a.name)}"` : ''}>
+    <div class="rail-col">
       <div class="movecol" role="group" aria-label="Reorder ${esc(a.name)}">
         <button class="mv" title="Up 5 (Shift-click: to the top)" aria-label="Move up 5" onclick="moveAgentBy('${a.id}',-5,event)">${MV_ICON.up5}</button>
         <button class="mv" title="Up one (Shift-click: to the top)" aria-label="Move up" onclick="moveAgentBy('${a.id}',-1,event)">${MV_ICON.up}</button>
@@ -4239,90 +4243,94 @@ function agentCard(a) {
         <button class="mv" title="Down one (Shift-click: to the bottom)" aria-label="Move down" onclick="moveAgentBy('${a.id}',1,event)">${MV_ICON.down}</button>
         <button class="mv" title="Down 5 (Shift-click: to the bottom)" aria-label="Move down 5" onclick="moveAgentBy('${a.id}',5,event)">${MV_ICON.down5}</button>
       </div>
-      <div class="grow">
-        ${a.deepLink && a.state === 'RUNNING'
-          ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
-          : `<span class="name">${esc(a.name)}</span>`}
-        ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
-        ${a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona) ? `<div class="sub" style="color:var(--warn)">⚙ Template not configured — <a onclick="openEdit('${a.id}','${jsq(a.name)}','def')" style="cursor:pointer;text-decoration:underline">fill its Setup values</a> to complete the description.</div>` : ''}
-      </div>
-      <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
     </div>
-    ${agentMeta(a)}
-    ${recheckNote(a)}
-    ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
-      <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
-    ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
-      <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
-    ${a.peersPending && !isRechecking(a) ? `<div class="pair">🔗 <span class="grow">Peer changes apply on the next rebuild — that's what installs its consult tool.</span>
-      <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
-    ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
-      <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
-    ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
-    ${botNameNote(a)}
-    ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
-    ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
-      <div class="pair">
-        <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
-        ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
-      </div>`).join('')}
-    ${pending ? tokenForm(a) : ''}
-    ${pairs.map(p => `
-      <div class="pair">
-        <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
-        <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
-                title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
-        ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
-                title="This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.">That's me — link</button>` : ''}
-        <button class="${myAccount.telegramUserId ? 'primary' : ''}" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
-      </div>`).join('')}
-    ${(members[a.id] ?? []).length > 1 ? `
-      <div class="members">👥 ${(members[a.id] ?? []).map(m => {
-        const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
-        const x = m.role === 'owner' ? '' :
-          `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
-        return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
-      }).join('')}
-      </div>` : ''}
-    <div class="actions">
-      <!-- "Telegram App" button retired: the agent NAME is the deep-link now;
-           Telegram Web stays in the ⋯ menu. -->
-      ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
-        <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
-        <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
-      ${a.state === 'RUNNING' && a.botUsername ? (
-        a.botDisplayName === a.name
-          ? `<button disabled title="The bot's Telegram display name already matches ('${esc(a.name)}') — nothing to sync.">🏷 Sync name</button>`
-          : `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" ${a.botDisplayName ? `style="border-color:var(--warn)" title="Bot is currently named '${esc(a.botDisplayName)}' — press to rename it to '${esc(a.name)}'. Members get a one-line heads-up DM."` : `title="Rename the Telegram bot's display name to match this agent."`}>🏷 Sync name</button>`
-      ) : ''}
-      ${a.state === 'RUNNING' ? `<button onclick="checkpointAgent('${a.id}', '${jsq(a.name)}')" title="Have the agent write the current conversation's key facts into MEMORY.md now (~20s), so they survive a reset or backend switch">📝 Chat → Memory</button>` : ''}
-      ${a.runtimeRef && ['RUNNING', 'STOPPED', 'ARCHIVED'].includes(a.state) ? `<button onclick="downloadHistory('${a.id}', '${jsq(a.name)}')" title="Download this agent's full chat history as a file — every conversation, including ones from before a reset (read from the agent's own transcripts; Telegram can't export bot chats)">💬 History</button>` : ''}
-      ${a.state === 'RUNNING' ? `<button onclick="recoverContext('${a.id}', '${jsq(a.name)}')" title="Lost context after a reset? Restore the agent's earlier conversations into its workspace and have it save the important parts to memory — no copy-pasting">📥 Recover context</button>` : ''}
-      <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
-      ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
-      ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
-      ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
-      ${a.state === 'RUNNING' && a.parameters?.length && !a.parentAgentId ? `<button onclick="deriveChild('${a.id}', '${jsq(a.name)}')" title="Create a child agent from this master: same training, its own setup values and bot, fresh memory. Children nest under this card.">👪 New child</button>` : ''}
-      ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="openProposals('${a.id}', '${jsq(a.name)}')" title="Distilled learnings proposed by this master's children, awaiting your review">📥 Proposals</button><button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
-      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
-        ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
-      <!-- lifecycle -->
-      ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
-      ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
-        ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
-      ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
-      <!-- Archive sits where Stop used to. On a fleet bounded by how many bots
-           Telegram lets you own, putting away an agent you're done with matters
-           more than pausing one, and Stop keeps the bot anyway. Stop moved to
-           the ⋯ menu. The SAME slot becomes Restore once archived, so the
-           button that put an agent away is the button that brings it back. -->
-      ${a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
-        ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}', '${a.state}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
-      ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
-      ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${a.id}', '${jsq(a.name)}')" title="Read its memory, key files, and chat history — without restoring it or its bot">🔍 Inspect</button>` : ''}
-      <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
-      ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
-      ${cardMenu(a)}
+    <div class="card-body">
+      <div class="row">
+        <div class="grow">
+          ${a.deepLink && a.state === 'RUNNING'
+            ? `<a class="name" href="${esc(a.deepLink)}" target="_blank" rel="noopener" title="Open this agent's chat in the Telegram app">${esc(a.name)}</a>`
+            : `<span class="name">${esc(a.name)}</span>`}
+          ${a.persona ? `<div class="persona">${esc(a.persona)}</div>` : ''}
+          ${a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona) ? `<div class="sub" style="color:var(--warn)">⚙ Template not configured — <a onclick="openEdit('${a.id}','${jsq(a.name)}','def')" style="cursor:pointer;text-decoration:underline">fill its Setup values</a> to complete the description.</div>` : ''}
+        </div>
+        <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
+      </div>
+      ${agentMeta(a)}
+      ${recheckNote(a)}
+      ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
+      ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
+        <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
+      ${a.peersPending && !isRechecking(a) ? `<div class="pair">🔗 <span class="grow">Peer changes apply on the next rebuild — that's what installs its consult tool.</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
+      ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
+      ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+      ${botNameNote(a)}
+      ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
+      ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
+        <div class="pair">
+          <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
+          ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
+        </div>`).join('')}
+      ${pending ? tokenForm(a) : ''}
+      ${pairs.map(p => `
+        <div class="pair">
+          <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
+          <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
+                  title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
+          ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
+                  title="This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.">That's me — link</button>` : ''}
+          <button class="${myAccount.telegramUserId ? 'primary' : ''}" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
+        </div>`).join('')}
+      ${(members[a.id] ?? []).length > 1 ? `
+        <div class="members">👥 ${(members[a.id] ?? []).map(m => {
+          const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
+          const x = m.role === 'owner' ? '' :
+            `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
+          return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
+        }).join('')}
+        </div>` : ''}
+      <div class="actions">
+        <!-- "Telegram App" button retired: the agent NAME is the deep-link now;
+             Telegram Web stays in the ⋯ menu. -->
+        ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
+          <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
+          <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
+        ${a.state === 'RUNNING' && a.botUsername ? (
+          a.botDisplayName === a.name
+            ? `<button disabled title="The bot's Telegram display name already matches ('${esc(a.name)}') — nothing to sync.">🏷 Sync name</button>`
+            : `<button onclick="syncBotName('${a.id}', '${jsq(a.name)}')" ${a.botDisplayName ? `style="border-color:var(--warn)" title="Bot is currently named '${esc(a.botDisplayName)}' — press to rename it to '${esc(a.name)}'. Members get a one-line heads-up DM."` : `title="Rename the Telegram bot's display name to match this agent."`}>🏷 Sync name</button>`
+        ) : ''}
+        ${a.state === 'RUNNING' ? `<button onclick="checkpointAgent('${a.id}', '${jsq(a.name)}')" title="Have the agent write the current conversation's key facts into MEMORY.md now (~20s), so they survive a reset or backend switch">📝 Chat → Memory</button>` : ''}
+        ${a.runtimeRef && ['RUNNING', 'STOPPED', 'ARCHIVED'].includes(a.state) ? `<button onclick="downloadHistory('${a.id}', '${jsq(a.name)}')" title="Download this agent's full chat history as a file — every conversation, including ones from before a reset (read from the agent's own transcripts; Telegram can't export bot chats)">💬 History</button>` : ''}
+        ${a.state === 'RUNNING' ? `<button onclick="recoverContext('${a.id}', '${jsq(a.name)}')" title="Lost context after a reset? Restore the agent's earlier conversations into its workspace and have it save the important parts to memory — no copy-pasting">📥 Recover context</button>` : ''}
+        <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
+        ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
+        ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
+        ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
+        ${a.state === 'RUNNING' && a.parameters?.length && !a.parentAgentId ? `<button onclick="deriveChild('${a.id}', '${jsq(a.name)}')" title="Create a child agent from this master: same training, its own setup values and bot, fresh memory. Children nest under this card.">👪 New child</button>` : ''}
+        ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="openProposals('${a.id}', '${jsq(a.name)}')" title="Distilled learnings proposed by this master's children, awaiting your review">📥 Proposals</button><button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
+        ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
+          ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
+        <!-- lifecycle -->
+        ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
+        ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
+          ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
+        ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
+        <!-- Archive sits where Stop used to. On a fleet bounded by how many bots
+             Telegram lets you own, putting away an agent you're done with matters
+             more than pausing one, and Stop keeps the bot anyway. Stop moved to
+             the ⋯ menu. The SAME slot becomes Restore once archived, so the
+             button that put an agent away is the button that brings it back. -->
+        ${a.state === 'RUNNING' || a.state === 'STOPPED' || a.state === 'FAILED'
+          ? `<button onclick="archiveAgent('${a.id}', '${jsq(a.name)}', '${a.state}')" title="Keep the agent and its memory; hand its Telegram bot back for another agent to use">📥 Archive</button>` : ''}
+        ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="restoreAgent('${a.id}', '${jsq(a.name)}')" title="Bring it back — it keeps its memory, but gets a NEW bot with a new link">📤 Restore</button>` : ''}
+        ${a.state === 'ARCHIVED' ? `<button onclick="openInspect('${a.id}', '${jsq(a.name)}')" title="Read its memory, key files, and chat history — without restoring it or its bot">🔍 Inspect</button>` : ''}
+        <button onclick="openGroupDlg('${a.id}')" title="Put this agent in a group / section">🏷 ${a.group ? esc(a.group) : 'Group'}</button>
+        ${a.state !== 'DELETING' ? `<button class="danger" onclick="del('${a.id}', '${jsq(a.name)}')">Delete</button>` : ''}
+        ${cardMenu(a)}
+      </div>
     </div>
   </div>`;
 }

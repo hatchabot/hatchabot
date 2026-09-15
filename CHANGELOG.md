@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.4] — 2026-09-15
+
+### Changed
+- The reorder rail now has its own full-height column at the far left of each agent card, with a thin divider; the name, details, notices, members and buttons all sit to its right. The rail stays at the top, beside the name, however tall the card gets.
+
 ## [1.5.3] — 2026-09-15
 
 ### Changed
