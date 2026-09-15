@@ -5695,7 +5695,6 @@ async function openFleetSources() {
     ${pending ? `<div class="sub" style="margin-top:6px">${pending} will change on next rebuild</div>` : ''}
   </div>`;
   el.innerHTML = html;
-  fillPositionPickers(el);
 }
 
 async function loadFleet() {
@@ -7229,6 +7228,7 @@ function renderAgents() {
     </details>`;
   }
   el.innerHTML = html;
+  fillPositionPickers(el);
 
   for (const [id, v] of Object.entries(saved)) { const i = $(id); if (i) i.value = v; }
   if (focusedId) {

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.6.1] — 2026-09-15
+
+### Fixed
+- **The position picker under each card's reorder rail now appears.** 1.5.6 shipped it hidden on every card: the code that numbers the pickers ran on the Sources view instead of the agent list. A test now pins it to the agent list.
+
 ## [1.6.0] — 2026-09-15
 
 ### Added

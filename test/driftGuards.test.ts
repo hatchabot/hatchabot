@@ -141,3 +141,16 @@ describe('base image carries the OCR stack (silent-fail class)', () => {
     }
   });
 });
+
+describe('agent list position pickers are filled where the cards render', () => {
+  // v1.5.6 wired fillPositionPickers() into the fleet-sources view instead of
+  // renderAgents(), so every picker stayed hidden and nothing failed. The
+  // pickers start `hidden`; only this call reveals them.
+  it('renderAgents() calls fillPositionPickers() after writing the list', () => {
+    const web = read('web/index.html');
+    const start = web.indexOf('\nfunction renderAgents()');
+    expect(start).toBeGreaterThan(0);
+    const body = web.slice(start, web.indexOf('\n}\n', start));
+    expect(body).toMatch(/el\.innerHTML = html;\s*\n\s*fillPositionPickers\(el\);/);
+  });
+});
