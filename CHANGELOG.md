@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.3] — 2026-09-15
+
+### Changed
+- Tidier reorder controls. The four boxed arrows on each card are now one slim rail — up 5 · up · drag grip · down · down 5 — with crisp icons, dimmed until you hover the card (always shown on touch screens). Group headers get the same look: A→Z · up · down in one pill. Same actions, same Shift-click shortcuts.
+
 ## [1.5.2] — 2026-09-15
 
 ### Added

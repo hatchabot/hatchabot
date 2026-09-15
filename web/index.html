@@ -125,7 +125,21 @@
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
     scroll-margin-top: 16px;
   }
-  .movecol { display: flex; flex-direction: column; gap: 2px; }
+  /* the reorder rail: one segmented control, dim until the card is hovered */
+  .movecol { display:flex; flex-direction:column; width:24px; flex:none; align-self:center; border:1px solid var(--line); border-radius:9px; overflow:hidden; opacity:.5; transition:opacity .15s }
+  .card:hover .movecol, .movecol:focus-within { opacity:1 }
+  @media (hover:none) { .movecol { opacity:1 } }
+  .movecol .mv { display:flex; align-items:center; justify-content:center; height:19px; margin:0; padding:0; border:0; border-radius:0; background:transparent; color:var(--dim); cursor:pointer; min-width:0 }
+  .movecol .mv:hover { background:var(--panel-2); color:var(--text) }
+  .movecol .mv:focus-visible { outline:2px solid var(--accent); outline-offset:-2px }
+  .movecol svg { width:12px; height:12px; display:block }
+  .movecol .grip { height:22px; cursor:grab; touch-action:none }
+  /* group header controls: the same look, laid out horizontally */
+  .seg { display:inline-flex; align-items:stretch; border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-left:6px }
+  .seg .mv { display:flex; align-items:center; justify-content:center; height:22px; min-width:24px; margin:0; padding:0 7px; border:0; border-radius:0; background:transparent; color:var(--dim); font-size:11px; font-weight:600; letter-spacing:.02em; cursor:pointer }
+  .seg .mv + .mv { border-left:1px solid var(--line) }
+  .seg .mv:hover { background:var(--panel-2); color:var(--text) }
+  .seg svg { width:12px; height:12px; display:block }
   .movebtn { padding: 0 7px; font-size: 10px; line-height: 1.35; color: var(--dim);
              background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px; cursor: pointer; }
   .movebtn:hover { color: var(--text); border-color: var(--accent); }
@@ -281,8 +295,7 @@
   }
   .toast.progress::before { content: "⏳ "; }
   /* drag to reorder: ⠿ grip on cards, whole row in the legend */
-  .grip { cursor:grab; color:var(--dim); font-size:13px; line-height:1; text-align:center; touch-action:none; user-select:none; padding:1px 0 }
-  .grip:hover { color:var(--text) }
+  .grip { user-select:none }
   body.dragging, body.dragging * { cursor:grabbing !important; user-select:none }
   .drag-src { opacity:.45 }
   .drop-line { position:fixed; height:3px; background:var(--accent); border-radius:2px; z-index:1000; pointer-events:none }
@@ -4219,12 +4232,12 @@ function agentCard(a) {
   return `
   <div class="card" id="card-${a.id}"${a.state !== 'ARCHIVED' ? ` data-agent-id="${a.id}" data-group="${esc(a.group || '')}" data-name="${esc(a.name)}"` : ''}>
     <div class="row">
-      <div class="movecol">
-        ${a.state !== 'ARCHIVED' ? `<span class="grip" title="Drag to move — drop it on another agent, even in another group">⠿</span>` : ''}
-        <button class="movebtn" title="Move up 5 (Shift-click: to the top)" onclick="moveAgentBy('${a.id}',-5,event)">▲5</button>
-        <button class="movebtn" title="Move up (Shift-click: to the top)" onclick="moveAgentBy('${a.id}',-1,event)">▲</button>
-        <button class="movebtn" title="Move down (Shift-click: to the bottom)" onclick="moveAgentBy('${a.id}',1,event)">▼</button>
-        <button class="movebtn" title="Move down 5 (Shift-click: to the bottom)" onclick="moveAgentBy('${a.id}',5,event)">▼5</button>
+      <div class="movecol" role="group" aria-label="Reorder ${esc(a.name)}">
+        <button class="mv" title="Up 5 (Shift-click: to the top)" aria-label="Move up 5" onclick="moveAgentBy('${a.id}',-5,event)">${MV_ICON.up5}</button>
+        <button class="mv" title="Up one (Shift-click: to the top)" aria-label="Move up" onclick="moveAgentBy('${a.id}',-1,event)">${MV_ICON.up}</button>
+        ${a.state !== 'ARCHIVED' ? `<span class="mv grip" title="Drag to move — drop it on another agent, even in another group" aria-hidden="true">${MV_ICON.grip}</span>` : ''}
+        <button class="mv" title="Down one (Shift-click: to the bottom)" aria-label="Move down" onclick="moveAgentBy('${a.id}',1,event)">${MV_ICON.down}</button>
+        <button class="mv" title="Down 5 (Shift-click: to the bottom)" aria-label="Move down 5" onclick="moveAgentBy('${a.id}',5,event)">${MV_ICON.down5}</button>
       </div>
       <div class="grow">
         ${a.deepLink && a.state === 'RUNNING'
@@ -6779,6 +6792,19 @@ async function checkpointAgent(id, name) {
   } catch (e) { toast(e.message); }
 }
 
+/** Line icons for the reorder rail — SVG so they render identically everywhere. */
+const MV_ICON = (() => {
+  const svg = (d, extra = '') => `<svg viewBox="0 0 12 12" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"${extra}/></svg>`;
+  const dots = [[4, 3], [8, 3], [4, 6], [8, 6], [4, 9], [8, 9]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="1.1" fill="currentColor"/>`).join('');
+  return {
+    up5: svg('M2.5 5.5 6 2l3.5 3.5M2.5 10 6 6.5l3.5 3.5'),
+    up: svg('M2.5 7.8 6 4.3l3.5 3.5'),
+    down: svg('M2.5 4.2 6 7.7l3.5-3.5'),
+    down5: svg('M2.5 2 6 5.5 9.5 2M2.5 6.5 6 10l3.5-3.5'),
+    grip: `<svg viewBox="0 0 12 12" aria-hidden="true">${dots}</svg>`,
+  };
+})();
+
 /**
  * Move an agent `delta` places among the cards you can SEE in its group (Shift:
  * all the way). Counting visible cards — not stored rows — matters: archived
@@ -7016,12 +7042,10 @@ function renderAgents() {
     // Ungrouped agents get a "Default" header too, so every section reads the
     // same as the legend (no move buttons: ungrouped always come first).
     if (!g && lastGroup === null) html += `<div class="group-header" data-group="Default" data-drop-group=""><span class="grow">Default</span>
-      <button class="movebtn" title="Sort this group A→Z" onclick="sortGroup('')">A→Z</button></div>`;
+      <span class="seg"><button class="mv" title="Sort this group A→Z" onclick="sortGroup('')">A→Z</button></span></div>`;
     if (g && g !== lastGroup) html += `<div class="group-header" data-group="${esc(g)}" data-drop-group="${esc(g)}">
       <span class="grow">${esc(g)}</span>
-      <button class="movebtn" title="Sort this group A→Z" onclick="sortGroup('${jsq(g)}')">A→Z</button>
-      <button class="movebtn" title="Move section up" onclick="moveGroup('${jsq(g)}','up')">▲</button>
-      <button class="movebtn" title="Move section down" onclick="moveGroup('${jsq(g)}','down')">▼</button>
+      <span class="seg"><button class="mv" title="Sort this group A→Z" onclick="sortGroup('${jsq(g)}')">A→Z</button><button class="mv" title="Move this group up" aria-label="Move group up" onclick="moveGroup('${jsq(g)}','up')">${MV_ICON.up}</button><button class="mv" title="Move this group down" aria-label="Move group down" onclick="moveGroup('${jsq(g)}','down')">${MV_ICON.down}</button></span>
     </div>`;
     lastGroup = g;
     html += agentCard(a) + renderKids(a.id);
