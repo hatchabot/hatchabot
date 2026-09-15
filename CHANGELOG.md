@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.2] — 2026-09-15
+
+### Added
+- **▲5 / ▼5** on every agent card move it five places at a time (Shift-click any arrow: straight to the top or bottom of its group).
+
+### Fixed
+- The arrows now count the cards you can see. Archived and child agents share a group in storage but show elsewhere, so a one-step move could swap with an invisible sibling and appear to do nothing. At the top or bottom of a group the arrows now say so instead of silently doing nothing.
+
 ## [1.5.1] — 2026-09-15
 
 ### Added

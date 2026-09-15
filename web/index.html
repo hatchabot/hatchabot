@@ -4221,8 +4221,10 @@ function agentCard(a) {
     <div class="row">
       <div class="movecol">
         ${a.state !== 'ARCHIVED' ? `<span class="grip" title="Drag to move — drop it on another agent, even in another group">⠿</span>` : ''}
-        <button class="movebtn" title="Move up (Shift-click: to the top)" onclick="moveAgent('${a.id}','up',event)">▲</button>
-        <button class="movebtn" title="Move down (Shift-click: to the bottom)" onclick="moveAgent('${a.id}','down',event)">▼</button>
+        <button class="movebtn" title="Move up 5 (Shift-click: to the top)" onclick="moveAgentBy('${a.id}',-5,event)">▲5</button>
+        <button class="movebtn" title="Move up (Shift-click: to the top)" onclick="moveAgentBy('${a.id}',-1,event)">▲</button>
+        <button class="movebtn" title="Move down (Shift-click: to the bottom)" onclick="moveAgentBy('${a.id}',1,event)">▼</button>
+        <button class="movebtn" title="Move down 5 (Shift-click: to the bottom)" onclick="moveAgentBy('${a.id}',5,event)">▼5</button>
       </div>
       <div class="grow">
         ${a.deepLink && a.state === 'RUNNING'
@@ -6774,6 +6776,31 @@ async function checkpointAgent(id, name) {
     const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
     if (r.saved) toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its Telegram chat.`);
     else toast(r.error || `Couldn't save "${name}" to memory — its AI source didn't respond (out of credits?).`, 12000);
+  } catch (e) { toast(e.message); }
+}
+
+/**
+ * Move an agent `delta` places among the cards you can SEE in its group (Shift:
+ * all the way). Counting visible cards — not stored rows — matters: archived
+ * and child agents share the group in storage but show elsewhere, so a stored
+ * one-step swap could hop an invisible sibling and look like nothing happened.
+ */
+async function moveAgentBy(id, delta, ev) {
+  if (ev?.shiftKey) delta = delta < 0 ? -Infinity : Infinity;
+  const card = document.getElementById('card-' + id);
+  const group = card?.dataset.group ?? '';
+  const order = [...document.querySelectorAll('#agents [data-agent-id]')]
+    .filter(el => !el.closest('.kids') && (el.dataset.group ?? '') === group)
+    .map(el => el.dataset.agentId);
+  const i = order.indexOf(id);
+  if (i < 0) return moveAgent(id, delta < 0 ? 'up' : 'down', ev); // not in the visible list: old behaviour
+  const j = Math.max(0, Math.min(order.length - 1, i + delta));
+  if (j === i) { toast(delta < 0 ? 'Already at the top of its group' : 'Already at the bottom of its group', 1800); return; }
+  const rest = order.filter(x => x !== id);
+  const before = rest[j] ?? null; // inserting at j of the list without it
+  try {
+    await api(`/v1/agents/${id}/move`, { method: 'POST', body: before ? { before } : { before: null, group } });
+    await refresh(false);
   } catch (e) { toast(e.message); }
 }
 
