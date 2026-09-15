@@ -280,6 +280,8 @@
     box-shadow: 0 6px 28px rgba(0,0,0,0.45);
   }
   .toast.progress::before { content: "⏳ "; }
+  /* ?demo screenshot mode: personal details unreadable */
+  .demo .pii { filter:blur(6px); user-select:none; pointer-events:none }
 </style>
 </head>
 <body>
@@ -1714,6 +1716,11 @@ const $ = (id) => document.getElementById(id);
 // obvious at a glance rather than something to argue about.
 try { $('appVer').textContent = 'v' + (window.HATCHABOT_VERSION ?? '?'); } catch {}
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
+/** ?demo in the URL: screenshot mode — personal details (your email, family members'
+ *  Telegram names, bot handles, connected accounts, Telegram ids) are blanked or
+ *  blurred. Nothing is changed on the server; drop ?demo to see everything again. */
+const DEMO = new URLSearchParams(location.search).has('demo');
+if (DEMO) document.documentElement.classList.add('demo');
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
@@ -1814,7 +1821,7 @@ async function startSession(idToken) {
 
 function renderWhoami() {
   const el = $('whoami');
-  if (el) el.textContent = appConfig.authMode === 'identity'
+  if (el) el.textContent = appConfig.authMode === 'identity' && !DEMO
     ? (localStorage.getItem('hatchabot_email') ?? '') : '';
 }
 
@@ -2118,8 +2125,8 @@ async function loadBotInventory() {
     };
     $('botInvList').innerHTML = bots.map(b => `
       <div class="pair" style="gap:8px">
-        <span class="grow"><code>@${esc(b.username)}</code>
-          <span class="sub">${b.displayName ? `“${esc(b.displayName)}” · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span></span>
+        <span class="grow"><code class="pii">@${esc(b.username)}</code>
+          <span class="sub">${b.displayName ? `<span class="pii">“${esc(b.displayName)}”</span> · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span></span>
         <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : 'Telegram unreachable — unknown'}">
           ${b.alive === true ? '✅' : b.alive === false ? '❌' : '❓'}</span>
       </div>`).join('') || '<div class="sub">No bots known to this server.</div>';
@@ -2140,7 +2147,7 @@ async function loadPool() {
     const bots = p.bots ?? [];
     el.innerHTML = bots.length
       ? bots.map(b => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
-          <span class="grow">🤖 <b>@${esc(b.username)}</b>
+          <span class="grow">🤖 <b class="pii">@${esc(b.username)}</b>
             <span class="sub">· ${b.shared ? 'shared' : b.mine ? 'yours' : 'another user’s'} · ${b.leasedTo ? `in use by <b>${esc(b.leasedToName || 'an agent')}</b>` : 'available'}</span></span>
           ${b.leasedTo ? '' : `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}')">Remove</button>`}
         </div>`).join('')
@@ -4198,7 +4205,7 @@ function agentCard(a) {
     ${pending ? tokenForm(a) : ''}
     ${pairs.map(p => `
       <div class="pair">
-        <span class="grow">🔑 <b>${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
+        <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
         <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
                 title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
         ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
@@ -4207,7 +4214,7 @@ function agentCard(a) {
       </div>`).join('')}
     ${(members[a.id] ?? []).length > 1 ? `
       <div class="members">👥 ${(members[a.id] ?? []).map(m => {
-        const label = esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)));
+        const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
         const x = m.role === 'owner' ? '' :
           `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
         return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
@@ -4410,7 +4417,7 @@ async function renderConnections() {
     if (editAgentId !== forId) return;
     const open = connections.filter(c => !c.attachedTo.some(a => a.id === forId));
     $('connAttachPick').innerHTML = open.length
-      ? open.map(c => `<option value="${c.id}">${esc(c.email)}</option>`).join('')
+      ? open.map(c => `<option value="${c.id}">${DEMO ? 'account' : esc(c.email)}</option>`).join('')
       : '<option value="">— no unattached accounts; connect one in ⚙ Settings → Connections —</option>';
     $('connAttachBtn').disabled = !open.length;
   }).catch(() => {});
@@ -4418,7 +4425,7 @@ async function renderConnections() {
     const { accounts } = await api(`/v1/agents/${forId}/connections`);
     if (editAgentId !== forId) return; // dialog moved on while we fetched
     el.innerHTML = accounts.length
-      ? accounts.map(a => `<div class="pair"><span class="grow"><b>${esc(a.email)}</b>
+      ? accounts.map(a => `<div class="pair"><span class="grow"><b class="pii">${esc(a.email)}</b>
           <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span></span>
           <button class="danger" onclick="disconnectAccount('${jsq(a.email)}')">Disconnect</button></div>`).join('')
       : 'No Google accounts on this agent yet — attach one above, or ask the agent in chat to connect one itself.';
@@ -4528,7 +4535,7 @@ async function loadConnections() {
         : '<div class="sub">not attached to any agent yet</div>';
       return `
       <div class="pair" style="flex-wrap:wrap;gap:6px;align-items:flex-start">
-        <span class="grow"><b>${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}
+        <span class="grow"><b class="pii">${esc(c.email)}</b>${c.staleCount ? ` <span style="color:var(--warn);font-size:12px">· ${c.staleCount} stale</span>` : ''}
           <span class="sub">${esc((c.services ?? []).join(', ') || 'default services')} · last consent ${esc((c.createdAt || '').slice(0, 10))}${c.createdAt ? ` (${ago(c.createdAt)})` : ''}</span>
           <div style="margin-top:4px;display:flex;flex-direction:column;gap:2px">${rows}</div></span>
         <button class="danger" onclick="removeConnection('${jsq(c.id)}','${jsq(c.email)}')">Remove</button>
@@ -5654,7 +5661,7 @@ async function renderEditMembers() {
   try {
     const ms = (members[editAgentId] = await api(`/v1/agents/${editAgentId}/members`));
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
-      const label = esc(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 12)));
+      const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
       const linked = m.channelUserId
         ? `<span class="sub" title="Telegram id ${esc(m.channelUserId)}">✓ linked</span>`
         : '<span class="sub" style="color:var(--warn)">not linked yet</span>';
@@ -6427,7 +6434,7 @@ async function loadMyAccount() {
   try { myAccount = await api('/v1/account'); } catch { myAccount = {}; }
   const el = $('tgLinkStatus');
   if (el) el.innerHTML = myAccount.telegramUserId
-    ? `✓ Linked (Telegram id <code>${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
+    ? `✓ Linked (Telegram id <code class="pii">${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
        <button class="hbtn" onclick="unlinkTelegram()">Unlink</button>`
     : `Not linked. Message one of your agents on Telegram, then choose <b>That's me — link</b> on the request card
        that appears here. After that, you never pair with your own agents again.`;
@@ -7079,7 +7086,7 @@ function renderMgmtStrip() {
   el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;
       border:1px dashed var(--line);border-radius:10px;padding:8px 12px;margin-bottom:10px">
     ${dot} <b>🛠 Management bot</b>
-    <a href="https://t.me/${esc(s.botUsername)}" target="_blank" rel="noopener">@${esc(s.botUsername)}</a>
+    <a class="pii" href="https://t.me/${esc(s.botUsername)}" target="_blank" rel="noopener">@${esc(s.botUsername)}</a>
     <span class="sub">${state}</span>
     <span class="spacer" style="flex:1"></span>
     ${bits.join(' ')}

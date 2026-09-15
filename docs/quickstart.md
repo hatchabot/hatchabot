@@ -107,6 +107,7 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 - **Let agents consult each other** — the agent's **Peers** tab.
 - **Keep it cheap** — **Classes** (⚙ → AI sources) put simple agents on a cheaper model and demanding ones on the best, in one place.
 - **Back up / move / share** — every card: Download (a single file), Rehost (to another Hatchabot), Share (as a template with no secrets).
+- **Share a screenshot** — add `?demo` to the app's address (e.g. `http://localhost:8080/?demo`): your email is hidden and family members' names, bot handles, connected accounts and Telegram ids are blurred. Nothing changes on the server; remove `?demo` to see everything again.
 
 ## Upgrading
 

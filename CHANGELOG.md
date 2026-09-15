@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.4.1] — 2026-09-15
+
+### Added
+- **Screenshot mode**: add `?demo` to the app's address and personal details are hidden for screenshots — your email is blanked, and family members' Telegram names (member chips and pairing requests), bot handles, connected Google accounts and your Telegram id are blurred. The owner's own chip reads "You". Nothing changes on the server; remove `?demo` to see everything again.
+- Slide deck and hatchabot.com: "one subscription, the whole household" — everyone gets their own agents, and you pay for one plan.
+
 ## [1.4.0] — 2026-09-15
 
 ### Added
