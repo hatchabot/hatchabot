@@ -14,6 +14,7 @@ h2 { font-size: 28pt; line-height: 1.1; margin: 0 0 16pt; font-weight: 800; lett
 h3 { font-size: 14pt; margin: 0 0 6pt; font-weight: 800; }
 p, li { font-size: 13.5pt; line-height: 1.38; margin: 0 0 8pt; }
 .lead { font-size: 18pt; line-height: 1.35; max-width: 10.5in; }
+.cmp table { font-size: 10.5pt; } .cmp th, .cmp td { padding: 4pt 8pt; }
 .tight .card { padding: 10pt 12pt; } .tight .card p { font-size: 12pt; margin-bottom: 3pt; } .tight .card h3 { font-size: 13.5pt; margin-bottom: 4pt; } .tight .grid3 + .grid3 { margin-top: 0.18in !important; }
 .grid2 { display: flex; gap: 0.45in; }
 .grid2 > div { flex: 1; }
@@ -164,9 +165,10 @@ code { font-family: "DejaVu Sans Mono", monospace; font-size: 0.92em; background
   <div class="foot"><span>Hatchabot</span><span>8</span></div>
 </section>
 
-<section class="slide">
+<section class="slide cmp">
   <p class="eyebrow">Compared</p>
-  <h2>Versus Claude.ai, ChatGPT and Codex</h2>
+  <h2 style="margin-bottom:6pt">Versus Claude.ai, ChatGPT and Codex</h2>
+  <p style="font-size:14pt;margin:0 0 10pt"><b>A chat app is a place you go to talk to one assistant. Hatchabot is a staff of agents that live on your machine and come to you.</b></p>
   <table>
     <tr><th style="width:1.9in"></th><th>Claude.ai / ChatGPT</th><th>Codex (and coding agents)</th><th>Hatchabot</th></tr>
     <tr><td class="hb">Shape</td><td>One assistant, one app, one person</td><td>One agent, one repo, one task at a time</td><td class="hb">A fleet of agents with jobs, for a household</td></tr>
@@ -177,8 +179,9 @@ code { font-family: "DejaVu Sans Mono", monospace; font-size: 0.92em; background
     <tr><td class="hb">Acts on its own</td><td>Limited scheduled tasks</td><td>When you run it</td><td class="hb">Cron and event-triggered tasks; polls its own inbox; consults other agents</td></tr>
     <tr><td class="hb">Access to your things</td><td>Connectors chosen by the vendor</td><td>The repo</td><td class="hb">Per agent: a folder, a git repo, a Google account with limits you set</td></tr>
     <tr><td class="hb">Cost model</td><td>Per seat</td><td>Per token / per seat</td><td class="hb">One Claude Max plan powers every agent; local models cost nothing per token</td></tr>
+    <tr><td class="hb">Lock-in</td><td>Your history stays with them</td><td>The repo is yours; the agent service is theirs</td><td class="hb">Export, move to another machine, change provider — the agents are yours</td></tr>
   </table>
-  <p style="margin-top:10pt;font-size:11pt;color:#6b5e49">Not a replacement for the models — Hatchabot <i>uses</i> Claude. It replaces the app around it. A coding agent with a git repo is one of the things you can make.</p>
+  <p style="margin-top:8pt;font-size:10.5pt;color:#6b5e49">The honest caveat: the chat apps are polished, zero-setup, and their models are excellent. Hatchabot doesn't compete with the model — it <i>uses</i> one (Claude by default). It competes with the app around the model: one assistant, one person, forgets you tomorrow. A coding agent with a git repo is one of the things you can make.</p>
   <div class="foot"><span>Hatchabot</span><span>9</span></div>
 </section>
 
