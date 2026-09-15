@@ -48,8 +48,8 @@ adopting, backing up, and operating a fleet of agents.
   it with a local model and nothing leaves the machine at all.
 - **Organize your fleet.** Sort agents into named groups and arrange them: drag a
   card by its ⠿ grip or a name in the left legend (drop it in another group to move
-  it there), ▲5 / ▼5 to jump five places, Shift-click any arrow to go to the top or
-  bottom, or sort a group — or every group — A→Z.
+  it there), ▲5 / ▼5 to jump five places, pick a position number under the arrows (1 = top),
+  Shift-click any arrow to go to the top or bottom, or sort a group — or every group — A→Z.
 - **Manage scheduled tasks.** See an agent's cron jobs (⏰ Tasks), enable or
   disable them, run one now to test, or delete one — no shelling into the
   container. Tasks live on the agent's durable volume and survive rebuilds.

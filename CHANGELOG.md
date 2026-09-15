@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.6] — 2026-09-15
+
+### Added
+- **Position picker** under each card's reorder rail: it shows the agent's place in its group (1 = top) and moving it is one pick — choose 1 to send it to the top, or any number to put it exactly there. Numbers count the cards you can see in the group; hidden when an agent is alone in its group. The list doesn't refresh while the picker is open.
+
 ## [1.5.5] — 2026-09-15
 
 ### Added
