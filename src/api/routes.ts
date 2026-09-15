@@ -3853,6 +3853,55 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   );
 
+  /**
+   * Connect (or disconnect) a whole selection of agents to EACH OTHER in one go:
+   * every selected agent may consult every other selected agent (grants are
+   * one-directional, so n agents = n×(n−1) grants). Existing grants to agents
+   * outside the selection are left alone. Returns which agents now need a
+   * rebuild — the asking side installs (or removes) the call-agent tool then.
+   */
+  app.post<{ Body: { agentIds?: string[]; connect?: boolean } }>('/v1/agent-peers/mesh', async (req, reply) => {
+    const b = (req.body ?? {}) as { agentIds?: unknown; connect?: unknown };
+    if (!Array.isArray(b.agentIds) || b.agentIds.some((x) => typeof x !== 'string') || typeof b.connect !== 'boolean') {
+      return reply.code(400).send({ error: 'Send agentIds (a list) and connect (true or false).' });
+    }
+    const ids = [...new Set(b.agentIds as string[])];
+    if (ids.length < 2) return reply.code(400).send({ error: 'Pick at least two agents to connect to each other.' });
+    if (ids.length > 50) return reply.code(400).send({ error: 'At most 50 agents at a time.' });
+    const skipped: Array<{ name: string; reason: string }> = [];
+    const members: Agent[] = [];
+    for (const id of ids) {
+      const a = ownedAgent(req, id);
+      if (!a) return reply.code(404).send({ error: 'One of those agents was not found.' });
+      if (a.state === 'ARCHIVED') { skipped.push({ name: a.name, reason: 'archived' }); continue; }
+      members.push(a);
+    }
+    if (members.length < 2) return reply.code(400).send({ error: 'At least two of the selected agents must be active.' });
+    const inSet = new Set(members.map((a) => a.id));
+    let changed = 0;
+    for (const a of members) {
+      const current = store.listAgentPeers(a.id);
+      const next = b.connect
+        ? [...new Set([...current, ...members.filter((m) => m.id !== a.id).map((m) => m.id)])]
+        : current.filter((p) => !inSet.has(p));
+      if (next.length === current.length && next.every((p) => current.includes(p))) continue;
+      store.setAgentPeers(a.id, next);
+      changed++;
+      if (next.length && !store.hasAgentCallToken(a.id)) {
+        await secrets.put(`agent-call-token/${a.id}`, store.createAgentCallToken(a.id, ownerIdOf(req)));
+      }
+    }
+    const pending = store.agentsWithPeersPending(ownerIdOf(req));
+    return {
+      connected: b.connect,
+      agents: members.length,
+      changed,
+      grants: b.connect ? members.length * (members.length - 1) : 0,
+      needRebuild: members.filter((a) => pending.has(a.id)).map((a) => ({ id: a.id, name: a.name, state: a.state })),
+      skipped,
+    };
+  });
+
   /** Agent-to-agent message: authenticated by the CALLER AGENT's call token
    *  (auth-exempt at the hook; validated here). Runs a turn on the target and
    *  returns its reply. */

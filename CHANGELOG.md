@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.1] — 2026-09-15
+
+### Added
+- **Connect agents to each other in one step.** ⚡ Bulk actions → *Connect to each other (agent-to-agent)*: every selected agent may consult every other one (three agents = six one-way grants), existing grants to other agents are kept, call tokens are minted where needed, and — ticked by default — the agents that change are rebuilt so they get their consult tool. *Disconnect from each other* removes exactly the grants inside the selection. The Peers tab now says grants are one-way and points here. API: `POST /v1/agent-peers/mesh` `{ agentIds, connect }`.
+
 ## [1.5.0] — 2026-09-15
 
 ### Added

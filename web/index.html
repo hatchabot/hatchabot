@@ -667,6 +667,8 @@
       Which of your <b>other</b> agents this one may consult. It gets a <code>call-agent</code> tool and can
       ask a peer a question mid-task — each answers with its own memory and accounts (e.g. an investing
       agent asking a tax or legal agent). Same-owner only; runs entirely on this machine.
+      <b>Grants are one-way:</b> to let two agents consult each other, tick each in the other's Peers tab —
+      or select several in <b>⚡ Bulk actions → Connect to each other</b>. Only the asking agent needs a rebuild.
     </div>
     <label>Can consult</label>
     <div id="agentPeerList" class="sub">Loading…</div>
@@ -1588,10 +1590,17 @@
       <option value="rebuild">Rebuild</option>
       <option value="stop">Stop</option>
       <option value="start">Start</option>
+      <option value="peers-connect">Connect to each other (agent-to-agent)</option>
+      <option value="peers-disconnect">Disconnect from each other</option>
     </select>
     <select id="faModel" style="width:auto;min-width:180px"></select>
     <select id="faClass" style="width:auto;min-width:160px;display:none"></select>
     <select id="faSource" style="width:auto;min-width:160px;display:none"></select>
+  </div>
+  <div id="faPeersOpts" style="display:none;margin-top:6px">
+    <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
+      <input type="checkbox" id="faPeersRebuild" checked style="width:auto;margin-top:3px;flex:none">
+      <span>Rebuild the ones that change now <span class="sub">— the asking side gets (or loses) its consult tool on rebuild; memory is kept</span></span></label>
   </div>
   <div id="faSourceOpts" style="display:none;margin-top:6px">
     <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
@@ -3338,6 +3347,7 @@ function faRenderAction() {
   $('faClass').style.display = action === 'class' ? '' : 'none';
   $('faSource').style.display = action === 'source' ? '' : 'none';
   $('faSourceOpts').style.display = action === 'source' ? '' : 'none';
+  $('faPeersOpts').style.display = action.startsWith('peers-') ? '' : 'none';
   const sel = faSelected().map(cb => agents.find(a => a.id === cb.dataset.id)).filter(Boolean);
   let note = '';
   if (action === 'source') {
@@ -3383,6 +3393,12 @@ function faRenderAction() {
       : action === 'checkpoint' ? 'Each running agent writes its current conversation into memory (~20s and some tokens per agent — runs one at a time). Stopped agents are skipped; an agent whose AI source is out of credits will report "not saved".'
       : '';
   }
+  if (action === 'peers-connect') {
+    const n = sel.filter(a => a.state !== 'ARCHIVED').length;
+    note = n < 2 ? 'Pick at least two agents.' : `Each of the ${n} may consult every other one — ${n * (n - 1)} one-way grants. Grants to agents outside the selection are kept.`;
+  } else if (action === 'peers-disconnect') {
+    note = 'Removes the grants between the selected agents only; their other peers are kept.';
+  }
   $('faActionNote').textContent = note;
 }
 async function faApply() {
@@ -3406,6 +3422,29 @@ async function faApply() {
       $('faErr').textContent = (r.skipped || []).slice(0, 3).map(s => `${s.name}: ${s.reason}`).join(' · ');
       if ($('faSourceRecover').checked && r.rebuilding) toast('Each agent will recover its pre-switch conversation once it is back up, and confirm in its chat.', 9000);
     } catch (e) { $('faErr').textContent = e.message; }
+    finally { $('faApplyBtn').disabled = false; await refresh(false); }
+    return;
+  }
+  if (action === 'peers-connect' || action === 'peers-disconnect') {
+    const connect = action === 'peers-connect';
+    if (ids.length < 2) { $('faErr').textContent = 'Pick at least two agents.'; return; }
+    $('faApplyBtn').disabled = true; $('faErr').textContent = ''; $('faResults').innerHTML = connect ? 'Connecting…' : 'Disconnecting…';
+    try {
+      const r = await api('/v1/agent-peers/mesh', { method: 'POST', body: { agentIds: ids, connect } });
+      const bits = [connect ? `${r.agents} agents can now consult each other (${r.grants} grants)` : `grants between ${r.agents} agents removed`];
+      if (r.skipped?.length) bits.push(`skipped ${r.skipped.map(x => `${x.name} (${x.reason})`).join(', ')}`);
+      let rebuilt = 0;
+      const todo = (r.needRebuild || []).filter(a => a.state === 'RUNNING' || a.state === 'STOPPED');
+      if ($('faPeersRebuild').checked) {
+        for (const a of todo) {
+          try { await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} }); rebuilt++; }
+          catch (e) { $('faErr').textContent = `${a.name}: ${e.message}`; }
+        }
+        if (rebuilt) bits.push(`rebuilding ${rebuilt} (a few at a time)`);
+      } else if (todo.length) bits.push(`${todo.length} need a rebuild — the legend marks them`);
+      if (!r.changed) bits.push('nothing to change — already set');
+      $('faResults').innerHTML = `✓ ${esc(bits.join(' · '))}.`;
+    } catch (e) { $('faErr').textContent = e.message; $('faResults').innerHTML = ''; }
     finally { $('faApplyBtn').disabled = false; await refresh(false); }
     return;
   }
