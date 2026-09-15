@@ -1,243 +1,285 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Hatchabot</title>
 <style>
-@page { size: 13.333in 7.5in; margin: 0; }
-* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
-body { font-family: "DejaVu Sans", "Liberation Sans", Arial, sans-serif; color: #14161a; }
-.slide { width: 13.333in; height: 7.5in; page-break-after: always; padding: 0.7in 0.9in; position: relative; background: #fbf7f0; overflow: hidden; }
-.slide.dark { background: #14161a; color: #f4efe6; }
-.slide.accent { background: #e8a33d; color: #14161a; }
-.eyebrow { font-size: 11pt; letter-spacing: 0.12em; text-transform: uppercase; color: #a3671a; font-weight: 700; margin: 0 0 8pt; }
-.dark .eyebrow { color: #e8a33d; }
-h1 { font-size: 40pt; line-height: 1.05; margin: 0 0 14pt; font-weight: 800; letter-spacing: -0.01em; }
-h2 { font-size: 28pt; line-height: 1.1; margin: 0 0 16pt; font-weight: 800; letter-spacing: -0.01em; }
-h3 { font-size: 14pt; margin: 0 0 6pt; font-weight: 800; }
-p, li { font-size: 13.5pt; line-height: 1.38; margin: 0 0 8pt; }
-.lead { font-size: 18pt; line-height: 1.35; max-width: 10.5in; }
-.cmp table { font-size: 10.5pt; } .cmp th, .cmp td { padding: 4pt 8pt; }
-.tight .card { padding: 10pt 12pt; } .tight .card p { font-size: 12pt; margin-bottom: 3pt; } .tight .card h3 { font-size: 13.5pt; margin-bottom: 4pt; } .tight .grid3 + .grid3 { margin-top: 0.18in !important; }
-.grid2 { display: flex; gap: 0.45in; }
-.grid2 > div { flex: 1; }
-.grid3 { display: flex; gap: 0.35in; }
-.grid3 > div { flex: 1; }
-.card { background: #fff; border: 1px solid #e6dccb; border-radius: 10pt; padding: 14pt 16pt; }
-.dark .card { background: #1f2229; border-color: #33373f; }
-.card p, .card li { font-size: 13pt; margin-bottom: 5pt; }
-.card h3 { font-size: 15pt; }
-.foot { position: absolute; bottom: 0.4in; left: 0.9in; right: 0.9in; font-size: 9.5pt; color: #8a7a62; display: flex; justify-content: space-between; }
-.dark .foot { color: #7b8190; }
-.egg { display: inline-block; width: 0.55in; height: 0.68in; background: #14161a; border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%; position: relative; vertical-align: middle; margin-right: 12pt; }
-.egg::after { content: ""; position: absolute; left: 18%; right: 18%; top: 33%; height: 0; border-top: 4pt solid #e8a33d; }
-.accent .egg { background: #14161a; }
-.dark .egg { background: #f4efe6; }
-table { border-collapse: collapse; width: 100%; font-size: 11.5pt; }
-th, td { text-align: left; padding: 6pt 9pt; border-bottom: 1px solid #e6dccb; vertical-align: top; }
-th { font-size: 10.5pt; letter-spacing: 0.06em; text-transform: uppercase; color: #a3671a; }
-td.hb { font-weight: 700; }
-.chip { display: inline-block; background: #14161a; color: #f4efe6; border-radius: 999pt; padding: 2pt 9pt; font-size: 10.5pt; margin: 0 4pt 4pt 0; }
-.accent .chip { background: #14161a; }
-ul { padding-left: 1.1em; margin: 0; }
-.big { font-size: 64pt; font-weight: 800; line-height: 1; margin: 0; }
-.steps { counter-reset: s; }
-.steps > div { display: flex; gap: 12pt; margin-bottom: 9pt; }
-.steps > div::before { counter-increment: s; content: counter(s); flex: none; width: 24pt; height: 24pt; border-radius: 50%; background: #14161a; color: #e8a33d; font-weight: 800; font-size: 12pt; display: flex; align-items: center; justify-content: center; margin-top: 2pt; }
-.diagram { display: flex; align-items: center; gap: 18pt; margin-top: 10pt; }
-.box { background: #fff; border: 2px solid #14161a; border-radius: 10pt; padding: 10pt 12pt; font-size: 11pt; text-align: center; }
-.box b { display: block; font-size: 12.5pt; margin-bottom: 3pt; }
-.arrow { font-size: 24pt; color: #a3671a; }
-.stack { display: flex; flex-direction: column; gap: 6pt; }
-code { font-family: "DejaVu Sans Mono", monospace; font-size: 0.92em; background: rgba(0,0,0,0.06); padding: 1pt 4pt; border-radius: 4pt; }
-.dark code { background: rgba(255,255,255,0.1); }
+@font-face { font-family:"Bricolage Grotesque"; src:url("fonts/bricolage-grotesque-latin.woff2") format("woff2"); }
+@font-face { font-family:"Bricolage Grotesque"; src:url("fonts/bricolage-grotesque-latin-ext.woff2") format("woff2"); unicode-range:U+0100-024F, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F; }
+@page { size:13.333in 7.5in; margin:0 }
+* { box-sizing:border-box }
+html, body { margin:0; padding:0 }
+body { font-family:"Liberation Sans", "DejaVu Sans", Arial, sans-serif; color:#14161a }
+.slide { width:13.333in; height:7.5in; page-break-after:always; padding:0.65in 0.9in; position:relative; background:#fbf7f0; overflow:hidden }
+.slide.dark { background:#14161a; color:#f4efe6 }
+.slide.accent { background:#e8a33d; color:#14161a }
+h1, h2, h3, .display { font-family:"Bricolage Grotesque", "Liberation Sans", sans-serif; letter-spacing:-0.01em }
+.eyebrow { font-size:11pt; letter-spacing:0.14em; text-transform:uppercase; color:#a3671a; font-weight:700; margin:0 0 6pt }
+.dark .eyebrow { color:#e8a33d }
+.accent .eyebrow { color:#14161a }
+h1 { font-size:54pt; line-height:1.02; margin:0 0 14pt; font-weight:800 }
+h2 { font-size:32pt; line-height:1.08; margin:0 0 18pt; font-weight:800 }
+h3 { font-size:15.5pt; margin:0 0 5pt; font-weight:700; line-height:1.2 }
+p, li { font-size:13.5pt; line-height:1.4; margin:0 0 7pt }
+.lead { font-size:18pt; line-height:1.35; max-width:10.8in }
+code { font-family:"DejaVu Sans Mono", monospace; font-size:0.86em; background:rgba(20,22,26,0.07); padding:1pt 4pt; border-radius:4pt; white-space:nowrap }
+.dark code { background:rgba(255,255,255,0.11) }
+.row { display:flex; gap:0.32in }
+.row > * { flex:1 }
+.card { background:#fff; border:1px solid #e6dccb; border-radius:11pt; padding:15pt 17pt }
+.dark .card { background:#1f2229; border-color:#33373f }
+.card p, .card li { font-size:13pt }
+ul { padding-left:1.05em; margin:0 }
+.takeaway { position:absolute; left:0.9in; right:0.9in; bottom:0.95in; background:#14161a; color:#f4efe6; border-radius:10pt; padding:12pt 18pt; font-family:"Bricolage Grotesque", sans-serif; font-weight:700; font-size:17pt; line-height:1.25 }
+.dark .takeaway, .accent .takeaway { background:#e8a33d; color:#14161a }
+.accent .takeaway { background:#14161a; color:#f4efe6 }
+.foot { position:absolute; bottom:0.38in; left:0.9in; right:0.9in; font-size:9.5pt; color:#8a7a62; display:flex; justify-content:space-between }
+.dark .foot { color:#7b8190 } .accent .foot { color:#5a3d10 }
+.accent .big { color:#a3671a }
+.brand { font-family:"Bricolage Grotesque", sans-serif; font-weight:800; font-size:21pt; letter-spacing:0.04em; vertical-align:middle }
+.egg { display:inline-block; width:0.5in; height:0.62in; background:#14161a; border-radius:50% 50% 50% 50% / 60% 60% 40% 40%; position:relative; vertical-align:middle; margin-right:12pt }
+.egg::after { content:""; position:absolute; left:18%; right:18%; top:33%; border-top:4pt solid #e8a33d }
+.formula { margin-top:18pt; font-family:"Bricolage Grotesque", sans-serif; font-weight:700; font-size:17pt }
+.formula .chip { display:inline-block; background:#14161a; color:#f4efe6; border-radius:8pt; padding:5pt 12pt }
+.formula .eq { display:inline-block; border:2.5pt solid #14161a; border-radius:8pt; padding:3pt 11pt }
+.formula .op { display:inline-block; margin:0 8pt }
+.cmdline { display:inline-block; background:#14161a; color:#f1ede4; border-radius:9pt; padding:9pt 14pt; font-family:"DejaVu Sans Mono", monospace; font-size:13pt }
+.cmdline b { color:#e8a33d; font-weight:400 }
+table.t { border-collapse:collapse; width:100%; font-size:11.5pt }
+table.t th, table.t td { text-align:left; padding:6pt 9pt; border-bottom:1px solid #e6dccb; vertical-align:top }
+table.t th { font-size:10pt; letter-spacing:0.07em; text-transform:uppercase; color:#a3671a }
+table.t td.k { font-weight:700; white-space:nowrap }
+table.t td.hb { background:#fff4e0; font-weight:700 }
+table.t th.hb { background:#fff4e0 }
+.cmp table.t { font-size:10.5pt } .cmp table.t th, .cmp table.t td { padding:4pt 8pt }
+table.flow { border-collapse:separate; border-spacing:0; width:100%; margin-top:4pt }
+table.flow td { vertical-align:middle; padding:0 }
+table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24pt }
+.box { background:#fff; border:2px solid #14161a; border-radius:10pt; padding:6pt 10pt; text-align:center; margin:4pt 0; font-size:10.5pt; line-height:1.28 }
+.box b { display:block; font-family:"Bricolage Grotesque", sans-serif; font-size:13pt; margin-bottom:2pt }
+.steps .s { position:relative; padding-left:0.46in; margin-bottom:17pt }
+.steps .s .n { position:absolute; left:0; top:0; width:24pt; height:24pt; border-radius:50%; background:#e8a33d; color:#14161a; font-weight:800; font-size:12pt; text-align:center; line-height:24pt }
+.steps p { margin:0 }
+.compact .card { padding:11pt 15pt } .compact .card p { font-size:12pt; margin:0 }
+.tight .card { padding:11pt 15pt } .tight .card p { font-size:12.5pt; margin:0 } .tight h2 { margin-bottom:14pt }
+.big { font-family:"Bricolage Grotesque", sans-serif; font-size:30pt; font-weight:800; line-height:1; margin:0 0 4pt; color:#a3671a }
+.dark .big { color:#e8a33d }
 </style></head><body>
 
+<!-- 1 -->
 <section class="slide accent">
-  <div style="margin-top:1.3in"><span class="egg"></span><span style="font-size:22pt;font-weight:800;vertical-align:middle;letter-spacing:.02em">HATCHABOT</span></div>
-  <h1 style="font-size:52pt;margin-top:0.5in;max-width:10.5in">Your AI should be a staff,<br>not a search box.</h1>
-  <p class="lead" style="margin-top:14pt">Many purpose-built agents · on hardware you own · thinking with the AI you choose · reachable by the people you let in · through Telegram.</p>
-  <div style="margin-top:22pt;display:flex;align-items:center;gap:14pt;font-size:17pt;font-weight:800">
-    <span style="display:inline-block;background:#14161a;color:#f4efe6;border-radius:8pt;padding:6pt 12pt">OpenClaw</span><span>+</span>
-    <span style="display:inline-block;background:#14161a;color:#f4efe6;border-radius:8pt;padding:6pt 12pt">Docker</span><span>+</span>
-    <span style="display:inline-block;background:#14161a;color:#f4efe6;border-radius:8pt;padding:6pt 12pt">Telegram</span><span>=</span>
-    <span style="display:inline-block;border:2.5pt solid #14161a;border-radius:8pt;padding:4pt 12pt">Hatchabot</span>
-  </div>
-  <p style="font-size:12pt;margin-top:8pt;opacity:.85">the open-source agent runtime · one isolated container per agent · the front door everyone already has</p>
-  <div class="foot"><span>hatchabot.com · github.com/hatchabot/hatchabot</span><span>v1.2 · September 2026</span></div>
+  <div style="margin-top:0.9in"><span class="egg"></span><span class="brand">HATCHABOT</span></div>
+  <h1 style="margin-top:0.42in;max-width:10.6in">Your AI should be a staff,<br>not a search box.</h1>
+  <p class="lead">Many purpose-built agents · on hardware you own · thinking with the AI you choose · reachable by the people you let in · through Telegram.</p>
+  <div class="formula"><span class="chip">OpenClaw</span><span class="op">+</span><span class="chip">Docker</span><span class="op">+</span><span class="chip">Telegram</span><span class="op">=</span><span class="eq">Hatchabot</span></div>
+  <p style="font-size:12pt;margin-top:9pt;opacity:.85">the open-source agent runtime · one isolated container per agent · the front door everyone already has</p>
+  <div class="foot"><span>hatchabot.com · github.com/hatchabot/hatchabot</span><span>v1.4 · September 2026</span></div>
 </section>
 
+<!-- 2 -->
 <section class="slide">
   <p class="eyebrow">The problem</p>
   <h2>A brilliant model, in the wrong shape</h2>
-  <div class="grid2">
-    <div>
+  <div class="row">
+    <div style="flex:1.1">
       <p class="lead">You already pay for a model that can do almost anything. What you get is <b>one assistant, in one app, from one company, for one person</b> — whose memory of you is whatever that company decides to keep.</p>
       <ul style="margin-top:12pt">
-        <li><b>"I keep re-explaining myself."</b> Every conversation starts from zero.</li>
-        <li><b>"One assistant can't be good at everything."</b> Your tax questions, your kids' homework and your condo board all get the same generic voice.</li>
-        <li><b>"I don't want to be locked in."</b> Your history, your prompts, your habits live in someone else's product.</li>
-        <li><b>"Only I can use it."</b> Your family can't message it; it doesn't do anything when you're not looking.</li>
+        <li><b>“I keep re-explaining myself.”</b> Every conversation starts from zero.</li>
+        <li><b>“One assistant can't be good at everything.”</b> Your tax questions, your kids' homework and your condo board all get the same generic voice.</li>
+        <li><b>“I don't want to be locked in.”</b> Your history, your prompts and your habits live in someone else's product.</li>
+        <li><b>“Only I can use it.”</b> Your family can't message it, and it does nothing when you're not looking.</li>
       </ul>
     </div>
-    <div class="card" style="align-self:flex-start">
-      <h3>Chat apps are sessions you visit</h3>
-      <p>Open the app, type, close it, forget. The model is powerful; the container around it is a search box with a scroll bar.</p>
-      <h3 style="margin-top:10pt">Hatchabot agents are things you own</h3>
-      <p>Files on your disk with a job, a personality and a memory that grows for years — behind a contact your whole household can message.</p>
+    <div style="flex:0.9">
+      <div class="card"><h3>Chat apps are sessions you visit</h3><p>Open the app, type, close it, forget. The model is powerful; the container around it is a search box with a scroll bar.</p></div>
+      <div class="card" style="margin-top:12pt;border:2px solid #14161a"><h3>Hatchabot agents are things you own</h3><p>Files on your disk with a job, a personality and a memory that grows for years — behind a contact your whole household can message.</p></div>
     </div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>2</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>2</span></div>
 </section>
 
+<!-- 3 -->
 <section class="slide dark tight">
   <p class="eyebrow">The idea</p>
   <h2>The opposite shape</h2>
-  <div class="grid3">
+  <div class="row">
     <div class="card"><h3>Many agents, each with a job</h3><p>A kitchen helper, a tax advisor, a homework tutor, a scheduler that reads its own inbox. Made in a minute: a name, a paragraph, a bot token.</p></div>
     <div class="card"><h3>On a computer you own</h3><p>Every agent is a container on your machine. Memory, credentials and history stay home. Pair it with a local model and nothing leaves at all.</p></div>
-    <div class="card"><h3>With the AI you choose</h3><p>Claude (subscription or API), Gemini, or a local model — per agent, switchable live. Cheap models for simple jobs, the best for the ones that matter.</p></div>
+    <div class="card"><h3>With the AI you choose</h3><p>Claude (subscription or API), Gemini or a local model — per agent, switchable live. Cheap models for simple jobs, the best for the ones that matter.</p></div>
   </div>
-  <div class="grid3" style="margin-top:0.3in">
-    <div class="card"><h3>For the people you let in</h3><p>Invite family by link or QR. Several people can talk to one agent — privately, or together in a group room — with memory shared or personal, and everyone told which.</p></div>
+  <div class="row" style="margin-top:0.16in">
+    <div class="card"><h3>For the people you let in</h3><p>Invite family by link or QR. Talk to one agent privately or together in a group room, with memory shared or personal — and everyone told which.</p></div>
     <div class="card"><h3>Through Telegram</h3><p>The app everyone already has. Each agent is a real contact with a name and a face. Nothing to install, no accounts to create.</p></div>
-    <div class="card"><h3>Run as a fleet</h3><p>Not a chatbot — a control plane: health, usage, audit trail, backups, security posture, upgrades rolled out one agent at a time.</p></div>
+    <div class="card"><h3>Run as a fleet</h3><p>Not a chatbot but a control plane: health, usage, audit trail, backups, security posture, upgrades rolled out one agent at a time.</p></div>
   </div>
-  <div style="margin-top:0.2in;background:#e8a33d;color:#14161a;border-radius:10pt;padding:10pt 14pt;font-size:13pt"><b>OpenClaw + Docker = Hatchabot.</b> Every agent is a stock <b>OpenClaw</b> gateway — the open-source agent runtime with tools, memory search and channels — running in its own <b>Docker</b> container with its own volume, bot and credentials. Hatchabot is OpenClaw <i>new and improved for a household</i>: many isolated installs, run as a fleet, by more than one person, with the lifecycle and safety OpenClaw deliberately leaves to you.</div>
-  <div class="foot"><span>Hatchabot</span><span>3</span></div>
+  <div class="takeaway" style="bottom:0.72in;padding:10pt 16pt;font-size:13.5pt;font-weight:400;font-family:'Liberation Sans',sans-serif"><b style="font-family:'Bricolage Grotesque',sans-serif;font-size:15pt">OpenClaw + Docker = Hatchabot.</b> Every agent is a stock OpenClaw gateway — the open-source agent runtime — in its own Docker container with its own volume, bot and credentials. Hatchabot is OpenClaw <i>new and improved for a household</i>: many isolated installs, run as a fleet, by more than one person.</div>
+  <div class="foot"><span>hatchabot.com</span><span>3</span></div>
 </section>
 
+<!-- 4 -->
 <section class="slide">
   <p class="eyebrow">Principles · 1 of 2</p>
   <h2>What we believe an agent is</h2>
-  <div class="grid3">
-    <div class="card"><h3>Agents are things you own</h3><p>Each one is a container with a persona (<code>SOUL.md</code>), operating rules (<code>AGENTS.md</code>) and memory (<code>MEMORY.md</code>) — plain files you can read and edit, snapshotted before every change.</p><p>An agent persists across restarts, rebuilds, model switches and moves between machines. What it knows about you accumulates for years, and it's yours.</p></div>
-    <div class="card"><h3>Memory is a file, not a chat log</h3><p>The agent writes durable facts as it goes. Save a conversation to memory. Download its whole chat history. Recover the context of a thread that got reset.</p><p>Nothing important is trapped in a transcript.</p></div>
+  <div class="row">
+    <div class="card"><h3>Agents are things you own</h3><p>Each one is a container with a persona, operating rules and a memory — plain files you can read and edit, snapshotted before every change:</p><p><code>SOUL.md</code> · <code>AGENTS.md</code> · <code>MEMORY.md</code></p><p>An agent survives restarts, rebuilds, model switches and moves between machines.</p></div>
+    <div class="card"><h3>Memory is a file, not a chat log</h3><p>The agent writes durable facts as it goes. Save a conversation to memory, download its whole chat history, or recover the context of a thread that got reset.</p><p>Nothing important is trapped in a transcript.</p></div>
     <div class="card"><h3>Not locked to one lab</h3><p>Anthropic, Google, or a local server with no account at all — per agent, switchable live without a rebuild.</p><p>Group agents into <b>classes</b> and retune a whole tier in one place. Your agents outlive any provider's pricing decision.</p></div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>4</span></div>
+  <div class="takeaway">An agent is a folder of files you own — not a session you visit. What it learns about you accumulates for years, and it's yours.</div>
+  <div class="foot"><span>hatchabot.com</span><span>4</span></div>
 </section>
 
+<!-- 5 -->
 <section class="slide">
   <p class="eyebrow">Principles · 2 of 2</p>
   <h2>How it should behave</h2>
-  <div class="grid3">
-    <div class="card"><h3>The front door is Telegram</h3><p>No app to ship, no accounts to run, no notification system to build. Bots are first-class in Telegram: deep links, group chats, per-agent allowlists — for free.</p></div>
-    <div class="card"><h3>Isolation by construction</h3><p>One container, one bot, one set of credentials per agent. Give an agent exactly the data it needs — a folder, a git repo, a Google account with "read mail but never send" — and nothing else.</p><p>A daily posture check names every agent that has both a wide audience and a powerful capability.</p></div>
-    <div class="card"><h3>Reversible, or honest about not being</h3><p>Snapshots before edits and rebuilds. Rollback on a failed move. A full audit timeline. Usage reported as tokens, not a made-up bill. Health probes that distinguish "listed as running" from "actually answering".</p></div>
+  <div class="row">
+    <div class="card"><h3>The front door is Telegram</h3><p>No app to ship, no accounts to run, no notification system to build. Bots are first-class in Telegram: deep links, group chats and per-agent allowlists, for free.</p></div>
+    <div class="card"><h3>Isolation by construction</h3><p>One container, one bot, one set of credentials per agent. Give an agent exactly the data it needs — a folder, a git repo, a Google account with “read mail but never send” — and nothing else.</p><p>A daily posture check names every agent that has both a wide audience and a powerful capability.</p></div>
+    <div class="card"><h3>Reversible, or honest about it</h3><p>Snapshots before edits and rebuilds. Rollback on a failed move or deploy. A full audit timeline. Usage reported as tokens, not a made-up bill. Health probes that tell “listed as running” from “actually answering”.</p></div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>5</span></div>
+  <div class="takeaway">One agent failing — a runaway task, a bad edit, a rate-limited source — never takes the others with it.</div>
+  <div class="foot"><span>hatchabot.com</span><span>5</span></div>
 </section>
 
+<!-- 6 -->
 <section class="slide accent">
-  <p class="eyebrow" style="color:#14161a">Two deliberate choices</p>
+  <p class="eyebrow">Two deliberate choices</p>
   <h2>Claude Max and Telegram, on purpose</h2>
-  <div class="grid2">
-    <div class="card"><h3>Claude Max: consumer pricing for a fleet</h3><p>A Max subscription is a flat monthly plan. <code>claude setup-token</code> turns it into a portable credential Hatchabot injects into every agent — one token per account, revocable, never a shared login.</p><p>So a household of always-on agents — schedulers polling inboxes, advisors reading mail, a dozen personas — runs on <b>one flat fee</b> instead of per-token metering. For this kind of fleet that is the difference between <i>affordable</i> and <i>a bill you watch</i>.</p></div>
-    <div class="card"><h3>Telegram: 20 real identities per account</h3><p>Free, on every platform, and bots are a first-class feature. BotFather makes one in a minute; a free account can own 20, Premium 40, and every household member adds more.</p><p>Each agent gets a separate identity people already know how to message. The alternative — shipping our own app with our own accounts and push notifications — would cost more than the whole rest of the product.</p></div>
+  <div class="row">
+    <div class="card"><div class="big">1 flat fee</div><h3>Claude Max: consumer pricing for a fleet</h3><p>A Max subscription is a flat monthly plan. <code>claude setup-token</code> turns it into a portable credential Hatchabot injects into every agent — one token per account, revocable, never a shared login.</p><p>So a household of always-on agents — schedulers polling inboxes, advisors reading mail, a dozen personas — runs on <b>one flat fee</b> instead of per-token metering.</p></div>
+    <div class="card"><div class="big">20 bots</div><h3>Telegram: 20 real identities per free account</h3><p>Free, on every platform, and bots are a first-class feature. BotFather makes one in a minute; a free account can own 20, Premium 40, and every household member adds more.</p><p>The alternative — our own app, our own accounts, our own push notifications — would cost more than the whole rest of the product.</p></div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>6</span></div>
+  <div class="takeaway">A flat fee and a free front door: a household of agents that's affordable to leave on.</div>
+  <div class="foot"><span>hatchabot.com</span><span>6</span></div>
 </section>
 
+<!-- 7 -->
 <section class="slide">
   <p class="eyebrow">Features</p>
   <h2>What you can do that you can't do with a chat app</h2>
-  <table>
-    <tr><th style="width:2.6in">Capability</th><th>In practice</th></tr>
-    <tr><td class="hb">Create agents fast</td><td>Name + one paragraph + a bot token → a running, remembering agent in a minute. Clone one you like; import a shared template; keep a launchpad of planned agents.</td></tr>
-    <tr><td class="hb">Many humans, one agent</td><td>Private one-to-one threads with the same agent, or a shared room. Invite by link or QR. Shared or private memory, declared.</td></tr>
-    <tr><td class="hb">Choose the brain per agent</td><td>Claude, Gemini or a local model; switch the model live; classes for tiers; migrate a whole source at once.</td></tr>
-    <tr><td class="hb">Give agents accounts and data</td><td>Gmail / Calendar / Drive / Sheets per agent (with "no send"); read-only or writable folders; git repos it commits to; per-agent secrets.</td></tr>
-    <tr><td class="hb">Schedule and react</td><td>Cron tasks, event-triggered tasks (a zero-cost check decides whether to wake the model), run-now tests.</td></tr>
-    <tr><td class="hb">Agents that consult each other</td><td>Grant an investing agent access to your tax and legal agents; it asks them mid-task, with scoped tokens, loop guards and rate limits.</td></tr>
-    <tr><td class="hb">Master → child lineage</td><td>A master agent's improvements distil into proposals that push to its children.</td></tr>
-    <tr><td class="hb">Move, copy, share, back up</td><td>Rehost to another machine in one step; download as one file; share as a template with no secrets; nightly backups with a restore drill.</td></tr>
-    <tr><td class="hb">Rebuild without fear</td><td>Rebuilds keep memory. Only a change of AI source resets a thread — and that offers to save memory first, and to recover context after.</td></tr>
+  <table class="t">
+    <tr><th style="width:2.7in">Capability</th><th>In practice</th></tr>
+    <tr><td class="k">Create agents fast</td><td>A name, one paragraph and a bot token → a running, remembering agent in a minute. Clone one you like; import a shared template; keep a launchpad of planned agents.</td></tr>
+    <tr><td class="k">Many humans, one agent</td><td>Private one-to-one threads with the same agent, or a shared room. Invite by link or QR. Shared or private memory, declared.</td></tr>
+    <tr><td class="k">Choose the brain per agent</td><td>Claude, Gemini or a local model; switch the model live; classes for tiers; migrate a whole source at once.</td></tr>
+    <tr><td class="k">Give agents accounts and data</td><td>Gmail, Calendar, Drive and Sheets per agent (with “no send”); read-only or writable folders; git repos it commits to — public repos need no key at all; per-agent secrets.</td></tr>
+    <tr><td class="k">Schedule and react</td><td>Cron tasks, event-triggered tasks (a zero-cost check decides whether to wake the model), run-now tests.</td></tr>
+    <tr><td class="k">Agents that consult each other</td><td>Grant an investing agent access to your tax and legal agents; it asks them mid-task, with scoped tokens, loop guards and rate limits.</td></tr>
+    <tr><td class="k">Master → child lineage</td><td>A master agent's improvements distil into proposals that push to its children.</td></tr>
+    <tr><td class="k">Move, copy, share, back up</td><td>Rehost to another machine in one step; download as one file; share as a template with no secrets; nightly backups with a restore drill.</td></tr>
+    <tr><td class="k">Rebuild without fear</td><td>Rebuilds keep memory. Only a change of AI source resets a thread — and that offers to save memory first, and to recover the context after.</td></tr>
   </table>
-  <div class="foot"><span>Hatchabot</span><span>7</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>7</span></div>
 </section>
 
+<!-- 8 -->
 <section class="slide dark">
   <p class="eyebrow">Features · operating a fleet</p>
   <h2>Operator-grade, because agents that matter need it</h2>
-  <div class="grid3">
-    <div class="card"><h3>See what's going on</h3><ul><li>Fleet health: probed, not assumed</li><li>Usage per agent per day, tokens/hour</li><li>Audit timeline of every change</li><li>Daily security posture with diffs</li><li>Legend with every pending action</li></ul></div>
-    <div class="card"><h3>Change things safely</h3><ul><li>Bulk actions by source, group, class, state</li><li>Classes: model + source + image, retuned in one place</li><li>Runtime images: build a candidate, try it on <b>one</b> agent, promote to the fleet, or discard</li><li>Snapshots before every edit; rollback on failed moves</li></ul></div>
-    <div class="card"><h3>Keep it yours</h3><ul><li>Nightly backups: every volume, the registry, the key</li><li>Restore one agent from any set</li><li>Export / import as a single file</li><li>Runners: place agents on a second machine</li><li>Everything works over a private Tailscale network — nothing opened to the internet</li></ul></div>
+  <div class="row">
+    <div class="card"><h3>See what's going on</h3><ul><li>Fleet health: probed, not assumed</li><li>Usage per agent per day, tokens per hour</li><li>An audit timeline of every change</li><li>A daily security posture with diffs</li><li>A legend showing every pending action</li></ul></div>
+    <div class="card"><h3>Change things safely</h3><ul><li>Bulk actions by source, group, class or state</li><li>Classes: model + source + runtime image, retuned in one place</li><li>Runtime images: build a candidate, try it on <b>one</b> agent, promote or discard</li><li>Snapshots before every edit; rollback on failed moves</li></ul></div>
+    <div class="card"><h3>Keep it yours</h3><ul><li>Nightly backups: every volume, the registry, the key</li><li>Restore one agent from any backup set</li><li>Export and import as a single file</li><li>Runners: place agents on a second machine</li><li>All over a private Tailscale network — nothing opened to the internet</li></ul></div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>8</span></div>
+  <div class="takeaway">Everything an operator needs — and nothing a family member ever has to see.</div>
+  <div class="foot"><span>hatchabot.com</span><span>8</span></div>
 </section>
 
+<!-- 9 -->
 <section class="slide cmp">
   <p class="eyebrow">Compared</p>
   <h2 style="margin-bottom:6pt">Versus Claude.ai, ChatGPT and Codex</h2>
-  <p style="font-size:14pt;margin:0 0 10pt"><b>A chat app is a place you go to talk to one assistant. Hatchabot is a staff of agents that live on your machine and come to you.</b></p>
-  <table>
-    <tr><th style="width:1.9in"></th><th>Claude.ai / ChatGPT</th><th>Codex (and coding agents)</th><th>Hatchabot</th></tr>
-    <tr><td class="hb">Shape</td><td>One assistant, one app, one person</td><td>One agent, one repo, one task at a time</td><td class="hb">A fleet of agents with jobs, for a household</td></tr>
-    <tr><td class="hb">Runs where</td><td>Their cloud</td><td>Their cloud or your terminal</td><td class="hb">Your machine (containers), reachable over your private network</td></tr>
-    <tr><td class="hb">Memory</td><td>What the provider keeps; opaque</td><td>The repo and the session</td><td class="hb">Files you read, edit, back up; survives rebuilds and moves</td></tr>
-    <tr><td class="hb">Who can talk to it</td><td>You, in the app</td><td>You, in the terminal or PR</td><td class="hb">Anyone you invite, on Telegram; private threads or group rooms</td></tr>
-    <tr><td class="hb">Choice of AI</td><td>That company's models</td><td>That company's models</td><td class="hb">Claude, Gemini, local — per agent, switchable live</td></tr>
-    <tr><td class="hb">Acts on its own</td><td>Limited scheduled tasks</td><td>When you run it</td><td class="hb">Cron and event-triggered tasks; polls its own inbox; consults other agents</td></tr>
-    <tr><td class="hb">Access to your things</td><td>Connectors chosen by the vendor</td><td>The repo</td><td class="hb">Per agent: a folder, a git repo, a Google account with limits you set</td></tr>
-    <tr><td class="hb">Cost model</td><td>Per seat</td><td>Per token / per seat</td><td class="hb">One Claude Max plan powers every agent; local models cost nothing per token</td></tr>
-    <tr><td class="hb">Lock-in</td><td>Your history stays with them</td><td>The repo is yours; the agent service is theirs</td><td class="hb">Export, move to another machine, change provider — the agents are yours</td></tr>
+  <p style="font-size:13pt;margin:0 0 10pt"><b>A chat app is a place you go to talk to one assistant. Hatchabot is a staff of agents that live on your machine and come to you.</b></p>
+  <table class="t">
+    <tr><th style="width:1.85in"></th><th>Claude.ai / ChatGPT</th><th>Codex (and coding agents)</th><th class="hb">Hatchabot</th></tr>
+    <tr><td class="k">Shape</td><td>One assistant, one app, one person</td><td>One agent, one repo, one task at a time</td><td class="hb">A fleet of agents with jobs, for a household</td></tr>
+    <tr><td class="k">Runs where</td><td>Their cloud</td><td>Their cloud or your terminal</td><td class="hb">Your machine (containers), over your private network</td></tr>
+    <tr><td class="k">Memory</td><td>What the provider keeps; opaque</td><td>The repo and the session</td><td class="hb">Files you read, edit, back up; survives rebuilds and moves</td></tr>
+    <tr><td class="k">Who can talk to it</td><td>You, in the app</td><td>You, in the terminal or a PR</td><td class="hb">Anyone you invite, on Telegram; private threads or group rooms</td></tr>
+    <tr><td class="k">Choice of AI</td><td>That company's models</td><td>That company's models</td><td class="hb">Claude, Gemini, local — per agent, switchable live</td></tr>
+    <tr><td class="k">Acts on its own</td><td>Limited scheduled tasks</td><td>When you run it</td><td class="hb">Schedules, events, and requests from other agents</td></tr>
+    <tr><td class="k">Access to your things</td><td>Connectors the vendor chose</td><td>The repo</td><td class="hb">Per agent: a folder, a git repo, a Google account — limits you set</td></tr>
+    <tr><td class="k">Cost</td><td>Per seat</td><td>Per token / per seat</td><td class="hb">One Claude Max plan powers every agent; local models cost nothing per token</td></tr>
+    <tr><td class="k">Lock-in</td><td>Your history stays with them</td><td>The repo is yours; the service is theirs</td><td class="hb">Export, move machines, change provider — the agents are yours</td></tr>
   </table>
-  <p style="margin-top:8pt;font-size:10.5pt;color:#6b5e49">The honest caveat: the chat apps are polished, zero-setup, and their models are excellent. Hatchabot doesn't compete with the model — it <i>uses</i> one (Claude by default). It competes with the app around the model: one assistant, one person, forgets you tomorrow. A coding agent with a git repo is one of the things you can make.</p>
-  <div class="foot"><span>Hatchabot</span><span>9</span></div>
+  <p style="margin-top:8pt;font-size:10.5pt;color:#6b5e49">The honest caveat: the chat apps are polished, need no setup, and their models are excellent. Hatchabot doesn't compete with the model — it <i>uses</i> one (Claude by default). It competes with the app around the model: one assistant, one person, forgets you tomorrow. A coding agent with a git repo is one of the things you can make.</p>
+  <div class="foot"><span>hatchabot.com</span><span>9</span></div>
 </section>
 
+<!-- 10 -->
 <section class="slide">
   <p class="eyebrow">Compared</p>
-  <h2>OpenClaw, new and improved: what Hatchabot adds</h2>
-  <p class="lead" style="margin-bottom:12pt">Every Hatchabot agent <b>is</b> an OpenClaw gateway. Hatchabot adds the layer OpenClaw deliberately doesn't have: many installs, run as a fleet, by more than one person.</p>
-  <div class="grid2">
-    <div class="card"><h3>One install per agent, so agents can't hurt each other</h3><p>Plain OpenClaw is one process, one config, one workspace and credential set shared by every agent in it. Hatchabot gives each agent its own container, volume, bot token, tool policy and secrets. A runaway task, a bad edit, a rate-limited source or a crash touches one agent — the other thirty keep answering.</p><h3 style="margin-top:8pt">Upgrades the same way</h3><p>The runtime image is pinned and rolled out per agent, candidate first — never "upgrade the gateway and hope every agent survives".</p></div>
-    <div class="card"><h3>Lifecycle instead of hand-editing</h3><p>Create, clone, rebuild, archive, restore, delete, move — with a snapshot before every change. In plain OpenClaw that's you, a shell and a directory.</p><h3 style="margin-top:8pt">More than one human</h3><p>Owners, members, invites, pairing approvals, group rooms, shared-vs-private memory people are told about. OpenClaw's allowlist is a config line.</p><h3 style="margin-top:8pt">Credentials managed once</h3><p>One setup-token serves every agent; Google accounts attach per agent; secrets are write-only.</p></div>
+  <h2 style="margin-bottom:10pt">OpenClaw, new and improved: what Hatchabot adds</h2>
+  <p class="lead" style="margin-bottom:14pt">Every Hatchabot agent <b>is</b> an OpenClaw gateway. Hatchabot adds the layer OpenClaw deliberately leaves out: many installs, run as a fleet, by more than one person.</p>
+  <div class="row">
+    <div class="card"><h3>One install per agent, so agents can't hurt each other</h3><p>Plain OpenClaw is one process, one config, one workspace and credential set shared by every agent in it. Hatchabot gives each agent its own container, volume, bot token, tool policy and secrets.</p><h3 style="margin-top:9pt">Upgrades the same way</h3><p>The runtime image is pinned and rolled out per agent, candidate first — never “upgrade the gateway and hope every agent survives”.</p></div>
+    <div class="card"><h3>Lifecycle instead of hand-editing</h3><p>Create, clone, rebuild, archive, restore, delete, move — with a snapshot before every change. In plain OpenClaw that's you, a shell and a directory.</p><h3 style="margin-top:9pt">More than one human</h3><p>Owners, members, invites, pairing approvals, group rooms, and memory people are told is shared or private.</p><h3 style="margin-top:9pt">Credentials managed once</h3><p>One setup-token serves every agent; Google accounts attach per agent; secrets are write-only.</p></div>
   </div>
   <p style="margin-top:10pt;font-size:11pt;color:#6b5e49">If you run one agent for yourself, plain OpenClaw is fine. Hatchabot is for when there are several, they matter, and other people talk to them.</p>
-  <div class="foot"><span>Hatchabot</span><span>10</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>10</span></div>
 </section>
 
+<!-- 11 -->
 <section class="slide">
   <p class="eyebrow">How it works</p>
   <h2>One control plane, one container per agent</h2>
-  <div class="diagram">
-    <div class="stack"><div class="box"><b>Your family</b>Telegram on their phones</div><div class="box"><b>You</b>Web app · CLI · management bot</div></div>
-    <div class="arrow">→</div>
-    <div class="box" style="min-width:2.4in"><b>Hatchabot control plane</b>Node + SQLite on your machine<br><span style="font-size:10pt">registry · secrets (encrypted) · scheduler · health · backups · audit</span></div>
-    <div class="arrow">→</div>
-    <div class="stack"><div class="box"><b>Agent container</b>OpenClaw gateway · own bot · own volume</div><div class="box"><b>Agent container</b>…one per agent, 40+ on one box</div><div class="box"><b>Runner</b>a second machine on your tailnet</div></div>
-    <div class="arrow">→</div>
-    <div class="stack"><div class="box"><b>AI sources</b>Claude Max / API · Gemini · local model</div><div class="box"><b>Data</b>folders · git repos · Google account</div></div>
-  </div>
-  <div class="grid3" style="margin-top:0.3in">
+  <table class="flow" style="margin-top:-4pt"><tr>
+    <td style="width:2.05in"><div class="box"><b>Your family</b>Telegram on their phones</div><div class="box"><b>You</b>web app · CLI · management bot</div></td>
+    <td class="arr">→</td>
+    <td style="width:3.1in"><div class="box" style="padding:14pt 12pt"><b>Hatchabot control plane</b>Node + SQLite on your machine<br><span style="font-size:10pt">registry · encrypted secrets · scheduler · health · backups · audit</span></div></td>
+    <td class="arr">→</td>
+    <td style="width:2.4in"><div class="box"><b>Agent container</b>OpenClaw gateway · own bot · own volume</div><div class="box"><b>Agent container</b>one per agent — dozens on one box</div><div class="box"><b>Runner</b>a second machine on your tailnet</div></td>
+    <td class="arr">→</td>
+    <td><div class="box"><b>AI sources</b>Claude Max or API · Gemini · a local model</div><div class="box"><b>Data</b>folders · git repos · a Google account</div></td>
+  </tr></table>
+  <div class="row compact" style="margin-top:0.18in">
     <div class="card"><h3>Persisted</h3><p>Each agent's <code>$HOME</code> is a Docker volume: persona, memory, sessions, tools. The runtime image is shared, versioned, and swapped under an agent without touching the volume.</p></div>
-    <div class="card"><h3>Private by default</h3><p>The web app binds to your machine; reach it from anywhere over Tailscale, never a port on your router. Telegram works from anywhere regardless.</p></div>
-    <div class="card"><h3>Open source</h3><p>TypeScript, ~950 tests, MIT. Fourteen full audits so far. Install from source in one command; upgrade by tag with automatic rollback.</p></div>
+    <div class="card"><h3>Private by default</h3><p>The web app lives on your machine; reach it from anywhere over Tailscale, never a port opened on your router. Telegram works from anywhere regardless.</p></div>
+    <div class="card"><h3>Open source</h3><p>TypeScript, MIT licensed, 965 automated tests and fifteen full audits. Tagged releases with notes; pre-built images for arm64 and amd64.</p></div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>11</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>11</span></div>
 </section>
 
+<!-- 12 -->
 <section class="slide dark">
+  <p class="eyebrow">Built to be easy to run</p>
+  <h2>From a spare computer to a running agent</h2>
+  <div class="row">
+    <div class="card"><div class="big">1 line</div><h3>One-line installer</h3><p>Checks git, Docker and Node, offers to install what's missing, fetches the latest release and installs the background service.</p></div>
+    <div class="card"><div class="big">~1 min</div><h3>Pre-built runtime image</h3><p>Published for arm64 and amd64 with every release, so setup pulls the agent image instead of building it for twenty minutes.</p></div>
+    <div class="card"><div class="big">3 steps</div><h3>Setup wizard</h3><p>The app walks you through connecting the AI, making the first Telegram bot and creating the first agent — each step checked as you go.</p></div>
+  </div>
+  <div class="row" style="margin-top:0.2in">
+    <div class="card"><h3><code>hatchabot doctor</code></h3><p>Checks Node, Docker, the image, the service, the database, disk, backups and Tailscale — and prints the fix for anything wrong.</p></div>
+    <div class="card"><h3>Upgrades by tag, with rollback</h3><p>Every release is a tag with notes. Deploying one restarts only the control plane; if it doesn't come up healthy, the previous release is put back.</p></div>
+    <div class="card"><h3>Backups on by default</h3><p>Nightly sets of every agent, the registry and the key, kept for two weeks, with a restore drill that proves a set actually restores.</p></div>
+  </div>
+  <div class="foot"><span>hatchabot.com</span><span>12</span></div>
+</section>
+
+<!-- 13 -->
+<section class="slide">
   <p class="eyebrow">Get started</p>
   <h2>Your first agent in 15 minutes</h2>
-  <div class="grid2">
-    <div class="steps">
-      <div><p><b>Make a bot.</b> Telegram → @BotFather → <code>/newbot</code>. Keep the token. (2 min)</p></div>
-      <div><p><b>Get Claude ready.</b> <code>npm i -g @anthropic-ai/claude-code</code>, log in once, <code>claude setup-token</code>. (3 min)</p></div>
-      <div><p><b>Install.</b> <code>git clone … hatchabot &amp;&amp; cd hatchabot &amp;&amp; ./scripts/setup-host.sh</code> — checks Docker and Node, builds the runtime, installs the service, links the CLI. (5 min, mostly waiting)</p></div>
-      <div><p><b>Connect the AI.</b> Open the app, paste the setup token on the Welcome card. (1 min)</p></div>
-      <div><p><b>Create the agent.</b> Tap +, name it, one paragraph about its job, paste the bot token. (1 min)</p></div>
-      <div><p><b>Say hi.</b> Open the Telegram link and send a message. It will still remember this conversation next year.</p></div>
+  <div class="row">
+    <div class="steps" style="flex:1.25">
+      <div class="s"><span class="n">1</span><p><b>Make a Telegram bot.</b> In Telegram, open @BotFather, send <code>/newbot</code>, and keep the token.</p></div>
+      <div class="s"><span class="n">2</span><p><b>Get Claude ready.</b> Install the Claude CLI, log in once, then run <code>claude setup-token</code> and keep that token too.</p></div>
+      <div class="s"><span class="n">3</span><p><b>Install Hatchabot</b> on the computer that stays on:</p><div class="cmdline" style="margin-top:6pt;font-size:11.5pt;white-space:nowrap"><b>$</b> bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"</div></div>
+      <div class="s"><span class="n">4</span><p><b>Open the app</b> at <code>http://localhost:8080</code>. The wizard takes both tokens and creates your first agent.</p></div>
+      <div class="s"><span class="n">5</span><p><b>Say hi</b> on Telegram. It will still remember this conversation next year.</p></div>
     </div>
-    <div class="card"><h3>You need</h3><ul><li>A computer that stays on — Linux or macOS, Docker, Node 22+ (a Mac mini, a home server, an old laptop)</li><li>A Telegram account</li><li>A Claude subscription (Pro works for a couple of agents; Max for a household) — or an API key, or a local model with no account at all</li></ul><h3 style="margin-top:10pt">Then, optionally</h3><ul><li>Tailscale, to open the app from anywhere without exposing anything</li><li>Google connections, folders, git repos, schedules, peers</li></ul></div>
+    <div style="flex:0.75">
+      <div class="card"><h3>You need</h3><ul><li>A Linux or macOS computer that stays on — a Mac mini, a home server, an old laptop</li><li>A Telegram account</li><li>A Claude subscription (Pro for a couple of agents, Max for a household) — or an API key, or a local model</li></ul></div>
+      <div class="card" style="margin-top:12pt"><h3>Then, when you like</h3><ul><li>Tailscale, to open the app from anywhere</li><li>Invite family by link or QR</li><li>Google accounts, folders, repos, schedules, peers</li></ul></div>
+    </div>
   </div>
-  <div class="foot"><span>Hatchabot</span><span>12</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>13</span></div>
 </section>
 
+<!-- 14 -->
 <section class="slide accent">
-  <div style="margin-top:1.4in"><span class="egg"></span><span style="font-size:22pt;font-weight:800;vertical-align:middle;letter-spacing:.02em">HATCHABOT</span></div>
-  <h2 style="font-size:36pt;margin-top:0.4in;max-width:10.5in">For people who want more than one assistant — shared with a household, on their own machine, with their own choice of AI.</h2>
-  <p class="lead">github.com/hatchabot/hatchabot · hello@hatchabot.com · MIT licensed</p>
-  <div class="foot"><span>Hatchabot</span><span>13</span></div>
+  <div style="margin-top:1.05in"><span class="egg"></span><span class="brand">HATCHABOT</span></div>
+  <h2 style="font-size:38pt;line-height:1.1;margin-top:0.38in;max-width:11.2in">For people who want more than one assistant — shared with a household, on their own machine, with the AI they choose.</h2>
+  <div style="margin-top:20pt"><span class="cmdline" style="font-size:14pt"><b>$</b> bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"</span></div>
+  <p class="lead" style="margin-top:18pt"><b>hatchabot.com</b> · github.com/hatchabot/hatchabot · hello@hatchabot.com · MIT licensed</p>
+  <div class="foot"><span>Built on OpenClaw · Docker · Telegram</span><span>14</span></div>
 </section>
 </body></html>
