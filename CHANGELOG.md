@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.5.5] — 2026-09-15
+
+### Added
+- **Resizable Recent activity.** Drag the bar under the list to make it taller or shorter (mouse or touch); double-click resets it; with the bar focused, the arrow keys nudge it. The height is remembered in this browser.
+
 ## [1.5.4] — 2026-09-15
 
 ### Changed

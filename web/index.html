@@ -125,6 +125,11 @@
     border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
     scroll-margin-top: 16px;
   }
+  /* drag bar under a scrolling pane (recent activity) */
+  .resize-bar { height:12px; margin:4px 0 -8px; cursor:ns-resize; touch-action:none; display:flex; align-items:center; justify-content:center }
+  .resize-bar::before { content:""; width:40px; height:4px; border-radius:2px; background:var(--line); transition:background .15s }
+  .resize-bar:hover::before, .resize-bar:focus-visible::before, .resize-bar.active::before { background:var(--accent) }
+  .resize-bar:focus-visible { outline:none }
   /* card with a reorder rail: rail in its own full-height column at the far left */
   .card.has-rail { display:flex; align-items:stretch; gap:14px; padding-left:10px }
   .rail-col { flex:none; display:flex; align-items:flex-start; padding:2px 10px 0 0; border-right:1px solid var(--line) } /* top: stays beside the name as the card grows */
@@ -363,6 +368,7 @@
       <button onclick="openAudit()" title="Full audit log — filter by agent, see details">See all →</button>
     </div>
     <div id="activity" style="margin-top:8px;max-height:260px;overflow:auto"></div>
+    <div class="resize-bar" id="activityResize" role="separator" aria-orientation="horizontal" aria-label="Resize recent activity" tabindex="0" title="Drag to resize · double-click to reset"></div>
   </div>
   <div id="agents"></div>
 </div>
@@ -5203,6 +5209,34 @@ const EVENT_WORDS = {
   'reconcile.marked_stopped': 'found stopped', 'reconcile.marked_running': 'found running',
   'import.rolled_back': 'import undone',
 };
+
+// Recent activity: drag the bar under the list to make it taller or shorter
+// (mouse or touch); double-click resets; arrow keys nudge. Remembered per browser.
+(function activityResizer() {
+  const box = $('activity'), bar = $('activityResize');
+  if (!box || !bar) return;
+  const KEY = 'hatchabot_activity_h', DEF = 260, MIN = 80;
+  const clamp = (h) => Math.max(MIN, Math.min(Math.round(innerHeight * 0.85), Math.round(h)));
+  const set = (h) => { box.style.maxHeight = `${clamp(h)}px`; };
+  const save = () => { try { localStorage.setItem(KEY, String(parseInt(box.style.maxHeight, 10))); } catch { /* private mode */ } };
+  try { set(Number(localStorage.getItem(KEY)) || DEF); } catch { set(DEF); }
+  let start = null;
+  bar.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    // Start from what's on screen: a short list under a tall limit would otherwise "stick".
+    start = { y: e.clientY, h: box.getBoundingClientRect().height, id: e.pointerId };
+    bar.setPointerCapture(e.pointerId); bar.classList.add('active'); e.preventDefault();
+  });
+  bar.addEventListener('pointermove', (e) => { if (start && e.pointerId === start.id) set(start.h + e.clientY - start.y); });
+  const end = (e) => { if (!start || e.pointerId !== start.id) return; start = null; bar.classList.remove('active'); save(); };
+  bar.addEventListener('pointerup', end);
+  bar.addEventListener('pointercancel', end);
+  bar.addEventListener('dblclick', () => { set(DEF); save(); });
+  bar.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault(); set(box.getBoundingClientRect().height + (e.key === 'ArrowDown' ? 40 : -40)); save();
+  });
+})();
 
 async function loadActivity() {
   try {
