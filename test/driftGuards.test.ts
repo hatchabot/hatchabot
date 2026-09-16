@@ -186,3 +186,15 @@ describe('dependencies are installed once, by one code path', () => {
     expect(read('scripts/setup-host.sh')).toContain('./scripts/ensure-deps.sh');
   });
 });
+
+describe('operator scripts name what blocks them', () => {
+  // Twice in one day a script refused to proceed and did not say which file was
+  // at fault: the installer silently left a checkout on an old release, and the
+  // deploy guard refused over a stray note saved into the prod directory.
+  it('the deploy guard and the installer both print the offending paths', () => {
+    const deploy = read('scripts/deploy-release.sh');
+    expect(deploy).toContain('git status --porcelain | sed');
+    expect(deploy).toMatch(/untracked file/i);
+    expect(read('install.sh')).toContain('These files differ from the release');
+  });
+});

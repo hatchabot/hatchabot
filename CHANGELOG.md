@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.10.1] — 2026-09-16
+
+### Fixed
+- **The deploy guard now names what is blocking it.** `deploy-release.sh` refuses to deploy over a dirty production checkout — correctly — but said only that local changes existed. A stray file saved into the directory by accident reads exactly like a hand-edit, and the operator can only act if the message names it. It now lists the paths and gives the command for each case.
+
 ## [1.10.0] — 2026-09-16
 
 ### Security

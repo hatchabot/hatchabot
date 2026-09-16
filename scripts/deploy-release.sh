@@ -17,7 +17,20 @@ SVC="${HATCHABOT_SERVICE:-hatchabot}"
 cd "$PROD"
 git fetch --tags --quiet origin
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not found on origin."; exit 1; }
-[ -z "$(git status --porcelain)" ] || { echo "$PROD has local changes — production must never be edited by hand. Refusing."; exit 1; }
+# Refusing is right; refusing without saying WHAT is not. An untracked stray —
+# a note saved into the wrong directory — reads identically to a hand-edit here,
+# and the operator can only act if the message names it.
+if [ -n "$(git status --porcelain)" ]; then
+  echo "$PROD has local changes — production must never be edited by hand. Refusing."
+  echo
+  git status --porcelain | sed 's/^/    /'
+  echo
+  echo "  ?? = an untracked file that does not belong to the release. If it is"
+  echo "       something of yours, move it out:  mv $PROD/<file> ~/"
+  echo "  Any other marker = a tracked file was edited in place. Restore it with"
+  echo "       git -C $PROD checkout -- <file>   (your .env and data/ are untouched)"
+  exit 1
+fi
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
 rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && npm ci --silent && systemctl --user restart "$SVC"; }
