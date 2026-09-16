@@ -3076,6 +3076,15 @@ function renderAiList() {
       </div>
       ${sourceUsage(p)}
       ${sourceUsagePanel(p)}
+      ${p.credential === 'machine-login' || p.vendor === 'local' ? '' : `
+      <details class="su" style="width:100%">
+        <summary><b>🔑 Credential</b> <span class="sub">— reveal only to copy this source to another Hatchabot machine</span></summary>
+        <div class="sub" style="margin:6px 0">Anyone holding it can spend this plan. Accounts you share the source with can use it, but never see it.</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button onclick="revealSourceCredential('${p.id}', this)">Show</button>
+          <code id="cred-${p.id}" class="invite-link" style="display:none;flex:1;min-width:0;word-break:break-all"></code>
+        </div>
+      </details>`}
       <div style="display:flex;align-items:center;gap:10px;width:100%">
         <label class="sub" style="min-width:104px">Default model</label>
         ${defaultModelControl(p)}
@@ -3176,6 +3185,23 @@ async function setMgmtLlmSource(id, on) {
     renderAiList();
     toast(on ? 'Management bot now answers with this source.' : 'Cleared — the bot falls back to the automatic pick.');
   } catch (e) { toast(e.message); renderAiList(); }
+}
+
+/** Reveal a source's stored credential so it can be added on another machine.
+ *  Owner-only server-side, and the server logs every reveal. */
+async function revealSourceCredential(id, btn) {
+  const out = $('cred-' + id);
+  if (out.style.display !== 'none') { out.style.display = 'none'; out.textContent = ''; btn.textContent = 'Show'; return; }
+  btn.disabled = true;
+  try {
+    const r = await api(`/v1/ai-profiles/${id}/credential`);
+    out.textContent = r.credential;
+    out.style.display = '';
+    btn.textContent = 'Hide';
+    try { await navigator.clipboard.writeText(r.credential); toast('Copied — add it on the other machine as a ' + (r.kind === 'setup-token' ? 'setup-token' : 'API key') + ' source.'); }
+    catch { toast('Shown below — copy it by hand.'); }
+  } catch (e) { toast(e.message, 9000); }
+  finally { btn.disabled = false; }
 }
 
 async function setDefaultSource(id, on, isShared) {

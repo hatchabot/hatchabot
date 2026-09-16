@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.9.0] — 2026-09-16
+
+### Added
+- **Copy an AI source to another machine.** ⚙ Settings → AI sources → **🔑 Credential → Show** reveals the stored setup token or API key and copies it to the clipboard, so a second installation can be given the same source. Owner only — sharing a source lets another account spend it, never read it, and a non-owner gets the same 404 as a stranger. Every reveal is logged as `ai_source.credential_revealed`. A machine-login subscription has nothing stored to copy, and says so, pointing at `claude setup-token`.
+
 ## [1.8.4] — 2026-09-16
 
 ### Added

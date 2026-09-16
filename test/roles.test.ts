@@ -278,6 +278,42 @@ describe('cross-owner isolation (audit regressions)', () => {
     expect(res.statusCode).toBe(201);
   });
 
+  it('reveals a source credential to its owner only — never to an account it is shared with', async () => {
+    // Copying a subscription token to a second installation is the one
+    // legitimate reason to read it back; sharing a source lets another
+    // account SPEND it, which must not mean READ it.
+    const store = twoOwners();
+    const f = await app(store);
+    const mine = await f.inject({
+      method: 'POST', url: '/v1/ai-profiles', headers: as(OWNER),
+      payload: { kind: 'api_key', name: 'Mine', vendor: 'anthropic', model: 'claude-opus-4-8', apiKey: 'sk-ant-secret-value' },
+    });
+    const id = mine.json().id as string;
+    store.setAIProfileShared(id, true);
+
+    const owner = await f.inject({ method: 'GET', url: `/v1/ai-profiles/${id}/credential`, headers: as(OWNER) });
+    expect(owner.statusCode).toBe(200);
+    expect(owner.json()).toMatchObject({ kind: 'api-key', credential: 'sk-ant-secret-value' });
+
+    // A shared-with account gets the same answer as a stranger: not found.
+    const them = await f.inject({ method: 'GET', url: `/v1/ai-profiles/${id}/credential`, headers: as(MEMBER) });
+    expect(them.statusCode).toBe(404);
+    expect(JSON.stringify(them.json())).not.toContain('sk-ant-secret-value');
+  });
+
+  it('explains itself when a source has nothing stored to copy', async () => {
+    const store = twoOwners();
+    const f = await app(store);
+    // A machine-login subscription rides this host's ~/.claude — no secret row.
+    store.insertAIProfile({
+      id: 'p-machine', ownerId: OWNER, name: 'This Mac', vendor: 'anthropic',
+      kind: 'subscription', model: 'claude-opus-4-8', createdAt: 'now',
+    });
+    const res = await f.inject({ method: 'GET', url: '/v1/ai-profiles/p-machine/credential', headers: as(OWNER) });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/claude setup-token/);
+  });
+
   it('accepts an OpenAI API-key source', async () => {
     // Third vendor alongside Anthropic and Google: OpenClaw speaks openai
     // natively, so the source only needs the key and the provider prefix.

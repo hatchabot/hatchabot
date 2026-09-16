@@ -97,6 +97,23 @@ Two things to know:
   which is exactly tool calling. A smaller model at Q8 drives an agent loop
   more reliably than a bigger one at Q4.
 
+## Copying a source to another installation
+
+A second Hatchabot machine needs its own copy of the credential — sources are
+per-installation. ⚙ Settings → AI sources → **🔑 Credential → Show** reveals the
+stored token or key (and copies it to the clipboard), so you can add it on the
+other machine as the same kind of source.
+
+- **Owner only.** Sharing a source lets other accounts *spend* it; it never lets
+  them read it. To everyone else the endpoint answers 404.
+- **Every reveal is logged** (`ai_source.credential_revealed` in the server log)
+  — a credential leaving the machine is worth a line in the record.
+- **A machine-login subscription has nothing to copy**: it rides this host's own
+  `~/.claude`. Run `claude setup-token` on the other machine instead and add the
+  result there.
+- Both installations then draw on the same plan and the same rate limits. The
+  usage panel on each shows only the agents it runs, so watch both.
+
 ## Sharing an AI source with other accounts
 
 With per-user identity, every account brings its own AI sources — a second

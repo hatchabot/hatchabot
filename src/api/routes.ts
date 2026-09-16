@@ -2177,6 +2177,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { models: [...CURATED_ANTHROPIC_MODELS], source: 'curated' as const };
   });
 
+  /**
+   * Reveal a source's stored credential — the only way to copy a Claude
+   * subscription token or an API key to a SECOND installation, since the app
+   * stores secrets write-only everywhere else. Owner only: a source shared
+   * with other accounts lets them SPEND it, never read it. Logged, because a
+   * credential leaving the box is exactly the event an audit wants.
+   */
+  app.get<{ Params: { id: string } }>('/v1/ai-profiles/:id/credential', async (req, reply) => {
+    const profile = store.getAIProfile(req.params.id);
+    // Not 403: a non-owner has no business learning the source exists.
+    if (!profile || profile.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
+    if (profile.vendor === 'local') {
+      return reply.code(409).send({ error: 'A local model server has no credential to copy — point the other installation at the same URL.' });
+    }
+    if (!profile.secretRef) {
+      return reply.code(409).send({
+        error: "This source uses this machine's own Claude login, so there's nothing stored to copy. Run `claude setup-token` on the other machine and add it there as a setup-token source.",
+      });
+    }
+    const credential = await secrets.get(profile.secretRef).catch(() => undefined);
+    if (!credential) return reply.code(409).send({ error: 'The stored credential is missing — re-add it on this source.' });
+    app.log.warn(
+      { profileId: profile.id, ownerId: profile.ownerId, vendor: profile.vendor, kind: profile.kind },
+      'ai_source.credential_revealed',
+    );
+    return {
+      kind: profile.kind === 'subscription' ? 'setup-token' : 'api-key',
+      vendor: profile.vendor,
+      credential,
+    };
+  });
+
   app.delete<{ Params: { id: string } }>('/v1/ai-profiles/:id', async (req, reply) => {
     const profile = store.getAIProfile(req.params.id);
     if (!profile || profile.ownerId !== ownerIdOf(req)) {
