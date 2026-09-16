@@ -1,7 +1,7 @@
 # Hatchabot deck
 
-`hatchabot-deck.pdf` — 15 slides (16:9). It leads with the objection ("can't ChatGPT or
-Claude already do this?"), then the idea, the side-by-side comparison, the one-subscription
+`hatchabot-deck.pdf` — 16 slides (16:9). It leads with the objection ("can't ChatGPT or
+Claude already do this?"), then the idea, the side-by-side comparison, what you actually buy from a frontier lab (inference — the rest is open source), the one-subscription
 household, the platform case, two agents built on it, the control panel, features, operating a fleet, principles, what Hatchabot adds
 to OpenClaw, how it works, and the 15-minute start.
 
