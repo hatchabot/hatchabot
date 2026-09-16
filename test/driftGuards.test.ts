@@ -154,3 +154,17 @@ describe('agent list position pickers are filled where the cards render', () => 
     expect(body).toMatch(/el\.innerHTML = html;\s*\n\s*fillPositionPickers\(el\);/);
   });
 });
+
+describe('the hatchabot CLI runs from any directory', () => {
+  // The bin was `#!/usr/bin/env -S npx tsx`, which resolves tsx against the
+  // CURRENT directory: the first `hatchabot ls` run from $HOME on a fresh
+  // install stopped to ask "Need to install the following packages: tsx".
+  // The wrapper runs the tsx installed beside the CLI instead.
+  it('bin points at the wrapper, and the wrapper resolves tsx from the checkout', async () => {
+    const pkg = JSON.parse(read('package.json')) as { bin: Record<string, string> };
+    expect(pkg.bin.hatchabot).toBe('bin/hatchabot.mjs');
+    const wrapper = read('bin/hatchabot.mjs');
+    expect(wrapper).toContain("join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs')");
+    expect(wrapper.startsWith('#!/usr/bin/env node\n')).toBe(true); // not `env -S npx tsx`
+  });
+});

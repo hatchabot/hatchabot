@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.7.1] — 2026-09-16
+
+### Fixed
+- **`hatchabot` from any directory.** The CLI's shebang was `env -S npx tsx`, which resolves tsx against the *current* directory — so the first `hatchabot ls` on a fresh install stopped to ask "Need to install the following packages: tsx". It now runs through `bin/hatchabot.mjs`, which uses the tsx installed beside the CLI and never reaches for the network.
+- **Dependency advisories cleared** (found during a fresh install): fastify raised to ^5.12.5 (schema-validation bypass, X-Forwarded-* spoofing under trustProxy) and fast-uri pinned to ^4.1.5 via overrides (SSRF and host-confusion advisories). `npm audit --omit=dev` now reports zero.
+
 ## [1.7.0] — 2026-09-16
 
 ### Added

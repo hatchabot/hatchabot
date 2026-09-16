@@ -1,6 +1,6 @@
 {
   "name": "hatchabot",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "bin": {
-    "hatchabot": "src/cli.ts"
+    "hatchabot": "bin/hatchabot.mjs"
   },
   "scripts": {
     "cli": "tsx src/cli.ts",
@@ -28,7 +28,7 @@
     "@anthropic-ai/sdk": "^0.119.0",
     "@fastify/cookie": "^11.1.2",
     "better-sqlite3": "^13.0.1",
-    "fastify": "^5.10.0",
+    "fastify": "^5.12.5",
     "grammy": "^1.45.1",
     "qrcode": "^1.5.4",
     "tsx": "^4.23.13",
@@ -40,5 +40,8 @@
     "@types/qrcode": "^1.5.6",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "fast-uri": "^4.1.5"
   }
 }
