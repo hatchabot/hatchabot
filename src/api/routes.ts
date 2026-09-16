@@ -217,6 +217,13 @@ function zodMessage(err: z.ZodError): string {
   return `${where}${i.message}`;
 }
 
+/** Shown when a non-machine-owner tries an action that touches the machine
+ *  itself — runtime images, runner setup, host probes. Not for anything a
+ *  member legitimately owns (their bots, their agents, their sources). */
+const MACHINE_OWNER_ONLY =
+  'Only the account that set up this machine can do that — it touches the machine itself ' +
+  '(its runtime images, hosts and runners), not just your own agents.';
+
 /** Shown when a non-machine-owner tries to name a host path. */
 const HOST_PATH_DENIED =
   'Only the account that set up this machine can mount or adopt host folders. ' +
@@ -1047,7 +1054,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     sources: summarizeSourceUsage(store, ownerIdOf(req)),
   }));
   app.post('/v1/ai-profiles/usage/sample', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const r = await runUsageSample();
     return { ok: true, result: r, sampledAt: usageSampledAt };
   });
@@ -1108,7 +1115,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** On-demand reachability check for a runner host's Docker endpoint. */
   app.get<{ Params: { id: string } }>('/v1/hosts/:id/ping', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const host = store.getHost(req.params.id);
     if (!host) return reply.code(404).send({ error: 'Not found' });
     const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
@@ -1125,7 +1132,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // without an SSH treasure hunt". Host-owner only: the snippet authorizes
   // THIS box onto another machine.
   app.get('/v1/runner-setup', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     try {
       const pubKey = await ensureRunnerKey();
       return { pubKey, snippet: runnerSetupSnippet(pubKey) };
@@ -1141,7 +1148,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Copy this box's runtime image onto a runner (docker save | docker -H load).
   // Slow — minutes for a multi-GB image — so the UI treats it as a long job.
   app.post<{ Params: { id: string } }>('/v1/hosts/:id/install-image', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const host = store.getHost(req.params.id);
     if (!host) return reply.code(404).send({ error: 'Not found' });
     const dockerHost = typeof host.settings?.dockerHost === 'string' ? host.settings.dockerHost : '';
@@ -1198,7 +1205,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** Fleet runtime images: every tag on the local daemon, who is pinned where, what :latest points at. */
   app.get('/v1/runtime/images', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
     let tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = [];
     try { if (localHost) tags = await providerFor(localHost.id).listImageTags(); } catch { /* daemon hiccup: empty list, not a 500 */ }
@@ -1239,7 +1246,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** What's baked into an image: the build steps, newest first. */
   app.get<{ Params: { tag: string } }>('/v1/runtime/images/:tag/history', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const tag = req.params.tag; // Fastify already URL-decodes params
     if (!IMAGE_TAG_RE.test(tag) || !tag.startsWith(`${RUNTIME_REPO}:`)) return reply.code(400).send({ error: `Only ${RUNTIME_REPO}:* tags are managed here.` });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
@@ -1249,7 +1256,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** Remove a version/candidate tag. The default, pinned tags and class images are refused; Docker refuses tags containers still use. */
   app.delete<{ Params: { tag: string } }>('/v1/runtime/images/:tag', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const tag = req.params.tag;
     if (!IMAGE_TAG_RE.test(tag) || !tag.startsWith(`${RUNTIME_REPO}:`)) return reply.code(400).send({ error: `Only ${RUNTIME_REPO}:* tags are managed here.` });
     if (tag === DEFAULT_BASE) return reply.code(400).send({ error: 'That is the fleet default — promote another image first.' });
@@ -1608,7 +1615,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Stock the pool from the app: verify the token against Telegram, then store
   // it. Refuses a bot that is currently some agent's live identity.
   app.post<{ Body: { token?: string; shared?: boolean } }>('/v1/pool', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    // Any account may park a bot IT minted: the row is scoped to them below,
+    // and availableCount() is per-owner. Donating one to the whole house
+    // (`shared`) is the machine owner's call, since everyone leases from it.
+    if (req.body?.shared && !ownsLocalHost(req)) {
+      return reply.code(403).send({ error: 'Only the account that set up this machine can donate a bot to the shared pool. Leave it unshared and it stays yours.' });
+    }
     const parsed = z
       .object({ token: z.string().min(1).max(256), shared: z.boolean().optional() })
       .safeParse(req.body ?? {});
@@ -1639,7 +1651,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.delete<{ Params: { username: string } }>('/v1/pool/:username', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const row = deps.channel.pool.list().find((b) => b.username === req.params.username);
+    if (!row) return reply.code(404).send({ error: 'No such bot in the pool.' });
+    // Your own, or the machine owner's. A house bot (no owner) is the latter.
+    if (row.ownerId !== ownerIdOf(req) && !ownsLocalHost(req)) {
+      return reply.code(403).send({ error: `@${req.params.username} was parked by someone else — only they or the account that set up this machine can remove it.` });
+    }
     try {
       await deps.channel.pool.removeFromPool(req.params.username);
     } catch (err) {
@@ -1652,7 +1669,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // registered peer's) so the owner can spot idle slots. ?live=1 adds a Telegram
   // getMe/poll check per bot — slower, and it touches the network.
   app.get<{ Querystring: { live?: string; consolidated?: string } }>('/v1/bots', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const ownerId = ownerIdOf(req);
     const live = req.query.live === '1' || req.query.live === 'true';
     const hostName = store.listHosts(ownerId).find((h) => h.kind === 'local')?.name ?? 'this server';

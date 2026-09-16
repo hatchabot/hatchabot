@@ -424,3 +424,39 @@ describe('full invite binding', () => {
     expect(() => redeemInvite(store, code, 'Dup', MEMBER)).toThrow(InviteInvalidError);
   });
 });
+
+describe('the bot pool belongs to whoever minted the bot', () => {
+  // A member adding a bot token was refused with a message about mounting HOST
+  // FOLDERS — a guard copy-pasted onto a route whose own body scopes each bot
+  // to the account that added it ("yours by default"). Reported 2026-09-16.
+  const poolWorld = () => world();
+
+  it('lets a member park a bot of their own', async () => {
+    const f = await app(poolWorld());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/pool', headers: as(MEMBER),
+      payload: { token: '123456:FAKE-TOKEN-FOR-LOCAL-TESTING' },
+    });
+    // Not 403: whatever Telegram says about the token, the ACCOUNT is allowed.
+    expect(res.statusCode).not.toBe(403);
+  });
+
+  it('still reserves donating to the whole house for the machine owner', async () => {
+    const f = await app(poolWorld());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/pool', headers: as(MEMBER),
+      payload: { token: '123456:FAKE-TOKEN-FOR-LOCAL-TESTING', shared: true },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toMatch(/shared pool/);
+  });
+
+  it('never blames host folders for a bot-pool refusal', async () => {
+    const f = await app(poolWorld());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/pool', headers: as(MEMBER),
+      payload: { token: '123456:FAKE-TOKEN-FOR-LOCAL-TESTING', shared: true },
+    });
+    expect(res.json().error).not.toMatch(/host folders/i);
+  });
+});

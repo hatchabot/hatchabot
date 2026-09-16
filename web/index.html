@@ -1082,7 +1082,7 @@
       with Telegram before it's stored.
     </div>
     <input type="password" id="poolToken" placeholder="123456789:AA..." autocomplete="off" style="font-family:ui-monospace,monospace">
-    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+    <label id="poolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
       <input type="checkbox" id="poolShared" style="width:auto">
       <span>Share with everyone on this server <span class="sub">— otherwise only you can lease it</span></span>
     </label>
@@ -2432,6 +2432,10 @@ async function loadBotInventory() {
 async function loadPool() {
   const el = $('poolList');
   try {
+    // Donating a bot to the house is the machine owner's call; parking your own
+    // is not. Show only what this account can actually do.
+    const sharedRow = $('poolSharedRow');
+    if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
     const p = await api('/v1/pool');
     const bots = p.bots ?? [];
     el.innerHTML = bots.length

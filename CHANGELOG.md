@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.11.1] — 2026-09-16
+
+### Fixed
+- **A member can park their own bot token again.** `POST /v1/pool` carried a host-owner guard copy-pasted from the host-folder routes, so every account but the machine owner was refused — with a message about *mounting host folders*, which had nothing to do with it. The route's own body stores each bot under the account that added it and counts availability per owner, so parking your own bot was always the intent. Donating one to the shared house pool stays the machine owner's call, and the checkbox for it is hidden from everyone else.
+- **Removing a pooled bot** is allowed for the account that parked it, not only the machine owner; an unknown bot now answers 404 rather than 409.
+- **The machine-owner refusals say what they mean.** Runtime images, runner setup, host probes and the bot census shared the host-folder wording; they now describe the actual rule.
+
 ## [1.11.0] — 2026-09-16
 
 ### Added

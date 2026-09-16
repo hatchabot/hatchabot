@@ -65,9 +65,22 @@ describe('POST /v1/pool', () => {
     expect(dupe.json().error).toMatch(/live identity/);
   });
 
-  it('is host-owner only', async () => {
+  it('lets any account park its OWN bot, but only the machine owner donate one', async () => {
+    // The route scopes each bot to whoever added it, and availableCount() is
+    // per-owner — so a member parking a bot they minted is the design, not an
+    // intrusion. A blanket host-owner guard used to refuse it with a message
+    // about mounting host folders (reported 2026-09-16).
     const w = await makeWorld();
-    expect((await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as('intruder'), payload: { token: 'x' } })).statusCode).toBe(403);
+    fakeTelegram('memberbot');
+    const own = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as('member'), payload: { token: '9:CC' } });
+    expect(own.statusCode).toBe(201);
+    expect(w.channel.pool.entries.find((e: any) => e.username === 'memberbot').ownerId).toBe('member');
+
+    // Donating to the whole house stays the machine owner's call.
+    const donate = await w.f.inject({ method: 'POST', url: '/v1/pool', headers: as('member'), payload: { token: '9:CC', shared: true } });
+    expect(donate.statusCode).toBe(403);
+    expect(donate.json().error).not.toMatch(/host folders/i);
+    vi.restoreAllMocks();
   });
 });
 
@@ -81,7 +94,8 @@ describe('DELETE /v1/pool/:username', () => {
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/pool/sparebot', headers: as() })).statusCode).toBe(200);
     expect(w.channel.pool.owns('sparebot')).toBe(false);
     expect((await w.f.inject({ method: 'DELETE', url: '/v1/pool/busybot', headers: as() })).statusCode).toBe(409);
-    expect((await w.f.inject({ method: 'DELETE', url: '/v1/pool/ghost', headers: as() })).statusCode).toBe(409);
+    // 404 rather than the pool's own 409: an unknown bot is not a conflict.
+    expect((await w.f.inject({ method: 'DELETE', url: '/v1/pool/ghost', headers: as() })).statusCode).toBe(404);
   });
 });
 
