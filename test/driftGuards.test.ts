@@ -198,3 +198,20 @@ describe('operator scripts name what blocks them', () => {
     expect(read('install.sh')).toContain('These files differ from the release');
   });
 });
+
+describe('a changed app icon actually reaches browsers', () => {
+  // Chrome stores favicons separately from the HTTP cache and the service
+  // worker, and re-reads one when its URL changes rather than when its bytes
+  // do — a renamed install kept the old icon in the tab for days. The ?v= on
+  // the link and the SW cache name have to move together.
+  it('the icon href carries a version and the SW caches that exact URL', () => {
+    const html = read('web/index.html');
+    const sw = read('web/sw.js');
+    const version = /href="\/icons\/icon-192\.png\?v=(\d+)"/.exec(html)?.[1];
+    expect(version, 'icon link must carry ?v=').toBeTruthy();
+    // The service worker is cache-first on the shell, so it must hold the same
+    // URL the page asks for — otherwise it caches a copy nothing requests.
+    expect(sw).toContain(`/icons/icon-192.png?v=${version}`);
+    expect(sw).toMatch(/hatchabot-shell-v\d+/);
+  });
+});

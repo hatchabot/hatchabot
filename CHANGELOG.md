@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.10.2] — 2026-09-16
+
+### Fixed
+- **The tab icon updates after a rebrand.** Chrome keeps favicons in a store of its own — separate from the HTTP cache and the service worker — and re-reads one when its *URL* changes, not when its bytes do, so an installation that predated the rename kept showing the AgentClaw icon indefinitely. The icon links now carry `?v=2`, the service-worker shell caches that same URL, and a test keeps the two in step for the next icon change.
+
 ## [1.10.1] — 2026-09-16
 
 ### Fixed
