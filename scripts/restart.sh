@@ -53,6 +53,24 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
-echo "Service was restarted but isn't answering on port ${PORT} yet."
-echo "Logs: tail -30 data/server.log   (mac)   journalctl --user -u hatchabot -n 30   (linux)"
+echo "Service was restarted but isn't answering on port ${PORT}."
+# Print the reason rather than pointing at it: a crash-on-boot (a bad .env
+# line, a duplicate route, a missing dependency) is ALWAYS in these lines, and
+# "here are the logs" sends people to restart again instead of reading them.
+echo
+if [ -s data/server.log ]; then
+  echo "Last lines of data/server.log:"
+  echo "----------------------------------------------------------------"
+  tail -n 20 data/server.log
+  echo "----------------------------------------------------------------"
+elif command -v journalctl >/dev/null 2>&1; then
+  echo "Last lines from the service log:"
+  echo "----------------------------------------------------------------"
+  journalctl --user -u hatchabot -n 20 --no-pager 2>/dev/null || true
+  echo "----------------------------------------------------------------"
+fi
+echo
+echo "If that names a version already fixed upstream, check you are on the"
+echo "latest release:  hatchabot doctor   (it reports the tag and any local"
+echo "changes that stop the installer upgrading)."
 exit 1

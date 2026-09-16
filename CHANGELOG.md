@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.8.3] — 2026-09-16
+
+### Fixed
+- **A failed restart now prints why.** `scripts/restart.sh` used to say the service wasn't answering and point at the log file; it now prints the last 20 lines itself. A crash on boot — a bad `.env` line, a missing dependency, a duplicate route — is always in those lines, and naming the file instead of reading it sends people back to restart again.
+- **The installer's refusal is unmissable.** Upgrading over a checkout with local changes is refused (correctly), but the message could scroll past, leaving an install silently on the old release while the user believed they had upgraded. It now lists the offending files, says which release you are still on, and gives both the keep (`git stash`) and discard commands.
+- **`hatchabot doctor` reports the release.** New lines: which tag this checkout sits on, whether a newer one is already fetched, and whether local changes will block the installer — the three facts that explain "I upgraded and it still crashes".
+
 ## [1.8.2] — 2026-09-16
 
 ### Fixed

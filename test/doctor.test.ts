@@ -36,3 +36,29 @@ describe('hatchabot doctor report', () => {
     expect(lines.find((l) => /12 days old/.test(l.text))?.level).toBe('warn');
   });
 });
+
+describe('checkout freshness', () => {
+  // A checkout stuck behind the latest tag is the quiet cause of "I upgraded
+  // and it still crashes" — the laptop install hit exactly this: the
+  // installer refused a dirty tree, the restart script relaunched the same
+  // broken build, and nothing said so.
+  it('warns when a newer tag is sitting there unused', () => {
+    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.1', latestTag: 'v1.8.2', dirty: [] } });
+    const line = lines.find((l) => l.text.includes('v1.8.1'))!;
+    expect(line.level).toBe('warn');
+    expect(line.fix).toContain('git checkout v1.8.2');
+  });
+
+  it('warns about local changes, because they block the installer', () => {
+    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.2', latestTag: 'v1.8.2', dirty: ['src/api/routes.ts', 'web/index.html'] } });
+    const line = lines.find((l) => l.text.includes('local changes'))!;
+    expect(line.level).toBe('warn');
+    expect(line.text).toContain('src/api/routes.ts');
+  });
+
+  it('says which release is running when it is current and clean', () => {
+    const lines = doctorReport({ ...healthy, checkout: { tag: 'v1.8.2', latestTag: 'v1.8.2', dirty: [] } });
+    expect(lines.find((l) => l.text === 'Release v1.8.2')?.level).toBe('ok');
+    expect(lines.some((l) => l.text.includes('local changes'))).toBe(false);
+  });
+});

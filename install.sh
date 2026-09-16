@@ -68,7 +68,16 @@ LATEST="$(git -C "$DIR" tag -l 'v[0-9]*' --sort=-v:refname | head -1)"
 [ -n "$LATEST" ] || die "No release tags found in $REPO."
 CUR="$(git -C "$DIR" describe --tags --exact-match 2>/dev/null || echo none)"
 if [ "$CUR" != "$LATEST" ]; then
-  [ -z "$(git -C "$DIR" status --porcelain)" ] || die "$DIR has local changes — commit or stash them, then re-run."
+  if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
+    echo
+    echo "   These files differ from the release:"
+    git -C "$DIR" status --porcelain | sed 's/^/     /'
+    echo
+    die "$DIR has local changes, so it is still on $CUR and will NOT be upgraded to $LATEST.
+  Keep them:     cd $DIR && git stash
+  Discard them:  cd $DIR && git checkout -- .
+Then re-run this installer. (Your .env, data/ and backups are untouched either way.)"
+  fi
   git -C "$DIR" checkout --quiet "$LATEST"
 fi
 echo "   release $LATEST"

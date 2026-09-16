@@ -21,6 +21,8 @@ export interface DoctorFacts {
   backups: { dir: string; lastSet?: string; ageDays?: number };
   tailscale?: { installed: boolean; up?: boolean; dns?: string };
   containers?: { running: number; total: number };
+  /** Which release this checkout sits on, and whether a newer tag is present. */
+  checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
 }
 
 export interface DoctorLine { level: 'ok' | 'warn' | 'fail'; text: string; fix?: string }
@@ -36,6 +38,25 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     if (!f.runtimeImage) out.push({ level: 'fail', text: 'Runtime image hatchabot-runtime:latest is missing — agents cannot start', fix: './scripts/build-runtime-image.sh (pulls the published image, builds only if that fails)' });
     else out.push({ level: 'ok', text: `Runtime image: OpenClaw ${f.runtimeImage.openclawVersion ?? '?'}${f.runtimeImage.sizeGb ? ` · ${f.runtimeImage.sizeGb.toFixed(1)} GB` : ''}` });
     if (f.containers) out.push({ level: 'ok', text: `Agent containers: ${f.containers.running} running of ${f.containers.total}` });
+  }
+  // A checkout behind the latest tag, or one the installer will refuse to
+  // move because it is dirty, is the quiet cause of "I upgraded but nothing
+  // changed" — including a crash-on-boot that was already fixed upstream.
+  if (f.checkout?.dirty?.length) {
+    out.push({
+      level: 'warn',
+      text: `Checkout has local changes (${f.checkout.dirty.slice(0, 3).join(', ')}${f.checkout.dirty.length > 3 ? `, +${f.checkout.dirty.length - 3} more` : ''}) — the installer refuses to upgrade over them`,
+      fix: 'git -C . stash   (or commit them), then re-run the installer',
+    });
+  }
+  if (f.checkout?.tag && f.checkout.latestTag && f.checkout.tag !== f.checkout.latestTag) {
+    out.push({
+      level: 'warn',
+      text: `Running ${f.checkout.tag}, but ${f.checkout.latestTag} is available locally`,
+      fix: `git fetch --tags origin && git checkout ${f.checkout.latestTag} && ./scripts/restart.sh`,
+    });
+  } else if (f.checkout?.tag) {
+    out.push({ level: 'ok', text: `Release ${f.checkout.tag}` });
   }
   if (!f.envFile.present) out.push({ level: 'fail', text: '.env is missing', fix: './scripts/setup-host.sh writes it (secret key, password, port)' });
   else {
@@ -55,6 +76,23 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   else out.push({ level: 'ok', text: `Backups: last set ${f.backups.lastSet}` });
   if (f.tailscale) out.push(!f.tailscale.installed ? { level: 'warn', text: 'Tailscale not installed — the app is reachable on your LAN only', fix: 'docs/tailscale.md — private access from anywhere, nothing opened to the internet' } : f.tailscale.up ? { level: 'ok', text: `Tailscale up${f.tailscale.dns ? ` (${f.tailscale.dns})` : ''}` } : { level: 'warn', text: 'Tailscale installed but not connected', fix: 'sudo tailscale up' });
   return out;
+}
+
+/** Git facts about this checkout. Offline: it reads the tags already fetched,
+ *  so "behind" means "behind what this machine has seen". */
+export function checkoutFacts(dir = process.cwd()): DoctorFacts['checkout'] {
+  const git = (...args: string[]) => sh('git', ['-C', dir, ...args]);
+  if (!git('rev-parse', '--git-dir')) return undefined;
+  const tag = git('describe', '--tags', '--exact-match')?.trim() || undefined;
+  const latestTag = git('tag', '-l', 'v[0-9]*', '--sort=-v:refname')?.split('\n')[0]?.trim() || undefined;
+  // Porcelain lines are "XY path", but the captured output is trimmed, so the
+  // first line may have lost its leading space — strip the status flags by
+  // shape, not by a fixed width (that ate a character off the filename).
+  const dirty = (git('status', '--porcelain') ?? '')
+    .split('\n')
+    .map((l) => l.replace(/^\s*[A-Z?!ADMRCU ]{1,2}\s+/, '').trim())
+    .filter(Boolean);
+  return { tag, latestTag, dirty };
 }
 
 function sh(cmd: string, args: string[], timeout = 8000): string | undefined {
@@ -112,5 +150,6 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined },
     service, controlPlane, diskFreeGb, backups, tailscale,
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length },
+    checkout: checkoutFacts(),
   };
 }
