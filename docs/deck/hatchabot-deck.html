@@ -141,6 +141,20 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
 </section>
 
 <!-- 6 -->
+<section class="slide dark">
+  <p class="eyebrow">Build on it</p>
+  <h2 style="margin-bottom:8pt">An operating system for agents</h2>
+  <p class="lead" style="margin-bottom:12pt">An agent is a container with a job, credentials and a memory of its own — and Hatchabot runs a fleet of them on a machine you control. Including agents you build for other people.</p>
+  <div class="row compact">
+    <div class="card" style="flex:1.35"><h3>Worked example: condo corporations</h3><p>Attach the manager's Gmail and the corporation's Drive to one agent — scoped to it, mail attachable with sending switched off. Give it the job: board minutes, contractor quotes driven to a decision, files kept in order, the reserve fund watched, the books checked.</p><p style="margin-top:5pt"><b>Then clone it for the next corporation:</b> own container, own credentials, own memory. Improve the master, push it to the copies.</p></div>
+    <div class="card"><h3>What you'd otherwise build</h3><p>An always-on machine that can hold a client's mailbox for a year. One isolated tenant per client. A front door they already have — a Telegram contact, no AI account, no seat per person.</p><h3 style="margin-top:8pt">Then it compounds</h3><p>The first agent takes an afternoon. The twentieth takes a minute — the infrastructure is already standing.</p></div>
+    <div class="card"><h3>Agents are portable goods</h3><p>Export one as a single file, hand it to someone else, and they run and adapt it. The persona, rules and accumulated training are the valuable part — and they're yours to keep, sell or give away.</p></div>
+  </div>
+  <div class="takeaway" style="bottom:0.62in;padding:9pt 16pt;font-size:12pt;font-weight:400;font-family:'Liberation Sans',sans-serif"><b style="font-family:'Bricolage Grotesque',sans-serif;font-size:13.5pt">Honestly:</b> OpenAI and Anthropic are <i>very</i> extensible, and people ship real products on them. They sell the engine. Neither hands you the operating layer around many long-lived agents — tenancy, credentials on your own hardware, a human front door, one console for the fleet.</div>
+  <div class="foot"><span>hatchabot.com</span><span>6</span></div>
+</section>
+
+<!-- 7 -->
 <section class="slide">
   <p class="eyebrow">The control panel</p>
   <h2>Your whole staff on one page</h2>
@@ -157,10 +171,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
       <div class="shot" style="margin-top:9pt"><img src="screenshot-usage.png" alt="Usage for one AI source"></div>
     </div>
   </div>
-  <div class="foot"><span>hatchabot.com</span><span>6</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>7</span></div>
 </section>
 
-<!-- 7 -->
+<!-- 8 -->
 <section class="slide">
   <p class="eyebrow">Features</p>
   <h2>What a staff can do that an assistant can't</h2>
@@ -174,10 +188,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <tr><td class="k">Agents that consult each other</td><td>Your investing agent asks your tax and legal agents mid-task, with scoped tokens, loop guards and rate limits.</td></tr>
   </table>
   <div class="takeaway">Each agent gets only what its job needs — which is what makes it safe to give them real work.</div>
-  <div class="foot"><span>hatchabot.com</span><span>7</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>8</span></div>
 </section>
 
-<!-- 8 -->
+<!-- 9 -->
 <section class="slide dark">
   <p class="eyebrow">Features · operating a fleet</p>
   <h2>Operator-grade, because agents that matter need it</h2>
@@ -187,10 +201,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Keep it yours</h3><ul><li>Nightly backups: every volume, the registry, the key</li><li>Restore one agent from any backup set</li><li>Export and import as a single file</li><li>Runners: place agents on a second machine</li><li>All over a private Tailscale network — nothing opened to the internet</li></ul></div>
   </div>
   <div class="takeaway">Everything an operator needs — and nothing a family member ever has to see.</div>
-  <div class="foot"><span>hatchabot.com</span><span>8</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>9</span></div>
 </section>
 
-<!-- 9 -->
+<!-- 10 -->
 <section class="slide">
   <p class="eyebrow">Principles</p>
   <h2>What we believe an agent is</h2>
@@ -201,10 +215,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Reversible, or honest about it</h3><p>Snapshots before edits and rebuilds. Rollback on a failed move. A full audit timeline. Health probes that tell “listed as running” from “actually answering”.</p></div>
   </div>
   <div class="takeaway">An agent is a folder of files you own, not a session you visit — and one agent failing never takes the others with it.</div>
-  <div class="foot"><span>hatchabot.com</span><span>9</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>10</span></div>
 </section>
 
-<!-- 10 -->
+<!-- 11 -->
 <section class="slide">
   <p class="eyebrow">Compared</p>
   <h2 style="margin-bottom:10pt">OpenClaw, new and improved: what Hatchabot adds</h2>
@@ -214,10 +228,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Lifecycle instead of hand-editing</h3><p>Create, clone, rebuild, archive, restore, delete, move — with a snapshot before every change. In plain OpenClaw that's you, a shell and a directory.</p><h3 style="margin-top:9pt">More than one human</h3><p>Owners, members, invites, pairing approvals, group rooms, and memory people are told is shared or private.</p><h3 style="margin-top:9pt">Credentials managed once</h3><p>One setup-token serves every agent; Google accounts attach per agent; secrets are write-only.</p></div>
   </div>
   <p style="margin-top:10pt;font-size:11pt;color:#6b5e49">If you run one agent for yourself, plain OpenClaw is fine. Hatchabot is for when there are several, they matter, and other people talk to them.</p>
-  <div class="foot"><span>hatchabot.com</span><span>10</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>11</span></div>
 </section>
 
-<!-- 11 -->
+<!-- 12 -->
 <section class="slide">
   <p class="eyebrow">How it works</p>
   <h2>One control plane, one container per agent</h2>
@@ -235,10 +249,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Private by default</h3><p>The web app lives on your machine; reach it from anywhere over Tailscale, never a port opened on your router. Telegram works from anywhere regardless.</p></div>
     <div class="card"><h3>Open source</h3><p>TypeScript, MIT licensed, 978 automated tests and fifteen full audits. Tagged releases with notes; pre-built images for arm64 and amd64.</p></div>
   </div>
-  <div class="foot"><span>hatchabot.com</span><span>11</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>12</span></div>
 </section>
 
-<!-- 12 -->
+<!-- 13 -->
 <section class="slide">
   <p class="eyebrow">Get started</p>
   <h2>Your first agent in 15 minutes</h2>
@@ -255,16 +269,16 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
       <div class="card" style="margin-top:12pt"><h3>Made to be easy to run</h3><ul><li>The installer checks git, Docker and Node, and installs what's missing</li><li>The agent image is pre-built — a pull, not a twenty-minute build</li><li><code>hatchabot doctor</code> checks everything and prints the fix</li></ul></div>
     </div>
   </div>
-  <div class="foot"><span>hatchabot.com</span><span>12</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>13</span></div>
 </section>
 
-<!-- 13 -->
+<!-- 14 -->
 <section class="slide accent">
   <div style="margin-top:1.05in"><span class="egg"></span><span class="brand">HATCHABOT</span></div>
   <h2 style="font-size:38pt;line-height:1.1;margin-top:0.38in;max-width:11.2in">For people who want more than one assistant — shared with a household, on their own machine, with the AI they choose.</h2>
   <div style="margin-top:20pt"><span class="cmdline" style="font-size:14pt"><b>$</b> bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"</span></div>
   <p class="lead" style="margin-top:18pt"><b>hatchabot.com</b> · github.com/hatchabot/hatchabot · MIT licensed</p>
-  <div class="foot"><span>Built on OpenClaw · Docker · Telegram</span><span>13</span></div>
+  <div class="foot"><span>Built on OpenClaw · Docker · Telegram</span><span>14</span></div>
 </section>
 
 </body></html>
