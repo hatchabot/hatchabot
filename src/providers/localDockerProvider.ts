@@ -522,7 +522,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Stream and filter: an agent that polls an inbox logs thousands of lines a
     // day, so never buffer the whole log — keep only the model-call results.
     const { container } = this.#names(runtimeRef);
-    return new Promise<string>((resolve) => {
+    return new Promise<string>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(['logs', '--since', sinceIso, '--timestamps', container]));
       const keep: string[] = [];
       let buf = '';
@@ -539,8 +539,19 @@ export class LocalDockerProvider implements RuntimeProvider {
       child.stderr.on('data', eat);
       const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
       timer.unref();
-      child.on('error', () => { clearTimeout(timer); resolve(keep.join('\n')); });
-      child.on('close', () => { clearTimeout(timer); resolve(keep.join('\n')); });
+      // A failure must REJECT. Resolving with "" made a dead docker daemon
+      // indistinguishable from an idle agent: the sampler logged nothing and
+      // advanced its cursor, so every call made during the outage was lost
+      // for good (audit 2026-09-16).
+      child.on('error', (err) => { clearTimeout(timer); reject(err); });
+      child.on('close', (code, signal) => {
+        clearTimeout(timer);
+        if (keep.length === 0 && (signal || (code ?? 0) !== 0)) {
+          reject(new Error(`docker logs exited ${signal ?? code} for ${container}`));
+          return;
+        }
+        resolve(keep.join('\n'));
+      });
     });
   }
 

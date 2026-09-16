@@ -203,7 +203,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS model_call_hours (
         agent_id TEXT NOT NULL, profile_id TEXT, hour TEXT NOT NULL,
         ok INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (agent_id, hour)
+        -- profile_id is PART OF THE KEY: an agent can move between sources
+        -- mid-hour, and the counts already recorded belong to the source that
+        -- served them. Keying on (agent_id, hour) alone let the later upsert
+        -- retag the whole bucket — and since a source can be SHARED across
+        -- accounts, that moved one account's counts onto another's dashboard
+        -- (audit 2026-09-16).
+        PRIMARY KEY (agent_id, profile_id, hour)
       );
       CREATE INDEX IF NOT EXISTS model_call_hours_profile ON model_call_hours (profile_id, hour);
       CREATE TABLE IF NOT EXISTS usage_cursor (
@@ -299,6 +305,10 @@ export class Store {
         disabled INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL
       );
+      -- Logins are matched case-insensitively, so uniqueness must be too:
+      -- the column's own UNIQUE would happily hold both "Chris" and "chris",
+      -- and the lookup would then return an arbitrary one of them.
+      CREATE UNIQUE INDEX IF NOT EXISTS local_accounts_username_ci ON local_accounts (lower(username));
 
       -- Who has signed in, so a share can be addressed by email. Email is
       -- mutable, so owner_id (the stable subject) is the key; email is the
@@ -444,6 +454,31 @@ export class Store {
         if (!/duplicate column name/i.test(String((e as Error)?.message ?? e))) throw e;
       }
     }
+    // model_call_hours was first keyed on (agent_id, hour), which let a later
+    // upsert retag an already-counted hour onto whatever source the agent had
+    // moved to — across accounts, for a shared source. Rebuild it under the
+    // three-column key, folding any rows that collide (audit 2026-09-16).
+    const hoursKey = this.db
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'model_call_hours'`)
+      .get() as { sql?: string } | undefined;
+    if (hoursKey?.sql && !/PRIMARY KEY \(agent_id, profile_id, hour\)/.test(hoursKey.sql)) {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE model_call_hours_v2 (
+            agent_id TEXT NOT NULL, profile_id TEXT, hour TEXT NOT NULL,
+            ok INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (agent_id, profile_id, hour)
+          );
+          INSERT INTO model_call_hours_v2 (agent_id, profile_id, hour, ok, limited, failed)
+            SELECT agent_id, profile_id, hour, SUM(ok), SUM(limited), SUM(failed)
+              FROM model_call_hours GROUP BY agent_id, profile_id, hour;
+          DROP TABLE model_call_hours;
+          ALTER TABLE model_call_hours_v2 RENAME TO model_call_hours;
+          CREATE INDEX IF NOT EXISTS model_call_hours_profile ON model_call_hours (profile_id, hour);
+        `);
+      })();
+    }
+
     // Indexes on ALTER-added columns must come AFTER the additive loop — on a
     // fresh DB the CREATE TABLE block doesn't have the column yet.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agents_image ON agents (image)`);
@@ -1101,7 +1136,13 @@ export class Store {
   }
 
   deleteLocalAccount(id: string): void {
-    this.db.prepare(`DELETE FROM local_accounts WHERE id = ?`).run(id);
+    // Their CLI tokens must die with them: ownerForCliToken only checks the
+    // hash and expiry, so a leftover row would keep authenticating as an owner
+    // who no longer exists (audit 2026-09-16).
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM cli_tokens WHERE owner_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM local_accounts WHERE id = ?`).run(id);
+    })();
   }
 
   recordAccount(ownerId: string, email?: string): void {
@@ -1883,7 +1924,7 @@ export class Store {
   addModelCallHours(agentId: string, profileId: string, buckets: Map<string, { ok: number; limited: number; failed: number }>): void {
     const up = this.db.prepare(
       `INSERT INTO model_call_hours (agent_id, profile_id, hour, ok, limited, failed) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(agent_id, hour) DO UPDATE SET profile_id = excluded.profile_id,
+       ON CONFLICT(agent_id, profile_id, hour) DO UPDATE SET
          ok = ok + excluded.ok, limited = limited + excluded.limited, failed = failed + excluded.failed`,
     );
     this.db.transaction(() => { for (const [h, b] of buckets) up.run(agentId, profileId, h, b.ok, b.limited, b.failed); })();
@@ -1914,7 +1955,7 @@ export class Store {
     ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
-      if (prev && prev.agent_id === r.agent_id && r.profile_id === profileId && r.at >= fromIso) {
+      if (prev && prev.agent_id === r.agent_id && r.profile_id === profileId && prev.profile_id === profileId && r.at >= fromIso) {
         out.set(r.agent_id, (out.get(r.agent_id) ?? 0) + (r.total >= prev.total ? r.total - prev.total : r.total));
       }
       prev = r;

@@ -325,6 +325,14 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
+      // ownerForCliToken checks only the hash and expiry, so a token minted by
+      // an account that has since been removed or disabled would still
+      // authenticate as that owner — removal has to mean revoked (audit
+      // 2026-09-16).
+      const owner = store.localAccount(cliOwner);
+      if (!owner || owner.disabled) {
+        return reply.code(401).send({ error: 'That access token belongs to an account that no longer exists.' });
+      }
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
       return;
     }

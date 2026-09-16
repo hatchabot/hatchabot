@@ -186,6 +186,17 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   });
 }
 
+// First run in accounts mode: creating account #1 is the one action with no
+// credential behind it. From this machine it needs nothing; from anywhere else
+// it needs this code, which is why it goes to the log and nowhere else.
+if (authModeFromEnv() === 'accounts' && store.countLocalAccounts() === 0) {
+  const { setupCode } = await import('./api/accountsAuth.js');
+  app.log.warn(
+    { setupCode: setupCode() },
+    'first-run setup code — needed only to create the first account from another machine',
+  );
+}
+
 // Without a password every request is treated as the owner. Agent containers
 // can reach this process on the docker bridge, so binding 0.0.0.0 in that
 // state hands the whole fleet to any prompt-injected agent. Bind loopback

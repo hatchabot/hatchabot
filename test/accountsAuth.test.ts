@@ -328,3 +328,81 @@ describe('recovery when nobody can sign in', () => {
     expect(store.localAccountByUsername('chris')?.username).toBe('Chris');
   });
 });
+
+describe('first-run bootstrap is not open to the network', () => {
+  // The server binds every interface once auth is on, and creating account #1
+  // has no credential behind it — so on a tailnet or shared wifi the first
+  // stranger to load the page could take the installation, adopting whatever
+  // password mode owned. From the machine itself: fine. From anywhere else:
+  // the setup code printed to the log at startup.
+  const remote = { 'x-forwarded-for': '100.64.0.9' };
+
+  it('refuses a remote bootstrap without the setup code', async () => {
+    const f = Fastify({ trustProxy: true });
+    const store = new Store(new Database(':memory:'));
+    await registerAuth(f, { secret: SECRET, mode: 'accounts', store });
+    const res = await f.inject({
+      method: 'POST', url: '/v1/local-accounts/bootstrap', headers: remote,
+      payload: { username: 'stranger', password: 'password123' },
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toMatch(/setup code/);
+    expect(store.countLocalAccounts()).toBe(0);
+  });
+
+  it('accepts a remote bootstrap carrying the code, and loopback without it', async () => {
+    const { setupCode } = await import('../src/api/accountsAuth.js');
+    const f = Fastify({ trustProxy: true });
+    const store = new Store(new Database(':memory:'));
+    await registerAuth(f, { secret: SECRET, mode: 'accounts', store });
+    const withCode = await f.inject({
+      method: 'POST', url: '/v1/local-accounts/bootstrap', headers: remote,
+      payload: { username: 'chris', password: 'correct-horse', setupCode: setupCode() },
+    });
+    expect(withCode.statusCode).toBe(201);
+
+    const { f: f2 } = await app(); // inject() with no forwarded header is loopback
+    expect((await bootstrap(f2)).statusCode).toBe(201);
+  });
+});
+
+describe('removing an account revokes it everywhere', () => {
+  it("kills the account's CLI tokens, and the token stops authenticating", async () => {
+    const { f, store } = await app();
+    const first = await bootstrap(f);
+    const cookie = cookieOf(first);
+    await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'partner', password: 'their-password' } });
+    const roster = (await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie } })).json() as Array<{ id: string; hostOwner: boolean }>;
+    const partner = roster.find((a) => !a.hostOwner)!;
+
+    const token = store.createCliToken(partner.id, 'their laptop');
+    expect(store.ownerForCliToken(token.token)).toBe(partner.id);
+
+    expect((await f.inject({ method: 'DELETE', url: `/v1/local-accounts/${partner.id}`, headers: { cookie } })).statusCode).toBe(200);
+    // The row is gone AND the token no longer resolves to an owner.
+    expect(store.ownerForCliToken(token.token)).toBeUndefined();
+  });
+
+  it('refuses while the account still owns an AI source', async () => {
+    const { f, store } = await app();
+    const first = await bootstrap(f);
+    const cookie = cookieOf(first);
+    await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'partner', password: 'their-password' } });
+    const roster = (await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie } })).json() as Array<{ id: string; hostOwner: boolean }>;
+    const partner = roster.find((a) => !a.hostOwner)!;
+    store.insertAIProfile({ id: 'p-theirs', ownerId: partner.id, name: 'Theirs', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p-theirs', createdAt: 'now' });
+    const res = await f.inject({ method: 'DELETE', url: `/v1/local-accounts/${partner.id}`, headers: { cookie } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/AI source/);
+  });
+});
+
+describe('usernames are unique regardless of case', () => {
+  it('the database refuses a case-variant duplicate', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertLocalAccount({ id: 'a1', username: 'Chris', pwHash: 'h', pwSalt: 's', hostOwner: true, disabled: false, createdAt: 'now' });
+    expect(() =>
+      store.insertLocalAccount({ id: 'a2', username: 'chris', pwHash: 'h', pwSalt: 's', hostOwner: false, disabled: false, createdAt: 'now' }),
+    ).toThrow();
+  });
+});

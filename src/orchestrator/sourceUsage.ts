@@ -40,7 +40,10 @@ export function parseModelCalls(text: string): ModelCall[] {
 export function hourOf(iso: string): string { return iso.slice(0, 13); }
 
 const DAY = 86_400_000;
-export const RETAIN_MS = 8 * DAY;
+export /** How many agents to sample at once, and how long one whole pass may take. */
+const PASS_CONCURRENCY = Number(process.env.HATCHABOT_USAGE_CONCURRENCY ?? 6);
+const PASS_BUDGET_MS = Number(process.env.HATCHABOT_USAGE_PASS_MS ?? 5 * 60_000);
+const RETAIN_MS = 8 * DAY;
 
 export interface SampleDeps {
   store: Store;
@@ -53,14 +56,22 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
   const { store } = deps;
   let agents = 0, calls = 0, limited = 0;
   const nowIso = new Date(now).toISOString();
-  for (const a of store.listAllActiveAgents()) {
-    if (a.state !== 'RUNNING' || !a.runtimeRef) continue;
+  // One slow `docker logs` used to hold up every agent behind it: 41 agents
+  // × a 60 s kill is 41 minutes, far past the sample interval, with the next
+  // pass blocked behind it. Sample a few at a time, and stop starting new ones
+  // once the pass has run long enough (audit 2026-09-16).
+  const deadline = Date.now() + PASS_BUDGET_MS;
+  const running = store.listAllActiveAgents().filter((a) => a.state === 'RUNNING' && a.runtimeRef);
+  const queue = [...running];
+  const one = async (a: (typeof running)[number]): Promise<void> => {
+    const runtimeRef = a.runtimeRef;
+    if (!runtimeRef) return;
     agents++;
     const provider = deps.providerFor(a.hostId);
     const cursor = store.usageCursor(a.id);
     const since = cursor?.lastTs ?? new Date(now - 7 * DAY).toISOString(); // first run: a week of history
     try {
-      const text = await provider.modelCallLog(a.runtimeRef, since);
+      const text = await provider.modelCallLog(runtimeRef, since);
       const fresh = parseModelCalls(text).filter((c) => c.at > since);
       const buckets = new Map<string, { ok: number; limited: number; failed: number }>();
       let lastOk: string | undefined, lastLimited: string | undefined, maxAt = since;
@@ -82,10 +93,19 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
       deps.log?.('usage.sample_log_failed', { agentId: a.id, error: String((err as Error).message ?? err).slice(0, 200) });
     }
     try {
-      const u = await agentUsage(provider, a.runtimeRef, a.slug);
+      const u = await agentUsage(provider, runtimeRef, a.slug);
       store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
     } catch { /* container busy/unreachable: no token sample this pass */ }
-  }
+  };
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const a = queue.shift();
+      if (!a || Date.now() > deadline) return;
+      await one(a);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PASS_CONCURRENCY, queue.length) }, worker));
+  if (queue.length) deps.log?.('usage.sample_incomplete', { remaining: queue.length });
   store.pruneSourceUsage(new Date(now - RETAIN_MS).toISOString());
   return { agents, calls, limited };
 }
@@ -122,8 +142,15 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
   const t5 = new Date(now - 5 * 3_600_000).toISOString(), t7 = new Date(now - 7 * DAY).toISOString();
   const out: SourceUsage[] = [];
   for (const p of store.listAIProfiles(ownerId)) {
+    // Agents CURRENTLY on this source — what "8 agents" means.
     const my = mine.filter((a) => a.aiProfileId === p.id);
-    const myIds = new Set(my.map((a) => a.id));
+    // …but history belongs to whoever spent it. Rows and limit hits are already
+    // scoped to this source in SQL, so gate them on ownership, not on where the
+    // agent happens to sit now: an agent that moved off after being rate-limited
+    // used to erase that hit from BOTH sources' views — the one moment someone
+    // would go looking for it (audit 2026-09-16).
+    const myIds = new Set(mine.map((a) => a.id));
+    const nameOf = new Map(mine.map((a) => [a.id, a.name]));
     const rows = store.modelCallHoursFor(p.id, d7);
     const mineRows = rows.filter((r) => myIds.has(r.agentId));
     const w = (from: string, list = mineRows): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.hour >= from)
@@ -146,7 +173,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
       byAgent.set(r.agentId, b);
     }
     const perAgentTokens = store.tokenIncreasesByAgent(p.id, t7, myIds);
-    const topAgents = my.map((a: Agent) => ({ name: a.name, requests: byAgent.get(a.id)?.requests ?? 0, limited: byAgent.get(a.id)?.limited ?? 0, tokens: perAgentTokens.get(a.id) ?? 0 }))
+    const topAgents = mine.map((a: Agent) => ({ name: nameOf.get(a.id) ?? a.name, requests: byAgent.get(a.id)?.requests ?? 0, limited: byAgent.get(a.id)?.limited ?? 0, tokens: perAgentTokens.get(a.id) ?? 0 }))
       .filter((x) => x.requests || x.tokens)
       .sort((x, y) => y.requests - x.requests || y.tokens - x.tokens)
       .slice(0, 5);

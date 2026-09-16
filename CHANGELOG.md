@@ -2,6 +2,24 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.10.0] — 2026-09-16
+
+### Security
+- **First-run account creation is no longer open to the network** (accounts mode). Creating account #1 needs no credential by definition, and the server binds every interface once auth is on — so on a tailnet or shared wifi the first stranger to load the page could have taken the installation, adopting everything password mode owned. It is now accepted from the machine itself, or with the setup code the server prints to its log at startup.
+- **Removing an account revokes it everywhere.** Its CLI tokens are deleted in the same transaction, and accounts mode re-checks the account on every token-authenticated request — a removed member's token used to keep working. Removal is also refused while the account still owns AI sources, whose stored secrets would otherwise be unreachable.
+- **Usage counts can no longer be re-tagged onto another account's source.** `model_call_hours` now keys on the source as well as the agent and hour (migrated in place); an agent changing source mid-hour used to move that hour's counts — including onto a *shared* source belonging to someone else.
+
+### Fixed
+- Rate-limit history stays with the source that served it, so moving a limited agent elsewhere no longer erases the evidence from both views.
+- A failed `docker logs` now surfaces as an error instead of an empty read, so a Docker outage is no longer recorded as an idle fleet with its calls lost.
+- Usage sampling runs several agents at a time with a whole-pass budget (`HATCHABOT_USAGE_CONCURRENCY`, `HATCHABOT_USAGE_PASS_MS`); one slow container used to stall every agent behind it.
+- Tokens spanning a source switch are attributed only where both samples agree, rather than landing wholesale on the new source.
+- Usernames are unique case-insensitively, matching how logins resolve them.
+- Account ids are escaped in inline handlers, and a revealed source credential is cleared when the dialog closes.
+
+### Notes
+- Full write-up in `docs/audit-2026-09-16.md`, including a scan of the published git history: no real secrets, and the pre-1.0 history is confirmed absent from the public remote.
+
 ## [1.9.1] — 2026-09-16
 
 ### Fixed

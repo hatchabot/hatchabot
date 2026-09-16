@@ -106,3 +106,25 @@ describe('GET /v1/ai-profiles/usage', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/ai-profiles/usage/sample', headers: { 'x-hatchabot-owner': 'user-other' } })).statusCode).toBe(403);
   });
 });
+
+describe('history follows the source that served it, not the agent', () => {
+  const NOW = Date.parse('2026-09-15T18:00:00Z');
+  it('a rate-limit hit stays visible after the agent moves to another source', async () => {
+    const { store, provider } = await world();
+    store.insertAIProfile({ id: 'other', ownerId: OWNER, name: 'Spare', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/other', createdAt: 'now' } as any);
+    provider.modelCallLines = [line('2026-09-15T15:00:00.000Z', 200), line('2026-09-15T15:01:00.000Z', 429)].join('\n');
+    await sampleSourceUsage({ store, providerFor: () => provider }, NOW);
+
+    const before = summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'max')!;
+    expect(before.limitHits7d).toBeGreaterThan(0);
+    expect(before.agents).toBe(2);
+
+    // The owner does exactly what the banner suggests: move off the limited source.
+    for (const a of store.listAgents(OWNER)) store.setAgentAIProfile(a.id, 'other');
+
+    const after = summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'max')!;
+    expect(after.limitHits7d).toBe(before.limitHits7d); // the record survives the move
+    expect(after.window7d.requests).toBe(before.window7d.requests);
+    expect(after.agents).toBe(0); // …while "agents on it now" correctly drops
+  });
+});

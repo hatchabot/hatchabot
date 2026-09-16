@@ -59,6 +59,28 @@ export interface AccountsAuthDeps {
 const COOKIE = 'hatchabot_session';
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
+/**
+ * Creating account #1 is the one action with no credential behind it, and the
+ * server binds every interface once auth is on — so on a tailnet or a shared
+ * wifi the first stranger to load the page could take the installation, data
+ * and all (adoptLocalOwnerData hands them whatever password mode owned).
+ *
+ * So: from the machine itself, anyone. From anywhere else, you need the setup
+ * code this process printed to its log at startup. Physical/ssh access to the
+ * box, or the log, is the credential.
+ */
+const SETUP_CODE = randomBytes(4).toString('hex');
+
+export function setupCode(): string {
+  return SETUP_CODE;
+}
+
+function isLoopback(ip: string | undefined): boolean {
+  if (!ip) return false;
+  const bare = ip.replace(/^::ffff:/, '');
+  return bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.');
+}
+
 /** Session signature. The account's password hash rides in the material, so
  *  changing (or resetting) a password invalidates that account's sessions
  *  everywhere without touching anyone else's. */
@@ -118,11 +140,18 @@ export function registerAccountRoutes(
    * install, where whoever gets there first sets the password. It closes the
    * moment that account exists.
    */
-  app.post<{ Body: { username?: string; password?: string; displayName?: string } }>(
+  app.post<{ Body: { username?: string; password?: string; displayName?: string; setupCode?: string } }>(
     '/v1/local-accounts/bootstrap',
     async (req, reply) => {
       if (store.countLocalAccounts() > 0) {
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
+      }
+      if (!isLoopback(req.ip) && (req.body?.setupCode ?? '').trim() !== SETUP_CODE) {
+        return reply.code(403).send({
+          error:
+            'Creating the first account from another machine needs the setup code this server printed when it started. ' +
+            'Find it in the server log ("first-run setup code"), or create the account on the machine itself.',
+        });
       }
       const username = (req.body?.username ?? '').trim();
       const password = req.body?.password ?? '';
@@ -261,7 +290,15 @@ export function registerAccountRoutes(
         error: `${target.username} still has ${agents.length} agent${agents.length === 1 ? '' : 's'}. Delete or hand them over first.`,
       });
     }
-    store.deleteLocalAccount(target.id);
+    // Their AI sources hold credentials nobody would own afterwards — and the
+    // stored secret would linger with no route left to delete it.
+    const sources = store.listAIProfiles(target.id).filter((p) => p.ownerId === target.id);
+    if (sources.length) {
+      return reply.code(409).send({
+        error: `${target.username} still owns ${sources.length} AI source${sources.length === 1 ? '' : 's'}. Delete those first.`,
+      });
+    }
+    store.deleteLocalAccount(target.id); // also revokes their CLI tokens
     return { ok: true };
   });
 }

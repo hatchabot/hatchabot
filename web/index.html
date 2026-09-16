@@ -422,6 +422,10 @@
     <input type="text" id="setupUser" autocomplete="username" placeholder="chris">
     <label>Password <span style="color:var(--dim)">(8 characters or more)</span></label>
     <input type="password" id="setupPw" autocomplete="new-password">
+    <details style="margin-top:8px"><summary class="sub">Setting this up from another machine?</summary>
+      <div class="sub" style="margin:6px 0">Creating the first account needs no credential, so from anywhere but this machine it needs the setup code the server printed when it started — look for “first-run setup code” in the log (<code>data/server.log</code>, or <code>journalctl --user -u hatchabot</code>).</div>
+      <input type="text" id="setupCode" placeholder="Setup code" autocomplete="off">
+    </details>
     <div class="actions" style="justify-content:flex-end">
       <button class="primary" id="setupBtn" onclick="acctBootstrap()">Create account</button>
     </div>
@@ -2001,7 +2005,7 @@ async function acctSignIn() {
 async function acctBootstrap() {
   $('setupBtn').disabled = true;
   try {
-    const r = await api('/v1/local-accounts/bootstrap', { method: 'POST', body: { username: $('setupUser').value.trim(), password: $('setupPw').value } });
+    const r = await api('/v1/local-accounts/bootstrap', { method: 'POST', body: { username: $('setupUser').value.trim(), password: $('setupPw').value, setupCode: $('setupCode').value.trim() || undefined } });
     loginDlg.close(); $('setupPw').value = '';
     if (r.adopted) toast(`Account created — it adopted ${r.adopted} existing record${r.adopted === 1 ? '' : 's'}.`);
     await loadConfig(); await refresh(true);
@@ -2023,8 +2027,8 @@ async function loadAccounts() {
       <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
       <span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>
       <span style="margin-left:auto;display:flex;gap:6px">
-        <button onclick="resetAccountPassword('${a.id}','${jsq(a.username)}')">Reset password</button>
-        ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${a.id}','${jsq(a.username)}')">Remove</button>`}
+        <button onclick="resetAccountPassword('${jsq(a.id)}','${jsq(a.username)}')">Reset password</button>
+        ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${jsq(a.id)}','${jsq(a.username)}')">Remove</button>`}
       </span></div>`).join('');
   } catch (e) { $('acctList').textContent = e.message; }
 }
@@ -3189,6 +3193,12 @@ async function setMgmtLlmSource(id, on) {
 
 /** Reveal a source's stored credential so it can be added on another machine.
  *  Owner-only server-side, and the server logs every reveal. */
+// A revealed credential lingers in the DOM until something re-renders the list;
+// clear it when the dialog closes so it doesn't sit there for the next opener.
+aiDlg?.addEventListener('close', () => {
+  document.querySelectorAll('#aiList code[id^="cred-"]').forEach(el => { el.textContent = ''; el.style.display = 'none'; });
+});
+
 async function revealSourceCredential(id, btn) {
   const out = $('cred-' + id);
   if (out.style.display !== 'none') { out.style.display = 'none'; out.textContent = ''; btn.textContent = 'Show'; return; }
