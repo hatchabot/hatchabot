@@ -2,8 +2,9 @@
 
 ## Your AI should be a staff, not a search box.
 
-You already have a subscription to a brilliant model. It answers your questions
-and forgets you by tomorrow. It's one assistant, in one app, for one person.
+You already pay for a brilliant model. It remembers you, runs tasks on a
+schedule and reads your Drive — for one person, inside one app, with a memory
+you can clear but never open, read or take anywhere else.
 
 **Hatchabot turns that subscription into a household of agents you own.** Each
 one has a job, a personality, and a memory that grows for years. Each one lives

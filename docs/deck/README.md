@@ -1,9 +1,17 @@
 # Hatchabot deck
 
-`hatchabot-deck.pdf` — 15 slides (16:9): the problem, the idea, principles, the two
-deliberate choices (Claude Max, Telegram), features, the control panel, operating a fleet, how it compares
-with Claude.ai / ChatGPT / Codex and with plain OpenClaw, how it works, why it's easy to
-run, and the 15-minute start.
+`hatchabot-deck.pdf` — 13 slides (16:9). It leads with the objection ("can't ChatGPT or
+Claude already do this?"), then the idea, the side-by-side comparison, the one-subscription
+household, the control panel, features, operating a fleet, principles, what Hatchabot adds
+to OpenClaw, how it works, and the 15-minute start.
+
+Comparison claims describe the CONSUMER chat apps as of September 2026 and were checked
+then: both have persistent memory and unattended scheduled tasks, ChatGPT shared projects
+admit collaborators on free accounts, and Claude Cowork reads and writes connected local
+folders. Don't reintroduce "it forgets you tomorrow", "only you can use it" or "it does
+nothing while you're away" — all three are false now. What still holds: memory you can
+read, edit, back up and move; no account or seat for the people you invite; agent-to-agent
+consultation; per-agent scoped access; and choosing the model per agent.
 
 `hatchabot-deck.html` is the source; the PDF is rendered from it with WeasyPrint, which
 the runtime image already contains. Headings use Bricolage Grotesque (SIL OFL 1.1,

@@ -2,8 +2,9 @@
 
 ## The idea in one paragraph
 
-Claude and ChatGPT give you **one assistant, in one app, from one company, for
-one person, whose memory of you is whatever that company decides to keep.**
+Claude and ChatGPT give you **one excellent assistant, in one app, from one
+company, for one person — with a memory you can clear but never open, correct,
+back up or take to another provider.**
 Hatchabot is the opposite shape: **many purpose-built agents, on hardware you
 own, thinking with whichever AI you choose, reachable by whoever you let in,
 through the messaging app your family already uses.** It is not a chatbot. It
