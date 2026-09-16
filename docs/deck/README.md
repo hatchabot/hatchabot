@@ -1,8 +1,8 @@
 # Hatchabot deck
 
-`hatchabot-deck.pdf` — 13 slides (16:9). It leads with the objection ("can't ChatGPT or
+`hatchabot-deck.pdf` — 15 slides (16:9). It leads with the objection ("can't ChatGPT or
 Claude already do this?"), then the idea, the side-by-side comparison, the one-subscription
-household, the control panel, features, operating a fleet, principles, what Hatchabot adds
+household, the platform case, two agents built on it, the control panel, features, operating a fleet, principles, what Hatchabot adds
 to OpenClaw, how it works, and the 15-minute start.
 
 Comparison claims describe the CONSUMER chat apps as of September 2026 and were checked
