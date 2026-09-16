@@ -2,6 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER, type Principal } from './principal.js';
+import { registerAccountRoutes, sessionAccount } from './accountsAuth.js';
+import type { Store } from '../store/store.js';
 import {
   identityConfigFromEnv,
   IdentityError,
@@ -79,6 +81,8 @@ export interface AuthOptions {
   mode?: AuthMode;
   /** Test seam / DI for identity mode. */
   verifier?: IdentityVerifier;
+  /** Accounts mode keeps its credentials in the store. */
+  store?: Store;
   /**
    * Called on each successful identity authentication. Phase 3 uses it to
    * hand a password-mode installation's data to its first real account.
@@ -92,13 +96,14 @@ export interface AuthOptions {
   cliTokenOwner?: (token: string) => string | undefined;
 }
 
-export type AuthMode = 'password' | 'identity';
+export type AuthMode = 'password' | 'accounts' | 'identity';
 
 export function authModeFromEnv(env = process.env): AuthMode {
   const raw = (env.HATCHABOT_AUTH ?? 'password').toLowerCase();
   if (raw === 'identity') return 'identity';
+  if (raw === 'accounts') return 'accounts';
   if (raw !== 'password') {
-    throw new Error(`HATCHABOT_AUTH must be "password" or "identity" (got "${raw}")`);
+    throw new Error(`HATCHABOT_AUTH must be "password", "accounts" or "identity" (got "${raw}")`);
   }
   return 'password';
 }
@@ -139,6 +144,10 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   const mode: AuthMode = opts.mode ?? 'password';
   if (mode === 'identity') {
     await registerIdentityAuth(app, opts);
+    return;
+  }
+  if (mode === 'accounts') {
+    registerAccountsAuth(app, opts);
     return;
   }
 
@@ -251,6 +260,57 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
       // A valid password session IS the installation's single owner. In
       // identity mode this becomes the verified token subject.
       req.principal = { ownerId: LOCAL_OWNER, via: 'password' };
+      return;
+    }
+    return reply.code(401).send({ error: 'auth required' });
+  });
+}
+
+/**
+ * Accounts mode: several local accounts, each with its own username and
+ * password, kept in this installation's database. Same session cookie shape as
+ * the other modes; the difference is that the cookie names WHICH account, and
+ * every route then scopes to that owner id.
+ */
+function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
+  const store = opts.store;
+  if (!store) throw new Error('accounts mode needs a store (registerAuth opts.store)');
+
+  registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure });
+
+  app.post('/v1/logout', async (_req, reply) => {
+    reply.clearCookie(COOKIE, { path: '/' });
+    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
+    return { ok: true };
+  });
+
+  app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
+    const id = sessionAccount(store, opts.secret, cookieValue(header, COOKIE));
+    return id ? { ownerId: id, via: 'password', subject: id } : undefined;
+  });
+
+  app.addHook('onRequest', async (req, reply) => {
+    const path = req.url.split('?')[0] ?? '';
+    if (path === '/' || path === '/healthz' || path === '/v1/config') return;
+    if (path === '/v1/login' || path === '/v1/logout') return;
+    // First run has no accounts and therefore no way to authenticate; the
+    // route itself refuses once account #1 exists.
+    if (path === '/v1/accounts/bootstrap') return;
+    if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
+    if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
+    if (path === '/privacy' || path === '/terms') return;
+    if (path === '/v1/connections/google/callback') return;
+    if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
+
+    const cliOwner = cliBearer(req, opts);
+    if (cliOwner) {
+      req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
+      return;
+    }
+    const id = sessionAccount(store, opts.secret, req.cookies[COOKIE]);
+    if (id) {
+      req.principal = { ownerId: id, via: 'password', subject: id };
+      opts.onAuthenticated?.(req.principal);
       return;
     }
     return reply.code(401).send({ error: 'auth required' });

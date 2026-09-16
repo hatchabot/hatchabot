@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.8.0] — 2026-09-16
+
+### Added
+- **Accounts mode: several logins, no cloud.** `HATCHABOT_AUTH=accounts` gives each person their own username and password, stored on this machine — no Google project, nothing to register. It's the middle rung between one shared password and identity mode, and it's the answer for a household that wants separate logins without the Google Cloud setup that identity mode requires.
+  - Each account's id is its owner id, so isolation matches identity mode: your agents, sources and invites are yours.
+  - **First run** offers "create the first account". That account is the **host owner**, and it adopts every row a password-mode install already owned — so switching mode doesn't strand your fleet.
+  - ⚙ Settings → Access gains *Accounts on this machine* (host owner: add, reset, remove) and *Your password* for everyone.
+  - Passwords are scrypt hashes with a per-account salt; the hash seeds the session signature, so changing or resetting one signs that account out everywhere — and only that account. A wrong username and a wrong password give the same answer, and failures are throttled per client.
+  - Removing an account is refused while it still owns agents; the host owner can't be removed.
+  - The security posture check now reports accounts mode as isolated, rather than warning as it does for password mode.
+
 ## [1.7.1] — 2026-09-16
 
 ### Fixed

@@ -22,10 +22,19 @@ server-side, and the web app can log in through Identity Platform's REST API
 
 ### Auth modes, not a rewrite
 
-`auth.ts` gains a mode switch (env: `HATCHABOT_AUTH=password|identity`):
+`auth.ts` has a mode switch (env: `HATCHABOT_AUTH=password|accounts|identity`):
 
 - `password` — today's behavior, unchanged. The default. A home install
   never needs a Google project.
+- `accounts` — **local accounts, shipped in 1.8.0**: several people, each
+  with their own username and password in this installation's database
+  (scrypt-hashed). No cloud project, nothing to register — the reason it
+  exists is that the identity-mode Google setup is expert-level, and a
+  household that just wants separate logins shouldn't need it. Each
+  account's id is its owner id, so isolation is the same as identity mode's.
+  Account #1 is the host owner: it adopts what password mode owned, and it
+  is the only one that can add, reset or remove accounts. See "Accounts
+  mode" below.
 - `identity` — `Authorization: Bearer <ID token>` verified against the
   project's JWKS (issuer + audience + expiry + signature). The session
   cookie mechanism stays for the browser; it just gets minted from a
@@ -109,3 +118,29 @@ requires Cloud Run to exist yet.
   come with the cloud step, not this one.
 - SSO providers beyond Google/email.
 - Token-gated agent-to-agent APIs.
+
+
+## Accounts mode — local logins, no cloud (1.8.0)
+
+Set `HATCHABOT_AUTH=accounts` in `.env` and restart. The app then asks for a
+username and password instead of the shared one.
+
+- **First run** shows "create the first account" — nobody can sign in yet, so
+  the bootstrap route is open exactly until account #1 exists, the same trust
+  window as the password screen on a fresh install. That account becomes the
+  **host owner** and adopts every row a password-mode install already owned.
+- **More people**: ⚙ Settings → Access → *Accounts on this machine* → add a
+  username and password, tell them out of band, and they change it themselves
+  from the same tab. Each account sees only its own agents; sharing an AI
+  source (the Shared toggle) is what lets them spend your plan.
+- **Passwords** are scrypt hashes with a per-account salt. The hash also seeds
+  the session signature, so changing or resetting a password signs that account
+  out everywhere — and only that account.
+- **Failures are throttled** per client (`HATCHABOT_LOGIN_FAILS_PER_WINDOW`),
+  and a wrong username and a wrong password give the same answer, so the login
+  form is not a username oracle.
+- **Removing an account** is refused while it still owns agents — they would
+  become unreachable, since every query scopes by owner. Delete or hand them
+  over first. The host owner can't be removed at all.
+- **The CLI** uses a token (⚙ Settings → Access → access token), not the
+  password: `hatchabot login --token <tok>`.

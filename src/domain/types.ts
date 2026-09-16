@@ -98,6 +98,23 @@ export interface AIProfile {
   createdAt: string;
 }
 
+/**
+ * A local sign-in account (HATCHABOT_AUTH=accounts): username + scrypt-hashed
+ * password, no cloud identity provider. `id` is the owner id every other table
+ * scopes by — an account owns agents exactly as an identity subject does.
+ */
+export interface LocalAccount {
+  id: string;
+  username: string;
+  displayName?: string;
+  pwHash: string;
+  pwSalt: string;
+  /** Account #1: may create, reset and remove the others. */
+  hostOwner: boolean;
+  disabled: boolean;
+  createdAt: string;
+}
+
 export interface Agent {
   id: string;
   ownerId: string;

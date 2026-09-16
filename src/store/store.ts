@@ -13,10 +13,35 @@ import type {
   GroupAccess,
   TemplateParam,
   Host,
+  LocalAccount,
   Membership,
   MemberRole,
 } from '../domain/types.js';
 import { assertTransition } from '../domain/stateMachine.js';
+
+interface LocalAccountRow {
+  id: string;
+  username: string;
+  display_name: string | null;
+  pw_hash: string;
+  pw_salt: string;
+  host_owner: number;
+  disabled: number;
+  created_at: string;
+}
+
+function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
+  return {
+    id: r.id,
+    username: r.username,
+    displayName: r.display_name ?? undefined,
+    pwHash: r.pw_hash,
+    pwSalt: r.pw_salt,
+    hostOwner: !!r.host_owner,
+    disabled: !!r.disabled,
+    createdAt: r.created_at,
+  };
+}
 
 /**
  * SQLite for the MVP; the interface is narrow enough that swapping in Postgres
@@ -257,6 +282,23 @@ export class Store {
         PRIMARY KEY (agent_id, name)
       );
       CREATE INDEX IF NOT EXISTS data_sources_agent ON data_sources (agent_id);
+
+      -- Accounts mode (HATCHABOT_AUTH=accounts): local sign-in credentials —
+      -- one row per person, no cloud identity provider. The id IS the owner id
+      -- every other table scopes by, so an account owns its agents the same
+      -- way an identity-mode subject does. Passwords are scrypt hashes; the
+      -- hash also seeds the session epoch, so changing it logs that account
+      -- out everywhere. host_owner marks account #1 (manages the rest).
+      CREATE TABLE IF NOT EXISTS local_accounts (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        display_name TEXT,
+        pw_hash TEXT NOT NULL,
+        pw_salt TEXT NOT NULL,
+        host_owner INTEGER NOT NULL DEFAULT 0,
+        disabled INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
 
       -- Who has signed in, so a share can be addressed by email. Email is
       -- mutable, so owner_id (the stable subject) is the key; email is the
@@ -1014,6 +1056,54 @@ export class Store {
   // ---- accounts (email <-> owner, for addressing shares) ------------------
 
   /** Record/refresh a signed-in account so shares can be addressed by email. */
+  // ---- accounts mode: local sign-in credentials -------------------------
+
+  countLocalAccounts(): number {
+    return (this.db.prepare(`SELECT COUNT(*) AS n FROM local_accounts`).get() as { n: number }).n;
+  }
+
+  /** Usernames are matched case-insensitively; stored as given for display. */
+  localAccountByUsername(username: string): LocalAccount | undefined {
+    const r = this.db
+      .prepare(`SELECT * FROM local_accounts WHERE lower(username) = lower(?)`)
+      .get(username) as LocalAccountRow | undefined;
+    return r ? rowToLocalAccount(r) : undefined;
+  }
+
+  localAccount(id: string): LocalAccount | undefined {
+    const r = this.db.prepare(`SELECT * FROM local_accounts WHERE id = ?`).get(id) as
+      | LocalAccountRow
+      | undefined;
+    return r ? rowToLocalAccount(r) : undefined;
+  }
+
+  listLocalAccounts(): LocalAccount[] {
+    return (
+      this.db.prepare(`SELECT * FROM local_accounts ORDER BY host_owner DESC, created_at`).all() as LocalAccountRow[]
+    ).map(rowToLocalAccount);
+  }
+
+  insertLocalAccount(a: LocalAccount): void {
+    this.db
+      .prepare(
+        `INSERT INTO local_accounts (id, username, display_name, pw_hash, pw_salt, host_owner, disabled, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(a.id, a.username, a.displayName ?? null, a.pwHash, a.pwSalt, a.hostOwner ? 1 : 0, a.disabled ? 1 : 0, a.createdAt);
+  }
+
+  setLocalAccountPassword(id: string, pwHash: string, pwSalt: string): void {
+    this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ? WHERE id = ?`).run(pwHash, pwSalt, id);
+  }
+
+  setLocalAccountDisabled(id: string, disabled: boolean): void {
+    this.db.prepare(`UPDATE local_accounts SET disabled = ? WHERE id = ?`).run(disabled ? 1 : 0, id);
+  }
+
+  deleteLocalAccount(id: string): void {
+    this.db.prepare(`DELETE FROM local_accounts WHERE id = ?`).run(id);
+  }
+
   recordAccount(ownerId: string, email?: string): void {
     this.db
       .prepare(

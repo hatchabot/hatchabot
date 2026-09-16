@@ -127,6 +127,7 @@ const sweptRefs = store.sweepOrphanBotSecrets();
 if (sweptRefs.length) app.log.warn({ refs: sweptRefs }, 'deleted orphaned bot-token secrets');
 await registerAuth(app, {
   password: process.env.HATCHABOT_PASSWORD,
+  store,
   secret: LocalSecretStore.keyFromEnv(),
   mode: authModeFromEnv(),
   cliTokenOwner: (token) => store.ownerForCliToken(token),

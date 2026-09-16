@@ -405,6 +405,26 @@
       <button class="primary" id="loginBtn" onclick="doLogin()">Unlock</button>
     </div>
   </div>
+  <div id="acctLogin" style="display:none">
+    <div class="sub" id="acctLoginNote">Sign in with your account on this machine.</div>
+    <label>Username</label>
+    <input type="text" id="loginUser" autocomplete="username">
+    <label>Password</label>
+    <input type="password" id="loginAcctPw" autocomplete="current-password">
+    <div class="actions" style="justify-content:flex-end">
+      <button class="primary" id="acctLoginBtn" onclick="acctSignIn()">Sign in</button>
+    </div>
+  </div>
+  <div id="acctSetup" style="display:none">
+    <div class="sub">No accounts yet — create the first one. It becomes the host owner, which manages the others.</div>
+    <label>Username</label>
+    <input type="text" id="setupUser" autocomplete="username" placeholder="chris">
+    <label>Password <span style="color:var(--dim)">(8 characters or more)</span></label>
+    <input type="password" id="setupPw" autocomplete="new-password">
+    <div class="actions" style="justify-content:flex-end">
+      <button class="primary" id="setupBtn" onclick="acctBootstrap()">Create account</button>
+    </div>
+  </div>
   <div id="idLogin" style="display:none">
     <div class="sub">Sign in to Hatchabot.</div>
     <div id="gsiBtn" style="margin-top:14px;display:flex;justify-content:center"></div>
@@ -1107,6 +1127,30 @@
   </section>
 
   <section id="paneAccess" role="tabpanel" hidden>
+    <div id="acctAdmin" hidden>
+      <h4 style="margin:0 0 4px">Accounts on this machine</h4>
+      <div class="sub">Everyone signs in with their own username and password. Each account owns its own agents; share an AI source to let another account spend your plan.</div>
+      <div id="acctList" class="sub" style="margin:8px 0">Loading…</div>
+      <details id="acctAddBox" style="margin-bottom:10px">
+        <summary><b>＋ Add an account</b></summary>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
+          <div><label>Username</label><input type="text" id="acctNewUser" style="width:180px" autocomplete="off"></div>
+          <div><label>Password</label><input type="password" id="acctNewPw" style="width:180px" autocomplete="new-password"></div>
+          <button class="primary" onclick="addAccount(this)">Create</button>
+        </div>
+        <div class="sub" style="margin-top:6px">Tell them the password out of band; they can change it from this tab once they sign in.</div>
+      </details>
+    </div>
+    <div id="acctSelf" hidden>
+      <h4 style="margin:0 0 4px">Your password</h4>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div><label>Current</label><input type="password" id="acctCurPw" style="width:170px" autocomplete="current-password"></div>
+        <div><label>New</label><input type="password" id="acctNewSelfPw" style="width:170px" autocomplete="new-password"></div>
+        <button onclick="changeMyPassword(this)">Change</button>
+      </div>
+      <div class="sub" style="margin:6px 0 18px">Changing it signs this account out everywhere else.</div>
+    </div>
+
     <h4 style="margin:0 0 4px">Your Telegram</h4>
     <div class="sub">
       Your login (email) and your Telegram are separate identities: the login
@@ -1820,8 +1864,13 @@ let appConfig = { authMode: 'password' };
 async function loadConfig() {
   try { appConfig = await (await fetch('/v1/config')).json(); } catch { /* keep default */ }
   const identity = appConfig.authMode === 'identity';
-  $('pwLogin').style.display = identity ? 'none' : '';
+  const accounts = appConfig.authMode === 'accounts';
+  const setup = accounts && appConfig.needsSetup;
+  $('pwLogin').style.display = identity || accounts ? 'none' : '';
   $('idLogin').style.display = identity ? '' : 'none';
+  $('acctLogin').style.display = accounts && !setup ? '' : 'none';
+  $('acctSetup').style.display = setup ? '' : 'none';
+  if (setup) $('loginDlg').querySelector('h3').textContent = 'Welcome to Hatchabot';
   renderWhoami();
   if (identity) loadGoogleButton();
 }
@@ -1935,6 +1984,84 @@ function showLogin() {
     });
   }
 }
+/** Accounts mode: username + password against this installation's own list. */
+async function acctSignIn() {
+  $('acctLoginBtn').disabled = true;
+  try {
+    await api('/v1/login', { method: 'POST', body: { username: $('loginUser').value.trim(), password: $('loginAcctPw').value } });
+    loginDlg.close(); $('loginAcctPw').value = '';
+    await loadConfig(); await refresh(true);
+  } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong username or password' : e.message; }
+  finally { $('acctLoginBtn').disabled = false; }
+}
+
+/** First run: create account #1, which adopts anything a password-mode
+ *  installation already owned. */
+async function acctBootstrap() {
+  $('setupBtn').disabled = true;
+  try {
+    const r = await api('/v1/accounts/bootstrap', { method: 'POST', body: { username: $('setupUser').value.trim(), password: $('setupPw').value } });
+    loginDlg.close(); $('setupPw').value = '';
+    if (r.adopted) toast(`Account created — it adopted ${r.adopted} existing record${r.adopted === 1 ? '' : 's'}.`);
+    await loadConfig(); await refresh(true);
+  } catch (e) { $('loginErr').textContent = e.message; }
+  finally { $('setupBtn').disabled = false; }
+}
+
+/** Accounts mode only: the roster (host owner) and your own password. */
+async function loadAccounts() {
+  if (appConfig.authMode !== 'accounts') return;
+  $('acctSelf').hidden = false;
+  let me;
+  try { me = await api('/v1/accounts/me'); } catch { return; }
+  if (!me.hostOwner) { $('acctAdmin').hidden = true; return; }
+  $('acctAdmin').hidden = false;
+  try {
+    const rows = await api('/v1/accounts');
+    $('acctList').innerHTML = rows.map(a => `<div class="pair" style="gap:8px;align-items:center">
+      <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
+      <span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <button onclick="resetAccountPassword('${a.id}','${jsq(a.username)}')">Reset password</button>
+        ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${a.id}','${jsq(a.username)}')">Remove</button>`}
+      </span></div>`).join('');
+  } catch (e) { $('acctList').textContent = e.message; }
+}
+
+async function addAccount(btn) {
+  btn.disabled = true;
+  try {
+    await api('/v1/accounts', { method: 'POST', body: { username: $('acctNewUser').value.trim(), password: $('acctNewPw').value } });
+    $('acctNewUser').value = ''; $('acctNewPw').value = '';
+    $('acctAddBox').open = false;
+    toast('Account created'); await loadAccounts();
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+}
+
+async function resetAccountPassword(id, username) {
+  const pw = prompt(`New password for ${username} (8 characters or more):`);
+  if (!pw) return;
+  try { await api(`/v1/accounts/${id}/password`, { method: 'POST', body: { password: pw } }); toast(`Password reset — ${username} is signed out everywhere.`); }
+  catch (e) { toast(e.message); }
+}
+
+async function removeAccount(id, username) {
+  if (!confirm(`Remove the account ${username}? Their agents must be gone first.`)) return;
+  try { await api(`/v1/accounts/${id}`, { method: 'DELETE' }); toast('Account removed'); await loadAccounts(); }
+  catch (e) { toast(e.message); }
+}
+
+async function changeMyPassword(btn) {
+  btn.disabled = true;
+  try {
+    await api('/v1/accounts/me/password', { method: 'POST', body: { current: $('acctCurPw').value, password: $('acctNewSelfPw').value } });
+    $('acctCurPw').value = ''; $('acctNewSelfPw').value = '';
+    toast('Password changed');
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+}
+
 async function doLogin() {
   $('loginBtn').disabled = true;
   try {
@@ -1946,7 +2073,9 @@ async function doLogin() {
 }
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' || !loginDlg.open) return;
-  appConfig.authMode === 'identity' ? idSignIn() : doLogin();
+  if (appConfig.authMode === 'identity') idSignIn();
+  else if (appConfig.authMode === 'accounts') appConfig.needsSetup ? acctBootstrap() : acctSignIn();
+  else doLogin();
 });
 // dialogs shouldn't be escapable into a broken page when auth is required
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
@@ -2041,7 +2170,7 @@ function showTab(name) {
     $(pane).hidden = !on;
     $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
   }
-  if (name === 'access') refreshMgmtBotStatus();
+  if (name === 'access') { refreshMgmtBotStatus(); void loadAccounts(); }
   if (name === 'conn') loadConnections();
   if (name === 'hosts') loadHosts();
   if (name === 'pool') loadPool();

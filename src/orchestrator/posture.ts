@@ -41,7 +41,7 @@ export interface PostureInput {
   /** True when the caller owns the local host — install-level checks are the
    *  operator's view and are omitted otherwise. */
   isHostOwner: boolean;
-  authMode: 'password' | 'identity';
+  authMode: 'password' | 'accounts' | 'identity';
 }
 
 function envNum(name: string, dflt: number): number {
@@ -57,12 +57,14 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
     install.push(
       authMode === 'identity'
         ? { key: 'auth-mode', level: 'ok', title: 'Identity mode', detail: 'Each account has its own owner scope.' }
-        : {
-            key: 'auth-mode',
-            level: 'warn',
-            title: 'Password mode — no per-account isolation',
-            detail: 'Every login is the same owner. Switch to identity mode before giving anyone their own account.',
-          },
+        : authMode === 'accounts'
+          ? { key: 'auth-mode', level: 'ok', title: 'Accounts mode', detail: 'Each account signs in with its own password and has its own owner scope.' }
+          : {
+              key: 'auth-mode',
+              level: 'warn',
+              title: 'Password mode — no per-account isolation',
+              detail: 'Every login is the same owner. Switch to accounts mode (local logins) or identity mode before giving anyone their own account.',
+            },
     );
     install.push(
       process.env.HATCHABOT_ALLOW_OWNER_HEADER === '1'
@@ -195,7 +197,7 @@ export function diffRisks(current: string[], previous: string[]): { added: strin
  */
 export function runPostureSweep(
   store: Store,
-  opts: { authMode: 'password' | 'identity'; log?: (event: string, detail: Record<string, unknown>) => void },
+  opts: { authMode: 'password' | 'accounts' | 'identity'; log?: (event: string, detail: Record<string, unknown>) => void },
 ): void {
   const today = new Date().toISOString().slice(0, 10);
   const hostOwner = store.localHostOwnerId();
