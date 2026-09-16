@@ -119,7 +119,7 @@ export function registerAccountRoutes(
    * moment that account exists.
    */
   app.post<{ Body: { username?: string; password?: string; displayName?: string } }>(
-    '/v1/accounts/bootstrap',
+    '/v1/local-accounts/bootstrap',
     async (req, reply) => {
       if (store.countLocalAccounts() > 0) {
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
@@ -169,7 +169,7 @@ export function registerAccountRoutes(
   });
 
   /** Who am I, for the app's header and the Access tab. */
-  app.get('/v1/accounts/me', async (req, reply) => {
+  app.get('/v1/local-accounts/me', async (req, reply) => {
     const account = store.localAccount(req.principal?.ownerId ?? '');
     if (!account) return reply.code(404).send({ error: 'Not found' });
     return { id: account.id, username: account.username, displayName: account.displayName, hostOwner: account.hostOwner };
@@ -177,7 +177,7 @@ export function registerAccountRoutes(
 
   /** The roster. Host owner only: who else can reach this installation is not
    *  ordinary-user business, and the list is a map of the household. */
-  app.get('/v1/accounts', async (req, reply) => {
+  app.get('/v1/local-accounts', async (req, reply) => {
     const me = store.localAccount(req.principal?.ownerId ?? '');
     if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner manages accounts.' });
     return store.listLocalAccounts().map((a) => ({
@@ -192,7 +192,7 @@ export function registerAccountRoutes(
   });
 
   app.post<{ Body: { username?: string; password?: string; displayName?: string } }>(
-    '/v1/accounts',
+    '/v1/local-accounts',
     async (req, reply) => {
       const me = store.localAccount(req.principal?.ownerId ?? '');
       if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner adds accounts.' });
@@ -223,7 +223,7 @@ export function registerAccountRoutes(
   /** Change a password: your own (current password required) or, for the host
    *  owner, anyone's (a reset — the person is told to change it after). */
   app.post<{ Params: { id: string }; Body: { current?: string; password?: string } }>(
-    '/v1/accounts/:id/password',
+    '/v1/local-accounts/:id/password',
     async (req, reply) => {
       const me = store.localAccount(req.principal?.ownerId ?? '');
       if (!me) return reply.code(401).send({ error: 'Sign in first.' });
@@ -247,7 +247,7 @@ export function registerAccountRoutes(
     },
   );
 
-  app.delete<{ Params: { id: string } }>('/v1/accounts/:id', async (req, reply) => {
+  app.delete<{ Params: { id: string } }>('/v1/local-accounts/:id', async (req, reply) => {
     const me = store.localAccount(req.principal?.ownerId ?? '');
     if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner removes accounts.' });
     const target = store.localAccount(req.params.id);

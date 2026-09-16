@@ -316,7 +316,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     if (path === '/v1/login' || path === '/v1/logout') return;
     // First run has no accounts and therefore no way to authenticate; the
     // route itself refuses once account #1 exists.
-    if (path === '/v1/accounts/bootstrap') return;
+    if (path === '/v1/local-accounts/bootstrap') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
     if (path === '/privacy' || path === '/terms') return;

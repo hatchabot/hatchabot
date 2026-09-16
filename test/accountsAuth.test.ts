@@ -21,7 +21,7 @@ const cookieOf = (res: { cookies: Array<{ name: string; value: string }> }) => {
 };
 
 const bootstrap = (f: any, username = 'chris', password = 'correct-horse') =>
-  f.inject({ method: 'POST', url: '/v1/accounts/bootstrap', payload: { username, password } });
+  f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username, password } });
 
 const signIn = (f: any, username: string, password: string) =>
   f.inject({ method: 'POST', url: '/v1/login', payload: { username, password } });
@@ -59,7 +59,7 @@ describe('first run', () => {
     // The open window closes the moment an account exists — otherwise anyone
     // who reached the port later could mint themselves an owner.
     const again = await f.inject({
-      method: 'POST', url: '/v1/accounts/bootstrap', payload: { username: 'intruder', password: 'password123' },
+      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'intruder', password: 'password123' },
     });
     expect(again.statusCode).toBe(403);
   });
@@ -125,7 +125,7 @@ describe('two accounts are two owners', () => {
     const first = await bootstrap(f);
     const hostCookie = cookieOf(first);
     const made = await f.inject({
-      method: 'POST', url: '/v1/accounts', headers: { cookie: hostCookie },
+      method: 'POST', url: '/v1/local-accounts', headers: { cookie: hostCookie },
       payload: { username: 'partner', password: 'their-password' },
     });
     expect(made.statusCode).toBe(201);
@@ -137,10 +137,10 @@ describe('two accounts are two owners', () => {
     expect(them.json().ownerId).not.toBe(mine.json().ownerId);
 
     // A non-host account may not see or manage the roster.
-    const roster = await f.inject({ method: 'GET', url: '/v1/accounts', headers: { cookie: cookieOf(theirs) } });
+    const roster = await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie: cookieOf(theirs) } });
     expect(roster.statusCode).toBe(403);
     const add = await f.inject({
-      method: 'POST', url: '/v1/accounts', headers: { cookie: cookieOf(theirs) },
+      method: 'POST', url: '/v1/local-accounts', headers: { cookie: cookieOf(theirs) },
       payload: { username: 'sneaky', password: 'password123' },
     });
     expect(add.statusCode).toBe(403);
@@ -151,7 +151,7 @@ describe('two accounts are two owners', () => {
     const { f } = await app();
     const first = await bootstrap(f);
     const dup = await f.inject({
-      method: 'POST', url: '/v1/accounts', headers: { cookie: cookieOf(first) },
+      method: 'POST', url: '/v1/local-accounts', headers: { cookie: cookieOf(first) },
       payload: { username: 'CHRIS', password: 'another-password' },
     });
     expect(dup.statusCode).toBe(409);
@@ -164,7 +164,7 @@ describe('passwords and removal', () => {
     const first = await bootstrap(f);
     const old = cookieOf(first);
     const changed = await f.inject({
-      method: 'POST', url: '/v1/accounts/me/password', headers: { cookie: old },
+      method: 'POST', url: '/v1/local-accounts/me/password', headers: { cookie: old },
       payload: { current: 'correct-horse', password: 'brand-new-password' },
     });
     expect(changed.statusCode).toBe(200);
@@ -178,7 +178,7 @@ describe('passwords and removal', () => {
     const { f } = await app();
     const first = await bootstrap(f);
     const res = await f.inject({
-      method: 'POST', url: '/v1/accounts/me/password', headers: { cookie: cookieOf(first) },
+      method: 'POST', url: '/v1/local-accounts/me/password', headers: { cookie: cookieOf(first) },
       payload: { current: 'not-it', password: 'brand-new-password' },
     });
     expect(res.statusCode).toBe(401);
@@ -188,13 +188,13 @@ describe('passwords and removal', () => {
     const { f } = await app();
     const first = await bootstrap(f);
     await f.inject({
-      method: 'POST', url: '/v1/accounts', headers: { cookie: cookieOf(first) },
+      method: 'POST', url: '/v1/local-accounts', headers: { cookie: cookieOf(first) },
       payload: { username: 'partner', password: 'their-password' },
     });
-    const roster = await f.inject({ method: 'GET', url: '/v1/accounts', headers: { cookie: cookieOf(first) } });
+    const roster = await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie: cookieOf(first) } });
     const partner = (roster.json() as Array<{ id: string; username: string }>).find((a) => a.username === 'partner')!;
     const reset = await f.inject({
-      method: 'POST', url: `/v1/accounts/${partner.id}/password`, headers: { cookie: cookieOf(first) },
+      method: 'POST', url: `/v1/local-accounts/${partner.id}/password`, headers: { cookie: cookieOf(first) },
       payload: { password: 'reset-by-owner' },
     });
     expect(reset.statusCode).toBe(200);
@@ -203,7 +203,7 @@ describe('passwords and removal', () => {
     const theirs = await signIn(f, 'partner', 'reset-by-owner');
     const hostRow = (roster.json() as Array<{ id: string; hostOwner: boolean }>).find((a) => a.hostOwner)!;
     const attack = await f.inject({
-      method: 'POST', url: `/v1/accounts/${hostRow.id}/password`, headers: { cookie: cookieOf(theirs) },
+      method: 'POST', url: `/v1/local-accounts/${hostRow.id}/password`, headers: { cookie: cookieOf(theirs) },
       payload: { password: 'owned-by-them' },
     });
     expect(attack.statusCode).toBe(403);
@@ -213,24 +213,24 @@ describe('passwords and removal', () => {
     const { f, store } = await app();
     const first = await bootstrap(f);
     const cookie = cookieOf(first);
-    await f.inject({ method: 'POST', url: '/v1/accounts', headers: { cookie }, payload: { username: 'partner', password: 'their-password' } });
-    const roster = (await f.inject({ method: 'GET', url: '/v1/accounts', headers: { cookie } })).json() as Array<{ id: string; username: string; hostOwner: boolean }>;
+    await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'partner', password: 'their-password' } });
+    const roster = (await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie } })).json() as Array<{ id: string; username: string; hostOwner: boolean }>;
     const host = roster.find((a) => a.hostOwner)!;
     const partner = roster.find((a) => !a.hostOwner)!;
-    expect((await f.inject({ method: 'DELETE', url: `/v1/accounts/${host.id}`, headers: { cookie } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'DELETE', url: `/v1/local-accounts/${host.id}`, headers: { cookie } })).statusCode).toBe(400);
 
     store.insertAgent({
       id: 'a1', ownerId: partner.id, name: 'Theirs', slug: 'theirs', state: 'RUNNING',
       aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now',
     });
-    const busy = await f.inject({ method: 'DELETE', url: `/v1/accounts/${partner.id}`, headers: { cookie } });
+    const busy = await f.inject({ method: 'DELETE', url: `/v1/local-accounts/${partner.id}`, headers: { cookie } });
     expect(busy.statusCode).toBe(409);
     expect(busy.json().error).toMatch(/still has 1 agent/);
 
     store.setAgentState('a1', 'STOPPED');
     store.setAgentState('a1', 'DELETING');
     store.setAgentState('a1', 'DELETED');
-    expect((await f.inject({ method: 'DELETE', url: `/v1/accounts/${partner.id}`, headers: { cookie } })).statusCode).toBe(200);
+    expect((await f.inject({ method: 'DELETE', url: `/v1/local-accounts/${partner.id}`, headers: { cookie } })).statusCode).toBe(200);
     expect(store.countLocalAccounts()).toBe(1);
   });
 });
@@ -251,5 +251,49 @@ describe('where the server listens', () => {
   it('always honours an explicit HATCHABOT_BIND', () => {
     expect(bindHostFor({ HATCHABOT_BIND: '127.0.0.1' } as NodeJS.ProcessEnv, 'accounts')).toBe('127.0.0.1');
     expect(bindHostFor({ HATCHABOT_BIND: '100.64.0.2', HATCHABOT_PASSWORD: 'x' } as NodeJS.ProcessEnv, 'password')).toBe('100.64.0.2');
+  });
+});
+
+describe('the whole server boots in accounts mode', () => {
+  // The first accounts build crashed on startup: registerAccountRoutes claimed
+  // GET /v1/accounts, which routes.ts has served for months (share
+  // recipients), and Fastify refuses a duplicate route at registration. The
+  // unit tests above register auth ALONE, so nothing caught it until a real
+  // install died on boot. This boots both halves together, as index.ts does.
+  it('registers auth and every route together without a collision', async () => {
+    const { registerRoutes } = await import('../src/api/routes.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const store = new Store(new Database(':memory:'));
+    const f = Fastify();
+    const secrets = {
+      map: new Map<string, string>(),
+      async put(ref: string, v: string) { this.map.set(ref, v); },
+      async get(ref: string) { const v = this.map.get(ref); if (v === undefined) throw new Error(ref); return v; },
+      async delete(ref: string) { this.map.delete(ref); },
+    };
+    await registerAuth(f, { secret: SECRET, mode: 'accounts', store });
+    await registerRoutes(f, {
+      store,
+      secrets: secrets as never,
+      providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 } } as never,
+      authMode: 'accounts',
+    });
+    await f.ready(); // the boot that used to throw FST_ERR_DUPLICATED_ROUTE
+
+    // And the two namespaces stay distinct: the roster is the new one.
+    const made = await f.inject({
+      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse' },
+    });
+    expect(made.statusCode).toBe(201);
+    const cookie = cookieOf(made);
+    expect((await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie } })).statusCode).toBe(200);
+    // …while /v1/accounts still answers with share recipients.
+    const share = await f.inject({ method: 'GET', url: '/v1/accounts', headers: { cookie } });
+    expect(share.statusCode).toBe(200);
+    expect(share.json()).toHaveProperty('accounts');
+    // The login screen must be told setup is done, or it offers bootstrap forever.
+    const cfg = await f.inject({ method: 'GET', url: '/v1/config' });
+    expect(cfg.json()).toMatchObject({ authMode: 'accounts', needsSetup: false });
   });
 });

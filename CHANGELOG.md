@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.8.2] — 2026-09-16
+
+### Fixed
+- **Accounts mode crashed the server on startup.** The new roster claimed `GET /v1/accounts`, which has served the share-recipient list for months, and Fastify refuses a duplicate route at registration — so `HATCHABOT_AUTH=accounts` meant the control plane exited on boot with `FST_ERR_DUPLICATED_ROUTE` and nothing answered on 8080. The account endpoints now live under `/v1/local-accounts`. A test boots auth and the full route table together, the way the server does, and fails on the old arrangement.
+
 ## [1.8.1] — 2026-09-16
 
 ### Fixed
