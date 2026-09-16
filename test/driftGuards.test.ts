@@ -168,3 +168,21 @@ describe('the hatchabot CLI runs from any directory', () => {
     expect(wrapper.startsWith('#!/usr/bin/env node\n')).toBe(true); // not `env -S npx tsx`
   });
 });
+
+describe('dependencies are installed once, by one code path', () => {
+  // setup-host.sh ran `npm ci` (which deletes node_modules, and with it the
+  // stamp restart.sh writes), so the restart that follows an install
+  // reinstalled everything again: "added 154 packages" on a machine that had
+  // just installed them. One helper owns the decision now.
+  it('no script runs npm ci directly except the helper', () => {
+    for (const f of ['scripts/restart.sh', 'scripts/setup-host.sh', 'install.sh']) {
+      expect(read(f), `${f} should call scripts/ensure-deps.sh`).not.toMatch(/^\s*npm ci/m);
+    }
+    expect(read('scripts/ensure-deps.sh')).toMatch(/npm ci/);
+  });
+
+  it('both callers use the helper', () => {
+    expect(read('scripts/restart.sh')).toContain('./scripts/ensure-deps.sh');
+    expect(read('scripts/setup-host.sh')).toContain('./scripts/ensure-deps.sh');
+  });
+});

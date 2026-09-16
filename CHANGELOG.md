@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.9.1] — 2026-09-16
+
+### Fixed
+- **Installing twice in a row.** The installer ran `npm ci`, which deletes `node_modules` — including the stamp `restart.sh` uses to tell whether dependencies moved. The restart that followed an install therefore always reinstalled everything again ("added 154 packages" on a machine that had just installed them). Both now call `scripts/ensure-deps.sh`, which owns the decision and writes the stamp once.
+
 ## [1.9.0] — 2026-09-16
 
 ### Added
