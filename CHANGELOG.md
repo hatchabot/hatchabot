@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.11.0] — 2026-09-16
+
+### Added
+- **Invitations instead of invented passwords.** ⚙ Settings → Access → **Invite someone** takes a username and hands back a one-time link that expires in 48 hours. They open it, choose their own password, and are signed in. The roster shows an unclaimed invitation with a **Copy invitation** button, and a pending account cannot sign in at all until it is claimed.
+- **"Share my AI source with them"**, ticked by default when you invite someone — the step everyone forgot. An account with no source can do nothing. (A machine-login source is never shared this way: it hands over this machine's own Claude login and keeps its separate confirmation.)
+- **Google sign-in and local accounts together.** `HATCHABOT_AUTH=identity` plus `HATCHABOT_LOCAL_ACCOUNTS=1` runs both — the owner signs in with Google, everyone else gets an invitation link and a password, and neither needs a cloud project. The login screen offers both doors.
+
+### Fixed
+- **A new member no longer lands on the owner's setup wizard**, which told them to run `claude setup-token` on a machine they have no access to. They now see what is actually true for them: no source has been shared yet, here is the one sentence to send the person who runs the server, or add your own API key.
+- **Creating an agent with no source** answered `aiProfileId: Invalid input: expected string, received undefined`. It now says which thing is missing and who can fix it.
+- **The browser can offer to save the password.** The login, first-run and claim panels are real `<form>` elements with the right `autocomplete` attributes, and a successful sign-in also offers the credential to the browser's password manager explicitly — a dialog that never navigates doesn't reliably trip Chrome's own heuristic.
+
 ## [1.10.2] — 2026-09-16
 
 ### Fixed

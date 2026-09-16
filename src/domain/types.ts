@@ -113,6 +113,9 @@ export interface LocalAccount {
   hostOwner: boolean;
   disabled: boolean;
   createdAt: string;
+  /** Set while the account is waiting for its person to choose a password. */
+  claimCode?: string;
+  claimExpires?: string;
 }
 
 export interface Agent {

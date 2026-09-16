@@ -775,6 +775,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Accounts mode with an empty roster: the login screen offers to create
     // account #1 instead of asking for credentials nobody has yet.
     needsSetup: deps.authMode === 'accounts' && store.countLocalAccounts() === 0,
+    // Google sign-in and local accounts can run together: the login screen
+    // needs to know whether to offer both.
+    localAccounts: deps.authMode === 'accounts' || (deps.authMode === 'identity' && process.env.HATCHABOT_LOCAL_ACCOUNTS === '1'),
     // Surfaced so the UI can show "N of M agents" instead of only revealing the
     // ceiling as a 429 at create time. 0 = no limit. Archived agents don't count.
     maxAgentsPerAccount: Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0),
@@ -2344,7 +2347,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.post('/v1/agents', async (req, reply) => {
     const parsed = CreateAgent.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    if (!parsed.success) {
+      // A new account with nothing shared to it hits this first, and
+      // "aiProfileId: expected string, received undefined" is a dead end.
+      // Name the actual situation instead.
+      if (/aiProfileId/.test(zodMessage(parsed.error)) && store.listAIProfiles(ownerIdOf(req)).length === 0) {
+        return reply.code(400).send({
+          error: 'No AI source is available to your account yet. Ask whoever runs this server to share one with you (⚙ Settings → AI sources → Shared), or add your own API key there.',
+        });
+      }
+      return reply.code(400).send({ error: zodMessage(parsed.error) });
+    }
     const ownerId = ownerIdOf(req);
 
     // Ownership, not mere existence: without this any authenticated caller

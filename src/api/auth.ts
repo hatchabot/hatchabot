@@ -98,6 +98,11 @@ export interface AuthOptions {
 
 export type AuthMode = 'password' | 'accounts' | 'identity';
 
+/** Local username/password accounts alongside Google sign-in (identity mode). */
+export function localAccountsEnabled(env = process.env): boolean {
+  return env.HATCHABOT_LOCAL_ACCOUNTS === '1';
+}
+
 export function authModeFromEnv(env = process.env): AuthMode {
   const raw = (env.HATCHABOT_AUTH ?? 'password').toLowerCase();
   if (raw === 'identity') return 'identity';
@@ -317,6 +322,9 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     // First run has no accounts and therefore no way to authenticate; the
     // route itself refuses once account #1 exists.
     if (path === '/v1/local-accounts/bootstrap') return;
+    // An invitation is claimed by someone who cannot sign in yet — the code is
+    // the credential, and the route validates it.
+    if (path === '/v1/local-accounts/claim') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
     if (path === '/privacy' || path === '/terms') return;
@@ -354,6 +362,18 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
  */
 async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
   const verifier = opts.verifier ?? new IdentityVerifier(identityConfigFromEnv());
+  // HATCHABOT_LOCAL_ACCOUNTS=1 keeps local username/password accounts alongside
+  // Google sign-in: the owner signs in with Google, everyone else gets an
+  // invitation link — nobody else needs a cloud project to exist.
+  const localAccounts = opts.store && localAccountsEnabled();
+  if (localAccounts && opts.store) {
+    registerAccountRoutes(
+      app,
+      { store: opts.store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner },
+      { throttled, noteFailure },
+      { bootstrap: false }, // the host owner is the Google account; nobody bootstraps
+    );
+  }
 
   // The browser trades a verified ID token for a short session cookie, so the
   // token itself never sits in localStorage and every page load isn't a
@@ -426,6 +446,9 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     const path = req.url.split('?')[0] ?? '';
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/session' || path === '/v1/logout') return;
+    // Sign-in, claiming an invitation, and the bootstrap route (which answers
+    // with "this installation signs in with Google" rather than a bare 401).
+    if (localAccounts && (path === '/v1/login' || path === '/v1/local-accounts/claim' || path === '/v1/local-accounts/bootstrap')) return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
@@ -464,6 +487,19 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (session) {
       req.principal = { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub };
       return;
+    }
+    // …or a local account's session, when those run alongside Google. The two
+    // cookie shapes are signed with different material, so one never validates
+    // as the other.
+    if (localAccounts && opts.store) {
+      const id = sessionAccount(opts.store, opts.secret, req.cookies[COOKIE]);
+      if (id) {
+        const owner = opts.store.localAccount(id);
+        if (owner && !owner.disabled) {
+          req.principal = { ownerId: id, via: 'password', subject: id };
+          return;
+        }
+      }
     }
     return reply.code(401).send({ error: 'auth required' });
   });

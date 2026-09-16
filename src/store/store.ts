@@ -28,6 +28,8 @@ interface LocalAccountRow {
   host_owner: number;
   disabled: number;
   created_at: string;
+  claim_code: string | null;
+  claim_expires: string | null;
 }
 
 function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
@@ -40,6 +42,8 @@ function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
     hostOwner: !!r.host_owner,
     disabled: !!r.disabled,
     createdAt: r.created_at,
+    claimCode: r.claim_code ?? undefined,
+    claimExpires: r.claim_expires ?? undefined,
   };
 }
 
@@ -303,7 +307,13 @@ export class Store {
         pw_salt TEXT NOT NULL,
         host_owner INTEGER NOT NULL DEFAULT 0,
         disabled INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        -- An account the host owner created but nobody has claimed yet: no
+        -- usable password until the person opens the claim link and sets one,
+        -- so the owner never has to invent a password and send it over
+        -- WhatsApp. Cleared on claim.
+        claim_code TEXT,
+        claim_expires TEXT
       );
       -- Logins are matched case-insensitively, so uniqueness must be too:
       -- the column's own UNIQUE would happily hold both "Chris" and "chris",
@@ -444,6 +454,8 @@ export class Store {
       // so a grant that differs from this needs a rebuild to take effect.
       `ALTER TABLE agents ADD COLUMN applied_peers TEXT`,
       // The agent class (model/source tier) this agent belongs to, if any.
+      `ALTER TABLE local_accounts ADD COLUMN claim_code TEXT`,
+      `ALTER TABLE local_accounts ADD COLUMN claim_expires TEXT`,
       `ALTER TABLE agents ADD COLUMN class_id TEXT`,
     ]) {
       try {
@@ -1121,10 +1133,25 @@ export class Store {
   insertLocalAccount(a: LocalAccount): void {
     this.db
       .prepare(
-        `INSERT INTO local_accounts (id, username, display_name, pw_hash, pw_salt, host_owner, disabled, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO local_accounts (id, username, display_name, pw_hash, pw_salt, host_owner, disabled, created_at, claim_code, claim_expires)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(a.id, a.username, a.displayName ?? null, a.pwHash, a.pwSalt, a.hostOwner ? 1 : 0, a.disabled ? 1 : 0, a.createdAt);
+      .run(a.id, a.username, a.displayName ?? null, a.pwHash, a.pwSalt, a.hostOwner ? 1 : 0, a.disabled ? 1 : 0, a.createdAt, a.claimCode ?? null, a.claimExpires ?? null);
+  }
+
+  /** The unclaimed account behind a claim code, if the code is live. */
+  localAccountByClaim(code: string): LocalAccount | undefined {
+    const r = this.db
+      .prepare(`SELECT * FROM local_accounts WHERE claim_code = ? AND claim_expires > ?`)
+      .get(code, new Date().toISOString()) as LocalAccountRow | undefined;
+    return r ? rowToLocalAccount(r) : undefined;
+  }
+
+  /** Claiming sets the password and burns the code in one step. */
+  claimLocalAccount(id: string, pwHash: string, pwSalt: string): void {
+    this.db
+      .prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ?, claim_code = NULL, claim_expires = NULL WHERE id = ?`)
+      .run(pwHash, pwSalt, id);
   }
 
   setLocalAccountPassword(id: string, pwHash: string, pwSalt: string): void {

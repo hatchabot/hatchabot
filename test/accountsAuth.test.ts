@@ -406,3 +406,84 @@ describe('usernames are unique regardless of case', () => {
     ).toThrow();
   });
 });
+
+describe('invitations instead of invented passwords', () => {
+  it('creates a pending account, which cannot sign in until it is claimed', async () => {
+    const { f, store } = await app();
+    const first = await bootstrap(f);
+    const cookie = cookieOf(first);
+    const made = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'partner' } });
+    expect(made.statusCode).toBe(201);
+    const claimPath = made.json().claimPath as string;
+    expect(claimPath).toMatch(/^\/\?claim=/);
+
+    // Pending: no password exists yet, so nothing signs in as them.
+    expect((await signIn(f, 'partner', '')).statusCode).toBe(401);
+    expect((await signIn(f, 'partner', 'guessing')).statusCode).toBe(401);
+
+    // The roster tells the owner it is still outstanding.
+    const roster = (await f.inject({ method: 'GET', url: '/v1/local-accounts', headers: { cookie } })).json() as Array<{ username: string; pending?: boolean }>;
+    expect(roster.find((a) => a.username === 'partner')?.pending).toBe(true);
+
+    const code = claimPath.split('=')[1]!;
+    const who = await f.inject({ method: 'GET', url: `/v1/local-accounts/claim?code=${code}` });
+    expect(who.json().username).toBe('partner');
+
+    const claimed = await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'chosen-by-them' } });
+    expect(claimed.statusCode).toBe(200);
+    // Signed in immediately, and the password now works on its own.
+    expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(claimed) } })).statusCode).toBe(200);
+    expect((await signIn(f, 'partner', 'chosen-by-them')).statusCode).toBe(200);
+    expect(store.localAccountByUsername('partner')?.claimCode).toBeUndefined();
+  });
+
+  it('a claim code is single use', async () => {
+    const { f } = await app();
+    const first = await bootstrap(f);
+    const made = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie: cookieOf(first) }, payload: { username: 'partner' } });
+    const code = (made.json().claimPath as string).split('=')[1]!;
+    expect((await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'chosen-by-them' } })).statusCode).toBe(200);
+    const again = await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'someone-else' } });
+    expect(again.statusCode).toBe(404);
+  });
+
+  it('refuses a short password at claim time', async () => {
+    const { f } = await app();
+    const first = await bootstrap(f);
+    const made = await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie: cookieOf(first) }, payload: { username: 'partner' } });
+    const code = (made.json().claimPath as string).split('=')[1]!;
+    expect((await f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'short' } })).statusCode).toBe(400);
+  });
+});
+
+describe('local accounts alongside Google sign-in', () => {
+  it('accepts a local session in identity mode, and refuses bootstrap there', async () => {
+    const prev = process.env.HATCHABOT_LOCAL_ACCOUNTS;
+    process.env.HATCHABOT_LOCAL_ACCOUNTS = '1';
+    try {
+      const store = new Store(new Database(':memory:'));
+      const f = Fastify();
+      // A verifier that rejects everything: this test is about the LOCAL half.
+      await registerAuth(f, {
+        secret: SECRET, mode: 'identity', store,
+        verifier: { verify: async () => { throw new Error('no google here'); } } as never,
+      });
+      f.get('/v1/whoami', async (req) => principalOf(req));
+
+      // Nobody bootstraps: Google owns account #1 on such an install.
+      const boot = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'x', password: 'password123' } });
+      expect(boot.statusCode).toBe(403);
+      expect(boot.json().error).toMatch(/Google/);
+
+      // An account seeded by the owner still signs in and gets its own scope.
+      const { hash, salt } = await hashPassword('their-password');
+      store.insertLocalAccount({ id: 'acct-1', username: 'partner', pwHash: hash, pwSalt: salt, hostOwner: false, disabled: false, createdAt: 'now' });
+      const res = await signIn(f, 'partner', 'their-password');
+      expect(res.statusCode).toBe(200);
+      const who = await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(res) } });
+      expect(who.json().ownerId).toBe('acct-1');
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_LOCAL_ACCOUNTS; else process.env.HATCHABOT_LOCAL_ACCOUNTS = prev;
+    }
+  });
+});

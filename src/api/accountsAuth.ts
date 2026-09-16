@@ -58,6 +58,8 @@ export interface AccountsAuthDeps {
 
 const COOKIE = 'hatchabot_session';
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** How long an unclaimed invitation stays good. */
+const CLAIM_TTL_MS = 48 * 60 * 60 * 1000;
 
 /**
  * Creating account #1 is the one action with no credential behind it, and the
@@ -131,8 +133,10 @@ export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
   guard: { throttled: (req: FastifyRequest) => boolean; noteFailure: (req: FastifyRequest) => void },
+  opts: { bootstrap?: boolean } = {},
 ): void {
   const { store, secret } = deps;
+  const allowBootstrap = opts.bootstrap !== false;
 
   /**
    * First run: with no accounts yet, anyone who can reach the port may create
@@ -143,6 +147,10 @@ export function registerAccountRoutes(
   app.post<{ Body: { username?: string; password?: string; displayName?: string; setupCode?: string } }>(
     '/v1/local-accounts/bootstrap',
     async (req, reply) => {
+      if (!allowBootstrap) {
+        // Google owns account #1 here; local accounts arrive by invitation.
+        return reply.code(403).send({ error: 'This installation signs in with Google — ask its owner for an invitation link.' });
+      }
       if (store.countLocalAccounts() > 0) {
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
       }
@@ -179,6 +187,35 @@ export function registerAccountRoutes(
     },
   );
 
+  /**
+   * Claim: the person opens the link the host owner sent them and chooses
+   * their own password. The code is the credential, it is single use, and it
+   * expires — so a link forwarded to the wrong chat stops working.
+   */
+  app.post<{ Body: { code?: string; password?: string } }>('/v1/local-accounts/claim', async (req, reply) => {
+    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many attempts — try again later.' });
+    const code = (req.body?.code ?? '').trim();
+    const password = req.body?.password ?? '';
+    const problem = passwordProblem(password);
+    if (problem) return reply.code(400).send({ error: problem });
+    const account = code ? store.localAccountByClaim(code) : undefined;
+    if (!account) {
+      guard.noteFailure(req);
+      return reply.code(404).send({ error: 'That invitation has been used already, or it has expired. Ask for a new one.' });
+    }
+    const { hash, salt } = await hashPassword(password);
+    store.claimLocalAccount(account.id, hash, salt);
+    setSessionCookie(reply, req, mintSession(secret, account.id, hash, Date.now() + TTL_MS));
+    return { ok: true, id: account.id, username: account.username };
+  });
+
+  /** Is this claim link still good? Lets the page show the username it is for. */
+  app.get<{ Querystring: { code?: string } }>('/v1/local-accounts/claim', async (req, reply) => {
+    const account = req.query.code ? store.localAccountByClaim(req.query.code) : undefined;
+    if (!account) return reply.code(404).send({ error: 'That invitation has been used already, or it has expired.' });
+    return { username: account.username };
+  });
+
   app.post<{ Body: { username?: string; password?: string } }>('/v1/login', async (req, reply) => {
     if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const username = (req.body?.username ?? '').trim();
@@ -186,7 +223,7 @@ export function registerAccountRoutes(
     const account = username ? store.localAccountByUsername(username) : undefined;
     // One message for every failure: a different answer for "no such user"
     // would turn this endpoint into a username oracle.
-    const ok = account && !account.disabled && (await verifyPassword(password, account.pwHash, account.pwSalt));
+    const ok = account && !account.disabled && account.pwHash !== '' && (await verifyPassword(password, account.pwHash, account.pwSalt));
     if (!account || !ok) {
       guard.noteFailure(req);
       await new Promise((r) => setTimeout(r, 400));
@@ -216,6 +253,8 @@ export function registerAccountRoutes(
       hostOwner: a.hostOwner,
       disabled: a.disabled,
       createdAt: a.createdAt,
+      pending: !!a.claimCode,
+      claimPath: a.claimCode ? `/?claim=${a.claimCode}` : undefined,
       agents: store.listAgents(a.id).filter((x) => x.state !== 'DELETED').length,
     }));
   });
@@ -227,13 +266,17 @@ export function registerAccountRoutes(
       if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner adds accounts.' });
       const username = (req.body?.username ?? '').trim();
       const password = req.body?.password ?? '';
-      const problem = usernameProblem(username) ?? passwordProblem(password);
+      // No password given = the good path: the person sets their own through a
+      // one-time link, so the owner never invents one and sends it over some
+      // other app. A password may still be passed for scripted setups.
+      const problem = usernameProblem(username) ?? (password ? passwordProblem(password) : undefined);
       if (problem) return reply.code(400).send({ error: problem });
       if (store.localAccountByUsername(username)) {
         return reply.code(409).send({ error: 'That username is taken.' });
       }
-      const { hash, salt } = await hashPassword(password);
       const id = `acct-${randomUUID()}`;
+      const claimCode = password ? undefined : randomBytes(16).toString('base64url');
+      const { hash, salt } = password ? await hashPassword(password) : { hash: '', salt: '' };
       store.insertLocalAccount({
         id,
         username,
@@ -243,9 +286,11 @@ export function registerAccountRoutes(
         hostOwner: false,
         disabled: false,
         createdAt: new Date().toISOString(),
+        claimCode,
+        claimExpires: claimCode ? new Date(Date.now() + CLAIM_TTL_MS).toISOString() : undefined,
       });
       store.recordAccount(id, username.includes('@') ? username : undefined);
-      return reply.code(201).send({ id, username, hostOwner: false });
+      return reply.code(201).send({ id, username, hostOwner: false, claimCode, claimPath: claimCode ? `/?claim=${claimCode}` : undefined });
     },
   );
 

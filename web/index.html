@@ -403,15 +403,16 @@
 
 <dialog id="loginDlg">
   <h3 style="margin:0 0 4px">Welcome back</h3>
-  <div id="pwLogin">
+  <form id="pwLogin" onsubmit="event.preventDefault();doLogin()">
     <div class="sub">Enter the Hatchabot password for this machine.</div>
+    <input type="text" name="username" value="hatchabot" autocomplete="username" hidden readonly>
     <label>Password</label>
     <input type="password" id="loginPw" autocomplete="current-password">
     <div class="actions" style="justify-content:flex-end">
-      <button class="primary" id="loginBtn" onclick="doLogin()">Unlock</button>
+      <button class="primary" id="loginBtn" type="submit">Unlock</button>
     </div>
-  </div>
-  <div id="acctLogin" style="display:none">
+  </form>
+  <form id="acctLogin" style="display:none" onsubmit="event.preventDefault();acctSignIn()">
     <div class="sub" id="acctLoginNote">Sign in with your account on this machine.</div>
     <div class="sub" style="margin-top:4px">No account? Accounts are created by whoever runs this machine, in ⚙ Settings → Access — there's no public sign-up, because anyone who could reach this page would get their own agents. Forgotten password? They can reset it there; if <b>they</b> are locked out, <code>hatchabot accounts reset-password &lt;user&gt; &lt;new&gt;</code> on the machine itself is the way back in.</div>
     <label>Username</label>
@@ -419,10 +420,10 @@
     <label>Password</label>
     <input type="password" id="loginAcctPw" autocomplete="current-password">
     <div class="actions" style="justify-content:flex-end">
-      <button class="primary" id="acctLoginBtn" onclick="acctSignIn()">Sign in</button>
+      <button class="primary" id="acctLoginBtn" type="submit">Sign in</button>
     </div>
-  </div>
-  <div id="acctSetup" style="display:none">
+  </form>
+  <form id="acctSetup" style="display:none" onsubmit="event.preventDefault();acctBootstrap()">
     <div class="sub">No accounts yet — create the first one. It becomes the host owner, which manages the others.</div>
     <label>Username</label>
     <input type="text" id="setupUser" autocomplete="username" placeholder="chris">
@@ -433,9 +434,20 @@
       <input type="text" id="setupCode" placeholder="Setup code" autocomplete="off">
     </details>
     <div class="actions" style="justify-content:flex-end">
-      <button class="primary" id="setupBtn" onclick="acctBootstrap()">Create account</button>
+      <button class="primary" id="setupBtn" type="submit">Create account</button>
     </div>
-  </div>
+  </form>
+
+  <form id="acctClaim" style="display:none" onsubmit="event.preventDefault();acctClaim()">
+    <div class="sub">You've been invited to <b id="claimFor">this server</b>. Choose a password and you're in.</div>
+    <label>Username</label>
+    <input type="text" id="claimUser" autocomplete="username" readonly>
+    <label>Password <span style="color:var(--dim)">(8 characters or more)</span></label>
+    <input type="password" id="claimPw" autocomplete="new-password">
+    <div class="actions" style="justify-content:flex-end">
+      <button class="primary" id="claimBtn" type="submit">Set password &amp; sign in</button>
+    </div>
+  </form>
   <div id="idLogin" style="display:none">
     <div class="sub">Sign in to Hatchabot.</div>
     <div id="gsiBtn" style="margin-top:14px;display:flex;justify-content:center"></div>
@@ -1143,13 +1155,14 @@
       <div class="sub">Everyone signs in with their own username and password. Each account owns its own agents; share an AI source to let another account spend your plan.</div>
       <div id="acctList" class="sub" style="margin:8px 0">Loading…</div>
       <details id="acctAddBox" style="margin-bottom:10px">
-        <summary><b>＋ Add an account</b></summary>
+        <summary><b>＋ Invite someone</b></summary>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px">
-          <div><label>Username</label><input type="text" id="acctNewUser" style="width:180px" autocomplete="off"></div>
-          <div><label>Password</label><input type="password" id="acctNewPw" style="width:180px" autocomplete="new-password"></div>
-          <button class="primary" onclick="addAccount(this)">Create</button>
+          <div><label>Username</label><input type="text" id="acctNewUser" style="width:180px" autocomplete="off" placeholder="partner"></div>
+          <label class="sub" style="display:flex;align-items:center;gap:4px" title="Every account on this server may use it — they spend on it"><input type="checkbox" id="acctShareSource" checked> Share my AI source with them</label>
+          <button class="primary" onclick="addAccount(this)">Create invitation</button>
         </div>
-        <div class="sub" style="margin-top:6px">Tell them the password out of band; they can change it from this tab once they sign in.</div>
+        <div class="sub" style="margin-top:6px">They pick their own password through a one-time link that expires in 48 hours — you never have to invent one or send it over another app.</div>
+        <div id="acctInviteOut" class="invite-link" style="display:none;margin-top:8px"></div>
       </details>
     </div>
     <div id="acctSelf" hidden>
@@ -1876,12 +1889,20 @@ async function loadConfig() {
   try { appConfig = await (await fetch('/v1/config')).json(); } catch { /* keep default */ }
   const identity = appConfig.authMode === 'identity';
   const accounts = appConfig.authMode === 'accounts';
+  const locals = !!appConfig.localAccounts;          // may be true in identity mode too
   const setup = accounts && appConfig.needsSetup;
+  const claim = new URLSearchParams(location.search).get('claim');
   $('pwLogin').style.display = identity || accounts ? 'none' : '';
   $('idLogin').style.display = identity ? '' : 'none';
-  $('acctLogin').style.display = accounts && !setup ? '' : 'none';
-  $('acctSetup').style.display = setup ? '' : 'none';
+  $('acctLogin').style.display = locals && !setup && !claim ? '' : 'none';
+  $('acctSetup').style.display = setup && !claim ? '' : 'none';
+  $('acctClaim').style.display = claim ? '' : 'none';
+  // With both, Google is the owner's door and the form is everyone else's.
+  $('acctLoginNote').textContent = identity
+    ? 'Or sign in with the username and password you were given.'
+    : 'Sign in with your account on this machine.';
   if (setup) $('loginDlg').querySelector('h3').textContent = 'Welcome to Hatchabot';
+  if (claim) { $('loginDlg').querySelector('h3').textContent = 'Set your password'; void loadClaim(claim); }
   renderWhoami();
   if (identity) loadGoogleButton();
 }
@@ -1995,11 +2016,48 @@ function showLogin() {
     });
   }
 }
+/** An invitation link: show who it is for, then let them choose a password. */
+async function loadClaim(code) {
+  try {
+    const r = await api('/v1/local-accounts/claim?code=' + encodeURIComponent(code));
+    $('claimFor').textContent = r.username;
+    $('claimUser').value = r.username;
+  } catch (e) {
+    $('loginErr').textContent = e.message;
+    $('acctClaim').style.display = 'none';
+    $('acctLogin').style.display = '';
+  }
+}
+
+async function acctClaim() {
+  const code = new URLSearchParams(location.search).get('claim');
+  $('claimBtn').disabled = true;
+  try {
+    const r = await api('/v1/local-accounts/claim', { method: 'POST', body: { code, password: $('claimPw').value } });
+    await rememberPassword(r.username, $('claimPw').value);
+    history.replaceState(null, '', location.pathname);   // the code is spent
+    loginDlg.close(); $('claimPw').value = '';
+    await loadConfig(); await refresh(true);
+  } catch (e) { $('loginErr').textContent = e.message; }
+  finally { $('claimBtn').disabled = false; }
+}
+
+/** Offer the browser's password manager the credential explicitly: a dialog
+ *  that never navigates doesn't always trip Chrome's own heuristic. */
+async function rememberPassword(id, password) {
+  try {
+    if (window.PasswordCredential && navigator.credentials?.store) {
+      await navigator.credentials.store(new PasswordCredential({ id, password, name: id }));
+    }
+  } catch { /* the browser declined; the form markup still offers to save */ }
+}
+
 /** Accounts mode: username + password against this installation's own list. */
 async function acctSignIn() {
   $('acctLoginBtn').disabled = true;
   try {
     await api('/v1/login', { method: 'POST', body: { username: $('loginUser').value.trim(), password: $('loginAcctPw').value } });
+    await rememberPassword($('loginUser').value.trim(), $('loginAcctPw').value);
     loginDlg.close(); $('loginAcctPw').value = '';
     await loadConfig(); await refresh(true);
   } catch (e) { $('loginErr').textContent = e.message === 'auth required' ? 'Wrong username or password' : e.message; }
@@ -2012,6 +2070,7 @@ async function acctBootstrap() {
   $('setupBtn').disabled = true;
   try {
     const r = await api('/v1/local-accounts/bootstrap', { method: 'POST', body: { username: $('setupUser').value.trim(), password: $('setupPw').value, setupCode: $('setupCode').value.trim() || undefined } });
+    await rememberPassword($('setupUser').value.trim(), $('setupPw').value);
     loginDlg.close(); $('setupPw').value = '';
     if (r.adopted) toast(`Account created — it adopted ${r.adopted} existing record${r.adopted === 1 ? '' : 's'}.`);
     await loadConfig(); await refresh(true);
@@ -2031,9 +2090,9 @@ async function loadAccounts() {
     const rows = await api('/v1/local-accounts');
     $('acctList').innerHTML = rows.map(a => `<div class="pair" style="gap:8px;align-items:center">
       <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
-      <span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>
+      ${a.pending ? '<span class="chip">invitation not accepted yet</span>' : `<span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>`}
       <span style="margin-left:auto;display:flex;gap:6px">
-        <button onclick="resetAccountPassword('${jsq(a.id)}','${jsq(a.username)}')">Reset password</button>
+        ${a.pending ? `<button onclick="copyInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>` : `<button onclick="resetAccountPassword('${jsq(a.id)}','${jsq(a.username)}')">Reset password</button>`}
         ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${jsq(a.id)}','${jsq(a.username)}')">Remove</button>`}
       </span></div>`).join('');
   } catch (e) { $('acctList').textContent = e.message; }
@@ -2042,12 +2101,28 @@ async function loadAccounts() {
 async function addAccount(btn) {
   btn.disabled = true;
   try {
-    await api('/v1/local-accounts', { method: 'POST', body: { username: $('acctNewUser').value.trim(), password: $('acctNewPw').value } });
-    $('acctNewUser').value = ''; $('acctNewPw').value = '';
-    $('acctAddBox').open = false;
-    toast('Account created'); await loadAccounts();
+    const r = await api('/v1/local-accounts', { method: 'POST', body: { username: $('acctNewUser').value.trim() } });
+    // The step everyone forgets: an account with no source can't do anything.
+    if ($('acctShareSource').checked) {
+      const mine = (profiles || []).filter(p => p.mine !== false && !p.shared);
+      const shareable = mine.filter(p => p.credential !== 'machine-login');
+      for (const p of shareable.slice(0, 1)) { try { await api(`/v1/ai-profiles/${p.id}`, { method: 'PATCH', body: { shared: true } }); } catch {} }
+    }
+    $('acctNewUser').value = '';
+    const url = location.origin + r.claimPath;
+    $('acctInviteOut').style.display = '';
+    $('acctInviteOut').textContent = url;
+    try { await navigator.clipboard.writeText(url); toast('Invitation copied — send it to them. It expires in 48 hours.', 7000); }
+    catch { toast('Invitation ready — copy the link below.', 7000); }
+    await loadAccounts();
   } catch (e) { toast(e.message); }
   finally { btn.disabled = false; }
+}
+
+async function copyInvite(path) {
+  const url = location.origin + path;
+  try { await navigator.clipboard.writeText(url); toast('Invitation copied — it expires 48 hours after it was made.', 7000); }
+  catch { toast(url, 12000); }
 }
 
 async function resetAccountPassword(id, username) {
@@ -2084,9 +2159,9 @@ async function doLogin() {
 }
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter' || !loginDlg.open) return;
+  // Forms handle Enter themselves; only the Google panel needs this.
+  if (e.target instanceof HTMLElement && e.target.closest('form')) return;
   if (appConfig.authMode === 'identity') idSignIn();
-  else if (appConfig.authMode === 'accounts') appConfig.needsSetup ? acctBootstrap() : acctSignIn();
-  else doLogin();
 });
 // dialogs shouldn't be escapable into a broken page when auth is required
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
@@ -2109,6 +2184,19 @@ function renderSetup() {
   // First-run wizard: shown until the first agent exists. Three steps, each
   // marked done from real state (an AI source, a parked bot, an agent).
   if (agents.length > 0) { el.innerHTML = ''; $('fabBtn').hidden = false; return; }
+  // An invited member with nothing shared to them used to land on the OWNER's
+  // wizard, which tells them to run `claude setup-token` on a machine they
+  // have no access to. Say what is actually true for them instead.
+  if (!myAccount.hostOwner && profiles.length === 0) {
+    $('fabBtn').hidden = true;
+    el.innerHTML = `<div class="card">
+      <div class="name">Welcome 👋</div>
+      <p class="sub" style="margin:6px 0">Your account is ready, but no AI source has been shared with it yet — agents need one to think with.</p>
+      <p class="sub" style="margin:0 0 10px"><b>Ask whoever runs this server</b> to open ⚙ Settings → AI sources and tick <b>Shared</b> on theirs. It takes them one click, and their plan covers your agents.</p>
+      <p class="sub" style="margin:0">Or bring your own: <a href="#" onclick="event.preventDefault();openAiDlg('ai')">add an API key</a> — billed to you, per token.</p>
+    </div>`;
+    return;
+  }
   const aiDone = profiles.length > 0, botDone = poolAvail > 0;
   $('fabBtn').hidden = !aiDone;
   const step = (n, done, title, body) => `

@@ -145,6 +145,34 @@ username and password instead of the shared one.
 - **The CLI** uses a token (⚙ Settings → Access → access token), not the
   password: `hatchabot login --token <tok>`.
 
+### Adding someone (1.11.0)
+
+⚙ Settings → Access → **Invite someone** → a username. You get a one-time link
+that expires in 48 hours; they open it, choose their own password, and are
+signed in. You never invent a password or send one through another app, and an
+unclaimed invitation shows in the roster with a **Copy invitation** button.
+
+The same panel offers **"Share my AI source with them"**, ticked by default —
+the step everyone forgets. An account with no source can do nothing, and the
+first thing it used to meet was a raw validation error. (A machine-login source
+is never shared automatically; that one hands over this machine's own Claude
+login and keeps its separate confirmation.)
+
+A member whose account has no source now sees a short page saying so, with the
+one sentence to send their host owner — not the owner's setup wizard telling
+them to run `claude setup-token` on a machine they have no access to.
+
+### Google and local accounts together
+
+`HATCHABOT_AUTH=identity` plus `HATCHABOT_LOCAL_ACCOUNTS=1` runs both: the owner
+signs in with Google, everyone else gets an invitation link and a password. The
+login screen shows the Google button and the username form. Nobody bootstraps on
+such an install — Google owns account #1 — so the bootstrap route answers with
+that, rather than a bare 401.
+
+This is the shape for a household where one person can manage a Google project
+and nobody else should have to.
+
 ### No public sign-up, on purpose
 
 The login screen has no "create an account" button once account #1 exists.
