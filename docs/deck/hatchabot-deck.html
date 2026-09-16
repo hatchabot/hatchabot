@@ -56,6 +56,9 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
 .steps .s { position:relative; padding-left:0.46in; margin-bottom:17pt }
 .steps .s .n { position:absolute; left:0; top:0; width:24pt; height:24pt; border-radius:50%; background:#e8a33d; color:#14161a; font-weight:800; font-size:12pt; text-align:center; line-height:24pt }
 .steps p { margin:0 }
+.shot { border:1px solid #e6dccb; border-radius:9pt; overflow:hidden; background:#fff; box-shadow:0 10pt 26pt rgba(20,22,26,0.10) }
+.shot img { display:block; width:100% }
+.shot-note { font-size:10.5pt; color:#8a7a62; margin:6pt 0 0 }
 .compact .card { padding:11pt 15pt } .compact .card p { font-size:12pt; margin:0 }
 .tight .card { padding:11pt 15pt } .tight .card p { font-size:12.5pt; margin:0 } .tight h2 { margin-bottom:14pt }
 .big { font-family:"Bricolage Grotesque", sans-serif; font-size:30pt; font-weight:800; line-height:1; margin:0 0 4pt; color:#a3671a }
@@ -170,6 +173,26 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
 </section>
 
 <!-- 8 -->
+<section class="slide">
+  <p class="eyebrow">The control panel</p>
+  <h2>Your whole staff on one page</h2>
+  <div class="row" style="gap:0.34in">
+    <div style="flex:1.62">
+      <div class="shot"><img src="screenshot.png" alt="The Hatchabot control panel"></div>
+      <p class="shot-note">An example fleet — the names and activity are invented for this picture.</p>
+    </div>
+    <div style="flex:1">
+      <h3>One page, the whole household</h3>
+      <p>Agents grouped how you like, each with its actions one tap away, and a running account of what the house has been doing.</p>
+      <h3 style="margin-top:12pt">Know what the plan is spending</h3>
+      <p>Every AI source reports requests and tokens for the last 5 hours and 7 days, names the heaviest agents, and raises a banner the moment calls start being refused.</p>
+      <div class="shot" style="margin-top:9pt"><img src="screenshot-usage.png" alt="Usage for one AI source"></div>
+    </div>
+  </div>
+  <div class="foot"><span>hatchabot.com</span><span>8</span></div>
+</section>
+
+<!-- 9 -->
 <section class="slide dark">
   <p class="eyebrow">Features · operating a fleet</p>
   <h2>Operator-grade, because agents that matter need it</h2>
@@ -179,10 +202,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Keep it yours</h3><ul><li>Nightly backups: every volume, the registry, the key</li><li>Restore one agent from any backup set</li><li>Export and import as a single file</li><li>Runners: place agents on a second machine</li><li>All over a private Tailscale network — nothing opened to the internet</li></ul></div>
   </div>
   <div class="takeaway">Everything an operator needs — and nothing a family member ever has to see.</div>
-  <div class="foot"><span>hatchabot.com</span><span>8</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>9</span></div>
 </section>
 
-<!-- 9 -->
+<!-- 10 -->
 <section class="slide cmp">
   <p class="eyebrow">Compared</p>
   <h2 style="margin-bottom:6pt">Versus Claude.ai, ChatGPT and Codex</h2>
@@ -200,10 +223,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <tr><td class="k">Lock-in</td><td>Your history stays with them</td><td>The repo is yours; the service is theirs</td><td class="hb">Export, move machines, change provider — the agents are yours</td></tr>
   </table>
   <p style="margin-top:8pt;font-size:10.5pt;color:#6b5e49">The honest caveat: the chat apps are polished, need no setup, and their models are excellent. Hatchabot doesn't compete with the model — it <i>uses</i> one (Claude by default). It competes with the app around the model: one assistant, one person, forgets you tomorrow. A coding agent with a git repo is one of the things you can make.</p>
-  <div class="foot"><span>hatchabot.com</span><span>9</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>10</span></div>
 </section>
 
-<!-- 10 -->
+<!-- 11 -->
 <section class="slide">
   <p class="eyebrow">Compared</p>
   <h2 style="margin-bottom:10pt">OpenClaw, new and improved: what Hatchabot adds</h2>
@@ -213,10 +236,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Lifecycle instead of hand-editing</h3><p>Create, clone, rebuild, archive, restore, delete, move — with a snapshot before every change. In plain OpenClaw that's you, a shell and a directory.</p><h3 style="margin-top:9pt">More than one human</h3><p>Owners, members, invites, pairing approvals, group rooms, and memory people are told is shared or private.</p><h3 style="margin-top:9pt">Credentials managed once</h3><p>One setup-token serves every agent; Google accounts attach per agent; secrets are write-only.</p></div>
   </div>
   <p style="margin-top:10pt;font-size:11pt;color:#6b5e49">If you run one agent for yourself, plain OpenClaw is fine. Hatchabot is for when there are several, they matter, and other people talk to them.</p>
-  <div class="foot"><span>hatchabot.com</span><span>10</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>11</span></div>
 </section>
 
-<!-- 11 -->
+<!-- 12 -->
 <section class="slide">
   <p class="eyebrow">How it works</p>
   <h2>One control plane, one container per agent</h2>
@@ -234,10 +257,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Private by default</h3><p>The web app lives on your machine; reach it from anywhere over Tailscale, never a port opened on your router. Telegram works from anywhere regardless.</p></div>
     <div class="card"><h3>Open source</h3><p>TypeScript, MIT licensed, 965 automated tests and fifteen full audits. Tagged releases with notes; pre-built images for arm64 and amd64.</p></div>
   </div>
-  <div class="foot"><span>hatchabot.com</span><span>11</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>12</span></div>
 </section>
 
-<!-- 12 -->
+<!-- 13 -->
 <section class="slide dark">
   <p class="eyebrow">Built to be easy to run</p>
   <h2>From a spare computer to a running agent</h2>
@@ -251,10 +274,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     <div class="card"><h3>Upgrades by tag, with rollback</h3><p>Every release is a tag with notes. Deploying one restarts only the control plane; if it doesn't come up healthy, the previous release is put back.</p></div>
     <div class="card"><h3>Backups on by default</h3><p>Nightly sets of every agent, the registry and the key, kept for two weeks, with a restore drill that proves a set actually restores.</p></div>
   </div>
-  <div class="foot"><span>hatchabot.com</span><span>12</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>13</span></div>
 </section>
 
-<!-- 13 -->
+<!-- 14 -->
 <section class="slide">
   <p class="eyebrow">Get started</p>
   <h2>Your first agent in 15 minutes</h2>
@@ -271,15 +294,15 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
       <div class="card" style="margin-top:12pt"><h3>Then, when you like</h3><ul><li>Tailscale, to open the app from anywhere</li><li>Invite family by link or QR</li><li>Google accounts, folders, repos, schedules, peers</li></ul></div>
     </div>
   </div>
-  <div class="foot"><span>hatchabot.com</span><span>13</span></div>
+  <div class="foot"><span>hatchabot.com</span><span>14</span></div>
 </section>
 
-<!-- 14 -->
+<!-- 15 -->
 <section class="slide accent">
   <div style="margin-top:1.05in"><span class="egg"></span><span class="brand">HATCHABOT</span></div>
   <h2 style="font-size:38pt;line-height:1.1;margin-top:0.38in;max-width:11.2in">For people who want more than one assistant — shared with a household, on their own machine, with the AI they choose.</h2>
   <div style="margin-top:20pt"><span class="cmdline" style="font-size:14pt"><b>$</b> bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"</span></div>
   <p class="lead" style="margin-top:18pt"><b>hatchabot.com</b> · github.com/hatchabot/hatchabot · hello@hatchabot.com · MIT licensed</p>
-  <div class="foot"><span>Built on OpenClaw · Docker · Telegram</span><span>14</span></div>
+  <div class="foot"><span>Built on OpenClaw · Docker · Telegram</span><span>15</span></div>
 </section>
 </body></html>
