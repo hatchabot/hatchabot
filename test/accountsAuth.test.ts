@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
-import { _resetLoginThrottle, authModeFromEnv, registerAuth } from '../src/api/auth.js';
+import { _resetLoginThrottle, authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from '../src/api/auth.js';
 import { hashPassword, verifyPassword } from '../src/api/accountsAuth.js';
 import { principalOf } from '../src/api/principal.js';
 import { Store } from '../src/store/store.js';
@@ -232,5 +232,24 @@ describe('passwords and removal', () => {
     store.setAgentState('a1', 'DELETED');
     expect((await f.inject({ method: 'DELETE', url: `/v1/accounts/${partner.id}`, headers: { cookie } })).statusCode).toBe(200);
     expect(store.countLocalAccounts()).toBe(1);
+  });
+});
+
+describe('where the server listens', () => {
+  // The bind decision used to read HATCHABOT_PASSWORD alone, which accounts
+  // mode ignores: an accounts install that dropped the password line bound
+  // loopback only and logged "auth is disabled" — both wrong.
+  it('binds beyond loopback whenever auth is actually on', () => {
+    expect(bindHostFor({} as NodeJS.ProcessEnv, 'password')).toBe('127.0.0.1');
+    expect(bindHostFor({ HATCHABOT_PASSWORD: 'x' } as NodeJS.ProcessEnv, 'password')).toBe('0.0.0.0');
+    expect(bindHostFor({} as NodeJS.ProcessEnv, 'accounts')).toBe('0.0.0.0');
+    expect(bindHostFor({} as NodeJS.ProcessEnv, 'identity')).toBe('0.0.0.0');
+    expect(authIsEnabled('accounts', undefined)).toBe(true);
+    expect(authIsEnabled('password', undefined)).toBe(false);
+  });
+
+  it('always honours an explicit HATCHABOT_BIND', () => {
+    expect(bindHostFor({ HATCHABOT_BIND: '127.0.0.1' } as NodeJS.ProcessEnv, 'accounts')).toBe('127.0.0.1');
+    expect(bindHostFor({ HATCHABOT_BIND: '100.64.0.2', HATCHABOT_PASSWORD: 'x' } as NodeJS.ProcessEnv, 'password')).toBe('100.64.0.2');
   });
 });

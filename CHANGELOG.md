@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.8.1] — 2026-09-16
+
+### Fixed
+- **Where the server listens now follows the auth mode, not `HATCHABOT_PASSWORD`.** Accounts and identity mode authenticate whatever that variable says, but the bind decision only looked at the password: an accounts-mode install that dropped the password line bound loopback only and logged "auth is disabled" — unreachable from a phone or tailnet, and the message was wrong. `HATCHABOT_BIND` still wins over both.
+
 ## [1.8.0] — 2026-09-16
 
 ### Added

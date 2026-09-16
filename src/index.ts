@@ -12,7 +12,7 @@ import { TelegramPoolProvisioner } from './channels/telegramPool.js';
 import { TelegramManualProvisioner } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
-import { authModeFromEnv, registerAuth } from './api/auth.js';
+import { authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from './api/auth.js';
 import { identityConfigFromEnv, IdentityVerifier } from './api/identity.js';
 import { reconcileAgents, startReconcileLoop } from './orchestrator/reconcile.js';
 import { runPostureSweep } from './orchestrator/posture.js';
@@ -190,11 +190,12 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
 // can reach this process on the docker bridge, so binding 0.0.0.0 in that
 // state hands the whole fleet to any prompt-injected agent. Bind loopback
 // instead and say so.
-const bindHost = process.env.HATCHABOT_BIND ?? (process.env.HATCHABOT_PASSWORD ? '0.0.0.0' : '127.0.0.1');
-if (bindHost === '127.0.0.1' && !process.env.HATCHABOT_PASSWORD) {
+const bindHost = bindHostFor(process.env, authModeFromEnv());
+if (!authIsEnabled(authModeFromEnv(), process.env.HATCHABOT_PASSWORD)) {
   app.log.warn(
-    'HATCHABOT_PASSWORD is not set — auth is disabled, so binding 127.0.0.1 only. ' +
-      'Set a password (or HATCHABOT_BIND) to accept connections from elsewhere.',
+    `HATCHABOT_PASSWORD is not set — auth is disabled, so binding ${bindHost} only. ` +
+      'Set a password, switch to HATCHABOT_AUTH=accounts, or set HATCHABOT_BIND ' +
+      'to accept connections from elsewhere.',
   );
 }
 // Reachable from off-box but serving plaintext: the password and every request

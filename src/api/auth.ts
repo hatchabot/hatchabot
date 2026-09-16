@@ -109,6 +109,27 @@ export function authModeFromEnv(env = process.env): AuthMode {
 }
 
 /**
+ * Is anyone actually being authenticated? Password mode needs a password to be
+ * set; accounts and identity modes authenticate by construction, whatever
+ * HATCHABOT_PASSWORD says (accounts mode ignores it entirely).
+ */
+export function authIsEnabled(mode: AuthMode, password: string | undefined): boolean {
+  return mode !== 'password' || !!password;
+}
+
+/**
+ * Where to listen. With auth OFF every request is the owner, and agent
+ * containers can reach this process over the docker bridge — so binding
+ * 0.0.0.0 there would hand the fleet to any prompt-injected agent. With auth
+ * on, listen everywhere so a tailnet or LAN client can reach the app.
+ * HATCHABOT_BIND always wins.
+ */
+export function bindHostFor(env: NodeJS.ProcessEnv, mode: AuthMode): string {
+  if (env.HATCHABOT_BIND) return env.HATCHABOT_BIND;
+  return authIsEnabled(mode, env.HATCHABOT_PASSWORD) ? '0.0.0.0' : '127.0.0.1';
+}
+
+/**
  * LAN-grade auth: one shared password, exchanged for a signed, httpOnly
  * session cookie. This is deliberately not accounts/identity — it is the
  * "don't let anyone on the wifi own my agents" lock. Real identity arrives
