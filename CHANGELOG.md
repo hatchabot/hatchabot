@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.8.4] — 2026-09-16
+
+### Added
+- **`hatchabot accounts` — the way back in.** Accounts mode has no email, so a forgotten host-owner password was an unrecoverable lockout. `hatchabot accounts` lists the local accounts and `hatchabot accounts reset-password <username> <new-password>` sets one, run on the machine itself. It talks to the database directly rather than the API, because the point is to work when nobody can sign in: write access to the database is the proof of ownership, the same trust as editing `.env`.
+
+### Changed
+- **The sign-in screen explains itself.** It now says accounts come from the host owner in ⚙ Settings → Access (there is no public sign-up — anyone who could reach the page would get their own owner scope and spend your AI plan), where a forgotten password is reset, and names the CLI command for when the host owner is the one locked out.
+
 ## [1.8.3] — 2026-09-16
 
 ### Fixed

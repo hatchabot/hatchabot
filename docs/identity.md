@@ -144,3 +144,24 @@ username and password instead of the shared one.
   over first. The host owner can't be removed at all.
 - **The CLI** uses a token (⚙ Settings → Access → access token), not the
   password: `hatchabot login --token <tok>`.
+
+### No public sign-up, on purpose
+
+The login screen has no "create an account" button once account #1 exists.
+Anyone who can reach the page — everyone on the tailnet, everyone on the wifi
+of a laptop install — would otherwise mint themselves an owner scope and start
+creating agents on your AI plan. Accounts are handed out by the host owner in
+⚙ Settings → Access instead.
+
+### Getting back in
+
+| Situation | Path |
+|---|---|
+| Someone forgot their password | Host owner → ⚙ Settings → Access → **Reset password** |
+| You want to change your own | ⚙ Settings → Access → **Your password** (needs the current one) |
+| **The host owner is locked out** | On the machine: `hatchabot accounts reset-password <username> <new-password>` |
+
+That last one is deliberately a local command, not an API call: there is no
+email to send a reset link to, so *write access to the database* is the proof
+of ownership — the same trust level as editing `HATCHABOT_PASSWORD` in `.env`.
+`hatchabot accounts` on its own lists who exists.

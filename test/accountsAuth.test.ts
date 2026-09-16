@@ -297,3 +297,34 @@ describe('the whole server boots in accounts mode', () => {
     expect(cfg.json()).toMatchObject({ authMode: 'accounts', needsSetup: false });
   });
 });
+
+describe('recovery when nobody can sign in', () => {
+  // No email means no "forgot password" link, so a forgotten host-owner
+  // password would be an unrecoverable lockout. Write access to the database
+  // is the proof of ownership instead — the same trust as editing .env.
+  it('a password set directly on the store lets that account back in', async () => {
+    const store = new Store(new Database(':memory:'));
+    const { f } = await app(store);
+    const made = await f.inject({
+      method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'forgotten-one' },
+    });
+    expect(made.statusCode).toBe(201);
+
+    // What `hatchabot accounts reset-password` does, without the process boundary.
+    const account = store.localAccountByUsername('chris')!;
+    const { hash, salt } = await hashPassword('recovered-password');
+    store.setLocalAccountPassword(account.id, hash, salt);
+
+    expect((await signIn(f, 'chris', 'recovered-password')).statusCode).toBe(200);
+    expect((await signIn(f, 'chris', 'forgotten-one')).statusCode).toBe(401);
+    // And the reset killed the session minted before it.
+    expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(made) } })).statusCode).toBe(401);
+  });
+
+  it('usernames are looked up case-insensitively by the recovery path too', async () => {
+    const store = new Store(new Database(':memory:'));
+    const { f } = await app(store);
+    await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'Chris', password: 'first-password' } });
+    expect(store.localAccountByUsername('chris')?.username).toBe('Chris');
+  });
+});

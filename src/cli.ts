@@ -61,6 +61,10 @@ Commands:
   login [--token <tok>]        Save an access token from the app (⚙ Settings → Access).
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
+  accounts [list]              Local sign-in accounts (HATCHABOT_AUTH=accounts).
+  accounts reset-password <user> <new>
+                               Reset a password from the machine itself — the
+                               way back in when the host owner is locked out.
   doctor                       Check this installation: Node, Docker, runtime
                                image, .env, database, service, control plane,
                                disk, backups, Tailscale — with the fix for
@@ -690,6 +694,67 @@ async function main() {
     flags.get('password') ?? process.env.HATCHABOT_PASSWORD ?? defaults.HATCHABOT_PASSWORD ?? '';
 
   // Diagnostics must work when the control plane is down — no handshake, no login.
+  /**
+   * Accounts-mode recovery, run ON the machine. Deliberately NOT an API call:
+   * the point is to get back in when nobody can sign in — a forgotten host
+   * owner password is otherwise an unrecoverable lockout, since there is no
+   * email to send a reset to. Write access to the database IS the proof of
+   * ownership here, the same trust as editing HATCHABOT_PASSWORD in .env.
+   */
+  if (cmd === 'accounts' || cmd === 'account') {
+    process.chdir(repoDir());
+    const sub = rest[0] ?? 'list';
+    const { Store } = await import('./store/store.js');
+    const { default: Database } = await import('better-sqlite3');
+    const { defaultDbPath } = await import('./envCompat.js');
+    const dbPath = process.env.HATCHABOT_DB ?? defaultDbPath();
+    if (!existsSync(dbPath)) {
+      console.error(`No database at ${dbPath}. Is this the Hatchabot checkout?`);
+      process.exitCode = 1;
+      return;
+    }
+    const store = new Store(new Database(dbPath));
+    const rows = store.listLocalAccounts();
+    if (sub === 'list') {
+      if (!rows.length) {
+        console.log('No local accounts. Either this install is not in accounts mode');
+        console.log('(HATCHABOT_AUTH=accounts in .env), or nobody has created the first one yet —');
+        console.log('open the app and it offers to.');
+        return;
+      }
+      for (const a of rows) {
+        const agents = store.listAgents(a.id).filter((x) => x.state !== 'DELETED').length;
+        console.log(`${a.username}${a.hostOwner ? '  (host owner)' : ''}${a.disabled ? '  [disabled]' : ''}  ${agents} agent${agents === 1 ? '' : 's'}`);
+      }
+      return;
+    }
+    if (sub === 'reset-password' || sub === 'reset') {
+      const username = rest[1];
+      const newPassword = rest[2] ?? flags.get('new-password');
+      if (!username || !newPassword) {
+        console.error('Usage: hatchabot accounts reset-password <username> <new-password>');
+        process.exitCode = 1;
+        return;
+      }
+      const account = store.localAccountByUsername(username);
+      if (!account) {
+        console.error(`No account "${username}". Known: ${rows.map((r) => r.username).join(', ') || '(none)'}`);
+        process.exitCode = 1;
+        return;
+      }
+      const { hashPassword, passwordProblem } = await import('./api/accountsAuth.js');
+      const problem = passwordProblem(newPassword);
+      if (problem) { console.error(problem); process.exitCode = 1; return; }
+      const { hash, salt } = await hashPassword(newPassword);
+      store.setLocalAccountPassword(account.id, hash, salt);
+      console.log(`Password reset for ${account.username}. Every session of that account is now signed out.`);
+      return;
+    }
+    console.error(`Unknown: accounts ${sub}. Try: list | reset-password <username> <new-password>`);
+    process.exitCode = 1;
+    return;
+  }
+
   if (cmd === 'doctor') {
     process.chdir(repoDir()); // .env, data/ and the scripts live in the checkout, wherever doctor was typed
     const { doctorReport, gatherFacts } = await import('./doctor.js');
