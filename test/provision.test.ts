@@ -370,6 +370,17 @@ describe('buildRuntimeSpec', () => {
     expect(spec2.env.GEMINI_API_KEY).toBe('sk-test'); // the profile's key
   });
 
+  it('an OpenAI source provisions as the openai provider with OPENAI_API_KEY', async () => {
+    // OpenClaw's model refs are `<provider>/<model>`; a profile configured
+    // under the wrong prefix provisions healthy and fails on first use.
+    const w = await world({ profile: { vendor: 'openai' } });
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch?.provider).toBe('openai');
+    expect(spec.env.OPENAI_API_KEY).toBe('sk-test');
+    expect(spec.env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
   it('seeds the gog skill so every agent can teach its owner the connect flow', async () => {
     const w = await world();
     const { agent } = await provisionAgent(w.deps, INPUT);

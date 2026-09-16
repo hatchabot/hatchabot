@@ -35,7 +35,7 @@ export type AIProfileKind = 'api_key' | 'subscription';
  * vendor with no credential at all — nothing to store, nothing to inject, and
  * nothing leaves the machine.
  */
-export type AIVendor = 'anthropic' | 'google' | 'local';
+export type AIVendor = 'anthropic' | 'google' | 'openai' | 'local';
 
 /**
  * An owner-defined agent class: a reusable tier that carries a model and/or an

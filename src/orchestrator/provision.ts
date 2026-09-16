@@ -481,7 +481,13 @@ export async function buildRuntimeSpec(
         cronTriggers: agent.cronTriggers === true,
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
-        provider: local ? 'ollama' : profile.vendor === 'google' ? 'google' : 'anthropic',
+        provider: local
+          ? 'ollama'
+          : profile.vendor === 'google'
+            ? 'google'
+            : profile.vendor === 'openai'
+              ? 'openai'
+              : 'anthropic',
         baseUrl: profile.baseUrl,
         setupToken: oauthToken,
         gatewayToken: gateway.token,
@@ -1103,6 +1109,8 @@ function envForProfile(vendor: string, key: string): Record<string, string> {
       return { ANTHROPIC_API_KEY: key };
     case 'google':
       return { GEMINI_API_KEY: key };
+    case 'openai':
+      return { OPENAI_API_KEY: key };
     default:
       throw new Error(`Unsupported AI vendor: ${vendor}`);
   }

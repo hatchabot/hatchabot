@@ -84,7 +84,7 @@ export interface OpenClawConfigPatch {
    * writer prefixes model refs with this and, for ollama, emits the provider
    * block pointing at `baseUrl`.
    */
-  provider?: 'anthropic' | 'google' | 'ollama';
+  provider?: 'anthropic' | 'google' | 'openai' | 'ollama';
   /** Where the local model server listens, as the container sees it. */
   baseUrl?: string;
   /**

@@ -191,7 +191,7 @@ const CreateAIProfile = z.union([
   z.object({
     kind: z.literal('api_key'),
     name: z.string().min(1),
-    vendor: z.enum(['anthropic', 'google']),
+    vendor: z.enum(['anthropic', 'google', 'openai']),
     model: z.string().min(1),
     models: z.array(z.string().min(1)).max(16).optional(),
     apiKey: z.string().min(1),
@@ -1760,7 +1760,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       name: body.name,
       // A local profile is its own vendor, and always api_key-shaped as far
       // as the rest of the system is concerned (no OAuth, no mount).
-      vendor: (isLocal ? 'local' : body.vendor) as 'anthropic' | 'google' | 'local',
+      vendor: (isLocal ? 'local' : body.vendor) as 'anthropic' | 'google' | 'openai' | 'local',
       kind: (isLocal ? 'api_key' : body.kind) as 'api_key' | 'subscription',
       model: body.model,
       models: seededModels,
@@ -2103,6 +2103,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return { models: (data.models ?? []).map((m) => m.name ?? '').filter(Boolean) };
       } catch {
         return { models: [], error: "Couldn't reach the model server to list its models." };
+      }
+    }
+    if (profile.vendor === 'openai') {
+      // Live list: a key sees exactly the models its account may call. Chat
+      // models only — the catalogue also carries embeddings, audio and image
+      // ids an agent can't hold a conversation with.
+      const key = profile.secretRef ? await secrets.get(profile.secretRef).catch(() => undefined) : undefined;
+      if (!key) return { models: [] };
+      try {
+        const res = await fetch('https://api.openai.com/v1/models', {
+          headers: { authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(6000),
+        });
+        if (!res.ok) return { models: [] };
+        const data = (await res.json()) as { data?: Array<{ id?: string }> };
+        const models = (data.data ?? [])
+          .map((m) => m.id ?? '')
+          .filter((id) => id && /^(gpt|o\d)/.test(id))
+          .filter((id) => !/(embed|audio|whisper|tts|image|dall-e|moderation|realtime|transcribe)/.test(id))
+          .sort();
+        return { models };
+      } catch {
+        return { models: [] };
       }
     }
     if (profile.vendor === 'google') {

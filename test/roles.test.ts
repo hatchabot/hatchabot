@@ -278,6 +278,19 @@ describe('cross-owner isolation (audit regressions)', () => {
     expect(res.statusCode).toBe(201);
   });
 
+  it('accepts an OpenAI API-key source', async () => {
+    // Third vendor alongside Anthropic and Google: OpenClaw speaks openai
+    // natively, so the source only needs the key and the provider prefix.
+    const f = await app(twoOwners());
+    const res = await f.inject({
+      method: 'POST', url: '/v1/ai-profiles', headers: as(MEMBER),
+      payload: { kind: 'api_key', name: 'My OpenAI', vendor: 'openai', model: 'gpt-5', apiKey: 'sk-openai-test' },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json().vendor).toBe('openai');
+    expect(JSON.stringify(res.json())).not.toContain('sk-openai-test');
+  });
+
   it("refuses to edit or delete another owner's AI profile", async () => {
     const f = await app(twoOwners());
     const patch = await f.inject({

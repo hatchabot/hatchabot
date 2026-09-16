@@ -54,6 +54,15 @@ shared surface for people you've admitted; accidental addees are ignored),
 mention-gated, bound to a single chat id, never channel-wide. DM pairing
 stays the core access model. Applies on the next Rebuild.
 
+**Several agents in one room** is supported: point each one at the same room
+and the panel names the others already there. Each agent is its own bot and
+answers only its own @mentions, so a board room can hold a minutes-taker, a
+legal advisor and a bookkeeper at once. One limit comes from Telegram itself —
+it never delivers one bot's message to another bot, so agents in a room cannot
+read each other's replies. When they need to consult each other, connect them
+as **peers** (A2A) instead; that path is direct and doesn't go through the
+room.
+
 Tap the **agent's name** on its card (it's the Telegram deep-link; Telegram
 Web lives in the ⋯ menu) and say hi. Your first-ever message claims
 the agent as yours; later agents recognize your Telegram account from birth

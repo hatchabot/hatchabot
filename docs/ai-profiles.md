@@ -6,10 +6,18 @@ difference decides what Hatchabot can host.
 
 ## API key — fully supported
 
-An API key is a bearer string — Anthropic (`ANTHROPIC_API_KEY`) or Google
-Gemini (the profile's vendor is `anthropic` or `google`). We store it
-encrypted, inject it into the runtime at boot, and it works identically on a
-cloud container and a local box. Billing is metered per token against the
+An API key is a bearer string — Anthropic (`ANTHROPIC_API_KEY`), Google
+Gemini (`GEMINI_API_KEY`) or OpenAI (`OPENAI_API_KEY`); the profile's vendor is
+`anthropic`, `google` or `openai`. We store it encrypted, inject it into the
+runtime at boot, and it works identically on a cloud container and a local box.
+The vendor decides the provider prefix OpenClaw uses for every model ref
+(`anthropic/…`, `google/…`, `openai/…`) — a key filed under the wrong vendor
+provisions healthy and fails on the first message.
+
+An OpenAI source lists its models live from the key (`GET /v1/models`, chat
+models only), so the picker shows exactly what that account may call. The
+management assistant still needs an Anthropic source: the control plane calls
+that one itself. Billing is metered per token against the
 key's organisation. This is the only credential type that would work on a host
 you don't control.
 

@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.7.0] — 2026-09-16
+
+### Added
+- **OpenAI as an AI source.** ⚙ Settings → AI sources → API key now offers OpenAI alongside Anthropic and Google. The key is stored encrypted and injected as `OPENAI_API_KEY`, model refs carry the `openai/` prefix, and the model picker lists live from the key (chat models only), so it shows exactly what that account may call. Agents can be switched onto it like any other source. The management assistant still requires an Anthropic source — the control plane makes those calls itself.
+- **Several agents in one Telegram group.** Pointing more than one agent at the same room already worked; now the Telegram panel names the others that share it. Each agent is its own bot and answers only its own @mentions, so a board room can hold a minutes-taker, a legal advisor and a bookkeeper at once. Telegram never delivers one bot's message to another, so agents in a room can't read each other's replies — connect them as peers (A2A) when they need to consult each other, which the panel now says.
+
 ## [1.6.1] — 2026-09-15
 
 ### Fixed

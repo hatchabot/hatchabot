@@ -782,6 +782,7 @@
         <button class="primary" onclick="saveGroupAccess()">Save</button>
       </div>
       <div class="sub" id="tgGroupModeHelp" style="margin-top:4px"></div>
+      <div class="sub" id="tgRoomMates" style="margin-top:4px" hidden></div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
         <button id="tgGroupBtn" onclick="checkGroupReadiness()">Check this bot's settings</button>
         <span id="tgGroupStatus" class="sub"></span>
@@ -903,7 +904,7 @@
     </div>
     <input type="text" id="aiName" placeholder="Name (e.g. Work Claude)" maxlength="64">
     <div id="aiKeyRow" style="display:none">
-      <select id="aiVendor" onchange="aiKindChanged()"><option value="anthropic">Anthropic</option><option value="google">Google</option></select>
+      <select id="aiVendor" onchange="aiKindChanged()"><option value="anthropic">Anthropic</option><option value="google">Google</option><option value="openai">OpenAI</option></select>
       <div style="display:flex;gap:8px;align-items:center">
         <input type="password" id="aiKey" placeholder="API key" autocomplete="off" style="flex:1;min-width:0">
         <button type="button" onclick="toggleReveal(this,'aiKey')">Show</button>
@@ -3793,10 +3794,28 @@ function aiKindChanged() {
     $('aiModel').style.display = '';
     $('aiModel').placeholder = k === 'local' ? 'Default model (e.g. qwen3.6:27b-q8_0)'
       : k === 'api_key' && $('aiVendor').value === 'google' ? 'Default model (e.g. gemini-2.5-pro)'
+      : k === 'api_key' && $('aiVendor').value === 'openai' ? 'Default model (e.g. gpt-5)'
       : 'Default model';
-    $('aiModelHint').textContent = k === 'local' ? 'Use the exact model tag your Ollama server serves.' : '';
+    $('aiModelHint').textContent = k === 'local' ? 'Use the exact model tag your Ollama server serves.'
+      : k === 'api_key' && $('aiVendor').value === 'openai' ? "Any chat model your key can call — the picker lists them once the source is saved."
+      : '';
   }
 }
+/** Who else answers in this room. Several agents can share one Telegram group —
+ *  each is its own bot and answers only its own @mentions. Telegram never
+ *  delivers one bot's message to another, so agents in a room don't hear each
+ *  other; that's what peers (A2A) are for. */
+function renderRoomMates(a, ga) {
+  const el = $('tgRoomMates');
+  if (!el) return;
+  if (ga.mode !== 'room' || !ga.roomId) { el.hidden = true; return; }
+  const mates = (agents || []).filter(x => x.id !== a?.id && x.groupAccess?.mode === 'room' && x.groupAccess?.roomId === ga.roomId);
+  el.hidden = false;
+  el.innerHTML = mates.length
+    ? `Also in this room: ${mates.map(m => `<b>${esc(m.name)}</b>`).join(', ')}. Each answers its own @mentions — and they can't hear each other's replies (Telegram never delivers one bot's message to another), so connect them as <b>peers</b> if they need to consult each other.`
+    : 'You can point other agents at this same room — each answers its own @mentions there.';
+}
+
 /** Show the free-text box only when "Other…" is chosen. */
 function aiModelSelectChanged() {
   const other = $('aiModelSelect').value === '__other';
@@ -5883,6 +5902,7 @@ function renderGroupAccess(a) {
   if (ga.mode === 'room' && ga.roomId) {
     $('tgGroupRoom').innerHTML = `<option value="${esc(ga.roomId)}">room ${esc(ga.roomId)}</option>`;
   }
+  renderRoomMates(a, ga);
   onGroupModeChange();
   $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
   // A non-default group setting is live state the owner should SEE — open
