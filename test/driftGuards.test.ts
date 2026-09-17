@@ -237,3 +237,28 @@ describe('action buttons never refuse in silence (UI audit 2026-09-17)', () => {
     }
   });
 });
+
+describe('the CLI keeps up with the app', () => {
+  // Two ways the command line drifts from the product: a vendor or auth mode
+  // the app supports but the docs/CLI never mention, and a saved token used
+  // against a server it was never minted for.
+  it('documents all three auth modes and all three API vendors', () => {
+    const readme = read('README.md');
+    expect(readme).toMatch(/`password` \(default\), `accounts` or `identity`/);
+    for (const vendor of ['Anthropic', 'OpenAI', 'Gemini']) {
+      expect(readme, `README should name ${vendor} as an API-key vendor`).toContain(vendor);
+    }
+  });
+
+  it('never sends a saved token to a server it was not minted for', () => {
+    const cli = read('src/cli.ts');
+    expect(cli).toContain('preferPassword');
+    expect(cli).toMatch(/saved access token was minted for/);
+  });
+
+  it('surfaces rate-limit state in `hatchabot sources`', () => {
+    const cli = read('src/cli.ts');
+    expect(cli).toContain("'/v1/ai-profiles/usage'");
+    expect(cli).toMatch(/RATE-LIMITED since/);
+  });
+});

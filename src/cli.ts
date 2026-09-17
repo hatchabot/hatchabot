@@ -87,7 +87,10 @@ Commands:
                                a live Telegram probe per bot.
   sources                      Summary: which agents are on which AI source
                                (yours + other accounts' counts, shared flag,
-                               id), and which models they run.
+                               id), which models they run, and each source's
+                               live spend — requests over the last 5 h / 7 d,
+                               refusals, the heaviest agents, and whether the
+                               source is being rate-limited right now.
   switch-source --to <id|name> [--agents a,b,c] [--rebuild]
                                Move agents onto one AI source in a single call
                                (default: all of yours). --rebuild applies now,
@@ -787,11 +790,32 @@ async function main() {
     return;
   }
 
+  // A saved token belongs to the server it was minted on. Pointing the CLI at a
+  // different one (--url, HATCHABOT_URL) used to send it anyway, and the answer
+  // was a bare "auth required" that blamed the wrong thing.
+  const savedUrl = (defaults.HATCHABOT_URL ?? '').replace(/\/$/, '');
+  const tokenFromEnv = !!process.env.HATCHABOT_TOKEN;
   const savedToken = process.env.HATCHABOT_TOKEN ?? defaults.HATCHABOT_TOKEN;
+  // Pointing at another server on purpose, with a password for it? That beats a
+  // token saved for somewhere else — most saved configs carry a token and no
+  // URL, so the mismatch can't always be detected from the config alone.
+  const urlWasChosen = flags.has('url') || !!process.env.HATCHABOT_URL;
+  const passwordWasChosen = flags.has('password') || !!process.env.HATCHABOT_PASSWORD;
+  const preferPassword = urlWasChosen && passwordWasChosen && (!savedUrl || savedUrl !== url);
+  const tokenFitsUrl = !preferPassword && (tokenFromEnv || !savedUrl || savedUrl === url);
 
   let ctx: Ctx;
-  if (savedToken) {
+  if (savedToken && preferPassword) {
+    ctx = await login(url, password);
+  } else if (savedToken && tokenFitsUrl) {
     ctx = { url, cookie: '', bearer: savedToken };
+  } else if (savedToken) {
+    fail(
+      `the saved access token was minted for ${savedUrl}, but you asked for ${url}.\n` +
+        `  Use a password for this one:  HATCHABOT_PASSWORD=… hatchabot --url ${url} …\n` +
+        `  or sign in to it:             hatchabot login --url ${url}`,
+    );
+    throw new Error('unreachable');
   } else if (server.authMode === 'identity') {
     const refresh = process.env.HATCHABOT_REFRESH_TOKEN ?? defaults.HATCHABOT_REFRESH_TOKEN;
     const apiKey = server.identity?.apiKey;
@@ -832,10 +856,14 @@ async function main() {
   switch (cmd) {
     case 'sources': {
       // Summary: which agents are on which AI source, and which models they run.
-      const [profiles, list] = await Promise.all([
+      const [profiles, list, usage] = await Promise.all([
         (await api(ctx, '/v1/ai-profiles')).json() as Promise<any[]>,
         (await api(ctx, '/v1/agents')).json() as Promise<any[]>,
+        // Live spend and rate-limit state. Best-effort: an older server, or one
+        // that hasn't sampled yet, simply has nothing to add.
+        (async () => { try { return (await (await api(ctx, '/v1/ai-profiles/usage')).json()) as any; } catch { return { sources: [] }; } })(),
       ]);
+      const usageOf = (id: string) => (usage?.sources ?? []).find((u: any) => u.id === id);
       const owned = list.filter((a) => !a.role || a.role === 'owner');
       const bySource = new Map<string, any[]>();
       for (const a of owned) (bySource.get(a.aiProfileId) ?? bySource.set(a.aiProfileId, []).get(a.aiProfileId)!).push(a);
@@ -848,6 +876,18 @@ async function main() {
           : p.kind === 'local' ? 'local' : `api key · ${p.vendor}`;
         const others = p.inUse?.others ?? 0;
         console.log(`  ${p.name}  [${cred}${p.shared ? ' · shared' : ''}]  ${n} agent${n === 1 ? '' : 's'}${others ? ` + ${others} on other accounts` : ''}  ${p.id}`);
+        // The answer to "why has everything gone quiet?" belongs here, not
+        // only in the web app.
+        const u = usageOf(p.id);
+        if (u && u.status !== 'idle') {
+          const w5 = u.window5h ?? {}, w7 = u.window7d ?? {};
+          const state = u.status === 'limited'
+            ? `RATE-LIMITED since ${new Date(u.limitedSince ?? u.lastLimitAt).toLocaleString()}`
+            : 'answering';
+          console.log(`      ${state} · last 5 h: ${w5.requests ?? 0} requests${w5.limited ? `, ${w5.limited} refused` : ''} · last 7 d: ${w7.requests ?? 0} requests${w7.limited ? `, ${w7.limited} refused` : ''}`);
+          const top = (u.topAgents ?? []).slice(0, 3).map((a: any) => `${a.name} ${a.requests}`).join(' · ');
+          if (top) console.log(`      heaviest: ${top}`);
+        }
       }
       const orphanIds = [...bySource.keys()].filter((id) => !profiles.some((p) => p.id === id));
       for (const id of orphanIds) console.log(`  (unknown source ${id.slice(0, 8)})  ${bySource.get(id)!.length} agents`);

@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.12.2] — 2026-09-17
+
+### Added
+- **`hatchabot sources` shows live spend.** Each source now reports requests over the last 5 hours and 7 days, refusals, the heaviest agents, and — the reason to look — whether it is **rate-limited right now**. "Why has everything gone quiet?" is answerable from the terminal, not only the web app.
+
+### Fixed
+- **A saved access token is no longer sent to a server it was not minted for.** Pointing the CLI at another install with `--url`/`HATCHABOT_URL` reused whatever token `~/.config/hatchabot/env` held, and the answer was a bare `auth required` that blamed the wrong thing. An explicitly supplied password now wins for an explicitly chosen server, and a detectable mismatch says which server the token belongs to and how to reach the other one.
+
+### Documentation
+- README: OpenAI named alongside Anthropic and Gemini as an API-key vendor (it has been supported since 1.7.0); all three auth modes described, including local accounts alongside Google; the listen-address rule corrected to follow the auth mode; the new `HATCHABOT_LOCAL_ACCOUNTS`, `HATCHABOT_USAGE_*` and `HATCHABOT_A2A_TIMEOUT_MS` knobs listed; and AI-source usage added to the feature list.
+- `docs/features.md`: who owns a parked bot, and what an authorized peer may do.
+- `docs/control-interfaces.md`: the routes added since it was written — source usage, the credential reveal, local accounts, and peers with `allowActions`.
+
 ## [1.12.1] — 2026-09-17
 
 ### Fixed

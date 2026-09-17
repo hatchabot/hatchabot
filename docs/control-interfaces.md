@@ -42,7 +42,21 @@ Grouped for reference (full list in `src/api/routes.ts`):
   (OpenClaw has no deny verb, so this is an atomic edit of the on-volume
   pairing store — a "not now", not a ban: they can ask again)
 - **AI sources:** `GET/POST /v1/ai-profiles`, `PATCH /v1/ai-profiles/:id`,
-  `GET /v1/ai-profiles/:id/available-models`, `DELETE /v1/ai-profiles/:id`
+  `GET /v1/ai-profiles/:id/available-models`, `DELETE /v1/ai-profiles/:id`,
+  `GET /v1/ai-profiles/:id/credential` (owner only — reveals the stored token
+  so a second installation can be given the same source; every read is logged)
+- **Source usage:** `GET /v1/ai-profiles/usage` (per-source requests, tokens,
+  rate-limit state for the caller's own agents), `POST /v1/ai-profiles/usage/sample`
+  (machine owner: measure now)
+- **Accounts (accounts mode):** `POST /v1/local-accounts/bootstrap` (first run
+  only, loopback or the boot-printed setup code), `POST /v1/login`,
+  `GET/POST /v1/local-accounts`, `GET/POST /v1/local-accounts/claim` (an
+  invitation being accepted), `POST /v1/local-accounts/:id/password`,
+  `DELETE /v1/local-accounts/:id`
+- **Peers (A2A):** `GET/PUT /v1/agents/:id/peers` (the PUT carries `peerIds`
+  and, optionally, `allowActions` — the peers permitted to ask this agent to
+  act), `POST /v1/agent-peers/mesh`, `POST /v1/agents/:id/message` (the consult
+  itself, authenticated by the calling agent's own token)
 - **Chat bridge:** `GET /v1/agents/:id/gateway` → `{ port, token }`
 - **Invites:** `POST /v1/agents/:id/invites`, `GET /v1/invites/:code`, `POST /v1/join`
 - **Fleet-wide pending joins:** `GET /v1/pending` — every pending pairing across

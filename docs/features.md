@@ -42,6 +42,12 @@ instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 `HATCHABOT_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
+**Whose bot is whose**: a bot you park is *yours* — only your agents lease it,
+and only you (or the machine owner) can remove it. Any account may park one it
+minted at @BotFather. Ticking **Share with everyone on this server** donates it
+to the house pool instead, which is the machine owner's call and hidden from
+other accounts.
+
 **Group chats**: two @BotFather settings gate a bot in a group —
 `/setjoingroups` Enable and `/setprivacy` Disable (privacy left on = the bot
 only sees /commands and @mentions). Neither is settable by API, but ⚙
@@ -62,6 +68,17 @@ it never delivers one bot's message to another bot, so agents in a room cannot
 read each other's replies. When they need to consult each other, connect them
 as **peers** (A2A) instead; that path is direct and doesn't go through the
 room.
+
+**What a peer may do.** A consult is relayed as *untrusted* input: the peer
+answers from knowledge and is told not to act on it, because anything that can
+steer one agent — an injected email, a message from someone in its chat —
+would otherwise reach into another agent's mail, files and calendar. For a pair
+you drive on purpose (a QA agent resetting the system it tests), tick **may act
+on its requests** beside that peer in the **Peers** tab: one direction, both
+agents yours, confirmed in the app, and recorded in the timeline. It never
+relaxes the rule against handing over credentials. A consult runs the peer's
+whole turn inside `HATCHABOT_A2A_TIMEOUT_MS` (120 s by default) — raise it for
+tool-heavy work.
 
 Tap the **agent's name** on its card (it's the Telegram deep-link; Telegram
 Web lives in the ⋯ menu) and say hi. Your first-ever message claims
