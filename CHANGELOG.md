@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.12.1] — 2026-09-17
+
+### Fixed
+- **Action buttons no longer refuse in silence.** Eight handlers returned early when a precondition wasn't met and said nothing — clicking **Apply** in Bulk actions with no agent ticked did nothing at all, which reads as a broken button. Each now says what is missing ("Tick at least one agent first", "Pick a connection to attach", and so on), matching the pattern the setup-field editor already used.
+
+### Notes
+- Found by driving the real interface in a headless browser: 283 controls across 29 dialogs and 10 settings tabs, each clicked with every form filled. **No runtime errors anywhere** — no exceptions, console errors or unhandled rejections. Write-up in `docs/audit-2026-09-17-ui.md`.
+
 ## [1.12.0] — 2026-09-17
 
 ### Added

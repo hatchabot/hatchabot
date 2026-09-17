@@ -215,3 +215,25 @@ describe('a changed app icon actually reaches browsers', () => {
     expect(sw).toMatch(/hatchabot-shell-v\d+/);
   });
 });
+
+describe('action buttons never refuse in silence (UI audit 2026-09-17)', () => {
+  // Driving all 283 controls in a headless browser turned up a class, not a
+  // one-off: bulk-action buttons that `return` when nothing is selected, with
+  // no message. To the person clicking, that is a broken button.
+  it('the bulk-action handlers say why they refused', () => {
+    const web = read('web/index.html');
+    const handlers = [
+      'faApply', 'moveAgentsApply', 'runMigrate', 'bringInSelected',
+      'attachConnection', 'applyModelToSelected',
+    ];
+    for (const name of handlers) {
+      const start = web.search(new RegExp(`(async )?function ${name}\\(`));
+      expect(start, `${name} not found`).toBeGreaterThan(0);
+      const body = web.slice(start, start + 700);
+      // Every early return in the guard block must carry a toast.
+      const bareReturns = [...body.matchAll(/if \([^)]*\) \{? ?return;/g)]
+        .filter((m) => !/toast|renderAgents|\$\(/.test(body.slice(Math.max(0, m.index! - 90), m.index! + 12)));
+      expect(bareReturns.map((m) => m[0]), `${name} refuses silently`).toEqual([]);
+    }
+  });
+});

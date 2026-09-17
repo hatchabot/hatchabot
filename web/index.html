@@ -3437,7 +3437,7 @@ function refreshApplyCount() {
   $('applyModelBtn').textContent = n ? `Apply to ${n}` : 'Apply';
 }
 async function applyModelToSelected() {
-  if (!applyModelState) return;
+  if (!applyModelState) { toast('Reopen this dialog and try again.'); return; }
   const apply = [...document.querySelectorAll('.applyModelCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
   const { profileId, model, extras } = applyModelState;
   $('applyModelBtn').disabled = true;
@@ -3779,7 +3779,7 @@ function faRenderAction() {
 async function faApply() {
   const action = $('faAction').value;
   const ids = faSelected().map(cb => cb.dataset.id);
-  if (!ids.length) return;
+  if (!ids.length) { toast('Tick at least one agent first.'); return; }
   const model = $('faModel').value;
   if (action === 'source') {
     const profileId = $('faSource').value;
@@ -3863,9 +3863,9 @@ async function faApply() {
   if ($('classList').childElementCount) renderClassList(); // Settings may still be open: keep its counts honest
 }
 async function moveAgentsApply(rebuild) {
-  if (!moveSourceState) return;
+  if (!moveSourceState) { toast('Reopen this dialog and try again.'); return; }
   const apply = [...document.querySelectorAll('.moveSourceCb')].filter(cb => cb.checked).map(cb => cb.dataset.id);
-  if (!apply.length) return;
+  if (!apply.length) { toast('Tick at least one agent to move.'); return; }
   $('moveSourceBtn').disabled = true;
   try {
     const r = await api(`/v1/ai-profiles/${moveSourceState.profileId}/adopt-agents`, {
@@ -3928,7 +3928,9 @@ function openMigrate(id, name) {
   }).catch(() => { $('migrateAgents').textContent = ''; });
 }
 async function runMigrate() {
-  const to = $('migrateTo').value; if (!to || !migrateState) return;
+  const to = $('migrateTo').value;
+  if (!to) { toast('Pick the machine to move it to.'); return; }
+  if (!migrateState) { toast('Reopen this dialog and try again.'); return; }
   const toName = (profiles.find(p => p.id === to) || {}).name || 'that source';
   if (!confirm(`Move EVERY agent on "${migrateState.name}" to "${toName}" and rebuild them?\n\nThis includes other accounts' agents; their chats restart on the new source (memory kept).`)) return;
   $('migrateBtn').disabled = true;
@@ -4286,7 +4288,7 @@ function updateSelCount() {
 
 async function bringInSelected() {
   const picks = [...document.querySelectorAll('#adoptDiscover input[data-oc]:checked')].map(el => ocAgents[+el.dataset.oc]);
-  if (!picks.length) return;
+  if (!picks.length) { toast('Tick at least one agent to bring in.'); return; }
   $('adoptBatchBtn').disabled = true;
   $('adoptErr').textContent = '';
   const rowSay = (i, m, color) => { const el = $(`ocrow-${i}`); if (el) { el.textContent = m; el.style.color = color || 'var(--dim)'; } };
@@ -4894,7 +4896,7 @@ async function renderConnections() {
 
 async function attachConnection() {
   const id = $('connAttachPick').value;
-  if (!id) return;
+  if (!id) { toast('Pick a connection to attach.'); return; }
   $('connAttachBtn').disabled = true;
   try {
     const r = await api(`/v1/agents/${editAgentId}/connections/attach`, {
@@ -5399,7 +5401,7 @@ function renderEnvList(vars) {
 async function addEnvVar() {
   const name = $('envName').value.trim();
   const value = $('envValue').value;
-  if (!name || !value) return;
+  if (!name || !value) { toast('Both a name and a value are needed.'); return; }
   $('envAddBtn').disabled = true;
   $('editErr').textContent = '';
   try {
