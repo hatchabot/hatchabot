@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.12.3] — 2026-09-17
+
+### Changed
+- **A recycled bot's notice now says what can be done about the old chat.** Telegram gives a bot no way to clear a conversation — `deleteMessage`/`deleteMessages` only reach messages under 48 hours old, and nothing resets a thread — so the message posted to the previous agent's chats now points at the one control the person actually has: clearing their own copy. `docs/features.md` states the limit and suggests minting a fresh bot when a clean slate matters.
+
 ## [1.12.2] — 2026-09-17
 
 ### Added

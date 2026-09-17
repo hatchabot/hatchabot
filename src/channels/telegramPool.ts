@@ -369,10 +369,17 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       } catch { /* malformed → none */ }
       if (!prior.length) return; // fresh bot: nothing above to explain
       const token = await this.secrets.get(secretRef);
+      // Telegram gives a bot no way to clear a conversation: deleteMessage(s)
+      // only reaches messages under 48 hours old, and nothing resets a chat.
+      // So the honest move is to say so and point at the one control the
+      // PERSON has — clearing their own copy.
       const text =
         `— this bot is now "${agentName}" —\n\n` +
         'It has been reassigned to a different agent. Anything above this line ' +
         'was a previous agent and no longer applies.\n\n' +
+        "Telegram doesn't let a bot delete an old conversation. If you'd rather " +
+        'not keep it, open this chat\'s menu and choose Clear history — that ' +
+        'removes your copy.\n\n' +
         'If you had archived this chat, this message just brought it back — ' +
         'unarchive it to keep the new agent handy.';
       // Sends run CONCURRENTLY: this is on the awaited lease/provision path,

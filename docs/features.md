@@ -42,6 +42,18 @@ instantly — the header shows "N instant bots ready" and the create dialog
 lets you opt out per agent for a bespoke @handle. (Server-side stocking:
 `HATCHABOT_SECRET_KEY=… npx tsx scripts/pool-add.ts <token>…`.)
 
+**A recycled bot keeps its old chat.** When a pooled bot is leased to a new
+agent, Hatchabot renames it, clears its description and command menu, and posts
+a marker to everyone who talked to the previous agent ("this bot is now X —
+anything above this line was a previous agent"). It cannot remove the old
+conversation: the Telegram Bot API only deletes individual messages under **48
+hours** old (`deleteMessage`, or `deleteMessages` for up to 100 at once), and
+there is no method that clears a chat or starts a fresh thread — renaming a bot
+changes nothing about the history already in someone's client. The marker
+message therefore tells the person how to clear their own copy, which is the
+only control that exists. If a clean slate matters, mint a new bot at
+@BotFather rather than recycling one.
+
 **Whose bot is whose**: a bot you park is *yours* — only your agents lease it,
 and only you (or the machine owner) can remove it. Any account may park one it
 minted at @BotFather. Ticking **Share with everyone on this server** donates it
