@@ -185,6 +185,13 @@ export class Store {
       -- row exists before running a turn on the peer.
       CREATE TABLE IF NOT EXISTS agent_peers (
         agent_id TEXT NOT NULL, peer_id TEXT NOT NULL,
+        -- A consult is normally framed as UNTRUSTED input the peer must not act
+        -- on: without that, anything able to steer one agent (an injected email,
+        -- a household member) reaches through A2A into another agent's mail,
+        -- files and calendar. This flag is the owner saying "these two are both
+        -- mine and one drives the other on purpose" — a QA agent resetting the
+        -- system under test is the case it exists for. Off unless asked for.
+        allow_actions INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (agent_id, peer_id)
       );
       CREATE INDEX IF NOT EXISTS agent_peers_peer ON agent_peers (peer_id);
@@ -456,6 +463,7 @@ export class Store {
       // The agent class (model/source tier) this agent belongs to, if any.
       `ALTER TABLE local_accounts ADD COLUMN claim_code TEXT`,
       `ALTER TABLE local_accounts ADD COLUMN claim_expires TEXT`,
+      `ALTER TABLE agent_peers ADD COLUMN allow_actions INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agents ADD COLUMN class_id TEXT`,
     ]) {
       try {
@@ -2148,12 +2156,25 @@ export class Store {
   // ---- agent-to-agent peers -------------------------------------------------
 
   /** Replace the set of agents this agent may consult (owner-validated upstream). */
-  setAgentPeers(agentId: string, peerIds: string[]): void {
+  setAgentPeers(agentId: string, peerIds: string[], allowActions: string[] = []): void {
+    const act = new Set(allowActions);
     this.transact(() => {
       this.db.prepare(`DELETE FROM agent_peers WHERE agent_id = ?`).run(agentId);
-      const ins = this.db.prepare(`INSERT OR IGNORE INTO agent_peers (agent_id, peer_id) VALUES (?, ?)`);
-      for (const p of peerIds) if (p && p !== agentId) ins.run(agentId, p);
+      const ins = this.db.prepare(`INSERT OR IGNORE INTO agent_peers (agent_id, peer_id, allow_actions) VALUES (?, ?, ?)`);
+      for (const p of peerIds) if (p && p !== agentId) ins.run(agentId, p, act.has(p) ? 1 : 0);
     });
+  }
+
+  /** Peers this agent may ask to ACT, not merely to answer. */
+  listAgentActionPeers(agentId: string): string[] {
+    return (this.db.prepare(`SELECT peer_id FROM agent_peers WHERE agent_id = ? AND allow_actions = 1`).all(agentId) as any[]).map((r) => r.peer_id);
+  }
+
+  /** Has the owner authorized `agentId` to ask `peerId` to act? */
+  peerMayRequestActions(agentId: string, peerId: string): boolean {
+    return !!this.db
+      .prepare(`SELECT 1 FROM agent_peers WHERE agent_id = ? AND peer_id = ? AND allow_actions = 1`)
+      .get(agentId, peerId);
   }
 
   listAgentPeers(agentId: string): string[] {

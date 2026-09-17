@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.12.0] — 2026-09-17
+
+### Added
+- **"May act on its requests" per peer.** A consult is relayed as untrusted input by default — the peer answers from knowledge and is told not to act, because anything that can steer one agent would otherwise reach into another's mail, files and calendar. For a pair you drive on purpose (a QA agent resetting the system it tests), tick the box next to that peer in the **Peers** tab: the framing becomes "your owner has authorized this peer to request actions", and the consult is recorded in the timeline with `actionsAllowed` so an action-capable consult is distinguishable from an ordinary one. Off by default, confirmed in the UI, one direction at a time, only between two agents the same person owns — and it never relaxes the rule against handing over credentials or tokens.
+
+### Notes
+- A consult still runs the peer's whole turn inside `HATCHABOT_A2A_TIMEOUT_MS` (default 120 s). Tool-heavy work — clearing a queue, verifying counts — needs that raised, or the caller gets "The peer did not answer in time."
+
 ## [1.11.1] — 2026-09-16
 
 ### Fixed

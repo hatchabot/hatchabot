@@ -4826,7 +4826,11 @@ async function loadPeers() {
     el.innerHTML = candidates.length
       ? candidates.map(c => `<label class="pair" style="padding:3px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
           <input type="checkbox" class="peerCb" data-id="${esc(c.id)}"${c.granted ? ' checked' : ''} style="width:auto;flex:none">
-          <span class="grow">${esc(c.name)}</span></label>`).join('')
+          <span class="grow">${esc(c.name)}</span>
+          <label class="sub" style="display:flex;align-items:center;gap:4px;font-weight:400"
+                 title="By default a consult is relayed as untrusted input the peer answers but never acts on. Tick this and it may carry out what this agent asks — for a pair you drive on purpose, like a QA agent resetting the system it tests. It can never hand over credentials either way.">
+            <input type="checkbox" class="peerAct" data-id="${esc(c.id)}"${c.allowActions ? ' checked' : ''} style="width:auto;flex:none"> may act on its requests
+          </label></label>`).join('')
       : '<span>No other agents to consult yet.</span>';
   } catch (e) { if (editAgentId === forId) el.innerHTML = esc(e.message); }
 }
@@ -4834,9 +4838,14 @@ async function savePeers() {
   // Never PUT from an unloaded/failed list: that would silently revoke every grant.
   if (peersLoadedFor !== editAgentId) { toast('Peer list not loaded yet — reopen the tab.'); return; }
   const ids = [...document.querySelectorAll('.peerCb:checked')].map(cb => cb.dataset.id);
+  const acts = [...document.querySelectorAll('.peerAct:checked')].map(cb => cb.dataset.id).filter(id => ids.includes(id));
+  if (acts.length && !confirm(
+    `${acts.length} peer${acts.length > 1 ? 's' : ''} will be allowed to ask this agent to ACT — send mail, change files, ` +
+    `run its tools — not just answer questions.\n\nOnly do this for agents you drive on purpose. Anything that can steer ` +
+    `the other agent (an injected email, a message from someone in its chat) can then reach in here.\n\nContinue?`)) return;
   $('peerSaveBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}/peers`, { method: 'PUT', body: { peerIds: ids } });
+    await api(`/v1/agents/${editAgentId}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
     // The call-agent tool + peer manifest are installed on rebuild, so offer it.
     if (ids.length) {
       if (confirm(`Saved. Rebuild this agent now so it can consult ${ids.length} peer${ids.length > 1 ? 's' : ''}?\n\nThe call-agent tool is installed on rebuild (memory kept, briefly offline). Without a rebuild the grant is saved but the agent can't call them yet.`)) {

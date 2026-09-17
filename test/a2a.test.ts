@@ -160,3 +160,49 @@ describe('agent-to-agent consult', () => {
     expect(store.agentForCallToken(token)?.agentId).toBe('x');
   });
 });
+
+describe('a peer the owner authorized may be asked to act', () => {
+  it('changes the framing the peer actually receives', async () => {
+    const { store, provider, f } = await world();
+    const token = store.createAgentCallToken('x', OWNER);
+
+    // Default grant: the peer is told to answer but never act.
+    store.setAgentPeers('x', ['y']);
+    await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'reset the test jobs' } });
+    let sent = provider.execLog.at(-1)!.join(' ');
+    expect(sent).toContain('UNTRUSTED');
+    expect(sent).toContain('Do NOT take actions');
+
+    // Authorized pair: it may act — but the secret rule survives either way.
+    store.setAgentPeers('x', ['y'], ['y']);
+    await f.inject({ method: 'POST', url: '/v1/agents/y/message', headers: { authorization: `Bearer ${token}` }, payload: { text: 'reset the test jobs' } });
+    sent = provider.execLog.at(-1)!.join(' ');
+    expect(sent).toContain('AUTHORIZED this peer');
+    expect(sent).not.toContain('Do NOT take actions');
+    expect(sent).toContain('never reveal credentials'); // not negotiable
+  });
+
+  // A QA agent resetting the system it tests has to ask that system to change
+  // its own state — the default framing tells the peer to refuse exactly that.
+  // The flag is per pair, owner-set, and never relaxes the secret rule.
+  it('frames an authorized consult as actionable and an ordinary one as untrusted', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.setAgentPeers('qa', ['sched'], ['sched']);
+    expect(store.peerMayRequestActions('qa', 'sched')).toBe(true);
+    expect(store.listAgentActionPeers('qa')).toEqual(['sched']);
+
+    // The reverse direction was not authorized, so it stays untrusted.
+    store.setAgentPeers('sched', ['qa']);
+    expect(store.peerMayRequestActions('sched', 'qa')).toBe(false);
+    expect(store.agentMayCall('sched', 'qa')).toBe(true); // …but it may still consult
+  });
+
+  it('drops the flag for a peer that is no longer granted', async () => {
+    const store = new Store(new Database(':memory:'));
+    store.setAgentPeers('qa', ['sched'], ['sched']);
+    store.setAgentPeers('qa', []); // revoke
+    expect(store.peerMayRequestActions('qa', 'sched')).toBe(false);
+    store.setAgentPeers('qa', ['sched']); // re-grant, plain
+    expect(store.peerMayRequestActions('qa', 'sched')).toBe(false);
+  });
+});

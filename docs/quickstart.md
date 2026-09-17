@@ -104,7 +104,15 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 - **Give it your Google account** — ⚙ Settings → Connections (Gmail, Calendar, Drive, Sheets). Per agent, with a "no send" option.
 - **Give it data** — the agent's **Data** tab: a read-only folder, a writable one, or a git repo it commits to.
 - **Schedule it** — the **Tasks** dialog: a morning briefing, an inbox poll, a weekly digest.
-- **Let agents consult each other** — the agent's **Peers** tab.
+- **Let agents consult each other** — the agent's **Peers** tab. A consult is
+  relayed as *untrusted* input by default: the peer answers from knowledge but
+  is told not to act on it, because anything that can steer one agent (an
+  injected email, a message from someone in its chat) would otherwise reach
+  into another agent's mail, files and calendar. For a pair you drive on
+  purpose — a QA agent resetting the system it tests — tick **may act on its
+  requests** next to that peer; it asks you to confirm, and it never relaxes
+  the rule against handing over credentials. Long jobs need
+  `HATCHABOT_A2A_TIMEOUT_MS` raised from its 120 s default.
 - **Keep it cheap** — **Classes** (⚙ → AI sources) put simple agents on a cheaper model and demanding ones on the best, in one place.
 - **Back up / move / share** — every card: Download (a single file), Rehost (to another Hatchabot), Share (as a template with no secrets).
 - **Share a screenshot** — add `?demo` to the app's address (e.g. `http://localhost:8080/?demo`): your email is hidden and family members' names, bot handles, connected accounts and Telegram ids are blurred. Nothing changes on the server; remove `?demo` to see everything again.
