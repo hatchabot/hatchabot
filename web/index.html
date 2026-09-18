@@ -518,6 +518,9 @@
   .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
   .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
   .v2notices:empty { display:none }
+  .v2ownernote { display:none }
+  #paneV2Derived #derivedSection > h4:first-child { display:none } /* the tab already says it */
+  #paneV2Derived:has(#derivedSection[hidden]) .v2ownernote { display:block }
   .v2clamp:not(.v2open) { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden }
   .v2more { background:none !important; border:0 !important; padding:0 !important; color:var(--accent-text) !important; font-size:12.5px; font-weight:600; margin:2px 0 8px }
   #v2FleetBody h3 { display:none }
@@ -1576,7 +1579,7 @@
       <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
     </details>
     <div id="rtList">Loading…</div>
-    <div class="sub" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
+    <div class="sub" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();if(UI_V2)showTab('derived');const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
     <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
     </div>
     <h4 style="margin:18px 0 4px">What agents can do</h4>
@@ -2604,12 +2607,14 @@ const V2_SETTINGS = [
   ['people', 'People', ['access', 'operator']],
   ['pool', 'Telegram bots', ['pool']],
   ['conn', 'Connections', ['conn']],
-  ['machines', 'Machines', ['hosts', 'runtime', 'servers']],
+  ['machines', 'Machines', ['hosts', 'servers']],
+  ['base', 'Base images', ['runtime']],
+  ['derived', 'Derived images', ['derived']],
   ['backups', 'Backups', ['backups']],
   ['security', 'Security', ['security']],
 ];
 const V2_SETTINGS_HEAD = { access: 'Accounts & sign-in', operator: 'About you — every agent you create knows this',
-  hosts: 'Machines that run agents', runtime: 'Runtime image', servers: 'Other Hatchabot servers' };
+  hosts: 'Machines that run agents', servers: 'Other Hatchabot servers' };
 let v2SettingsGroup = 'ai';
 function showTab(name) {
   if (UI_V2) {
@@ -2628,14 +2633,14 @@ function showTabPane(name) {
   for (const [key, pane] of Object.entries(TABS)) {
     const on = key === name;
     $(pane).hidden = !on;
-    $('tab' + key[0].toUpperCase() + key.slice(1)).setAttribute('aria-selected', String(on));
+    $('tab' + key[0].toUpperCase() + key.slice(1))?.setAttribute('aria-selected', String(on)); // v2-only panes have no classic tab
   }
   if (name === 'access') { refreshMgmtBotStatus(); void loadAccounts(); }
   if (name === 'conn') loadConnections();
   if (name === 'hosts') loadHosts();
   if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
-  if (name === 'runtime') loadRuntime();
+  if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
   if (name === 'security') loadPosture();
   if (name === 'operator') loadOperator();
 }
@@ -9222,6 +9227,10 @@ function initV2() {
   const strip = aiDlg.querySelector('.tabs');
   strip.hidden = true;
   strip.insertAdjacentHTML('afterend', '<div class="tabs" role="tablist" id="v2SettingsTabs"></div>');
+  // Derived images get their own tab: move their section into a pane of its own.
+  $('paneRuntime').insertAdjacentHTML('afterend', '<section id="paneV2Derived" role="tabpanel" hidden><div class="sub v2ownernote">Derived images are managed by the account that set up this machine.</div></section>');
+  $('paneV2Derived').append($('derivedSection'));
+  TABS.derived = 'paneV2Derived';
   for (const [key, text] of Object.entries(V2_SETTINGS_HEAD)) {
     $(TABS[key])?.insertAdjacentHTML('afterbegin', `<h4 class="v2sec v2settingshead" hidden>${esc(text)}</h4>`);
   }

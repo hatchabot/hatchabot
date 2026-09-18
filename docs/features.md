@@ -56,8 +56,9 @@ The header holds:
 - **Machine settings have seven tabs**: AI (sources and agent classes),
   People (your account, other accounts, "about you"), Telegram bots,
   Connections (Google accounts, plus the voice-notes and web-search keys),
-  Machines (runners, the runtime image, other Hatchabot servers), Backups,
-  Security.
+  Machines (runners, other Hatchabot servers), Base images (the fleet's
+  OpenClaw version, candidates, promote), Derived images (base plus your own
+  packages), Backups, Security.
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.
 - Long introductions show two lines; **More** reveals the rest.

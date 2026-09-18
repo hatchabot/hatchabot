@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.22.0] — 2026-09-18
+
+### Changed
+- **Images get their own Settings tabs.** Machines now holds only runners and other Hatchabot servers.
+  - **Base images:** the fleet's OpenClaw version, candidates and their trials, "Build a base-image candidate", promote, and what agents can do.
+  - **Derived images:** the base plus your own packages, with "New derived image". The "Need packages?" link on Base images jumps there.
+  - An account that doesn't own the machine sees a one-line explanation instead of an empty tab.
+  - Old links to the runtime section open Base images.
+
 ## [1.21.1] — 2026-09-18
 
 ### Fixed
