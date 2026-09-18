@@ -201,7 +201,10 @@ async function runProvisionStepsInner(
   try {
     // Step 3: messaging identity.
     let provisioned = store.getChannelForAgent(agentId);
-    if (!provisioned) {
+    if (!provisioned && agent.webOnly) {
+      // No Telegram: reached only through Hatchabot. Nothing to lease.
+      log('channel.skipped', { agentId, reason: 'web-only' });
+    } else if (!provisioned) {
       const result = await channel.provision({
         agentId,
         agentName: agent.name,
@@ -327,7 +330,7 @@ async function runProvisionStepsInner(
 
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');
-    return { agent: live, deepLink: provisioned.deepLink };
+    return { agent: live, deepLink: provisioned?.deepLink };
   } catch (err) {
     // A channel that needs a human step is not a failure — the agent parks in
     // PROVISIONING with a pendingAction the app renders; once the user acts,
@@ -380,9 +383,9 @@ export async function buildRuntimeSpec(
   const profile = store.getAIProfile(agent.aiProfileId)!;
   const host = hostOverride ?? store.getHost(agent.hostId)!;
   const channelRow = store.getChannelForAgent(agentId);
-  if (!channelRow) throw new Error(`Agent ${agentId} has no channel yet`);
+  if (!channelRow && !agent.webOnly) throw new Error(`Agent ${agentId} has no channel yet`);
 
-  const botToken = await secrets.get(channelRow.secretRef);
+  const botToken = channelRow ? await secrets.get(channelRow.secretRef) : undefined;
   // A local model server needs no credential of any kind: no key to inject,
   // no ~/.claude to mount, nothing that can leak. It is the only vendor where
   // "your data never leaves the machine" is literally true.
@@ -492,14 +495,16 @@ export async function buildRuntimeSpec(
         baseUrl: profile.baseUrl,
         setupToken: oauthToken,
         gatewayToken: gateway.token,
-        telegram: {
+        // Web-only agents have no bot: configWriter then writes no Telegram
+        // channel at all.
+        telegram: channelRow && botToken ? {
           accountId: channelRow.accountId,
           botToken,
           dmPolicy: 'pairing',
           allowFrom,
           groupAccess: agent.groupAccess,
           richMessages: agent.richMessages !== false,
-        },
+        } : undefined,
       },
     },
     hostname: containerHostname,

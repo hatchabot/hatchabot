@@ -81,6 +81,8 @@
     border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
   .pool-ready[hidden] { display: none; }
   .pool-dot { color: var(--ok); font-size: 10px; line-height: 1; }
+  .pool-status { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:10px 0 4px; padding:10px 12px;
+    border:1px solid var(--line); border-radius:10px; background:var(--panel-2); font-size:14px }
   /* Jump-to legend: fixed in the left margin, so it stays put while the cards
      scroll. Wide screens PIN it open permanently and the page reserves a gutter
      (body.has-toc padding) so it never covers a card. Narrow screens have no
@@ -772,7 +774,7 @@
 
 <dialog id="createDlg">
   <h3 style="margin:0 0 4px">New agent</h3>
-  <div class="sub">It boots on this machine and lives on Telegram.
+  <div class="sub">It runs on this machine; talk to it here, or on Telegram.
     Or <a href="#" onclick="event.preventDefault(); createDlg.close(); openGallery()">start from a template</a>,
     or <a href="#" onclick="event.preventDefault(); createDlg.close(); $('importFile').click()">open a .hatchabot file</a>.</div>
   <div class="sub" id="agentCountNote" style="margin-top:2px"></div>
@@ -793,6 +795,12 @@
     <input type="checkbox" id="agentPrivate" style="width:auto">
     Keep memory private — just for you. Leave off for a family/group agent:
     everyone you invite reads and writes one common memory
+  </label>
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+    <input type="checkbox" id="agentNoTelegram" style="width:auto" onchange="$('agentPoolRow').hidden = this.checked">
+    <span>No Telegram — talk to it here in Hatchabot only
+      <div class="sub" style="margin-top:2px">Uses no bot. You can add one later from its settings, e.g. to reach it
+        from your phone or to invite other people.</div></span>
   </label>
   <label id="agentPoolRow" style="display:none;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
     <input type="checkbox" id="agentUsePool" checked style="width:auto">
@@ -1382,7 +1390,24 @@
       any time), so each user leases only <i>their own</i> bots — plus
       <b>shared</b> house bots explicitly donated for everyone on this server.
     </div>
-    <div id="poolList" style="margin-top:10px">Loading…</div>
+    <div class="pool-status" id="poolStatus"></div>
+    <details class="sec-drawer" id="botInvDrawer">
+      <summary><b>🔎 Bot inventory</b> <span class="sub">— every bot this server holds a token for, live-checked (for the ~40-bots BotFather cap)</span></summary>
+      <div class="sub" style="margin-top:6px">
+        BotFather's <code>/mybots</code> is the full list of bots YOUR Telegram
+        account minted. Anything there that is <i>not</i> below is a stray from
+        an old install or experiment — safe to <code>/deletebot</code> once
+        you've confirmed nothing else uses it. A ❌ token here means Hatchabot's
+        copy was revoked; the bot may still exist (and count) at BotFather.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+        <button id="botInvBtn" onclick="loadBotInventory()">Run the live check</button>
+        <span class="sub" id="botInvStatus"></span>
+      </div>
+      <div id="botInvList"></div>
+    </details>
+    <h4 style="margin:16px 0 4px">Bots in your pool</h4>
+    <div id="poolList">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a bot</h4>
     <div class="sub">
       Mint one at <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a>
@@ -1399,21 +1424,6 @@
       <button class="primary" id="poolAddBtn" onclick="addPoolBot()">Add to pool</button>
     </div>
 
-    <details class="sec-drawer" id="botInvDrawer">
-      <summary><b>🔎 Bot inventory</b> <span class="sub">— every bot this server holds a token for, live-checked (for the ~40-bots BotFather cap)</span></summary>
-      <div class="sub" style="margin-top:6px">
-        BotFather's <code>/mybots</code> is the full list of bots YOUR Telegram
-        account minted. Anything there that is <i>not</i> below is a stray from
-        an old install or experiment — safe to <code>/deletebot</code> once
-        you've confirmed nothing else uses it. A ❌ token here means Hatchabot's
-        copy was revoked; the bot may still exist (and count) at BotFather.
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
-        <button id="botInvBtn" onclick="loadBotInventory()">Run the live check</button>
-        <span class="sub" id="botInvStatus"></span>
-      </div>
-      <div id="botInvList"></div>
-    </details>
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
@@ -2784,6 +2794,12 @@ async function loadPool() {
     if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
     const p = await api('/v1/pool');
     const bots = p.bots ?? [];
+    // The at-a-glance answer to "can I make an agent instantly?"
+    const ready = p.availableBots ?? bots.filter(b => !b.leasedTo).length;
+    const inUse = bots.filter(b => b.leasedTo).length;
+    $('poolStatus').innerHTML = `<span class="pool-dot"${ready > 0 ? '' : ' style="color:var(--off)"'}>●</span>
+      <b>${ready}</b> instant bot${ready === 1 ? '' : 's'} ready${inUse ? ` <span class="sub">· ${inUse} in use by agents</span>` : ''}
+      ${ready ? '' : '<span class="sub">· a new agent will ask for a BotFather token, or can go without Telegram</span>'}`;
     el.innerHTML = bots.length
       ? bots.map(b => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
           <span class="grow">🤖 <b class="pii">@${esc(b.username)}</b>
@@ -4563,8 +4579,10 @@ async function createAgent() {
       sharedMemory: !$('agentPrivate').checked,
       // Only meaningful when the pool row was offered and declined.
       skipPool: ($('agentPoolRow').style.display !== 'none' && !$('agentUsePool').checked) || undefined,
+      telegram: $('agentNoTelegram').checked ? false : undefined,
     }});
     createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentPrivate').checked = false;
+    $('agentNoTelegram').checked = false; $('agentPoolRow').hidden = false;
     await refresh(false);
   } catch (e) { $('createErr').textContent = e.message; }
   finally { $('createBtn').disabled = false; }
@@ -8818,8 +8836,17 @@ function v2Pane(a, tab) {
            ${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open</a>` : ''}
            ${run ? B('Invite…', `invite('${id}','${n}')`) : ''}
            ${run && a.botDisplayName && a.botDisplayName !== a.name ? B('🏷 Sync name', `syncBotName('${id}','${n}')`, `title="Telegram shows it as '${esc(a.botDisplayName)}'"`) : ''}
+           ${run || a.state === 'STOPPED' ? B('Remove…', `v2RemoveTelegram('${id}','${n}','${jsq(a.botUsername)}')`, 'title="Hand the bot back to your pool; talk to it here only"') : ''}
            <span class="sub">Optional. It's how you reach it from your phone, and how people reach it when this machine isn't reachable from where they are.</span>`
-        : '<span class="sub">No Telegram bot.</span>') : ''}
+        : a.webOnly && (run || a.state === 'STOPPED')
+          ? `<span>None — you talk to it here.</span>${B('Add a Telegram bot', `v2AddTelegram('${id}')`)}
+             <span class="sub">Add one to reach it from your phone, or to invite other people.${poolAvail > 0 ? ` ${poolAvail} ready in your pool, so it's instant.` : ''}</span>
+             <div id="v2TgToken" hidden style="flex-basis:100%;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+               <input type="text" id="v2TgTokenIn" placeholder="123456789:AA…" autocomplete="off" style="flex:1;min-width:200px">
+               <button class="primary" onclick="v2AddTelegram('${id}', true)">Connect</button>
+               <span class="sub" style="flex-basis:100%">No spare bots in your pool. In Telegram, message @BotFather, send /newbot, and paste the token it gives you.</span>
+             </div>`
+          : '<span class="sub">No Telegram bot.</span>') : ''}
       ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
         <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
@@ -8834,6 +8861,10 @@ function v2Pane(a, tab) {
       ${slot('paneEditConn')}
       ${built ? `<h4 class="v2sec">Chat history</h4>${row('Every conversation', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">As a file.</span>`)}` : ''}`;
     case 'sharing': {
+      if (a.webOnly && !a.botUsername) return `
+      ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`)}${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}`) : ''}
+      ${row('People', `<span>Only you — it has no Telegram bot.</span>${B('Add one…', goto('overview'))}<span class="sub">Other people reach an agent through its Telegram bot.</span>`)}
+      ${slot('paneEditPeers')}`;
       // People (members, invites) live in the Telegram section below — one list, not two.
       return `
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
@@ -8861,6 +8892,30 @@ function v2Pane(a, tab) {
       </div></div>`;
   }
   return '';
+}
+
+async function v2AddTelegram(id, withToken) {
+  const body = {};
+  if (withToken) {
+    body.token = $('v2TgTokenIn').value.trim();
+    if (!body.token) return toast('Paste the token from @BotFather first.');
+  }
+  try {
+    const r = await api(`/v1/agents/${id}/telegram`, { method: 'POST', body });
+    toast(`Connected @${r.username} — rebuilding so it answers there (memory kept).`, 6000);
+    await refresh(false);
+  } catch (e) {
+    if (/pool/i.test(e.message) && !withToken) { $('v2TgToken').hidden = false; $('v2TgTokenIn').focus(); return; }
+    toast(e.message, 8000);
+  }
+}
+async function v2RemoveTelegram(id, name, bot) {
+  if (!confirm(`Take @${bot} off "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. It restarts to apply this.`)) return;
+  try {
+    await api(`/v1/agents/${id}/telegram`, { method: 'DELETE' });
+    toast(`@${bot} is back in your pool.`, 6000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); }
 }
 
 async function v2SetGroup(id, value) {

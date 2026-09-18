@@ -73,6 +73,17 @@ The header holds:
 
 ## Creating & talking to agents
 
+**Telegram is optional.** Tick **No Telegram** when creating an agent (or
+`hatchabot create <name> --no-telegram`) and it uses no bot at all: you talk to
+it by clicking its icon, which opens its OpenClaw console. Add a bot later from
+its Overview (**Add a Telegram bot**: instant from your pool, or paste a
+BotFather token) when you want to reach it from your phone or invite people.
+**Remove…** on the same row does the reverse. The bot goes back to your pool,
+its Telegram contacts get a goodbye, and you keep talking to it in the app.
+Memory is untouched either way. A bot-less agent's backups and shared copies
+work as usual; moving one to *another Hatchabot server* needs a bot, so use
+Download copy and import it there instead.
+
 To create an agent, tap **+** in the web app: name it, optionally answer
 "What is it for?" (that text becomes its persona), pick an AI source, and —
 when more than one host exists — pick where it runs ("Runs on"). A "Keep

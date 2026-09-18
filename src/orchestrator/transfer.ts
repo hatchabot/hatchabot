@@ -68,7 +68,8 @@ export interface ExportManifest {
     model?: string;
   };
   ai: { vendor: string; model: string; models?: string[] };
-  channel: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
+  /** Absent when the agent is web-only (no Telegram bot). */
+  channel?: { kind: 'telegram'; accountId: string; deepLink: string; botToken: string };
   memberships: Array<{
     userId: string;
     role: MemberRole;
@@ -130,7 +131,7 @@ const ManifestSchema = z.object({
     // URI and run script in the app's origin when the owner clicked it.
     deepLink: z.string().max(256).startsWith('https://t.me/'),
     botToken: z.string().min(1).max(256),
-  }),
+  }).optional(), // absent for a web-only agent (no Telegram bot)
   memberships: z
     .array(
       z.object({
@@ -181,7 +182,7 @@ export async function exportAgent(
     throw new TransferError(`Can't export while the agent is ${agent.state}.`);
   }
   const channel = store.getChannelForAgent(agentId);
-  if (!channel) throw new TransferError('This agent has no messaging channel to export.');
+  if (!channel && !agent.webOnly) throw new TransferError('This agent has no messaging channel to export.');
   const profile = store.getAIProfile(agent.aiProfileId);
 
   // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
@@ -244,12 +245,12 @@ export async function exportAgent(
       model: profile?.model ?? '',
       models: profile?.models,
     },
-    channel: {
+    channel: channel ? {
       kind: channel.kind,
       accountId: channel.accountId,
       deepLink: channel.deepLink,
       botToken: await secrets.get(channel.secretRef),
-    },
+    } : undefined,
     memberships: store.listMemberships(agentId).map((m) => ({
       ...m,
       role: m.role as MemberRole,
@@ -345,7 +346,7 @@ async function importAgentInner(
   }
   // A previously deleted agent's tombstone may still hold the slug.
   store.releaseDeletedSlug(opts.ownerId, manifest.agent.slug);
-  if (store.findAgentUsingAccount(manifest.channel.accountId)) {
+  if (manifest.channel && store.findAgentUsingAccount(manifest.channel.accountId)) {
     throw new TransferError(
       `Bot @${manifest.channel.accountId} is already wired to an agent here.`,
     );
@@ -380,6 +381,7 @@ async function importAgentInner(
     hostId: host.id,
     persona: manifest.agent.persona,
     sharedMemory: manifest.agent.sharedMemory,
+    webOnly: !manifest.channel,
     icon: validIcon(manifest.agent.icon) ? manifest.agent.icon : undefined,
     iconColor: validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : undefined,
     // The per-agent model override survives the move only if the destination
@@ -442,18 +444,20 @@ async function importAgentInner(
       });
     }
 
-    await secrets.put(secretRef, manifest.channel.botToken);
-    store.insertChannel({
-      id: randomUUID(),
-      agentId: agent.id,
-      kind: manifest.channel.kind,
-      accountId: manifest.channel.accountId,
-      secretRef,
-      // Derived, not imported: accountId is regex-validated, so this cannot be
-      // anything but a t.me link no matter what the archive claimed.
-      deepLink: `https://t.me/${manifest.channel.accountId}`,
-      createdAt: now,
-    });
+    if (manifest.channel) {
+      await secrets.put(secretRef, manifest.channel.botToken);
+      store.insertChannel({
+        id: randomUUID(),
+        agentId: agent.id,
+        kind: manifest.channel.kind,
+        accountId: manifest.channel.accountId,
+        secretRef,
+        // Derived, not imported: accountId is regex-validated, so this cannot be
+        // anything but a t.me link no matter what the archive claimed.
+        deepLink: `https://t.me/${manifest.channel.accountId}`,
+        createdAt: now,
+      });
+    }
 
     // Recreate the env vars BEFORE provisioning renders the runtime spec, so
     // the container boots with them (an agent without its env secrets is

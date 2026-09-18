@@ -256,7 +256,9 @@ async function migrateAgentInner(
     );
   }
   const channel = store.getChannelForAgent(agentId);
-  if (!channel) throw new MigrateError('This agent has no messaging identity to move.');
+  if (!channel) throw new MigrateError(agent.webOnly
+    ? 'This agent has no Telegram bot, and moving to another server needs one. Download a copy (Advanced → Download copy) and import it there instead, or add a bot first.'
+    : 'This agent has no messaging identity to move.');
   const profile = store.getAIProfile(agent.aiProfileId);
 
   // Our runtime-image version rides along so the destination can refuse a

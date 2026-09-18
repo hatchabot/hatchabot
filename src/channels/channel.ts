@@ -48,7 +48,7 @@ export class ChannelSetupRequired extends Error {
 
 /** Why an identity is being given up, and on whose behalf. */
 export interface ReleaseOptions {
-  reason?: 'deleted' | 'archived';
+  reason?: 'deleted' | 'archived' | 'detached';
   agentId?: string;
 }
 

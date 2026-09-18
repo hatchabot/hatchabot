@@ -96,10 +96,11 @@ Commands:
                                (default: all of yours). --rebuild applies now,
                                else each shows "rebuild to apply".
   create <name> [--persona <text>] [--profile <id>] [--host <id>]
-         [--private] [--bot-token <tok>]
+         [--private] [--bot-token <tok>] [--no-telegram]
                                Create an agent and wait for it to boot.
                                Prompts for a BotFather token if the bot pool
-                               is empty.
+                               is empty. --no-telegram: no bot at all; talk
+                               to it in the web app instead.
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
   archive <agent> [--yes]      Park an agent and hand its Telegram bot back for
@@ -946,6 +947,8 @@ async function main() {
         aiProfileId: profile,
         hostId: host,
         sharedMemory: !flags.has('private'),
+        // --no-telegram: no bot; talk to it in the web app's console.
+        telegram: flags.has('no-telegram') ? false : undefined,
       });
       const created: any = await res.json();
       console.log(`creating "${name}"…`);
@@ -963,6 +966,7 @@ async function main() {
       if (a.state === 'FAILED') fail(`provisioning failed: ${a.stateReason ?? 'unknown'} (try: hatchabot retry "${name}")`);
       console.log(`"${a.name}" is RUNNING.`);
       if (a.deepLink) console.log(`Say hi to claim it as owner: ${a.deepLink}`);
+      else if (a.webOnly) console.log('No Telegram bot: talk to it in the web app (click its icon).');
       return;
     }
     case 'delete': {

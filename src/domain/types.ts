@@ -172,6 +172,9 @@ export interface Agent {
    *  Absent until chosen (by the owner, or picked from the name). Cosmetic. */
   icon?: string;
   iconColor?: string;
+  /** No Telegram bot: talked to only through Hatchabot (the OpenClaw console).
+   *  Provisioning skips the bot step; one can be added (or removed) later. */
+  webOnly?: boolean;
   sortOrder?: number;
   /** Setup fields this agent's shares/templates ask the importer to fill. */
   parameters?: TemplateParam[];

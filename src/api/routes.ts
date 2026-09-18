@@ -14,6 +14,7 @@ import { ProviderError } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
+import { ChannelSetupRequired } from '../channels/channel.js';
 import {
   claudeAuthDir,
   createAgentRecord,
@@ -244,6 +245,8 @@ const CreateAgent = z.object({
   /** Owner unchecked "use a pool bot": walk BotFather even if the pool has
    *  bots (they want a bespoke @handle for this agent). */
   skipPool: z.boolean().optional(),
+  /** false = no Telegram bot: talked to only through Hatchabot. Default true. */
+  telegram: z.boolean().optional(),
 });
 
 /**
@@ -2443,8 +2446,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     }
 
-    const { seedMembers, skipPool, ...create } = parsed.data;
+    const { seedMembers, skipPool, telegram, ...create } = parsed.data;
     const agent = createAgentRecord(store, { ownerId, ...create });
+    if (telegram === false) store.setAgentWebOnly(agent.id, true);
     // One-shot preference for the provision that's about to run: skip the
     // pool and walk BotFather. After the manual flow parks the agent with a
     // pendingAction, that persisted state drives every retry — the flag only
@@ -4469,6 +4473,88 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  // Telegram is optional. Add a bot to a web-only agent (from the pool, or a
+  // pasted BotFather token), or take one away (the bot goes back to the pool,
+  // members get a goodbye). Either way the agent rebuilds with the new config;
+  // its memory is untouched.
+  app.post<{ Params: { id: string }; Body: { token?: string } }>('/v1/agents/:id/telegram', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (store.getChannelForAgent(agent.id)) return reply.code(409).send({ error: 'It already has a Telegram bot.' });
+    if (!agent.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) {
+      return reply.code(409).send({ error: `Wait until it is running (it is ${agent.state.toLowerCase()}).` });
+    }
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    if (token) {
+      try {
+        const { username } = await deps.channel.submitToken(agent.id, token);
+        const inUseBy = store.findAgentUsingAccount(username);
+        if (inUseBy && inUseBy.id !== agent.id) {
+          deps.channel.discardPending?.(agent.id);
+          return reply.code(400).send({ error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.` });
+        }
+      } catch (err) {
+        if (err instanceof InvalidBotTokenError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    }
+    let result;
+    try {
+      result = await deps.channel.provision({ agentId: agent.id, agentName: agent.name, slug: agent.slug, ownerId: agent.ownerId, skipPool: token ? true : undefined });
+    } catch (err) {
+      if (err instanceof ChannelSetupRequired) {
+        return reply.code(409).send({ needsToken: true, error: 'No spare bots in the pool. Create one with @BotFather and paste its token.' });
+      }
+      throw err;
+    }
+    const clash = store.findAgentUsingAccount(result.accountId);
+    if (clash && clash.id !== agent.id) {
+      return reply.code(409).send({ error: `@${result.accountId} already belongs to "${clash.name}".` });
+    }
+    store.insertChannel({
+      id: randomUUID(), agentId: agent.id, kind: deps.channel.kind, accountId: result.accountId,
+      secretRef: result.secretRef, deepLink: result.deepLink, createdAt: new Date().toISOString(),
+    });
+    store.setAgentWebOnly(agent.id, false);
+    await deps.channel.syncDisplayName?.(result.accountId, agent.name).catch(() => {});
+    trace(agent.id)('channel.attached', { accountId: result.accountId });
+    kickRebuild(agent.id);
+    return reply.code(202).send({ username: result.accountId, deepLink: result.deepLink });
+  });
+
+  app.delete<{ Params: { id: string } }>('/v1/agents/:id/telegram', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const row = store.getChannelForAgent(agent.id);
+    if (!row) return reply.code(404).send({ error: 'It has no Telegram bot.' });
+    if (!agent.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) {
+      return reply.code(409).send({ error: `Wait until it is running (it is ${agent.state.toLowerCase()}).` });
+    }
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    // Same order as archive: stop polling BEFORE the token goes back to the
+    // pool, or the next agent to lease it would fight this one for messages.
+    const provider = providerFor(agent.hostId);
+    if (agent.state === 'RUNNING') {
+      await provider.stop(agent.runtimeRef);
+      store.setAgentState(agent.id, 'STOPPED');
+    }
+    const pool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
+    if (pool && !pool.owns(row.accountId)) {
+      try { await pool.addToPool(row.accountId, await secrets.get(row.secretRef), agent.ownerId); }
+      catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
+    }
+    await deps.channel.release(row.accountId, { reason: 'detached', agentId: agent.id });
+    if (row.secretRef.startsWith('channel/')) await secrets.delete(row.secretRef).catch(() => {});
+    store.deleteChannelForAgent(agent.id);
+    store.expireInvitesFor(agent.id, 'agent-detached');
+    store.setAgentPendingAction(agent.id, null);
+    store.setAgentWebOnly(agent.id, true);
+    trace(agent.id)('channel.detached', { accountId: row.accountId });
+    kickRebuild(agent.id);
+    return reply.code(202).send({ released: row.accountId });
+  });
 
   // Owner-facing reveal of the agent's bot token — for recycling a hand-made
   // bot into a new agent after deleting this one. Owner-authed like all /v1.

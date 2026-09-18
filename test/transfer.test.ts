@@ -341,3 +341,24 @@ describe('peekFormat — the one-Import router', () => {
     );
   });
 });
+
+describe('web-only agents (no Telegram bot)', () => {
+  it('export and import round-trip without a bot, and come back web-only', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.deleteChannelForAgent('a1');
+    src.store.setAgentWebOnly('a1', true);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    const agent = await importAgent(dst.deps, data, { ownerId: 'importer' });
+    expect(dst.store.getAgent(agent.id)?.webOnly).toBe(true);
+    expect(dst.store.getChannelForAgent(agent.id)).toBeUndefined();
+  });
+
+  it('an agent that should have a bot but lost it still refuses to export', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.store.deleteChannelForAgent('a1');
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/no messaging channel/);
+  });
+});

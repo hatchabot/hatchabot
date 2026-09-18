@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.19.0] — 2026-09-18
+
+### Added
+- **Agents without Telegram.** Now that the OpenClaw console opens from an agent's icon, a Telegram bot is optional.
+  - Tick **No Telegram** in New agent (CLI: `hatchabot create <name> --no-telegram`) and the agent uses no bot at all: provisioning skips it, and its config carries no Telegram channel.
+  - **Add a Telegram bot** on the agent's Overview attaches one later: instant from your pool, or with a pasted BotFather token when the pool is empty.
+  - **Remove…** does the reverse. It stops the agent before the bot goes back to your pool, so two agents can never poll one bot. The bot's contacts get a "moved off Telegram" goodbye, and the agent rebuilds to apply either change. Memory is untouched.
+  - Backups and shared copies of a bot-less agent round-trip without a bot. Moving one to another Hatchabot server still needs a bot, and says so, pointing at Download copy + import instead.
+  - Agents that are supposed to have a bot still refuse to build or export without one, as before.
+  - Routes: `POST`/`DELETE /v1/agents/:id/telegram`; `telegram: false` on `POST /v1/agents`.
+
+### Changed
+- **Telegram bots tab.** It opens with a status line ("● 2 instant bots ready · 3 in use by agents", or what happens when there are none). **Bot inventory** moved up, above the list of pooled bots.
+
 ## [1.18.0] — 2026-09-18
 
 ### Changed

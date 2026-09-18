@@ -468,6 +468,8 @@ export class Store {
       // Home-screen icon: an emoji and a #rrggbb tint (ui v2). Cosmetic.
       `ALTER TABLE agents ADD COLUMN icon TEXT`,
       `ALTER TABLE agents ADD COLUMN icon_color TEXT`,
+      // No Telegram bot: reached only through Hatchabot itself.
+      `ALTER TABLE agents ADD COLUMN web_only INTEGER NOT NULL DEFAULT 0`,
     ]) {
       try {
         this.db.exec(alter);
@@ -824,10 +826,10 @@ export class Store {
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
                              host_id, runtime_ref, persona, shared_memory, model, pending_action,
-                             group_name, sort_order, icon, icon_color, created_at, updated_at)
+                             group_name, sort_order, icon, icon_color, web_only, created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
                  @hostId, @runtimeRef, @persona, @sharedMemory, @model, @pendingAction,
-                 @group, @sortOrder, @icon, @iconColor, @createdAt, @updatedAt)`,
+                 @group, @sortOrder, @icon, @iconColor, @webOnly, @createdAt, @updatedAt)`,
       )
       .run({
         stateReason: null,
@@ -843,6 +845,7 @@ export class Store {
         // a silent no-op.
         sortOrder: a.sortOrder ?? this.firstSortOrder(a.ownerId, a.group ?? null),
         sharedMemory: a.sharedMemory ? 1 : 0,
+        webOnly: a.webOnly ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
   }
@@ -2262,6 +2265,10 @@ export class Store {
     ).map(rowToAgent);
   }
 
+  setAgentWebOnly(id: string, on: boolean): void {
+    this.db.prepare(`UPDATE agents SET web_only = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
+  }
+
   /** Home-screen icon. `undefined` leaves that half alone; `null` clears it. */
   setAgentIcon(id: string, icon: string | null | undefined, color: string | null | undefined): void {
     const now = new Date().toISOString();
@@ -2845,6 +2852,7 @@ function rowToAgent(r: any): Agent {
     classId: r.class_id ?? undefined,
     icon: r.icon ?? undefined,
     iconColor: r.icon_color ?? undefined,
+    webOnly: !!r.web_only,
     sortOrder: r.sort_order ?? undefined,
     parameters: r.params ? safeJson(r.params, undefined) : undefined,
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,

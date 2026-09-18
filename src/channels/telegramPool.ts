@@ -506,7 +506,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   async #farewell(
     secretRef: string,
     agentId: string,
-    reason: 'deleted' | 'archived',
+    reason: 'deleted' | 'archived' | 'detached',
   ): Promise<void> {
     try {
       const token = await this.secrets.get(secretRef);
@@ -524,6 +524,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
             'agent could use it, so it will not reply here any more. If it is ' +
             'brought back it will be on a NEW bot — ask whoever runs it for the ' +
             'new link. This bot may start answering as a different agent.'
+          : reason === 'detached'
+          ? '— moved off Telegram —\n\n' +
+            'This agent no longer uses Telegram; its owner talks to it in ' +
+            'Hatchabot now. Nothing was lost, but it will not reply here any ' +
+            'more. This bot may start answering as a different agent later.'
           : '— end of this agent —\n\n' +
             'This agent has been removed, so it will not reply here any more. ' +
             'This bot may be reassigned to a different agent later; if it starts ' +
