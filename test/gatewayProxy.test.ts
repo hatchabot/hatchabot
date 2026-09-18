@@ -133,3 +133,56 @@ describe('the console can be embedded by Hatchabot, and only by Hatchabot', () =
     expect(csp).toContain("script-src 'self'"); // everything else untouched
   });
 });
+
+describe('approving the console for a new browser', () => {
+  // OpenClaw's instruction — "run openclaw devices approve <id> on the Gateway
+  // host" — means a shell inside the agent's container. Hatchabot approves on
+  // the owner's behalf instead, and only a request made in the last minutes.
+  const setup = async () => {
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    const provider = new MockProvider();
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a', workspace: { files: {}, configPatch: { agentId: 'a', authMode: 'api-key' } as never }, env: {} } as never);
+    await provider.start(runtimeRef);
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'A', slug: 'a', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    const now = Date.now();
+    provider.execResponses.set('devices list --json', {
+      code: 0, stderr: '',
+      stdout: JSON.stringify({
+        pending: [
+          { requestId: 'fresh-0000-1111', ts: now - 30_000 },     // the one this person just caused
+          { requestId: 'stale-2222-3333', ts: now - 3_600_000 },  // sitting there an hour: not ours
+        ],
+        paired: [],
+      }),
+    });
+    provider.execResponses.set('devices approve', { code: 0, stdout: '', stderr: '' });
+    const app = Fastify();
+    await registerRoutes(app, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
+    return { app, provider };
+  };
+
+  it('approves only a recent request, for the owner', async () => {
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try {
+      const { app, provider } = await setup();
+      const pending = await app.inject({ method: 'GET', url: '/v1/agents/a1/console/pending', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(pending.json().pending).toBe(1); // the stale one is not offered
+
+      const res = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().approved).toBe(1);
+      const approvals = provider.execLog.filter((a) => a[0] === 'devices' && a[1] === 'approve');
+      expect(approvals).toEqual([['devices', 'approve', 'fresh-0000-1111']]);
+
+      // Someone who doesn't own the agent can't approve a browser into it.
+      const stranger = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': 'user-stranger' } });
+      expect(stranger.statusCode).toBe(404);
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
+    }
+  });
+});

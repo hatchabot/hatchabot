@@ -3291,6 +3291,57 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return h;
   };
 
+  /**
+   * OpenClaw asks each new browser to be approved once before it may use the
+   * console — "run `openclaw devices approve <id>` on the Gateway host". The
+   * gateway host is the agent's CONTAINER, which the owner can't reach from a
+   * laptop, so the instruction dead-ended.
+   *
+   * Approving on the owner's behalf is safe for one reason: a pending request
+   * can only come from a browser that reached the gateway through this proxy,
+   * which requires the owner's session. The gateway itself is bound to the
+   * host's loopback, and loopback clients never need pairing. So: explicit
+   * click, owner only, and only requests from the last few minutes — the one
+   * this person just caused, not anything that has been sitting there.
+   */
+  const CONSOLE_PAIRING_WINDOW_MS = 10 * 60_000;
+  const pendingConsoleRequests = async (agent: Agent): Promise<Array<{ requestId: string; ts: number }>> => {
+    if (!agent.runtimeRef) return [];
+    const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['devices', 'list', '--json'], { timeoutMs: 20_000 });
+    if (res.code !== 0) return [];
+    try {
+      const j = JSON.parse(res.stdout) as { pending?: Array<{ requestId?: string; ts?: number }> };
+      const since = Date.now() - CONSOLE_PAIRING_WINDOW_MS;
+      return (j.pending ?? [])
+        .filter((r): r is { requestId: string; ts: number } => typeof r.requestId === 'string' && typeof r.ts === 'number')
+        .filter((r) => r.ts >= since && /^[A-Za-z0-9-]{8,64}$/.test(r.requestId));
+    } catch {
+      return [];
+    }
+  };
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/console/pending', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent || agent.state !== 'RUNNING') return reply.code(404).send({ error: 'Not found' });
+    return { pending: (await pendingConsoleRequests(agent)).length };
+  });
+
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/console/approve', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef || agent.state !== 'RUNNING') return reply.code(404).send({ error: 'Not found' });
+    const pending = await pendingConsoleRequests(agent);
+    if (!pending.length) {
+      return reply.code(409).send({ error: 'Nothing is waiting for approval. Open the console first — it asks once per browser.' });
+    }
+    let approved = 0;
+    for (const r of pending) {
+      const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['devices', 'approve', r.requestId], { timeoutMs: 20_000 });
+      if (res.code === 0) approved++;
+    }
+    trace(agent.id)('console.device_approved', { approved, requested: pending.length });
+    return { approved };
+  });
+
   app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui', async (req, reply) => {
     // The UI is a SPA served from a directory; without the trailing slash its
     // relative asset paths would resolve one level too high.

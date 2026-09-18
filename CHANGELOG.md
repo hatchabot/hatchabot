@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.13.1] — 2026-09-17
+
+### Added
+- **"Approve this browser" in the OpenClaw console.** Over HTTPS, OpenClaw asks each new browser to be approved once, and tells you to run `openclaw devices approve <id>` "on the Gateway host" — which is the agent's container, unreachable from a laptop. A few seconds after the console opens, Hatchabot now checks for a waiting request and offers to approve it, then reconnects. It approves only requests from the last ten minutes, and only for the agent's owner. That is safe because the gateway listens on loopback (whose clients never need pairing) and the only way to reach it from elsewhere is through Hatchabot's owner-authenticated proxy. Approval lives on the agent's volume, so the browser stays approved through rebuilds.
+
 ## [1.13.0] — 2026-09-17
 
 ### Changed

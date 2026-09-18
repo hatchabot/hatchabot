@@ -97,3 +97,22 @@ tab* link is there if you want one). It is served through Hatchabot on its own
 origin — that is what lets it work off-machine while the agent's gateway port
 stays bound to loopback — so it is an owner tool: whoever opens it has a shell
 in the agent's container.
+
+### "Device pairing required"
+
+On HTTPS, the next thing OpenClaw asks is that each **new browser** be approved
+once. Its own message says to run `openclaw devices approve <id>` "on the
+Gateway host" — but the gateway runs inside the agent's container, so that is
+not something you can do from a laptop.
+
+Hatchabot does it for you: a few seconds after the console opens, an
+**Approve this browser** button appears if a request is waiting. It approves
+only requests made in the last ten minutes (the one you just caused), only for
+the agent's owner, and then reconnects. This is safe because the only way to
+reach the gateway from another machine is through Hatchabot's proxy, which
+already requires your session — the gateway itself listens on loopback, and
+loopback clients never need pairing.
+
+Approval is stored on the agent's volume, so that browser stays approved
+through rebuilds. By hand, if you ever need it:
+`docker exec <agent-container> openclaw devices approve <request-id>`.

@@ -411,6 +411,8 @@
     <b id="consoleTitle">Agent</b>
     <span class="sub" style="margin-left:6px">OpenClaw console</span>
     <span class="spacer"></span>
+    <button id="consoleApproveBtn" class="primary" hidden onclick="approveConsoleBrowser(this)"
+            title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner.">Approve this browser</button>
     <a href="#" id="consoleNewTab" class="sub" title="Open the same console in its own tab">Open in new tab ↗</a>
     <button onclick="closeConsole()" aria-label="Close">✕</button>
   </div>
@@ -6657,13 +6659,43 @@ async function openGateway(id, slug) {
     $('consoleTitle').textContent = a?.name || slug;
     $('consoleNewTab').onclick = (e) => { e.preventDefault(); window.open(url, '_blank', 'noopener'); };
     $('consoleFrame').src = url;
+    $('consoleApproveBtn').hidden = true;
     $('consoleDlg').showModal();
+    // A new browser has to be approved once. OpenClaw's own instruction ("run
+    // this on the Gateway host") means a shell inside the container, which is
+    // no use from a laptop — so look for the request and offer to approve it.
+    consoleAgentId = id;
+    consoleUrl = url;
+    setTimeout(checkConsolePairing, 3000);
   } catch (e) { toast(e.message); }
 }
 
 // Esc closes a dialog without calling closeConsole(): blank the frame either
 // way, or the console's WebSocket and token outlive the panel.
 $('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'about:blank'; });
+
+let consoleAgentId = null, consoleUrl = null;
+
+async function checkConsolePairing() {
+  if (!consoleAgentId || !$('consoleDlg').open) return;
+  try {
+    const r = await api(`/v1/agents/${consoleAgentId}/console/pending`);
+    $('consoleApproveBtn').hidden = !(r.pending > 0);
+  } catch { /* best-effort */ }
+}
+
+async function approveConsoleBrowser(btn) {
+  btn.disabled = true;
+  try {
+    const r = await api(`/v1/agents/${consoleAgentId}/console/approve`, { method: 'POST', body: {} });
+    toast(r.approved ? 'Approved — reconnecting.' : 'Nothing to approve.');
+    btn.hidden = true;
+    // Reload with the token still in the fragment, so it connects on its own.
+    $('consoleFrame').src = 'about:blank';
+    setTimeout(() => { $('consoleFrame').src = consoleUrl; }, 50);
+  } catch (e) { toast(e.message, 9000); }
+  finally { btn.disabled = false; }
+}
 
 function closeConsole() {
   // Drop the frame so its WebSocket closes and the token leaves the DOM.
