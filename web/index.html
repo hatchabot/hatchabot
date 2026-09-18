@@ -45,6 +45,10 @@
     color-scheme: light;
   }
   * { box-sizing: border-box; }
+  /* `hidden` must win over any display rule. Without this, the base
+     button/.actions/.tabs styles quietly showed elements the code had hidden
+     (found in the 2026-09-18 menu pass: hidden buttons were rendering). */
+  [hidden] { display: none !important; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -165,7 +169,7 @@
   .cbtn svg { flex:none; display:block }
   .cbtn .lbl-short { display:none }
   /* These set their own display, which would otherwise beat the hidden attribute. */
-  .cbtn[hidden], .v2btn[hidden], .v2tabs[hidden] { display:none !important }
+  .cbtn[hidden], .v2btn[hidden], .v2tabs[hidden], .tabs[hidden] { display:none !important }
   @media (max-width:560px) {
     .cbtn { padding:0 9px }
     .cbtn .lbl, .cbtn .lbl-long { display:none }
@@ -507,19 +511,30 @@
   .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
   .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
   .v2notices:empty { display:none }
+  .v2pane .cron-close { display:none }
+  .v2sec { margin:10px 0 0; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2emoji { display:flex; flex-wrap:wrap; gap:4px; margin:6px 0 }
   .v2emoji button { font-size:20px; width:38px; height:38px; padding:0; line-height:1 }
   .v2swatches { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 }
   .v2swatches button { width:26px; height:26px; border-radius:50%; padding:0; border:2px solid transparent }
   .v2swatches button[aria-pressed="true"] { border-color:var(--text) }
   .v2menu { display:grid; gap:4px }
-  /* "‹ Back" pinned to the top of every dialog on the v2 screen: closing one
-     returns to whatever opened it (the menu, an agent's settings, home). */
-  .v2back { position:sticky; top:0; z-index:5; display:flex; margin:-8px 0 8px; pointer-events:none }
-  .v2back button { pointer-events:auto; background:var(--panel); border:1px solid var(--line); border-radius:8px;
-                   padding:4px 12px 4px 8px; font:inherit; font-size:13.5px; color:inherit; cursor:pointer;
-                   box-shadow:0 2px 8px rgba(0,0,0,.12) }
-  .v2back button:hover { border-color:var(--dim) }
+  /* Every panel on the v2 screen is a sheet like the agent panel: it slides in
+     from the right, full height, under a header bar with ‹ Back and its title.
+     Panels stack; Back (or Esc) returns to the one underneath. */
+  body.v2 dialog.v2panel { width:min(820px, 100vw) !important; max-width:none; height:100%; max-height:none; margin:0 0 0 auto;
+    border-radius:0; border:0; border-left:1px solid var(--line); padding:0 22px 40px; overflow:auto; animation:v2slide .18s ease-out }
+  body.v2 dialog.v2panel::backdrop { background:rgba(0,0,0,.45) }
+  @keyframes v2slide { from { transform:translateX(24px); opacity:.6 } }
+  @media (prefers-reduced-motion: reduce) { body.v2 dialog.v2panel { animation:none } }
+  .v2pbar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px; margin:0 -22px 16px;
+    padding:10px 16px 10px 12px; padding-top:calc(10px + env(safe-area-inset-top, 0px)); background:var(--panel); border-bottom:1px solid var(--line) }
+  .v2ptitle { flex:1; min-width:0 }
+  .v2ptitle h2, .v2ptitle h3 { margin:0 !important; font-size:16px; font-weight:650; overflow:hidden; text-overflow:ellipsis }
+  .v2ptitle > div { margin:0 !important }
+  .v2pback { flex:none; width:36px; height:36px; padding:0; display:grid; place-items:center; border-radius:10px }
+  body.v2 .v2panel .tabs { gap:2px; margin:0 -22px 16px; padding:0 12px; overflow-x:auto }
+  body.v2 .v2panel .tab { white-space:nowrap }
   .v2menu h4 { margin:10px 0 2px; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim) }
   .v2menu button { text-align:left; justify-content:flex-start }
   @media (max-width:640px) {
@@ -1731,7 +1746,7 @@
   <div class="err" id="cronErr"></div>
   <div class="actions" style="justify-content:flex-end">
     <button onclick="loadCrons()">Refresh</button>
-    <button class="primary" onclick="cronDlg.close()">Close</button>
+    <button class="primary cron-close" onclick="cronDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -2569,7 +2584,37 @@ async function createSubscriptionProfile() {
 
 const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
+/**
+ * v2 groups the Settings panel's ten tabs into seven by what people come to do:
+ * People joins "You" and "Access"; Machines joins runners, other servers and
+ * the runtime image. Old deep links (openAiDlg('hosts')) land on their group.
+ */
+const V2_SETTINGS = [
+  ['ai', 'AI', ['ai']],
+  ['people', 'People', ['access', 'operator']],
+  ['pool', 'Telegram bots', ['pool']],
+  ['conn', 'Connections', ['conn']],
+  ['machines', 'Machines', ['hosts', 'runtime', 'servers']],
+  ['backups', 'Backups', ['backups']],
+  ['security', 'Security', ['security']],
+];
+const V2_SETTINGS_HEAD = { access: 'Accounts & sign-in', operator: 'About you — every agent you create knows this',
+  hosts: 'Machines that run agents', runtime: 'Runtime image', servers: 'Other Hatchabot servers' };
+let v2SettingsGroup = 'ai';
 function showTab(name) {
+  if (UI_V2) {
+    const g = V2_SETTINGS.find(([k, , panes]) => k === name || panes.includes(name)) ?? V2_SETTINGS[0];
+    v2SettingsGroup = g[0];
+    for (const pane of g[2]) showTabPane(pane); // runs each pane's loader
+    for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
+    for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
+    $('v2SettingsTabs').innerHTML = V2_SETTINGS.map(([k, label]) =>
+      `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
+    return;
+  }
+  showTabPane(name);
+}
+function showTabPane(name) {
   for (const [key, pane] of Object.entries(TABS)) {
     const on = key === name;
     $(pane).hidden = !on;
@@ -3465,7 +3510,7 @@ function renderAiList() {
       ${sourceUsagePanel(p)}
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
-      <div style="display:flex;align-items:center;gap:6px;width:100%">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%">
         <b>${esc(p.name)}</b>
         <span class="chip">${vendorChip(p)}</span>
         ${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? `
@@ -3493,19 +3538,19 @@ function renderAiList() {
           <code id="cred-${p.id}" class="invite-link" style="display:none;flex:1;min-width:0;word-break:break-all"></code>
         </div>
       </details>`}
-      <div style="display:flex;align-items:center;gap:10px;width:100%">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px;width:100%">
         <label class="sub" style="min-width:104px">Default model</label>
         ${defaultModelControl(p)}
       </div>
       ${(staleModels[p.id] ?? []).includes(p.model) ? `<div class="sub" style="width:100%;color:var(--bad)">
         ⚠ <b>${esc(p.model)}</b> isn't served by this source's runtime — agents on it will fail when a
         conversation fills up (compaction can't resolve the model). Pick another default above and Save.</div>` : ''}
-      <div style="display:flex;gap:10px;width:100%">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;width:100%">
         <label class="sub" style="min-width:104px;padding-top:5px">Also switchable</label>
         <div id="aiExtras-${p.id}" style="flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:30px"></div>
         <input type="hidden" id="aiModels-${p.id}" value="${esc((p.models ?? []).filter(m => m !== p.model).join(','))}">
       </div>
-      <div style="display:flex;gap:6px;width:100%;justify-content:flex-end">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;width:100%;justify-content:flex-end">
         <button onclick="syncModels('${p.id}', '${jsq(p.name)}')" title="Reconcile this source's switchable models with what its runtime serves now — adds new models, drops ones no longer served">⟳ Sync models</button>
         ${(() => {
           const movable = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.aiProfileId !== p.id).length;
@@ -5369,6 +5414,17 @@ async function disconnectAccount(email) {
 }
 
 async function openEdit(id, name, tab = 'def') {
+  // v2: an agent's settings are one sheet; its tabs hold these same sections.
+  if (UI_V2) return openV2Agent(id, V2_TAB_FOR_EDIT[tab] ?? 'personality');
+  prepareEdit(id, name, tab);
+  editDlg.showModal();
+  await loadEditFile();
+  await loadSnapshots();
+}
+
+/** Fill the edit sections for this agent — wherever they currently sit (the
+ *  classic dialog, or the v2 agent sheet, which borrows them). */
+function prepareEdit(id, name, tab = 'def') {
   editAgentId = id;
   $('editAgent').textContent = name;
   $('editName').value = name;
@@ -5402,9 +5458,6 @@ async function openEdit(id, name, tab = 'def') {
   renderEnvList(cur?.envVars);
   $('editErr').textContent = '';
   $('snapList').innerHTML = '';
-  editDlg.showModal();
-  await loadEditFile();
-  await loadSnapshots();
 }
 
 async function loadSnapshots() {
@@ -6649,6 +6702,12 @@ function cronScheduleLabel(c) {
   return c.scheduleKind || 'schedule';
 }
 async function openCrons(id, name) {
+  if (UI_V2) return openV2Agent(id, 'schedule'); // v2: the tasks live in the agent's Schedule tab
+  prepareCrons(id, name);
+  cronDlg.showModal();
+  await loadCrons();
+}
+function prepareCrons(id, name) {
   cronAgentId = id;
   $('cronTriggers').checked = !!(agents.find(x => x.id === id) || {}).cronTriggers;
   // A leftover edit armed from a previous open silently DELETED an unrelated
@@ -6657,8 +6716,6 @@ async function openCrons(id, name) {
   $('cronAgent').textContent = name;
   $('cronErr').textContent = '';
   $('cronList').innerHTML = 'Loading…';
-  cronDlg.showModal();
-  await loadCrons();
 }
 function cancelCronEdit() {
   cronEditingId = null;
@@ -8646,7 +8703,50 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['ai', 'AI & personality'], ['knowledge', 'Knowledge'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Knowledge'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+/** Where each classic edit tab now lives in the sheet (so every old deep link,
+ *  e.g. "fill its Setup values", still lands in the right place). */
+const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'sharing', env: 'advanced' };
+/** The classic edit sections each sheet tab embeds, with a heading for each. */
+const V2_EMBED = {
+  personality: [['paneDef', ''], ['paneEditSnap', 'Snapshots']],
+  ai: [['paneEditAi', '']],
+  knowledge: [['paneEditData', 'Data & folders'], ['paneEditConn', 'Connections']],
+  sharing: [['paneEditTg', 'People & Telegram'], ['paneEditPeers', 'Other agents it can ask']],
+  advanced: [['paneEditEnv', 'Environment']],
+  schedule: [['cronBody', '']],
+};
+let v2EditFor = null;
+/** Put borrowed edit sections back in their dialog before the pane is redrawn,
+ *  or setting innerHTML would destroy them (and every id the edit code uses). */
+function v2ParkPanes() {
+  for (const el of $('v2Pane').querySelectorAll('section[id^="pane"], #editErr')) editDlg.append(el);
+  const cron = $('v2Pane').querySelector('#cronBody'); if (cron) cronDlg.append(cron);
+}
+function v2EmbedPanes(a, tab) {
+  const list = V2_EMBED[tab]; if (!list) return;
+  if (tab === 'schedule') {
+    const slot = $('v2Pane').querySelector('[data-v2slot="cronBody"]');
+    if (!slot || a.state !== 'RUNNING') return;
+    prepareCrons(a.id, a.name);
+    slot.append($('cronBody'));
+    void loadCrons();
+    return;
+  }
+  if (v2EditFor !== a.id) {
+    prepareEdit(a.id, a.name);
+    v2EditFor = a.id;
+    void loadEditFile(); void loadSnapshots();
+  }
+  for (const [paneId, heading] of list) {
+    const slot = $('v2Pane').querySelector(`[data-v2slot="${paneId}"]`); if (!slot) continue;
+    if (heading) slot.insertAdjacentHTML('beforeend', `<h4 class="v2sec">${esc(heading)}</h4>`);
+    const pane = $(paneId); pane.hidden = false; slot.append(pane);
+  }
+  $('v2Pane').append($('editErr'));
+  if (list.some(([p]) => p === 'paneEditConn')) void renderConnections();
+  if (list.some(([p]) => p === 'paneEditPeers')) void loadPeers();
+}
 
 function openV2Agent(id, tab) {
   const a = v2Find(id); if (!a) return;
@@ -8656,7 +8756,7 @@ function openV2Agent(id, tab) {
   v2RenderSheet();
   if (!v2AgentDlg.open) v2AgentDlg.showModal();
 }
-function v2Close() { if (v2AgentDlg.open) v2AgentDlg.close(); }
+function v2Close() { v2ParkPanes(); if (v2AgentDlg.open) v2AgentDlg.close(); }
 function v2RenderSheetBar() {
   const a = v2Find(v2AgentId);
   if (!a) { v2Close(); return; }
@@ -8675,7 +8775,9 @@ function v2RenderSheet() {
   if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
   $('v2Tabs').hidden = !tabs.length;
   $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
+  v2ParkPanes();
   $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
+  if (v2Mine(a)) v2EmbedPanes(a, v2Tab);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
 }
 
@@ -8694,6 +8796,8 @@ function v2Pane(a, tab) {
   const id = jsq(a.id), n = jsq(a.name), run = a.state === 'RUNNING', built = !!a.runtimeRef;
   const B = (label, call, extra = '') => `<button onclick="${call}" ${extra}>${label}</button>`;
   const row = (k, v) => `<div class="v2row"><div class="v2k">${k}</div><div class="v2v">${v}</div></div>`;
+  const slot = (pane) => `<div data-v2slot="${pane}"></div>`;
+  const goto = (t) => `openV2Agent('${id}','${t}')`;
   const st = v2Status(a);
   const src = profiles.find(p => p.id === a.aiProfileId);
   const host = hosts.find(h => h.id === a.hostId);
@@ -8707,8 +8811,9 @@ function v2Pane(a, tab) {
         ${a.state === 'ARCHIVED' ? B('📤 Restore', `v2Close();restoreAgent('${id}','${n}')`, 'class="primary"') + B('🔍 Inspect', `openInspect('${id}','${n}')`) : ''}
         ${a.state === 'FAILED' && a.stateReason ? `<span class="sub">${esc(a.stateReason)}</span>` : ''}
         ${st.why.length ? `<ul class="v2why">${st.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}`)}
-      ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${B('Rename…', `openEdit('${id}','${n}','def')`)}
+      ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
         ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
+      ${a.state !== 'ARCHIVED' ? row('AI', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change…', goto('ai'))}`) : ''}
       ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
           <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
@@ -8721,37 +8826,30 @@ function v2Pane(a, tab) {
         : '<span class="sub">No Telegram bot.</span>') : ''}
       ${run ? row('Checks', `${B('❤️ Health', `openHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
-    case 'ai': return `
-      ${row('AI source', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change AI or model', `openEdit('${id}','${n}','ai')`)}
-        ${a.pendingModel && a.pendingModel !== a.model ? `<span class="sub">Switches to ${esc(a.pendingModel)} on the next rebuild.</span>` : ''}`)}
-      ${row('Personality', `${B('Edit definition', `openEdit('${id}','${n}','def')`)}${B('Snapshots', `openEdit('${id}','${n}','snap')`)}
-        <span class="sub">Who it is (SOUL.md), how it works (AGENTS.md), and what it remembers (MEMORY.md)${a.parameters?.length ? ', plus its setup values' : ''}.</span>`)}
-      ${run ? row('Memory', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
-        <span class="sub">Save what matters from the current chat, or bring back earlier conversations after a reset.</span>`) : ''}`;
+    case 'personality': return `
+      ${slot('paneDef')}
+      ${run ? `<h4 class="v2sec">Memory</h4>${row('Conversation', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
+        <span class="sub">Save what matters from the current chat, or bring back earlier conversations after a reset.</span>`)}` : ''}
+      ${slot('paneEditSnap')}`;
+    case 'ai': return slot('paneEditAi');
     case 'knowledge': return `
-      ${row('Data &amp; folders', `<span>${esc(a.dataSummary || 'none')}</span>${B('Manage', `openEdit('${id}','${n}','data')`)}`)}
-      ${row('Connections', B('Google &amp; other accounts', `openEdit('${id}','${n}','conn')`))}
-      ${built ? row('Chat history', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">Every conversation, as a file.</span>`) : ''}`;
+      ${slot('paneEditData')}
+      ${slot('paneEditConn')}
+      ${built ? `<h4 class="v2sec">Chat history</h4>${row('Every conversation', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">As a file.</span>`)}` : ''}`;
     case 'sharing': {
-      const mem = (members[a.id] ?? []).filter(m => m.role !== 'owner');
+      // People (members, invites) live in the Telegram section below — one list, not two.
       return `
-      ${row('People', `<span>${mem.length ? mem.map(m => `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`).join(', ') : 'Only you'}</span>
-        ${run ? B('Invite…', `invite('${id}','${n}')`) : ''}
-        ${mem.length ? '<span class="sub">To remove someone, use the × by their name on the Overview tab.</span>' : ''}`)}
-      ${row('Other agents', B('🔗 Which agents it can ask', `openEdit('${id}','${n}','peers')`))}
-      ${row('Telegram', B('Group chats &amp; bot', `openEdit('${id}','${n}','tg')`))}
-      ${run ? row('Copies', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
+      ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
         ${a.parameters?.length && !a.parentAgentId ? B('👪 New child', `deriveChild('${id}','${n}')`) : ''}
         ${agents.some(k => k.parentAgentId === a.id) ? B('📥 Proposals', `openProposals('${id}','${n}')`) + B('⬇ Push to children', `pushDefinition('${id}','${n}')`) : ''}
-        ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}`;
+        ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
+      ${slot('paneEditTg')}
+      ${slot('paneEditPeers')}`;
     }
-    case 'schedule': return `
-      ${row('Scheduled tasks', `${run ? B('⏰ Open tasks', `openCrons('${id}','${n}')`, 'class="primary"') : '<span>Start it to see its tasks.</span>'}
-        <span class="sub">Things it does on its own, like a Friday summary or a morning check.</span>`)}`;
+    case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', '<span>Start it to see its tasks.</span>');
     case 'advanced': return `
-      ${a.state !== 'ARCHIVED' ? row('Environment', `<span>${(a.envVars || []).length} variable${(a.envVars || []).length === 1 ? '' : 's'}</span>${B('Edit', `openEdit('${id}','${n}','env')`)}`) : ''}
       ${row('Machine', `<span>${esc(host ? (host.kind === 'local' ? (host.hostname || host.name) : host.name) : '—')}</span>
         ${(run || a.state === 'STOPPED') && built && hosts.length > 1 ? B('Move…', `moveHostAgent('${id}','${n}')`) : ''}
         ${(run || a.state === 'STOPPED') && built ? B('Move to another cluster', `rehostAgent('${id}','${n}')`) : ''}`)}
@@ -8759,6 +8857,7 @@ function v2Pane(a, tab) {
         ${run || a.state === 'STOPPED' ? B('Rebuild', `rebuild('${id}')`, 'title="New container, memory kept"') : ''}
         ${run && a.hasGateway ? B('OpenClaw console', `v2Close();openGateway('${id}','${jsq(a.slug)}')`) : ''}`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
+      ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">
         ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
         ${a.state !== 'DELETING' ? B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"') : ''}
@@ -8785,10 +8884,11 @@ async function v2SetGroup(id, value) {
 function v2RefreshSheet() {
   if (!v2AgentDlg.open) return;
   const pane = $('v2Pane');
-  const busy = [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
+  // Tabs holding the edit sections manage their own state; only repaint the bar.
+  const busy = V2_EMBED[v2Tab] || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
   if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
 }
-v2AgentDlg.addEventListener('close', () => { v2AgentId = null; });
+v2AgentDlg.addEventListener('close', () => { v2ParkPanes(); v2AgentId = null; v2EditFor = null; });
 
 // ---- icon picker ---------------------------------------------------------------------
 const V2_EMOJI = ['📈', '💹', '🧾', '⚖️', '💰', '🏢', '🏡', '🚗', '✈️', '🧭', '📅', '✅', '☑️', '🍳', '🥗', '🏃', '🩺', '🛡️',
@@ -8902,30 +9002,51 @@ function v2SetTheme(t) {
 }
 
 /**
- * A "‹ Back" at the top of every dialog. The menu and an agent's settings stay
- * open underneath whatever they open, so closing the top one lands you back
- * where you came from. Back presses the dialog's own Close/Cancel when it has
- * one, so any tidy-up that button does still runs.
+ * Turn every panel into a v2 sheet: a header bar with ‹ Back and the panel's
+ * own title (or title row, with whatever controls sit beside it), moved in
+ * rather than copied, so ids and handlers inside keep working. Panels stay
+ * open underneath what they open, so Back lands where you came from. Back
+ * presses the panel's own Close/Cancel when it has one, so any tidy-up that
+ * button does still runs.
  */
-function v2AddBackButtons() {
-  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'v2MenuDlg']);
+const V2_BACK_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>';
+function v2ConvertPanels() {
+  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg']);
   for (const d of document.querySelectorAll('dialog')) {
-    if (skip.has(d.id) || d.querySelector(':scope > .v2back')) continue;
+    if (skip.has(d.id) || d.classList.contains('v2panel')) continue;
+    d.classList.add('v2panel');
     const bar = document.createElement('div');
-    bar.className = 'v2back';
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = '‹ Back';
-    b.addEventListener('click', () => {
+    bar.className = 'v2pbar';
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'v2pback';
+    back.title = 'Back';
+    back.setAttribute('aria-label', 'Back');
+    back.innerHTML = V2_BACK_SVG;
+    back.addEventListener('click', () => {
       const own = [...d.querySelectorAll('button')].reverse()
-        .find(x => x !== b && !x.hidden && /^(✕|×|Close|Cancel|Done)$/.test(x.textContent.trim()));
+        .find(x => x !== back && !x.hidden && /^(✕|×|Close|Cancel|Done)$/.test(x.textContent.trim()));
       if (own) own.click(); else d.close();
     });
-    bar.append(b);
+    const title = document.createElement('div');
+    title.className = 'v2ptitle';
+    const first = d.firstElementChild;
+    if (first && (/^H[23]$/.test(first.tagName) || (first.tagName === 'DIV' && first.querySelector(':scope > h3, :scope > h2')))) {
+      title.append(first);
+    }
+    bar.append(back, title);
     d.prepend(bar);
+    // A bottom "Close" that only closes the panel repeats Back; hide it. Ones
+    // that do more (tidy-up, saving) stay, and Back presses them.
+    for (const b of d.querySelectorAll('button')) {
+      if (/^(Close|Done)$/.test(b.textContent.trim()) && (b.getAttribute('onclick') || '').trim() === `${d.id}.close()`) {
+        b.hidden = true;
+        const row = b.parentElement;
+        if (row?.classList.contains('actions') && ![...row.children].some(c => !c.hidden)) row.hidden = true;
+      }
+    }
   }
 }
-
 function initV2() {
   document.body.classList.add('v2');
   // The hub borrows the management chat's own controls, so the web chat keeps
@@ -8943,7 +9064,20 @@ function initV2() {
   $('v2AppVer').textContent = `v${window.HATCHABOT_VERSION ?? '?'}`;
   v2SyncTheme();
   addEventListener('scroll', () => $('v2Header').classList.toggle('scrolled', scrollY > 4), { passive: true });
-  v2AddBackButtons();
+  v2ConvertPanels();
+  // The tasks panel's body, as one movable block for the agent sheet.
+  const cronBody = document.createElement('div');
+  cronBody.id = 'cronBody';
+  for (const el of [...cronDlg.children]) if (!el.classList.contains('v2pbar')) cronBody.append(el);
+  cronDlg.append(cronBody);
+  // Settings: swap the ten-tab strip for the grouped one, and head each pane
+  // so a merged tab reads as sections.
+  const strip = aiDlg.querySelector('.tabs');
+  strip.hidden = true;
+  strip.insertAdjacentHTML('afterend', '<div class="tabs" role="tablist" id="v2SettingsTabs"></div>');
+  for (const [key, text] of Object.entries(V2_SETTINGS_HEAD)) {
+    $(TABS[key])?.insertAdjacentHTML('afterbegin', `<h4 class="v2sec v2settingshead" hidden>${esc(text)}</h4>`);
+  }
   $('consoleGearBtn').hidden = false;
   $('consoleGearBtn').onclick = () => { const id = consoleAgentId; closeConsole(); openV2Agent(id); };
   void loadMgmtChat();

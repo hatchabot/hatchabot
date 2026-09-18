@@ -2,6 +2,26 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.17.0] — 2026-09-18
+
+### Changed
+- **Every panel has the agent panel's format.** On the home screen, every panel (Settings, Health, Usage, Help, invites, backups and the rest) is now a sheet that slides in from the right, under a header bar with **‹ Back** and its title. Panels stack, and Back returns to the one that opened it. A bottom **Close** that only repeated Back is hidden.
+- **An agent's settings are one layer.** The agent sheet's tabs used to hold buttons that opened a second panel with eight more tabs. Those editors now sit directly in the sheet's tabs:
+  - **Personality:** name, description, SOUL/AGENTS/MEMORY files, setup values, memory tools, snapshots.
+  - **AI:** source, model, class.
+  - **Knowledge:** data and folders, connections, chat history.
+  - **Sharing:** copies, then people and Telegram, then the other agents it can ask. Members are listed once, not twice.
+  - **Schedule:** the agent's tasks, inline.
+  - **Advanced:** machine, runtime, backup and environment.
+
+  Every old link into those editors, such as "fill its Setup values", lands on the right tab.
+- **Machine Settings: seven tabs instead of ten.** AI · People (your Telegram, access tokens, accounts, management bot, and "about you") · Telegram bots · Connections · Machines (runners, the runtime image, other Hatchabot servers) · Backups · Security. Merged tabs read as headed sections.
+- The classic view keeps its dialogs and tabs as they were.
+
+### Fixed
+- **Elements the app hid could still show.** The base button style (and the `.actions`/`.tabs` rows) overrode the `hidden` attribute, so buttons the code had hidden kept rendering, in both views. `hidden` now always wins.
+- **The AI source card fits a phone.** Its title, model and button rows wrap instead of spilling sideways.
+
 ## [1.16.0] — 2026-09-18
 
 ### Security

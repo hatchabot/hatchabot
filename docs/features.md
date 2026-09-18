@@ -40,9 +40,16 @@ version, and sign out.
   (over HTTPS, see `docs/tailscale.md`). The **⚙ Settings** button in its bar
   opens the agent's settings. An agent that needs you opens straight to
   settings instead.
-- **Settings are one sheet with tabs**: Overview, AI & personality,
-  Knowledge, Sharing, Schedule, Advanced. Every button from the classic
-  card is in one of them.
+- **Settings are one sheet with tabs**: Overview, Personality, AI,
+  Knowledge, Sharing, Schedule, Advanced. The editors live right in those
+  tabs (the files, the AI source, data and connections, people and Telegram,
+  other agents it can ask, scheduled tasks, environment), not one panel
+  deeper. Every button from the classic card is in one of them.
+- **Every panel slides in from the right** with **‹ Back** at the top. Panels
+  stack: Back returns to whatever opened it.
+- **Machine settings have seven tabs**: AI, People (your account, other
+  accounts, "about you"), Telegram bots, Connections, Machines (runners, the
+  runtime image, other Hatchabot servers), Backups, Security.
 - **Hatchabot itself is at the top**: the management chat, always open. Ask
   it to create, fix, move or share agents. There is no "Allow changes" switch
   on this screen: every change arrives as a card showing exactly what it will
