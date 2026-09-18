@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.29.1] — 2026-09-18
+
+### Changed
+- **The Hatchabot agent looks and behaves like every other agent, only bigger.** The hub box shows it as a larger agent icon with its name underneath, with the same status ring, badge and tooltip. Its own **Open**, **Settings** and **Retry** buttons are gone. Click it to talk to it; if it needs you (failed, stopped, or paused after its safety settings were changed), the click opens its settings instead. Settings stays reachable from the gear inside the chat panel, like the other agents.
+
 ## [1.29.0] — 2026-09-18
 
 ### Changed

@@ -435,7 +435,13 @@
   .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
            grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
   .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
-  .v2face.live { background:none; width:auto; height:auto; padding:5px; font-size:inherit }
+  .v2face.live { background:none; width:auto; height:auto; font-size:inherit; display:block; color:var(--text) }
+  .v2hubagent { padding:8px 6px 2px }
+  .v2hubagent .v2ic { width:88px; height:88px; border-radius:26px; font-size:44px }
+  .v2hubagent .v2ic::after { inset:-6px; border-radius:31px }
+  .v2hubagent .v2name { font-size:13.5px; font-weight:600; max-width:110px }
+  .hub-ops .v2hubhead { display:none }
+  .hub-ops.v2hub { align-items:center }
   .v2hubmain { min-width:0; display:grid; gap:8px }
   .v2hubhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
   .v2hubhead h2 { margin:0; font-size:17px }
@@ -8962,7 +8968,7 @@ function v2Open(id) {
   // Something waiting on you (a token to paste, someone asking to join, a
   // failure) — the settings sheet is where you act on it, so start there.
   const st = v2Status(a);
-  if (st.cls === 'waiting' || a.state === 'FAILED' || !v2CanChat(a) || !window.isSecureContext) return openV2Agent(id);
+  if (st.cls === 'waiting' || a.state === 'FAILED' || a.opsDrift || !v2CanChat(a) || !window.isSecureContext) return openV2Agent(id, a.opsDrift ? 'advanced' : undefined);
   openGateway(a.id, a.slug);
 }
 
@@ -9423,33 +9429,33 @@ function v2RenderHub() {
   const box = $('v2OpsBox');
   let html;
   if (ops) {
-    const st = v2Status(ops);
-    const ready = v2CanChat(ops) && window.isSecureContext;
-    html = `<div class="v2opsrow"><span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
-      <span class="sub" style="flex:1;min-width:200px">${ops.opsDrift ? `<b style="color:var(--bad)">Paused:</b> its safety settings were changed (${esc(ops.opsDrift)}). Rebuild it to restore them.` : ops.state === 'FAILED' ? `It didn't start${ops.stateReason ? ': ' + esc(ops.stateReason) : '.'}` : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.' : 'Ask it about your agents, or to change something. What it prepares waits below for your Confirm.'}</span>
-      ${ops.opsDrift ? `<button class="primary" onclick="rebuild('${jsq(ops.id)}')">Rebuild</button>` : ''}
-      ${ops.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(ops.id)}','provision')">Retry</button>` : ''}
-      ${ready ? `<button class="primary" onclick="openGateway('${jsq(ops.id)}','${jsq(ops.slug)}')">💬 Open</button>` : ''}
-      <button onclick="openV2Agent('${jsq(ops.id)}')">Settings</button></div>
-      ${!window.isSecureContext && v2CanChat(ops) ? '<div class="sub">Open Hatchabot over https to chat with it from this device.</div>' : ''}`;
+    // No buttons of its own: it is an agent like the others, only bigger.
+    // Click it to talk; if it needs you, the click opens its settings instead.
+    const say = ops.opsDrift ? `<b style="color:var(--bad)">Paused:</b> its safety settings were changed (${esc(ops.opsDrift)}). Click it and Rebuild to restore them.`
+      : ops.state === 'FAILED' ? `It didn't start${ops.stateReason ? ': ' + esc(ops.stateReason) : '.'} Click it to retry.`
+      : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.'
+      : ops.state === 'STOPPED' ? 'Stopped. Click it to start it again.'
+      : 'Your manager. Click it to ask about your agents or to change something; what it prepares waits below for your Confirm.';
+    html = `<div class="sub">${say}</div>`;
   } else {
     html = `<div class="v2opsrow"><span class="sub" style="flex:1;min-width:220px"><b>Set up your Hatchabot agent.</b> A manager for your agents that you can talk to: it works with whichever AI source you have, remembers how you like things run, and asks before it changes anything.</span>
       <button class="primary" id="v2OpsSetup" onclick="v2SetupOps(this)" ${profiles.length ? '' : 'disabled title="Add an AI source first (Settings → AI)"'}>Set it up</button></div>`;
   }
   if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
   box.hidden = false;
-  // Its icon behaves like every other agent's: the spinning dashed ring while
-  // it sets up or rebuilds, red when it failed, its own emoji and colour.
+  // Its icon IS an agent icon: same markup and classes as the grid's, so the
+  // ring, badge, tooltip and click all behave identically. Only the size differs.
   const face = hub.querySelector('.v2face');
   const st = ops && v2Status(ops);
-  const faceHtml = ops ? v2IconHTML(ops, st) : '🐣';
-  if (face.__html !== faceHtml + (st?.cls ?? '')) {
-    face.__html = faceHtml + (st?.cls ?? '');
-    face.className = `v2face${ops ? ` live v2st-${st.cls}` : ''}`;
+  const faceHtml = ops
+    ? `<button class="v2agent v2hubagent v2st-${st.cls}" data-v2id="${esc(ops.id)}" data-v2fixed="1" onclick="v2Open('${jsq(ops.id)}')"
+         aria-label="${esc(ops.name)} — ${esc(st.label)}">${v2IconHTML(ops, st)}<span class="v2name">${esc(ops.name)}</span></button>`
+    : '🐣';
+  if (face.__html !== faceHtml) {
+    face.__html = faceHtml;
+    face.className = `v2face${ops ? ' live' : ''}`;
     face.innerHTML = faceHtml;
-    face.title = ops ? `${ops.name} · ${st.label}` : '';
-    face.removeAttribute('aria-hidden');
-    if (!ops) face.setAttribute('aria-hidden', 'true');
+    if (ops) face.removeAttribute('aria-hidden'); else face.setAttribute('aria-hidden', 'true');
   }
 }
 async function v2SetupOps(btn) {
