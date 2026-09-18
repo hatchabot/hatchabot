@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.15.1] — 2026-09-18
+
+### Fixed
+- **The chat panel's bar fits one line on a phone.**
+  - The buttons are compact, with line icons.
+  - On a narrow screen, **Settings**, **New tab** and **Close** become icons alone, and **Approve this browser** shortens to **Approve**.
+  - A long agent name is cut short with "…" instead of pushing the buttons onto a second line.
+- **The header's inbox button appeared even when the inbox was empty** (1.15.0). The button's own display style beat the `hidden` attribute. The same flaw would have left an empty tab strip on a shared agent's settings; both are fixed.
+
 ## [1.15.0] — 2026-09-18
 
 ### Changed

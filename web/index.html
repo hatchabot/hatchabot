@@ -158,7 +158,19 @@
   /* The OpenClaw console, embedded: most of the viewport, no page chrome. */
   .console-dlg { width:min(1200px, 96vw); height:min(900px, 92vh); max-width:none; padding:0; display:none; flex-direction:column; overflow:hidden }
   .console-dlg[open] { display:flex }
-  .console-bar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--line) }
+  .console-bar { display:flex; align-items:center; gap:6px; padding:8px 10px 8px 14px; border-bottom:1px solid var(--line) }
+  /* One line at every width: the title gives way, labels drop to icons on a phone. */
+  #consoleTitle { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:15px }
+  .cbtn { display:inline-flex; align-items:center; gap:6px; height:34px; padding:0 11px; white-space:nowrap; flex:none; border-radius:9px; font-size:13.5px }
+  .cbtn svg { flex:none; display:block }
+  .cbtn .lbl-short { display:none }
+  /* These set their own display, which would otherwise beat the hidden attribute. */
+  .cbtn[hidden], .v2btn[hidden], .v2tabs[hidden] { display:none !important }
+  @media (max-width:560px) {
+    .cbtn { padding:0 9px }
+    .cbtn .lbl, .cbtn .lbl-long { display:none }
+    .cbtn .lbl-short { display:inline }
+  }
   .console-dlg iframe { flex:1; width:100%; border:0; background:var(--bg) }
   .posdd { width:24px; height:22px; padding:0; margin:0; border:1px solid var(--line); border-radius:7px; background:transparent; color:var(--dim); font-size:11px; font-weight:600; text-align:center; text-align-last:center; appearance:none; -webkit-appearance:none; cursor:pointer; font-variant-numeric:tabular-nums }
   .posdd:hover, .posdd:focus-visible { color:var(--text); border-color:var(--accent); outline:none }
@@ -668,12 +680,11 @@
 <dialog id="consoleDlg" class="console-dlg" aria-label="Agent console">
   <div class="console-bar">
     <b id="consoleTitle">Agent</b>
-    <span class="spacer"></span>
-    <button id="consoleGearBtn" class="v2gear" hidden title="This agent's settings"><span aria-hidden="true">⚙︎</span> Settings</button>
-    <button id="consoleApproveBtn" class="primary" hidden onclick="approveConsoleBrowser(this)"
-            title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner.">Approve this browser</button>
-    <button id="consoleNewTab" class="primary" title="Open the same console in its own tab">Open in new tab ↗</button>
-    <button onclick="closeConsole()" aria-label="Close">✕</button>
+    <button id="consoleGearBtn" class="cbtn" hidden title="This agent's settings"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
+    <button id="consoleApproveBtn" class="cbtn primary" hidden onclick="approveConsoleBrowser(this)"
+            title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner."><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="lbl-long">Approve this browser</span><span class="lbl-short">Approve</span></button>
+    <button id="consoleNewTab" class="cbtn" title="Open the same console in its own tab"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span class="lbl">New tab</span></button>
+    <button class="cbtn" onclick="closeConsole()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
   <iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>
 </dialog>
