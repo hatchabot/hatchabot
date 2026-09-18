@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.28.3] — 2026-09-18
+
+### Changed
+- The Hatchabot agent's icon in the hub box behaves like every other agent's: the spinning dashed ring while it sets up or rebuilds, red with **!** when it failed, its own emoji and colour, and a tooltip with its state.
+
 ## [1.28.2] — 2026-09-18
 
 ### Fixed

@@ -432,6 +432,7 @@
   .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
            grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
   .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
+  .v2face.live { background:none; width:auto; height:auto; padding:5px; font-size:inherit }
   .v2hubmain { min-width:0; display:grid; gap:8px }
   .v2hubhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
   .v2hubhead h2 { margin:0; font-size:17px }
@@ -9417,6 +9418,19 @@ function v2RenderHub() {
   }
   if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
   box.hidden = false;
+  // Its icon behaves like every other agent's: the spinning dashed ring while
+  // it sets up or rebuilds, red when it failed, its own emoji and colour.
+  const face = hub.querySelector('.v2face');
+  const st = ops && v2Status(ops);
+  const faceHtml = ops ? v2IconHTML(ops, st) : '🐣';
+  if (face.__html !== faceHtml + (st?.cls ?? '')) {
+    face.__html = faceHtml + (st?.cls ?? '');
+    face.className = `v2face${ops ? ` live v2st-${st.cls}` : ''}`;
+    face.innerHTML = faceHtml;
+    face.title = ops ? `${ops.name} · ${st.label}` : '';
+    face.removeAttribute('aria-hidden');
+    if (!ops) face.setAttribute('aria-hidden', 'true');
+  }
 }
 async function v2SetupOps(btn) {
   btn.disabled = true; btn.textContent = 'Setting up…';
