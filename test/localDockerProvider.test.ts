@@ -121,6 +121,48 @@ describe('container and volume shape', () => {
     expect(argv()).not.toMatch(/-p 19100:18789/);
   });
 
+  it('puts agents on the isolated agents network (no agent-to-agent traffic)', async () => {
+    await provider.provision(spec() as any);
+    const create = argv().split('\n').find((l) => l.startsWith('create '));
+    expect(create).toContain('--network hatchabot-agents');
+  });
+
+  it('creates that network with inter-container traffic off when it is missing', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-net-'));
+    const log = join(d, 'argv.log');
+    const st = join(d, 'docker');
+    // `network inspect` fails until `network create` has run.
+    writeFileSync(st, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+if [ "$1 $2" = "network inspect" ] && [ ! -f ${JSON.stringify(join(d, 'made'))} ]; then exit 1; fi
+if [ "$1 $2" = "network create" ]; then touch ${JSON.stringify(join(d, 'made'))}; fi
+exit 0
+`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: st, image: 'test-image:latest' });
+    await p.provision(spec() as any);
+    await p.provision(spec() as any);
+    const lines = readFileSync(log, 'utf8').split('\n');
+    const creates = lines.filter((l) => l.startsWith('network create'));
+    expect(creates).toHaveLength(1); // once per provider, not per agent
+    expect(creates[0]).toContain('com.docker.network.bridge.enable_icc=false');
+  });
+
+  it('HATCHABOT_AGENT_NETWORK=bridge keeps the old default network', async () => {
+    const prev = process.env.HATCHABOT_AGENT_NETWORK;
+    process.env.HATCHABOT_AGENT_NETWORK = 'bridge';
+    try {
+      const d = mkdtempSync(join(tmpdir(), 'acl-br-'));
+      const log = join(d, 'argv.log');
+      const st = join(d, 'docker');
+      writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nexit 0\n`, { mode: 0o755 });
+      await new LocalDockerProvider({ docker: st, image: 'test-image:latest' }).provision(spec() as any);
+      const create = readFileSync(log, 'utf8').split('\n').find((l) => l.startsWith('create '));
+      expect(create).not.toContain('--network');
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_AGENT_NETWORK; else process.env.HATCHABOT_AGENT_NETWORK = prev;
+    }
+  });
+
   it('runs with an init process, so orphaned grandchildren get reaped', async () => {
     await provider.provision(spec() as any);
     const create = argv().split('\n').find((l) => l.startsWith('create '));

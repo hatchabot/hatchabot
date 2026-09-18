@@ -8477,7 +8477,7 @@ function renderV2() {
   if (parked.length) for (const a of parked) section('archived', 'Archived', V2_ARCHIVE).items.push({ a, child: false });
   else if (live.some(v2Mine)) section('archived', 'Archived', V2_ARCHIVE); // somewhere to drop one
 
-  $('v2groups').innerHTML = sections.map(s => `
+  const html = sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
       <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
@@ -8488,11 +8488,20 @@ function renderV2() {
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
-          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${a.id}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
+          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)} — ${esc(st.label)}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
     </section>`).join('');
+  // The poll calls this every few seconds. Rebuilding identical markup would
+  // drop keyboard focus and strand a tooltip over a replaced icon, so only
+  // touch the DOM when something changed, and put focus back if it did.
+  const root = $('v2groups');
+  if (root.__html === html) return;
+  const focused = document.activeElement?.closest?.('.v2agent')?.dataset.v2id;
+  root.innerHTML = html; root.__html = html;
+  $('v2Tip').hidden = true;
+  if (focused) root.querySelector(`.v2agent[data-v2id="${CSS.escape(focused)}"]`)?.focus();
 }
 
 // Icons for agents that have none yet: one batch, picked by the management AI.
@@ -8654,9 +8663,9 @@ function v2RenderSheetBar() {
   const st = v2Status(a);
   const chat = v2CanChat(a) && window.isSecureContext;
   $('v2AgentBar').className = `v2sbar v2st-${st.cls}`;
-  $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${a.id}')" onkeydown="if(event.key==='Enter')openV2Icon('${a.id}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
+  $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${jsq(a.id)}')" onkeydown="if(event.key==='Enter')openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
     <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b><span>${esc(st.label)}${!v2Mine(a) ? ' · shared with you' : ''}</span></div>
-    ${chat ? `<button class="primary" onclick="v2Close();openGateway('${a.id}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
+    ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
     <button onclick="v2Close()" aria-label="Close">✕</button>`;
 }
 function v2RenderSheet() {
@@ -8665,7 +8674,7 @@ function v2RenderSheet() {
   const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'advanced') : V2_TABS;
   if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
   $('v2Tabs').hidden = !tabs.length;
-  $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${a.id}','${k}')">${l}</button>`).join('');
+  $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
   $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
 }
@@ -8681,7 +8690,8 @@ function v2MemberPane(a) {
 }
 
 function v2Pane(a, tab) {
-  const id = a.id, n = jsq(a.name), run = a.state === 'RUNNING', built = !!a.runtimeRef;
+  // id/n go into onclick strings: escaped even though ids are server UUIDs.
+  const id = jsq(a.id), n = jsq(a.name), run = a.state === 'RUNNING', built = !!a.runtimeRef;
   const B = (label, call, extra = '') => `<button onclick="${call}" ${extra}>${label}</button>`;
   const row = (k, v) => `<div class="v2row"><div class="v2k">${k}</div><div class="v2v">${v}</div></div>`;
   const st = v2Status(a);
@@ -8723,7 +8733,7 @@ function v2Pane(a, tab) {
       ${row('Connections', B('Google &amp; other accounts', `openEdit('${id}','${n}','conn')`))}
       ${built ? row('Chat history', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">Every conversation, as a file.</span>`) : ''}`;
     case 'sharing': {
-      const mem = (members[id] ?? []).filter(m => m.role !== 'owner');
+      const mem = (members[a.id] ?? []).filter(m => m.role !== 'owner');
       return `
       ${row('People', `<span>${mem.length ? mem.map(m => `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`).join(', ') : 'Only you'}</span>
         ${run ? B('Invite…', `invite('${id}','${n}')`) : ''}
@@ -8734,7 +8744,7 @@ function v2Pane(a, tab) {
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
         ${a.parameters?.length && !a.parentAgentId ? B('👪 New child', `deriveChild('${id}','${n}')`) : ''}
-        ${agents.some(k => k.parentAgentId === id) ? B('📥 Proposals', `openProposals('${id}','${n}')`) + B('⬇ Push to children', `pushDefinition('${id}','${n}')`) : ''}
+        ${agents.some(k => k.parentAgentId === a.id) ? B('📥 Proposals', `openProposals('${id}','${n}')`) + B('⬇ Push to children', `pushDefinition('${id}','${n}')`) : ''}
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}`;
     }
     case 'schedule': return `
@@ -8827,7 +8837,9 @@ async function v2IconAuto(btn) {
     const r = await api('/v1/agents/icons/auto', { method: 'POST', body: { ids: [v2IconFor], redo: true } });
     const got = r.icons?.[0];
     if (got) { $('v2IconInput').value = got.icon; v2IconColor = got.color; v2RenderSwatches(); v2IconPreview(); }
-    $('v2IconErr').textContent = r.via === 'keywords' ? 'No management AI is set up, so this was picked from its name. It is saved already.' : 'Picked and saved.';
+    $('v2IconErr').textContent = r.via === 'keywords'
+      ? 'The management AI wasn’t available (none set up, or it’s busy), so this was picked from its name. It’s saved; try again later for an AI pick.'
+      : 'Picked and saved.';
     await refresh(false);
   } catch (e) { $('v2IconErr').textContent = e.message; }
   finally { btn.disabled = false; btn.textContent = '✨ Let Hatchabot pick'; }

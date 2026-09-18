@@ -160,6 +160,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       // for hosts that want to run bigger agents.
       '--log-opt', 'max-size=10m',
       '--log-opt', 'max-file=3',
+      // Agents live on their own network with inter-container traffic off. On
+      // docker's default bridge every agent could open a connection to every
+      // other agent's gateway, bypassing the owner-only proxy (audit
+      // 2026-09-18). Host services (Hatchabot at 172.17.0.1:8080, Ollama) stay
+      // reachable. HATCHABOT_AGENT_NETWORK=bridge restores the old behaviour.
+      ...(await this.#agentNetworkArgs()),
       '--memory', process.env.HATCHABOT_AGENT_MEMORY ?? '2g',
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
@@ -664,6 +670,31 @@ export class LocalDockerProvider implements RuntimeProvider {
       child.stdin.on('error', () => {});
       child.stdin.end(data);
     });
+  }
+
+  #networkReady = false;
+  /** `--network <name>`, creating the isolated agent network on first use. */
+  async #agentNetworkArgs(): Promise<string[]> {
+    const name = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+    if (!name || name === 'bridge' || name === 'default') return [];
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) {
+      throw new ProviderError(`bad network name ${name}`, 'HATCHABOT_AGENT_NETWORK is not a valid docker network name.');
+    }
+    if (!this.#networkReady) {
+      if ((await this.#docker(['network', 'inspect', name])).code !== 0) {
+        const made = await this.#docker([
+          'network', 'create', '--driver', 'bridge',
+          '-o', 'com.docker.network.bridge.enable_icc=false',
+          '--label', 'hatchabot.role=agents', name,
+        ]);
+        // Another provision may have created it a moment ago: fine if it now exists.
+        if (made.code !== 0 && (await this.#docker(['network', 'inspect', name])).code !== 0) {
+          throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, 'Could not create the agents network.');
+        }
+      }
+      this.#networkReady = true;
+    }
+    return ['--network', name];
   }
 
   async #must(args: string[], userMessage: string): Promise<ExecResult> {

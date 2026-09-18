@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.16.0] — 2026-09-18
+
+### Security
+- **Agents no longer share a network with each other** (18th audit, `docs/audit-2026-09-18.md`).
+  - Until now every agent container sat on Docker's default bridge, where any agent that can run a shell command could open a connection to every other agent's OpenClaw gateway, going around Hatchabot's owner-only proxy. Each gateway's own token still stood in the way.
+  - New and rebuilt agents now run on `hatchabot-agents`, a network Hatchabot creates with inter-container traffic switched off. They still reach Hatchabot (agent-to-agent calls) and Ollama on the host, and the loopback-published console port works as before.
+  - `HATCHABOT_AGENT_NETWORK=bridge` keeps the old network.
+  - **Existing agents move when rebuilt: Settings → Rebuild all.**
+
+### Fixed
+- The home screen no longer steals keyboard focus, or leaves a tooltip behind, when it refreshes: the icon grid only re-renders when something changed.
+- "Let Hatchabot pick" no longer says no management AI is set up when it was only busy.
+- Agent ids are escaped in the home screen's click handlers, as account ids already were (latent: ids are server-generated).
+
 ## [1.15.4] — 2026-09-18
 
 ### Changed
