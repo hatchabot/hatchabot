@@ -440,6 +440,8 @@
   #v2HubTools label { margin:0; width:auto }
   .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
   .v2hub #mgmtChatLog:empty { display:none !important }
+  #v2Proposals { margin:-8px 0 24px }
+  #v2PropList { display:grid; gap:8px }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
   /* The chat, expanded into a full-height panel. */
   #v2HubScrim { display:none }
@@ -702,6 +704,10 @@
         <div id="v2HubInputSlot"></div>
         <div class="v2chips" id="v2Chips"></div>
       </div>
+    </section>
+    <section id="v2Proposals" hidden aria-labelledby="v2PropTitle">
+      <div class="v2ghead"><h3 id="v2PropTitle">Waiting for you</h3><span class="n" id="v2PropCount"></span></div>
+      <div id="v2PropList"></div>
     </section>
     <div id="v2groups"></div>
     <div class="v2newgroup" id="v2NewGroup">Drop here to start a new group</div>
@@ -8341,7 +8347,8 @@ async function loadMgmtChat() {
       if (m.kind === 'proposal' && m.proposal) {
         // A reloaded pane re-renders unconfirmed cards live; resolved ones
         // show as a plain note (their outcome line follows in the transcript).
-        if (m.pending) mgmtProposalCard(m.proposal);
+        if (m.pending && !UI_V2) mgmtProposalCard(m.proposal);
+        else if (m.pending) mgmtBubble('assistant', '🗂 A change is waiting for your Confirm below.');
         else mgmtBubble('assistant', `🗂 (earlier proposal: ${(m.proposal.summary || '').split('\n')[0]})`);
         continue;
       }
@@ -8429,8 +8436,8 @@ function mgmtSteps(steps, live) {
 
 /** A confirmation card: summary + the FULL spec (expandable) + Confirm/Cancel.
  *  Built with createElement/textContent — file bodies never touch innerHTML. */
-function mgmtProposalCard(p) {
-  const log = $('mgmtChatLog');
+function mgmtProposalCard(p, into) {
+  const log = into || $('mgmtChatLog');
   const card = document.createElement('div');
   card.style.cssText = 'align-self:stretch;border:1px solid var(--warn);border-radius:10px;padding:10px 12px;font-size:14px';
   const head = document.createElement('div');
@@ -8470,8 +8477,9 @@ function mgmtProposalCard(p) {
   const act = async (verb) => {
     for (const b of row.querySelectorAll('button')) b.disabled = true;
     try {
-      const r = await api('/v1/mgmt/chat/confirm', { method: 'POST', body: { confirmId: p.confirmId, verb } });
+      const r = await api(`/v1/proposals/${encodeURIComponent(p.confirmId)}/${verb}`, { method: 'POST', body: {} });
       done(r.text, verb === 'confirm');
+      if (UI_V2) { setTimeout(loadProposals, 2500); void refresh(false); }
     } catch (e) { done(`⚠ ${e.message}`, false); }
   };
   const cancel = document.createElement('button');
@@ -8543,7 +8551,12 @@ async function sendMgmtChat() {
     liveSteps?.remove();
     if (r.steps?.length) $('mgmtChatLog').appendChild(mgmtSteps(r.steps, false));
     for (const t of r.texts) mgmtBubble('assistant', t);
-    for (const p of r.proposals) mgmtProposalCard(p);
+    // v2: cards live in the "Waiting for you" list under the chat, one place
+    // to approve whatever prepared them; the chat just points there.
+    if (UI_V2 && r.proposals.length) {
+      mgmtBubble('assistant', r.proposals.length === 1 ? 'I’ve prepared that — it’s waiting for your Confirm below.' : `I’ve prepared ${r.proposals.length} changes — they’re waiting for your Confirm below.`);
+      await loadProposals();
+    } else for (const p of r.proposals) mgmtProposalCard(p);
     if (!r.texts.length && !r.proposals.length) mgmtBubble('assistant', '(no reply)');
   } catch (e) {
     thinking.textContent = `⚠ ${e.message}`;
@@ -8598,7 +8611,7 @@ async function refresh(withMeta) {
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) { void loadMgmtStatus(); void loadSourceUsage(); }
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadMgmtStatus(); void loadSourceUsage(); void loadProposals(); }
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       const running = agents.filter(a => a.state === 'RUNNING');
@@ -9349,6 +9362,22 @@ function v2HubExpand(on) {
   if (on) $('mgmtChatInput').focus();
 }
 
+/** Changes the assistant prepared, waiting for Confirm. Survives reloads and
+ *  restarts; whatever prepared them (today the chat, later an agent). */
+let v2PropSig = '';
+async function loadProposals() {
+  if (!UI_V2) return;
+  let r; try { r = await api('/v1/proposals'); } catch { return; }
+  const sig = r.pending.map(p => p.confirmId).join(',');
+  $('v2Proposals').hidden = !r.pending.length;
+  $('v2PropCount').textContent = r.pending.length || '';
+  if (sig === v2PropSig) return; // don't rebuild under a finger
+  v2PropSig = sig;
+  const list = $('v2PropList');
+  list.innerHTML = '';
+  for (const p of r.pending) mgmtProposalCard(p, list);
+}
+
 function initV2() {
   document.body.classList.add('v2');
   // The hub borrows the management chat's own controls, so the web chat keeps
@@ -9427,6 +9456,7 @@ function initV2() {
   $('consoleGearBtn').hidden = false;
   $('consoleGearBtn').onclick = () => { const id = consoleAgentId; closeConsole(); openV2Agent(id); };
   void loadMgmtChat();
+  void loadProposals();
 }
 if (UI_V2) initV2();
 

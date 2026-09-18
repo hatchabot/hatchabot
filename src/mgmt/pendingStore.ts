@@ -60,7 +60,18 @@ export interface PendingConfirm {
   status: 'pending' | 'confirmed' | 'cancelled' | 'expired';
 }
 
+/** Where records live when they must outlast the process and be listable
+ *  per owner (the web's proposals). Absent = in memory (the Telegram bot). */
+export interface PendingBacking {
+  get(id: string): PendingConfirm | undefined;
+  put(rec: PendingConfirm): void;
+  /** Flip pending → status atomically; false if it was no longer pending. */
+  resolve(id: string, status: PendingConfirm['status']): boolean;
+  sweep(nowMs: number): number;
+}
+
 export interface PendingStoreOptions {
+  backing?: PendingBacking;
   ttlMs?: number;
   now?: () => number;
   /** Injectable for tests; defaults to a CSPRNG-backed short id. */
@@ -77,7 +88,10 @@ export class PendingStore {
   #now: () => number;
   #genId: () => string;
 
+  #backing?: PendingBacking;
+
   constructor(opts: PendingStoreOptions = {}) {
+    this.#backing = opts.backing;
     this.#ttlMs = opts.ttlMs ?? 120_000;
     this.#now = opts.now ?? (() => Date.now());
     this.#genId = opts.genId ?? (() => 'c_' + randomBytes(6).toString('base64url'));
@@ -95,21 +109,25 @@ export class PendingStore {
       id: this.#genId(),
       messageId: 0,
       createdAtMs: now,
-      expiresAtMs: now + (ttlMs ?? this.#ttlMs),
+      // The longer of the two: a store with a long default (the web's
+      // proposals list) must not have authoring cards expire sooner.
+      expiresAtMs: now + Math.max(ttlMs ?? 0, this.#ttlMs),
       status: 'pending',
     };
-    this.#map.set(rec.id, rec);
+    if (this.#backing) this.#backing.put(rec); else this.#map.set(rec.id, rec);
     return rec;
   }
 
   /** Attach the card's message id so we can edit it in place on resolve. */
   attachMessage(id: string, messageId: number): void {
-    const rec = this.#map.get(id);
-    if (rec) rec.messageId = messageId;
+    const rec = this.peek(id);
+    if (!rec) return;
+    rec.messageId = messageId;
+    this.#backing?.put(rec);
   }
 
   peek(id: string): PendingConfirm | undefined {
-    return this.#map.get(id);
+    return this.#backing ? this.#backing.get(id) : this.#map.get(id);
   }
 
   /**
@@ -120,26 +138,33 @@ export class PendingStore {
   claim(
     id: string,
     verb: 'confirm' | 'cancel',
-    by: { fromUserId: number; chatId: number },
+    by: { fromUserId: number; chatId: number; ownerId?: string },
   ): ClaimResult {
-    const rec = this.#map.get(id);
+    const rec = this.peek(id);
     if (!rec) return { ok: false, reason: 'missing' };
+    // A shared (database) store holds every owner's records: never another's.
+    if (by.ownerId !== undefined && rec.ownerId !== by.ownerId) return { ok: false, reason: 'missing' };
     if (rec.status !== 'pending') return { ok: false, reason: 'already' };
     if (this.#now() > rec.expiresAtMs) {
       rec.status = 'expired';
+      this.#backing?.resolve(id, 'expired');
       return { ok: false, reason: 'expired' };
     }
     // Confused-deputy / cross-chat replay: only the proposer, in the same chat.
     if (rec.fromUserId !== by.fromUserId || rec.chatId !== by.chatId) {
       return { ok: false, reason: 'not_yours' };
     }
-    rec.status = verb === 'confirm' ? 'confirmed' : 'cancelled';
+    const next = verb === 'confirm' ? 'confirmed' : 'cancelled';
+    // Two tabs pressing Confirm at once: the database decides who won.
+    if (this.#backing && !this.#backing.resolve(id, next)) return { ok: false, reason: 'already' };
+    rec.status = next;
     return { ok: true, rec };
   }
 
   /** Drop expired/resolved records; call periodically. Returns count removed. */
   sweep(): number {
     const now = this.#now();
+    if (this.#backing) return this.#backing.sweep(now);
     let n = 0;
     for (const [id, rec] of this.#map) {
       if (rec.status !== 'pending' || now > rec.expiresAtMs) {

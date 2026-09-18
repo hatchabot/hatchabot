@@ -382,6 +382,22 @@ export class Store {
         built_at TEXT
       );
     `);
+    // Management proposals: a change the assistant prepared, waiting for its
+    // owner's Confirm. In the database so they survive a restart, show on the
+    // home screen, and (later) can be filed by a propose-only agent.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS mgmt_proposals (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        record TEXT NOT NULL,
+        status TEXT NOT NULL,
+        outcome TEXT,
+        created_at_ms INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        resolved_at_ms INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS mgmt_proposals_owner ON mgmt_proposals (owner_id, status);
+    `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
     for (const alter of [
@@ -2263,6 +2279,44 @@ export class Store {
         .prepare(`SELECT * FROM agents WHERE parent_agent_id = ? AND state != 'DELETED'`)
         .all(parentAgentId) as any[]
     ).map(rowToAgent);
+  }
+
+  // ---- management proposals ------------------------------------------------
+  putMgmtProposal(rec: { id: string; ownerId: string; status: string; createdAtMs: number; expiresAtMs: number }): void {
+    this.db.prepare(
+      `INSERT INTO mgmt_proposals (id, owner_id, record, status, created_at_ms, expires_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET record = excluded.record`,
+    ).run(rec.id, rec.ownerId, JSON.stringify(rec), rec.status, rec.createdAtMs, rec.expiresAtMs);
+  }
+  getMgmtProposal<T>(id: string): (T & { status: string; outcome?: string }) | undefined {
+    const r = this.db.prepare(`SELECT record, status, outcome FROM mgmt_proposals WHERE id = ?`).get(id) as { record: string; status: string; outcome: string | null } | undefined;
+    if (!r) return undefined;
+    const rec = safeJson<T | undefined>(r.record, undefined);
+    return rec ? { ...rec, status: r.status, outcome: r.outcome ?? undefined } : undefined;
+  }
+  /** pending → status, once. False when someone else already resolved it. */
+  resolveMgmtProposal(id: string, status: string, nowMs: number): boolean {
+    return this.db.prepare(`UPDATE mgmt_proposals SET status = ?, resolved_at_ms = ? WHERE id = ? AND status = 'pending'`).run(status, nowMs, id).changes === 1;
+  }
+  setMgmtProposalOutcome(id: string, outcome: string): void {
+    this.db.prepare(`UPDATE mgmt_proposals SET outcome = ? WHERE id = ?`).run(outcome.slice(0, 2000), id);
+  }
+  listMgmtProposals<T>(ownerId: string, nowMs: number): Array<T & { status: string; outcome?: string; resolvedAtMs?: number }> {
+    const rows = this.db.prepare(
+      `SELECT record, status, outcome, resolved_at_ms FROM mgmt_proposals
+       WHERE owner_id = ? AND ((status = 'pending' AND expires_at_ms > ?) OR resolved_at_ms > ?)
+       ORDER BY created_at_ms DESC LIMIT 50`,
+    ).all(ownerId, nowMs, nowMs - 24 * 3600_000) as Array<{ record: string; status: string; outcome: string | null; resolved_at_ms: number | null }>;
+    return rows.flatMap((r) => {
+      const rec = safeJson<T | undefined>(r.record, undefined);
+      return rec ? [{ ...rec, status: r.status, outcome: r.outcome ?? undefined, resolvedAtMs: r.resolved_at_ms ?? undefined }] : [];
+    });
+  }
+  /** Expire overdue ones; forget anything resolved more than a week ago. */
+  sweepMgmtProposals(nowMs: number): number {
+    this.db.prepare(`UPDATE mgmt_proposals SET status = 'expired', resolved_at_ms = ? WHERE status = 'pending' AND expires_at_ms <= ?`).run(nowMs, nowMs);
+    return this.db.prepare(`DELETE FROM mgmt_proposals WHERE status != 'pending' AND resolved_at_ms < ?`).run(nowMs - 7 * 24 * 3600_000).changes;
   }
 
   setAgentWebOnly(id: string, on: boolean): void {

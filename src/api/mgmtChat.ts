@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import { Broker } from '../mgmt/broker.js';
-import { PendingStore } from '../mgmt/pendingStore.js';
+import { PendingStore, type PendingConfirm } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { LlmAgent, type AgentSink, type ChatMessage, type ChatModel } from '../mgmt/llm.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, type MgmtChatRequest, type RunCompletionDeps } from './mgmtLlm.js';
@@ -108,6 +108,21 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   const { store, secrets } = deps;
   const complete = deps.mgmtLlmComplete ?? completeWithProfile;
   const sessions = new Map<string, ChatSession>();
+  /**
+   * One database-backed store for every owner's proposals: they survive a
+   * restart, list on the home screen, and can be approved from any tab. A day
+   * to decide, not two minutes — the list is a to-do, not a popup.
+   */
+  const pendingStore = new PendingStore({
+    ttlMs: 24 * 3600_000,
+    backing: {
+      get: (id) => store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined,
+      put: (rec) => store.putMgmtProposal(rec),
+      resolve: (id, status) => store.resolveMgmtProposal(id, status, Date.now()),
+      sweep: (now) => store.sweepMgmtProposals(now),
+    },
+  });
+
   /** Live CLI+MCP turns: one-turn token → the session and the turn's sink. */
   const turns = new Map<string, { ownerId: string; session: ChatSession; sink: AgentSink }>();
   const selfUrl = deps.selfUrl ?? `http://127.0.0.1:${process.env.PORT ?? 8080}`;
@@ -145,9 +160,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   // Sweep every session's pending store — the bot process sweeps its own
   // singleton, but these per-owner stores had nobody doing it and resolved
   // authoring cards carry multi-KB specs (audit 2026-09-04).
-  setInterval(() => {
-    for (const s of sessions.values()) s.broker.pending.sweep();
-  }, 60_000).unref();
+  setInterval(() => { pendingStore.sweep(); }, 60_000).unref();
 
   const sessionFor = (ownerId: string): ChatSession => {
     const existing = sessions.get(ownerId);
@@ -189,7 +202,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       return parsed;
     };
     const api = new HttpApiClient(requester);
-    const broker = new Broker(api, new PendingStore(), {
+    const broker = new Broker(api, pendingStore, {
       audit: (event, detail) => app.log.info(detail, event),
     });
     const setStep = (step: string) => {
@@ -260,6 +273,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       summary,
       tool: rec?.tool,
       agentId: rec?.resolved.agentId || undefined,
+      createdAtMs: rec?.createdAtMs,
       expiresAtMs: rec?.expiresAtMs,
       spec: rec?.resolved.spec
         ? {
@@ -374,18 +388,44 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       .object({ confirmId: z.string().min(1).max(64), verb: z.enum(['confirm', 'cancel']) })
       .safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'confirmId and verb required' });
-    const s = sessions.get(ownerIdOf(req));
-    if (!s) return reply.code(404).send({ error: 'No chat session — the card may predate a server restart.' });
+    return resolveProposal(req, reply, parsed.data.confirmId, parsed.data.verb);
+  });
+
+  /** Confirm or cancel a proposal as the signed-in owner. Hatchabot executes
+   *  it with THIS request's auth, exactly as if they had done it in a panel. */
+  const resolveProposal = async (req: FastifyRequest, reply: import('fastify').FastifyReply, id: string, verb: 'confirm' | 'cancel') => {
+    const ownerId = ownerIdOf(req);
+    const s = sessionFor(ownerId); // created on demand: cards outlive a restart
     s.setAuth(req);
-    const out = await s.broker.confirm(parsed.data.confirmId, parsed.data.verb, WEB_WHO);
+    const out = await s.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
     if (!out.ok) {
-      return reply.code(409).send({
-        error: out.reason === 'expired' ? 'That card expired — ask again.' : 'Already handled.',
+      return reply.code(out.reason === 'missing' ? 404 : 409).send({
+        error: out.reason === 'expired' ? 'That card expired — ask again.' : out.reason === 'missing' ? 'No such proposal.' : 'Already handled.',
       });
     }
+    store.setMgmtProposalOutcome(id, out.text);
     s.transcript.push({ kind: 'assistant', text: out.text });
     s.transcript = s.transcript.slice(-TRANSCRIPT_CAP);
     return { done: out.done, text: out.text };
+  };
+
+  /** The home screen's list: what is waiting for you, and what happened to
+   *  the last day's. */
+  app.get('/v1/proposals', async (req) => {
+    const ownerId = ownerIdOf(req);
+    const s = sessionFor(ownerId);
+    const rows = store.listMgmtProposals<PendingConfirm>(ownerId, Date.now());
+    return {
+      pending: rows.filter((r) => r.status === 'pending').map((r) => enrich(s, r.id, r.summary)),
+      recent: rows.filter((r) => r.status !== 'pending').slice(0, 10).map((r) => ({
+        confirmId: r.id, summary: r.summary.split('\n')[0], status: r.status, outcome: r.outcome, resolvedAtMs: r.resolvedAtMs,
+      })),
+    };
+  });
+  app.post<{ Params: { id: string; verb: string } }>('/v1/proposals/:id/:verb', async (req, reply) => {
+    const verb = req.params.verb;
+    if (verb !== 'confirm' && verb !== 'cancel') return reply.code(404).send({ error: 'Not found' });
+    return resolveProposal(req, reply, req.params.id, verb);
   });
 
   app.post('/v1/mgmt/chat/mode', async (req, reply) => {

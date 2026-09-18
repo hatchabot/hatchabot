@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.26.0] — 2026-09-18
+
+### Added
+- **"Waiting for you": proposals on the home screen.** This is the first step towards an OpenClaw management agent; see `docs/ops-agent-design.md`.
+  - **Where they show up:** changes the assistant prepares now live in the database and list under the chat on the home screen, each with Confirm, Cancel and a link to the panel it concerns.
+  - **How long they last:** they survive a reload and a server restart, stay for a day instead of two minutes, and can be approved from any tab you're signed in to. The last day's outcomes are kept.
+  - **Who can use them:** one account never sees or touches another's, and two tabs pressing Confirm at once can't run a change twice.
+  - **In the chat:** it now points to the list instead of holding its own copy of the card.
+  - **Routes:** `GET /v1/proposals` and `POST /v1/proposals/:id/confirm|cancel`. The Telegram management bot keeps its own short-lived cards for now.
+
 ## [1.25.0] — 2026-09-18
 
 ### Changed

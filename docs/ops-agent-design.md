@@ -198,11 +198,33 @@ becomes the approvals channel.
 Each step ships on its own. Steps 1 and 2 are useful even if the rest were
 never built.
 
-## Open decisions
+## Web search without opening the jail
 
-- Should the ops agent read other agents' memory and logs by default? Proposed:
-  logs yes (trimmed), memory no, with a switch.
-- Keep the hub box as a thin chat, or make it only a launcher for the console
-  plus the proposals strip?
-- One ops agent per account, or only for the machine owner at first?
-  Proposed: machine owner first.
+A management agent will be asked things that need the web ("what changed in
+OpenClaw 2026.9?", "why does Telegram refuse this rename?"). Giving it
+internet would undo layer 2: a hijacked agent could send what it has read to
+any address.
+
+Instead, **Hatchabot does the searching**, as two more tools behind the door:
+
+- `web_search(query)`: Hatchabot runs the search (the machine's Brave key, or
+  DuckDuckGo) and returns titles, snippets and result addresses. A hijacked
+  agent can leak only what fits in a search query, and only to the search
+  provider.
+- `read_result(n)`: fetches a page **only from the addresses the last
+  searches returned**. The agent can't invent an address, so it can't send
+  data to a server of its choosing through the path or query string. GET only,
+  text only, size-capped, private and local addresses refused.
+
+Both are rate-limited and logged. Everyday questions that need free browsing
+belong with an ordinary agent; the management agent can consult one through
+the existing agent-to-agent route.
+
+## Decisions (Chris, 2026-09-18)
+
+- It reads other agents' **logs and memory** by default.
+- **One management agent per account.**
+- The home-screen chat box goes: no hard-coded Claude dependency. The home
+  screen gets a launcher for the account's management agent and the
+  "Waiting for you" proposals list (shipped in v1.26.0). The old box stays
+  only until the agent exists.

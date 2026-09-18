@@ -265,7 +265,7 @@ export class Broker {
   async confirm(
     id: string,
     verb: 'confirm' | 'cancel',
-    by: { fromUserId: number; chatId: number },
+    by: { fromUserId: number; chatId: number; ownerId?: string },
   ): Promise<
     | { ok: true; done: boolean; text: string; rec: PendingConfirm }
     | { ok: false; reason: string }
