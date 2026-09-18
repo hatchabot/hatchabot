@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.15.4] — 2026-09-18
+
+### Changed
+- The home screen shows the running version next to the Hatchabot name again, as the classic view did. It's the quickest way to tell whether a deploy reached this browser.
+
 ## [1.15.3] — 2026-09-18
 
 ### Fixed

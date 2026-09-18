@@ -546,6 +546,7 @@
     <a class="v2brand" href="./" onclick="event.preventDefault(); scrollTo({ top: 0, behavior: 'smooth' })">
       <img src="/icons/icon-192.png" alt="" width="30" height="30"><span>Hatcha<b>bot</b></span>
     </a>
+    <span class="appver" id="v2AppVer" title="The build this browser is running. If it lags the server after a reload, something is serving you a cached page."></span>
     <span class="v2spacer"></span>
     <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg><span class="lbl">New agent</span></button>
     <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span class="v2count" id="v2InboxCount"></span></button>
@@ -8927,6 +8928,7 @@ function initV2() {
   $('v2HubInputSlot').append($('mgmtChatInput').parentElement);
   $('mgmtChatInput').placeholder = 'e.g. “make a travel agent for our Sicily trip and share it with Sophie”';
   $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}`;
+  $('v2AppVer').textContent = `v${window.HATCHABOT_VERSION ?? '?'}`;
   v2SyncTheme();
   addEventListener('scroll', () => $('v2Header').classList.toggle('scrolled', scrollY > 4), { passive: true });
   v2AddBackButtons();
