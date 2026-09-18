@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.21.1] — 2026-09-18
+
+### Fixed
+- The 1.21.0 test suite did not type-check: a tidy-up of the new broker tests also removed a variable two older tests still used. Only the tests were affected, not the app. Restored, and the release step now stops on any failed check.
+
 ## [1.21.0] — 2026-09-18
 
 ### Added

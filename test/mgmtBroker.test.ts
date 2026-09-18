@@ -295,7 +295,7 @@ describe('authoring tools — the full spec rides the confirmation', () => {
   });
 
   it('proposes with a spec card (name, placement, fields) and a long TTL — nothing created yet', async () => {
-    const { broker, api } = make({ rw: true });
+    const { broker, api, pending } = make({ rw: true });
     const r = await broker.handleTool(
       'create_agent',
       { name: 'Stock Broker', persona: 'Markets copilot', soul: 'You are {{risk_tolerance}}.\nLine 2.', fields: FIELDS },
@@ -497,7 +497,7 @@ describe('image tools', () => {
   });
 
   it('build_image shows the Dockerfile on the card, refuses a name that exists, executes on confirm', async () => {
-    const { broker, api } = make({ rw: true });
+    const { broker, api, pending } = make({ rw: true });
     const dup = await broker.handleTool('build_image', { name: 'ml-tools', dockerfile: 'RUN apt-get install -y ffmpeg' }, WHO);
     expect(dup).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     const r = await broker.handleTool('build_image', { name: 'av-tools', dockerfile: 'RUN apt-get install -y ffmpeg' }, WHO);
