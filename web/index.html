@@ -28,20 +28,20 @@
        explicitly below so the header toggle can switch either way. */
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
-    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8;
+    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8; --accent-text: #f0b458;
     --radius: 12px;
     color-scheme: dark;
   }
   :root[data-theme="dark"] {
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
-    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8;
+    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8; --accent-text: #f0b458;
     color-scheme: dark;
   }
   :root[data-theme="light"] {
     --bg: #ffffff; --panel: #ffffff; --panel-2: #f1f3f5; --line: #e2e5ea;
     --text: #1a1c20; --dim: #6b7079; --accent: #b5791a; --accent-ink: #ffffff;
-    --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8; --info: #2f72c4;
+    --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8; --info: #2f72c4; --accent-text: #8a5a0f;
     color-scheme: light;
   }
   * { box-sizing: border-box; }
@@ -358,6 +358,16 @@
   body.v2 header > .hrow + .hrow, body.v2 #agents, body.v2 #activityCard, body.v2 #mgmtStrip,
   body.v2 #limitBanner, body.v2 #toc, body.v2 .fab, body.v2 #tocBtn, body.v2 #installBtn { display:none !important }
   body.v2 .wrap > header:not(#v2Header) { display:none !important }
+  /* One button look on the v2 screen (Chris, 2026-09-18: no mix of white and
+     gold). Every button shares a surface; the main action on a panel is marked
+     by accent-coloured text and a tinted edge rather than a gold fill. */
+  body.v2 .primary, body.v2 .hbtn.accent, body.v2 .v2new, body.v2 .cbtn.primary {
+    background:var(--panel-2); color:var(--accent-text); border-color:color-mix(in srgb, var(--accent) 55%, var(--line)); filter:none }
+  body.v2 .primary:hover, body.v2 .hbtn.accent:hover, body.v2 .v2new:hover { border-color:var(--accent); filter:none }
+  body.v2 .hbtn { background:var(--panel-2) }
+  body.v2 .danger { color:var(--bad) }
+  body.v2 button.pressed, body.v2 .btn.pressed { background:color-mix(in srgb, var(--accent) 22%, var(--panel-2)); color:var(--text); border-color:var(--accent) }
+  body.v2 .v2seg button[aria-pressed="true"] { background:var(--panel-2); color:var(--accent-text) }
   body.v2 .wrap { padding-top:0 }
   /* v2 header: one quiet bar. Brand left; New agent, Settings and the account
      menu right. Inbox shows only when something is waiting in it. */
@@ -372,11 +382,10 @@
   .v2brand b { color:var(--accent); font-weight:700 }
   .v2spacer { flex:1 }
   .v2btn { display:inline-flex; align-items:center; gap:7px; height:38px; padding:0 14px; border-radius:10px; border:1px solid var(--line);
-           background:var(--panel); color:var(--text); font:inherit; font-size:14px; cursor:pointer; position:relative }
+           background:var(--panel-2); color:var(--text); font:inherit; font-size:14px; cursor:pointer; position:relative }
   .v2btn:hover { border-color:var(--dim) }
   .v2btn .v2glyph { flex:none; display:block }
-  .v2new { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); font-weight:600 }
-  .v2new:hover { border-color:var(--accent); filter:brightness(1.06) }
+  .v2new { font-weight:600 }
   .v2count { position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--bad); color:#fff;
              font-size:11px; font-weight:700; display:grid; place-items:center; border:2px solid var(--bg) }
   .v2acct { position:relative }

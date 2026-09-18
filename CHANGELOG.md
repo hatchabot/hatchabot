@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.15.2] — 2026-09-18
+
+### Changed
+- **One button style on the home screen.** Buttons no longer mix white fills with gold ones: every button shares the same surface, and the main action on a panel (New agent, Send, Chat, Confirm, Save, Approve) is marked by gold text and a gold-tinted edge instead of a solid gold fill. The gold text uses a darker shade in light mode, so it stays readable. The chosen Light/Dark option in the account menu follows the same rule. The classic view is unchanged.
+
 ## [1.15.1] — 2026-09-18
 
 ### Fixed
