@@ -409,11 +409,10 @@
 <dialog id="consoleDlg" class="console-dlg" aria-label="Agent console">
   <div class="console-bar">
     <b id="consoleTitle">Agent</b>
-    <span class="sub" style="margin-left:6px">OpenClaw console</span>
     <span class="spacer"></span>
     <button id="consoleApproveBtn" class="primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner.">Approve this browser</button>
-    <a href="#" id="consoleNewTab" class="sub" title="Open the same console in its own tab">Open in new tab ↗</a>
+    <button id="consoleNewTab" class="primary" title="Open the same console in its own tab">Open in new tab ↗</button>
     <button onclick="closeConsole()" aria-label="Close">✕</button>
   </div>
   <iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>
@@ -6657,7 +6656,7 @@ async function openGateway(id, slug) {
     // (and still refuses every other one).
     const a = (agents || []).find(x => x.id === id);
     $('consoleTitle').textContent = a?.name || slug;
-    $('consoleNewTab').onclick = (e) => { e.preventDefault(); window.open(url, '_blank', 'noopener'); };
+    $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
     $('consoleFrame').src = url;
     $('consoleApproveBtn').hidden = true;
     $('consoleDlg').showModal();
@@ -6666,7 +6665,7 @@ async function openGateway(id, slug) {
     // no use from a laptop — so look for the request and offer to approve it.
     consoleAgentId = id;
     consoleUrl = url;
-    setTimeout(checkConsolePairing, 3000);
+    void autoApproveConsole(id);
   } catch (e) { toast(e.message); }
 }
 
@@ -6676,12 +6675,34 @@ $('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'abou
 
 let consoleAgentId = null, consoleUrl = null;
 
-async function checkConsolePairing() {
-  if (!consoleAgentId || !$('consoleDlg').open) return;
-  try {
-    const r = await api(`/v1/agents/${consoleAgentId}/console/pending`);
-    $('consoleApproveBtn').hidden = !(r.pending > 0);
-  } catch { /* best-effort */ }
+/**
+ * Approve this browser without making anyone click. Opening the console IS the
+ * consent: the gateway listens on loopback and the only way to it from another
+ * machine is this owner-authenticated proxy, so a request that appears while
+ * the panel is open was caused by the person looking at it. The request only
+ * exists once the console has tried to connect, so watch for it briefly — and
+ * only while this panel, for this agent, is still open.
+ */
+async function autoApproveConsole(id) {
+  const stillOurs = () => $('consoleDlg').open && consoleAgentId === id;
+  for (let i = 0; i < 12 && stillOurs(); i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (!stillOurs()) return;
+    let pending = 0;
+    try { pending = (await api(`/v1/agents/${id}/console/pending`)).pending || 0; } catch { return; }
+    if (!pending) continue;
+    try {
+      await api(`/v1/agents/${id}/console/approve`, { method: 'POST', body: {} });
+      if (!stillOurs()) return;
+      toast('This browser is now approved for this agent.');
+      $('consoleFrame').src = 'about:blank';
+      setTimeout(() => { if (stillOurs()) $('consoleFrame').src = consoleUrl; }, 50);
+    } catch {
+      // Couldn't do it for them — fall back to the button, which says why.
+      $('consoleApproveBtn').hidden = false;
+    }
+    return;
+  }
 }
 
 async function approveConsoleBrowser(btn) {

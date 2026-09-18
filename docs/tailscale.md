@@ -105,10 +105,11 @@ once. Its own message says to run `openclaw devices approve <id>` "on the
 Gateway host" — but the gateway runs inside the agent's container, so that is
 not something you can do from a laptop.
 
-Hatchabot does it for you: a few seconds after the console opens, an
-**Approve this browser** button appears if a request is waiting. It approves
-only requests made in the last ten minutes (the one you just caused), only for
-the agent's owner, and then reconnects. This is safe because the only way to
+Hatchabot does it for you, automatically: while the console panel is open it
+watches for the request and approves it, then reconnects — you don't click
+anything. It approves only requests made in the last ten minutes (the one you
+just caused), only for the agent's owner, and only while that panel is open. If
+it can't, an **Approve this browser** button appears instead. This is safe because the only way to
 reach the gateway from another machine is through Hatchabot's proxy, which
 already requires your session — the gateway itself listens on loopback, and
 loopback clients never need pairing.

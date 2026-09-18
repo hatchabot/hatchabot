@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.13.2] — 2026-09-17
+
+### Changed
+- **A new browser is approved for the console automatically.** Opening the console is the consent — the only way to reach it from another machine is through Hatchabot signed in as the agent's owner — so the panel now watches for the pairing request while it is open, approves it, and reconnects, with nothing to click. The **Approve this browser** button remains as a fallback if that fails.
+- The console panel's bar: the redundant "OpenClaw console" label is gone, and **Open in new tab** is a button matching its neighbour rather than a text link.
+
 ## [1.13.1] — 2026-09-17
 
 ### Added
