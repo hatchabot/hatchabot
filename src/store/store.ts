@@ -405,6 +405,12 @@ export class Store {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mgmt_proposals_owner ON mgmt_proposals (owner_id, status);
+      CREATE TABLE IF NOT EXISTS agent_seen (
+        owner_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        seen_at INTEGER NOT NULL,
+        PRIMARY KEY (owner_id, agent_id)
+      );
     `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
@@ -2291,6 +2297,18 @@ export class Store {
         .prepare(`SELECT * FROM agents WHERE parent_agent_id = ? AND state != 'DELETED'`)
         .all(parentAgentId) as any[]
     ).map(rowToAgent);
+  }
+
+  // ---- when each person last had an agent's console open (the unread mark) --
+  getAgentSeen(ownerId: string, agentId: string): number | undefined {
+    const r = this.db.prepare(`SELECT seen_at FROM agent_seen WHERE owner_id = ? AND agent_id = ?`).get(ownerId, agentId) as { seen_at: number } | undefined;
+    return r?.seen_at;
+  }
+  setAgentSeen(ownerId: string, agentId: string, at: number): void {
+    this.db.prepare(
+      `INSERT INTO agent_seen (owner_id, agent_id, seen_at) VALUES (?, ?, ?)
+       ON CONFLICT(owner_id, agent_id) DO UPDATE SET seen_at = excluded.seen_at`,
+    ).run(ownerId, agentId, at);
   }
 
   // ---- the management agent and its key -----------------------------------

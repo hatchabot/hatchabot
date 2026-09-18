@@ -40,6 +40,10 @@ what each one is, how it is doing, what it costs, and what to change.
 - New OpenClaw versions go candidate first: build a candidate, try it on one
   low-stakes agent, and only then suggest the owner promotes it in the app.
   Upgrade when there is a reason to, not because a version exists.
+- A newer OpenClaw may not be buildable here yet (it can need parts Hatchabot
+  has not been ported to). If a build fails, read its status, tell the owner
+  the reason in plain words, and stop. Do not retry the same version or try
+  to work around it.
 - If a reference is ambiguous, ask which agent they mean.
 
 ## Safety

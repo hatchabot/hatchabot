@@ -539,6 +539,10 @@
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
   .v2tg svg { display:block; margin-left:-1px }
+  /* Unread: the agent said something in its console since you last had it open. */
+  .v2unread { position:absolute; left:-6px; top:-6px; width:16px; height:16px; border-radius:50%; background:var(--bad);
+              border:2.5px solid var(--bg); z-index:1 }
+  .v2sbar .v2unread { width:12px; height:12px; left:-4px; top:-4px; border-width:2px }
   .v2sbar .v2tg { width:16px; height:16px; right:-5px; bottom:-5px }
   .v2sbar .v2tg svg { width:9px; height:9px }
   .v2b-shared { right:auto; left:-8px; top:auto; bottom:-8px; background:var(--panel-2); color:var(--text); font-size:11px }
@@ -582,7 +586,7 @@
   .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
   .v2notices:empty { display:none }
   /* Base images, v2: one sentence and the list. The long explanations stay in the classic view and the docs. */
-  body.v2 #rtIntro, body.v2 #rtIntro + .v2more, body.v2 #runtimeSearch, body.v2 #rtImagesH, body.v2 #rtFleetNote { display:none }
+  body.v2 #rtIntro, body.v2 #rtIntro + .v2more, body.v2 #rtDerivedHint, body.v2 #runtimeSearch, body.v2 #rtImagesH, body.v2 #rtFleetNote { display:none }
   body.v2 #paneRuntime:has(#rtPanel:not([hidden])) #runtimeStatus { display:none }
   body.v2 #rtBase { font-size:14.5px; color:var(--text); margin:2px 0 14px }
   body.v2 #rtBase b { font-weight:650 }
@@ -1664,7 +1668,7 @@
       <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
     </details>
     <div id="rtList">Loading…</div>
-    <div class="sub" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();if(UI_V2)showTab('derived');const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
+    <div class="sub" id="rtDerivedHint" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();if(UI_V2)showTab('derived');const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
     <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
     </div>
     <div id="rtCapsHome">
@@ -3995,7 +3999,9 @@ async function loadRuntimeImages() {
       const lag = (agents ?? []).filter(a => a.updateAvailable).length;
       $('rtBase').innerHTML = `Your agents run <b>OpenClaw ${esc(rt.imageVersion || '?')}</b>` +
         (rt.upgradeAvailable && rt.npmLatest
-          ? `. <b>${esc(rt.npmLatest)}</b> is available: ask your Hatchabot agent to “build a candidate for OpenClaw ${esc(rt.npmLatest)}”, then try it on one agent below.`
+          ? (rt.upgradeBuildable === false
+              ? `. OpenClaw ${esc(rt.npmLatest)} exists, but Hatchabot can't build images for it yet, so there is nothing to do.`
+              : `. <b>${esc(rt.npmLatest)}</b> is available: ask your Hatchabot agent to “build a candidate for OpenClaw ${esc(rt.npmLatest)}”, then try it on one agent below.`)
           : rt.npmLatest ? ', the latest.' : '.') +
         (lag ? ` ${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild to pick up the current image.` : '');
     }
@@ -7162,15 +7168,25 @@ async function openGateway(id, slug) {
     // no use from a laptop — so look for the request and offer to approve it.
     consoleAgentId = id;
     consoleUrl = url;
+    markConsoleSeen(id);
     void autoApproveConsole(id);
   } catch (e) { toast(e.message); }
 }
 
 // Esc closes a dialog without calling closeConsole(): blank the frame either
 // way, or the console's WebSocket and token outlive the panel.
-$('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; $('consoleCover').hidden = true; });
+$('consoleDlg')?.addEventListener('close', () => { markConsoleSeen(consoleAgentId); $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; $('consoleCover').hidden = true; });
 
 let consoleAgentId = null, consoleUrl = null;
+// What you can see in an open console is read: on open, on close, and every
+// 20 seconds in between (so a reply that lands while you watch never flags).
+function markConsoleSeen(id) {
+  if (!id) return;
+  const a = (agents || []).find(x => x.id === id);
+  if (a?.unread) { a.unread = false; renderAgents(); }
+  api(`/v1/agents/${id}/seen`, { method: 'POST' }).catch(() => {});
+}
+setInterval(() => { if ($('consoleDlg')?.open && consoleAgentId) markConsoleSeen(consoleAgentId); }, 20000);
 
 /**
  * Approve this browser without making anyone click. Opening the console IS the
@@ -8771,12 +8787,15 @@ function v2Status(a) {
   return { ...st, why };
 }
 
+// Never flag the console you are looking at.
+const v2Unread = (a) => !!a.unread && !($('consoleDlg')?.open && consoleAgentId === a.id);
 function v2IconHTML(a, st) {
   const color = /^#[0-9a-f]{6}$/i.test(a.iconColor || '') ? a.iconColor : v2ColorFor(a.name);
   const face = a.icon ? esc(a.icon) : esc((a.name.trim()[0] || '?').toUpperCase());
   return `<span class="v2ic${a.icon ? '' : ' mono'}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
     + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
     + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
+    + (v2Unread(a) ? '<span class="v2unread" title="New messages in its console" aria-hidden="true"></span>' : '')
     // A small paper-plane mark: this agent is reachable on Telegram.
     + (a.botUsername ? `<span class="v2tg" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span>` : '')
     + '</span>';
@@ -8836,7 +8855,7 @@ function renderV2() {
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
           return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
-            aria-label="${esc(a.name)} — ${esc(st.label)}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
+            aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
     </section>`).join('');
@@ -9469,7 +9488,7 @@ function v2RenderHub() {
   const st = ops && v2Status(ops);
   const faceHtml = ops
     ? `<button class="v2agent v2hubagent v2st-${st.cls}" data-v2id="${esc(ops.id)}" data-v2fixed="1" onclick="v2Open('${jsq(ops.id)}')"
-         aria-label="${esc(ops.name)} — ${esc(st.label)}">${v2IconHTML(ops, st)}<span class="v2name">${esc(ops.name)}</span></button>`
+         aria-label="${esc(ops.name)} — ${esc(st.label)}${v2Unread(ops) ? ', new messages' : ''}">${v2IconHTML(ops, st)}<span class="v2name">${esc(ops.name)}</span></button>`
     : '🐣';
   if (face.__html !== faceHtml) {
     face.__html = faceHtml;

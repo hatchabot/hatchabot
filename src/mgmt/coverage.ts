@@ -40,6 +40,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/restore': 'app: browser — uploading a backup file',
   'POST /v1/agents/preflight': 'app: internal — cross-server move check',
   'POST /v1/agents/:id/message': 'app: internal — agent-to-agent consult',
+  'POST /v1/agents/:id/seen': 'app: internal — opening a console marks its messages read',
   'POST /v1/agents/:id/console/approve': 'app: internal — the console panel approves its own browser',
   'POST /v1/agents/:id/push-definition': 'app: later — push a master definition to its children',
   'POST /v1/agents/:id/distill': 'app: later — a child proposes a lesson to its master',

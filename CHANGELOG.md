@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.30.0] — 2026-09-18
+
+### Added
+- **Unread mark on agent icons**, the management agent included. A red dot at the top left means the agent said something in its console since you last had that console open: a reply that finished after you closed it, or a scheduled run on a web-only agent. Opening the console clears it. Messages that went to Telegram are not flagged (Telegram shows its own mark), and an agent-to-agent consult does not raise it. It is remembered per person on the server, so it follows you across devices. It can lag by up to a minute.
+
+### Fixed
+- **Candidate builds for a newer OpenClaw: Node.js.** OpenClaw 2026.9 needs Node.js 24.16 or newer and the image was fixed on Node 22. The build now reads what the requested OpenClaw asks for and builds on the lowest Node line that fits (the proven default stays on Node 22). It also picks the embedding plugin published for that OpenClaw, and reads the plugin installer's confirmation options from the CLI, which renamed them in 2026.9.
+- **A failed build says why.** The app and the management agent used to see only "build exited 1". They now get the build's own reason. The management agent is told to report it and stop, not retry.
+
+### Known limit
+- **OpenClaw 2026.8 and newer still cannot be built.** From 2026.8 the embedding plugin no longer carries its engine; it runs a separate llama-server that it downloads later. Hatchabot bakes the engine into the image so that memory search works with no download and no per-agent copy, and that is not ported yet. The build refuses with that reason, and Base images now says "Hatchabot can't build images for it yet" instead of inviting the build. The extended-stable release (2026.7.33) was tried too: as published it does not start (a missing package of its own), so it is not an option today. Agents stay on 2026.7.1-2, which is unaffected.
+
 ## [1.29.3] — 2026-09-18
 
 ### Changed

@@ -60,17 +60,59 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
   fi
   echo "Not published (or offline) — building locally instead."
 fi
+DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | head -1)"
+PINS="$(dirname "$0")/runtime-pins.mjs"
+
+# The embedding plugin is published in step with OpenClaw and declares it as a
+# peer, so a newer OpenClaw needs a newer plugin. Given explicitly, use that;
+# for the proven default, keep the Dockerfile's pin; otherwise take the newest
+# plugin release that is not newer than this OpenClaw.
 PLUGIN_ARG=()
 if [ -n "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
   PLUGIN_ARG=(--build-arg "LLAMA_CPP_PROVIDER_VERSION=${LLAMA_CPP_PROVIDER_VERSION}")
-elif [ "${OPENCLAW_VERSION}" != "$(grep -oP 'ARG OPENCLAW_VERSION=\K\S+' docker/Dockerfile.runtime)" ]; then
-  echo "⚠ OPENCLAW_VERSION=${OPENCLAW_VERSION} but LLAMA_CPP_PROVIDER_VERSION not set —" >&2
-  echo "  the embedding plugin keeps the Dockerfile's pinned version; verify it peers with this OpenClaw." >&2
+elif [ "${OPENCLAW_VERSION}" != "${DEFAULT_OPENCLAW}" ]; then
+  LIST="$(npm view @openclaw/llama-cpp-provider versions --json 2>/dev/null || true)"
+  PICK="$(node "$PINS" plugin "${OPENCLAW_VERSION}" "${LIST:-[]}" 2>/dev/null || true)"
+  if [ -n "$PICK" ]; then
+    echo "Embedding plugin for OpenClaw ${OPENCLAW_VERSION}: ${PICK}"
+    PLUGIN_ARG=(--build-arg "LLAMA_CPP_PROVIDER_VERSION=${PICK}")
+  else
+    echo "⚠ Couldn't work out the embedding plugin for OpenClaw ${OPENCLAW_VERSION};" >&2
+    echo "  keeping the Dockerfile's pin. Set LLAMA_CPP_PROVIDER_VERSION if the build fails on it." >&2
+  fi
+fi
+
+# Node.js: OpenClaw raises its floor over time (2026.9 needs 24.16+). Read what
+# this version asks for and take the lowest Node line that fits, so the proven
+# default stays on the line it was proven on.
+NODE_ARG=()
+if [ -n "${NODE_IMAGE:-}" ]; then
+  NODE_ARG=(--build-arg "NODE_IMAGE=${NODE_IMAGE}")
+elif [ "${OPENCLAW_VERSION}" != "${DEFAULT_OPENCLAW}" ]; then
+  NEEDS="$(npm view "openclaw@${OPENCLAW_VERSION}" engines.node 2>/dev/null || true)"
+  if [ -n "$NEEDS" ]; then
+    echo "OpenClaw ${OPENCLAW_VERSION} needs Node.js ${NEEDS}"
+    for major in 22 24 26; do
+      img="node:${major}-slim"
+      docker pull -q "$img" >/dev/null 2>&1 || true   # the line's newest patch; offline keeps the local copy
+      has="$(docker run --rm --network none "$img" node --version 2>/dev/null || true)"
+      if [ -n "$has" ] && node "$PINS" node-ok "$NEEDS" "$has"; then
+        echo "Building on ${img} (Node.js ${has})"
+        NODE_ARG=(--build-arg "NODE_IMAGE=${img}")
+        break
+      fi
+    done
+    if [ "${#NODE_ARG[@]}" -eq 0 ]; then
+      echo "✗ No Node.js line here (22, 24, 26) fits '${NEEDS}'. Set NODE_IMAGE to one that does." >&2
+      exit 1
+    fi
+  fi
 fi
 
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
   "${PLUGIN_ARG[@]}" \
+  "${NODE_ARG[@]}" \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/

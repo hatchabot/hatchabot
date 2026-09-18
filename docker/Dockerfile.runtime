@@ -13,7 +13,11 @@
 #      OpenClaw's claude-cli backend passes that flag.
 #   2. uid 1000 matches the typical owner of the host's ~/.claude, so the
 #      bind-mounted credential is readable/refreshable without chown games.
-FROM node:22-slim
+# The Node.js line follows what the OpenClaw being baked requires (its npm
+# "engines"). scripts/build-runtime-image.sh picks it; a bare build gets the
+# one the default OpenClaw below is proven on.
+ARG NODE_IMAGE=node:22-slim
+FROM ${NODE_IMAGE}
 
 # Keep this in step with scripts/build-runtime-image.sh's default, so a bare
 # `docker build` (no --build-arg) produces the same version the build script
@@ -106,14 +110,24 @@ RUN ARCH="$(dpkg --print-architecture)" \
 # installer — which resolves the exact pinned dep tree — then relocate just the
 # package dir. The peerDependency symlink targets the global openclaw, which stays
 # put after the move, so the link keeps resolving.
+#
+# The installer's "yes, I mean it" options were renamed in OpenClaw 2026.9, so they
+# are read from the installed CLI's own help rather than assumed.
 RUN export HOME=/tmp/ocbuild \
  && mkdir -p "$HOME" && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
- && openclaw plugins install "@openclaw/llama-cpp-provider@${LLAMA_CPP_PROVIDER_VERSION}" --acknowledge-clawhub-risk \
+ && HELP="$(openclaw plugins install --help 2>&1)" \
+ && if echo "$HELP" | grep -q -- '--acknowledge-clawhub-risk'; then ACK="--acknowledge-clawhub-risk"; \
+    else ACK="--accept-capabilities --acknowledge-install-policy-warning --force"; fi \
+ && openclaw plugins install "@openclaw/llama-cpp-provider@${LLAMA_CPP_PROVIDER_VERSION}" $ACK \
  && mkdir -p /opt/agentclaw/llama-cpp \
  && cp -a "$HOME"/.openclaw/npm/projects/openclaw-llama-cpp-provider-*/node_modules/@openclaw/llama-cpp-provider \
       /opt/agentclaw/llama-cpp/llama-cpp-provider \
  && test -f /opt/agentclaw/llama-cpp/llama-cpp-provider/dist/index.js \
- && find /opt/agentclaw/llama-cpp/llama-cpp-provider/node_modules -name llama-addon.node -print -quit | grep -q . \
+ && if ! find /opt/agentclaw/llama-cpp/llama-cpp-provider/node_modules -name llama-addon.node -print -quit | grep -q .; then \
+      echo "✗ OpenClaw ${OPENCLAW_VERSION}: its embedding plugin (${LLAMA_CPP_PROVIDER_VERSION}) no longer carries its own engine." >&2; \
+      echo "  From OpenClaw 2026.8 the plugin runs a separate llama-server that it downloads later. Hatchabot's memory" >&2; \
+      echo "  search is not ported to that yet, so an image for this version would have no memory search. Not building it." >&2; \
+      exit 1; fi \
  && rm -rf /tmp/ocbuild
 
 # The GGUF model — verified against its pinned digest before it can ship.

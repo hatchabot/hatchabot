@@ -44,6 +44,8 @@ import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
+import { consoleActivity, type SessionEntry } from '../orchestrator/unread.js';
+import { buildFailureReason, openclawBuildable } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { estimateCost } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
@@ -1197,7 +1199,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
       child.stdout.pipe(out, { end: false }); child.stderr.pipe(out, { end: false });
       child.on('error', (err) => { out.end(); resolve({ ok: false, error: err.message }); });
-      child.on('close', (code) => { out.end(); resolve(code === 0 ? { ok: true } : { ok: false, error: `build exited ${code}` }); });
+      child.on('close', (code) => {
+        out.end(() => {
+          if (code === 0) return resolve({ ok: true });
+          let log = '';
+          try { log = readFileSync(opts.logPath, 'utf8').slice(-200_000); } catch { /* no log: the code is all we have */ }
+          resolve({ ok: false, error: buildFailureReason(log, code) });
+        });
+      });
     });
 
   const kickImageBuild = (name: string): void => {
@@ -2536,6 +2545,46 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return value;
   };
 
+  // The agent's own record of its conversations, read once a minute at most.
+  // Feeds the unread mark here and the "last seen" column of the people list.
+  const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry> }>();
+  const sessionsFor = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
+    if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
+    const hit = sessionsCache.get(a.id);
+    if (hit && Date.now() - hit.fetchedAt < 60_000) return hit.value;
+    let value: Record<string, SessionEntry> | undefined;
+    try {
+      const res = await providerFor(a.hostId).execShell(
+        a.runtimeRef,
+        `cat ${JSON.stringify(`/home/node/.openclaw/agents/${a.slug}/sessions/sessions.json`)} 2>/dev/null || true`,
+      );
+      if (res.code === 0 && res.stdout.trim()) value = JSON.parse(res.stdout) as Record<string, SessionEntry>;
+    } catch {
+      /* a container hiccup: no mark this minute */
+    }
+    sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
+    return value;
+  };
+  /** Has this agent said something in its console since this person last had it open? */
+  const unreadFor = async (a: Agent, ownerId: string): Promise<boolean> => {
+    const at = consoleActivity(await sessionsFor(a), { webOnly: !!a.webOnly });
+    const seen = store.getAgentSeen(ownerId, a.id);
+    if (seen === undefined) {
+      // First look at this agent: start from now rather than flagging its whole past.
+      store.setAgentSeen(ownerId, a.id, Date.now());
+      return false;
+    }
+    return at > seen;
+  };
+
+  // The console is open (or just closed): everything so far counts as read.
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/seen', async (req, reply) => {
+    const agent = visibleAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'No such agent.' });
+    store.setAgentSeen(ownerIdOf(req), agent.id, Date.now());
+    return { ok: true };
+  });
+
   app.get<{ Querystring: { all?: string } }>('/v1/agents', async (req, reply) => {
     // ?all=1: the HOST OWNER's admin view — every user's agents, with their
     // ownerId, so orphans from other logins (an old test account's leftovers)
@@ -2607,6 +2656,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.
           lastActiveAt: await lastActiveFor(a),
+          unread: role ? await unreadFor(a, ownerIdOf(req)) : undefined,
           modelWarm: await (async () => {
             const p = store.getAIProfile(a.aiProfileId);
             if (p?.vendor !== 'local' || !p.baseUrl) return undefined;
@@ -4257,7 +4307,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // actionsAllowed rides the timeline: a consult that could CHANGE things
       // must be distinguishable from one that could only answer.
       trace(target.id)('a2a.consult', { from: caller.agentId, fromName, actionsAllowed: mayAct, text: text.slice(0, 1000), chars: text.length });
+      // A consult lands in the peer's main conversation. It is machine talk:
+      // if the owner had nothing unread there, keep it that way afterwards.
+      sessionsCache.delete(target.id);
+      const hadUnread = await unreadFor(target, target.ownerId);
       const res = await providerFor(target.hostId).exec(target.runtimeRef, ['agent', '--agent', target.slug, '-m', framed], { timeoutMs: A2A_TIMEOUT_MS });
+      sessionsCache.delete(target.id);
+      if (!hadUnread) store.setAgentSeen(target.ownerId, target.id, Date.now());
       trace(target.id)('a2a.consulted', { from: caller.agentId, ok: res.code === 0 && !res.timedOut, timedOut: !!res.timedOut });
       if (res.code !== 0 || res.timedOut) {
         // Never hand the caller a docker/openclaw error as if it were the peer's
@@ -5167,6 +5223,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       npmLatest: latest,
       npmExtendedStable: extendedStable,
       upgradeAvailable: !!(imageVersion && latest && imageVersion !== latest),
+      /** False while the newest OpenClaw needs parts Hatchabot is not ported to: say so rather than invite a build that must fail. */
+      upgradeBuildable: openclawBuildable(latest),
     };
   });
 
