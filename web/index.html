@@ -441,6 +441,32 @@
   .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
   .v2hub #mgmtChatLog:empty { display:none !important }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
+  /* The chat, expanded into a full-height panel. */
+  #v2HubScrim { display:none }
+  body.hub-expanded #v2HubScrim { display:block; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:48 }
+  body.hub-expanded .v2hub { position:fixed; top:0; right:0; bottom:0; width:min(860px, 100vw); margin:0; border-radius:0; z-index:49;
+    display:flex; flex-direction:column; padding-top:calc(16px + env(safe-area-inset-top, 0px)); animation:v2slide .18s ease-out }
+  body.hub-expanded .v2face, body.hub-expanded #v2HubLede, body.hub-expanded .v2chips { display:none }
+  body.hub-expanded .v2hubmain { flex:1; min-height:0; display:flex; flex-direction:column }
+  body.hub-expanded #v2HubLogSlot { flex:1; min-height:0; display:flex }
+  body.hub-expanded .v2hub #mgmtChatLog { flex:1; max-height:none !important; display:flex !important }
+  /* Formatting in the assistant's answers. */
+  .md > div { min-height:1em }
+  .md .md-gap { height:6px }
+  .md .md-h { font-weight:650; margin-top:4px }
+  .md ul, .md ol { margin:4px 0; padding-left:20px }
+  .md code { font-family:ui-monospace,monospace; font-size:.92em; background:var(--panel-2); padding:1px 4px; border-radius:4px }
+  .md pre { background:var(--panel-2); padding:8px 10px; border-radius:8px; overflow-x:auto; margin:6px 0 }
+  .md pre code { background:none; padding:0 }
+  .md .md-table { overflow-x:auto; margin:6px 0 }
+  .md table { border-collapse:collapse; font-size:13px }
+  .md th, .md td { border-bottom:1px solid var(--line); padding:4px 8px; text-align:left; vertical-align:top }
+  .md th { color:var(--dim); font-weight:600 }
+  .md a { color:var(--accent-text) }
+  .mgmt-steps { align-self:flex-start; font-size:12.5px; color:var(--dim); max-width:85% }
+  .mgmt-steps summary { cursor:pointer }
+  .mgmt-steps ul { margin:4px 0 0; padding-left:18px; list-style:none }
+  .mgmt-open { display:inline-block; margin-top:6px; font-size:13px; color:var(--accent-text) }
   .mgmt-working { color:var(--dim) !important; font-style:italic }
   .mgmt-working::before { content:""; display:inline-block; width:8px; height:8px; margin-right:8px; border-radius:50%;
     background:var(--accent); vertical-align:middle; animation:mgmtPulse 1s ease-in-out infinite }
@@ -8319,6 +8345,7 @@ async function loadMgmtChat() {
         else mgmtBubble('assistant', `🗂 (earlier proposal: ${(m.proposal.summary || '').split('\n')[0]})`);
         continue;
       }
+      if (m.kind === 'steps') { if (m.steps?.length) $('mgmtChatLog').appendChild(mgmtSteps(m.steps, false)); continue; }
       mgmtBubble(m.kind, m.text);
     }
     if (!s.transcript.length && !UI_V2) {
@@ -8332,10 +8359,71 @@ function mgmtBubble(kind, text) {
   const el = document.createElement('div');
   el.style.cssText = kind === 'user'
     ? 'align-self:flex-end;background:var(--accent);color:var(--accent-ink);border-radius:12px 12px 2px 12px;padding:8px 12px;max-width:85%;white-space:pre-wrap;font-size:14px'
-    : 'align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-radius:12px 12px 12px 2px;padding:8px 12px;max-width:85%;white-space:pre-wrap;font-size:14px';
-  el.textContent = text;
+    : 'align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-radius:12px 12px 12px 2px;padding:8px 12px;max-width:85%;font-size:14px';
+  // The assistant's answers get light formatting (lists, bold, code, tables,
+  // links); what the owner typed stays verbatim.
+  if (kind === 'user') el.textContent = text;
+  else { el.className = 'md'; el.innerHTML = mdToHtml(text); }
   log.appendChild(el);
   log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+/**
+ * A small, safe Markdown subset for the assistant's answers. Everything is
+ * HTML-escaped FIRST; only then are these patterns turned into tags, so the
+ * model (or text it quotes from logs and agents) can't inject markup. Links
+ * must be http(s).
+ */
+function mdToHtml(src) {
+  const blocks = [];
+  let t = String(src ?? '').replace(/```[\w-]*\n?([\s\S]*?)```/g, (_, code) => { blocks.push(code.replace(/\n$/, '')); return `${blocks.length - 1}`; });
+  t = esc(t);
+  const inline = (x) => x
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<i>$2</i>')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+  const out = [];
+  const lines = t.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*[-*] /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*] /.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*[-*] /, ''))}</li>`);
+      i--; out.push(`<ul>${items.join('')}</ul>`); continue;
+    }
+    if (/^\s*\d+[.)] /.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+[.)] /.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*\d+[.)] /, ''))}</li>`);
+      i--; out.push(`<ol>${items.join('')}</ol>`); continue;
+    }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      const rows = [];
+      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
+      i--;
+      const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
+      const body = rows.filter((r) => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
+      const [head, ...rest] = body;
+      out.push(`<div class="md-table"><table><thead><tr>${cells(head).map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rest.map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+    const h = line.match(/^#{1,4} (.*)$/);
+    if (h) { out.push(`<div class="md-h">${inline(h[1])}</div>`); continue; }
+    out.push(line.trim() ? `<div>${inline(line)}</div>` : '<div class="md-gap"></div>');
+  }
+  return out.join('').replace(/(\d+)/g, (_, n) => `<pre><code>${esc(blocks[+n])}</code></pre>`);
+}
+
+/** The steps a turn took, as a small collapsible list above its answer. */
+function mgmtSteps(steps, live) {
+  const el = document.createElement('details');
+  el.className = 'mgmt-steps';
+  if (live) el.open = true;
+  el.innerHTML = `<summary>${live ? 'Working' : `${steps.length} step${steps.length === 1 ? '' : 's'}`}</summary><ul></ul>`;
+  const ul = el.querySelector('ul');
+  for (const st of steps) { const li = document.createElement('li'); li.textContent = `✓ ${st}`; ul.appendChild(li); }
   return el;
 }
 
@@ -8349,6 +8437,14 @@ function mgmtProposalCard(p) {
   head.style.cssText = 'white-space:pre-wrap;font-family:inherit';
   head.textContent = p.summary;
   card.appendChild(head);
+  // Where to see (or double-check) the thing this card changes.
+  const place = UI_V2 ? mgmtCardPlace(p) : null;
+  if (place) {
+    const a = document.createElement('a');
+    a.href = '#'; a.className = 'mgmt-open'; a.textContent = `${place.label} →`;
+    a.addEventListener('click', (e) => { e.preventDefault(); place.go(); });
+    card.appendChild(a);
+  }
   const full = [['Persona', p.spec?.persona], ['SOUL.md', p.spec?.soul], ['AGENTS.md', p.spec?.agentsMd], ['Dockerfile lines', p.spec?.dockerfile]]
     .filter(([, t]) => typeof t === 'string' && t.length);
   for (const [label, text] of full) {
@@ -8390,6 +8486,23 @@ function mgmtProposalCard(p) {
   log.scrollTop = log.scrollHeight;
 }
 
+/** The panel a proposal card is about, for its "Open …" link (v2). */
+function mgmtCardPlace(p) {
+  const t = p.tool || '';
+  if (/^(build_base_candidate|delete_base_image)$/.test(t)) return { label: 'Open Base images', go: () => openAiDlg('runtime') };
+  if (/^(build_image|rebuild_image|remove_image)$/.test(t)) return { label: 'Open Derived images', go: () => openAiDlg('derived') };
+  if (!p.agentId) return null;
+  const tab = /cron/.test(t) ? 'schedule'
+    : /peers/.test(t) ? 'sharing'
+    : /telegram|invite|member/.test(t) ? 'messaging'
+    : /source|model|class/.test(t) ? 'ai'
+    : /definition|snapshot|checkpoint/.test(t) ? 'personality'
+    : /image|base_candidate|base_trial/.test(t) ? 'advanced'
+    : 'overview';
+  // The chat can load before the agent list does; the link still works.
+  return { label: `Open ${v2Find(p.agentId)?.name ?? 'this agent'}`, go: () => openV2Agent(p.agentId, tab) };
+}
+
 async function sendMgmtChat() {
   if ($('mgmtChatSend').disabled) return; // Enter while a turn is in flight
   const input = $('mgmtChatInput');
@@ -8408,9 +8521,17 @@ async function sendMgmtChat() {
     thinking.textContent = `${step}… ${secs}s` + (secs > 60 ? ' — still working; a subscription source can take a minute or two' : '');
   };
   const ticker = setInterval(tick, 1000);
+  // The steps so far, listed live above the status line.
+  let liveSteps = null;
+  const showSteps = (list) => {
+    if (!list?.length) return;
+    const fresh = mgmtSteps(list, true);
+    if (liveSteps) liveSteps.replaceWith(fresh); else thinking.before(fresh);
+    liveSteps = fresh;
+  };
   const poller = setInterval(() => {
-    api('/v1/mgmt/chat/progress').then((p) => { if (p.busy && p.step) { step = p.step; tick(); } }).catch(() => {});
-  }, 1500);
+    api('/v1/mgmt/chat/progress').then((p) => { if (p.busy && p.step) { step = p.step; tick(); showSteps(p.steps); } }).catch(() => {});
+  }, 1200);
   $('mgmtChatSend').disabled = true;
   // v2 arms changes on every send rather than once: the server's chat session
   // (and its mode) is gone after a restart or "New chat", and each change is
@@ -8419,6 +8540,8 @@ async function sendMgmtChat() {
   try {
     const r = await api('/v1/mgmt/chat', { method: 'POST', body: { message } });
     thinking.remove();
+    liveSteps?.remove();
+    if (r.steps?.length) $('mgmtChatLog').appendChild(mgmtSteps(r.steps, false));
     for (const t of r.texts) mgmtBubble('assistant', t);
     for (const p of r.proposals) mgmtProposalCard(p);
     if (!r.texts.length && !r.proposals.length) mgmtBubble('assistant', '(no reply)');
@@ -9219,6 +9342,13 @@ function v2InlineHealth(id, name) {
   void loadHealth();
 }
 
+function v2HubExpand(on) {
+  document.body.classList.toggle('hub-expanded', on);
+  $('v2HubExpand').textContent = on ? 'Close' : 'Expand';
+  $('mgmtChatLog').scrollTop = 1e9;
+  if (on) $('mgmtChatInput').focus();
+}
+
 function initV2() {
   document.body.classList.add('v2');
   // The hub borrows the management chat's own controls, so the web chat keeps
@@ -9229,6 +9359,17 @@ function initV2() {
   // arming step only produced "tick Allow changes first" dead ends (Chris,
   // 2026-09-18). The classic dialog keeps its switch.
   $('v2HubTools').append($('mgmtChatNew'));
+  // Expand: the chat as a full-height panel, for real work.
+  const exp = document.createElement('button');
+  exp.id = 'v2HubExpand'; exp.className = 'hbtn'; exp.type = 'button';
+  exp.textContent = 'Expand'; exp.title = 'Open the chat as a full-height panel';
+  exp.addEventListener('click', () => v2HubExpand(!document.body.classList.contains('hub-expanded')));
+  $('v2HubTools').append(exp);
+  const scrim = document.createElement('div');
+  scrim.id = 'v2HubScrim';
+  scrim.addEventListener('click', () => v2HubExpand(false));
+  document.body.append(scrim);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.body.classList.contains('hub-expanded') && !document.querySelector('dialog[open]')) v2HubExpand(false); });
   $('v2HubLogSlot').append($('mgmtChatLog'));
   $('v2HubInputSlot').append($('mgmtChatInput').parentElement);
   $('mgmtChatInput').placeholder = 'e.g. “make a travel agent for our Sicily trip and share it with Sophie”';

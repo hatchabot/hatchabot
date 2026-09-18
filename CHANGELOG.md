@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.25.0] — 2026-09-18
+
+### Changed
+- **The Hatchabot chat is a better place to work.**
+  - **Expand** opens it as a full-height panel; Close or Esc puts it back.
+  - **Answers are formatted:** lists, bold, code, tables and links. The renderer escapes everything first, and links must be http(s), so text the assistant quotes from logs or agents can't inject anything. A test holds that.
+  - **You see what it did.** The steps of a turn ("Checking the runtime version", "Looking at base images", …) list live while it works and stay above the answer as a collapsible "3 steps".
+  - **Cards link to their panel.** "Open Stock Advisor →" opens the right tab (Schedule for a task, Messaging for Telegram, AI for a source change, …). Image cards open Base images or Derived images.
+
 ## [1.24.0] — 2026-09-18
 
 ### Added

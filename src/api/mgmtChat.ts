@@ -8,7 +8,7 @@ import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { LlmAgent, type AgentSink, type ChatMessage, type ChatModel } from '../mgmt/llm.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, type MgmtChatRequest, type RunCompletionDeps } from './mgmtLlm.js';
 import { runCliTurnWithMcp } from './cliChatModel.js';
-import { MANIFEST } from '../mgmt/tools.js';
+import { MANIFEST, toolDef } from '../mgmt/tools.js';
 import { SYSTEM_PROMPT } from '../mgmt/llm.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { ownerIdOf } from './principal.js';
@@ -36,6 +36,8 @@ interface ChatSession {
   /** What the assistant is doing right now, for the pane's live status line
    *  ("Thinking… 6s", "Checking the runtime… 2s"). Undefined when idle. */
   progress?: { step: string; since: number };
+  /** Every step of the current turn, in order, for the pane's step list. */
+  steps?: string[];
   broker: Broker;
   llm: LlmAgent;
   history: ChatMessage[];
@@ -43,8 +45,9 @@ interface ChatSession {
    *  entries carry the full card so a long turn outliving the HTTP request
    *  (or a page reload) can't lose an unconfirmed card (audit backlog #2). */
   transcript: Array<{
-    kind: 'user' | 'assistant' | 'proposal';
+    kind: 'user' | 'assistant' | 'proposal' | 'steps';
     text?: string;
+    steps?: string[];
     proposal?: unknown;
     confirmId?: string;
   }>;
@@ -189,7 +192,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     const broker = new Broker(api, new PendingStore(), {
       audit: (event, detail) => app.log.info(detail, event),
     });
-    const setStep = (step: string) => { if (session.busy) session.progress = { step, since: Date.now() }; };
+    const setStep = (step: string) => {
+      if (!session.busy) return;
+      session.progress = { step, since: Date.now() };
+      // Tool steps are the story worth keeping; "Thinking" in between isn't.
+      if (!/^Thinking/.test(step) && session.steps && session.steps[session.steps.length - 1] !== step) session.steps.push(step);
+    };
     // Name each tool as it runs, so a slow step reads as work, not a hang.
     const handle = broker.handleTool.bind(broker);
     broker.handleTool = async (name, args, who) => {
@@ -251,6 +259,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       confirmId,
       summary,
       tool: rec?.tool,
+      agentId: rec?.resolved.agentId || undefined,
       expiresAtMs: rec?.expiresAtMs,
       spec: rec?.resolved.spec
         ? {
@@ -290,7 +299,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   app.get('/v1/mgmt/chat/progress', async (req) => {
     const s = sessions.get(ownerIdOf(req));
     if (!s?.busy || !s.progress) return { busy: false };
-    return { busy: true, step: s.progress.step, elapsedMs: Date.now() - s.progress.since };
+    return { busy: true, step: s.progress.step, elapsedMs: Date.now() - s.progress.since, steps: s.steps ?? [] };
   });
 
   app.post('/v1/mgmt/chat', async (req, reply) => {
@@ -303,6 +312,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     }
     s.busy = true;
     s.progress = { step: 'Thinking', since: Date.now() };
+    s.steps = [];
     s.setAuth(req);
     const texts: string[] = [];
     const proposals: Array<ReturnType<typeof enrich>> = [];
@@ -350,11 +360,13 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       s.busy = false;
       s.progress = undefined;
     }
+    const steps = s.steps ?? [];
     s.transcript.push({ kind: 'user', text: parsed.data.message });
+    if (steps.length) s.transcript.push({ kind: 'steps', steps });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });
     for (const p of proposals) s.transcript.push({ kind: 'proposal', proposal: p, confirmId: p.confirmId });
     s.transcript = s.transcript.slice(-TRANSCRIPT_CAP);
-    return { texts, proposals, mode: s.broker.readWrite ? 'read-write' : 'read-only' };
+    return { texts, proposals, steps, mode: s.broker.readWrite ? 'read-write' : 'read-only' };
   });
 
   app.post('/v1/mgmt/chat/confirm', async (req, reply) => {
@@ -397,7 +409,11 @@ const TOOL_STEPS: Record<string, string> = {
   list_members: 'Checking who can talk to it', list_pending: 'Checking who is waiting to join', get_pool: 'Checking the bot pool',
   get_runtime: 'Checking the runtime version', list_images: 'Looking at images', get_image_log: 'Reading the build log',
   list_base_images: 'Looking at base images', get_base_build: 'Checking the build',
+  list_sources: 'Checking AI sources and usage', list_crons: 'Reading its scheduled tasks', list_peers: 'Checking which agents it can ask',
+  list_snapshots: 'Listing its snapshots', list_backups: 'Listing backups', list_classes: 'Listing classes',
 };
 export function toolStep(name: string): string {
-  return TOOL_STEPS[name] ?? `Preparing a card: ${name.replace(/_/g, ' ')}`;
+  if (TOOL_STEPS[name]) return TOOL_STEPS[name]!;
+  const words = name.replace(/_/g, ' ');
+  return toolDef(name)?.tier === 'read' ? `Looking up ${words}` : `Preparing a card: ${words}`;
 }
