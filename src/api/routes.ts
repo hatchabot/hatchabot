@@ -3342,7 +3342,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const CONSOLE_PAIRING_WINDOW_MS = 10 * 60_000;
   const pendingConsoleRequests = async (agent: Agent): Promise<Array<{ requestId: string; ts: number }>> => {
     if (!agent.runtimeRef) return [];
-    const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['devices', 'list', '--json'], { timeoutMs: 20_000 });
+    const provider = providerFor(agent.hostId);
+    // Fast path: read OpenClaw's pending store directly (~50 ms). The CLI takes
+    // over two seconds to start, and the panel polls this while someone stares
+    // at a pairing screen. Any surprise in the file falls back to the CLI.
+    try {
+      const raw = await provider.execShell(agent.runtimeRef, 'cat "$HOME/.openclaw/devices/pending.json" 2>/dev/null || echo "{}"');
+      // An empty answer is not "nothing pending" (the shell always prints at
+      // least {}): it means we learned nothing, so ask the CLI.
+      if (raw.code === 0 && raw.stdout.trim()) {
+        const parsed = JSON.parse(raw.stdout) as unknown;
+        const rows = (Array.isArray(parsed) ? parsed : Object.values((parsed ?? {}) as Record<string, unknown>)) as Array<Record<string, unknown>>;
+        if (rows.every((r) => r && typeof r === 'object' && typeof r.requestId === 'string' && typeof (r.ts ?? r.createdAtMs) === 'number')) {
+          const since = Date.now() - CONSOLE_PAIRING_WINDOW_MS;
+          return rows
+            .map((r) => ({ requestId: r.requestId as string, ts: (r.ts ?? r.createdAtMs) as number }))
+            .filter((r) => r.ts >= since && /^[A-Za-z0-9-]{8,64}$/.test(r.requestId));
+        }
+      }
+    } catch { /* fall through to the CLI */ }
+    const res = await provider.exec(agent.runtimeRef, ['devices', 'list', '--json'], { timeoutMs: 20_000 });
     if (res.code !== 0) return [];
     try {
       const j = JSON.parse(res.stdout) as { pending?: Array<{ requestId?: string; ts?: number }> };

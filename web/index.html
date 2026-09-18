@@ -187,6 +187,9 @@
     .cbtn .lbl-short { display:inline }
   }
   .console-dlg iframe { flex:1; width:100%; border:0; background:var(--bg) }
+  #consoleCover { position:absolute; left:0; right:0; bottom:0; top:51px; z-index:2; background:var(--bg); display:flex; align-items:center; justify-content:center; gap:12px; color:var(--dim); font-size:15px }
+  .console-spin { width:18px; height:18px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:v2spin .8s linear infinite }
+  @media (prefers-reduced-motion: reduce) { .console-spin { animation:none } }
   .posdd { width:24px; height:22px; padding:0; margin:0; border:1px solid var(--line); border-radius:7px; background:transparent; color:var(--dim); font-size:11px; font-weight:600; text-align:center; text-align-last:center; appearance:none; -webkit-appearance:none; cursor:pointer; font-variant-numeric:tabular-nums }
   .posdd:hover, .posdd:focus-visible { color:var(--text); border-color:var(--accent); outline:none }
   .posdd option { color:var(--text); background:var(--panel) }
@@ -774,6 +777,7 @@
     <button class="cbtn" onclick="closeConsole()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
   <div id="consoleProps" hidden></div>
+  <div id="consoleCover" hidden><span class="console-spin" aria-hidden="true"></span><span>Connecting this browser…</span></div>
   <iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>
 </dialog>
 
@@ -7138,7 +7142,7 @@ async function openGateway(id, slug) {
 
 // Esc closes a dialog without calling closeConsole(): blank the frame either
 // way, or the console's WebSocket and token outlive the panel.
-$('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; });
+$('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; $('consoleCover').hidden = true; });
 
 let consoleAgentId = null, consoleUrl = null;
 
@@ -7152,24 +7156,40 @@ let consoleAgentId = null, consoleUrl = null;
  */
 async function autoApproveConsole(id) {
   const stillOurs = () => $('consoleDlg').open && consoleAgentId === id;
-  for (let i = 0; i < 12 && stillOurs(); i++) {
-    await new Promise((r) => setTimeout(r, 1500));
+  // The first time this browser opens this agent, OpenClaw shows a "pairing
+  // required" screen until it is approved. Cover it with our own calm
+  // "Connecting…" so nobody has to look at that; a browser we've already seen
+  // through skips the cover entirely.
+  const known = (() => { try { return localStorage.getItem(`hb-console-ok:${id}`) === '1'; } catch { return false; } })();
+  const remember = () => { try { localStorage.setItem(`hb-console-ok:${id}`, '1'); } catch {} };
+  const uncover = () => { if (consoleAgentId === id) $('consoleCover').hidden = true; };
+  $('consoleCover').hidden = known;
+  // Checking is cheap now (a 50 ms file read), so look often, for ~12 s.
+  for (let i = 0; i < 40 && stillOurs(); i++) {
+    await new Promise((r) => setTimeout(r, 300));
     if (!stillOurs()) return;
     let pending = 0;
-    try { pending = (await api(`/v1/agents/${id}/console/pending`)).pending || 0; } catch { return; }
-    if (!pending) continue;
+    try { pending = (await api(`/v1/agents/${id}/console/pending`)).pending || 0; } catch { uncover(); return; }
+    if (!pending) {
+      // No request after ~3 s: this browser was approved before.
+      if (i === 10) { remember(); uncover(); }
+      continue;
+    }
     try {
       await api(`/v1/agents/${id}/console/approve`, { method: 'POST', body: {} });
       if (!stillOurs()) return;
-      toast('This browser is now approved for this agent.');
+      remember();
       $('consoleFrame').src = 'about:blank';
       setTimeout(() => { if (stillOurs()) $('consoleFrame').src = consoleUrl; }, 50);
+      setTimeout(uncover, 1500); // let the console connect before showing it
     } catch {
       // Couldn't do it for them — fall back to the button, which says why.
+      uncover();
       $('consoleApproveBtn').hidden = false;
     }
     return;
   }
+  uncover();
 }
 
 async function approveConsoleBrowser(btn) {

@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.28.4] — 2026-09-18
+
+### Changed
+- **No more OpenClaw pairing screen when you open an agent.**
+  - **Before:** the first time a browser opened an agent's console, OpenClaw's "pairing required" screen sat there for several seconds while Hatchabot approved it.
+  - **Now:** Hatchabot covers the console with a plain "Connecting this browser…" until it is approved and connected. A browser that has been through it before skips the cover.
+  - **It is faster too:** the check reads OpenClaw's pending-request file directly (about 50 ms, against over 2 s for the command line) and runs every 0.3 s, down from 1.5 s. If the file ever looks unfamiliar, it falls back to the command line.
+
 ## [1.28.3] — 2026-09-18
 
 ### Changed
