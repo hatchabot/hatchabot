@@ -58,6 +58,9 @@ export interface PendingConfirm {
   createdAtMs: number;
   expiresAtMs: number;
   status: 'pending' | 'confirmed' | 'cancelled' | 'expired';
+  source?: 'chat' | 'agent';
+  note?: string;
+  risk?: 'routine' | 'disruptive' | 'careful';
 }
 
 /** Where records live when they must outlast the process and be listable

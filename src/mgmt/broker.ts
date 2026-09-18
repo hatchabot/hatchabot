@@ -160,6 +160,10 @@ export interface Proposer {
    *  Optional for back-compat (undefined = operator — the historical behavior
    *  where every allowlisted user had full authority). */
   role?: 'operator' | 'viewer';
+  /** Who prepared this: the built-in chat, or the account's management agent. */
+  source?: 'chat' | 'agent';
+  /** The agent's own reason, shown on the card clearly labelled as its words. */
+  note?: string;
 }
 
 export interface BrokerOptions {
@@ -250,7 +254,8 @@ export class Broker {
       const resolved = await this.#resolveMutate(name, args);
       const summary = summarize(name, resolved);
       const rec = this.pending.create(
-        { ownerId: who.ownerId, chatId: who.chatId, fromUserId: who.fromUserId, tool: name, resolved, summary },
+        { ownerId: who.ownerId, chatId: who.chatId, fromUserId: who.fromUserId, tool: name, resolved, summary,
+          source: who.source, note: who.note?.trim().slice(0, 400) || undefined, risk: riskOf(name) },
         AUTHORING_TOOLS.has(name) ? AUTHORING_TTL_MS : undefined,
       );
       this.#audit('mgmt.propose', { tool: name, confirmId: rec.id, resolved, ...who });
@@ -819,4 +824,20 @@ export function summarize(tool: string, r: Resolved): string {
     default:
       return `${tool} on "${r.agentName}"`;
   }
+}
+
+/**
+ * How much care a change deserves, shown on its card.
+ *  - routine: easily undone, nothing restarts.
+ *  - disruptive: restarts or takes an agent offline, or changes who it talks to.
+ *  - careful: builds images, changes what an agent can do or whom it can
+ *    direct, or rewrites its definition.
+ */
+export type Risk = 'routine' | 'disruptive' | 'careful';
+const CAREFUL = new Set(['build_image', 'rebuild_image', 'remove_image', 'build_base_candidate', 'try_base_candidate', 'delete_base_image',
+  'pin_image', 'set_peers', 'update_definition', 'create_agent', 'restore_snapshot', 'remove_member', 'approve_member']);
+const DISRUPTIVE = new Set(['stop_agent', 'rebuild_agent', 'set_source', 'set_model', 'set_class', 'archive_agent', 'restore_agent',
+  'remove_telegram', 'add_telegram', 'end_base_trial', 'clone_agent', 'remove_cron', 'add_cron']);
+export function riskOf(tool: string): Risk {
+  return CAREFUL.has(tool) ? 'careful' : DISRUPTIVE.has(tool) ? 'disruptive' : 'routine';
 }

@@ -60,6 +60,8 @@ import {
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
+import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
+import { OPS_DIGEST_MESSAGE } from '../ops/opsAgent.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
@@ -478,6 +480,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
        *  as a lie — a move shows STOPPED for a minute — so the app can show
        *  "working" instead of leaving the owner to think nothing is happening. */
       busy: isBusy(agent.id),
+      /** The management agent's tool lockdown was loosened: key suspended. */
+      opsDrift: agent.ops ? opsDriftOf(agent.id) : undefined,
       ...extra,
     };
   };
@@ -4486,6 +4490,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   );
 
+  if (process.env.NODE_ENV !== 'test') {
+    setInterval(() => { void checkOpsDrift({ store, providerFor, log: (e, d) => app.log.warn(d, e) }); }, Number(process.env.HATCHABOT_OPS_DRIFT_MS) || 10 * 60_000).unref();
+  }
+
   // The account's management agent (docs/ops-agent-design.md): an OpenClaw
   // agent in a network jail, with locked-down tools and a propose-only key.
   // One per account, on this machine, web-only until a bot is added.
@@ -4516,6 +4524,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.setAgentOps(agent.id, true);
     store.setAgentIcon(agent.id, OPS_AGENT_ICON, '#e0a13a');
     store.setAgentSeed(agent.id, { 'SOUL.md': OPS_SOUL, 'AGENTS.md': OPS_AGENTS_MD });
+    // A morning look at the fleet. Created by Hatchabot (the agent itself has
+    // no scheduling tools); an ordinary task the owner can pause or delete.
+    store.setPendingSchedules(agent.id, [{
+      name: 'Morning fleet check',
+      message: OPS_DIGEST_MESSAGE,
+      cron: '0 8 * * *',
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
+    }]);
     // Pinned to the version it was born on: it never follows a promote or a
     // candidate, so a bad OpenClaw upgrade can't take the manager down with it.
     try {

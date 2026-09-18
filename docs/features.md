@@ -98,6 +98,23 @@ Three things keep that true even if the agent is misled by something it reads
   Telegram, if it has a bot).
 - **Locked-down tools.** No shell, web or browser tools.
 
+More about it:
+
+- **Cards say who and how risky.** Each card says who prepared it and how much
+  care it deserves ("Restarts or interrupts something", "Read carefully"), and
+  shows the agent's own reason, marked as its words.
+- **Approve from your phone.** If the Telegram management bot is set up
+  (`hatchabot mgmt-bot setup`), it sends you each change your agent prepares,
+  with Confirm and Cancel. It is a separate bot on purpose: the agent can't
+  speak as it.
+- **It can search the web without having internet.** Hatchabot runs the
+  search, and the agent can open only the results that came back.
+- **A morning fleet check** is set up as an ordinary scheduled task (08:00).
+  Pause or delete it from its Schedule tab.
+- **Tampered safety settings pause it.** If someone loosens its tool settings
+  from the console, Hatchabot notices within minutes and pauses its access.
+  **Rebuild** restores the settings.
+
 It is also pinned to the OpenClaw version it was created on, so a bad upgrade
 can't take your manager down with the fleet. Secrets, deleting agents,
 promoting a base image and accounts stay in the app.

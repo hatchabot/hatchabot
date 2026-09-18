@@ -1,4 +1,5 @@
 import { ensureOpsServer, opsPort } from '../ops/opsServer.js';
+import { clearOpsDrift } from '../ops/opsDrift.js';
 import { randomBytes } from 'node:crypto';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
@@ -466,6 +467,7 @@ export async function buildRuntimeSpec(
   if (agent.ops) {
     const token = randomBytes(32).toString('base64url');
     store.setOpsToken(agentId, agent.ownerId, token);
+    clearOpsDrift(agentId); // this build re-asserts the lockdown
     const at = deps.provider.isolatedGateway
       ? await ensureOpsServer(() => deps.provider.isolatedGateway!())
       : { host: '127.0.0.1', port: opsPort() }; // providers without networks (mock)

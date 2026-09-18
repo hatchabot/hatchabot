@@ -12,13 +12,14 @@ Status, 2026-09-18:
     openrouter.ai, GitHub and npm were refused.
   - 55 tools loaded through the door; the model call went out through the
     proxy; the console worked by container address.
-- **Not built yet:**
-  - approvals through the Telegram bot;
-  - web search through Hatchabot;
-  - the config drift check;
-  - risk tiers and the agent's "why" note;
-  - the nightly digest;
-  - retiring the old chat.
+- **Shipped in v1.28.0:**
+  - approvals through Hatchabot's own Telegram bot;
+  - web search through Hatchabot (`web_search`, `read_result`);
+  - the lockdown drift check, which suspends the key;
+  - risk labels and the agent's "why" on cards;
+  - the morning fleet check.
+- **Not done, on purpose:** retiring the older built-in chat. That waits until
+  the agent has been used for real.
 
 ## Why
 

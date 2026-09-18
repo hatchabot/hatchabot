@@ -33,6 +33,7 @@ import { PendingStore } from './pendingStore.js';
 import { ManagementBot } from './bot.js';
 import { GrammyTransport } from './telegram.js';
 import { createPairingNotifier } from './notifier.js';
+import { createProposalNotifier } from './proposalNotifier.js';
 import { LlmAgent } from './llm.js';
 import { AnthropicChatModel } from './anthropicModel.js';
 import { ProxyChatModel } from './proxyModel.js';
@@ -107,7 +108,7 @@ const llm = anthropicKey
 
 const bot = new Bot(botToken);
 const transport = new GrammyTransport(bot.api);
-const mgmt = new ManagementBot(broker, transport, { ownerId, allowlist, viewers, llm });
+const mgmt = new ManagementBot(broker, transport, { ownerId, allowlist, viewers, llm, proposals: api });
 
 // Approval push: DM the owner a one-tap Approve card whenever an invitee
 // messages one of their agents' bots, so a Telegram-only invite needs no web UI.
@@ -116,6 +117,14 @@ const pairingNotifier = createPairingNotifier(api, transport, allowlist, {
   log: (event, detail) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...detail })),
 });
 void pairingNotifier.tick(); // catch anyone already waiting at boot
+
+// Changes the account's management agent prepared: sent here with
+// Confirm/Cancel, because the agent must not collect its own approvals.
+const proposalNotifier = createProposalNotifier(api, transport, allowlist, {
+  intervalMs: Number(process.env.HATCHABOT_MGMT_PROPOSAL_POLL_MS) || 15_000,
+  log: (event, detail) => console.log(JSON.stringify({ t: new Date().toISOString(), event, ...detail })),
+});
+proposalNotifier.start();
 
 bot.on('message:text', async (ctx) => {
   if (!ctx.from) return;

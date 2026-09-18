@@ -13,6 +13,8 @@ import { SYSTEM_PROMPT } from '../mgmt/llm.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { internalHeaders, ownerIdOf } from './principal.js';
 import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
+import { makeOpsWeb, OPS_WEB_TOOLS, type OpsWebDeps } from '../ops/opsWeb.js';
+import { SEARCH_KEY_REF } from '../orchestrator/provision.js';
 
 /**
  * Management Phase C: the web chat pane. The SAME broker that runs the
@@ -101,6 +103,8 @@ export interface MgmtChatDeps {
   /** Test seam: replaces the whole CLI+MCP turn. Receives the turn token so a
    *  test can play the CLI's part by calling POST /v1/mgmt/mcp itself. */
   mgmtMcpTurn?: (turnToken: string, req: { system: string; messages: unknown[] }) => Promise<string>;
+  /** Test seams for the management agent's web tools. */
+  opsWeb?: Partial<OpsWebDeps>;
   /** Off switch for the MCP path (falls back to the text protocol). */
   disableMcp?: boolean;
 }
@@ -275,6 +279,9 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       tool: rec?.tool,
       agentId: rec?.resolved.agentId || undefined,
       createdAtMs: rec?.createdAtMs,
+      source: rec?.source ?? 'chat',
+      note: rec?.note,
+      risk: rec?.risk ?? 'routine',
       expiresAtMs: rec?.expiresAtMs,
       spec: rec?.resolved.spec
         ? {
@@ -416,6 +423,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
   // owner's "Waiting for you" list; they execute later, with the auth of
   // whoever presses Confirm — never with anything the agent holds.
   const OPEN_PROPOSALS_CAP = 20;
+  const opsWeb = makeOpsWeb({ braveKey: () => secrets.get(SEARCH_KEY_REF).catch(() => undefined), ...deps.opsWeb });
   const opsBrokers = new Map<string, Broker>();
   const opsBrokerFor = (ownerId: string): Broker => {
     let b = opsBrokers.get(ownerId);
@@ -453,7 +461,14 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       case 'ping':
         return ok({});
       case 'tools/list':
-        return ok({ tools: MANIFEST.map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema })) });
+        // Change tools take one extra argument here: the agent's reason, shown
+        // to the owner on the card, labelled as the agent's words.
+        return ok({ tools: [...MANIFEST.map((t) => ({
+          name: t.name, description: t.description,
+          inputSchema: t.tier === 'mutate'
+            ? { ...t.input_schema, properties: { ...t.input_schema.properties, why: { type: 'string', maxLength: 400, description: 'One or two sentences for the owner: why you propose this.' } } }
+            : t.input_schema,
+        })), ...OPS_WEB_TOOLS] });
       case 'tools/call': {
         const name = String(m.params?.name ?? '');
         const text = (t: string, isError = false) => ok({ content: [{ type: 'text', text: t }], isError });
@@ -461,7 +476,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
           && store.listMgmtProposals<PendingConfirm>(agent.ownerId, Date.now()).filter((p) => p.status === 'pending').length >= OPEN_PROPOSALS_CAP) {
           return text(`There are already ${OPEN_PROPOSALS_CAP} proposals waiting for the owner. Ask them to confirm or cancel some first.`, true);
         }
-        const r = await opsBrokerFor(agent.ownerId).handleTool(name, (m.params?.arguments ?? {}) as Record<string, unknown>, { ownerId: agent.ownerId, ...WEB_WHO });
+        const { why, ...args } = (m.params?.arguments ?? {}) as Record<string, unknown>;
+        if (name === 'web_search' || name === 'read_result') {
+          const out = await opsWeb(agent.ownerId, name, args).catch((e) => ({ text: `Error: ${String((e as Error).message ?? e)}`, isError: true }));
+          return text(out.text, out.isError);
+        }
+        const r = await opsBrokerFor(agent.ownerId).handleTool(name, args, { ownerId: agent.ownerId, ...WEB_WHO, source: 'agent', note: typeof why === 'string' ? why : undefined });
         if (r.ok && 'pending' in r) {
           return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Waiting for you" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.`);
         }

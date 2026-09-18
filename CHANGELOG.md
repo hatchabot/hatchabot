@@ -2,6 +2,28 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.28.0] — 2026-09-18
+
+### Added
+- **Approve your Hatchabot agent's changes from Telegram.**
+  - The Telegram management bot now sends each change your agent prepares, with its risk, the agent's reason, and Confirm/Cancel.
+  - It is a separate bot with its own token, so the agent cannot speak as it or collect its own approvals.
+  - Operators only, private chats only.
+  - A tap goes through the same route as the home screen, so a change runs once, wherever it was pressed first. `HATCHABOT_MGMT_PROPOSAL_POLL_MS`, default 15 s.
+- **Web search for the agent, without internet.**
+  - `web_search`: Hatchabot runs the search, with the machine's Brave key or DuckDuckGo.
+  - `read_result`: opens **only** addresses that recent searches returned, so the agent cannot name a destination.
+  - Page fetches use no credentials, are text only and size-capped, refuse private and local addresses on every redirect hop, and are rate-limited.
+- **Cards say who prepared them and how careful to be.** The labels are routine (no label), "Restarts or interrupts something", and "Read carefully" (images, definitions, who may direct whom). The agent's own reason is shown last, marked as its words.
+- **A morning fleet check** for the agent, created by Hatchabot as an ordinary scheduled task (08:00, the server's timezone). It reports, and does not file proposals unasked.
+
+### Security
+- **Loosened safety settings pause the agent.**
+  - **Check:** every 10 minutes Hatchabot checks the agent's tool lockdown and tool servers.
+  - **What counts as loosened:** extra tools allowed, a denied tool no longer denied, elevated tools enabled, or another tool server added.
+  - **Response:** its key is suspended, and the hub says so and offers Rebuild, which restores the settings and mints a new key. A failed check never suspends anything.
+  - `HATCHABOT_OPS_DRIFT_MS` sets the interval.
+
 ## [1.27.0] — 2026-09-18
 
 ### Added

@@ -23,6 +23,8 @@ export interface BotTransport {
 }
 
 export interface ManagementBotOptions {
+  /** Where agent-prepared proposals are confirmed (the control plane). */
+  proposals?: import('./proposalNotifier.js').ProposalSource;
   ownerId: string;
   /** Telegram user ids with FULL authority — reads, mutates (armed via
    *  /mode + confirm), and the control verbs /mode /pause /resume + join
@@ -51,7 +53,9 @@ export class ManagementBot {
     this.#allow = new Set([...this.#operators, ...(opts.viewers ?? [])]);
     this.#ownerId = opts.ownerId;
     this.#llm = opts.llm;
+    this.#proposals = opts.proposals;
   }
+  #proposals?: import('./proposalNotifier.js').ProposalSource;
 
   #roleOf(fromUserId: number): 'operator' | 'viewer' {
     return this.#operators.has(fromUserId) ? 'operator' : 'viewer';
@@ -248,6 +252,25 @@ export class ManagementBot {
           ? '✅ Let in — they can chat with the agent now.'
           : '🚫 Turned away. Not a ban — they can ask again by messaging the bot.',
       );
+      return;
+    }
+    // A change the account's management agent prepared (proposalNotifier.ts).
+    // Operators only; the server runs it, once, as this bot's owner.
+    const prop = /^prp:([A-Za-z0-9_-]+):(y|n)$/.exec(data);
+    if (prop) {
+      if (this.#roleOf(fromUserId) !== 'operator' || !this.#proposals) {
+        await this.tx.answerCallback(callbackId, 'Only an operator can approve changes.');
+        return;
+      }
+      try {
+        const out = await this.#proposals.resolveProposal(prop[1]!, prop[2] === 'y' ? 'confirm' : 'cancel');
+        await this.tx.answerCallback(callbackId, prop[2] === 'y' ? 'Confirmed' : 'Cancelled');
+        await this.tx.editMessage(chatId, messageId, out.text.slice(0, 3900));
+      } catch (e) {
+        const msg = String((e as Error).message ?? e);
+        await this.tx.answerCallback(callbackId, msg.slice(0, 190));
+        if (/handled|expired|No such/i.test(msg)) await this.tx.editMessage(chatId, messageId, `(${msg})`).catch(() => {});
+      }
       return;
     }
     const m = /^cfm:([A-Za-z0-9_-]+):(y|n)$/.exec(data);

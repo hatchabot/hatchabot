@@ -445,6 +445,8 @@
   /* With a management agent (or no way to run the old chat), the old chat's parts go. */
   .hub-ops #v2HubLede, .hub-ops #v2HubLogSlot, .hub-ops #v2HubInputSlot, .hub-ops .v2chips, .hub-ops #v2HubTools, .hub-ops #v2HubLlm,
   .hub-nochat #v2HubLede, .hub-nochat #v2HubLogSlot, .hub-nochat #v2HubInputSlot, .hub-nochat .v2chips, .hub-nochat #v2HubTools, .hub-nochat #v2HubLlm { display:none !important }
+  .prop-meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12.5px; color:var(--dim); margin-bottom:6px }
+  .prop-note { margin-top:6px; padding-left:10px; border-left:2px solid var(--line); color:var(--dim); font-size:13px; font-style:italic }
   #v2Proposals { margin:-8px 0 24px }
   #v2PropList { display:grid; gap:8px }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
@@ -8126,6 +8128,7 @@ function agentAttention(a) {
   const unsynced = rechecking ? [] : (a.dataSources || []).filter(d => d.syncError);
   if (unsynced.length) out.push({ icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
   if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ icon: '⚙', why: 'template setup values not filled in' });
+  if (a.opsDrift) out.push({ icon: '🔒', why: `its safety settings were changed (${a.opsDrift}), so its access to Hatchabot is paused — Rebuild it to restore them` });
   if (a.migratedTo) out.push({ icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
   if (sourceUsageOf(a.aiProfileId)?.status === 'limited') out.push({ icon: '⛔', why: `its AI source is being rate-limited (since ${clock(sourceUsageOf(a.aiProfileId).limitedSince)})` });
   if (a.imageTrial) out.push({ icon: '🧪', why: `on trial image ${a.image} (Runtime → ✕ to discard)` });
@@ -8449,10 +8452,26 @@ function mgmtProposalCard(p, into) {
   const log = into || $('mgmtChatLog');
   const card = document.createElement('div');
   card.style.cssText = 'align-self:stretch;border:1px solid var(--warn);border-radius:10px;padding:10px 12px;font-size:14px';
+  // Who prepared it and how much care it deserves — then Hatchabot's own
+  // description of the change. The agent's reason comes last, marked as its words.
+  if (p.source === 'agent' || (p.risk && p.risk !== 'routine')) {
+    const meta = document.createElement('div');
+    meta.className = 'prop-meta';
+    const risk = { disruptive: ['Restarts or interrupts something', 'warn'], careful: ['Read carefully', 'bad'] }[p.risk];
+    if (risk) { const b = document.createElement('span'); b.className = `v2pill ${risk[1]}`; b.textContent = risk[0]; meta.appendChild(b); }
+    if (p.source === 'agent') { const w = document.createElement('span'); w.textContent = 'Prepared by your Hatchabot agent'; meta.appendChild(w); }
+    card.appendChild(meta);
+  }
   const head = document.createElement('div');
   head.style.cssText = 'white-space:pre-wrap;font-family:inherit';
   head.textContent = p.summary;
   card.appendChild(head);
+  if (p.note) {
+    const note = document.createElement('div');
+    note.className = 'prop-note';
+    note.textContent = `Its reason: “${p.note}”`;
+    card.appendChild(note);
+  }
   // Where to see (or double-check) the thing this card changes.
   const place = UI_V2 ? mgmtCardPlace(p) : null;
   if (place) {
@@ -9382,7 +9401,8 @@ function v2RenderHub() {
     const st = v2Status(ops);
     const ready = v2CanChat(ops) && window.isSecureContext;
     html = `<div class="v2opsrow"><span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
-      <span class="sub" style="flex:1;min-width:200px">Ask it about your agents, or to change something. What it prepares waits below for your Confirm.</span>
+      <span class="sub" style="flex:1;min-width:200px">${ops.opsDrift ? `<b style="color:var(--bad)">Paused:</b> its safety settings were changed (${esc(ops.opsDrift)}). Rebuild it to restore them.` : 'Ask it about your agents, or to change something. What it prepares waits below for your Confirm.'}</span>
+      ${ops.opsDrift ? `<button class="primary" onclick="rebuild('${jsq(ops.id)}')">Rebuild</button>` : ''}
       ${ready ? `<button class="primary" onclick="openGateway('${jsq(ops.id)}','${jsq(ops.slug)}')">💬 Open</button>` : ''}
       <button onclick="openV2Agent('${jsq(ops.id)}')">Settings</button></div>
       ${!window.isSecureContext && v2CanChat(ops) ? '<div class="sub">Open Hatchabot over https to chat with it from this device.</div>' : ''}`;
