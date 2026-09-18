@@ -511,6 +511,11 @@
   .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
   .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
   .v2notices:empty { display:none }
+  .v2clamp:not(.v2open) { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden }
+  .v2more { background:none !important; border:0 !important; padding:0 !important; color:var(--accent-text) !important; font-size:12.5px; font-weight:600; margin:2px 0 8px }
+  #v2FleetBody h3 { display:none }
+  body.v2 .v2panel a:not(.btn), body.v2 .v2sheet a:not(.btn) { color:var(--accent-text) }
+  #v2HealthSlot { border-top:1px solid var(--line); padding-top:10px; margin-top:4px }
   .v2pane .cron-close { display:none }
   .v2sec { margin:10px 0 0; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2emoji { display:flex; flex-wrap:wrap; gap:4px; margin:6px 0 }
@@ -565,7 +570,8 @@
     <span class="v2spacer"></span>
     <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg><span class="lbl">New agent</span></button>
     <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span class="v2count" id="v2InboxCount"></span></button>
-    <button class="v2btn" onclick="openV2Menu()" title="Settings, health, usage, import and more"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
+    <button class="v2btn" onclick="openFleet()" title="Health, usage and activity across all your agents"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="lbl">Fleet</span></button>
+    <button class="v2btn" onclick="openAiDlg()" title="AI sources, people, Telegram bots, machines, backups, security"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
     <div class="v2acct">
       <button class="v2avatar" id="v2AvatarBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="v2AcctPop" onclick="v2ToggleAccount()" title="Your account">?</button>
       <div class="v2pop" id="v2AcctPop" role="menu" hidden>
@@ -680,23 +686,10 @@
   </div>
 </dialog>
 
-<dialog id="v2MenuDlg" style="width:min(420px,94vw)">
-  <div style="display:flex;align-items:center"><h3 style="margin:0">Settings &amp; more</h3><span style="flex:1"></span><button onclick="v2MenuDlg.close()" aria-label="Close">✕</button></div>
-  <div class="v2menu">
-    <h4>This machine</h4>
-    <button data-go onclick="openAiDlg()">⚙ Settings — AI sources, people, bots, machines, backups</button>
-    <h4>Your agents</h4>
-    <button data-go onclick="openFleetHealth()">📊 Health</button>
-    <button data-go onclick="openFleetUsage()">📊 Usage</button>
-    <button data-go onclick="openFleetSources()">📊 Which AI each agent uses</button>
-    <button data-go onclick="openAudit()">🕘 Recent activity</button>
-    <button data-go onclick="openFleetActions()">⚡ Bulk actions</button>
-    <button data-go onclick="rebuildAll()">Rebuild all</button>
-    <button data-go onclick="sortAllGroups()">Sort every group A→Z</button>
-    <h4>Add</h4>
-    <button data-go onclick="openGallery()">📋 Start from a template</button>
-    <button data-go onclick="$('importFile').click()">Import a .hatchabot file</button>
-  </div>
+<dialog id="v2FleetDlg" aria-label="Fleet">
+  <h3 style="margin:0">Fleet</h3>
+  <div class="tabs" role="tablist" id="v2FleetTabs"></div>
+  <div id="v2FleetBody"></div>
 </dialog>
 
 <button class="fab fab-top" id="topBtn" title="Back to top" hidden>↑</button>
@@ -779,7 +772,9 @@
 
 <dialog id="createDlg">
   <h3 style="margin:0 0 4px">New agent</h3>
-  <div class="sub">It boots on this machine and lives on Telegram.</div>
+  <div class="sub">It boots on this machine and lives on Telegram.
+    Or <a href="#" onclick="event.preventDefault(); createDlg.close(); openGallery()">start from a template</a>,
+    or <a href="#" onclick="event.preventDefault(); createDlg.close(); $('importFile').click()">open a .hatchabot file</a>.</div>
   <div class="sub" id="agentCountNote" style="margin-top:2px"></div>
   <label>Name</label>
   <input type="text" id="agentName" placeholder="Kitchen Helper" maxlength="64">
@@ -8722,6 +8717,7 @@ let v2EditFor = null;
 function v2ParkPanes() {
   for (const el of $('v2Pane').querySelectorAll('section[id^="pane"], #editErr')) editDlg.append(el);
   const cron = $('v2Pane').querySelector('#cronBody'); if (cron) cronDlg.append(cron);
+  const hb = $('v2Pane').querySelector('#healthDlgBody'); if (hb) healthDlg.append(hb);
 }
 function v2EmbedPanes(a, tab) {
   const list = V2_EMBED[tab]; if (!list) return;
@@ -8824,8 +8820,9 @@ function v2Pane(a, tab) {
            ${run && a.botDisplayName && a.botDisplayName !== a.name ? B('🏷 Sync name', `syncBotName('${id}','${n}')`, `title="Telegram shows it as '${esc(a.botDisplayName)}'"`) : ''}
            <span class="sub">Optional. It's how you reach it from your phone, and how people reach it when this machine isn't reachable from where they are.</span>`
         : '<span class="sub">No Telegram bot.</span>') : ''}
-      ${run ? row('Checks', `${B('❤️ Health', `openHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
-        ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
+      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
+        ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
+        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
     case 'personality': return `
       ${slot('paneDef')}
       ${run ? `<h4 class="v2sec">Memory</h4>${row('Conversation', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
@@ -8885,7 +8882,7 @@ function v2RefreshSheet() {
   if (!v2AgentDlg.open) return;
   const pane = $('v2Pane');
   // Tabs holding the edit sections manage their own state; only repaint the bar.
-  const busy = V2_EMBED[v2Tab] || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
+  const busy = V2_EMBED[v2Tab] || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
   if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
 }
 v2AgentDlg.addEventListener('close', () => { v2ParkPanes(); v2AgentId = null; v2EditFor = null; });
@@ -8959,7 +8956,6 @@ $('v2Chips').addEventListener('click', (e) => {
   $('mgmtChatInput').value = c.dataset.chip;
   sendMgmtChat();
 });
-function openV2Menu() { v2MenuDlg.showModal(); }
 
 // ---- the header's account menu ---------------------------------------------------------
 function v2RenderWho() {
@@ -9047,6 +9043,62 @@ function v2ConvertPanels() {
     }
   }
 }
+// ---- the Fleet panel: health, usage, AI in use, activity, fleet-wide tools ----------------
+// Four views that used to be separate panels become tabs of one. Each view's
+// own dialog body is borrowed into the tab (ids and loaders unchanged) and put
+// back when the tab changes or the panel closes.
+const V2_FLEET = [
+  ['health', 'Health', 'fleetDlg'],
+  ['usage', 'Usage', 'fleetUsageDlg'],
+  ['sources', 'AI in use', 'fleetSourcesDlg'],
+  ['activity', 'Activity', 'auditDlg'],
+  ['tools', 'Tools', null],
+];
+const V2_FLEET_OPEN = {}; // the original openers, captured by initV2
+let v2FleetTab = 'health';
+function v2ParkFleet() {
+  for (const el of $('v2FleetBody').querySelectorAll(':scope > [data-v2from]')) $(el.dataset.v2from).append(el);
+  $('v2FleetBody').innerHTML = '';
+}
+/** Run an opener with its dialog's showModal disarmed, so it loads into the
+ *  borrowed body without popping its own panel. */
+async function v2WithoutModal(dlg, fn) {
+  const show = dlg.showModal;
+  dlg.showModal = () => {};
+  try { await fn(); } finally { dlg.showModal = show; }
+}
+async function openFleet(tab = v2FleetTab, arg) {
+  v2FleetTab = V2_FLEET.some(([k]) => k === tab) ? tab : 'health';
+  $('v2FleetTabs').innerHTML = V2_FLEET.map(([k, label]) =>
+    `<button class="tab" role="tab" aria-selected="${k === v2FleetTab}" onclick="openFleet('${k}')">${label}</button>`).join('');
+  v2ParkFleet();
+  if (!v2FleetDlg.open) v2FleetDlg.showModal();
+  const [, , dlgId] = V2_FLEET.find(([k]) => k === v2FleetTab);
+  if (!dlgId) {
+    $('v2FleetBody').innerHTML = `
+      <div class="v2row"><div class="v2k">Bulk actions</div><div class="v2v"><button onclick="openFleetActions()">⚡ Choose agents…</button>
+        <span class="sub">Switch model, rebuild, stop or start a selection — by AI source, group, machine or state.</span></div></div>
+      <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
+        <span class="sub">New container for every agent, memory kept. Picks up a new runtime image or network.</span></div></div>
+      <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups()">Sort every group A→Z</button></div></div>`;
+    return;
+  }
+  const body = $(`${dlgId}Body`);
+  $('v2FleetBody').append(body);
+  await v2WithoutModal($(dlgId), () => V2_FLEET_OPEN[v2FleetTab](arg));
+}
+v2FleetDlg.addEventListener('close', v2ParkFleet);
+
+// ---- health, inline on an agent's Overview -----------------------------------------------
+function v2InlineHealth(id, name) {
+  const slot = $('v2HealthSlot'); if (!slot) return;
+  healthAgentId = id;
+  $('healthAgent').textContent = name;
+  slot.append($('healthDlgBody'));
+  slot.hidden = false;
+  void loadHealth();
+}
+
 function initV2() {
   document.body.classList.add('v2');
   // The hub borrows the management chat's own controls, so the web chat keeps
@@ -9070,6 +9122,35 @@ function initV2() {
   cronBody.id = 'cronBody';
   for (const el of [...cronDlg.children]) if (!el.classList.contains('v2pbar')) cronBody.append(el);
   cronDlg.append(cronBody);
+  // Bodies the Fleet panel and the Overview borrow, each as one movable block.
+  const wrapBody = (dlg, id, withTitle) => {
+    const body = document.createElement('div');
+    body.id = id; body.dataset.v2from = dlg.id;
+    const title = dlg.querySelector(':scope > .v2pbar .v2ptitle');
+    if (withTitle && title) body.append(...title.childNodes); // their Refresh / filter rows
+    for (const el of [...dlg.children]) if (!el.classList.contains('v2pbar')) body.append(el);
+    dlg.append(body);
+  };
+  for (const [, , dlgId] of V2_FLEET) if (dlgId) wrapBody($(dlgId), `${dlgId}Body`, true);
+  wrapBody(healthDlg, 'healthDlgBody', false);
+  Object.assign(V2_FLEET_OPEN, { health: openFleetHealth, usage: openFleetUsage, sources: openFleetSources, activity: openAudit });
+  openFleetHealth = () => openFleet('health');
+  openFleetUsage = () => openFleet('usage');
+  openFleetSources = () => openFleet('sources');
+  openAudit = (agentId) => openFleet('activity', agentId);
+  // The voice and web-search keys are outside services an agent can use —
+  // they sit with the Google accounts under Connections, not with AI sources.
+  $('paneConn').insertAdjacentHTML('beforeend', '<h4 class="v2sec">Keys for extra abilities</h4>');
+  $('paneConn').append($('mediaKeyDrawer'), $('searchKeyDrawer'));
+  // Long introductions: two lines, with "More" to read the rest.
+  for (const el of document.querySelectorAll('dialog > .sub, section > .sub:first-of-type, #cronBody > .sub, [id$="DlgBody"] > .sub')) {
+    if (el.textContent.trim().length < 180 || el.querySelector('input, select, button')) continue;
+    el.classList.add('v2clamp');
+    const more = document.createElement('button');
+    more.type = 'button'; more.className = 'v2more'; more.textContent = 'More';
+    more.addEventListener('click', () => { const open = el.classList.toggle('v2open'); more.textContent = open ? 'Less' : 'More'; });
+    el.after(more);
+  }
   // Settings: swap the ten-tab strip for the grouped one, and head each pane
   // so a merged tab reads as sections.
   const strip = aiDlg.querySelector('.tabs');

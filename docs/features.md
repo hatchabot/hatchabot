@@ -22,11 +22,15 @@ still there: open the account menu (your initial, top right) and choose
 remembered in that browser; **✨ New look** in the classic header, or
 `?ui=v2`, switches back. Both views drive the same actions.
 
-The header holds **New agent**, **Settings** (machine settings, health,
-usage, bulk actions, templates, import), an inbox button that appears only
-when someone has sent you an agent, and the account menu: who you're signed in
-as, light or dark appearance, install as an app, help, the classic look, the
-version, and sign out.
+The header holds:
+- **New agent**, whose panel also offers *start from a template* and *open a
+  .hatchabot file*.
+- **Fleet**: one panel with tabs for Health, Usage, AI in use, Activity, and
+  Tools (bulk actions, rebuild all, sort A→Z).
+- **Settings**: this machine's settings, opened directly.
+- An inbox button, which appears only when someone has sent you an agent.
+- The account menu: who you're signed in as, light or dark appearance,
+  install as an app, help, the classic look, the version, and sign out.
 
 - **Agents are icons** in their groups. Drag one to reorder it, onto another
   group to move it, onto **Archived** to archive it, or onto the strip that
@@ -47,9 +51,14 @@ version, and sign out.
   deeper. Every button from the classic card is in one of them.
 - **Every panel slides in from the right** with **‹ Back** at the top. Panels
   stack: Back returns to whatever opened it.
-- **Machine settings have seven tabs**: AI, People (your account, other
-  accounts, "about you"), Telegram bots, Connections, Machines (runners, the
-  runtime image, other Hatchabot servers), Backups, Security.
+- **Machine settings have seven tabs**: AI (sources and agent classes),
+  People (your account, other accounts, "about you"), Telegram bots,
+  Connections (Google accounts, plus the voice-notes and web-search keys),
+  Machines (runners, the runtime image, other Hatchabot servers), Backups,
+  Security.
+- **Check an agent's health on its Overview**: the result appears right
+  there, not in another panel.
+- Long introductions show two lines; **More** reveals the rest.
 - **Hatchabot itself is at the top**: the management chat, always open. Ask
   it to create, fix, move or share agents. There is no "Allow changes" switch
   on this screen: every change arrives as a card showing exactly what it will

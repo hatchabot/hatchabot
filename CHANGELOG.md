@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.18.0] — 2026-09-18
+
+### Changed
+- **No more Settings → Settings.** The header's **Settings** opens this machine's settings directly. The in-between menu is gone, and what it held moved to where it belongs:
+  - **Fleet**, a new header button, opens one panel with tabs for **Health**, **Usage**, **AI in use**, **Activity** and **Tools** (bulk actions, rebuild all, sort every group A→Z). These were four separate panels plus three menu items. Anything that used to open one of them (such as an agent's "recent activity") now opens the matching tab.
+  - **Start from a template** and **open a .hatchabot file** are links in the **New agent** panel.
+- **The AI tab holds AI.** The voice-notes (Gemini) and web-search (Brave) keys moved to **Connections**, beside your Google accounts, under "Keys for extra abilities". AI sources and agent classes stay under AI.
+- **Health runs on the agent's Overview.** **Check health** shows the live result inline, and it stays put while the page refreshes.
+- **Shorter introductions.** Panel and section introductions longer than a couple of lines show two lines, with **More** for the rest.
+
 ## [1.17.0] — 2026-09-18
 
 ### Changed
