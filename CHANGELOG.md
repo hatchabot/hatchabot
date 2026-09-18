@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.22.2] — 2026-09-18
+
+### Fixed
+- **The Hatchabot chat no longer looks hung.** While it works, its reply bubble shows a live status with a timer: "Thinking… 4s", then what it's doing ("Checking the runtime version… 9s", "Thinking about what it found… 14s"), from a new `GET /v1/mgmt/chat/progress`. After a minute it adds that a subscription source can take a minute or two.
+- **A tool call wrapped in a sentence is no longer lost.** On a Claude subscription the assistant runs through the Claude CLI, which must reply with only a JSON object to call a tool. When the model said a sentence first ("Sure — I'll build a candidate: {…}"), the whole reply was taken as prose, and no confirmation card appeared. That is the likeliest reason "build a candidate" did nothing: the production log shows the turn checked the runtime version and then answered in text. A tool call after prose is now recognised, fenced or bare, but only for a tool on the assistant's menu, so a JSON example in an explanation can't trigger anything.
+
 ## [1.22.1] — 2026-09-18
 
 ### Changed

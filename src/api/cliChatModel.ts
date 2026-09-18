@@ -109,6 +109,39 @@ export function parseToolEmission(text: string): { tool: string; input: unknown 
   return undefined;
 }
 
+/**
+ * The model doesn't always follow "JSON only": it may say a sentence first
+ * ("Sure — I'll build a candidate:") and then emit the call, which the strict
+ * parser read as prose, so no card ever appeared. Find a trailing tool object
+ * (fenced or bare) after some prose, but only for a tool that is actually on
+ * the menu, so a JSON example in an explanation can't trigger anything.
+ */
+export function parseToolAfterProse(
+  text: string,
+  known: ReadonlySet<string>,
+): { prose: string; tool: string; input: unknown } | undefined {
+  const t = text.trim();
+  const fence = t.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```\s*$/i);
+  const candidates: Array<{ json: string; at: number }> = [];
+  if (fence) candidates.push({ json: fence[1]!, at: fence.index! });
+  // A bare object at the very end: scan back from the last "}" to each "{".
+  if (t.endsWith('}')) {
+    for (let i = t.lastIndexOf('{'); i >= 0; i = t.lastIndexOf('{', i - 1)) {
+      candidates.push({ json: t.slice(i), at: i });
+      if (candidates.length > 20) break;
+    }
+  }
+  for (const c of candidates) {
+    try {
+      const obj = JSON.parse(c.json);
+      if (obj && typeof obj === 'object' && typeof obj.tool === 'string' && known.has(obj.tool)) {
+        return { prose: t.slice(0, c.at).trim(), tool: obj.tool, input: obj.input ?? {} };
+      }
+    } catch { /* not this one */ }
+  }
+  return undefined;
+}
+
 export async function completeViaCli(
   opts: CliCompletionOptions,
   req: MgmtChatRequest,
@@ -190,6 +223,17 @@ export async function completeViaCli(
     return {
       stopReason: 'tool_use',
       content: [{ type: 'tool_use', id: `cli_${Date.now().toString(36)}`, name: tool.tool, input: tool.input }],
+    };
+  }
+  const known = new Set((req.tools as Array<{ name: string }>).map((x) => x.name));
+  const mixed = parseToolAfterProse(text, known);
+  if (mixed) {
+    return {
+      stopReason: 'tool_use',
+      content: [
+        ...(mixed.prose ? [{ type: 'text', text: mixed.prose }] : []),
+        { type: 'tool_use', id: `cli_${Date.now().toString(36)}`, name: mixed.tool, input: mixed.input },
+      ],
     };
   }
   return { stopReason: 'end_turn', content: [{ type: 'text', text }] };

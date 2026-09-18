@@ -441,6 +441,11 @@
   .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
   .v2hub #mgmtChatLog:empty { display:none !important }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
+  .mgmt-working { color:var(--dim) !important; font-style:italic }
+  .mgmt-working::before { content:""; display:inline-block; width:8px; height:8px; margin-right:8px; border-radius:50%;
+    background:var(--accent); vertical-align:middle; animation:mgmtPulse 1s ease-in-out infinite }
+  @keyframes mgmtPulse { 0%,100% { opacity:.25; transform:scale(.8) } 50% { opacity:1; transform:scale(1.1) } }
+  @media (prefers-reduced-motion: reduce) { .mgmt-working::before { animation:none } }
   .v2chips:empty { display:none }
   .v2gear { display:inline-flex; align-items:center; gap:6px }
   .v2gear span { font-size:19px; line-height:1 }
@@ -8392,7 +8397,20 @@ async function sendMgmtChat() {
   if (!message) return;
   input.value = '';
   mgmtBubble('user', message);
-  const thinking = mgmtBubble('assistant', '…');
+  const thinking = mgmtBubble('assistant', 'Thinking…');
+  thinking.classList.add('mgmt-working');
+  // A live status line, so a slow turn reads as work and not a hang: what it
+  // is doing (from the server) and for how long.
+  const started = Date.now();
+  let step = 'Thinking';
+  const tick = () => {
+    const secs = Math.round((Date.now() - started) / 1000);
+    thinking.textContent = `${step}… ${secs}s` + (secs > 60 ? ' — still working; a subscription source can take a minute or two' : '');
+  };
+  const ticker = setInterval(tick, 1000);
+  const poller = setInterval(() => {
+    api('/v1/mgmt/chat/progress').then((p) => { if (p.busy && p.step) { step = p.step; tick(); } }).catch(() => {});
+  }, 1500);
   $('mgmtChatSend').disabled = true;
   // v2 arms changes on every send rather than once: the server's chat session
   // (and its mode) is gone after a restart or "New chat", and each change is
@@ -8407,6 +8425,8 @@ async function sendMgmtChat() {
   } catch (e) {
     thinking.textContent = `⚠ ${e.message}`;
   } finally {
+    clearInterval(ticker); clearInterval(poller);
+    thinking.classList.remove('mgmt-working');
     $('mgmtChatSend').disabled = false;
     input.focus();
   }

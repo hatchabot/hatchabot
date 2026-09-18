@@ -156,3 +156,35 @@ describe('parseToolEmission (existing coverage kept)', () => {
     expect(parseToolEmission('prose')).toBeUndefined();
   });
 });
+
+describe('parseToolAfterProse — a tool call after a sentence still becomes a card', () => {
+  const known = new Set(['build_base_candidate', 'list_agents']);
+  it('finds a trailing bare object after prose', async () => {
+    const { parseToolAfterProse } = await import('../src/api/cliChatModel.js');
+    const r = parseToolAfterProse('Sure — I will build a candidate for the newest version:\n{"tool":"build_base_candidate","input":{"version":"2026.9.0"}}', known);
+    expect(r).toEqual({ prose: 'Sure — I will build a candidate for the newest version:', tool: 'build_base_candidate', input: { version: '2026.9.0' } });
+  });
+  it('finds a fenced object after prose, with nested braces in the input', async () => {
+    const { parseToolAfterProse } = await import('../src/api/cliChatModel.js');
+    const r = parseToolAfterProse('Checking.\n```json\n{"tool":"list_agents","input":{"filter":{"state":"RUNNING"}}}\n```', known);
+    expect(r?.tool).toBe('list_agents');
+    expect(r?.input).toEqual({ filter: { state: 'RUNNING' } });
+  });
+  it('ignores tools not on the menu, and JSON that is not a tool call', async () => {
+    const { parseToolAfterProse } = await import('../src/api/cliChatModel.js');
+    expect(parseToolAfterProse('For example {"tool":"delete_everything","input":{}}', known)).toBeUndefined();
+    expect(parseToolAfterProse('The config is {"a":1}', known)).toBeUndefined();
+    expect(parseToolAfterProse('No JSON here at all.', known)).toBeUndefined();
+  });
+  it('completeViaCli returns the prose and the tool call together', async () => {
+    const runner: CliRunner = async () => JSON.stringify({ result: 'On it:\n{"tool":"build_base_candidate","input":{}}' });
+    const out = await completeViaCli({ model: 'm', runner }, {
+      system: 's', tools: [{ name: 'build_base_candidate', description: 'd', input_schema: {} }], messages: [{ role: 'user', content: 'hi' }], maxTokens: 10,
+    });
+    expect(out.stopReason).toBe('tool_use');
+    expect(out.content).toEqual([
+      { type: 'text', text: 'On it:' },
+      expect.objectContaining({ type: 'tool_use', name: 'build_base_candidate', input: {} }),
+    ]);
+  });
+});

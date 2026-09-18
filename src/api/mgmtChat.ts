@@ -29,6 +29,9 @@ import { ownerIdOf } from './principal.js';
  */
 
 interface ChatSession {
+  /** What the assistant is doing right now, for the pane's live status line
+   *  ("Thinking… 6s", "Checking the runtime… 2s"). Undefined when idle. */
+  progress?: { step: string; since: number };
   broker: Broker;
   llm: LlmAgent;
   history: ChatMessage[];
@@ -142,8 +145,16 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     const broker = new Broker(api, new PendingStore(), {
       audit: (event, detail) => app.log.info(detail, event),
     });
+    const setStep = (step: string) => { if (session.busy) session.progress = { step, since: Date.now() }; };
+    // Name each tool as it runs, so a slow step reads as work, not a hang.
+    const handle = broker.handleTool.bind(broker);
+    broker.handleTool = async (name, args, who) => {
+      setStep(toolStep(name));
+      return handle(name, args, who);
+    };
     const model: ChatModel = {
       create: async (req) => {
+        setStep(req.messages.length > 1 ? 'Thinking about what it found' : 'Thinking');
         const profile = pickMgmtProfile(store, ownerId);
         if (!profile) {
           throw new Error(
@@ -231,6 +242,13 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     };
   });
 
+  /** The live status line: what the assistant is doing, and for how long. */
+  app.get('/v1/mgmt/chat/progress', async (req) => {
+    const s = sessions.get(ownerIdOf(req));
+    if (!s?.busy || !s.progress) return { busy: false };
+    return { busy: true, step: s.progress.step, elapsedMs: Date.now() - s.progress.since };
+  });
+
   app.post('/v1/mgmt/chat', async (req, reply) => {
     const parsed = z.object({ message: z.string().trim().min(1).max(8000) }).safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: 'message required' });
@@ -240,6 +258,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       return reply.code(409).send({ error: 'A message is already being answered — wait for the reply.' });
     }
     s.busy = true;
+    s.progress = { step: 'Thinking', since: Date.now() };
     s.setAuth(req);
     const texts: string[] = [];
     const proposals: Array<ReturnType<typeof enrich>> = [];
@@ -254,6 +273,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       return reply.code(502).send({ error: friendlyLlmError(String((err as Error).message ?? err)) });
     } finally {
       s.busy = false;
+      s.progress = undefined;
     }
     s.transcript.push({ kind: 'user', text: parsed.data.message });
     for (const t of texts) s.transcript.push({ kind: 'assistant', text: t });
@@ -293,4 +313,16 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     sessions.delete(ownerIdOf(req));
     return { cleared: true };
   });
+}
+
+/** A person-shaped label for a tool while it runs. */
+const TOOL_STEPS: Record<string, string> = {
+  list_agents: 'Looking at your agents', get_agent: 'Looking at the agent', get_logs: 'Reading its logs',
+  get_health: 'Checking its health', get_usage: 'Checking usage', list_events: 'Reading recent activity',
+  list_members: 'Checking who can talk to it', list_pending: 'Checking who is waiting to join', get_pool: 'Checking the bot pool',
+  get_runtime: 'Checking the runtime version', list_images: 'Looking at images', get_image_log: 'Reading the build log',
+  list_base_images: 'Looking at base images', get_base_build: 'Checking the build',
+};
+export function toolStep(name: string): string {
+  return TOOL_STEPS[name] ?? `Preparing a card: ${name.replace(/_/g, ' ')}`;
 }
