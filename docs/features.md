@@ -14,12 +14,19 @@ bots that front them outlive any one agent and can be recycled into the next. Yo
 (installable as a phone PWA), the `hatchabot` CLI, or an optional Telegram
 management bot.
 
-## The new home screen (preview)
+## The home screen
 
-Open the app with `?ui=v2` on the end of its address (for example
-`https://your-machine.ts.net/?ui=v2`) to try the redesigned home screen. The
-classic view stays the default until the new one replaces it; everything
-underneath is the same, so you can switch back and forth freely.
+Since 1.15.0 the app opens on the icon home screen. The older card view is
+still there: open the account menu (your initial, top right) and choose
+**Classic look**, or add `?ui=classic` to the address. The choice is
+remembered in that browser; **✨ New look** in the classic header, or
+`?ui=v2`, switches back. Both views drive the same actions.
+
+The header holds **New agent**, **Settings** (machine settings, health,
+usage, bulk actions, templates, import), an inbox button that appears only
+when someone has sent you an agent, and the account menu: who you're signed in
+as, light or dark appearance, install as an app, help, the classic look, the
+version, and sign out.
 
 - **Agents are icons** in their groups. Drag one to reorder it, onto another
   group to move it, onto **Archived** to archive it, or onto the strip that
@@ -47,8 +54,6 @@ underneath is the same, so you can switch back and forth freely.
   Change any of them by clicking the icon in its settings. Icons travel with
   the agent: backups, shared copies and agents sent to someone else keep
   theirs.
-- Machine-wide settings, health, usage, bulk actions, templates and import are
-  under the **⚙** button in the header.
 
 ## Creating & talking to agents
 

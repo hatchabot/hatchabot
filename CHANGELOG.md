@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.15.0] — 2026-09-18
+
+### Changed
+- **The icon home screen is now the default.** The card view is still available as **Classic look** in the account menu, or with `?ui=classic`. The choice is remembered per browser, and **✨ New look** (or `?ui=v2`) switches back.
+- **A calmer header.** One bar that stays at the top as you scroll: the Hatchabot mark on the left; **New agent**, **Settings** and your account on the right, drawn as line icons that shrink to icons alone on a phone.
+  - The inbox button appears only when someone has sent you an agent, with a count.
+  - Your email, the light/dark switch, **Sign out or switch account**, **Install as an app**, **Help**, **Classic look** and the version number move into an account menu under your initial.
+  - The Settings menu keeps to settings and fleet tools.
+
 ## [1.14.3] — 2026-09-18
 
 ### Changed
