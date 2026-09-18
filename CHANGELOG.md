@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.14.0] — 2026-09-18
+
+### Added
+- **A new home screen, in preview at `/?ui=v2`.** Agents become icons in their groups instead of cards covered in buttons. Click one to talk to it: OpenClaw's console opens in the page. Everything else is in a tabbed settings sheet, and every action from the classic card has a home there. Status shows on the icon as a ring plus a badge, with the reason in a tooltip, in place of the legend. Drag icons to reorder, regroup, archive, or start a group; on touch it's press-and-hold. The management chat sits at the centre of the page. The classic view is unchanged and remains the default. `docs/features.md` has the tour.
+- **Agent icons.** Each agent can carry an emoji and a colour (`PATCH /v1/agents/:id` with `icon`, `iconColor`). `POST /v1/agents/icons/auto` fills in any that are missing. One call to the owner's management AI picks them all from name and description; without one, a keyword table does. Replies are validated down to a single emoji and a palette colour, so an agent's name or description can't smuggle anything else through. Icons are carried by backups (`.hatchabot`), shared templates, clones and sends, so a shared agent looks the same to the person who receives it.
+
+### Changed
+- The card's notices (rebuild prompts, sync errors, bot-token form, join requests, members) are built by one function, `agentNotices`, shared by the classic card and the new settings sheet, so the two can't disagree about what needs doing.
+
 ## [1.13.2] — 2026-09-17
 
 ### Changed

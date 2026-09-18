@@ -465,6 +465,9 @@ export class Store {
       `ALTER TABLE local_accounts ADD COLUMN claim_expires TEXT`,
       `ALTER TABLE agent_peers ADD COLUMN allow_actions INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agents ADD COLUMN class_id TEXT`,
+      // Home-screen icon: an emoji and a #rrggbb tint (ui v2). Cosmetic.
+      `ALTER TABLE agents ADD COLUMN icon TEXT`,
+      `ALTER TABLE agents ADD COLUMN icon_color TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -821,16 +824,18 @@ export class Store {
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
                              host_id, runtime_ref, persona, shared_memory, model, pending_action,
-                             group_name, sort_order, created_at, updated_at)
+                             group_name, sort_order, icon, icon_color, created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
                  @hostId, @runtimeRef, @persona, @sharedMemory, @model, @pendingAction,
-                 @group, @sortOrder, @createdAt, @updatedAt)`,
+                 @group, @sortOrder, @icon, @iconColor, @createdAt, @updatedAt)`,
       )
       .run({
         stateReason: null,
         runtimeRef: null,
         model: null,
         group: null,
+        icon: null,
+        iconColor: null,
         ...a,
         // Land new agents strictly last in their section. A per-owner max+1
         // avoids the ties a wall-clock stamp produced when two agents were
@@ -2257,6 +2262,13 @@ export class Store {
     ).map(rowToAgent);
   }
 
+  /** Home-screen icon. `undefined` leaves that half alone; `null` clears it. */
+  setAgentIcon(id: string, icon: string | null | undefined, color: string | null | undefined): void {
+    const now = new Date().toISOString();
+    if (icon !== undefined) this.db.prepare(`UPDATE agents SET icon = ?, updated_at = ? WHERE id = ?`).run(icon, now, id);
+    if (color !== undefined) this.db.prepare(`UPDATE agents SET icon_color = ?, updated_at = ? WHERE id = ?`).run(color, now, id);
+  }
+
   setAgentGroupAccess(id: string, ga: GroupAccess | null): void {
     this.db
       .prepare(`UPDATE agents SET group_access = ?, updated_at = ? WHERE id = ?`)
@@ -2831,6 +2843,8 @@ function rowToAgent(r: any): Agent {
     gatewayToken: r.gateway_token ?? undefined,
     group: r.group_name ?? undefined,
     classId: r.class_id ?? undefined,
+    icon: r.icon ?? undefined,
+    iconColor: r.icon_color ?? undefined,
     sortOrder: r.sort_order ?? undefined,
     parameters: r.params ? safeJson(r.params, undefined) : undefined,
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,

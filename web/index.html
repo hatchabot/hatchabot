@@ -28,20 +28,20 @@
        explicitly below so the header toggle can switch either way. */
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
-    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88;
+    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8;
     --radius: 12px;
     color-scheme: dark;
   }
   :root[data-theme="dark"] {
     --bg: #14161a; --panel: #1e2127; --panel-2: #262a31; --line: #32363e;
     --text: #e8e6e1; --dim: #9a978f; --accent: #e8a33d; --accent-ink: #14161a;
-    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88;
+    --ok: #58c08a; --warn: #e8a33d; --bad: #e06c5f; --off: #7a7f88; --info: #6aa7e8;
     color-scheme: dark;
   }
   :root[data-theme="light"] {
     --bg: #ffffff; --panel: #ffffff; --panel-2: #f1f3f5; --line: #e2e5ea;
     --text: #1a1c20; --dim: #6b7079; --accent: #b5791a; --accent-ink: #ffffff;
-    --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8;
+    --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8; --info: #2f72c4;
     color-scheme: light;
   }
   * { box-sizing: border-box; }
@@ -339,6 +339,118 @@
   .drop-line { position:fixed; height:3px; background:var(--accent); border-radius:2px; z-index:1000; pointer-events:none }
   .drag-ghost { position:fixed; left:0; top:0; z-index:1001; pointer-events:none; background:var(--panel); color:var(--text); border:1px solid var(--accent); border-radius:8px; padding:4px 10px; font-size:13px; font-weight:600; box-shadow:0 6px 18px rgba(0,0,0,.35); white-space:nowrap }
   .toc-item { user-select:none }
+
+  /* ---- UI v2 (?ui=v2): icon home screen, chat first, settings in a sheet ---- */
+  .v2only { display:none }
+  body.v2 .v2only { display:revert }
+  body.v2 header > .hrow + .hrow, body.v2 #agents, body.v2 #activityCard, body.v2 #mgmtStrip,
+  body.v2 #limitBanner, body.v2 #toc, body.v2 .fab, body.v2 #tocBtn { display:none !important }
+  #v2Bar { display:none; align-items:center; gap:8px }
+  body.v2 #v2Bar { display:flex }
+  .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
+           grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
+  .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
+  .v2hubmain { min-width:0; display:grid; gap:8px }
+  .v2hubhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+  .v2hubhead h2 { margin:0; font-size:17px }
+  .v2hubhead .spacer { flex:1 }
+  #v2HubTools { display:flex; align-items:center; gap:8px }
+  #v2HubTools label { margin:0; width:auto }
+  .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
+  .v2hub #mgmtChatLog:empty { display:none !important }
+  .v2chips { display:flex; flex-wrap:wrap; gap:6px }
+  .v2chip { background:var(--panel-2); border:1px solid var(--line); border-radius:999px; padding:3px 11px; font-size:12.5px; cursor:pointer; color:inherit; font:inherit; font-size:12.5px }
+  .v2chip:hover { border-color:var(--accent) }
+  .v2group { margin-bottom:22px }
+  .v2ghead { display:flex; align-items:baseline; gap:10px; margin-bottom:6px }
+  .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
+  .v2ghead .n { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums }
+  .v2ghead .v2gtools { margin-left:auto; display:flex; gap:4px }
+  .v2ghead .v2gtools button { background:none; border:0; color:var(--dim); cursor:pointer; font-size:12.5px; padding:2px 6px }
+  .v2ghead .v2gtools button:hover { color:var(--text) }
+  .v2grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(96px, 1fr)); gap:14px 8px; min-height:64px; border-radius:12px; padding:8px 6px }
+  .v2grid.drop, .v2newgroup.drop { background:color-mix(in srgb, var(--accent) 10%, transparent); outline:1px dashed var(--accent) }
+  .v2group.collapsed .v2grid { display:none }
+  .v2agent { background:none; border:0; padding:6px 2px 4px; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:8px;
+             border-radius:12px; color:inherit; font:inherit; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none }
+  .v2agent:hover .v2ic { transform:translateY(-2px) }
+  .v2agent:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+  .v2ic { width:62px; height:62px; border-radius:18px; display:grid; place-items:center; font-size:30px; line-height:1; position:relative;
+          background:var(--panel); border:1px solid var(--line); transition:transform .12s }
+  .v2tint { position:absolute; inset:0; border-radius:inherit; opacity:.17 }
+  .v2ic.mono .v2tint { opacity:.75 }
+  .v2ic.mono .v2em { color:#fff; font-weight:700; font-size:26px }
+  .v2em { position:relative }
+  .v2name { font-size:12.5px; line-height:1.25; text-align:center; max-width:94px; overflow-wrap:anywhere;
+            display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden }
+  .v2agent.v2child .v2name::before { content:"↳ "; color:var(--dim) }
+  .v2ic::after { content:""; position:absolute; inset:-5px; border-radius:22px; border:2px solid transparent; pointer-events:none }
+  .v2st-working .v2ic::after { border-color:var(--warn); border-style:dashed; animation:v2spin 6s linear infinite }
+  .v2st-blocked .v2ic::after { border-color:var(--bad) }
+  .v2st-waiting .v2ic::after { border-color:var(--info); border-style:dotted }
+  .v2st-waiting .v2ic { animation:v2nudge 2.4s ease-in-out infinite }
+  .v2st-stopped .v2ic, .v2st-archived .v2ic { filter:grayscale(1); opacity:.55 }
+  .v2badge { position:absolute; right:-8px; top:-8px; min-width:22px; height:22px; border-radius:11px; display:grid; place-items:center; padding:0 3px;
+             font-size:11.5px; font-weight:800; border:2px solid var(--bg); color:#fff; z-index:1; line-height:1 }
+  .v2b-working { background:var(--warn); color:var(--accent-ink) }
+  .v2b-blocked { background:var(--bad) }
+  .v2b-waiting { background:var(--info) }
+  .v2b-stopped { background:var(--off) }
+  .v2b-note { background:var(--warn); color:var(--accent-ink); min-width:14px; height:14px; right:-4px; top:-4px; font-size:0 }
+  .v2b-shared { right:auto; left:-8px; top:auto; bottom:-8px; background:var(--panel-2); color:var(--text); font-size:11px }
+  @keyframes v2spin { to { transform:rotate(360deg) } }
+  @keyframes v2nudge { 0%,100% { transform:none } 50% { transform:translateY(-3px) } }
+  @media (prefers-reduced-motion: reduce) { .v2st-working .v2ic::after, .v2st-waiting .v2ic { animation:none } .v2ic { transition:none } }
+  .v2newgroup { border:1px dashed var(--line); border-radius:12px; padding:14px; text-align:center; color:var(--dim); font-size:13px; margin-bottom:20px }
+  body:not(.v2dragging) .v2newgroup { display:none }
+  .v2ghost { position:fixed; z-index:1001; pointer-events:none; opacity:.92; transform:translate(-50%,-60%) scale(1.06) }
+  .v2agent.v2src { opacity:.25 }
+  .v2caret { position:fixed; width:3px; background:var(--accent); border-radius:2px; z-index:1000; pointer-events:none }
+  body.v2dragging, body.v2dragging * { cursor:grabbing !important }
+  .v2tip { position:fixed; z-index:1002; background:var(--text); color:var(--bg); font-size:12.5px; padding:6px 9px; border-radius:8px;
+           max-width:260px; pointer-events:none; box-shadow:0 8px 24px rgba(0,0,0,.3); line-height:1.35 }
+  .v2tip b { display:block }
+  .v2tip ul { margin:4px 0 0; padding-left:16px }
+  /* the agent sheet */
+  .v2sheet { width:min(860px, 100vw); max-width:none; height:100%; max-height:none; margin:0 0 0 auto; border-radius:0; padding:0;
+             border:0; border-left:1px solid var(--line); display:none; flex-direction:column }
+  .v2sheet[open] { display:flex }
+  .v2sbar { display:flex; align-items:center; gap:10px; padding:10px 14px; padding-top:calc(10px + env(safe-area-inset-top, 0px)); border-bottom:1px solid var(--line) }
+  .v2sbar .v2ic { width:40px; height:40px; border-radius:12px; font-size:21px; cursor:pointer }
+  .v2sbar .v2ic::after { inset:-4px; border-radius:15px }
+  .v2sbar .v2ic.mono .v2em { font-size:18px }
+  .v2sbar .v2ttl { min-width:0; flex:1 }
+  .v2sbar .v2ttl b { display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:16px }
+  .v2sbar .v2ttl span { font-size:12.5px; color:var(--dim) }
+  .v2tabs { display:flex; gap:2px; padding:0 12px; border-bottom:1px solid var(--line); overflow-x:auto; flex:none }
+  .v2tabs button { background:none; border:0; border-bottom:2px solid transparent; border-radius:0; padding:10px 11px; cursor:pointer; color:var(--dim); white-space:nowrap; font:inherit; font-size:13.5px }
+  .v2tabs button[aria-selected="true"] { color:var(--text); border-bottom-color:var(--accent); font-weight:600 }
+  .v2pane { flex:1; overflow:auto; padding:16px 18px 40px; display:grid; gap:14px; align-content:start }
+  .v2row { display:grid; grid-template-columns:170px 1fr; gap:12px; align-items:baseline; padding-bottom:12px; border-bottom:1px solid var(--line) }
+  .v2row:last-child { border-bottom:0 }
+  .v2k { font-size:13px; color:var(--dim) }
+  .v2v { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0 }
+  .v2v .sub { flex-basis:100% }
+  .v2pill { font-size:12px; border-radius:999px; padding:2px 9px; border:1px solid var(--line) }
+  .v2pill.ok { color:var(--ok) } .v2pill.bad { color:var(--bad) } .v2pill.warn { color:var(--warn) } .v2pill.info { color:var(--info) }
+  .v2why { margin:0; padding-left:18px; font-size:13px; color:var(--dim); flex-basis:100% }
+  .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
+  .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
+  .v2notices:empty { display:none }
+  .v2emoji { display:flex; flex-wrap:wrap; gap:4px; margin:6px 0 }
+  .v2emoji button { font-size:20px; width:38px; height:38px; padding:0; line-height:1 }
+  .v2swatches { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 }
+  .v2swatches button { width:26px; height:26px; border-radius:50%; padding:0; border:2px solid transparent }
+  .v2swatches button[aria-pressed="true"] { border-color:var(--text) }
+  .v2menu { display:grid; gap:4px }
+  .v2menu h4 { margin:10px 0 2px; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim) }
+  .v2menu button { text-align:left; justify-content:flex-start }
+  @media (max-width:640px) {
+    .v2hub { grid-template-columns:1fr }
+    .v2face { display:none }
+    .v2row { grid-template-columns:1fr; gap:4px }
+    .v2grid { grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)) }
+  }
   /* ?demo screenshot mode: personal details unreadable */
   .demo .pii { filter:blur(6px); user-select:none; pointer-events:none }
 </style>
@@ -359,6 +471,11 @@
       <span class="appver" id="appVer" title="The build this browser is running. If it lags the server after a reload, something is serving you a cached page."></span>
       <span class="spacer"></span>
       <button id="installBtn" class="hbtn accent" title="Install Hatchabot as an app on this device" onclick="installApp()" hidden>⬇ Install app</button>
+      <span id="v2Bar">
+        <button class="hbtn accent" onclick="$('fabBtn').click()" title="Create a new agent">+ New agent</button>
+        <span id="v2InboxSlot"></span>
+        <button class="hbtn" onclick="openV2Menu()" title="Settings, health, usage, import and more" aria-label="Settings and more">⚙︎</button>
+      </span>
       <span class="sub" id="whoami"></span>
       <label class="switch" title="Light / dark theme">
         <span class="switch-ico">☀</span>
@@ -401,7 +518,71 @@
     <div class="resize-bar" id="activityResize" role="separator" aria-orientation="horizontal" aria-label="Resize recent activity" tabindex="0" title="Drag to resize · double-click to reset"></div>
   </div>
   <div id="agents"></div>
+  <div id="v2home" class="v2only">
+    <section class="v2hub" aria-labelledby="v2HubTitle">
+      <div class="v2face" aria-hidden="true">🐣</div>
+      <div class="v2hubmain">
+        <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
+        <div class="sub" id="v2HubLede">Say what you want in plain words. I create, fix, move and share agents, and I ask before I change anything.</div>
+        <div id="v2HubLogSlot"></div>
+        <div id="v2HubInputSlot"></div>
+        <div class="v2chips" id="v2Chips"></div>
+      </div>
+    </section>
+    <div id="v2groups"></div>
+    <div class="v2newgroup" id="v2NewGroup">Drop here to start a new group</div>
+  </div>
 </div>
+<div class="v2tip" id="v2Tip" hidden></div>
+
+<dialog id="v2AgentDlg" class="v2sheet" aria-labelledby="v2AgentName">
+  <div class="v2sbar" id="v2AgentBar"></div>
+  <div class="v2tabs" role="tablist" id="v2Tabs"></div>
+  <div class="v2pane" id="v2Pane"></div>
+</dialog>
+
+<dialog id="v2IconDlg" style="width:min(460px,94vw)">
+  <h3 style="margin:0 0 8px">Icon for <span id="v2IconName"></span></h3>
+  <div style="display:flex;align-items:center;gap:14px">
+    <span id="v2IconPreview"></span>
+    <div style="flex:1;min-width:0">
+      <label for="v2IconInput" style="margin-top:0">Emoji</label>
+      <input type="text" id="v2IconInput" maxlength="16" placeholder="Pick one below, or paste any emoji" oninput="v2IconPreview()">
+    </div>
+  </div>
+  <div class="v2emoji" id="v2EmojiRow"></div>
+  <label>Colour</label>
+  <div class="v2swatches" id="v2Swatches"></div>
+  <div class="err" id="v2IconErr"></div>
+  <div class="actions">
+    <button id="v2IconAutoBtn" onclick="v2IconAuto(this)" title="Hatchabot picks from its name and description">✨ Let Hatchabot pick</button>
+    <span class="spacer" style="flex:1"></span>
+    <button onclick="v2IconDlg.close()">Cancel</button>
+    <button class="primary" id="v2IconSaveBtn" onclick="v2IconSave(this)">Save</button>
+  </div>
+</dialog>
+
+<dialog id="v2MenuDlg" style="width:min(420px,94vw)">
+  <div style="display:flex;align-items:center"><h3 style="margin:0">Settings &amp; more</h3><span style="flex:1"></span><button onclick="v2MenuDlg.close()" aria-label="Close">✕</button></div>
+  <div class="v2menu" onclick="if (event.target.closest('button[data-go]')) v2MenuDlg.close()">
+    <h4>This machine</h4>
+    <button data-go onclick="openAiDlg()">⚙ Settings — AI sources, people, bots, machines, backups</button>
+    <h4>Your agents</h4>
+    <button data-go onclick="openFleetHealth()">📊 Health</button>
+    <button data-go onclick="openFleetUsage()">📊 Usage</button>
+    <button data-go onclick="openFleetSources()">📊 Which AI each agent uses</button>
+    <button data-go onclick="openAudit()">🕘 Recent activity</button>
+    <button data-go onclick="openFleetActions()">⚡ Bulk actions</button>
+    <button data-go onclick="rebuildAll()">Rebuild all</button>
+    <button data-go onclick="sortAllGroups()">Sort every group A→Z</button>
+    <h4>Add</h4>
+    <button data-go onclick="openGallery()">📋 Start from a template</button>
+    <button data-go onclick="$('importFile').click()">Import a .hatchabot file</button>
+    <h4>Other</h4>
+    <button data-go onclick="helpDlg.showModal()">❔ Help</button>
+    <button data-go onclick="location.href = location.pathname">Back to the classic look</button>
+  </div>
+</dialog>
 
 <button class="fab fab-top" id="topBtn" title="Back to top" hidden>↑</button>
 <button class="fab" id="fabBtn" title="New agent" hidden>+</button>
@@ -410,6 +591,7 @@
   <div class="console-bar">
     <b id="consoleTitle">Agent</b>
     <span class="spacer"></span>
+    <button id="consoleGearBtn" hidden title="This agent's settings" aria-label="Settings">⚙︎ Settings</button>
     <button id="consoleApproveBtn" class="primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner.">Approve this browser</button>
     <button id="consoleNewTab" class="primary" title="Open the same console in its own tab">Open in new tab ↗</button>
@@ -1341,7 +1523,7 @@
            title="Change tools stay refused until armed. Every change still needs your Confirm on its card.">
       <input type="checkbox" id="mgmtChatArm" onchange="toggleMgmtMode(this.checked)" style="width:auto;flex:none"> 🔓 Allow changes
     </label>
-    <button class="hbtn" title="Forget this conversation" onclick="resetMgmtChat()">New chat</button>
+    <button class="hbtn" id="mgmtChatNew" title="Forget this conversation" onclick="resetMgmtChat()">New chat</button>
   </div>
   <div id="mgmtChatLog" style="height:min(48vh,460px);overflow:auto;border:1px solid var(--line);border-radius:10px;
        padding:12px;margin:12px 0;display:flex;flex-direction:column;gap:8px"></div>
@@ -1871,6 +2053,9 @@ let poolAvail = 0; // instant bots ready — drives the create dialog's pool che
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
 let availableSource = {}; // profile id -> 'runtime' | 'curated' — was the list PROBED live, or the offline fallback
+
+/** The v2 home screen (icons, chat first) — opt-in with ?ui=v2 while it's new. */
+const UI_V2 = new URLSearchParams(location.search).get('ui') === 'v2';
 
 const api = async (path, opts = {}) => {
   const res = await fetch(path, {
@@ -4626,8 +4811,6 @@ function agentCard(a) {
   // members list. The server enforces this too — this just hides what would
   // 404 anyway. (role is absent on older servers → treat as owner.)
   if (a.role === 'user') return memberCard(a);
-  const pending = a.pendingAction?.type === 'bot_token';
-  const pairs = pairings[a.id] ?? [];
   return `
   <div class="card has-rail" id="card-${a.id}"${a.state !== 'ARCHIVED' ? ` data-agent-id="${a.id}" data-group="${esc(a.group || '')}" data-name="${esc(a.name)}"` : ''}>
     <div class="rail-col">
@@ -4652,41 +4835,7 @@ function agentCard(a) {
         <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
       </div>
       ${agentMeta(a)}
-      ${recheckNote(a)}
-      ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
-        <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
-      ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
-        <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
-      ${a.peersPending && !isRechecking(a) ? `<div class="pair">🔗 <span class="grow">Peer changes apply on the next rebuild — that's what installs its consult tool.</span>
-        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
-      ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
-        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
-      ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
-      ${botNameNote(a)}
-      ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
-      ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
-        <div class="pair">
-          <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
-          ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
-        </div>`).join('')}
-      ${pending ? tokenForm(a) : ''}
-      ${pairs.map(p => `
-        <div class="pair">
-          <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
-          <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
-                  title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
-          ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
-                  title="This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.">That's me — link</button>` : ''}
-          <button class="${myAccount.telegramUserId ? 'primary' : ''}" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
-        </div>`).join('')}
-      ${(members[a.id] ?? []).length > 1 ? `
-        <div class="members">👥 ${(members[a.id] ?? []).map(m => {
-          const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
-          const x = m.role === 'owner' ? '' :
-            `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
-          return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
-        }).join('')}
-        </div>` : ''}
+      ${agentNotices(a)}
       <div class="actions">
         <!-- "Telegram App" button retired: the agent NAME is the deep-link now;
              Telegram Web stays in the ⋯ menu. -->
@@ -4729,6 +4878,53 @@ function agentCard(a) {
       </div>
     </div>
   </div>`;
+}
+
+/**
+ * Everything on an agent that tells you something or waits on you — rebuild
+ * prompts, sync errors, a bot token to paste, people asking to be let in, the
+ * members list. One builder, so the classic card and the v2 settings sheet
+ * can never disagree about what needs doing.
+ */
+function agentNotices(a) {
+  const pending = a.pendingAction?.type === 'bot_token';
+  const pairs = pairings[a.id] ?? [];
+  return `
+      ${recheckNote(a)}
+      ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
+      ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
+        <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
+      ${a.peersPending && !isRechecking(a) ? `<div class="pair">🔗 <span class="grow">Peer changes apply on the next rebuild — that's what installs its consult tool.</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
+      ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
+      ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+      ${botNameNote(a)}
+      ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
+      ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
+        <div class="pair">
+          <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
+          ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
+        </div>`).join('')}
+      ${pending ? tokenForm(a) : ''}
+      ${pairs.map(p => `
+        <div class="pair">
+          <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
+          <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
+                  title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
+          ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
+                  title="This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.">That's me — link</button>` : ''}
+          <button class="${myAccount.telegramUserId ? 'primary' : ''}" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
+        </div>`).join('')}
+      ${(members[a.id] ?? []).length > 1 ? `
+        <div class="members">👥 ${(members[a.id] ?? []).map(m => {
+          const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
+          const x = m.role === 'owner' ? '' :
+            `<span class="kick" title="Remove this member" onclick="kick('${a.id}','${jsq(m.userId)}','${jsq(m.displayName || (m.role === 'owner' ? 'You' : m.userId.slice(0, 8)))}')">×</span>`;
+          return `<span class="member ${m.channelUserId ? 'linked' : ''}" title="${m.channelUserId ? 'Linked to Telegram' : 'Not linked to Telegram yet'}">${label}${m.role === 'owner' ? ' ★' : ''}${x}</span>`;
+        }).join('')}
+        </div>` : ''}`;
 }
 
 /** The ⋯ overflow menu: observational and occasional actions, state-gated. */
@@ -7539,6 +7735,7 @@ function archivedAgents() { return agents.filter(a => a.state === 'ARCHIVED'); }
 let archiveOpen = false;
 
 function renderAgents() {
+  if (UI_V2) return renderV2();
   const el = $('agents');
   // Show "Rebuild all" only when there's more than one agent to rebuild.
   $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
@@ -7868,6 +8065,13 @@ function renderMgmtStrip() {
 
 async function openMgmtChat() {
   mgmtChatDlg.showModal();
+  await loadMgmtChat();
+  $('mgmtChatInput').focus();
+}
+
+/** Fill the chat log from the server's transcript — the dialog's, or (v2) the
+ *  home screen's hub, which borrows the same log/input elements. */
+async function loadMgmtChat() {
   const log = $('mgmtChatLog');
   log.innerHTML = '<div class="sub">Loading…</div>';
   try {
@@ -7889,11 +8093,10 @@ async function openMgmtChat() {
       }
       mgmtBubble(m.kind, m.text);
     }
-    if (!s.transcript.length) {
+    if (!s.transcript.length && !UI_V2) {
       mgmtBubble('assistant', 'Hi — ask about your fleet, or tell me what to create or change. Try: “which agents look unhealthy?” or “draft a recipe-keeper agent with a cuisine setup field”.');
     }
   } catch (e) { log.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
-  $('mgmtChatInput').focus();
 }
 
 function mgmtBubble(kind, text) {
@@ -7993,6 +8196,7 @@ async function toggleMgmtMode(on) {
 
 async function resetMgmtChat() {
   try { await api('/v1/mgmt/chat', { method: 'DELETE' }); } catch { /* nothing to clear */ }
+  if (UI_V2) return loadMgmtChat(); // the hub: already on screen
   openMgmtChat();
 }
 
@@ -8061,6 +8265,491 @@ function jsq(v) {
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+
+// ---- UI v2 (?ui=v2) -----------------------------------------------------------
+// The icon home screen: agents as icons in groups, a click opens the agent to
+// talk to (OpenClaw's own console), and every other control lives in one
+// settings sheet. It drives the same functions and dialogs as the classic
+// cards, so nothing here is a second implementation of an action — only a
+// different way in. Ships dark behind the flag until it replaces the cards.
+
+/** Same palette and hash as src/orchestrator/agentIcons.ts, so an agent with
+ *  no stored colour shows the one the server would give it. */
+const V2_PALETTE = ['#3aa36b', '#2f9e8f', '#3a8fd0', '#5a7fd6', '#8a6fd0', '#c26fa0',
+  '#d05a5a', '#d0703a', '#e0a13a', '#c9b03a', '#8a9a5a', '#7a8a9a'];
+function v2ColorFor(name) {
+  let h = 2166136261;
+  for (const c of String(name).toLowerCase()) h = Math.imul(h ^ c.codePointAt(0), 16777619);
+  return V2_PALETTE[(h >>> 0) % V2_PALETTE.length];
+}
+const V2_ARCHIVE = '__archived__', V2_NEW_GROUP = '__new__';
+const v2Mine = (a) => (a.role ? a.role === 'owner' : true);
+const v2Find = (id) => agents.find(x => x.id === id);
+
+/** One status per agent, for the ring, the badge and the tooltip — never colour alone. */
+function v2Status(a) {
+  const waiting = (pairings[a.id] ?? []).length;
+  const why = [];
+  if (waiting) why.push(`${waiting} ${waiting > 1 ? 'people want' : 'person wants'} to talk to it — let them in from its settings`);
+  for (const f of agentAttention(a)) why.push(f.why);
+  const limited = sourceUsageOf(a.aiProfileId)?.status === 'limited';
+  let st;
+  if (a.state === 'ARCHIVED') st = { cls: 'archived', glyph: '', label: 'Archived' };
+  else if (a.state === 'DELETING') st = { cls: 'working', glyph: '↻', label: 'Deleting' };
+  else if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') {
+    st = { cls: 'working', glyph: '↻', label: a.state === 'PROVISIONING' ? 'Setting up' : a.state === 'REBUILDING' ? 'Rebuilding' : 'Working on it' };
+  }
+  else if (a.state === 'FAILED') st = { cls: 'blocked', glyph: '!', label: 'Failed' };
+  else if (a.pendingAction) st = { cls: 'waiting', glyph: '✋', label: 'Waiting on you' };
+  else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
+  else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
+  else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
+  else if (why.length && v2Mine(a)) st = { cls: 'note', glyph: '•', label: 'Worth a look' };
+  else st = { cls: 'ok', glyph: '', label: a.state === 'RUNNING' ? 'Ready' : a.state };
+  return { ...st, why };
+}
+
+function v2IconHTML(a, st) {
+  const color = /^#[0-9a-f]{6}$/i.test(a.iconColor || '') ? a.iconColor : v2ColorFor(a.name);
+  const face = a.icon ? esc(a.icon) : esc((a.name.trim()[0] || '?').toUpperCase());
+  return `<span class="v2ic${a.icon ? '' : ' mono'}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
+    + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
+    + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
+    + '</span>';
+}
+
+let v2Collapsed = (() => { try { return JSON.parse(localStorage.getItem('hb-v2-collapsed') || '{}') || {}; } catch { return {}; } })();
+function v2Fold(key) {
+  v2Collapsed[key] = !v2IsCollapsed(key);
+  try { localStorage.setItem('hb-v2-collapsed', JSON.stringify(v2Collapsed)); } catch {}
+  renderV2();
+}
+const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 'archived');
+
+function renderV2() {
+  if (v2drag.active) return; // never re-render out from under a drag
+  v2MaybeAutoIcons();
+  v2RenderChips();
+  v2RefreshSheet();
+  const live = liveAgents();
+  const liveIds = new Set(live.map(x => x.id));
+  const sections = [], byKey = new Map();
+  const section = (key, label, drop) => {
+    let s = byKey.get(key);
+    if (!s) { s = { key, label, drop, items: [] }; byKey.set(key, s); sections.push(s); }
+    return s;
+  };
+  const named = live.some(a => a.group);
+  const emitted = new Set();
+  const withKids = (s, a, depth) => {
+    emitted.add(a.id);
+    s.items.push({ a, child: depth > 0 });
+    for (const k of live.filter(k => k.parentAgentId === a.id && !emitted.has(k.id))) withKids(s, k, depth + 1);
+  };
+  const groupSection = (a) => section('g:' + (a.group || ''), a.group || (named ? 'Default' : 'Agents'), a.group || '');
+  for (const a of live) {
+    if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
+    if (!v2Mine(a)) continue; // shared with me: its own section, below
+    withKids(groupSection(a), a, 0);
+  }
+  for (const a of live) if (!emitted.has(a.id) && v2Mine(a)) withKids(groupSection(a), a, 0); // lineage-cycle fallback
+  for (const a of live) if (!v2Mine(a)) section('shared', 'Shared with me', null).items.push({ a, child: false });
+  const parked = archivedAgents();
+  if (parked.length) for (const a of parked) section('archived', 'Archived', V2_ARCHIVE).items.push({ a, child: false });
+  else if (live.some(v2Mine)) section('archived', 'Archived', V2_ARCHIVE); // somewhere to drop one
+
+  $('v2groups').innerHTML = sections.map(s => `
+    <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
+      <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
+        <span class="v2gtools">
+          ${s.key.startsWith('g:') && s.items.length > 1 ? `<button onclick="sortGroup('${jsq(s.drop)}')" title="Sort this group A→Z">A→Z</button>` : ''}
+          ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
+          <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
+        </span></div>
+      <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
+        ${s.items.map(({ a, child }) => {
+          const st = v2Status(a);
+          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${a.id}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
+            aria-label="${esc(a.name)} — ${esc(st.label)}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
+        }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
+      </div>
+    </section>`).join('');
+}
+
+// Icons for agents that have none yet: one batch, picked by the management AI.
+let v2IconTry = 0;
+function v2MaybeAutoIcons() {
+  if (!agents.some(a => v2Mine(a) && !a.icon && a.state !== 'DELETED')) return;
+  if (Date.now() - v2IconTry < 5 * 60e3) return;
+  v2IconTry = Date.now();
+  api('/v1/agents/icons/auto', { method: 'POST', body: {} })
+    .then(r => { if (r.assigned) refresh(false); }).catch(() => {});
+}
+
+// ---- tooltip --------------------------------------------------------------------
+function v2ShowTip(el) {
+  const a = v2Find(el.dataset.v2id); if (!a) return;
+  const st = v2Status(a);
+  const tip = $('v2Tip');
+  tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
+    + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '');
+  tip.hidden = false;
+  const r = el.querySelector('.v2ic').getBoundingClientRect();
+  const w = tip.offsetWidth;
+  tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + 'px';
+  tip.style.top = Math.max(8, Math.min(innerHeight - tip.offsetHeight - 8, r.bottom + 10)) + 'px';
+}
+document.addEventListener('mouseover', (e) => { const el = e.target.closest?.('.v2agent'); if (el && !v2drag.active) v2ShowTip(el); });
+document.addEventListener('mouseout', (e) => { if (e.target.closest?.('.v2agent')) $('v2Tip').hidden = true; });
+document.addEventListener('focusin', (e) => { const el = e.target.closest?.('.v2agent'); if (el) v2ShowTip(el); else $('v2Tip').hidden = true; });
+window.addEventListener('scroll', () => { $('v2Tip').hidden = true; }, { passive: true });
+
+// ---- drag to rearrange ------------------------------------------------------------
+// Mouse: press and move. Touch: press and hold, then move — a plain swipe
+// still scrolls the page. Drop between icons to place it, on a group to join
+// it, on Archived to archive, or on the strip at the bottom for a new group.
+const v2drag = { st: null, active: false, suppress: false };
+$('v2groups').addEventListener('pointerdown', (e) => {
+  const el = e.target.closest('.v2agent');
+  if (!el || e.button !== 0 || el.dataset.v2fixed) return;
+  const a = v2Find(el.dataset.v2id); if (!a) return;
+  const st = { el, a, x0: e.clientX, y0: e.clientY, pid: e.pointerId, touch: e.pointerType === 'touch', held: e.pointerType !== 'touch' };
+  if (st.touch) st.timer = setTimeout(() => { st.held = true; navigator.vibrate?.(15); }, 350);
+  v2drag.st = st;
+});
+window.addEventListener('touchmove', (e) => { if (v2drag.active) e.preventDefault(); }, { passive: false });
+window.addEventListener('pointermove', (e) => {
+  const st = v2drag.st; if (!st || e.pointerId !== st.pid) return;
+  if (!v2drag.active) {
+    const moved = Math.hypot(e.clientX - st.x0, e.clientY - st.y0);
+    if (!st.held) { if (moved > 8) { clearTimeout(st.timer); v2drag.st = null; } return; } // a swipe: let it scroll
+    if (moved < 6) return;
+    v2drag.active = true;
+    $('v2Tip').hidden = true;
+    document.body.classList.add('v2dragging');
+    st.el.classList.add('v2src');
+    st.ghost = st.el.cloneNode(true); st.ghost.classList.add('v2ghost'); st.ghost.classList.remove('v2src');
+    st.caret = Object.assign(document.createElement('div'), { className: 'v2caret' });
+    document.body.append(st.ghost, st.caret);
+  }
+  e.preventDefault();
+  st.ghost.style.left = e.clientX + 'px'; st.ghost.style.top = e.clientY + 'px';
+  st.target = v2DropTarget(e.clientX, e.clientY, st);
+  document.querySelectorAll('.v2grid.drop, .v2newgroup.drop').forEach(x => x.classList.remove('drop'));
+  if (st.target?.zone) st.target.zone.classList.add('drop');
+  const c = st.target?.caret;
+  st.caret.hidden = !c;
+  if (c) Object.assign(st.caret.style, { left: `${c.x - 1}px`, top: `${c.top}px`, height: `${c.h}px` });
+});
+function v2DropTarget(x, y, st) {
+  const under = document.elementFromPoint(x, y);
+  if (!under) return null;
+  if (under.closest('#v2NewGroup')) return { zone: $('v2NewGroup'), newGroup: true };
+  const grid = under.closest('.v2grid[data-v2drop]');
+  if (!grid) return null;
+  const group = grid.dataset.v2drop;
+  if (group === V2_ARCHIVE) return { zone: grid, archive: true };
+  const tiles = [...grid.querySelectorAll('.v2agent:not(.v2child)')].filter(t => t !== st.el);
+  let best = null, bestD = Infinity;
+  for (const t of tiles) {
+    const r = t.getBoundingClientRect();
+    const d = Math.hypot(x - (r.left + r.width / 2), y - (r.top + r.height / 2));
+    if (d < bestD) { bestD = d; best = { t, r }; }
+  }
+  if (!best || bestD > 140) return { zone: grid, group, before: null };
+  const after = x > best.r.left + best.r.width / 2;
+  const next = after ? tiles[tiles.indexOf(best.t) + 1] : best.t;
+  return { zone: grid, group, before: next ? next.dataset.v2id : null,
+    caret: { x: after ? best.r.right + 4 : best.r.left - 4, top: best.r.top, h: best.r.height } };
+}
+function v2DragEnd() {
+  const st = v2drag.st;
+  clearTimeout(st?.timer);
+  st?.el.classList.remove('v2src'); st?.ghost?.remove(); st?.caret?.remove();
+  document.body.classList.remove('v2dragging');
+  document.querySelectorAll('.v2grid.drop, .v2newgroup.drop').forEach(x => x.classList.remove('drop'));
+  v2drag.st = null; v2drag.active = false;
+}
+window.addEventListener('pointerup', async (e) => {
+  const st = v2drag.st; if (!st || e.pointerId !== st.pid) return;
+  const wasActive = v2drag.active, t = st.target, a = st.a;
+  v2DragEnd();
+  if (!wasActive) return; // a plain click: the click handler opens it
+  v2drag.suppress = true; setTimeout(() => { v2drag.suppress = false; }, 0);
+  if (!t) return renderV2();
+  try {
+    if (t.archive) {
+      if (a.state !== 'ARCHIVED') archiveAgent(a.id, a.name, a.state);
+      return renderV2();
+    }
+    if (a.state === 'ARCHIVED') { await restoreAgent(a.id, a.name); return; }
+    if (t.newGroup) {
+      const name = (prompt(`Name the new group for "${a.name}":`) || '').trim();
+      if (!name) return renderV2();
+      await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: name } });
+      toast(`${a.name} moved to ${name}`);
+    } else {
+      const r = await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: t.before ? { before: t.before } : { before: null, group: t.group } });
+      if ((r.group ?? '') !== (a.group ?? '')) toast(`${a.name} moved to ${r.group || 'Default'}`);
+    }
+    await refresh(false);
+  } catch (err) { toast(err.message); renderV2(); }
+});
+window.addEventListener('pointercancel', (e) => { if (v2drag.st && e.pointerId === v2drag.st.pid) { v2DragEnd(); renderV2(); } });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && v2drag.active) { v2DragEnd(); renderV2(); } });
+$('v2groups').addEventListener('click', (e) => {
+  const el = e.target.closest('.v2agent'); if (!el) return;
+  if (v2drag.suppress) { e.preventDefault(); return; }
+  v2Open(el.dataset.v2id);
+});
+
+// ---- opening an agent: chat first ---------------------------------------------------
+const v2CanChat = (a) => v2Mine(a) && a.state === 'RUNNING' && a.hasGateway;
+function v2Open(id) {
+  const a = v2Find(id); if (!a) return;
+  $('v2Tip').hidden = true;
+  if (!v2Mine(a)) return openV2Agent(id);
+  // Something waiting on you (a token to paste, someone asking to join, a
+  // failure) — the settings sheet is where you act on it, so start there.
+  const st = v2Status(a);
+  if (st.cls === 'waiting' || a.state === 'FAILED' || !v2CanChat(a) || !window.isSecureContext) return openV2Agent(id);
+  openGateway(a.id, a.slug);
+}
+
+// ---- the settings sheet ----------------------------------------------------------------
+let v2AgentId = null, v2Tab = 'overview';
+const V2_TABS = [['overview', 'Overview'], ['ai', 'AI & personality'], ['knowledge', 'Knowledge'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+
+function openV2Agent(id, tab) {
+  const a = v2Find(id); if (!a) return;
+  if (v2AgentId !== id) v2Tab = 'overview';
+  v2AgentId = id;
+  if (tab) v2Tab = tab;
+  v2RenderSheet();
+  if (!v2AgentDlg.open) v2AgentDlg.showModal();
+}
+function v2Close() { if (v2AgentDlg.open) v2AgentDlg.close(); }
+function v2RenderSheetBar() {
+  const a = v2Find(v2AgentId);
+  if (!a) { v2Close(); return; }
+  const st = v2Status(a);
+  const chat = v2CanChat(a) && window.isSecureContext;
+  $('v2AgentBar').className = `v2sbar v2st-${st.cls}`;
+  $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${a.id}')" onkeydown="if(event.key==='Enter')openV2Icon('${a.id}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
+    <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b><span>${esc(st.label)}${!v2Mine(a) ? ' · shared with you' : ''}</span></div>
+    ${chat ? `<button class="primary" onclick="v2Close();openGateway('${a.id}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
+    <button onclick="v2Close()" aria-label="Close">✕</button>`;
+}
+function v2RenderSheet() {
+  const a = v2Find(v2AgentId); if (!a) return v2Close();
+  v2RenderSheetBar();
+  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'advanced') : V2_TABS;
+  if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
+  $('v2Tabs').hidden = !tabs.length;
+  $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${a.id}','${k}')">${l}</button>`).join('');
+  $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
+  const g = $('v2GroupSel'); if (g) g.value = a.group || '';
+}
+
+function v2MemberPane(a) {
+  const run = a.state === 'RUNNING' && a.deepLink;
+  return `<div class="v2row"><div class="v2k">Chat</div><div class="v2v">
+      ${run ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open in Telegram</a>
+               <a class="btn" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : '<span>Not running right now.</span>'}
+      <span class="sub">It answers in Telegram, which works wherever you are.</span></div></div>
+    ${a.persona ? `<div class="v2row"><div class="v2k">What it does</div><div class="v2v">${esc(a.persona)}</div></div>` : ''}
+    <div class="v2row"><div class="v2k">Memory</div><div class="v2v">${a.sharedMemory ? 'Shared — it remembers what everyone who uses it tells it.' : 'Private to each person who talks to it.'}</div></div>`;
+}
+
+function v2Pane(a, tab) {
+  const id = a.id, n = jsq(a.name), run = a.state === 'RUNNING', built = !!a.runtimeRef;
+  const B = (label, call, extra = '') => `<button onclick="${call}" ${extra}>${label}</button>`;
+  const row = (k, v) => `<div class="v2row"><div class="v2k">${k}</div><div class="v2v">${v}</div></div>`;
+  const st = v2Status(a);
+  const src = profiles.find(p => p.id === a.aiProfileId);
+  const host = hosts.find(h => h.id === a.hostId);
+  const groups = [...new Set(agents.filter(x => v2Mine(x) && x.group).map(x => x.group))].sort();
+  switch (tab) {
+    case 'overview': return `
+      <div class="v2notices">${agentNotices(a).trim()}</div>
+      ${row('Status', `<span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : st.cls === 'waiting' ? 'info' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
+        ${a.state === 'STOPPED' ? B('Start', `act('${id}','start')`) : ''}
+        ${a.state === 'FAILED' ? B('Retry', `act('${id}','provision')`, 'class="primary"') : ''}
+        ${a.state === 'ARCHIVED' ? B('📤 Restore', `v2Close();restoreAgent('${id}','${n}')`, 'class="primary"') + B('🔍 Inspect', `openInspect('${id}','${n}')`) : ''}
+        ${a.state === 'FAILED' && a.stateReason ? `<span class="sub">${esc(a.stateReason)}</span>` : ''}
+        ${st.why.length ? `<ul class="v2why">${st.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}`)}
+      ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${B('Rename…', `openEdit('${id}','${n}','def')`)}
+        ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
+      ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
+          <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
+          <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
+      ${a.state !== 'ARCHIVED' ? row('Telegram', a.botUsername
+        ? `<span>@${esc(a.botUsername)}</span>
+           ${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open</a>` : ''}
+           ${run ? B('Invite…', `invite('${id}','${n}')`) : ''}
+           ${run && a.botDisplayName && a.botDisplayName !== a.name ? B('🏷 Sync name', `syncBotName('${id}','${n}')`, `title="Telegram shows it as '${esc(a.botDisplayName)}'"`) : ''}
+           <span class="sub">Optional. It's how you reach it from your phone, and how people reach it when this machine isn't reachable from where they are.</span>`
+        : '<span class="sub">No Telegram bot.</span>') : ''}
+      ${run ? row('Checks', `${B('❤️ Health', `openHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
+        ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
+    case 'ai': return `
+      ${row('AI source', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change AI or model', `openEdit('${id}','${n}','ai')`)}
+        ${a.pendingModel && a.pendingModel !== a.model ? `<span class="sub">Switches to ${esc(a.pendingModel)} on the next rebuild.</span>` : ''}`)}
+      ${row('Personality', `${B('Edit definition', `openEdit('${id}','${n}','def')`)}${B('Snapshots', `openEdit('${id}','${n}','snap')`)}
+        <span class="sub">Who it is (SOUL.md), how it works (AGENTS.md), and what it remembers (MEMORY.md)${a.parameters?.length ? ', plus its setup values' : ''}.</span>`)}
+      ${run ? row('Memory', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
+        <span class="sub">Save what matters from the current chat, or bring back earlier conversations after a reset.</span>`) : ''}`;
+    case 'knowledge': return `
+      ${row('Data &amp; folders', `<span>${esc(a.dataSummary || 'none')}</span>${B('Manage', `openEdit('${id}','${n}','data')`)}`)}
+      ${row('Connections', B('Google &amp; other accounts', `openEdit('${id}','${n}','conn')`))}
+      ${built ? row('Chat history', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">Every conversation, as a file.</span>`) : ''}`;
+    case 'sharing': {
+      const mem = (members[id] ?? []).filter(m => m.role !== 'owner');
+      return `
+      ${row('People', `<span>${mem.length ? mem.map(m => `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`).join(', ') : 'Only you'}</span>
+        ${run ? B('Invite…', `invite('${id}','${n}')`) : ''}
+        ${mem.length ? '<span class="sub">To remove someone, use the × by their name on the Overview tab.</span>' : ''}`)}
+      ${row('Other agents', B('🔗 Which agents it can ask', `openEdit('${id}','${n}','peers')`))}
+      ${row('Telegram', B('Group chats &amp; bot', `openEdit('${id}','${n}','tg')`))}
+      ${run ? row('Copies', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
+        ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
+        ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
+        ${a.parameters?.length && !a.parentAgentId ? B('👪 New child', `deriveChild('${id}','${n}')`) : ''}
+        ${agents.some(k => k.parentAgentId === id) ? B('📥 Proposals', `openProposals('${id}','${n}')`) + B('⬇ Push to children', `pushDefinition('${id}','${n}')`) : ''}
+        ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}`;
+    }
+    case 'schedule': return `
+      ${row('Scheduled tasks', `${run ? B('⏰ Open tasks', `openCrons('${id}','${n}')`, 'class="primary"') : '<span>Start it to see its tasks.</span>'}
+        <span class="sub">Things it does on its own, like a Friday summary or a morning check.</span>`)}`;
+    case 'advanced': return `
+      ${a.state !== 'ARCHIVED' ? row('Environment', `<span>${(a.envVars || []).length} variable${(a.envVars || []).length === 1 ? '' : 's'}</span>${B('Edit', `openEdit('${id}','${n}','env')`)}`) : ''}
+      ${row('Machine', `<span>${esc(host ? (host.kind === 'local' ? (host.hostname || host.name) : host.name) : '—')}</span>
+        ${(run || a.state === 'STOPPED') && built && hosts.length > 1 ? B('Move…', `moveHostAgent('${id}','${n}')`) : ''}
+        ${(run || a.state === 'STOPPED') && built ? B('Move to another cluster', `rehostAgent('${id}','${n}')`) : ''}`)}
+      ${built ? row('Runtime', `<span>${esc(a.image || 'fleet default')}${a.openclawVersion ? ' · OpenClaw ' + esc(a.openclawVersion) : ''}</span>
+        ${run || a.state === 'STOPPED' ? B('Rebuild', `rebuild('${id}')`, 'title="New container, memory kept"') : ''}
+        ${run && a.hasGateway ? B('OpenClaw console', `v2Close();openGateway('${id}','${jsq(a.slug)}')`) : ''}`) : ''}
+      ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
+      <div class="v2danger"><h4>Careful</h4><div class="v2v">
+        ${['RUNNING', 'STOPPED', 'FAILED'].includes(a.state) ? B('📥 Archive', `v2Close();archiveAgent('${id}','${n}','${a.state}')`, 'title="Keep it and its memory; hand its Telegram bot back"') : ''}
+        ${a.state !== 'DELETING' ? B('Delete…', `v2Close();del('${id}','${n}')`, 'class="danger"') : ''}
+      </div></div>`;
+  }
+  return '';
+}
+
+async function v2SetGroup(id, value) {
+  let group = value;
+  if (value === V2_NEW_GROUP) {
+    group = (prompt('Name the new group:') || '').trim();
+    if (!group) { $('v2GroupSel').value = v2Find(id)?.group || ''; return; }
+  }
+  try {
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { group: group || null } });
+    toast(group ? `Moved to ${group}` : 'Moved out of its group');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+
+// Keep an open sheet current as the poll brings news (a pairing request, a
+// finished rebuild), but never repaint a pane someone is typing in.
+function v2RefreshSheet() {
+  if (!v2AgentDlg.open) return;
+  const pane = $('v2Pane');
+  const busy = [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
+  if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
+}
+v2AgentDlg.addEventListener('close', () => { v2AgentId = null; });
+
+// ---- icon picker ---------------------------------------------------------------------
+const V2_EMOJI = ['📈', '💹', '🧾', '⚖️', '💰', '🏢', '🏡', '🚗', '✈️', '🧭', '📅', '✅', '☑️', '🍳', '🥗', '🏃', '🩺', '🛡️',
+  '💻', '🖥️', '🏛️', '🎓', '📚', '🎮', '📺', '💼', '🚀', '💡', '🎨', '🎵', '💐', '🎤', '📰', '🌮', '🌴', '🤖'];
+let v2IconFor = null, v2IconColor = null;
+function openV2Icon(id) {
+  const a = v2Find(id); if (!a) return;
+  v2IconFor = id; v2IconColor = a.iconColor || v2ColorFor(a.name);
+  $('v2IconName').textContent = a.name;
+  $('v2IconInput').value = a.icon || '';
+  $('v2IconErr').textContent = '';
+  $('v2EmojiRow').innerHTML = V2_EMOJI.map(e => `<button type="button" data-emoji="${e}" aria-label="${e}">${e}</button>`).join('');
+  v2RenderSwatches();
+  v2IconPreview();
+  v2IconDlg.showModal();
+}
+$('v2EmojiRow').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-emoji]'); if (!b) return;
+  $('v2IconInput').value = b.dataset.emoji; v2IconPreview();
+});
+function v2RenderSwatches() {
+  $('v2Swatches').innerHTML = V2_PALETTE.map(c => `<button type="button" data-color="${c}" style="background:${c}" aria-label="Colour ${c}" aria-pressed="${c === v2IconColor}"></button>`).join('');
+}
+$('v2Swatches').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-color]'); if (!b) return;
+  v2IconColor = b.dataset.color; v2RenderSwatches(); v2IconPreview();
+});
+function v2IconPreview() {
+  const a = v2Find(v2IconFor); if (!a) return;
+  const icon = $('v2IconInput').value.trim();
+  $('v2IconPreview').innerHTML = v2IconHTML({ ...a, icon: icon || undefined, iconColor: v2IconColor }, { glyph: '' });
+}
+async function v2IconSave(btn) {
+  const icon = $('v2IconInput').value.trim();
+  btn.disabled = true;
+  try {
+    await api(`/v1/agents/${v2IconFor}`, { method: 'PATCH', body: { icon: icon || null, iconColor: v2IconColor } });
+    v2IconDlg.close();
+    await refresh(false);
+  } catch (e) { $('v2IconErr').textContent = /single emoji/.test(e.message) ? 'That isn’t a single emoji. Pick one above, or paste just one.' : e.message; }
+  finally { btn.disabled = false; }
+}
+async function v2IconAuto(btn) {
+  btn.disabled = true; btn.textContent = 'Picking…';
+  try {
+    const r = await api('/v1/agents/icons/auto', { method: 'POST', body: { ids: [v2IconFor], redo: true } });
+    const got = r.icons?.[0];
+    if (got) { $('v2IconInput').value = got.icon; v2IconColor = got.color; v2RenderSwatches(); v2IconPreview(); }
+    $('v2IconErr').textContent = r.via === 'keywords' ? 'No management AI is set up, so this was picked from its name. It is saved already.' : 'Picked and saved.';
+    await refresh(false);
+  } catch (e) { $('v2IconErr').textContent = e.message; }
+  finally { btn.disabled = false; btn.textContent = '✨ Let Hatchabot pick'; }
+}
+
+// ---- the hub: the management bot at the centre --------------------------------------------
+function v2RenderChips() {
+  const needs = agents.filter(a => v2Mine(a) && a.state !== 'ARCHIVED' && v2Status(a).cls === 'blocked').slice(0, 2);
+  const chips = [
+    ...needs.map(a => `What's wrong with ${a.name}?`),
+    'Which agents look unhealthy?',
+    'Which agents use the most AI this week?',
+    'Make a new agent that…',
+  ];
+  const html = chips.map(c => `<button type="button" class="v2chip" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
+  if ($('v2Chips').innerHTML !== html) $('v2Chips').innerHTML = html;
+}
+$('v2Chips').addEventListener('click', (e) => {
+  const c = e.target.closest('[data-chip]'); if (!c) return;
+  const text = c.dataset.chip;
+  $('mgmtChatInput').value = text.endsWith('…') ? text.slice(0, -1) + ' ' : text;
+  $('mgmtChatInput').focus();
+  if (!text.endsWith('…')) sendMgmtChat();
+});
+function openV2Menu() { v2MenuDlg.showModal(); }
+
+function initV2() {
+  document.body.classList.add('v2');
+  // The hub borrows the management chat's own controls, so the web chat keeps
+  // one implementation (and one set of ids) whichever look is showing.
+  $('v2HubLlm').append($('mgmtChatLlm'));
+  $('v2HubTools').append($('mgmtChatArm').closest('label'), $('mgmtChatNew'));
+  $('v2HubLogSlot').append($('mgmtChatLog'));
+  $('v2HubInputSlot').append($('mgmtChatInput').parentElement);
+  $('mgmtChatInput').placeholder = 'e.g. “make a travel agent for our Sicily trip and share it with Sophie”';
+  $('v2InboxSlot').append($('inboxBtn'));
+  $('consoleGearBtn').hidden = false;
+  $('consoleGearBtn').onclick = () => { const id = consoleAgentId; closeConsole(); openV2Agent(id); };
+  void loadMgmtChat();
+}
+if (UI_V2) initV2();
 
 loadConfig(); // whoami + auth mode even when the cookie is already valid
 refresh(true);

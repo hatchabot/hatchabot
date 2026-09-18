@@ -168,6 +168,10 @@ export interface Agent {
   group?: string;
   /** The agent class (model/source tier) this agent belongs to, if any. */
   classId?: string;
+  /** Its picture on the home screen: one emoji, and a #rrggbb tint behind it.
+   *  Absent until chosen (by the owner, or picked from the name). Cosmetic. */
+  icon?: string;
+  iconColor?: string;
   sortOrder?: number;
   /** Setup fields this agent's shares/templates ask the importer to fill. */
   parameters?: TemplateParam[];

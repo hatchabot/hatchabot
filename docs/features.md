@@ -14,6 +14,39 @@ bots that front them outlive any one agent and can be recycled into the next. Yo
 (installable as a phone PWA), the `hatchabot` CLI, or an optional Telegram
 management bot.
 
+## The new home screen (preview)
+
+Open the app with `?ui=v2` on the end of its address (for example
+`https://your-machine.ts.net/?ui=v2`) to try the redesigned home screen. The
+classic view stays the default until the new one replaces it; everything
+underneath is the same, so you can switch back and forth freely.
+
+- **Agents are icons** in their groups. Drag one to reorder it, onto another
+  group to move it, onto **Archived** to archive it, or onto the strip that
+  appears at the bottom to start a new group. On a phone, press and hold,
+  then drag; an ordinary swipe still scrolls.
+- **Status lives on the icon**: a dashed spinning ring while it rebuilds, red
+  with **!** when it failed or its AI source is rate-limited, a dotted blue
+  ring when it is waiting on you (a bot token, someone asking to join),
+  greyed out when stopped. Hover for the reason.
+- **Click an icon to talk to it.** It opens OpenClaw's console in the page
+  (over HTTPS, see `docs/tailscale.md`). The **⚙ Settings** button in its bar
+  opens the agent's settings. An agent that needs you opens straight to
+  settings instead.
+- **Settings are one sheet with tabs**: Overview, AI & personality,
+  Knowledge, Sharing, Schedule, Advanced. Every button from the classic
+  card is in one of them.
+- **Hatchabot itself is at the top**: the management chat, always open. Ask
+  it to create, fix, move or share agents; changes still need your Confirm.
+- **Icons are picked for you.** The first time the new screen sees agents
+  without one, your management AI chooses an emoji and colour for each from
+  its name and description (or, with no AI set up, a keyword table does).
+  Change any of them by clicking the icon in its settings. Icons travel with
+  the agent: backups, shared copies and agents sent to someone else keep
+  theirs.
+- Machine-wide settings, health, usage, bulk actions, templates and import are
+  under the **⚙** button in the header.
+
 ## Creating & talking to agents
 
 To create an agent, tap **+** in the web app: name it, optionally answer

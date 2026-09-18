@@ -1,3 +1,4 @@
+import { validIcon, validIconColor } from './agentIcons.js';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { Agent, TemplateParam } from '../domain/types.js';
@@ -91,7 +92,7 @@ export interface TemplateManifest {
   format: typeof TEMPLATE_FORMAT;
   version: number;
   exportedAt: string;
-  agent: { name: string; persona: string; sharedMemory: boolean };
+  agent: { name: string; persona: string; sharedMemory: boolean; icon?: string; iconColor?: string };
   files: Record<string, string>;
   ai: { vendor: string };
   /** What the agent expects to read — declarations only, never secrets. */
@@ -113,6 +114,9 @@ const TemplateSchema = z.object({
     name: z.string().min(1).max(64),
     persona: z.string().max(8000),
     sharedMemory: z.boolean(),
+    // Its home-screen icon travels with it; a bad value is dropped, not fatal.
+    icon: z.string().max(16).optional().catch(undefined),
+    iconColor: z.string().max(7).optional().catch(undefined),
   }),
   files: z
     .record(z.string().max(200), z.string().max(200_000))
@@ -185,7 +189,7 @@ export async function exportTemplate(
     format: TEMPLATE_FORMAT,
     version: TEMPLATE_VERSION,
     exportedAt: new Date().toISOString(),
-    agent: { name: agent.name, persona: agent.persona, sharedMemory: agent.sharedMemory },
+    agent: { name: agent.name, persona: agent.persona, sharedMemory: agent.sharedMemory, icon: agent.icon, iconColor: agent.iconColor },
     files,
     ai: { vendor: profile?.vendor ?? 'anthropic' },
     // agentTurn crons travel as DECLARATIONS (name/schedule/message) — the
@@ -461,6 +465,9 @@ export function importTemplate(
     });
   } catch {
     throw new TransferError(`Couldn't create "${name}" — an agent with that name may already exist here. Import under a different name.`);
+  }
+  if (validIcon(manifest.agent.icon)) {
+    store.setAgentIcon(agent.id, manifest.agent.icon, validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : null);
   }
 
   // Seed the trained files (and MEMORY.md if the template carried it).

@@ -262,3 +262,18 @@ describe('the CLI keeps up with the app', () => {
     expect(cli).toMatch(/RATE-LIMITED since/);
   });
 });
+
+describe('icon palette: agentIcons.ts ↔ the v2 home screen', () => {
+  // The page shows a stable colour for an agent with none stored by hashing its
+  // name into the same palette the server uses. Two copies of the list, no
+  // import edge: if they drift, an icon's colour changes the moment the server
+  // stores one.
+  it('the page carries the same palette, in the same order', async () => {
+    const { ICON_PALETTE } = await import('../src/orchestrator/agentIcons.js');
+    const html = read('web/index.html');
+    const m = html.match(/const V2_PALETTE = \[([^\]]+)\]/);
+    expect(m).toBeTruthy();
+    const page = [...m![1]!.matchAll(/'(#[0-9a-f]{6})'/gi)].map((x) => x[1]);
+    expect(page).toEqual([...ICON_PALETTE]);
+  });
+});

@@ -59,6 +59,7 @@ import {
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
+import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
@@ -2696,6 +2697,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
            *  clears back to the managed default (on). */
           richMessages: z.boolean().nullable().optional(),
           cronTriggers: z.boolean().optional(),
+          /** Home-screen icon: one emoji, and a #rrggbb tint. Cosmetic and
+           *  immediate. `null` clears (the app then shows a picked default). */
+          icon: z.string().refine(validIcon, { message: 'icon must be a single emoji' }).nullable().optional(),
+          iconColor: z.string().refine(validIconColor, { message: 'iconColor must look like #3a8fd0' }).nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -2713,9 +2718,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.parameters === undefined &&
         parsed.data.groupAccess === undefined &&
         parsed.data.richMessages === undefined &&
-        parsed.data.cronTriggers === undefined
+        parsed.data.cronTriggers === undefined &&
+        parsed.data.icon === undefined &&
+        parsed.data.iconColor === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
+      }
+
+      if (parsed.data.icon !== undefined || parsed.data.iconColor !== undefined) {
+        store.setAgentIcon(agent.id, parsed.data.icon, parsed.data.iconColor);
       }
 
       if (parsed.data.parameters !== undefined) {
@@ -3660,6 +3671,56 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return publicAgent(store.getAgent(agent.id)!);
     },
   );
+
+  // Pick home-screen icons (ui v2) for the caller's agents that have none —
+  // or, with `redo`, for the named ones. One call to the owner's management
+  // AI covers the batch; without one (or if it fails) a keyword table picks.
+  // Either way the result is validated to one emoji and a palette colour.
+  const iconRuns = new Set<string>();
+  app.post<{ Body: { ids?: string[]; redo?: boolean } }>('/v1/agents/icons/auto', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const b = (req.body ?? {}) as { ids?: unknown; redo?: unknown };
+    if (b.ids !== undefined && (!Array.isArray(b.ids) || b.ids.length > 200 || b.ids.some((x) => typeof x !== 'string'))) {
+      return reply.code(400).send({ error: 'ids must be a list of agent ids.' });
+    }
+    const ids = b.ids ? new Set(b.ids as string[]) : undefined;
+    const targets = store
+      .listAgents(ownerId)
+      .filter((a) => a.ownerId === ownerId && a.state !== 'DELETED')
+      .filter((a) => (ids ? ids.has(a.id) : true))
+      .filter((a) => (b.redo === true ? true : !a.icon))
+      .slice(0, 80);
+    if (!targets.length) return { assigned: 0, via: 'none', icons: [] };
+    if (iconRuns.has(ownerId)) return reply.code(429).send({ error: 'Already picking icons — give it a moment.' });
+    iconRuns.add(ownerId);
+    try {
+      const profile = pickMgmtProfile(store, ownerId);
+      const complete: IconCompleter | undefined = profile
+        ? async (system, user) => {
+            const r = await runMgmtCompletion(
+              { secrets, apiComplete: deps.mgmtLlmComplete, cliComplete: deps.mgmtCliComplete },
+              profile,
+              { system, tools: [], messages: [{ role: 'user', content: user }], maxTokens: 4000 },
+            );
+            return (r.content as Array<{ type?: string; text?: string }>)
+              .filter((c) => c?.type === 'text' && typeof c.text === 'string')
+              .map((c) => c.text)
+              .join('\n');
+          }
+        : undefined;
+      const picks = await pickIcons(targets.map((a) => ({ id: a.id, name: a.name, persona: a.persona })), complete);
+      for (const p of picks) {
+        // Re-check at write time: the owner may have chosen one meanwhile.
+        const now = store.getAgent(p.id);
+        if (!now || (now.icon && b.redo !== true)) continue;
+        store.setAgentIcon(p.id, p.icon, p.color);
+      }
+      const via = picks.some((p) => p.via === 'ai') ? 'ai' : 'keywords';
+      return { assigned: picks.length, via, icons: picks.map(({ id, icon, color }) => ({ id, icon, color })) };
+    } finally {
+      iconRuns.delete(ownerId);
+    }
+  });
 
   // Reorder an agent. Cosmetic, immediate, no rebuild. Three shapes:
   //   { dir: 'up' | 'down' }       one place within its section

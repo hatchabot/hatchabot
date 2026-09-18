@@ -1,3 +1,4 @@
+import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { z } from 'zod';
@@ -59,6 +60,9 @@ export interface ExportManifest {
     /** Host folders it could read. Paths are machine-specific — carried as a
      *  declaration so the destination can check them, never auto-applied. */
     sharedPaths?: string[];
+    /** Home-screen icon (one emoji) and its tint. */
+    icon?: string;
+    iconColor?: string;
     /** Per-agent model override. Applied on import only if the destination
      *  profile's menu still offers it; otherwise dropped to the default. */
     model?: string;
@@ -109,6 +113,9 @@ const ManifestSchema = z.object({
     sharedMemory: z.boolean(),
     sharedPaths: z.array(z.string().max(512)).max(8).optional(),
     model: z.string().max(64).optional(),
+    // Its home-screen icon travels with it; a bad value is dropped, not fatal.
+    icon: z.string().max(16).optional().catch(undefined),
+    iconColor: z.string().max(7).optional().catch(undefined),
   }),
   ai: z.object({
     vendor: z.string().max(32),
@@ -229,6 +236,8 @@ export async function exportAgent(
       sharedMemory: agent.sharedMemory,
       sharedPaths: agent.sharedPaths,
       model: agent.model,
+      icon: agent.icon,
+      iconColor: agent.iconColor,
     },
     ai: {
       vendor: profile?.vendor ?? 'anthropic',
@@ -371,6 +380,8 @@ async function importAgentInner(
     hostId: host.id,
     persona: manifest.agent.persona,
     sharedMemory: manifest.agent.sharedMemory,
+    icon: validIcon(manifest.agent.icon) ? manifest.agent.icon : undefined,
+    iconColor: validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : undefined,
     // The per-agent model override survives the move only if the destination
     // profile is cloud and still offers it — landing on a different profile
     // (or a local one) drops it back to that profile's default rather than
