@@ -41,6 +41,12 @@ export interface ConfigCommand {
   rawShell?: string;
   /** True when the value is a secret and must be redacted in logs. */
   sensitive?: boolean;
+  /**
+   * Cosmetic: a failure must not fail the provision. The script runs under
+   * `set -euo pipefail`, so without this a naming hiccup would abort a
+   * rebuild and cost the owner their agent over a label.
+   */
+  optional?: boolean;
 }
 
 export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent';
@@ -401,6 +407,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // re-applied agents.defaults.model.primary — one source of truth.
   if (patch.telegram) add.push('--bind', `telegram:${patch.telegram.accountId}`);
   cmds.push({ argv: add });
+  // Name it what the owner calls it. `agents add` takes only the id (the
+  // slug), so the Control UI labelled every agent "stock-advisor" rather than
+  // "Stock Advisor". Cosmetic, so a failure here must not fail a provision.
+  if (patch.displayName) {
+    cmds.push({ argv: ['agents', 'set-identity', '--agent', patch.agentId, '--name', patch.displayName], optional: true });
+  }
 
   // Heal volumes seeded before this rule (and imported ones): strip any
   // frozen per-agent model so the default actually governs.

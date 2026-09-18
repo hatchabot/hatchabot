@@ -65,6 +65,9 @@ export interface WorkspaceSeed {
 
 export interface OpenClawConfigPatch {
   agentId: string;
+  /** The agent's Hatchabot name. OpenClaw otherwise shows the slug, so the
+   *  console named every agent something the owner never called it. */
+  displayName?: string;
   /** Bare model id, e.g. "claude-opus-4-8". Prefixing is the writer's job. */
   model?: string;
   /**

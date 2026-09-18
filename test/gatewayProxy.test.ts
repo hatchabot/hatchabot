@@ -37,7 +37,12 @@ afterEach(() => {
 
 /** A stand-in for the agent's OpenClaw gateway: upgrades, then echoes. */
 async function fakeGateway(): Promise<{ port: number; server: Server }> {
-  const server = createServer((_req, res) => res.end('page'));
+  const server = createServer((_req, res) => {
+    // What OpenClaw actually sends: framing forbidden outright.
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'; script-src 'self'");
+    res.end('page');
+  });
   server.on('upgrade', (_req, socket) => {
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
     socket.on('data', (d) => socket.write(Buffer.concat([Buffer.from('echo:'), d])));
@@ -106,5 +111,25 @@ describe('Control UI websocket proxy', () => {
   it('destroys an upgrade for an agent the caller does not own', async () => {
     const { port } = await world({ ownerId: 'someone-else', via: 'identity' });
     expect((await upgrade(port, '/v1/agents/a1/ui/')).status).toMatch(/DESTROYED|TIMEOUT/);
+  });
+});
+
+
+describe('the console can be embedded by Hatchabot, and only by Hatchabot', () => {
+  // OpenClaw forbids framing (X-Frame-Options: DENY, frame-ancestors 'none'),
+  // which forced the console into a separate tab. Served through the proxy it
+  // is same-origin, so it may be framed by this app — and by no other site.
+  it('relaxes framing to same-origin, and keeps the rest of the policy', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    const res = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/index.html`, { headers: { 'x-hatchabot-owner': OWNER } })
+      .finally(() => { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    const csp = res.headers.get('content-security-policy') ?? '';
+    expect(csp).toContain("frame-ancestors 'self'");
+    expect(csp).not.toContain("frame-ancestors 'none'");
+    expect(csp).toContain("script-src 'self'"); // everything else untouched
   });
 });

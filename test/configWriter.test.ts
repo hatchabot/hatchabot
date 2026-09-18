@@ -339,3 +339,23 @@ describe('session continuity (idle window + active-memory)', () => {
     expect(v.config.model).toBeUndefined();
   });
 });
+
+describe('the OpenClaw console shows the agent by its Hatchabot name', () => {
+  // `agents add` takes only the id, so the console labelled every agent by its
+  // slug ("stock-advisor") instead of what the owner calls it.
+  it('sets the identity name after adding the agent, and never lets it fail a provision', () => {
+    const cmds = buildConfigCommands({ agentId: 'stock-advisor', displayName: 'Stock Advisor', authMode: 'api-key' } as never);
+    const i = cmds.findIndex((c) => c.argv[0] === 'agents' && c.argv[1] === 'set-identity');
+    expect(i).toBeGreaterThan(-1);
+    expect(cmds[i]!.argv).toEqual(['agents', 'set-identity', '--agent', 'stock-advisor', '--name', 'Stock Advisor']);
+    expect(cmds[i]!.optional).toBe(true);
+    // …and only once the agent exists.
+    const add = cmds.findIndex((c) => c.argv[0] === 'agents' && c.argv[1] === 'add');
+    expect(add).toBeLessThan(i);
+  });
+
+  it('adds nothing when no name is known', () => {
+    const cmds = buildConfigCommands({ agentId: 'x', authMode: 'api-key' } as never);
+    expect(cmds.some((c) => c.argv[1] === 'set-identity')).toBe(false);
+  });
+});

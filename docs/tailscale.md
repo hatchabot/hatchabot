@@ -76,3 +76,24 @@ app needed for invitees). In **password mode** that's a bad trade: one shared
 password guards everything. With `HATCHABOT_AUTH=identity` (per-user accounts,
 see docs/identity.md) the calculus changes — but note the join pages are still
 reachable by invite code alone, by design.
+
+
+## The OpenClaw console needs HTTPS
+
+Each agent's OpenClaw console (⋯ → **OpenClaw (debug)**) creates a device
+identity with WebCrypto, which browsers only allow in a *secure context*: an
+`https://` page, or `http://localhost`. Tailscale encrypting the wire doesn't
+count — the browser judges by the URL scheme alone.
+
+So from another machine, open Hatchabot at its **https** address
+(`https://<machine>.<tailnet>.ts.net`, set up with `tailscale serve` above), not
+`http://<machine>:8080`. Over plain http the app says so instead of opening a
+console that can never connect. It works on the host itself because
+`localhost` counts as secure even without TLS — which is why it can look like
+"only works on localhost".
+
+The console opens inside Hatchabot rather than in a new tab (an *Open in new
+tab* link is there if you want one). It is served through Hatchabot on its own
+origin — that is what lets it work off-machine while the agent's gateway port
+stays bound to loopback — so it is an owner tool: whoever opens it has a shell
+in the agent's container.

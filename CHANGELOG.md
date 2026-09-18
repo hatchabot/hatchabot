@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.13.0] — 2026-09-17
+
+### Changed
+- **The OpenClaw console opens inside Hatchabot**, in a large panel, instead of a new browser tab — an *Open in new tab* link remains. OpenClaw forbids framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`); served through Hatchabot's proxy it is same-origin, so the proxy now permits framing by this app and still refuses every other site. Closing the panel (or pressing Esc) drops the frame, so its connection and token don't outlive it.
+- **Agents carry their Hatchabot name inside OpenClaw.** `agents add` takes only the id, so the console labelled every agent by its slug. Provisioning now sets the identity name, and a rename updates it live without a rebuild. The step is marked optional, so a naming hiccup can never fail a provision (the provisioning script runs under `set -euo pipefail`).
+
+### Documentation
+- `docs/tailscale.md` explains why the console needs HTTPS off-machine: it creates a device identity with WebCrypto, which browsers allow only on `https://` or `localhost` — the reason it can look like it "only works on localhost".
+
 ## [1.12.3] — 2026-09-17
 
 ### Changed

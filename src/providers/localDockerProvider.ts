@@ -281,7 +281,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       );
       for (const cmd of batchConfigCommands(buildConfigCommands(spec.workspace.configPatch))) {
         const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
-        const line = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
+        const base = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
+        const line = cmd.optional ? `${base} || true` : base;
         script.push(
           cmd.argv[0] === 'agents' && cmd.argv[1] === 'add'
             ? `if [ ! -d ${shq(workspaceDir)} ]; then ${line}; fi`

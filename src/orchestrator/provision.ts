@@ -475,6 +475,7 @@ export async function buildRuntimeSpec(
       }),
       configPatch: {
         agentId: agent.slug,
+        displayName: agent.name,
         model: effectiveModel(agent, profile),
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',

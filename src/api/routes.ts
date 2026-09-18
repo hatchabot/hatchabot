@@ -2908,6 +2908,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // infallible DB writes together, so nothing was half-committed on a 502.
       if (name !== undefined && name !== agent.name) {
         store.setAgentName(agent.id, name);
+        // And inside OpenClaw, whose console otherwise keeps the old name (or
+        // the slug) until the next rebuild. Live, cosmetic, best-effort.
+        if (agent.runtimeRef && agent.state === 'RUNNING') {
+          void providerFor(agent.hostId)
+            .exec(agent.runtimeRef, ['agents', 'set-identity', '--agent', agent.slug, '--name', name], { timeoutMs: 20_000 })
+            .catch(() => {});
+        }
         // Keep Telegram in step: the bot's display name is what people see in
         // the chat header, and it previously froze at whatever the agent was
         // called when its token was first leased (or, for a hand-pasted bot,
@@ -3324,7 +3331,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!upstream) return reply.code(502).send({ error: "The agent's gateway did not answer." });
     for (const [k, v] of Object.entries(upstream.headers)) {
       // set-cookie: the gateway is the least-trusted component; it must not plant cookies on our origin.
-      if (v !== undefined && !/^(transfer-encoding|connection|content-length|set-cookie)$/i.test(k)) reply.header(k, v);
+      if (v === undefined || /^(transfer-encoding|connection|content-length|set-cookie)$/i.test(k)) continue;
+      // OpenClaw forbids framing outright (X-Frame-Options: DENY and
+      // frame-ancestors 'none'), which forced the console into a separate tab.
+      // Served through us it is same-origin, so permit framing by THIS app and
+      // no one else: clickjacking protection against other sites is unchanged.
+      if (/^x-frame-options$/i.test(k)) { reply.header(k, 'SAMEORIGIN'); continue; }
+      if (/^content-security-policy$/i.test(k)) {
+        const csp = (Array.isArray(v) ? v.join('; ') : v).replace(/frame-ancestors\s+[^;]*/i, "frame-ancestors 'self'");
+        reply.header(k, csp);
+        continue;
+      }
+      reply.header(k, v);
     }
     return reply.code(upstream.status).send(upstream.body);
   });
