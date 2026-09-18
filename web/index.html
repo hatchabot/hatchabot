@@ -81,6 +81,15 @@
     border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
   .pool-ready[hidden] { display: none; }
   .pool-dot { color: var(--ok); font-size: 10px; line-height: 1; }
+  .rt-steps { margin:10px 0 4px; padding-left:20px; display:grid; gap:6px; font-size:13.5px }
+  .rt-caps { margin-top:10px }
+  .rt-caps > summary { cursor:pointer; font-size:13.5px; color:var(--text) }
+  .cap-wrap { overflow-x:auto; margin-top:8px }
+  .cap-table { width:100%; border-collapse:collapse; font-size:13px }
+  .cap-table th { text-align:left; font-weight:600; color:var(--dim); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; padding:6px 8px; border-bottom:1px solid var(--line) }
+  .cap-table td { padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:top }
+  .cap-table td:first-child { white-space:nowrap }
+  .cap-ver { font-family:ui-monospace,monospace; white-space:nowrap }
   .pool-status { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin:10px 0 4px; padding:10px 12px;
     border:1px solid var(--line); border-radius:10px; background:var(--panel-2); font-size:14px }
   /* Jump-to legend: fixed in the left margin, so it stays put while the cards
@@ -1554,7 +1563,7 @@
   <section id="paneRuntime" role="tabpanel" hidden>
     <div class="sub">
       The shared runtime image every agent runs; each agent picks up changes on its
-      next <b>Rebuild</b>. The live capability list below is probed from the image itself.
+      next <b>Rebuild</b>. What agents can do is probed live from the image itself.
       <details style="margin-top:4px"><summary style="cursor:pointer">What's baked in, and the upgrade rule</summary>
       <div style="margin-top:4px">The image bakes in the OpenClaw version, the Claude CLI, the <b>gog</b> Google
       Workspace CLI, the local embedding model (semantic memory search), the <b>PDF/OCR stack</b>
@@ -1569,22 +1578,34 @@
     <h4 style="margin:18px 0 4px">Images on this machine</h4>
     <div class="sub" style="margin-bottom:10px"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
     <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
-    <details id="rtBuild" style="margin-bottom:12px">
-      <summary style="cursor:pointer">🔨 Build a base-image candidate (new OpenClaw version)</summary>
+    <details id="rtBuild" class="sec-drawer" style="margin-bottom:12px">
+      <summary><b>🧪 Try a newer OpenClaw version, safely</b> <span class="sub">— build a candidate, test it on one agent, then promote</span></summary>
+      <ol class="rt-steps">
+        <li><b>Build a candidate.</b> Hatchabot builds a second copy of the runtime with the new OpenClaw version,
+          next to the current one. No agent changes. It takes a few minutes, and the log appears here.</li>
+        <li><b>Try it on one agent.</b> The candidate shows up in the list below. Press <b>Try on one agent…</b>,
+          pick a low-stakes agent, and use it for a while. Everything else stays on the current version.</li>
+        <li><b>Promote, or back out.</b> Happy? <b>Promote to fleet</b> makes it the default, and each agent moves over
+          on its next rebuild. Not happy? The <b>✕</b> by the agent's name puts it back, and you can delete the candidate.</li>
+      </ol>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
-        <input type="text" id="rtBuildVersion" placeholder="OpenClaw version (blank = script default)" maxlength="64" style="flex:1;min-width:200px;font-family:ui-monospace,monospace">
-        <label style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" id="rtBuildCandidate" checked style="width:auto"> candidate only (don't touch :latest)</label>
-        <button class="primary" id="rtBuildBtn" onclick="startBaseBuild()">Build</button>
+        <input type="text" id="rtBuildVersion" placeholder="OpenClaw version, e.g. 2026.9.0 — blank = the newest" maxlength="64" style="flex:1;min-width:220px;font-family:ui-monospace,monospace">
+        <button class="primary" id="rtBuildBtn" onclick="startBaseBuild()">Build candidate</button>
       </div>
+      <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-top:8px" class="sub">
+        <input type="checkbox" id="rtBuildCandidate" checked style="width:auto">
+        Keep it as a candidate (recommended). Untick to replace the fleet default directly, skipping the trial.</label>
       <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
     </details>
     <div id="rtList">Loading…</div>
     <div class="sub" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();if(UI_V2)showTab('derived');const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
     <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
     </div>
+    <div id="rtCapsHome">
     <h4 style="margin:18px 0 4px">What agents can do</h4>
     <div class="sub">Probed live from the image — this list can't drift from reality.</div>
     <div id="runtimeCaps" style="margin-top:8px">Loading…</div>
+    </div>
 
     <div id="derivedSection" hidden>
       <h4 style="margin:22px 0 4px">Derived images</h4>
@@ -3065,17 +3086,14 @@ async function loadRuntimeCaps() {
       api('/v1/media-key').catch(() => ({ set: false })),
     ]);
     const t = c.tools || {};
-    const row = (name, detail, version) => `<div class="pair" style="padding:3px 0">
-      <span class="grow"><span style="color:var(--ok)">●</span> <b>${esc(name)}</b> <span class="sub">— ${detail}</span></span>
-      ${version ? `<span class="sub" style="font-family:ui-monospace,monospace">${esc(version)}</span>` : ''}</div>`;
+    const row = (name, detail, version, dot = 'var(--ok)') => `<tr><td><span style="color:${dot}">●</span> <b>${esc(name)}</b></td>
+      <td class="sub">${detail}</td><td class="sub cap-ver">${version ? esc(version) : ''}</td></tr>`;
     const rows = [];
     if (t.openclaw) rows.push(row('Agent runtime', 'conversations, memory, Telegram gateway, scheduled tasks', t.openclaw));
     if (t['claude-code']) rows.push(row('Claude Code', 'the Anthropic model runtime agents think with', t['claude-code']));
     rows.push(row('Web search', 'DuckDuckGo, enabled per agent (keyless)'));
     rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings, keyless'));
-    rows.push(`<div class="pair" style="padding:3px 0"><span class="grow">
-      <span style="color:${mk.set ? 'var(--ok)' : 'var(--warn)'}">●</span> <b>Voice notes</b>
-      <span class="sub">— ${mk.set ? 'transcribed via the Gemini media key' : 'needs the Gemini media key (AI sources tab)'}</span></span></div>`);
+    rows.push(row('Voice notes', mk.set ? 'transcribed via the Gemini media key' : 'needs the Gemini media key (Settings → Connections)', '', mk.set ? 'var(--ok)' : 'var(--warn)'));
     if (t.gog) rows.push(row('Google Workspace', 'Gmail / Drive / Calendar / Sheets / Docs via <code>gog</code> — each agent connects its own account in chat', t.gog));
     if (t.python) rows.push(row('Python', 'agents run scripts; libraries install per agent (<code>pip install --target ~/.openclaw/pylibs</code>)', t.python));
     if (t.git) rows.push(row('Git + SSH', 'repo data sources with generated deploy keys', t.git));
@@ -3083,7 +3101,8 @@ async function loadRuntimeCaps() {
     const missing = (c.missing || []).length
       ? `<div class="sub" style="margin-top:8px">Not included (by design, to keep the image lean): ${c.missing.map(esc).join(', ')} — so no local audio/video processing or browser automation. Agents can still fetch web pages and read PDFs/images via the model.</div>`
       : '';
-    el.innerHTML = rows.join('') + missing;
+    el.innerHTML = `<div class="cap-wrap"><table class="cap-table"><thead><tr><th>Capability</th><th>What it's for</th><th>Version</th></tr></thead>
+      <tbody>${rows.join('')}</tbody></table></div>` + missing;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
@@ -3105,16 +3124,16 @@ async function loadRuntime() {
     else if (r.upgradeAvailable) latestLine = `<div style="color:var(--warn)">⬆ OpenClaw <b>${esc(r.npmLatest)}</b> is the latest stable — you're on ${cur}.</div>`;
     else latestLine = `<div style="color:var(--ok)">✓ up to date with the latest stable (${esc(r.npmLatest)}).</div>`;
     const lagging = (agents ?? []).filter(a => a.updateAvailable).length;
+    // The machine owner gets buttons below (candidate → try → promote), so
+    // the command-line hints and the repeated "newer version" line only
+    // confuse there; everyone else still needs them.
+    const owner = !!myAccount.hostOwner;
     el.innerHTML =
       `<div style="font-size:15px"><b>Runtime image:</b> OpenClaw ${cur}</div>
-       <div style="margin-top:4px">${latestLine}</div>
+       ${owner && r.upgradeAvailable ? '' : `<div style="margin-top:4px">${latestLine}</div>`}
        ${r.npmExtendedStable ? `<div class="sub" style="margin-top:2px">extended-stable track: <code>${esc(r.npmExtendedStable)}</code></div>` : ''}
        ${lagging ? `<div class="sub" style="margin-top:8px">${lagging} agent${lagging > 1 ? 's are' : ' is'} on an older image — <b>Rebuild</b> each to adopt the current one.</div>` : ''}
-       <div class="sub" style="margin-top:12px">Upgrade the image from the host:
-         <div class="invite-link" style="margin-top:6px">hatchabot upgrade-image</div>
-         <div style="margin-top:4px">…or build a candidate to smoke-test first:</div>
-         <div class="invite-link" style="margin-top:4px">hatchabot upgrade-image --version &lt;X&gt; --candidate</div>
-       </div>`;
+       ${owner ? '' : `<div class="sub" style="margin-top:12px">Upgrading is done by whoever runs this machine.</div>`}`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
@@ -3903,12 +3922,16 @@ async function loadRuntimeImages() {
     const [rt, imgs] = await Promise.all([api('/v1/runtime'), api('/v1/runtime/images')]);
     rtData = imgs;
     $('rtDefault').textContent = imgs.default;
-    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}) — build it as a candidate, try it on one agent, then promote.` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
+    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). <a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
+    if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
     renderRuntimeList();
   } catch (e) { $('rtList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 function renderRuntimeList() {
   const d = rtData; if (!d) return;
+  // Park the capability list before the redraw, or innerHTML would destroy it.
+  const caps = $('runtimeCaps');
+  if (caps && $('rtList').contains(caps)) { $('rtCapsHome').append(caps); $('rtCapsHome').hidden = false; }
   if (!d.tags.length) { $('rtList').innerHTML = '<div class="sub">No runtime image is built on this machine yet.</div>'; return; }
   const defV = d.defaultInfo?.openclawVersion;
   $('rtList').innerHTML = d.tags.map(t => {
@@ -3937,9 +3960,15 @@ function renderRuntimeList() {
         ${canDelete ? `<button class="danger" onclick="deleteImageTag('${jsq(t.tag)}')" title="Remove this tag (refused while anything is pinned to it or a container still runs on it)">Delete</button>` : ''}
       </div>
       <pre id="rtHist_${key}" hidden style="margin:8px 0 0;max-height:260px;overflow:auto;font-size:11px;white-space:pre-wrap;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px"></pre>
+      ${t.isDefault ? `<details class="rt-caps" id="rtCapsBox"${rtCapsOpen ? ' open' : ''} ontoggle="rtCapsOpen = this.open"><summary>What agents can do with this image</summary><div id="rtCapsSlot"></div></details>` : ''}
     </div>`;
   }).join('');
+  // The capability list describes the fleet default, so it lives under that
+  // image's entry (the element moves; its loader keeps filling it wherever it is).
+  const slot = $('rtCapsSlot');
+  if (slot) { slot.append($('runtimeCaps')); $('rtCapsHome').hidden = true; }
 }
+let rtCapsOpen = false;
 async function toggleImageDetails(tag, key) {
   const pre = $('rtHist_' + key);
   if (!pre.hidden) { pre.hidden = true; return; }

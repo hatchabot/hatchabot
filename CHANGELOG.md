@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.22.1] — 2026-09-18
+
+### Changed
+- **Base images reads more plainly.**
+  - "Build a base-image candidate" is now **Try a newer OpenClaw version, safely**, with the three steps spelled out: build a candidate (no agent changes), try it on one agent, then promote or back out. The newest version is pre-filled when there is one, and "Try it safely →" on the upgrade notice opens it.
+  - "Candidate only" is reworded as the recommended default.
+- **What agents can do** is a table (capability, what it's for, version) inside a fold-out under `hatchabot-runtime:latest`, the image it describes, rather than a list at the bottom of the tab.
+- For the machine owner, the tab no longer repeats the "newer version" notice or shows `hatchabot upgrade-image` command lines next to the buttons that do the same thing. Other accounts are told upgrading is done by whoever runs the machine.
+
 ## [1.22.0] — 2026-09-18
 
 ### Changed
