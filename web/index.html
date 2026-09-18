@@ -473,6 +473,11 @@
   .v2b-waiting { background:var(--info) }
   .v2b-stopped { background:var(--off) }
   .v2b-note { background:var(--warn); color:var(--accent-ink); min-width:14px; height:14px; right:-4px; top:-4px; font-size:0 }
+  .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
+          display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
+  .v2tg svg { display:block; margin-left:-1px }
+  .v2sbar .v2tg { width:16px; height:16px; right:-5px; bottom:-5px }
+  .v2sbar .v2tg svg { width:9px; height:9px }
   .v2b-shared { right:auto; left:-8px; top:auto; bottom:-8px; background:var(--panel-2); color:var(--text); font-size:11px }
   @keyframes v2spin { to { transform:rotate(360deg) } }
   @keyframes v2nudge { 0%,100% { transform:none } 50% { transform:translateY(-3px) } }
@@ -8503,6 +8508,8 @@ function v2IconHTML(a, st) {
   return `<span class="v2ic${a.icon ? '' : ' mono'}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
     + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
     + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
+    // A small paper-plane mark: this agent is reachable on Telegram.
+    + (a.botUsername ? `<span class="v2tg" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span>` : '')
     + '</span>';
 }
 
@@ -8590,6 +8597,7 @@ function v2ShowTip(el) {
   const st = v2Status(a);
   const tip = $('v2Tip');
   tip.innerHTML = `<b>${esc(a.name)} · ${esc(st.label)}</b>${a.persona ? esc(a.persona.slice(0, 140)) : ''}${!v2Mine(a) ? '<br>Shared with you.' : ''}`
+    + `<br>${a.botUsername ? `On Telegram as @${esc(a.botUsername)}` : 'No Telegram — chat here in Hatchabot'}`
     + (st.why.length ? `<ul>${st.why.slice(0, 4).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : '');
   tip.hidden = false;
   const r = el.querySelector('.v2ic').getBoundingClientRect();
@@ -8716,16 +8724,17 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Knowledge'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Knowledge'], ['messaging', 'Messaging'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
 /** Where each classic edit tab now lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
-const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'sharing', env: 'advanced' };
+const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
 /** The classic edit sections each sheet tab embeds, with a heading for each. */
 const V2_EMBED = {
   personality: [['paneDef', ''], ['paneEditSnap', 'Snapshots']],
   ai: [['paneEditAi', '']],
   knowledge: [['paneEditData', 'Data & folders'], ['paneEditConn', 'Connections']],
-  sharing: [['paneEditTg', 'People & Telegram'], ['paneEditPeers', 'Other agents it can ask']],
+  messaging: [['paneEditTg', '']],
+  sharing: [['paneEditPeers', 'Other agents it can ask']],
   advanced: [['paneEditEnv', 'Environment']],
   schedule: [['cronBody', '']],
 };
@@ -8831,10 +8840,22 @@ function v2Pane(a, tab) {
       ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
           <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
-      ${a.state !== 'ARCHIVED' ? row('Telegram', a.botUsername
+      ${a.state !== 'ARCHIVED' ? row('Messaging', a.botUsername
+        ? `<span>Telegram · @${esc(a.botUsername)}</span>${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open</a>` : ''}${B('Manage…', goto('messaging'))}`
+        : `<span>None — you talk to it here.</span>${B('Add Telegram…', goto('messaging'))}`) : ''}
+      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
+        ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
+        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
+    case 'personality': return `
+      ${slot('paneDef')}
+      ${run ? `<h4 class="v2sec">Memory</h4>${row('Conversation', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
+        <span class="sub">Save what matters from the current chat, or bring back earlier conversations after a reset.</span>`)}` : ''}
+      ${slot('paneEditSnap')}`;
+    case 'ai': return slot('paneEditAi');
+    case 'messaging': return a.state === 'ARCHIVED' ? row('Telegram', '<span>Archived agents have no bot. Restore it to get one.</span>') : `
+      ${a.state !== 'ARCHIVED' ? row('Telegram bot', a.botUsername
         ? `<span>@${esc(a.botUsername)}</span>
            ${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open</a>` : ''}
-           ${run ? B('Invite…', `invite('${id}','${n}')`) : ''}
            ${run && a.botDisplayName && a.botDisplayName !== a.name ? B('🏷 Sync name', `syncBotName('${id}','${n}')`, `title="Telegram shows it as '${esc(a.botDisplayName)}'"`) : ''}
            ${run || a.state === 'STOPPED' ? B('Remove…', `v2RemoveTelegram('${id}','${n}','${jsq(a.botUsername)}')`, 'title="Hand the bot back to your pool; talk to it here only"') : ''}
            <span class="sub">Optional. It's how you reach it from your phone, and how people reach it when this machine isn't reachable from where they are.</span>`
@@ -8847,33 +8868,23 @@ function v2Pane(a, tab) {
                <span class="sub" style="flex-basis:100%">No spare bots in your pool. In Telegram, message @BotFather, send /newbot, and paste the token it gives you.</span>
              </div>`
           : '<span class="sub">No Telegram bot.</span>') : ''}
-      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
-        ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
-        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
-    case 'personality': return `
-      ${slot('paneDef')}
-      ${run ? `<h4 class="v2sec">Memory</h4>${row('Conversation', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
-        <span class="sub">Save what matters from the current chat, or bring back earlier conversations after a reset.</span>`)}` : ''}
-      ${slot('paneEditSnap')}`;
-    case 'ai': return slot('paneEditAi');
+      ${a.botUsername ? slot('paneEditTg') : ''}
+      <div class="sub" style="margin-top:6px">Telegram is the only messaging app wired up so far.</div>`;
     case 'knowledge': return `
       ${slot('paneEditData')}
       ${slot('paneEditConn')}
       ${built ? `<h4 class="v2sec">Chat history</h4>${row('Every conversation', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">As a file.</span>`)}` : ''}`;
     case 'sharing': {
-      if (a.webOnly && !a.botUsername) return `
-      ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`)}${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}`) : ''}
-      ${row('People', `<span>Only you — it has no Telegram bot.</span>${B('Add one…', goto('overview'))}<span class="sub">Other people reach an agent through its Telegram bot.</span>`)}
-      ${slot('paneEditPeers')}`;
-      // People (members, invites) live in the Telegram section below — one list, not two.
       return `
+      ${row('People', a.botUsername
+        ? `<span>${(members[a.id] ?? []).filter(m => m.role !== 'owner').length || 'No'} other ${((members[a.id] ?? []).filter(m => m.role !== 'owner').length === 1) ? 'person' : 'people'}</span>${run ? B('Invite…', `invite('${id}','${n}')`) : ''}${B('Who can talk to it', goto('messaging'))}`
+        : `<span>Only you.</span>${B('Add Telegram…', goto('messaging'))}<span class="sub">Other people reach an agent through a messaging app.</span>`)}
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
         ${a.parameters?.length && !a.parentAgentId ? B('👪 New child', `deriveChild('${id}','${n}')`) : ''}
         ${agents.some(k => k.parentAgentId === a.id) ? B('📥 Proposals', `openProposals('${id}','${n}')`) + B('⬇ Push to children', `pushDefinition('${id}','${n}')`) : ''}
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
-      ${slot('paneEditTg')}
       ${slot('paneEditPeers')}`;
     }
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', '<span>Start it to see its tasks.</span>');

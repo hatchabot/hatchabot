@@ -36,6 +36,7 @@ The header holds:
   group to move it, onto **Archived** to archive it, or onto the strip that
   appears at the bottom to start a new group. On a phone, press and hold,
   then drag; an ordinary swipe still scrolls.
+- **A small blue paper-plane on the icon** means the agent is on Telegram.
 - **Status lives on the icon**: a dashed spinning ring while it rebuilds, red
   with **!** when it failed or its AI source is rate-limited, a dotted blue
   ring when it is waiting on you (a bot token, someone asking to join),
@@ -45,7 +46,8 @@ The header holds:
   opens the agent's settings. An agent that needs you opens straight to
   settings instead.
 - **Settings are one sheet with tabs**: Overview, Personality, AI,
-  Knowledge, Sharing, Schedule, Advanced. The editors live right in those
+  Knowledge, Messaging, Sharing, Schedule, Advanced. **Messaging** holds the
+  agent's Telegram bot (add, remove, members, group chats, formatting). The editors live right in those
   tabs (the files, the AI source, data and connections, people and Telegram,
   other agents it can ask, scheduled tasks, environment), not one panel
   deeper. Every button from the classic card is in one of them.

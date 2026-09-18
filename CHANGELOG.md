@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.20.0] — 2026-09-18
+
+### Changed
+- **A Messaging tab in each agent's settings.** Everything about how people reach the agent, which today means its Telegram bot, now lives in one tab:
+  - the bot itself (open, sync name, add or remove it);
+  - who may talk to it;
+  - group chats and formatting;
+  - the bot token.
+
+  Overview keeps a one-line summary with **Manage…**. Sharing keeps copies and which other agents it can ask, with a pointer to Messaging for people. This is the tab other messaging apps would join.
+- **A Telegram badge on agent icons.** A small blue paper-plane in the icon's corner marks agents that are on Telegram, and the tooltip says which bot.
+
 ## [1.19.0] — 2026-09-18
 
 ### Added
