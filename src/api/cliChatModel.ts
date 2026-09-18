@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { defaultDbPath } from '../envCompat.js';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { MgmtChatRequest, MgmtChatResponse } from './mgmtLlm.js';
@@ -237,4 +238,75 @@ export async function completeViaCli(
     };
   }
   return { stopReason: 'end_turn', content: [{ type: 'text', text }] };
+}
+
+/**
+ * A whole management turn through the Claude CLI with REAL tool use: the CLI
+ * is handed the assistant's tools as an MCP server (src/mgmt/mcpServer.mjs)
+ * and runs its own multi-step loop. That server forwards every call to the
+ * control plane with a one-turn token, where the broker decides exactly as it
+ * always has (reads run; changes become cards). Only the final prose comes
+ * back here; proposals are captured server-side as the tools are called.
+ *
+ * Same containment as completeViaCli: minimal env, empty scratch cwd, NO
+ * built-in tools (--tools ""), and only our MCP server allowed.
+ */
+export async function runCliTurnWithMcp(
+  opts: CliCompletionOptions & { mcpUrl: string; turnToken: string },
+  req: { system: string; messages: MgmtChatRequest['messages'] },
+): Promise<string> {
+  const run = opts.runner ?? defaultRunner;
+  const dataDir = dirname(process.env.HATCHABOT_DB ?? defaultDbPath());
+  const scratch = join(dataDir, 'mgmt-cli-home');
+  mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TERM: process.env.TERM, LANG: process.env.LANG };
+  if (opts.oauthToken) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = opts.oauthToken;
+    env.HOME = scratch;
+  }
+  // The config names our server and hands it the one-turn token. A file, not
+  // an argv string, so the token never shows up in the process list.
+  const cfgPath = join(scratch, `mcp-${opts.turnToken.slice(0, 12)}.json`);
+  const server = fileURLToPath(new URL('../mgmt/mcpServer.mjs', import.meta.url));
+  writeFileSync(cfgPath, JSON.stringify({
+    mcpServers: {
+      hatchabot: {
+        command: process.execPath,
+        args: [server],
+        env: { HATCHABOT_MCP_URL: opts.mcpUrl, HATCHABOT_TURN_TOKEN: opts.turnToken },
+      },
+    },
+  }), { mode: 0o600 });
+  const prompt = [
+    req.system,
+    '',
+    'Your tools are the hatchabot MCP tools. Call them directly, as many as the task needs.',
+    '',
+    'CONVERSATION SO FAR:',
+    renderConversation(req.messages),
+    '',
+    'Your reply:',
+  ].join('\n');
+  try {
+    const stdout = await run(
+      [
+        '-p', '--output-format', 'json', '--model', opts.model,
+        '--tools', '', '--mcp-config', cfgPath, '--strict-mcp-config',
+        '--allowedTools', 'mcp__hatchabot', '--no-session-persistence',
+      ],
+      prompt,
+      env,
+      scratch,
+    );
+    try {
+      const parsed = JSON.parse(stdout);
+      if (parsed.is_error) throw new Error(String(parsed.result ?? 'unknown CLI error').slice(0, 400));
+      return typeof parsed.result === 'string' ? parsed.result : '';
+    } catch (e) {
+      if (e instanceof SyntaxError) return stdout.trim();
+      throw e;
+    }
+  } finally {
+    try { unlinkSync(cfgPath); } catch { /* already gone */ }
+  }
 }

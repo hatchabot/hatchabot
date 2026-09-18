@@ -6,7 +6,11 @@ import { Broker } from '../mgmt/broker.js';
 import { PendingStore } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { LlmAgent, type AgentSink, type ChatMessage, type ChatModel } from '../mgmt/llm.js';
-import { completeWithProfile, friendlyLlmError, pickMgmtProfile, runMgmtCompletion, type MgmtChatRequest, type RunCompletionDeps } from './mgmtLlm.js';
+import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, type MgmtChatRequest, type RunCompletionDeps } from './mgmtLlm.js';
+import { runCliTurnWithMcp } from './cliChatModel.js';
+import { MANIFEST } from '../mgmt/tools.js';
+import { SYSTEM_PROMPT } from '../mgmt/llm.js';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { ownerIdOf } from './principal.js';
 
 /**
@@ -88,12 +92,52 @@ export interface MgmtChatDeps {
   /** Test seams — same overrides the Telegram proxy route uses. */
   mgmtLlmComplete?: typeof completeWithProfile;
   mgmtCliComplete?: RunCompletionDeps['cliComplete'];
+  /** How the MCP tool server reaches this process (loopback). */
+  selfUrl?: string;
+  /** Test seam: replaces the whole CLI+MCP turn. Receives the turn token so a
+   *  test can play the CLI's part by calling POST /v1/mgmt/mcp itself. */
+  mgmtMcpTurn?: (turnToken: string, req: { system: string; messages: unknown[] }) => Promise<string>;
+  /** Off switch for the MCP path (falls back to the text protocol). */
+  disableMcp?: boolean;
 }
 
 export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void {
   const { store, secrets } = deps;
   const complete = deps.mgmtLlmComplete ?? completeWithProfile;
   const sessions = new Map<string, ChatSession>();
+  /** Live CLI+MCP turns: one-turn token → the session and the turn's sink. */
+  const turns = new Map<string, { ownerId: string; session: ChatSession; sink: AgentSink }>();
+  const selfUrl = deps.selfUrl ?? `http://127.0.0.1:${process.env.PORT ?? 8080}`;
+
+  /**
+   * The MCP tool server's only door. Authenticated by the one-turn token (not
+   * a user session, so the auth hooks exempt it) and loopback-only. Goes
+   * through the SAME broker as every other path: reads run, changes become
+   * cards, forbidden tools don't exist.
+   */
+  app.post('/v1/mgmt/mcp', async (req, reply) => {
+    const ip = req.ip;
+    if (ip !== '127.0.0.1' && ip !== '::1' && ip !== '::ffff:127.0.0.1') return reply.code(403).send({ error: 'loopback only' });
+    const token = String(req.headers['x-hatchabot-turn'] ?? '');
+    let turn: { ownerId: string; session: ChatSession; sink: AgentSink } | undefined;
+    for (const [k, v] of turns) {
+      if (k.length === token.length && timingSafeEqual(Buffer.from(k), Buffer.from(token))) { turn = v; break; }
+    }
+    if (!turn || !turn.session.busy) return reply.code(401).send({ error: 'That turn is over.' });
+    const b = (req.body ?? {}) as { op?: string; name?: unknown; input?: unknown };
+    if (b.op === 'list') {
+      return { tools: MANIFEST.map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema })) };
+    }
+    if (b.op !== 'call' || typeof b.name !== 'string') return reply.code(400).send({ error: 'op must be list or call' });
+    const r = await turn.session.broker.handleTool(b.name, (b.input ?? {}) as Record<string, unknown>, { ownerId: turn.ownerId, ...WEB_WHO });
+    turn.session.progress = { step: 'Thinking about what it found', since: Date.now() };
+    if (r.ok && 'pending' in r) {
+      await turn.sink.proposeCard(r.pending.confirmId, r.pending.summary);
+      return { text: `A confirmation card was posted to the owner for "${r.pending.summary}". This is NOT done yet — the owner must press Confirm. Do not claim it succeeded.` };
+    }
+    if (r.ok) return { text: JSON.stringify(r.data).slice(0, 6000) };
+    return { text: `Error ${r.error.code}: ${r.error.message}`, isError: true };
+  });
 
   // Sweep every session's pending store — the bot process sweeps its own
   // singleton, but these per-owner stores had nobody doing it and resolved
@@ -267,8 +311,39 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       proposeCard: async (confirmId, summary) => void proposals.push(enrich(s, confirmId, summary)),
     };
     try {
-      const msgs = await s.llm.respond({ ownerId, ...WEB_WHO }, parsed.data.message, sink, s.history);
-      s.history = sanitizeHistory(msgs, HISTORY_CAP);
+      const profile = pickMgmtProfile(store, ownerId);
+      // Tests that stub the text-protocol CLI keep that path; HATCHABOT_MGMT_MCP=0
+      // is the operator's off switch.
+      const viaMcp = !deps.disableMcp && process.env.HATCHABOT_MGMT_MCP !== '0' && profile &&
+        (deps.mgmtMcpTurn || (mgmtBackendOf(profile).kind === 'cli' && !deps.mgmtCliComplete));
+      if (viaMcp) {
+        // Subscription source: the Claude CLI gets the tools natively over MCP
+        // and runs its own multi-step loop; see runCliTurnWithMcp.
+        const turnToken = randomBytes(24).toString('hex');
+        turns.set(turnToken, { ownerId, session: s, sink });
+        try {
+          const history = [...s.history, { role: 'user' as const, content: parsed.data.message }];
+          const text = deps.mgmtMcpTurn
+            ? await deps.mgmtMcpTurn(turnToken, { system: SYSTEM_PROMPT, messages: history })
+            : await runCliTurnWithMcp(
+                {
+                  model: profile!.model,
+                  oauthToken: profile!.secretRef ? await secrets.get(profile!.secretRef) : undefined,
+                  mcpUrl: selfUrl,
+                  turnToken,
+                },
+                { system: SYSTEM_PROMPT, messages: history as MgmtChatRequest['messages'] },
+              );
+          if (text.trim()) await sink.say(text.trim());
+          const noted = proposals.length ? `\n\n[Cards posted: ${proposals.map((p) => p.summary.split('\n')[0]).join('; ')}]` : '';
+          s.history = sanitizeHistory([...history, { role: 'assistant', content: (text.trim() || '(no reply)') + noted }], HISTORY_CAP);
+        } finally {
+          turns.delete(turnToken);
+        }
+      } else {
+        const msgs = await s.llm.respond({ ownerId, ...WEB_WHO }, parsed.data.message, sink, s.history);
+        s.history = sanitizeHistory(msgs, HISTORY_CAP);
+      }
     } catch (err) {
       return reply.code(502).send({ error: friendlyLlmError(String((err as Error).message ?? err)) });
     } finally {

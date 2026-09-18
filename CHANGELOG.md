@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.23.0] — 2026-09-18
+
+### Changed
+- **The Hatchabot chat uses real tool calls on a Claude subscription.**
+  - **Before:** the model ran through the Claude CLI and had to print each tool call as text, one step per round trip, and a call wrapped in a sentence was lost.
+  - **Now:** the CLI gets the assistant's tools as an MCP server and runs its own multi-step loop, so a job like "build a candidate, then check the build" happens in one turn.
+  - **Same safety:** every call goes back to Hatchabot with a one-turn token (loopback only, dead when the turn ends) and through the same broker, so reads run, changes become confirmation cards, and forbidden tools don't exist. The CLI still has no built-in tools.
+  - **Verified live:** the real CLI listed the tools and called one natively, answering in under 4 seconds.
+  - `HATCHABOT_MGMT_MCP=0` switches back. API-key sources already used native tool calls and are unchanged.
+
 ## [1.22.2] — 2026-09-18
 
 ### Fixed

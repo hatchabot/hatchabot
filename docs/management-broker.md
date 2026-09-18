@@ -390,3 +390,25 @@ table), so "why did it rebuild at 3am" is answerable:
 4. No outbound tools — the agent's only channel is back to the owner.
 5. Resolution is owner-scoped, so ids can't cross accounts and ambiguity never
    auto-resolves a mutation.
+
+## Native tool use on a subscription (v1.23.0)
+
+On a Claude subscription the web chat's model runs through the `claude` CLI.
+It used to call tools through a text protocol ("reply with only a JSON
+object"), which dropped calls the model wrapped in prose and needed a round
+trip per step. Now the CLI is given the assistant's tools as an **MCP server**
+(`src/mgmt/mcpServer.mjs`) and runs its own multi-step loop with real tool
+use.
+
+- The MCP server holds no authority. Every call goes to
+  `POST /v1/mgmt/mcp` with a **one-turn token**: random, held only while that
+  chat turn runs, checked in constant time, and accepted only from loopback.
+  The same broker decides: reads run, changes become confirmation cards,
+  forbidden tools don't exist.
+- The token reaches the server through a 0600 config file in the CLI's
+  scratch home, which is deleted after the turn, never through argv.
+- Containment is unchanged: minimal env, empty scratch cwd, `--tools ""` (no
+  built-in tools), `--strict-mcp-config`, and `--allowedTools mcp__hatchabot`.
+- `HATCHABOT_MGMT_MCP=0` falls back to the text protocol. The Telegram
+  management bot still uses the text protocol, with the tolerant parser from
+  v1.22.2.

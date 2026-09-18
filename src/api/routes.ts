@@ -167,6 +167,10 @@ export interface ApiDeps {
   mgmtLlmComplete?: typeof completeWithProfile;
   /** Override the mgmt-LLM CLI path (tests — the real one spawns `claude`). */
   mgmtCliComplete?: Parameters<typeof runMgmtCompletion>[0]['cliComplete'];
+  /** Loopback URL of this server, for the management chat's MCP tool server. */
+  selfUrl?: string;
+  /** Test seam for the CLI+MCP management turn (see mgmtChat.ts). */
+  mgmtMcpTurn?: import('./mgmtChat.js').MgmtChatDeps['mgmtMcpTurn'];
 }
 
 const LocalProfile = z.object({
@@ -2340,7 +2344,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     maxTokens: z.number().int().min(1).max(16_384),
   });
   // Phase C: the web management chat pane — same broker, web transport.
-  registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete });
+  registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {
     const parsed = MgmtLlmBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
