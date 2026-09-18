@@ -165,7 +165,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // other agent's gateway, bypassing the owner-only proxy (audit
       // 2026-09-18). Host services (Hatchabot at 172.17.0.1:8080, Ollama) stay
       // reachable. HATCHABOT_AGENT_NETWORK=bridge restores the old behaviour.
-      ...(await this.#agentNetworkArgs()),
+      ...(spec.isolated ? ['--network', await this.#isolatedNetwork()] : await this.#agentNetworkArgs()),
       '--memory', process.env.HATCHABOT_AGENT_MEMORY ?? '2g',
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
@@ -190,7 +190,9 @@ export class LocalDockerProvider implements RuntimeProvider {
         args.push('-v', `${m.source}:${m.target}${m.readonly ? ':ro' : ''}`);
       }
     }
-    for (const p of spec.ports ?? []) {
+    // An isolated network publishes nothing (docker ignores -p there anyway):
+    // the control plane reaches the container by its address instead.
+    for (const p of spec.isolated ? [] : spec.ports ?? []) {
       // Loopback only: the agent's Control UI is a debug door for whoever is
       // on this box (or tunnelling to it), never for the whole LAN/tailnet.
       args.push('-p', `127.0.0.1:${p.host}:${p.container}`);
@@ -670,6 +672,44 @@ export class LocalDockerProvider implements RuntimeProvider {
       child.stdin.on('error', () => {});
       child.stdin.end(data);
     });
+  }
+
+  #isolatedReady = false;
+  /** The management agents' jail: `--internal` (no route off this host, no
+   *  DNS) and no traffic between the containers on it either. */
+  async #isolatedNetwork(): Promise<string> {
+    // Per installation: two installs on one box must not share a jail (or
+    // fight over the ops server's address).
+    const name = `${this.prefix}-ops`;
+    if (!this.#isolatedReady) {
+      if ((await this.#docker(['network', 'inspect', name])).code !== 0) {
+        const made = await this.#docker([
+          'network', 'create', '--driver', 'bridge', '--internal',
+          '-o', 'com.docker.network.bridge.enable_icc=false',
+          '--label', 'hatchabot.role=ops', name,
+        ]);
+        if (made.code !== 0 && (await this.#docker(['network', 'inspect', name])).code !== 0) {
+          throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, 'Could not create the management agent’s network.');
+        }
+      }
+      this.#isolatedReady = true;
+    }
+    return name;
+  }
+
+  async isolatedGateway(): Promise<string> {
+    const name = await this.#isolatedNetwork();
+    const res = await this.#must(['network', 'inspect', name, '--format', '{{(index .IPAM.Config 0).Gateway}}'], 'Could not read the management agent’s network.');
+    const ip = res.stdout.trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new ProviderError(`bad gateway ${ip}`, 'Could not read the management agent’s network.');
+    return ip;
+  }
+
+  async containerIp(runtimeRef: string): Promise<string | undefined> {
+    const { container } = this.#names(runtimeRef);
+    const res = await this.#docker(['inspect', container, '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}']);
+    const ip = res.code === 0 ? res.stdout.trim().split(/\s+/)[0] : undefined;
+    return ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
   }
 
   #networkReady = false;

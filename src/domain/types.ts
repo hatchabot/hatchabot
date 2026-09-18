@@ -175,6 +175,9 @@ export interface Agent {
   /** No Telegram bot: talked to only through Hatchabot (the OpenClaw console).
    *  Provisioning skips the bot step; one can be added (or removed) later. */
   webOnly?: boolean;
+  /** This account's management agent (docs/ops-agent-design.md): jailed
+   *  network, locked-down tools, a propose-only key. One per owner. */
+  ops?: boolean;
   sortOrder?: number;
   /** Setup fields this agent's shares/templates ask the importer to fill. */
   parameters?: TemplateParam[];

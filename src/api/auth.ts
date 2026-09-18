@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
-import { LOCAL_OWNER, type Principal } from './principal.js';
+import { LOCAL_OWNER, internalPrincipal, type Principal } from './principal.js';
 import { registerAccountRoutes, sessionAccount } from './accountsAuth.js';
 import type { Store } from '../store/store.js';
 import {
@@ -254,6 +254,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   });
 
   app.addHook('onRequest', async (req, reply) => {
+    { const internal = internalPrincipal(req); if (internal) { req.principal = internal; return; } }
     if (!opts.password) {
       req.principal = { ownerId: LOCAL_OWNER, via: 'password' };
       return;
@@ -319,6 +320,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   });
 
   app.addHook('onRequest', async (req, reply) => {
+    { const internal = internalPrincipal(req); if (internal) { req.principal = internal; return; } }
     const path = req.url.split('?')[0] ?? '';
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/login' || path === '/v1/logout') return;
@@ -449,6 +451,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   });
 
   app.addHook('onRequest', async (req, reply) => {
+    { const internal = internalPrincipal(req); if (internal) { req.principal = internal; return; } }
     const path = req.url.split('?')[0] ?? '';
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/session' || path === '/v1/logout') return;

@@ -153,6 +153,7 @@ export const COVERAGE: Record<string, string> = {
   'DELETE /v1/connections/:id': 'app: later — disconnect a Google account',
 
   // ---- the management chat itself ----
+  'POST /v1/ops-agent': 'app: browser — setting up the account’s own management agent',
   'POST /v1/mgmt/chat': 'app: internal — the chat',
   'DELETE /v1/mgmt/chat': 'app: internal — New chat',
   'POST /v1/proposals/:id/:verb': 'app: internal — pressing Confirm or Cancel on a proposal',

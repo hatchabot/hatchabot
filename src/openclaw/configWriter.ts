@@ -346,6 +346,22 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // writes true, everything else re-asserts false on every provision/rebuild.
   cmds.push({ argv: ['config', 'set', 'cron.triggers.enabled', patch.cronTriggers === true ? 'true' : 'false'] });
 
+  // The management agent: only Hatchabot's tools (an HTTP MCP server, reached
+  // with its propose-only key), its memory, and its own workspace files. No
+  // shell, web, browser, nodes, schedules, sub-sessions or gateway config.
+  // Re-asserted on every provision; the network jail and the key's scope hold
+  // even if this is changed from the console (docs/ops-agent-design.md).
+  if (patch.ops) {
+    cmds.push({ argv: ['config', 'set', 'tools.allow', JSON.stringify(OPS_TOOLS_ALLOW)] });
+    cmds.push({ argv: ['config', 'set', 'tools.deny', JSON.stringify(OPS_TOOLS_DENY)] });
+    cmds.push({
+      argv: ['mcp', 'set', 'hatchabot', JSON.stringify({
+        url: patch.ops.mcpUrl, transport: 'streamable-http', headers: { Authorization: `Bearer ${patch.ops.token}` },
+      })],
+      sensitive: true, // carries the key
+    });
+  }
+
   if (patch.telegram) {
     const { accountId, botToken, dmPolicy, allowFrom, groupAccess, richMessages } = patch.telegram;
     cmds.push({ argv: ['config', 'set', 'channels.telegram.enabled', 'true'] });
@@ -354,6 +370,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // Hatchabot's managed default is ON; only an explicit per-agent opt-out
     // writes false. Missing from the patch (older caller) also lands true.
     cmds.push({ argv: ['config', 'set', 'channels.telegram.richMessages', richMessages === false ? 'false' : 'true'] });
+    if (patch.telegram.proxy) cmds.push({ argv: ['config', 'set', 'channels.telegram.proxy', patch.telegram.proxy], sensitive: true });
     // One JSON set for the whole account object keeps the command count down
     // and matches the shape observed in a live 2026.6.11 config.
     const account: Record<string, unknown> = {
@@ -467,3 +484,6 @@ export function describeConfigCommands(cmds: ConfigCommand[]): string[] {
     return `openclaw ${argv.join(' ')}`;
   });
 }
+
+export const OPS_TOOLS_ALLOW = ['bundle-mcp', 'group:memory', 'read', 'write', 'edit'];
+export const OPS_TOOLS_DENY = ['group:runtime', 'group:web', 'group:ui', 'group:nodes', 'group:automation', 'group:sessions', 'gateway'];

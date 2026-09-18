@@ -1,4 +1,5 @@
 import type { FastifyRequest } from 'fastify';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 /**
  * Who is making this request. Phase 1 of docs/identity.md: every route reads
@@ -31,8 +32,32 @@ declare module 'fastify' {
  * authenticated route — in password mode that is the single local owner, in
  * identity mode the verified token subject.
  */
+/**
+ * In-process calls on an owner's behalf (the management agent's READS, made
+ * by the broker through app.inject). The secret is random per process and
+ * never leaves it, and inject's remote address is loopback, so nothing outside
+ * this process can use it. Changes never ride this: they execute with the
+ * approving person's own sign-in.
+ */
+const INTERNAL_SECRET = randomBytes(32).toString('hex');
+export const internalHeaders = (ownerId: string): Record<string, string> => ({
+  'x-hatchabot-internal': INTERNAL_SECRET,
+  'x-hatchabot-internal-owner': ownerId,
+});
+export function internalPrincipal(req: FastifyRequest): Principal | undefined {
+  const h = req.headers as Record<string, unknown>;
+  const given = h['x-hatchabot-internal'];
+  const owner = h['x-hatchabot-internal-owner'];
+  if (typeof given !== 'string' || typeof owner !== 'string' || !owner) return undefined;
+  if (given.length !== INTERNAL_SECRET.length || !timingSafeEqual(Buffer.from(given), Buffer.from(INTERNAL_SECRET))) return undefined;
+  if (req.ip !== '127.0.0.1' && req.ip !== '::1') return undefined;
+  return { ownerId: owner, via: 'identity', subject: owner };
+}
+
 export function principalOf(req: FastifyRequest): Principal {
   if (req.principal) return req.principal;
+  const internal = internalPrincipal(req);
+  if (internal) return internal;
   // No verified principal: this is either a test harness or an auth-exempt
   // route that has no business asking who the caller is. The header branch is
   // opt-in so that adding a route under /join/* or /v1/invites/* can never

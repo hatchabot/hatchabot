@@ -74,6 +74,37 @@ The header holds:
   the agent: backups, shared copies and agents sent to someone else keep
   theirs.
 
+## Your Hatchabot agent (the manager)
+
+The box at the top of the home screen offers **Set it up**: a management agent
+of your own, one per account. It is an ordinary OpenClaw agent, so it runs on
+**whichever AI source you have** (Claude, OpenAI, Gemini or a local model),
+has the full console, remembers how you like things run, and can have a
+Telegram bot added later. **💬 Open** talks to it.
+
+It can look at everything about your agents (health, logs, usage, their files
+and memory) and it can *prepare* changes: archive, rebuild, switch AI source,
+scheduled tasks, images and the rest. It cannot carry any of them out. What it
+prepares appears under **Waiting for you**, on the home screen and above the
+conversation, and happens only when you press **Confirm**, with your own
+sign-in. Replying "yes" in its chat approves nothing, on purpose.
+
+Three things keep that true even if the agent is misled by something it reads
+(details in `docs/ops-agent-design.md`):
+
+- **A limited key.** Its key to Hatchabot can only read and propose.
+- **No internet.** Its container reaches only a small Hatchabot server. That
+  server offers the tools, and a filtered route to its own AI provider (plus
+  Telegram, if it has a bot).
+- **Locked-down tools.** No shell, web or browser tools.
+
+It is also pinned to the OpenClaw version it was created on, so a bad upgrade
+can't take your manager down with the fleet. Secrets, deleting agents,
+promoting a base image and accounts stay in the app.
+
+Until you set one up, the older built-in chat remains in that box where a
+Claude source exists.
+
 ## Creating & talking to agents
 
 **Telegram is optional.** Tick **No Telegram** when creating an agent (or

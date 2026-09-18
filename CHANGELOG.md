@@ -2,6 +2,25 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.27.0] — 2026-09-18
+
+### Added
+- **Your Hatchabot agent: a management agent that runs on any AI source.** "Set it up" in the box at the top of the home screen creates one per account: an OpenClaw agent with the full console, memory, and an optional Telegram bot. It works with Claude, OpenAI, Gemini or a local model.
+  - **What it can do:** read everything about your agents, including their files and memory, and *prepare* changes. It cannot make them: what it prepares appears under **Waiting for you**, on the home screen and above the conversation, and happens only when you press Confirm, with your own sign-in.
+  - **Three safeguards outside the agent** (design and risks in `docs/ops-agent-design.md`):
+    - a key that can only read and propose, replaced on every rebuild and dead when the agent is stopped, archived or deleted;
+    - a container with **no internet**: a per-installation `--internal` Docker network with no traffic between containers, reaching only a small Hatchabot server that offers the tools and an allowlisting HTTPS proxy to its own AI provider (plus Telegram if it has a bot);
+    - locked-down tools: no shell, web, browser, schedules, sub-sessions or gateway config.
+  - **Pinned version:** it stays on the OpenClaw version it was created on.
+  - **Tested on real containers, with a throwaway install and a fake API key:**
+    - **Blocked:** the internet, Hatchabot's main port, another install and another agent's gateway.
+    - **Refused by the proxy:** example.com, and OpenClaw's own calls to openrouter.ai, GitHub and npm.
+    - **Allowed:** the AI provider only.
+    - **Worked:** 55 tools loaded through the door; the console.
+  - **New tool:** `read_agent_file` (SOUL.md, AGENTS.md, MEMORY.md).
+  - **New setting:** `HATCHABOT_OPS_PORT` (default 8091).
+- The older built-in chat stays in that box only until you set your agent up, and only where a Claude source exists. It is no longer required for anything.
+
 ## [1.26.0] — 2026-09-18
 
 ### Added

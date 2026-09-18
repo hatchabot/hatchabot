@@ -440,6 +440,11 @@
   #v2HubTools label { margin:0; width:auto }
   .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
   .v2hub #mgmtChatLog:empty { display:none !important }
+  #consoleProps { max-height:40%; overflow:auto; padding:10px 12px; display:grid; gap:8px; border-bottom:1px solid var(--line); background:var(--panel) }
+  .v2opsrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+  /* With a management agent (or no way to run the old chat), the old chat's parts go. */
+  .hub-ops #v2HubLede, .hub-ops #v2HubLogSlot, .hub-ops #v2HubInputSlot, .hub-ops .v2chips, .hub-ops #v2HubTools, .hub-ops #v2HubLlm,
+  .hub-nochat #v2HubLede, .hub-nochat #v2HubLogSlot, .hub-nochat #v2HubInputSlot, .hub-nochat .v2chips, .hub-nochat #v2HubTools, .hub-nochat #v2HubLlm { display:none !important }
   #v2Proposals { margin:-8px 0 24px }
   #v2PropList { display:grid; gap:8px }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
@@ -699,6 +704,7 @@
       <div class="v2face" aria-hidden="true">🐣</div>
       <div class="v2hubmain">
         <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
+        <div id="v2OpsBox" hidden></div>
         <div class="sub" id="v2HubLede">Say what you want in plain words. I create, fix, move and share agents, and I ask before I change anything.</div>
         <div id="v2HubLogSlot"></div>
         <div id="v2HubInputSlot"></div>
@@ -760,6 +766,7 @@
     <button id="consoleNewTab" class="cbtn" title="Open the same console in its own tab"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span class="lbl">New tab</span></button>
     <button class="cbtn" onclick="closeConsole()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
+  <div id="consoleProps" hidden></div>
   <iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>
 </dialog>
 
@@ -7124,7 +7131,7 @@ async function openGateway(id, slug) {
 
 // Esc closes a dialog without calling closeConsole(): blank the frame either
 // way, or the console's WebSocket and token outlive the panel.
-$('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'about:blank'; });
+$('consoleDlg')?.addEventListener('close', () => { $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; });
 
 let consoleAgentId = null, consoleUrl = null;
 
@@ -8331,6 +8338,7 @@ async function openMgmtChat() {
 
 /** Fill the chat log from the server's transcript — the dialog's, or (v2) the
  *  home screen's hub, which borrows the same log/input elements. */
+let mgmtChatAvailable = null; // null = not known yet
 async function loadMgmtChat() {
   const log = $('mgmtChatLog');
   log.innerHTML = '<div class="sub">Loading…</div>';
@@ -8338,6 +8346,7 @@ async function loadMgmtChat() {
     const s = await api('/v1/mgmt/chat');
     $('mgmtChatArm').checked = s.mode === 'read-write';
     $('mgmtChatLlm').textContent = s.available ? `${s.llm.model} via ${s.llm.profileName}` : '';
+    mgmtChatAvailable = !!s.available; if (UI_V2) v2RenderHub();
     log.innerHTML = '';
     if (!s.available) {
       mgmtBubble('assistant', 'No AI source can back management chat yet — flag one as 🛠 Management under ⚙ Settings → AI sources.');
@@ -8714,10 +8723,11 @@ const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 
 function renderV2() {
   if (v2drag.active) return; // never re-render out from under a drag
   v2MaybeAutoIcons();
+  v2RenderHub();
   v2RenderChips();
   v2RenderWho();
   v2RefreshSheet();
-  const live = liveAgents();
+  const live = liveAgents().filter(a => !(a.ops && v2Mine(a))); // the manager lives in the hub, not the grid
   const liveIds = new Set(live.map(x => x.id));
   const sections = [], byKey = new Map();
   const section = (key, label, drop) => {
@@ -9355,6 +9365,43 @@ function v2InlineHealth(id, name) {
   void loadHealth();
 }
 
+/**
+ * The hub: this account's management agent. An OpenClaw agent that runs on
+ * any AI source; it prepares changes and they wait in "Waiting for you".
+ * Until one is set up, the older built-in chat (Claude-only) stays as a stopgap
+ * where it can work at all.
+ */
+function v2RenderHub() {
+  const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
+  const hub = document.querySelector('.v2hub');
+  hub.classList.toggle('hub-ops', !!ops);
+  hub.classList.toggle('hub-nochat', !ops && mgmtChatAvailable === false);
+  const box = $('v2OpsBox');
+  let html;
+  if (ops) {
+    const st = v2Status(ops);
+    const ready = v2CanChat(ops) && window.isSecureContext;
+    html = `<div class="v2opsrow"><span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
+      <span class="sub" style="flex:1;min-width:200px">Ask it about your agents, or to change something. What it prepares waits below for your Confirm.</span>
+      ${ready ? `<button class="primary" onclick="openGateway('${jsq(ops.id)}','${jsq(ops.slug)}')">💬 Open</button>` : ''}
+      <button onclick="openV2Agent('${jsq(ops.id)}')">Settings</button></div>
+      ${!window.isSecureContext && v2CanChat(ops) ? '<div class="sub">Open Hatchabot over https to chat with it from this device.</div>' : ''}`;
+  } else {
+    html = `<div class="v2opsrow"><span class="sub" style="flex:1;min-width:220px"><b>Set up your Hatchabot agent.</b> A manager for your agents that you can talk to: it works with whichever AI source you have, remembers how you like things run, and asks before it changes anything.</span>
+      <button class="primary" id="v2OpsSetup" onclick="v2SetupOps(this)" ${profiles.length ? '' : 'disabled title="Add an AI source first (Settings → AI)"'}>Set it up</button></div>`;
+  }
+  if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
+  box.hidden = false;
+}
+async function v2SetupOps(btn) {
+  btn.disabled = true; btn.textContent = 'Setting up…';
+  try {
+    await api('/v1/ops-agent', { method: 'POST', body: {} });
+    toast('Setting up your Hatchabot agent — about a minute.', 6000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 9000); btn.disabled = false; btn.textContent = 'Set it up'; }
+}
+
 function v2HubExpand(on) {
   document.body.classList.toggle('hub-expanded', on);
   $('v2HubExpand').textContent = on ? 'Close' : 'Expand';
@@ -9368,15 +9415,22 @@ let v2PropSig = '';
 async function loadProposals() {
   if (!UI_V2) return;
   let r; try { r = await api('/v1/proposals'); } catch { return; }
+  if (!Array.isArray(r?.pending)) r = { pending: [] }; // an older server mid-deploy
   const sig = r.pending.map(p => p.confirmId).join(',');
   $('v2Proposals').hidden = !r.pending.length;
   $('v2PropCount').textContent = r.pending.length || '';
-  if (sig === v2PropSig) return; // don't rebuild under a finger
-  v2PropSig = sig;
+  // While you talk to your management agent, what it prepares shows right
+  // above the conversation — in Hatchabot's frame, which the agent can't draw in.
+  const inConsole = $('consoleDlg').open && v2Find(consoleAgentId)?.ops;
+  const cp = $('consoleProps');
+  cp.hidden = !(inConsole && r.pending.length);
+  if (sig === v2PropSig && cp.__sig === (inConsole ? sig : '')) return; // don't rebuild under a finger
+  v2PropSig = sig; cp.__sig = inConsole ? sig : '';
   const list = $('v2PropList');
-  list.innerHTML = '';
-  for (const p of r.pending) mgmtProposalCard(p, list);
+  list.innerHTML = ''; cp.innerHTML = '';
+  for (const p of r.pending) { mgmtProposalCard(p, list); if (inConsole) mgmtProposalCard(p, cp); }
 }
+setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?.ops) void loadProposals(); }, 4000);
 
 function initV2() {
   document.body.classList.add('v2');

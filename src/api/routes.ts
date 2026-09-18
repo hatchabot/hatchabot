@@ -60,6 +60,7 @@ import {
 } from '../orchestrator/backups.js';
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
+import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
@@ -167,6 +168,8 @@ export interface ApiDeps {
   mgmtLlmComplete?: typeof completeWithProfile;
   /** Override the mgmt-LLM CLI path (tests — the real one spawns `claude`). */
   mgmtCliComplete?: Parameters<typeof runMgmtCompletion>[0]['cliComplete'];
+  /** Tests: allow a management agent on a provider with no network isolation. */
+  allowUnjailedOps?: boolean;
   /** Loopback URL of this server, for the management chat's MCP tool server. */
   selfUrl?: string;
   /** Test seam for the CLI+MCP management turn (see mgmtChat.ts). */
@@ -2576,7 +2579,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
-          imageTrial: !!a.image && (!a.classId || classes.get(a.classId)?.image !== a.image),
+          imageTrial: !a.ops && !!a.image && (!a.classId || classes.get(a.classId)?.image !== a.image),
           /** What the viewer may do — drives which controls the app renders. */
           role,
           // The owner's applied setup ANSWERS are theirs — a member (or the
@@ -3287,10 +3290,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * before. Relative asset paths resolve under this prefix, so the UI loads
    * unmodified.
    */
-  const gatewayTarget = (req: FastifyRequest, id: string): { port: number } | undefined => {
+  /** Where an agent's gateway answers. Normally its loopback-published port;
+   *  a jailed management agent publishes nothing, so its container address. */
+  const gatewayAddr = async (agent: Agent): Promise<{ host: string; port: number } | undefined> => {
+    if (!agent.gatewayToken || agent.state !== 'RUNNING') return undefined;
+    if (agent.ops) {
+      const ip = agent.runtimeRef ? await providerFor(agent.hostId).containerIp?.(agent.runtimeRef) : undefined;
+      return ip ? { host: ip, port: 18789 } : undefined;
+    }
+    return agent.gatewayPort ? { host: '127.0.0.1', port: agent.gatewayPort } : undefined;
+  };
+  const gatewayTarget = async (req: FastifyRequest, id: string): Promise<{ host: string; port: number } | undefined> => {
     const agent = ownedAgent(req, id);
-    if (!agent?.gatewayPort || !agent.gatewayToken || agent.state !== 'RUNNING') return undefined;
-    return { port: agent.gatewayPort };
+    return agent ? gatewayAddr(agent) : undefined;
   };
 
   // The agent gateway is the least-trusted component (it runs AI-authored tool
@@ -3368,7 +3380,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', async (req, reply) => {
-    const target = gatewayTarget(req, req.params.id);
+    const target = await gatewayTarget(req, req.params.id);
     if (!target) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     const path = `/${req.params['*'] ?? ''}`;
     const qs = req.raw.url?.includes('?') ? req.raw.url.slice(req.raw.url.indexOf('?')) : '';
@@ -3376,7 +3388,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       (resolve, reject) => {
         const r = httpRequest(
           {
-            host: '127.0.0.1',
+            host: target.host,
             port: target.port,
             path: path + qs,
             method: req.method,
@@ -3426,7 +3438,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // password and identity modes, and anything that silently fell back to
   // LOCAL_OWNER would forward an UNAUTHENTICATED upgrade on a password-mode
   // install. No resolver (or no session) means the socket is destroyed.
-  app.server.on('upgrade', (rawReq, socket, head) => {
+  app.server.on('upgrade', async (rawReq, socket, head) => {
     const url = rawReq.url ?? '';
     const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
     if (!m) return; // not ours — leave it alone
@@ -3438,22 +3450,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
     // Same ownership rule as every other agent route, against the real caller.
     const agent = store.getAgent(m[1]!);
-    if (
-      !agent ||
-      agent.ownerId !== principal.ownerId ||
-      agent.state !== 'RUNNING' ||
-      !agent.gatewayPort
-    ) {
-      return deny();
-    }
+    if (!agent || agent.ownerId !== principal.ownerId || agent.state !== 'RUNNING') return deny();
+    socket.on('error', () => {}); // the await below must not leave an unhandled error
+    const addr = await gatewayAddr(agent).catch(() => undefined);
+    if (!addr) return deny();
 
     const qs = url.includes('?') ? url.slice(url.indexOf('?')) : '';
     const up = httpRequest({
-      host: '127.0.0.1',
-      port: agent.gatewayPort,
+      host: addr.host,
+      port: addr.port,
       path: `/${m[2] ?? ''}${qs}`,
       method: 'GET',
-      headers: { ...stripSessionCookie(rawReq.headers), host: `127.0.0.1:${agent.gatewayPort}` },
+      headers: { ...stripSessionCookie(rawReq.headers), host: `127.0.0.1:${addr.port}` },
     });
     up.on('upgrade', (upRes, upSocket, upHead) => {
       socket.write(
@@ -4477,6 +4485,55 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  // The account's management agent (docs/ops-agent-design.md): an OpenClaw
+  // agent in a network jail, with locked-down tools and a propose-only key.
+  // One per account, on this machine, web-only until a bot is added.
+  app.get('/v1/ops-agent', async (req) => {
+    const a = store.getOpsAgent(ownerIdOf(req));
+    return { agent: a ? publicAgent(a) : null };
+  });
+  app.post<{ Body: { aiProfileId?: string } }>('/v1/ops-agent', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    if (store.getOpsAgent(ownerId)) return reply.code(409).send({ error: 'You already have a Hatchabot agent.' });
+    const capErr = capProblem(req);
+    if (capErr) return reply.code(429).send({ error: capErr });
+    const sources = store.listAIProfiles(ownerId);
+    const wanted = (req.body as { aiProfileId?: string } | null)?.aiProfileId;
+    const profile = wanted ? sources.find((p) => p.id === wanted) : sources.find((p) => p.defaultSource) ?? sources[0];
+    if (!profile) return reply.code(400).send({ error: 'Add an AI source first (Settings → AI). Any kind works: Claude, OpenAI, Gemini or a local model.' });
+    const host = store.listHosts(ownerId).find((h) => h.kind === 'local');
+    if (!host) return reply.code(400).send({ error: 'The Hatchabot agent runs on this machine, and no local host is set up.' });
+    const provider = providerFor(host.id);
+    if (!provider.isolatedGateway && process.env.NODE_ENV !== 'test' && !deps.allowUnjailedOps) {
+      return reply.code(400).send({ error: 'This machine’s runtime cannot isolate the agent’s network, so it is not offered here.' });
+    }
+    const taken = new Set(store.listAllActiveAgents().filter((a) => a.ownerId === ownerId).map((a) => a.slug));
+    const name = [OPS_AGENT_NAME, 'Hatchabot agent', 'Hatchabot manager'].find((n) => !taken.has(slugify(n)));
+    if (!name) return reply.code(409).send({ error: 'Rename your agent called "Hatchabot" first.' });
+    const agent = createAgentRecord(store, { ownerId, name, persona: OPS_AGENT_PERSONA, aiProfileId: profile.id, hostId: host.id, sharedMemory: false });
+    store.setAgentWebOnly(agent.id, true);
+    store.setAgentOps(agent.id, true);
+    store.setAgentIcon(agent.id, OPS_AGENT_ICON, '#e0a13a');
+    store.setAgentSeed(agent.id, { 'SOUL.md': OPS_SOUL, 'AGENTS.md': OPS_AGENTS_MD });
+    // Pinned to the version it was born on: it never follows a promote or a
+    // candidate, so a bad OpenClaw upgrade can't take the manager down with it.
+    try {
+      const tags = await provider.listImageTags();
+      const latest = tags.find((t) => t.tag === DEFAULT_BASE);
+      const pin = latest && tags.find((t) => t.tag !== DEFAULT_BASE && t.imageId === latest.imageId && !t.tag.includes(':derived-'));
+      if (pin) store.setAgentImage(agent.id, pin.tag);
+      else if (latest) {
+        // :latest has no other name on this machine: give today's image one,
+        // so the pin keeps pointing at it after a promote moves :latest.
+        const tag = `${DEFAULT_BASE.split(':')[0]}:ops-${latest.imageId.replace(/^sha256:/, '').replace(/[^a-f0-9]/gi, '').slice(0, 12)}`;
+        if (IMAGE_TAG_RE.test(tag)) { await provider.tagImage(DEFAULT_BASE, tag); store.setAgentImage(agent.id, tag); }
+      }
+    } catch { /* unpinned is acceptable; it still works */ }
+    trace(agent.id)('ops.created', { aiProfileId: profile.id });
+    kickProvision(agent.id);
+    return reply.code(202).send(publicAgent(store.getAgent(agent.id)!));
+  });
 
   // Telegram is optional. Add a bot to a web-only agent (from the pool, or a
   // pasted BotFather token), or take one away (the bot goes back to the pool,

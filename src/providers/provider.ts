@@ -45,6 +45,11 @@ export interface RuntimeSpec {
    * Providers that cannot mount (mock, future remote clouds) ignore these.
    */
   hostMounts?: HostMount[];
+  /**
+   * Run with no route to anywhere but this host: no internet, no DNS, no other
+   * containers, and no published ports (the management agent's jail).
+   */
+  isolated?: boolean;
 }
 
 export interface HostMount {
@@ -103,6 +108,9 @@ export interface OpenClawConfigPatch {
   gatewayToken?: string;
   /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
   cronTriggers?: boolean;
+  /** The management agent: lock its tools down to Hatchabot's tool server
+   *  (an HTTP MCP server reached with its propose-only key) plus its memory. */
+  ops?: { mcpUrl: string; token: string };
   telegram?: {
     accountId: string;
     botToken: string;
@@ -118,6 +126,8 @@ export interface OpenClawConfigPatch {
     /** Rich Telegram formatting; written unconditionally (true unless the
      *  owner turned it off), so the fleet converges on rebuild. */
     richMessages?: boolean;
+    /** Reach Telegram through this HTTP proxy (the management agent's jail). */
+    proxy?: string;
   };
 }
 
@@ -194,6 +204,13 @@ export interface RuntimeProvider {
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
   listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[]>;
+
+  /** The isolated network's gateway address on this host (created on first
+   *  use). Absent on providers without the concept (mock). */
+  isolatedGateway?(): Promise<string>;
+  /** A running container's address on its network, for host→container calls
+   *  where no port is published (isolated runtimes). */
+  containerIp?(runtimeRef: string): Promise<string | undefined>;
 
   /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
   tagImage(from: string, to: string): Promise<void>;

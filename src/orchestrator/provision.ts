@@ -1,3 +1,5 @@
+import { ensureOpsServer, opsPort } from '../ops/opsServer.js';
+import { randomBytes } from 'node:crypto';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname as osHostname } from 'node:os';
 import { lstatSync, realpathSync } from 'node:fs';
@@ -458,9 +460,34 @@ export async function buildRuntimeSpec(
     perAgentEnv.HATCHABOT_AGENT_TOKEN = callToken;
     perAgentEnv.HATCHABOT_INTERNAL_URL = process.env.HATCHABOT_INTERNAL_URL ?? 'http://172.17.0.1:8080';
   }
+  // The management agent: a fresh propose-only key on every build, and the
+  // address of the ops server — its tools and its only way to its AI provider.
+  let ops: { mcpUrl: string; token: string; proxyUrl: string; host: string } | undefined;
+  if (agent.ops) {
+    const token = randomBytes(32).toString('base64url');
+    store.setOpsToken(agentId, agent.ownerId, token);
+    const at = deps.provider.isolatedGateway
+      ? await ensureOpsServer(() => deps.provider.isolatedGateway!())
+      : { host: '127.0.0.1', port: opsPort() }; // providers without networks (mock)
+    ops = {
+      host: at.host,
+      token,
+      mcpUrl: `http://${at.host}:${at.port}/mcp`,
+      proxyUrl: `http://ops:${token}@${at.host}:${at.port}`,
+    };
+    Object.assign(perAgentEnv, {
+      HTTPS_PROXY: ops.proxyUrl, https_proxy: ops.proxyUrl,
+      NO_PROXY: `${at.host},localhost,127.0.0.1`, no_proxy: `${at.host},localhost,127.0.0.1`,
+      NODE_USE_ENV_PROXY: '1',
+    });
+    // It consults nobody directly (no route to the main port); drop A2A env.
+    delete perAgentEnv.HATCHABOT_AGENT_TOKEN;
+    delete perAgentEnv.HATCHABOT_INTERNAL_URL;
+  }
   return {
     agentId,
     slug: agent.slug,
+    isolated: agent.ops || undefined,
     // Pinned image, when the agent has one — a candidate under test, or a
     // derived image with extra system packages. Absent = provider default.
     image: agent.image,
@@ -492,7 +519,9 @@ export async function buildRuntimeSpec(
             : profile.vendor === 'openai'
               ? 'openai'
               : 'anthropic',
-        baseUrl: profile.baseUrl,
+        // A local model server is reached on the jail's own gateway address.
+        baseUrl: ops && local ? (profile.baseUrl ?? 'http://172.17.0.1:11434/v1').replace(/\/\/172\.17\.0\.1(?=[:/])/, `//${ops.host}`) : profile.baseUrl,
+        ops: ops && { mcpUrl: ops.mcpUrl, token: ops.token },
         setupToken: oauthToken,
         gatewayToken: gateway.token,
         // Web-only agents have no bot: configWriter then writes no Telegram
@@ -504,6 +533,7 @@ export async function buildRuntimeSpec(
           allowFrom,
           groupAccess: agent.groupAccess,
           richMessages: agent.richMessages !== false,
+          proxy: ops?.proxyUrl,
         } : undefined,
       },
     },

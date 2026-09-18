@@ -1,6 +1,24 @@
 # Design: an OpenClaw agent as the management agent
 
-Status: proposal, 2026-09-18. Nothing here is built yet.
+Status, 2026-09-18:
+
+- **Shipped in v1.26.0–v1.27.0:** proposals in the database; the `ops` key
+  and the tool door; the network jail and its proxy; the agent itself; the
+  home-screen launcher; proposals above the console.
+- **Verified on real containers:**
+  - No internet, and no route to the main port, to another install, or to
+    other agents.
+  - The proxy refused everything but the AI provider; OpenClaw's own calls to
+    openrouter.ai, GitHub and npm were refused.
+  - 55 tools loaded through the door; the model call went out through the
+    proxy; the console worked by container address.
+- **Not built yet:**
+  - approvals through the Telegram bot;
+  - web search through Hatchabot;
+  - the config drift check;
+  - risk tiers and the agent's "why" note;
+  - the nightly digest;
+  - retiring the old chat.
 
 ## Why
 

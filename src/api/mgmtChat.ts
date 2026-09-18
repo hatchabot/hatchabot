@@ -11,7 +11,8 @@ import { runCliTurnWithMcp } from './cliChatModel.js';
 import { MANIFEST, toolDef } from '../mgmt/tools.js';
 import { SYSTEM_PROMPT } from '../mgmt/llm.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { ownerIdOf } from './principal.js';
+import { internalHeaders, ownerIdOf } from './principal.js';
+import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
 
 /**
  * Management Phase C: the web chat pane. The SAME broker that runs the
@@ -409,6 +410,84 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     return { done: out.done, text: out.text };
   };
 
+  // ---- the management agent's door (docs/ops-agent-design.md) --------------
+  // Reached only through the ops server, with the agent's propose-only key.
+  // Reads run as its owner, in process. Changes are filed as proposals in the
+  // owner's "Waiting for you" list; they execute later, with the auth of
+  // whoever presses Confirm — never with anything the agent holds.
+  const OPEN_PROPOSALS_CAP = 20;
+  const opsBrokers = new Map<string, Broker>();
+  const opsBrokerFor = (ownerId: string): Broker => {
+    let b = opsBrokers.get(ownerId);
+    if (!b) {
+      const requester: Requester = async (method, path, body) => {
+        const res = await app.inject({
+          method: method as 'GET', url: path,
+          headers: { ...internalHeaders(ownerId), ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+          payload: body !== undefined ? JSON.stringify(body) : undefined,
+        });
+        let parsed: unknown;
+        try { parsed = res.json(); } catch { parsed = res.body; }
+        if (res.statusCode >= 400) {
+          throw new Error(parsed && typeof parsed === 'object' && typeof (parsed as { error?: unknown }).error === 'string'
+            ? (parsed as { error: string }).error : `${method} ${path} → ${res.statusCode}`);
+        }
+        return parsed;
+      };
+      b = new Broker(new HttpApiClient(requester), pendingStore, { audit: (event, detail) => app.log.info({ ...detail, via: 'ops-agent' }, event) });
+      b.setMode(true);
+      opsBrokers.set(ownerId, b);
+    }
+    return b;
+  };
+
+  const opsMcp = async (token: string, message: unknown): Promise<unknown> => {
+    const agent = store.opsAgentForToken(token);
+    if (!agent) throw new OpsAuthError('unknown key');
+    const m = (message ?? {}) as { id?: unknown; method?: string; params?: { name?: unknown; arguments?: unknown; protocolVersion?: string } };
+    if (m.id === undefined || m.id === null) return undefined; // a notification
+    const ok = (result: unknown) => ({ jsonrpc: '2.0', id: m.id, result });
+    switch (m.method) {
+      case 'initialize':
+        return ok({ protocolVersion: m.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'hatchabot', version: '1' } });
+      case 'ping':
+        return ok({});
+      case 'tools/list':
+        return ok({ tools: MANIFEST.map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema })) });
+      case 'tools/call': {
+        const name = String(m.params?.name ?? '');
+        const text = (t: string, isError = false) => ok({ content: [{ type: 'text', text: t }], isError });
+        if (toolDef(name)?.tier === 'mutate'
+          && store.listMgmtProposals<PendingConfirm>(agent.ownerId, Date.now()).filter((p) => p.status === 'pending').length >= OPEN_PROPOSALS_CAP) {
+          return text(`There are already ${OPEN_PROPOSALS_CAP} proposals waiting for the owner. Ask them to confirm or cancel some first.`, true);
+        }
+        const r = await opsBrokerFor(agent.ownerId).handleTool(name, (m.params?.arguments ?? {}) as Record<string, unknown>, { ownerId: agent.ownerId, ...WEB_WHO });
+        if (r.ok && 'pending' in r) {
+          return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Waiting for you" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.`);
+        }
+        if (r.ok) return text(JSON.stringify(r.data).slice(0, 12_000));
+        return text(`Error ${r.error.code}: ${r.error.message}`, true);
+      }
+      default:
+        return { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: `Unknown method ${String(m.method)}` } };
+    }
+  };
+
+  /** Where this agent's container may connect: its AI provider, and Telegram
+   *  if it has a bot. Nothing else leaves the jail. */
+  const opsAllowedHosts = (token: string): string[] | undefined => {
+    const agent = store.opsAgentForToken(token);
+    if (!agent) return undefined;
+    const vendor = store.getAIProfile(agent.aiProfileId)?.vendor;
+    const hosts = vendor === 'openai' ? ['api.openai.com']
+      : vendor === 'google' ? ['generativelanguage.googleapis.com']
+      : vendor === 'anthropic' ? ['api.anthropic.com']
+      : [];
+    if (store.getChannelForAgent(agent.id)) hosts.push('api.telegram.org');
+    return hosts;
+  };
+  setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, log: (event, detail) => app.log.info(detail, event) });
+
   /** The home screen's list: what is waiting for you, and what happened to
    *  the last day's. */
   app.get('/v1/proposals', async (req) => {
@@ -450,7 +529,7 @@ const TOOL_STEPS: Record<string, string> = {
   get_runtime: 'Checking the runtime version', list_images: 'Looking at images', get_image_log: 'Reading the build log',
   list_base_images: 'Looking at base images', get_base_build: 'Checking the build',
   list_sources: 'Checking AI sources and usage', list_crons: 'Reading its scheduled tasks', list_peers: 'Checking which agents it can ask',
-  list_snapshots: 'Listing its snapshots', list_backups: 'Listing backups', list_classes: 'Listing classes',
+  read_agent_file: 'Reading one of its files', list_snapshots: 'Listing its snapshots', list_backups: 'Listing backups', list_classes: 'Listing classes',
 };
 export function toolStep(name: string): string {
   if (TOOL_STEPS[name]) return TOOL_STEPS[name]!;

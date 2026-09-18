@@ -396,6 +396,14 @@ export class Store {
         expires_at_ms INTEGER NOT NULL,
         resolved_at_ms INTEGER
       );
+      -- The management agent's key: read + propose, nothing else. One per
+      -- agent, replaced on every rebuild; only its hash is kept.
+      CREATE TABLE IF NOT EXISTS ops_tokens (
+        agent_id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS mgmt_proposals_owner ON mgmt_proposals (owner_id, status);
     `);
     // Additive dev migrations for databases created before these columns
@@ -486,6 +494,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN icon_color TEXT`,
       // No Telegram bot: reached only through Hatchabot itself.
       `ALTER TABLE agents ADD COLUMN web_only INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agents ADD COLUMN ops INTEGER NOT NULL DEFAULT 0`,
     ]) {
       try {
         this.db.exec(alter);
@@ -842,10 +851,10 @@ export class Store {
       .prepare(
         `INSERT INTO agents (id, owner_id, name, slug, state, state_reason, ai_profile_id,
                              host_id, runtime_ref, persona, shared_memory, model, pending_action,
-                             group_name, sort_order, icon, icon_color, web_only, created_at, updated_at)
+                             group_name, sort_order, icon, icon_color, web_only, ops, created_at, updated_at)
          VALUES (@id, @ownerId, @name, @slug, @state, @stateReason, @aiProfileId,
                  @hostId, @runtimeRef, @persona, @sharedMemory, @model, @pendingAction,
-                 @group, @sortOrder, @icon, @iconColor, @webOnly, @createdAt, @updatedAt)`,
+                 @group, @sortOrder, @icon, @iconColor, @webOnly, @ops, @createdAt, @updatedAt)`,
       )
       .run({
         stateReason: null,
@@ -862,6 +871,7 @@ export class Store {
         sortOrder: a.sortOrder ?? this.firstSortOrder(a.ownerId, a.group ?? null),
         sharedMemory: a.sharedMemory ? 1 : 0,
         webOnly: a.webOnly ? 1 : 0,
+        ops: a.ops ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
   }
@@ -1006,6 +1016,8 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET state = ?, state_reason = ?, updated_at = ? WHERE id = ?`)
       .run(next, reason ?? null, new Date().toISOString(), id);
+    // A management agent that is put away or removed has no key any more.
+    if (agent.ops && (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED')) this.deleteOpsToken(id);
     return this.getAgent(id)!;
   }
 
@@ -2281,6 +2293,32 @@ export class Store {
     ).map(rowToAgent);
   }
 
+  // ---- the management agent and its key -----------------------------------
+  getOpsAgent(ownerId: string): Agent | undefined {
+    const r = this.db.prepare(`SELECT * FROM agents WHERE owner_id = ? AND ops = 1 AND state != 'DELETED' LIMIT 1`).get(ownerId) as any;
+    return r ? rowToAgent(r) : undefined;
+  }
+  listOpsAgents(): Agent[] {
+    return (this.db.prepare(`SELECT * FROM agents WHERE ops = 1 AND state != 'DELETED'`).all() as any[]).map(rowToAgent);
+  }
+  setOpsToken(agentId: string, ownerId: string, token: string): void {
+    this.db.prepare(
+      `INSERT INTO ops_tokens (agent_id, owner_id, token_hash, created_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at`,
+    ).run(agentId, ownerId, hashToken(token), new Date().toISOString());
+  }
+  deleteOpsToken(agentId: string): void {
+    this.db.prepare(`DELETE FROM ops_tokens WHERE agent_id = ?`).run(agentId);
+  }
+  /** The live management agent this key belongs to, or undefined. A key whose
+   *  agent is archived, deleted or not running is dead. */
+  opsAgentForToken(token: string): Agent | undefined {
+    if (!token) return undefined;
+    const r = this.db.prepare(`SELECT agent_id FROM ops_tokens WHERE token_hash = ?`).get(hashToken(token)) as { agent_id: string } | undefined;
+    const a = r && this.getAgent(r.agent_id);
+    return a && a.ops && ['RUNNING', 'PROVISIONING', 'REBUILDING'].includes(a.state) ? a : undefined;
+  }
+
   // ---- management proposals ------------------------------------------------
   putMgmtProposal(rec: { id: string; ownerId: string; status: string; createdAtMs: number; expiresAtMs: number }): void {
     this.db.prepare(
@@ -2317,6 +2355,10 @@ export class Store {
   sweepMgmtProposals(nowMs: number): number {
     this.db.prepare(`UPDATE mgmt_proposals SET status = 'expired', resolved_at_ms = ? WHERE status = 'pending' AND expires_at_ms <= ?`).run(nowMs, nowMs);
     return this.db.prepare(`DELETE FROM mgmt_proposals WHERE status != 'pending' AND resolved_at_ms < ?`).run(nowMs - 7 * 24 * 3600_000).changes;
+  }
+
+  setAgentOps(id: string, on: boolean): void {
+    this.db.prepare(`UPDATE agents SET ops = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
   }
 
   setAgentWebOnly(id: string, on: boolean): void {
@@ -2907,6 +2949,7 @@ function rowToAgent(r: any): Agent {
     icon: r.icon ?? undefined,
     iconColor: r.icon_color ?? undefined,
     webOnly: !!r.web_only,
+    ops: !!r.ops,
     sortOrder: r.sort_order ?? undefined,
     parameters: r.params ? safeJson(r.params, undefined) : undefined,
     paramValues: r.param_values ? safeJson(r.param_values, undefined) : undefined,
