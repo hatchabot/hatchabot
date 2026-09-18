@@ -54,6 +54,11 @@ export class HttpApiClient implements ApiClient {
     return this.#request(method, path, body);
   }
 
+  /** One-call tools (restTools.ts) go through here: same auth, same routes. */
+  async raw(method: string, path: string, body?: unknown): Promise<unknown> {
+    return this.#req(method, path, body);
+  }
+
   async listAgents(): Promise<AgentSummary[]> {
     const rows = (await this.#req('GET', '/v1/agents')) as AgentSummary[];
     return rows.map((a) => ({

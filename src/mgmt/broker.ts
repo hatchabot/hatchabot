@@ -1,3 +1,4 @@
+import { REST_BY_NAME, type RestCtx, type RestTool } from './restTools.js';
 import { z } from 'zod';
 import { toolDef } from './tools.js';
 import { TemplateParamSchema } from '../orchestrator/template.js';
@@ -123,6 +124,8 @@ export interface ApiClient {
   baseBuild?(): Promise<{ running?: boolean; version?: string; candidate?: boolean; ok?: boolean; error?: string; log?: string }>;
   buildBaseCandidate?(version?: string): Promise<void>;
   setAgentImage?(id: string, image: string | null): Promise<void>;
+  /** Any /v1 call as the owner — used by the one-call tools (restTools.ts). */
+  raw?(method: string, path: string, body?: unknown): Promise<unknown>;
 }
 
 export interface ImageSummary {
@@ -275,9 +278,9 @@ export class Broker {
       return { ok: true, done: false, text: `✖ Cancelled — ${rec.summary}`, rec };
     }
     try {
-      await this.#execMutate(rec.tool, rec.resolved);
+      const extra = await this.#execMutate(rec.tool, rec.resolved);
       this.#audit('mgmt.confirmed', { tool: rec.tool, confirmId: id, resolved: rec.resolved });
-      return { ok: true, done: true, text: `✅ ${rec.summary}`, rec };
+      return { ok: true, done: true, text: `✅ ${rec.summary}${extra ? `\n${extra}` : ''}`, rec };
     } catch (e) {
       const msg = String((e as Error).message ?? e);
       this.#audit('mgmt.failed', { tool: rec.tool, confirmId: id, error: msg });
@@ -374,7 +377,35 @@ export class Broker {
     throw new BrokerError('NOT_FOUND', `No agent matches "${ref}".`);
   }
 
+  /** Context for a one-call tool: its agent resolved, lookups, other refs. */
+  async #restCtx(rt: RestTool, args: Record<string, unknown>): Promise<RestCtx> {
+    const raw = this.#need(this.api.raw);
+    const agent = rt.agentArg ? await this.#resolve(args.agent) : undefined;
+    return {
+      agent: agent && { id: agent.id, name: agent.name },
+      input: { ...args },
+      resolve: async (ref) => { const a = await this.#resolve(ref); return { id: a.id, name: a.name }; },
+      get: (path) => raw.call(this.api, 'GET', path),
+    };
+  }
+
+  /** Build a one-call tool's call; its own validation errors go back to the model. */
+  async #restCall(rt: RestTool, ctx: RestCtx) {
+    try {
+      return await rt.call(ctx);
+    } catch (e) {
+      if (e instanceof BrokerError) throw e;
+      throw new BrokerError('INVALID_INPUT', String((e as Error).message ?? e));
+    }
+  }
+
   async #execRead(name: string, args: Record<string, unknown>): Promise<unknown> {
+    const rt = REST_BY_NAME.get(name);
+    if (rt) {
+      const ctx = await this.#restCtx(rt, args);
+      const c = await this.#restCall(rt, ctx);
+      return this.#need(this.api.raw).call(this.api, c.method, c.path, c.body);
+    }
     switch (name) {
       case 'list_agents': {
         let list = await this.api.listAgents();
@@ -467,6 +498,16 @@ export class Broker {
   /** Build the concrete Resolved for a mutate, validating inputs up front so a
    *  bad model or code fails BEFORE a confirmation is ever shown. */
   async #resolveMutate(name: string, args: Record<string, unknown>): Promise<Resolved> {
+    const rt = REST_BY_NAME.get(name);
+    if (rt) {
+      const ctx = await this.#restCtx(rt, args);
+      const call = await this.#restCall(rt, ctx);
+      return {
+        agentId: ctx.agent?.id ?? '',
+        agentName: ctx.agent?.name ?? '',
+        rest: { call, card: rt.card ? rt.card(ctx) : `${name.replace(/_/g, ' ')}`, rebuild: rt.rebuildAfter },
+      };
+    }
     if (name === 'create_agent') {
       const agentName = args.name;
       if (typeof agentName !== 'string' || !agentName.trim() || agentName.length > 64) {
@@ -607,7 +648,12 @@ export class Broker {
     }
   }
 
-  async #execMutate(name: string, r: Resolved): Promise<void> {
+  async #execMutate(name: string, r: Resolved): Promise<string | void> {
+    if (r.rest) {
+      const out = await this.#need(this.api.raw).call(this.api, r.rest.call.method, r.rest.call.path, r.rest.call.body);
+      if (r.rest.rebuild && r.agentId) await this.api.rebuildAgent(r.agentId);
+      return REST_BY_NAME.get(name)?.done?.(out);
+    }
     switch (name) {
       case 'build_image':
         return this.api.buildImage({ name: r.spec!.name!, dockerfile: r.spec!.dockerfile!, base: r.spec!.base });
@@ -709,6 +755,7 @@ const previewOf = (label: string, text: string, maxChars: number): string => {
 /** Human-facing confirmation text — the RESOLVED target, never the raw input.
  *  Authoring proposals are multi-line: the card IS the review surface. */
 export function summarize(tool: string, r: Resolved): string {
+  if (r.rest) return r.rest.card;
   if (tool === 'build_image') {
     const s = r.spec!;
     return [

@@ -1,0 +1,163 @@
+/**
+ * Which management-chat tool covers each route that changes something, or
+ * why the chat deliberately can't. A test (mgmtCoverage.test.ts) reads every
+ * POST/PUT/PATCH/DELETE route in src/api and fails if one is missing here, or
+ * if a named tool doesn't exist, so the chat can't quietly fall behind the app.
+ *
+ * `app:` entries are choices, not gaps. The categories:
+ *  - secret: the request carries a credential (AI key, bot token, env value,
+ *    password, OAuth client). Secrets never pass through a model.
+ *  - fleet-wide/irreversible: kept to a deliberate click in the app.
+ *  - browser: needs the person's own browser (sign-in, OAuth consent, files).
+ *  - internal: plumbing for other components, not an owner action.
+ *  - later: reasonable for the chat, not wired yet.
+ */
+export const COVERAGE: Record<string, string> = {
+  // ---- agents: lifecycle ----
+  'POST /v1/agents': 'create_agent',
+  'DELETE /v1/agents/:id': 'app: fleet-wide/irreversible — deleting an agent erases its memory; a typed-name confirm in the app',
+  'POST /v1/agents/:id/start': 'start_agent',
+  'POST /v1/agents/:id/stop': 'stop_agent',
+  'POST /v1/agents/:id/rebuild': 'rebuild_agent',
+  'POST /v1/agents/:id/provision': 'app: later — retry a failed provision',
+  'POST /v1/agents/:id/archive': 'archive_agent',
+  'POST /v1/agents/:id/restore': 'restore_agent',
+  'POST /v1/agents/:id/clone': 'clone_agent',
+  'POST /v1/agents/:id/derive': 'app: later — new child from a template master',
+  'PATCH /v1/agents/:id': 'rename_agent, set_group, set_source, pin_image, update_definition (persona/fields)',
+  'POST /v1/agents/:id/model': 'set_model',
+  'POST /v1/agents/:id/class': 'set_class',
+  'POST /v1/agents/:id/move': 'set_group',
+  'POST /v1/agents/icons/auto': 'app: internal — the home screen fills in icons',
+  'POST /v1/agents/:id/checkpoint': 'checkpoint_memory',
+  'POST /v1/agents/:id/recover-context': 'app: later — restore earlier conversations',
+  'POST /v1/agents/:id/move-host': 'app: later — move to another runner',
+  'POST /v1/agents/:id/rehost': 'app: fleet-wide/irreversible — moves the agent to another Hatchabot server',
+  'POST /v1/agents/:id/send': 'app: later — send a copy to another account',
+  'POST /v1/agents/:id/bot-name/sync': 'app: later — rename the Telegram bot to match',
+  'POST /v1/agents/:id/adopt-workspace': 'app: browser — adopting a hand-built OpenClaw workspace from host paths',
+  'POST /v1/agents/import': 'app: browser — uploading a .hatchabot file',
+  'POST /v1/agents/restore': 'app: browser — uploading a backup file',
+  'POST /v1/agents/preflight': 'app: internal — cross-server move check',
+  'POST /v1/agents/:id/message': 'app: internal — agent-to-agent consult',
+  'POST /v1/agents/:id/console/approve': 'app: internal — the console panel approves its own browser',
+  'POST /v1/agents/:id/push-definition': 'app: later — push a master definition to its children',
+  'POST /v1/agents/:id/distill': 'app: later — a child proposes a lesson to its master',
+  'POST /v1/agents/:id/proposals/:pid/resolve': 'app: later — accept/reject a child’s proposal',
+
+  // ---- agents: definition & memory ----
+  'PUT /v1/agents/:id/files/:name': 'update_definition (SOUL.md / AGENTS.md; never MEMORY.md)',
+  'PUT /v1/agents/:id/params': 'app: later — setup values of a template copy',
+  'POST /v1/agents/:id/snapshots': 'snapshot_agent',
+  'POST /v1/agents/:id/snapshots/:snapId/restore': 'restore_snapshot',
+  'DELETE /v1/agents/:id/snapshots/:snapId': 'app: later — delete a snapshot',
+
+  // ---- agents: data, connections, env ----
+  'POST /v1/agents/:id/data-sources': 'app: browser — host folders need the machine owner’s eye; repos need a deploy key added by hand',
+  'PATCH /v1/agents/:id/data-sources/:dsId': 'app: browser — see data-sources',
+  'DELETE /v1/agents/:id/data-sources/:dsId': 'app: later — detach a data source',
+  'POST /v1/agents/:id/connections/attach': 'app: later — attach a connected Google account',
+  'POST /v1/agents/:id/connections/detach': 'app: later — detach a Google account',
+  'DELETE /v1/agents/:id/connections/:email': 'app: later — detach a Google account',
+  'POST /v1/agents/:id/env': 'app: secret — environment values are credentials',
+  'DELETE /v1/agents/:id/env/:envId': 'app: later — remove an environment variable',
+
+  // ---- agents: people & reach ----
+  'POST /v1/agents/:id/telegram': 'add_telegram (pool bot only; a pasted token stays in the app)',
+  'DELETE /v1/agents/:id/telegram': 'remove_telegram',
+  'POST /v1/agents/:id/channel-token': 'app: secret — a BotFather token',
+  'POST /v1/agents/:id/invites': 'create_invite',
+  'POST /v1/agents/:id/pairing/approve': 'approve_member',
+  'POST /v1/agents/:id/pairing/deny': 'app: later — turn a join request away',
+  'DELETE /v1/agents/:id/members/:userId': 'remove_member',
+  'PUT /v1/agents/:id/peers': 'set_peers',
+  'POST /v1/agent-peers/mesh': 'set_peers (one agent at a time)',
+
+  // ---- agents: scheduled tasks ----
+  'POST /v1/agents/:id/crons': 'add_cron',
+  'PATCH /v1/agents/:id/crons/:jobId': 'set_cron_enabled',
+  'POST /v1/agents/:id/crons/:jobId/run': 'run_cron',
+  'DELETE /v1/agents/:id/crons/:jobId': 'remove_cron',
+
+  // ---- groups, classes, plans ----
+  'POST /v1/groups/sort': 'app: later — sort a group A→Z',
+  'POST /v1/groups/move': 'app: later — reorder groups',
+  'POST /v1/agent-classes': 'app: later — define a class',
+  'PUT /v1/agent-classes/:id': 'app: later — edit a class',
+  'DELETE /v1/agent-classes/:id': 'app: later — delete a class',
+  'POST /v1/agent-todos': 'app: later — plan an agent',
+  'DELETE /v1/agent-todos/:id': 'app: later — drop a planned agent',
+
+  // ---- images ----
+  'POST /v1/images': 'build_image',
+  'POST /v1/images/:name/rebuild': 'rebuild_image',
+  'DELETE /v1/images/:name': 'remove_image',
+  'POST /v1/runtime/build': 'build_base_candidate (candidates only)',
+  'POST /v1/runtime/images/promote': 'app: fleet-wide/irreversible — promoting a base image moves every agent',
+  'DELETE /v1/runtime/images/:tag': 'delete_base_image',
+  'POST /v1/hosts/:id/install-image': 'app: later — copy the runtime image to a runner',
+
+  // ---- AI sources ----
+  'POST /v1/ai-profiles': 'app: secret — adding a source takes its key or token',
+  'PATCH /v1/ai-profiles/:id': 'app: later — rename/share a source, change its default model',
+  'DELETE /v1/ai-profiles/:id': 'app: fleet-wide/irreversible — deleting a source strands its agents',
+  'POST /v1/ai-profiles/:id/adopt-agents': 'set_source (one agent at a time)',
+  'POST /v1/ai-profiles/:id/migrate-agents': 'set_source (one agent at a time)',
+  'POST /v1/ai-profiles/:id/apply-default-model': 'set_model (one agent at a time)',
+  'POST /v1/ai-profiles/usage/sample': 'app: internal — the usage view refreshes itself',
+  'PUT /v1/media-key': 'app: secret — the Gemini key',
+  'DELETE /v1/media-key': 'app: later — remove the Gemini key',
+  'PUT /v1/search-key': 'app: secret — the Brave key',
+  'DELETE /v1/search-key': 'app: later — remove the Brave key',
+
+  // ---- Telegram bots ----
+  'POST /v1/pool': 'app: secret — adding a bot takes its token',
+  'DELETE /v1/pool/:username': 'app: later — discard a pooled bot',
+
+  // ---- machines & servers ----
+  'POST /v1/hosts': 'app: secret — a runner address and SSH setup',
+  'DELETE /v1/hosts/:id': 'app: fleet-wide/irreversible — removing a runner',
+  'POST /v1/hosts/:id/drain': 'app: fleet-wide/irreversible — moves every agent off a runner',
+  'POST /v1/peers': 'app: secret — another server’s access token',
+  'DELETE /v1/peers/:id': 'app: later — forget another server',
+  'POST /v1/workspaces/inspect': 'app: browser — reading host paths for adoption',
+  'POST /v1/workspaces/scan-paths': 'app: browser — scanning host paths for adoption',
+  'POST /v1/openclaw/quiesce': 'app: internal — adoption stops a hand-built instance',
+
+  // ---- backups ----
+  'POST /v1/backups/run': 'run_backup',
+  'POST /v1/backups/restore': 'app: fleet-wide/irreversible — restoring from a backup set',
+  'DELETE /v1/backups/:date': 'app: later — delete a backup set',
+
+  // ---- people, accounts, sign-in ----
+  'POST /v1/local-accounts': 'app: secret — account creation and invitations',
+  'POST /v1/local-accounts/:id/password': 'app: secret — a password',
+  'DELETE /v1/local-accounts/:id': 'app: fleet-wide/irreversible — removing an account',
+  'POST /v1/local-accounts/bootstrap': 'app: browser — first sign-in',
+  'POST /v1/local-accounts/claim': 'app: browser — claiming an invitation',
+  'POST /v1/login': 'app: browser — signing in to this machine',
+  'POST /v1/logout': 'app: browser — signing out of this machine',
+  'POST /v1/session': 'app: browser — Google sign-in',
+  'POST /v1/join': 'app: browser — someone joining an agent',
+  'POST /v1/cli-tokens': 'app: secret — mints an access token',
+  'DELETE /v1/cli-tokens/:id': 'app: later — revoke an access token',
+  'DELETE /v1/account/telegram': 'app: later — unlink your Telegram',
+  'PUT /v1/operator-profile': 'app: later — "about you"',
+  'POST /v1/inbox/:id/accept': 'app: later — accept an agent sent to you',
+  'POST /v1/inbox/:id/dismiss': 'app: later — dismiss an agent sent to you',
+
+  // ---- Google ----
+  'PUT /v1/google-oauth/client': 'app: secret — the OAuth client secret',
+  'DELETE /v1/google-oauth/client': 'app: later — remove the OAuth client',
+  'POST /v1/connections/google/start': 'app: browser — Google consent',
+  'DELETE /v1/connections/:id': 'app: later — disconnect a Google account',
+
+  // ---- the management chat itself ----
+  'POST /v1/mgmt/chat': 'app: internal — the chat',
+  'DELETE /v1/mgmt/chat': 'app: internal — New chat',
+  'POST /v1/mgmt/chat/confirm': 'app: internal — pressing Confirm',
+  'POST /v1/mgmt/chat/mode': 'app: internal — arming changes',
+  'POST /v1/mgmt/mcp': 'app: internal — the chat’s tool server',
+  'POST /v1/mgmt/heartbeat': 'app: internal — the Telegram management bot',
+  'POST /v1/mgmt/llm/complete': 'app: internal — the Telegram management bot’s model calls',
+};

@@ -35,6 +35,9 @@ export interface AuthorSpec {
 export interface Resolved {
   agentId: string;
   agentName: string;
+  /** A one-call tool (restTools.ts): the exact call, built and checked at
+   *  propose time, replayed on Confirm — so the card and the act match. */
+  rest?: { call: { method: string; path: string; body?: unknown }; card: string; rebuild?: boolean };
   /** set_model */ model?: string;
   /** approve_member */ code?: string;
   /** remove_member */ userId?: string;

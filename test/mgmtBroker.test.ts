@@ -154,6 +154,18 @@ class FakeApi implements ApiClient {
   async setAgentImage(id: string, image: string | null) {
     this.calls.push(`image:${id}:${image ?? 'default'}`);
   }
+
+  // ---- one-call tools (restTools.ts) ----
+  async raw(method: string, path: string, body?: unknown) {
+    if (method === 'GET') {
+      if (path === '/v1/ai-profiles') return [{ id: 'p1', name: 'Claude Max' }, { id: 'p2', name: 'Spare Key' }];
+      if (path === '/v1/agent-classes') return { classes: [{ id: 'k1', name: 'Heavy' }] };
+      return { path };
+    }
+    this.calls.push(`${method} ${path} ${body === undefined ? '' : JSON.stringify(body)}`.trim());
+    if (path.endsWith('/invites')) return { code: 'abc123', url: 'https://example.test/join/abc123' };
+    return {};
+  }
 }
 
 const AGENTS: AgentSummary[] = [
@@ -816,5 +828,70 @@ describe('base-image candidates from chat — candidate first, promote stays in 
     expect((l as any).data.tags).toHaveLength(4);
     const b = await broker.handleTool('get_base_build', {}, WHO);
     expect((b as any).data.log.length).toBe(3000);
+  });
+});
+
+describe('one-call tools (restTools.ts) — resolved at propose time, replayed on confirm', () => {
+  const confirm = (broker: Broker, r: any) => broker.confirm(r.pending.confirmId, 'confirm', { fromUserId: 555, chatId: 100 });
+
+  it('a read runs straight away, through the owner-scoped client', async () => {
+    const { broker } = make();
+    const r = await broker.handleTool('list_crons', { agent: 'Tech Advisor' }, WHO);
+    expect((r as any).data).toEqual({ path: '/v1/agents/a1/crons' });
+  });
+
+  it('archive: the card names the agent, nothing happens until confirm, then exactly that call', async () => {
+    const { broker, api } = make({ rw: true });
+    const r = await broker.handleTool('archive_agent', { agent: 'tech-advisor' }, WHO);
+    expect((r as any).pending.summary).toMatch(/Archive "Tech Advisor"/);
+    expect(api.calls).toEqual([]);
+    await confirm(broker, r);
+    expect(api.calls).toEqual(['POST /v1/agents/a1/archive {"checkpoint":true}']);
+  });
+
+  it('set_source resolves a source NAME to its id, names it on the card, and rebuilds after', async () => {
+    const { broker, api } = make({ rw: true });
+    const r = await broker.handleTool('set_source', { agent: 'a1', source: 'spare key' }, WHO);
+    expect((r as any).pending.summary).toMatch(/"Spare Key"/);
+    await confirm(broker, r);
+    expect(api.calls).toEqual(['PATCH /v1/agents/a1 {"aiProfileId":"p2"}', 'rebuild:a1']);
+  });
+
+  it('an unknown source is refused before any card, listing the options', async () => {
+    const { broker } = make({ rw: true });
+    const r = await broker.handleTool('set_source', { agent: 'a1', source: 'Nope' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect((r as any).error.message).toMatch(/Claude Max, Spare Key/);
+  });
+
+  it('set_peers resolves every peer against the owner’s fleet and names them on the card', async () => {
+    const { broker, api } = make({ rw: true });
+    const r = await broker.handleTool('set_peers', { agent: 'a1', peers: ['CMT advisor', 'a3'], allow_actions: ['a3'] }, WHO);
+    expect((r as any).pending.summary).toMatch(/may ask: CMT advisor, Advisor/);
+    expect((r as any).pending.summary).toMatch(/ask these to act: Advisor/);
+    await confirm(broker, r);
+    expect(api.calls).toEqual(['PUT /v1/agents/a1/peers {"peerIds":["a2","a3"],"allowActions":["a3"]}', 'rebuild:a1']);
+  });
+
+  it('create_invite puts the link in the done message', async () => {
+    const { broker } = make({ rw: true });
+    const r = await broker.handleTool('create_invite', { agent: 'a1' }, WHO);
+    const out = await confirm(broker, r);
+    expect((out as any).text).toMatch(/Invite link: https:\/\/example\.test\/join\/abc123/);
+  });
+
+  it('add_cron needs a schedule; delete_base_image refuses the fleet default', async () => {
+    const { broker } = make({ rw: true });
+    const a = await broker.handleTool('add_cron', { agent: 'a1', name: 'x', message: 'y' }, WHO);
+    expect(a).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    const d = await broker.handleTool('delete_base_image', { tag: 'hatchabot-runtime:latest' }, WHO);
+    expect(d).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('changes are still refused in read-only mode', async () => {
+    const { broker, api } = make();
+    const r = await broker.handleTool('remove_telegram', { agent: 'a1' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'READ_ONLY_MODE' } });
+    expect(api.calls).toEqual([]);
   });
 });

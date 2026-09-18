@@ -412,3 +412,23 @@ use.
 - `HATCHABOT_MGMT_MCP=0` falls back to the text protocol. The Telegram
   management bot still uses the text protocol, with the tolerant parser from
   v1.22.2.
+
+## Matching the app (v1.24.0)
+
+About 30 more tools, most of them one `/v1` call each, declared as data in
+`src/mgmt/restTools.ts`. They cover archive, restore, clone, rename, group,
+AI source (with rebuild), class, image pin (with rebuild), scheduled tasks,
+peers (with rebuild), Telegram from the pool, invites, memory checkpoints,
+snapshots, backups and base-image deletion, plus reads for sources and usage,
+tasks, peers, snapshots, backups and classes.
+
+- **Built at propose time, replayed on Confirm.** Each one's call is built
+  and checked when the card is proposed: agent references resolve against the
+  owner's fleet, source and class names resolve to ids, and peers resolve one
+  by one. Confirm replays exactly that call, so the card and the act can't
+  differ.
+- **The coverage ledger.** `src/mgmt/coverage.ts` marks every route that
+  changes something with the chat tool that covers it, or `app: <kind> —
+  <reason>`, where the kind is secret, fleet-wide/irreversible, browser,
+  internal or later. `test/mgmtCoverage.test.ts` fails when a new route
+  arrives unmarked.

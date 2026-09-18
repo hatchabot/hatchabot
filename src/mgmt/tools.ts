@@ -1,3 +1,4 @@
+import { REST_TOOLS } from './restTools.js';
 /**
  * The management broker's tool manifest — the SINGLE source of truth for what
  * the model (Phase 2) may propose and what the deterministic slash commands
@@ -398,6 +399,9 @@ export const MANIFEST: ToolDef[] = [
     },
   },
 ];
+
+// The one-call tools (restTools.ts) join the menu with the same shape.
+MANIFEST.push(...REST_TOOLS.map(({ name, tier, description, input_schema }) => ({ name, tier, description, input_schema } as ToolDef)));
 
 const BY_NAME = new Map(MANIFEST.map((t) => [t.name, t]));
 

@@ -2,6 +2,23 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.24.0] — 2026-09-18
+
+### Added
+- **The Hatchabot chat can do most of what the panels do.** New tools cover:
+  - agents: archive, restore, clone, rename, move to a group;
+  - switching an agent's AI source (with the rebuild);
+  - setting its class, and running it on a derived image or candidate (with the rebuild);
+  - scheduled tasks: list, add, turn on or off, run now, delete;
+  - which agents it may ask, and whether it may ask them to act;
+  - Telegram: add a pool bot, remove its bot, make an invite link (shown after Confirm);
+  - memory: save the chat into memory, snapshot and restore definition files;
+  - start a backup, and delete an unused base image;
+  - reading AI-source usage and rate limits, backups, snapshots and classes.
+
+  Every change is still a card that names exactly what will happen, and Confirm does exactly that.
+- **A ledger of what the chat covers.** Every one of the app's 120 routes that change something is marked with the chat tool that covers it, or left to the app with a reason: a secret, fleet-wide or irreversible, needs your browser, internal, or not yet. A test fails if a new one arrives unmarked, so the chat can't quietly fall behind the app. Still app-only on purpose: secrets of any kind, deleting agents, promoting a base image, moving to another server, accounts.
+
 ## [1.23.0] — 2026-09-18
 
 ### Changed
