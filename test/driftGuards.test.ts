@@ -277,3 +277,16 @@ describe('icon palette: agentIcons.ts ↔ the v2 home screen', () => {
     expect(page).toEqual([...ICON_PALETTE]);
   });
 });
+
+describe('console session: the page ↔ configWriter agent ids', () => {
+  // Every container also holds OpenClaw's unused default agent "main"; the
+  // console's bare address opens that one, which looks like total amnesia. The
+  // page must open `agent:<slug>:main` — the session Telegram DMs use — which
+  // relies on OpenClaw's agent id being the slug, as configWriter adds it.
+  it('openGateway opens the agent’s own session, keyed by slug', () => {
+    const html = read('web/index.html');
+    expect(html).toMatch(/\/ui\/chat\?session=\$\{session\}/);
+    expect(html).toContain('`agent:${slug}:main`');
+    expect(read('src/openclaw/configWriter.ts')).toMatch(/'agents',\s*'add'/);
+  });
+});

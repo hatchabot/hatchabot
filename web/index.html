@@ -6950,7 +6950,14 @@ async function openGateway(id, slug) {
     // derives its gateway from the page it was served from, and handing it an
     // explicit gatewayUrl instead parks it behind a "Change Gateway URL"
     // confirmation that also withholds the token.
-    const url = `/v1/agents/${id}/ui/#token=${encodeURIComponent(g.token)}`;
+    //
+    // Open straight on the agent's own conversation. Each container also holds
+    // OpenClaw's built-in default agent, "main" — unused, with its own empty
+    // workspace — and the console's bare address lands there, which looked
+    // like the agent had forgotten everything said on Telegram. Telegram DMs
+    // live in `agent:<slug>:main` (OpenClaw's agent id is always the slug).
+    const session = encodeURIComponent(`agent:${slug}:main`);
+    const url = `/v1/agents/${id}/ui/chat?session=${session}#token=${encodeURIComponent(g.token)}`;
     // In the app, not a new tab: the proxy now permits framing by this origin
     // (and still refuses every other one).
     const a = (agents || []).find(x => x.id === id);

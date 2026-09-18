@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.15.3] — 2026-09-18
+
+### Fixed
+- **The chat panel opened the wrong agent, so it seemed to remember nothing.**
+  - Every agent's container also holds OpenClaw's built-in default agent, `main`. It is unused and has its own empty workspace, and the console's plain address opens it.
+  - Hatchabot's agent is a second agent in the same container: the one Telegram talks to, with the agent's memory, files and conversation.
+  - The panel now opens straight on that agent's conversation, `agent:<slug>:main`, the same one its Telegram messages go to. It works for existing agents at once, with no rebuild.
+  - Verified through a prefix proxy that mimics Hatchabot's: the plain address lands on session `main`; the new one lands on the agent's own.
+
 ## [1.15.2] — 2026-09-18
 
 ### Changed
