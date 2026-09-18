@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.29.0] — 2026-09-18
+
+### Changed
+- **Base images no longer has a build form.** Building a candidate is the management agent's job: ask your Hatchabot agent, and it prepares the build for your Confirm.
+  - **What stays:** the images, **Try on one agent**, **Promote to fleet**, **Delete**, the ✕ that ends a trial, and a live build log whenever a build is running.
+  - **Fallbacks:** the classic view keeps the form, and `hatchabot upgrade-image --candidate` still works on the machine.
+
 ## [1.28.4] — 2026-09-18
 
 ### Changed

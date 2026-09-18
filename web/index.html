@@ -3977,7 +3977,7 @@ async function loadRuntimeImages() {
     const [rt, imgs] = await Promise.all([api('/v1/runtime'), api('/v1/runtime/images')]);
     rtData = imgs;
     $('rtDefault').textContent = imgs.default;
-    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). <a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
+    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
     if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
     renderRuntimeList();
   } catch (e) { $('rtList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -9559,6 +9559,14 @@ function initV2() {
   const strip = aiDlg.querySelector('.tabs');
   strip.hidden = true;
   strip.insertAdjacentHTML('afterend', '<div class="tabs" role="tablist" id="v2SettingsTabs"></div>');
+  // Base images: building is the management agent's job here, not a form.
+  // The tab keeps what you act on (try on one agent, promote, delete) and
+  // shows a build's log when one is running.
+  $('rtBuild').hidden = true;
+  $('rtBuild').insertAdjacentHTML('afterend', `<div class="sub" id="v2BuildHint" style="margin-bottom:10px">
+    <b>Want a newer OpenClaw version?</b> Ask your Hatchabot agent: “build a candidate for the newest OpenClaw”. It prepares the build for your Confirm;
+    the candidate then appears below, where you try it on one agent and promote it when you’re happy.</div>`);
+  $('v2BuildHint').after($('rtBuildLog'));
   // Derived images get their own tab: move their section into a pane of its own.
   $('paneRuntime').insertAdjacentHTML('afterend', '<section id="paneV2Derived" role="tabpanel" hidden><div class="sub v2ownernote">Derived images are managed by the account that set up this machine.</div></section>');
   $('paneV2Derived').append($('derivedSection'));
