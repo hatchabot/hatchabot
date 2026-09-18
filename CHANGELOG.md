@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.28.1] — 2026-09-18
+
+### Changed
+- Each group of agents on the home screen sits in a soft outlined panel, so the groups read as separate shelves, not one long list.
+
 ## [1.28.0] — 2026-09-18
 
 ### Added

@@ -486,7 +486,11 @@
   .v2gear span { font-size:19px; line-height:1 }
   .v2chip { background:var(--panel-2); border:1px solid var(--line); border-radius:999px; padding:3px 11px; font-size:12.5px; cursor:pointer; color:inherit; font:inherit; font-size:12.5px }
   .v2chip:hover { border-color:var(--accent) }
-  .v2group { margin-bottom:22px }
+  /* A soft outline per group: the groups read as shelves, not one long list. */
+  .v2group { margin-bottom:16px; border:1px solid color-mix(in srgb, var(--line) 70%, transparent); border-radius:16px;
+             padding:12px 14px 6px; background:color-mix(in srgb, var(--panel) 45%, transparent) }
+  .v2group.collapsed { padding-bottom:12px }
+  .v2group.collapsed .v2ghead { margin-bottom:0 }
   .v2ghead { display:flex; align-items:baseline; gap:10px; margin-bottom:6px }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2ghead .n { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums }
