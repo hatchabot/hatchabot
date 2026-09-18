@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.14.3] — 2026-09-18
+
+### Changed
+- **New home screen (`/?ui=v2`): no "Allow changes" switch on the Hatchabot chat.** Every change it proposes already arrives as a card with the full detail and does nothing until you press **Confirm**. On a chat that is always on screen, the extra arming step mostly produced "tick Allow changes first" dead ends. This screen now arms changes itself on each message, which also survives a server restart or **New chat**. The classic view's chat dialog and the Telegram management bot keep their switch.
+
 ## [1.14.2] — 2026-09-18
 
 ### Changed

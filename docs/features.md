@@ -37,7 +37,10 @@ underneath is the same, so you can switch back and forth freely.
   Knowledge, Sharing, Schedule, Advanced. Every button from the classic
   card is in one of them.
 - **Hatchabot itself is at the top**: the management chat, always open. Ask
-  it to create, fix, move or share agents; changes still need your Confirm.
+  it to create, fix, move or share agents. There is no "Allow changes" switch
+  on this screen: every change arrives as a card showing exactly what it will
+  do, and nothing happens until you press its Confirm. (The classic view's chat
+  dialog keeps the switch.)
 - **Icons are picked for you.** The first time the new screen sees agents
   without one, your management AI chooses an emoji and colour for each from
   its name and description (or, with no AI set up, a keyword table does).

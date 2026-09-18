@@ -8182,6 +8182,10 @@ async function sendMgmtChat() {
   mgmtBubble('user', message);
   const thinking = mgmtBubble('assistant', '…');
   $('mgmtChatSend').disabled = true;
+  // v2 arms changes on every send rather than once: the server's chat session
+  // (and its mode) is gone after a restart or "New chat", and each change is
+  // still only a proposal until its Confirm.
+  if (UI_V2) await api('/v1/mgmt/chat/mode', { method: 'POST', body: { readWrite: true } }).catch(() => {});
   try {
     const r = await api('/v1/mgmt/chat', { method: 'POST', body: { message } });
     thinking.remove();
@@ -8771,7 +8775,11 @@ function initV2() {
   // The hub borrows the management chat's own controls, so the web chat keeps
   // one implementation (and one set of ids) whichever look is showing.
   $('v2HubLlm').append($('mgmtChatLlm'));
-  $('v2HubTools').append($('mgmtChatArm').closest('label'), $('mgmtChatNew'));
+  // No "Allow changes" switch here: every change already arrives as a card
+  // that does nothing until Confirm, and on an always-visible chat the extra
+  // arming step only produced "tick Allow changes first" dead ends (Chris,
+  // 2026-09-18). The classic dialog keeps its switch.
+  $('v2HubTools').append($('mgmtChatNew'));
   $('v2HubLogSlot').append($('mgmtChatLog'));
   $('v2HubInputSlot').append($('mgmtChatInput').parentElement);
   $('mgmtChatInput').placeholder = 'e.g. “make a travel agent for our Sicily trip and share it with Sophie”';
