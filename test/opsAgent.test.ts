@@ -57,7 +57,13 @@ describe('its runtime spec', () => {
     await f.inject({ method: 'POST', url: '/v1/ops-agent', headers: H, payload: {} });
     const a = store.getOpsAgent(OWNER)!;
     const deps = { store, secrets, provider, channel: {} as any };
+    // A fleet search key must NOT reach it: that makes OpenClaw fetch the Brave
+    // plugin from npm at startup, which the jail refuses, and it never comes up
+    // healthy (seen live on first real setup).
+    await secrets.put('media/brave-api-key', 'BSA-fleet-key');
     const one = await buildRuntimeSpec(deps, a.id);
+    expect(one.env.BRAVE_API_KEY).toBeUndefined();
+    expect(buildConfigCommands(one.workspace.configPatch as any).map((c) => c.argv.join(' '))).toContain('config set tools.web.search.enabled false');
     expect(one.isolated).toBe(true);
     expect(one.env.HTTPS_PROXY).toMatch(/^http:\/\/ops:[\w-]+@/);
     expect(one.env.NODE_USE_ENV_PROXY).toBe('1');
@@ -80,7 +86,9 @@ describe('its runtime spec', () => {
   it('an ordinary agent is untouched', async () => {
     const { store, secrets, provider } = await world();
     store.insertAgent({ id: 'n1', ownerId: OWNER, name: 'N', slug: 'n', state: 'RUNNING', aiProfileId: `p-${OWNER}`, hostId: `h-${OWNER}`, persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as any);
+    await secrets.put('media/brave-api-key', 'BSA-fleet-key');
     const spec = await buildRuntimeSpec({ store, secrets, provider, channel: {} as any }, 'n1');
+    expect(spec.env.BRAVE_API_KEY).toBe('BSA-fleet-key');
     expect(spec.isolated).toBeUndefined();
     expect(spec.env.HTTPS_PROXY).toBeUndefined();
     expect((spec.workspace.configPatch as any).ops).toBeUndefined();

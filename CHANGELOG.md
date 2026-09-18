@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.28.2] — 2026-09-18
+
+### Fixed
+- **Setting up the Hatchabot agent failed on machines with a fleet search key.**
+  - **Cause:** the Brave key made OpenClaw download its Brave plugin from npm at startup. The agent's no-internet jail refused that, so it never came up healthy ("started but never came online").
+  - **Fix:** the management agent no longer receives the search key (it searches through Hatchabot) and has OpenClaw's own web search switched off. Ordinary agents are unchanged.
+  - **Re-tested on throwaway containers:** with a search key present, in both API-key and subscription mode. It booted healthy and answered through the filtered route.
+- The hub box shows why a setup failed and offers **Retry**, and says "Setting up" while it is.
+
 ## [1.28.1] — 2026-09-18
 
 ### Changed

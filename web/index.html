@@ -9405,8 +9405,9 @@ function v2RenderHub() {
     const st = v2Status(ops);
     const ready = v2CanChat(ops) && window.isSecureContext;
     html = `<div class="v2opsrow"><span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
-      <span class="sub" style="flex:1;min-width:200px">${ops.opsDrift ? `<b style="color:var(--bad)">Paused:</b> its safety settings were changed (${esc(ops.opsDrift)}). Rebuild it to restore them.` : 'Ask it about your agents, or to change something. What it prepares waits below for your Confirm.'}</span>
+      <span class="sub" style="flex:1;min-width:200px">${ops.opsDrift ? `<b style="color:var(--bad)">Paused:</b> its safety settings were changed (${esc(ops.opsDrift)}). Rebuild it to restore them.` : ops.state === 'FAILED' ? `It didn't start${ops.stateReason ? ': ' + esc(ops.stateReason) : '.'}` : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.' : 'Ask it about your agents, or to change something. What it prepares waits below for your Confirm.'}</span>
       ${ops.opsDrift ? `<button class="primary" onclick="rebuild('${jsq(ops.id)}')">Rebuild</button>` : ''}
+      ${ops.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(ops.id)}','provision')">Retry</button>` : ''}
       ${ready ? `<button class="primary" onclick="openGateway('${jsq(ops.id)}','${jsq(ops.slug)}')">💬 Open</button>` : ''}
       <button onclick="openV2Agent('${jsq(ops.id)}')">Settings</button></div>
       ${!window.isSecureContext && v2CanChat(ops) ? '<div class="sub">Open Hatchabot over https to chat with it from this device.</div>' : ''}`;

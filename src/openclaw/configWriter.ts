@@ -172,7 +172,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // fleet ran with this UNSET (= enabled by default); an earlier draft wrote
   // `false` for keyless agents, which would have disabled search fleet-wide
   // on the next rebuild — caught before any rebuild ran.
-  cmds.push({ argv: ['config', 'set', 'tools.web.search.enabled', 'true'] });
+  cmds.push({ argv: ['config', 'set', 'tools.web.search.enabled', patch.ops ? 'false' : 'true'] });
   // Memory search: OpenClaw's default points at OpenAI embeddings, which no
   // Hatchabot agent has a key for — so semantic recall over MEMORY.md was
   // silently dead fleet-wide (doctor flagged it once the lint sweep landed).

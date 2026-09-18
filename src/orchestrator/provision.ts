@@ -544,7 +544,10 @@ export async function buildRuntimeSpec(
       ...(mediaKey ? { GEMINI_API_KEY: mediaKey } : {}),
       // Fleet search key first, per-agent env after — an agent's own
       // BRAVE_API_KEY (its own quota/bill) wins over the household one.
-      ...(searchKey ? { BRAVE_API_KEY: searchKey } : {}),
+      // Not for the management agent: a Brave key makes OpenClaw download the
+      // Brave plugin from npm at startup, which its jail refuses — it then never
+      // comes up healthy (seen live, 2026-09-18). It searches through Hatchabot.
+      ...(searchKey && !agent.ops ? { BRAVE_API_KEY: searchKey } : {}),
       ...perAgentEnv,
       // Orientation, not configuration: the human name of the machine this
       // agent runs on, refreshed by every rebuild/move.
