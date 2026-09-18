@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.21.0] — 2026-09-18
+
+### Added
+- **New OpenClaw versions from the Hatchabot chat, candidate first.** The management chat, on the web or on Telegram, can now:
+  - check what is available and what is on trial (`list_base_images`, `get_base_build`);
+  - **build a candidate** base image for a new OpenClaw version (the newest by default). No agent changes; the card says so.
+  - **try the candidate on one agent** (pin plus rebuild, memory kept);
+  - **end the trial** (unpin plus rebuild).
+
+  Each change is a confirmation card. **Promoting to the whole fleet is deliberately not something the chat can do:** it tells you to press Promote in Settings → Machines → Runtime image, and a test holds that line. It refuses a build while one is running, a `latest` or `derived-*` "version", and trials of the default, a derived image, or a tag that isn't built.
+
 ## [1.20.0] — 2026-09-18
 
 ### Changed

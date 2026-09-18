@@ -118,6 +118,11 @@ export interface ApiClient {
   buildImage(body: { name: string; dockerfile: string; base?: string }): Promise<void>;
   rebuildImage(name: string, base?: string): Promise<void>;
   removeImage(name: string): Promise<void>;
+  // Base-image candidates (optional so older fakes/clients still type-check).
+  listBaseImages?(): Promise<import('./apiClient.js').BaseImages>;
+  baseBuild?(): Promise<{ running?: boolean; version?: string; candidate?: boolean; ok?: boolean; error?: string; log?: string }>;
+  buildBaseCandidate?(version?: string): Promise<void>;
+  setAgentImage?(id: string, image: string | null): Promise<void>;
 }
 
 export interface ImageSummary {
@@ -403,6 +408,12 @@ export class Broker {
         return this.api.getRuntime();
       case 'list_images':
         return this.api.listImages();
+      case 'list_base_images':
+        return this.#need(this.api.listBaseImages).call(this.api);
+      case 'get_base_build': {
+        const b = await this.#need(this.api.baseBuild).call(this.api);
+        return { ...b, log: (b.log ?? '').slice(-3000) };
+      }
       case 'get_image_log': {
         if (typeof args.name !== 'string' || !args.name) throw new BrokerError('INVALID_INPUT', 'Missing image name.');
         return this.api.imageLog(args.name);
@@ -428,6 +439,11 @@ export class Broker {
       throw new BrokerError('INVALID_INPUT', 'Setup field keys must be unique.');
     }
     return parsed.data as unknown as Array<Record<string, unknown>>;
+  }
+
+  #need<F>(fn: F | undefined): F {
+    if (!fn) throw new BrokerError('UPSTREAM_ERROR', 'This server does not support base-image candidates from chat.');
+    return fn;
   }
 
   /** create_agent placement: the LOCAL host and the AI profile most of the
@@ -501,6 +517,33 @@ export class Broker {
       }
       return { agentId: '', agentName: imgName, spec: { name: imgName, base } };
     }
+    if (name === 'build_base_candidate') {
+      const rt = await this.api.getRuntime();
+      const version = typeof args.version === 'string' && args.version.trim() ? args.version.trim() : rt.npmLatest;
+      if (!version || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version) || version === 'latest' || version.startsWith('derived-')) {
+        throw new BrokerError('INVALID_INPUT', 'Give a specific OpenClaw version, e.g. 2026.9.1.');
+      }
+      const running = await this.#need(this.api.baseBuild).call(this.api);
+      if (running.running) throw new BrokerError('INVALID_INPUT', 'A base-image build is already running — check get_base_build.');
+      return { agentId: '', agentName: version, spec: { version, current: rt.imageVersion } };
+    }
+    if (name === 'try_base_candidate' || name === 'end_base_trial') {
+      const agent = await this.#resolve(args.agent);
+      const imgs = await this.#need(this.api.listBaseImages).call(this.api);
+      if (name === 'end_base_trial') {
+        const onCandidate = imgs.tags.find((t) => t.pinned.some((p) => p.id === agent.id) && !t.derived && !t.isDefault);
+        if (!onCandidate) throw new BrokerError('INVALID_INPUT', `"${agent.name}" isn't trying a candidate image.`);
+        return { agentId: agent.id, agentName: agent.name, spec: { tag: onCandidate.tag } };
+      }
+      const tag = typeof args.tag === 'string' ? args.tag.trim() : '';
+      const t = imgs.tags.find((x) => x.tag === tag);
+      // Only a real, built, non-default base candidate: never :latest, never a
+      // derived image (those carry packages), never something not on disk.
+      if (!t || !t.exists) throw new BrokerError('NOT_FOUND', `No built image "${tag}" — list_base_images shows what exists.`);
+      if (t.isDefault || t.isLatest) throw new BrokerError('INVALID_INPUT', `${tag} is already the fleet default — nothing to try.`);
+      if (t.derived) throw new BrokerError('INVALID_INPUT', `${tag} is a derived image, not a base candidate.`);
+      return { agentId: agent.id, agentName: agent.name, spec: { tag, version: t.openclawVersion, current: imgs.defaultInfo?.openclawVersion } };
+    }
     const agent = await this.#resolve(args.agent);
     const base: Resolved = { agentId: agent.id, agentName: agent.name };
     switch (name) {
@@ -572,6 +615,14 @@ export class Broker {
         return this.api.rebuildImage(r.spec!.name!, r.spec!.base);
       case 'remove_image':
         return this.api.removeImage(r.spec!.name!);
+      case 'build_base_candidate':
+        return this.#need(this.api.buildBaseCandidate).call(this.api, r.spec!.version);
+      case 'try_base_candidate':
+        await this.#need(this.api.setAgentImage).call(this.api, r.agentId, r.spec!.tag!);
+        return this.api.rebuildAgent(r.agentId);
+      case 'end_base_trial':
+        await this.#need(this.api.setAgentImage).call(this.api, r.agentId, null);
+        return this.api.rebuildAgent(r.agentId);
       case 'create_agent': {
         const s = r.spec!;
         const created = await this.api.createAgent({
@@ -670,6 +721,17 @@ export function summarize(tool: string, r: Resolved): string {
   }
   if (tool === 'remove_image') {
     return `🗑 Delete derived image "${r.agentName}"`;
+  }
+  if (tool === 'build_base_candidate') {
+    return `🧪 Build a base-image CANDIDATE for OpenClaw ${r.spec?.version}` +
+      `\nThe fleet keeps running ${r.spec?.current ? `OpenClaw ${r.spec.current}` : 'its current image'}. Nothing changes for any agent until you try the candidate on one agent, and then press Promote in the web app (Settings → Machines → Runtime image).`;
+  }
+  if (tool === 'try_base_candidate') {
+    return `🧪 Try ${r.spec?.tag}${r.spec?.version ? ` (OpenClaw ${r.spec.version})` : ''} on "${r.agentName}"` +
+      `\nPins this one agent to the candidate and rebuilds it (memory kept; briefly offline). Every other agent stays on ${r.spec?.current ? `OpenClaw ${r.spec.current}` : 'the fleet default'}. Undo with end_base_trial.`;
+  }
+  if (tool === 'end_base_trial') {
+    return `↩ End the trial on "${r.agentName}": unpin it from ${r.spec?.tag} and rebuild it onto the fleet default (memory kept).`;
   }
   if (tool === 'create_agent' || tool === 'update_definition') {
     const s = r.spec!;

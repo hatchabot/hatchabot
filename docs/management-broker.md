@@ -173,8 +173,20 @@ card and the FULL lines are posted above it, 10-min authoring TTL; existing
 names refused at propose time — use `rebuild_image`), `rebuild_image` (name +
 optional newer base → `POST /v1/images/:name/rebuild`), and `remove_image`
 (`DELETE /v1/images/:name`; refused BEFORE a card when any agent pins the
-image). The BASE image is read-only to the bot (`get_runtime` reports it);
-base builds are a host operation (`scripts/build-runtime-image.sh`).
+image).
+
+**Base-image candidates** (v1.21.0), candidate-first:
+
+- `build_base_candidate`: version, defaulting to the newest on npm →
+  `POST /v1/runtime/build {candidate: true}`. It never touches `:latest`, and
+  is refused while a build runs or for `latest`/`derived-*` versions.
+- `try_base_candidate`: agent + tag → `PATCH image` then rebuild. Only for a
+  tag that is built, not the default, and not derived.
+- `end_base_trial`: unpin, then rebuild.
+- Reads: `list_base_images` and `get_base_build`.
+- **Promote is not a tool.** Moving the whole fleet stays a button in the web
+  app (Settings → Machines → Runtime image). The system prompt tells the model
+  to send the owner there, and a test asserts no promote tool exists.
 
 **Forbidden** (never in the tool array — the model literally cannot call them):
 `add_ai_key`, set/paste bot token, set password, edit `MEMORY.md`,

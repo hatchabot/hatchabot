@@ -195,6 +195,18 @@ export class HttpApiClient implements ApiClient {
   async rebuildImage(name: string, base?: string): Promise<void> {
     await this.#req('POST', `/v1/images/${encodeURIComponent(name)}/rebuild`, base ? { base } : {});
   }
+  async listBaseImages(): Promise<BaseImages> {
+    return (await this.#req('GET', '/v1/runtime/images')) as BaseImages;
+  }
+  async baseBuild(): Promise<{ running?: boolean; version?: string; candidate?: boolean; ok?: boolean; error?: string; log?: string }> {
+    return (await this.#req('GET', '/v1/runtime/build')) as { running?: boolean; ok?: boolean; error?: string; log?: string };
+  }
+  async buildBaseCandidate(version?: string): Promise<void> {
+    await this.#req('POST', '/v1/runtime/build', { version, candidate: true });
+  }
+  async setAgentImage(id: string, image: string | null): Promise<void> {
+    await this.#req('PATCH', `/v1/agents/${id}`, { image });
+  }
   async removeImage(name: string): Promise<void> {
     await this.#req('DELETE', `/v1/images/${encodeURIComponent(name)}`);
   }
@@ -237,4 +249,21 @@ export class HttpApiClient implements ApiClient {
   }): Promise<void> {
     await this.#req('POST', '/v1/mgmt/heartbeat', hb);
   }
+}
+
+/** GET /v1/runtime/images, the parts the management tools read. */
+export interface BaseImages {
+  default: string;
+  defaultInfo: { openclawVersion?: string; resolvesTo?: string[] } | null;
+  building?: { base: { version?: string } | null };
+  tags: Array<{
+    tag: string;
+    exists: boolean;
+    isDefault: boolean;
+    isLatest: boolean;
+    openclawVersion?: string;
+    relation: string;
+    derived: unknown | null;
+    pinned: Array<{ id: string; name: string }>;
+  }>;
 }

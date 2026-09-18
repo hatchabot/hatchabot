@@ -332,7 +332,7 @@ function renderData(tool: string, data: unknown): string {
   if (tool === 'get_runtime' && data && typeof data === 'object') {
     const r = data as { imageVersion?: string; npmLatest?: string; upgradeAvailable: boolean };
     return `Base image: OpenClaw ${r.imageVersion ?? 'unknown'} · npm latest ${r.npmLatest ?? 'unknown'} · ${
-      r.upgradeAvailable ? '⬆ upgrade available (base builds run on the host: scripts/build-runtime.sh)' : '✓ up to date'
+      r.upgradeAvailable ? '⬆ upgrade available — build a candidate to try it on one agent first' : '✓ up to date'
     }`;
   }
   if (tool === 'list_images' && data && typeof data === 'object') {
@@ -341,6 +341,17 @@ function renderData(tool: string, data: unknown): string {
       (i) => `• ${i.name} — ${i.status}${i.pinnedBy ? ` · pinned by ${i.pinnedBy}` : ''}${i.error ? ` · ⚠ ${i.error.slice(0, 120)}` : ''}`,
     );
     return `Base: ${d.base}\n${rows.join('\n') || 'No derived images.'}`;
+  }
+  if (tool === 'list_base_images' && data && typeof data === 'object') {
+    const d = data as { defaultInfo?: { openclawVersion?: string } | null; tags?: Array<{ tag: string; exists: boolean; isDefault: boolean; isLatest: boolean; derived: unknown; openclawVersion?: string; pinned: Array<{ name: string }> }> };
+    const cands = (d.tags ?? []).filter((t) => !t.isDefault && !t.isLatest && !t.derived && t.exists);
+    return `Fleet default: OpenClaw ${d.defaultInfo?.openclawVersion ?? 'unknown'}\n` +
+      (cands.map((t) => `• ${t.tag}${t.openclawVersion ? ` (OpenClaw ${t.openclawVersion})` : ''}${t.pinned.length ? ` · on trial: ${t.pinned.map((p) => p.name).join(', ')}` : ''}`).join('\n') || 'No candidates.');
+  }
+  if (tool === 'get_base_build' && data && typeof data === 'object') {
+    const b = data as { running?: boolean; version?: string; ok?: boolean; error?: string; log?: string };
+    return `${b.running ? `Building OpenClaw ${b.version ?? ''}…` : b.ok ? `Built OpenClaw ${b.version ?? ''} ✓` : b.error ? `Build failed: ${b.error}` : 'No build yet.'}` +
+      (b.log ? `\n\`\`\`\n${b.log.slice(-1500)}\n\`\`\`` : '');
   }
   if (tool === 'get_image_log' && data && typeof data === 'object') {
     const l = data as { status: string; error?: string; log: string };

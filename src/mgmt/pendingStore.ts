@@ -26,6 +26,10 @@ export interface AuthorSpec {
   /** build_image / rebuild_image: the Dockerfile snippet and base tag. */
   dockerfile?: string;
   base?: string;
+  /** build_base_candidate: the OpenClaw version; try/end_base_trial: the tag. */
+  version?: string;
+  tag?: string;
+  current?: string;
 }
 
 export interface Resolved {

@@ -133,6 +133,27 @@ class FakeApi implements ApiClient {
   async removeImage(name: string) {
     this.calls.push(`imgrm:${name}`);
   }
+
+  // ---- base-image candidates ----
+  building = false;
+  baseTags = [
+    { tag: 'hatchabot-runtime:latest', exists: true, isDefault: true, isLatest: true, openclawVersion: '2026.8.1', relation: 'same', derived: null, pinned: [] as Array<{ id: string; name: string }> },
+    { tag: 'hatchabot-runtime:2026.9.0', exists: true, isDefault: false, isLatest: false, openclawVersion: '2026.9.0', relation: 'newer', derived: null, pinned: [] as Array<{ id: string; name: string }> },
+    { tag: 'hatchabot-runtime:derived-ml-tools', exists: true, isDefault: false, isLatest: false, relation: 'derived', derived: { name: 'ml-tools' }, pinned: [] as Array<{ id: string; name: string }> },
+    { tag: 'hatchabot-runtime:2026.9.9', exists: false, isDefault: false, isLatest: false, relation: 'missing', derived: null, pinned: [] as Array<{ id: string; name: string }> },
+  ];
+  async listBaseImages() {
+    return { default: 'hatchabot-runtime:latest', defaultInfo: { openclawVersion: '2026.8.1' }, tags: this.baseTags };
+  }
+  async baseBuild() {
+    return { running: this.building, log: 'x'.repeat(5000) };
+  }
+  async buildBaseCandidate(version?: string) {
+    this.calls.push(`basebuild:${version}`);
+  }
+  async setAgentImage(id: string, image: string | null) {
+    this.calls.push(`image:${id}:${image ?? 'default'}`);
+  }
 }
 
 const AGENTS: AgentSummary[] = [
@@ -274,7 +295,7 @@ describe('authoring tools — the full spec rides the confirmation', () => {
   });
 
   it('proposes with a spec card (name, placement, fields) and a long TTL — nothing created yet', async () => {
-    const { broker, api, pending } = make({ rw: true });
+    const { broker, api } = make({ rw: true });
     const r = await broker.handleTool(
       'create_agent',
       { name: 'Stock Broker', persona: 'Markets copilot', soul: 'You are {{risk_tolerance}}.\nLine 2.', fields: FIELDS },
@@ -476,7 +497,7 @@ describe('image tools', () => {
   });
 
   it('build_image shows the Dockerfile on the card, refuses a name that exists, executes on confirm', async () => {
-    const { broker, api, pending } = make({ rw: true });
+    const { broker, api } = make({ rw: true });
     const dup = await broker.handleTool('build_image', { name: 'ml-tools', dockerfile: 'RUN apt-get install -y ffmpeg' }, WHO);
     expect(dup).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     const r = await broker.handleTool('build_image', { name: 'av-tools', dockerfile: 'RUN apt-get install -y ffmpeg' }, WHO);
@@ -732,5 +753,68 @@ describe('broker.approveJoin (one-tap approval push)', () => {
     broker.pause();
     expect(await broker.denyJoin('a1', 'AB12CD', WHO)).toMatchObject({ ok: false });
     expect(api.calls).toHaveLength(1); // the paused one never reached the API
+  });
+});
+
+describe('base-image candidates from chat — candidate first, promote stays in the app', () => {
+  it('build_base_candidate defaults to the newest version, and only runs on confirm', async () => {
+    const { broker, api } = make({ rw: true });
+    const r = await broker.handleTool('build_base_candidate', {}, WHO);
+    expect(r).toMatchObject({ ok: true, pending: { confirmId: 'c_1' } });
+    expect(api.calls).toEqual([]);
+    expect((r as any).pending.summary).toMatch(/CANDIDATE for OpenClaw 2026\.9\.0/);
+    expect((r as any).pending.summary).toMatch(/Promote in the web app/);
+    await broker.confirm('c_1', 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['basebuild:2026.9.0']);
+  });
+
+  it('refuses while a build is running, and refuses :latest / derived / junk versions', async () => {
+    const { broker, api } = make({ rw: true });
+    for (const version of ['latest', 'derived-x', 'a b']) {
+      const r = await broker.handleTool('build_base_candidate', { version }, WHO);
+      expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    }
+    api.building = true;
+    const r = await broker.handleTool('build_base_candidate', { version: '2026.9.1' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+  });
+
+  it('try_base_candidate pins ONE agent and rebuilds it — only for a built, non-default, non-derived tag', async () => {
+    const { broker, api } = make({ rw: true });
+    for (const tag of ['hatchabot-runtime:latest', 'hatchabot-runtime:derived-ml-tools', 'hatchabot-runtime:2026.9.9', 'nope']) {
+      const bad = await broker.handleTool('try_base_candidate', { agent: 'a1', tag }, WHO);
+      expect(bad.ok).toBe(false);
+    }
+    const r = await broker.handleTool('try_base_candidate', { agent: 'Tech Advisor', tag: 'hatchabot-runtime:2026.9.0' }, WHO);
+    expect(r.ok).toBe(true);
+    expect(api.calls).toEqual([]);
+    await broker.confirm((r as any).pending.confirmId, 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['image:a1:hatchabot-runtime:2026.9.0', 'rebuild:a1']);
+  });
+
+  it('end_base_trial unpins and rebuilds; refuses an agent that is not on trial', async () => {
+    const { broker, api } = make({ rw: true });
+    const not = await broker.handleTool('end_base_trial', { agent: 'a1' }, WHO);
+    expect(not).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    api.baseTags[1]!.pinned.push({ id: 'a1', name: 'Tech Advisor' });
+    const r = await broker.handleTool('end_base_trial', { agent: 'a1' }, WHO);
+    await broker.confirm((r as any).pending.confirmId, 'confirm', { fromUserId: 555, chatId: 100 });
+    expect(api.calls).toEqual(['image:a1:default', 'rebuild:a1']);
+  });
+
+  it('there is no promote tool at all', async () => {
+    const { MANIFEST } = await import('../src/mgmt/tools.js');
+    expect(MANIFEST.map((t) => t.name).filter((n) => /promote/i.test(n))).toEqual([]);
+    const { broker } = make({ rw: true });
+    const r = await broker.handleTool('promote_image', { tag: 'hatchabot-runtime:2026.9.0' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'FORBIDDEN_TOOL' } });
+  });
+
+  it('reads: the candidate list, and the build log trimmed for chat', async () => {
+    const { broker } = make();
+    const l = await broker.handleTool('list_base_images', {}, WHO);
+    expect((l as any).data.tags).toHaveLength(4);
+    const b = await broker.handleTool('get_base_build', {}, WHO);
+    expect((b as any).data.log.length).toBe(3000);
   });
 });

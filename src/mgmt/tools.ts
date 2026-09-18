@@ -237,7 +237,7 @@ export const MANIFEST: ToolDef[] = [
     name: 'get_runtime',
     tier: 'read',
     description:
-      "The fleet's base runtime: which OpenClaw version the base image bakes in, the newest on npm, and whether an upgrade is available. (Building the base itself is a host operation — scripts/build-runtime.sh — not a bot action.)",
+      "The fleet's base runtime: which OpenClaw version the base image bakes in, the newest on npm, and whether an upgrade is available. To try a new version, propose build_base_candidate.",
     input_schema: { type: 'object', additionalProperties: false, properties: {} },
   },
   {
@@ -256,6 +256,53 @@ export const MANIFEST: ToolDef[] = [
       additionalProperties: false,
       properties: { name: { type: 'string', minLength: 1, maxLength: 40 } },
       required: ['name'],
+    },
+  },
+  {
+    name: 'list_base_images',
+    tier: 'read',
+    description:
+      'Base runtime images on this machine: the fleet default (:latest) and its OpenClaw version, plus every candidate (a built but not promoted version) with the agents trying it.',
+    input_schema: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'get_base_build',
+    tier: 'read',
+    description: 'Progress of the base-image candidate build: running or finished, success or error, and the log tail.',
+    input_schema: { type: 'object', additionalProperties: false, properties: {} },
+  },
+  {
+    name: 'build_base_candidate',
+    tier: 'mutate',
+    description:
+      'Build a CANDIDATE base image for an OpenClaw version (default: the newest on npm). Nothing changes for any agent: the fleet keeps its current image until a candidate is tried on one agent and then promoted in the web app. Requires confirm; runs in the background — check get_base_build.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { version: { type: 'string', minLength: 1, maxLength: 64, description: 'OpenClaw version, e.g. 2026.9.1' } },
+    },
+  },
+  {
+    name: 'try_base_candidate',
+    tier: 'mutate',
+    description:
+      "Try a built candidate on ONE agent: pin that agent to the candidate's tag and rebuild it (memory kept). Use a tag from list_base_images. Requires confirm.",
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { agent: agentRef, tag: { type: 'string', minLength: 1, maxLength: 160 } },
+      required: ['agent', 'tag'],
+    },
+  },
+  {
+    name: 'end_base_trial',
+    tier: 'mutate',
+    description: 'End a trial: unpin the agent from its candidate image and rebuild it back onto the fleet default (memory kept). Requires confirm.',
+    input_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { agent: agentRef },
+      required: ['agent'],
     },
   },
   {
