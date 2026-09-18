@@ -344,7 +344,7 @@
   .v2only { display:none }
   body.v2 .v2only { display:revert }
   body.v2 header > .hrow + .hrow, body.v2 #agents, body.v2 #activityCard, body.v2 #mgmtStrip,
-  body.v2 #limitBanner, body.v2 #toc, body.v2 .fab, body.v2 #tocBtn { display:none !important }
+  body.v2 #limitBanner, body.v2 #toc, body.v2 .fab, body.v2 #tocBtn, body.v2 #installBtn { display:none !important }
   #v2Bar { display:none; align-items:center; gap:8px }
   body.v2 #v2Bar { display:flex }
   .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
@@ -359,6 +359,9 @@
   .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
   .v2hub #mgmtChatLog:empty { display:none !important }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
+  .v2chips:empty { display:none }
+  .v2gear { display:inline-flex; align-items:center; gap:6px }
+  .v2gear span { font-size:19px; line-height:1 }
   .v2chip { background:var(--panel-2); border:1px solid var(--line); border-radius:999px; padding:3px 11px; font-size:12.5px; cursor:pointer; color:inherit; font:inherit; font-size:12.5px }
   .v2chip:hover { border-color:var(--accent) }
   .v2group { margin-bottom:22px }
@@ -474,7 +477,7 @@
       <span id="v2Bar">
         <button class="hbtn accent" onclick="$('fabBtn').click()" title="Create a new agent">+ New agent</button>
         <span id="v2InboxSlot"></span>
-        <button class="hbtn" onclick="openV2Menu()" title="Settings, health, usage, import and more" aria-label="Settings and more">⚙︎</button>
+        <button class="hbtn v2gear" onclick="openV2Menu()" title="Settings, health, usage, import and more"><span aria-hidden="true">⚙︎</span> Settings</button>
       </span>
       <span class="sub" id="whoami"></span>
       <label class="switch" title="Light / dark theme">
@@ -579,6 +582,7 @@
     <button data-go onclick="openGallery()">📋 Start from a template</button>
     <button data-go onclick="$('importFile').click()">Import a .hatchabot file</button>
     <h4>Other</h4>
+    <button data-go onclick="installApp()">⬇ Install as an app on this device</button>
     <button data-go onclick="helpDlg.showModal()">❔ Help</button>
     <button data-go onclick="location.href = location.pathname">Back to the classic look</button>
   </div>
@@ -591,7 +595,7 @@
   <div class="console-bar">
     <b id="consoleTitle">Agent</b>
     <span class="spacer"></span>
-    <button id="consoleGearBtn" hidden title="This agent's settings" aria-label="Settings">⚙︎ Settings</button>
+    <button id="consoleGearBtn" class="v2gear" hidden title="This agent's settings"><span aria-hidden="true">⚙︎</span> Settings</button>
     <button id="consoleApproveBtn" class="primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner.">Approve this browser</button>
     <button id="consoleNewTab" class="primary" title="Open the same console in its own tab">Open in new tab ↗</button>
@@ -8717,21 +8721,16 @@ async function v2IconAuto(btn) {
 // ---- the hub: the management bot at the centre --------------------------------------------
 function v2RenderChips() {
   const needs = agents.filter(a => v2Mine(a) && a.state !== 'ARCHIVED' && v2Status(a).cls === 'blocked').slice(0, 2);
-  const chips = [
-    ...needs.map(a => `What's wrong with ${a.name}?`),
-    'Which agents look unhealthy?',
-    'Which agents use the most AI this week?',
-    'Make a new agent that…',
-  ];
+  // Only when something is actually broken — a standing menu of example
+  // questions was noise (Chris, 2026-09-18).
+  const chips = needs.map(a => `What's wrong with ${a.name}?`);
   const html = chips.map(c => `<button type="button" class="v2chip" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
   if ($('v2Chips').innerHTML !== html) $('v2Chips').innerHTML = html;
 }
 $('v2Chips').addEventListener('click', (e) => {
   const c = e.target.closest('[data-chip]'); if (!c) return;
-  const text = c.dataset.chip;
-  $('mgmtChatInput').value = text.endsWith('…') ? text.slice(0, -1) + ' ' : text;
-  $('mgmtChatInput').focus();
-  if (!text.endsWith('…')) sendMgmtChat();
+  $('mgmtChatInput').value = c.dataset.chip;
+  sendMgmtChat();
 });
 function openV2Menu() { v2MenuDlg.showModal(); }
 

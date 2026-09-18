@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.14.1] — 2026-09-18
+
+### Changed
+- **New home screen (`/?ui=v2`) tidied.** The standing example questions under the Hatchabot box are gone; a "What's wrong with …?" suggestion appears only while an agent is actually failing or rate-limited. The header's settings button is larger and labelled **Settings**, like the one in the chat panel. **Install app** moves from the header into that menu: it is a one-time action per device, and the header button stays hidden once the app is installed anyway.
+
 ## [1.14.0] — 2026-09-18
 
 ### Added
