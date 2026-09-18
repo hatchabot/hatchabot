@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.14.2] — 2026-09-18
+
+### Changed
+- **New home screen (`/?ui=v2`): every panel has a "‹ Back".** The Settings menu now stays open under whatever it opens, and so does an agent's settings sheet, so closing a panel returns you to where you came from instead of dropping you on the home screen. Each dialog gets a **‹ Back** button pinned to its top, so you don't have to scroll a long panel to find its Close. Back presses the dialog's own Close or Cancel, so any tidying that button does still happens.
+
 ## [1.14.1] — 2026-09-18
 
 ### Changed

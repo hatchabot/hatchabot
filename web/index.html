@@ -446,6 +446,13 @@
   .v2swatches button { width:26px; height:26px; border-radius:50%; padding:0; border:2px solid transparent }
   .v2swatches button[aria-pressed="true"] { border-color:var(--text) }
   .v2menu { display:grid; gap:4px }
+  /* "‹ Back" pinned to the top of every dialog on the v2 screen: closing one
+     returns to whatever opened it (the menu, an agent's settings, home). */
+  .v2back { position:sticky; top:0; z-index:5; display:flex; margin:-8px 0 8px; pointer-events:none }
+  .v2back button { pointer-events:auto; background:var(--panel); border:1px solid var(--line); border-radius:8px;
+                   padding:4px 12px 4px 8px; font:inherit; font-size:13.5px; color:inherit; cursor:pointer;
+                   box-shadow:0 2px 8px rgba(0,0,0,.12) }
+  .v2back button:hover { border-color:var(--dim) }
   .v2menu h4 { margin:10px 0 2px; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim) }
   .v2menu button { text-align:left; justify-content:flex-start }
   @media (max-width:640px) {
@@ -567,7 +574,7 @@
 
 <dialog id="v2MenuDlg" style="width:min(420px,94vw)">
   <div style="display:flex;align-items:center"><h3 style="margin:0">Settings &amp; more</h3><span style="flex:1"></span><button onclick="v2MenuDlg.close()" aria-label="Close">✕</button></div>
-  <div class="v2menu" onclick="if (event.target.closest('button[data-go]')) v2MenuDlg.close()">
+  <div class="v2menu">
     <h4>This machine</h4>
     <button data-go onclick="openAiDlg()">⚙ Settings — AI sources, people, bots, machines, backups</button>
     <h4>Your agents</h4>
@@ -8734,6 +8741,31 @@ $('v2Chips').addEventListener('click', (e) => {
 });
 function openV2Menu() { v2MenuDlg.showModal(); }
 
+/**
+ * A "‹ Back" at the top of every dialog. The menu and an agent's settings stay
+ * open underneath whatever they open, so closing the top one lands you back
+ * where you came from. Back presses the dialog's own Close/Cancel when it has
+ * one, so any tidy-up that button does still runs.
+ */
+function v2AddBackButtons() {
+  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'v2MenuDlg']);
+  for (const d of document.querySelectorAll('dialog')) {
+    if (skip.has(d.id) || d.querySelector(':scope > .v2back')) continue;
+    const bar = document.createElement('div');
+    bar.className = 'v2back';
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = '‹ Back';
+    b.addEventListener('click', () => {
+      const own = [...d.querySelectorAll('button')].reverse()
+        .find(x => x !== b && !x.hidden && /^(✕|×|Close|Cancel|Done)$/.test(x.textContent.trim()));
+      if (own) own.click(); else d.close();
+    });
+    bar.append(b);
+    d.prepend(bar);
+  }
+}
+
 function initV2() {
   document.body.classList.add('v2');
   // The hub borrows the management chat's own controls, so the web chat keeps
@@ -8744,6 +8776,7 @@ function initV2() {
   $('v2HubInputSlot').append($('mgmtChatInput').parentElement);
   $('mgmtChatInput').placeholder = 'e.g. “make a travel agent for our Sicily trip and share it with Sophie”';
   $('v2InboxSlot').append($('inboxBtn'));
+  v2AddBackButtons();
   $('consoleGearBtn').hidden = false;
   $('consoleGearBtn').onclick = () => { const id = consoleAgentId; closeConsole(); openV2Agent(id); };
   void loadMgmtChat();
