@@ -581,6 +581,11 @@
   .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
   .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
   .v2notices:empty { display:none }
+  /* Base images, v2: one sentence and the list. The long explanations stay in the classic view and the docs. */
+  body.v2 #rtIntro, body.v2 #rtIntro + .v2more, body.v2 #runtimeSearch, body.v2 #rtImagesH, body.v2 #rtFleetNote { display:none }
+  body.v2 #paneRuntime:has(#rtPanel:not([hidden])) #runtimeStatus { display:none }
+  body.v2 #rtBase { font-size:14.5px; color:var(--text); margin:2px 0 14px }
+  body.v2 #rtBase b { font-weight:650 }
   .v2ownernote { display:none }
   #paneV2Derived #derivedSection > h4:first-child { display:none } /* the tab already says it */
   #paneV2Derived:has(#derivedSection[hidden]) .v2ownernote { display:block }
@@ -1622,7 +1627,7 @@
   </section>
 
   <section id="paneRuntime" role="tabpanel" hidden>
-    <div class="sub">
+    <div class="sub" id="rtIntro">
       The shared runtime image every agent runs; each agent picks up changes on its
       next <b>Rebuild</b>. What agents can do is probed live from the image itself.
       <details style="margin-top:4px"><summary style="cursor:pointer">What's baked in, and the upgrade rule</summary>
@@ -1636,8 +1641,8 @@
     <div id="runtimeStatus" style="margin-top:12px">Loading…</div>
     <div id="runtimeSearch" class="sub" style="margin-top:6px"></div>
     <div id="rtPanel" hidden>
-    <h4 style="margin:18px 0 4px">Images on this machine</h4>
-    <div class="sub" style="margin-bottom:10px"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
+    <h4 style="margin:18px 0 4px" id="rtImagesH">Images on this machine</h4>
+    <div class="sub" style="margin-bottom:10px" id="rtFleetNote"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
     <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
     <details id="rtBuild" class="sec-drawer" style="margin-bottom:12px">
       <summary><b>🧪 Try a newer OpenClaw version, safely</b> <span class="sub">— build a candidate, test it on one agent, then promote</span></summary>
@@ -3985,6 +3990,15 @@ async function loadRuntimeImages() {
     $('rtDefault').textContent = imgs.default;
     $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
     if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
+    if (UI_V2) {
+      // One sentence: what runs, whether something newer exists, what to do.
+      const lag = (agents ?? []).filter(a => a.updateAvailable).length;
+      $('rtBase').innerHTML = `Your agents run <b>OpenClaw ${esc(rt.imageVersion || '?')}</b>` +
+        (rt.upgradeAvailable && rt.npmLatest
+          ? `. <b>${esc(rt.npmLatest)}</b> is available: ask your Hatchabot agent to “build a candidate for OpenClaw ${esc(rt.npmLatest)}”, then try it on one agent below.`
+          : rt.npmLatest ? ', the latest.' : '.') +
+        (lag ? ` ${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild to pick up the current image.` : '');
+    }
     renderRuntimeList();
   } catch (e) { $('rtList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -9575,10 +9589,7 @@ function initV2() {
   // The tab keeps what you act on (try on one agent, promote, delete) and
   // shows a build's log when one is running.
   $('rtBuild').hidden = true;
-  $('rtBuild').insertAdjacentHTML('afterend', `<div class="sub" id="v2BuildHint" style="margin-bottom:10px">
-    <b>Want a newer OpenClaw version?</b> Ask your Hatchabot agent: “build a candidate for the newest OpenClaw”. It prepares the build for your Confirm;
-    the candidate then appears below, where you try it on one agent and promote it when you’re happy.</div>`);
-  $('v2BuildHint').after($('rtBuildLog'));
+  $('rtBuild').after($('rtBuildLog'));
   // Derived images get their own tab: move their section into a pane of its own.
   $('paneRuntime').insertAdjacentHTML('afterend', '<section id="paneV2Derived" role="tabpanel" hidden><div class="sub v2ownernote">Derived images are managed by the account that set up this machine.</div></section>');
   $('paneV2Derived').append($('derivedSection'));

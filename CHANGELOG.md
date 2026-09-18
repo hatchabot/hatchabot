@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.29.3] — 2026-09-18
+
+### Changed
+- **Base images is one sentence and the list.** The top of the tab now says only what your agents run, whether a newer OpenClaw exists, what to ask your Hatchabot agent, and how many agents still need a rebuild. The intro, the "what's baked in" fold-out, the extended-stable line, the web-search note, the "Images on this machine" paragraph and the separate hint are gone from the new look (the classic view keeps them).
+
 ## [1.29.2] — 2026-09-18
 
 ### Fixed
