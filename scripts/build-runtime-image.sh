@@ -37,10 +37,21 @@ PUBLISHED="${HATCHABOT_IMAGE_REGISTRY:-ghcr.io/hatchabot/runtime}"
 if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
   # The per-release tag (vX.Y.Z) is never rewritten; the version tag moves with every release.
   RELEASE_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
+  # The per-release image bakes the Dockerfile's DEFAULT OpenClaw. It is only
+  # the right image when that is the version asked for: a candidate for a
+  # newer OpenClaw once pulled it, got the old version, and was tagged as the
+  # new one (2026-09-18). So: release tag only on a version match, and every
+  # pulled image must prove its version by its label before it is accepted.
+  DEFAULT_VERSION="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | head -1)"
+  [ "${OPENCLAW_VERSION}" = "${DEFAULT_VERSION}" ] || RELEASE_TAG=""
   PULLED=""
   for cand in ${RELEASE_TAG:+"${PUBLISHED}:${RELEASE_TAG}"} "${PUBLISHED}:${OPENCLAW_VERSION}"; do
     echo "Trying the published image ${cand}…"
-    if docker pull "$cand"; then PULLED="$cand"; break; fi
+    if docker pull "$cand"; then
+      HAS="$(docker inspect "$cand" --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+      if [ "$HAS" = "${OPENCLAW_VERSION}" ]; then PULLED="$cand"; break; fi
+      echo "  …that image carries OpenClaw ${HAS:-unknown}, not ${OPENCLAW_VERSION}; not using it."
+    fi
   done
   if [ -n "$PULLED" ]; then
     docker tag "$PULLED" "${REPO}:${IMAGE_TAG}"
@@ -63,6 +74,15 @@ docker build \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/
+
+# Trust, but verify: the image must actually run the version it is named for.
+RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TAG}" --version 2>/dev/null | head -1 || true)"
+case "$RUNS" in
+  *"${OPENCLAW_VERSION}"*) ;;
+  *) echo "✗ ${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}. Removing it." >&2
+     docker rmi "${REPO}:${IMAGE_TAG}" >/dev/null 2>&1 || true
+     exit 1 ;;
+esac
 
 if [ "${NO_LATEST:-0}" != "1" ]; then
   docker tag "${REPO}:${IMAGE_TAG}" "${REPO}:latest"

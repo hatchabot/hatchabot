@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.29.2] — 2026-09-18
+
+### Fixed
+- **A candidate for a newer OpenClaw could come out containing the old one.**
+  - **Cause:** the build script first tried to download the ready-made image for the current Hatchabot release, which carries the *default* OpenClaw. It did that even when another version was asked for, then tagged the download as the requested version. That produced `hatchabot-runtime:2026.9.4` containing 2026.7.1-2.
+  - **Fix:** the release image is tried only when the versions match. Every downloaded image must carry the right version label. Every built or downloaded image is started once and must report the requested version; if it doesn't, the image is removed and the build fails.
+- **Base images flags a mislabelled image** in red, naming both versions and saying what to do.
+- **"Try on one agent" says what is happening** on the home screen: the agent is rebuilding and its icon shows the spinning ring. The old message pointed at a legend that no longer exists. The pinned-agent chip now shows "↻ rebuilding".
+
 ## [1.29.1] — 2026-09-18
 
 ### Changed

@@ -3996,6 +3996,10 @@ function renderRuntimeList() {
   if (!d.tags.length) { $('rtList').innerHTML = '<div class="sub">No runtime image is built on this machine yet.</div>'; return; }
   const defV = d.defaultInfo?.openclawVersion;
   $('rtList').innerHTML = d.tags.map(t => {
+    // An image named for one version but carrying another is a bad build: say so loudly.
+    const named = /:(\d{4}\.\d+\.\d+[\w.-]*)$/.exec(t.tag)?.[1];
+    const mislabelled = t.exists && named && t.openclawVersion && named !== t.openclawVersion
+      ? `<div style="color:var(--bad);margin-top:4px">⚠ This image is named ${esc(named)} but contains OpenClaw ${esc(t.openclawVersion)}. It was not built correctly: end any trial on it and delete it.</div>` : '';
     const facts = t.exists ? [t.openclawVersion ? `OpenClaw <b>${esc(t.openclawVersion)}</b>${defV && t.openclawVersion !== defV && !t.isDefault ? ` <span class="sub">(default runs ${esc(defV)})</span>` : ''}` : '', t.size ? esc(t.size) : '', t.createdAt ? `built ${esc(t.createdAt.slice(0, 10))}` : ''].filter(Boolean).join(' · ') : '';
     const kind = t.isDefault ? '⭐ <b>fleet default</b>' + (d.defaultInfo?.resolvesTo?.length ? ` — same image as ${d.defaultInfo.resolvesTo.map(x => `<code>${esc(x)}</code>`).join(', ')}` : '')
       : t.derived ? `<b>derived</b> · ${esc(t.derived.status.toLowerCase())} · FROM ${esc(t.derived.base)}${t.derived.summary ? ` · <span title="${esc(t.derived.summary)}">${esc(t.derived.summary.slice(0, 70))}${t.derived.summary.length > 70 ? '…' : ''}</span>` : ''}`
@@ -4003,7 +4007,7 @@ function renderRuntimeList() {
       : t.relation === 'newer' ? '<b>candidate</b> — newer than the default'
       : t.relation === 'older' ? 'older build — a previous default'
       : t.exists ? 'candidate' : '<b>not built</b> on this machine';
-    const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${esc(a.name)}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
+    const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${a.state === 'REBUILDING' ? '↻ rebuilding · ' : ''}${esc(a.name)}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
     const cls = t.classes.map(c => `<span class="chip">🏷 ${esc(c.name)}</span>`).join(' ');
     const who = t.isDefault ? `<b>${d.unpinned.length}</b> agent${d.unpinned.length === 1 ? '' : 's'} follow it (no pin)` : (pins || cls) ? `${pins ? 'Pinned: ' + pins : ''} ${cls ? 'Classes: ' + cls : ''}` : 'Nothing pinned to it.';
     const canPromote = t.exists && !t.isDefault && !t.isLatest && !t.derived;
@@ -4012,6 +4016,7 @@ function renderRuntimeList() {
     return `<div style="padding:10px 0;border-top:1px solid var(--line)">
       <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap"><code style="font-size:14px;font-weight:600">${esc(t.tag)}</code><span class="sub">${kind}</span></div>
       ${facts ? `<div class="sub" style="margin-top:4px">${facts}</div>` : ''}
+      ${mislabelled}
       <div class="sub" style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${who}</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
         ${t.exists ? `<button onclick="toggleImageDetails('${jsq(t.tag)}','${key}')" title="What is baked into this image (its build steps)">🔎 Details</button>` : ''}
@@ -4054,7 +4059,8 @@ async function tryOnAgent(tag) {
   try {
     await api(`/v1/agents/${a.id}`, { method: 'PATCH', body: { image: tag } });
     await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} });
-    toast(`"${a.name}" is rebuilding on ${tag} — 🧪 in the legend while it's on trial.`, 8000);
+    toast(UI_V2 ? `"${a.name}" is rebuilding on ${tag} (about a minute). Its icon on the home screen shows the spinning ring until it is back.`
+      : `"${a.name}" is rebuilding on ${tag} — 🧪 in the legend while it's on trial.`, 9000);
     await refresh(false); await loadRuntimeImages();
   } catch (e) { $('rtErr').textContent = e.message; }
 }
