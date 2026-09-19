@@ -108,6 +108,21 @@ export const getOpsHandlers = (): OpsHandlers | undefined => handlersRef;
 
 export const opsPort = (): number => Number(process.env.HATCHABOT_OPS_PORT) || 8091;
 
+/**
+ * Why the door could not open, in words the owner can act on. The address is
+ * the jail network's gateway: on Linux that is a real address on this machine,
+ * but on Docker Desktop (macOS, Windows) it lives inside Docker's VM and
+ * cannot be bound here — which is why the management agent needs Linux Docker.
+ */
+export function opsListenError(err: NodeJS.ErrnoException, host: string, port: number): Error & { userMessage: string } {
+  const why = err?.code === 'EADDRNOTAVAIL'
+    ? `Hatchabot could not listen on ${host}:${port}, the management agent's private network address. On Docker Desktop (macOS or Windows) that address lives inside Docker's own virtual machine, so the management agent can only run where Docker runs natively (Linux). Your other agents are unaffected.`
+    : err?.code === 'EADDRINUSE'
+      ? `Something else is already using ${host}:${port}, which the management agent needs. Stop it, or set HATCHABOT_OPS_PORT to a free port and try again.`
+      : `Hatchabot could not open the management agent's door on ${host}:${port} (${err?.code ?? 'unknown error'}).`;
+  return Object.assign(new Error(`ops listen failed on ${host}:${port}: ${err?.code ?? err?.message}`), { userMessage: why });
+}
+
 /** Start (once) on the isolated network's gateway address; returns where the
  *  agent reaches it. `gateway` comes from the provider. */
 export function ensureOpsServer(gateway: () => Promise<string>): Promise<{ host: string; port: number }> {
@@ -117,7 +132,7 @@ export function ensureOpsServer(gateway: () => Promise<string>): Promise<{ host:
     const port = opsPort();
     const server = createOpsServer(handlersRef);
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
+      server.once('error', (err: NodeJS.ErrnoException) => reject(opsListenError(err, host, port)));
       server.listen(port, host, () => resolve());
     });
     server.unref();

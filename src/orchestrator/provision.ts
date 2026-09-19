@@ -59,6 +59,7 @@ if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map
 export const SEARCH_KEY_REF = 'media/brave-api-key';
 import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
 import type { Agent, Channel, Host } from '../domain/types.js';
+import { briefCause } from '../domain/redact.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -1188,7 +1189,12 @@ function userMessageFor(err: unknown): string {
   if (err && typeof err === 'object' && 'userMessage' in err) {
     return String((err as { userMessage: unknown }).userMessage);
   }
-  return 'Something went wrong setting up your agent. Try again?';
+  // An error nobody wrote a sentence for still has to say something the owner
+  // can act on or send on. The cause is redacted, never raw (docs/audit-2026-09-19.md).
+  const cause = briefCause(err);
+  return cause
+    ? `Something went wrong setting up your agent. Try again? (${cause})`
+    : 'Something went wrong setting up your agent. Try again?';
 }
 
 /** A messaging identity that already belongs to another agent. */

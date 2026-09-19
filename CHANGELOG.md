@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.32.1] — 2026-09-19
+
+### Fixed
+- **"Something went wrong setting up your agent" now says what went wrong.** A failure nobody had written a sentence for lost its cause to the log; the card gave you nothing to act on. It now carries a short technical cause, with credentials masked first (URLs with a password, Telegram/Slack/Anthropic tokens, anything else long enough to be a key).
+- **The management agent explains a door it cannot open.** Hatchabot listens for it on the jail network's gateway address. On Docker Desktop (macOS, Windows) that address lives inside Docker's virtual machine and cannot be bound from the host, so setup failed with no reason. It now says so plainly — and that the rest of your agents are unaffected. A port already in use names `HATCHABOT_OPS_PORT` instead.
+
 ## [1.32.0] — 2026-09-19
 
 ### Fixed (19th audit — docs/audit-2026-09-19.md)
