@@ -190,3 +190,45 @@ describe('the ops server', () => {
     server.close();
   });
 });
+
+describe('the ops proxy is bounded', () => {
+  it('refuses more than the tunnel cap at once, and frees a slot when one closes', async () => {
+    const { createOpsServer } = await import('../src/ops/opsServer.js');
+    const net = await import('node:net');
+    process.env.HATCHABOT_OPS_MAX_TUNNELS = '2';
+    // The far side is a socket that never connects, so each tunnel holds its
+    // slot. Nothing leaves this machine.
+    const dialed: import('node:net').Socket[] = [];
+    const server = createOpsServer({
+      mcp: async () => undefined,
+      allowedHosts: () => ['api.example.com'],
+      dial: () => { const s = new net.Socket(); dialed.push(s); return s; },
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as { port: number }).port;
+    const open: import('node:net').Socket[] = [];
+    const connect = (): Promise<string> => new Promise((resolve, reject) => {
+      const sock = net.connect(port, '127.0.0.1', () => {
+        sock.write(`CONNECT api.example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic ${Buffer.from('ops:k').toString('base64')}\r\n\r\n`);
+      });
+      open.push(sock);
+      sock.once('data', (b: Buffer) => resolve(b.toString()));
+      sock.once('error', reject);
+      setTimeout(() => resolve(''), 400); // no answer = the tunnel is being held
+    });
+    try {
+      expect(await connect()).toBe('');            // slot 1: held
+      expect(await connect()).toBe('');            // slot 2: held
+      expect(await connect()).toMatch(/429/);      // over the cap
+      open.forEach((s) => s.destroy());
+      dialed.forEach((s) => s.destroy());
+      await new Promise((r) => setTimeout(r, 400));
+      expect(await connect()).not.toMatch(/429/);  // a freed slot is reusable
+    } finally {
+      delete process.env.HATCHABOT_OPS_MAX_TUNNELS;
+      open.forEach((s) => s.destroy());
+      dialed.forEach((s) => s.destroy());
+      server.close();
+    }
+  }, 20_000);
+});

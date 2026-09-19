@@ -19,6 +19,8 @@ export interface OpsHandlers {
   mcp(token: string, message: unknown): Promise<unknown>;
   /** Hosts this key may CONNECT to, or undefined for a bad key. */
   allowedHosts(token: string): string[] | undefined;
+  /** How the tunnel reaches the far side. Tests pass a socket that never answers. */
+  dial?: (host: string, port: number, onReady: () => void) => net.Socket;
   log?(event: string, detail: Record<string, unknown>): void;
 }
 
@@ -63,7 +65,10 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
   });
 
   // The allowlisting proxy. Anything not CONNECT host:443 to a listed host is
-  // refused; plain-HTTP proxying is never offered.
+  // refused; plain-HTTP proxying is never offered. A bounded number of tunnels
+  // at a time: a confused agent must not be able to hold the box's sockets open.
+  const MAX_TUNNELS = Number(process.env.HATCHABOT_OPS_MAX_TUNNELS) || 24;
+  let tunnels = 0;
   server.on('connect', (req, client, head) => {
     const deny = (code: string) => { client.end(`HTTP/1.1 ${code}\r\n\r\n`); };
     client.on('error', () => {});
@@ -74,14 +79,22 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
       log('ops.proxy_refused', { target: String(req.url).slice(0, 120) });
       return deny('403 Forbidden');
     }
-    const up = net.connect(443, m[1]!, () => {
+    if (tunnels >= MAX_TUNNELS) {
+      log('ops.proxy_busy', { tunnels });
+      return deny('429 Too Many Requests');
+    }
+    tunnels++;
+    let closed = false;
+    const done = () => { if (!closed) { closed = true; tunnels--; } };
+    const ready = () => {
       client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head?.length) up.write(head);
       up.pipe(client); client.pipe(up);
-    });
-    up.on('error', () => deny('502 Bad Gateway'));
-    client.on('close', () => up.destroy());
-    up.on('close', () => client.destroy());
+    };
+    const up = handlers.dial ? handlers.dial(m[1]!, 443, ready) : net.connect(443, m[1]!, ready);
+    up.on('error', () => { deny('502 Bad Gateway'); done(); });
+    client.on('close', () => { up.destroy(); done(); });
+    up.on('close', () => { client.destroy(); done(); });
   });
   return server;
 }

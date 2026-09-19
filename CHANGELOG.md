@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.32.0] — 2026-09-19
+
+### Fixed (19th audit — docs/audit-2026-09-19.md)
+- **The Messaging tab no longer blanks on an odd answer.** The channel list, the set-up sheet and the derived-images list trusted the server's response shape; anything unexpected threw inside the sheet and left it empty. All three are guarded, and a stub sweep of every new screen is now error-free.
+- **Download and Move say what will not travel.** An export carries the agent's Telegram bot, never its Slack or Discord app — those belong to your own workspace. Both confirms now name the channels you will have to set up again on the other side.
+- **The management agent's proxy is bounded**: at most 24 open tunnels (`HATCHABOT_OPS_MAX_TUNNELS`), so a confused agent cannot hold the machine's sockets open.
+- **A deleted agent leaves nothing behind**: its unread marks and its Slack/Discord identities are deleted with it.
+
+### Note
+- The audit found the 18th audit's network isolation is not yet live on this machine: 42 of 45 running agents are still on the old shared network, because the change only applies on rebuild. **Settings → Fleet → Rebuild all.**
+
 ## [1.31.3] — 2026-09-19
 
 ### Changed

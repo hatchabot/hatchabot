@@ -1042,6 +1042,12 @@ export class Store {
       .run(next, reason ?? null, new Date().toISOString(), id);
     // A management agent that is put away or removed has no key any more.
     if (agent.ops && (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED')) this.deleteOpsToken(id);
+    // A deleted agent leaves nothing behind: its unread marks and channel
+    // identities go with it (the rows are keyed by agent id, which is never reused).
+    if (next === 'DELETED') {
+      this.db.prepare(`DELETE FROM agent_seen WHERE agent_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ?`).run(id);
+    }
     return this.getAgent(id)!;
   }
 

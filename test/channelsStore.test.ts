@@ -107,3 +107,18 @@ describe('member identities on Slack and Discord', () => {
     expect(store.memberIdentities('a1', 'sis')).toEqual({ discord: '555' });
   });
 });
+
+describe('a deleted agent leaves nothing behind', () => {
+  it('drops its unread marks and channel identities', () => {
+    const { store, ch } = setup();
+    ch('slack', 'U0BOT');
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'sis', role: 'user', status: 'active' });
+    store.bindMemberIdentity('a1', 'sis', 'slack', 'U0SIS');
+    store.setAgentSeen('o', 'a1', Date.now());
+    expect(store.getAgentSeen('o', 'a1')).toBeDefined();
+    store.setAgentState('a1', 'DELETING');
+    store.setAgentState('a1', 'DELETED');
+    expect(store.getAgentSeen('o', 'a1')).toBeUndefined();
+    expect(store.getMemberByIdentity('a1', 'slack', 'U0SIS')).toBeUndefined();
+  });
+});

@@ -3266,11 +3266,12 @@ async function loadDerivedImages() {
   }
   sec.hidden = false;
   populateDerivedDatalist();
-  if (!r.images.length) {
+  const images = Array.isArray(r?.images) ? r.images : [];
+  if (!images.length) {
     el.innerHTML = `<div class="sub">None yet. Build one below — e.g. a media agent that needs <code>ffmpeg</code>.</div>`;
     return;
   }
-  el.innerHTML = r.images.map(img => {
+  el.innerHTML = images.map(img => {
     const mark = img.status === 'READY' ? '<span style="color:var(--ok)">✓</span>'
       : img.status === 'FAILED' ? '<span style="color:var(--warn)">✗</span>' : '<span style="color:var(--dim)">⏳</span>';
     const pins = img.pinnedBy ? ` · <span class="sub">${img.pinnedBy} agent${img.pinnedBy > 1 ? 's' : ''}</span>` : '';
@@ -3289,7 +3290,7 @@ async function loadDerivedImages() {
     </div>`;
   }).join('');
   // Resume following any build still in progress (e.g. after a page reload).
-  for (const img of r.images) if (img.status === 'BUILDING') pollDerivedBuild(img.name);
+  for (const img of images) if (img.status === 'BUILDING') pollDerivedBuild(img.name);
 }
 
 async function createDerivedImage() {
@@ -4528,6 +4529,17 @@ async function moveHostAgent(id, name) {
   await refresh(false);
 }
 
+/**
+ * An export carries the agent's Telegram bot, never its Slack or Discord app —
+ * those belong to apps the owner made on those platforms. Say so before the
+ * agent leaves, instead of letting the channels vanish quietly.
+ */
+function channelsLostOnExport(id) {
+  const a = v2Find ? v2Find(id) : (agents || []).find(x => x.id === id);
+  const kinds = (a?.otherChannels ?? []).map(c => V2_CHAN_LABEL[c.kind] || c.kind);
+  return kinds.length ? `\n\n${kinds.join(' and ')} ${kinds.length > 1 ? 'do' : 'does'} not travel with it: the app belongs to your ${kinds.join('/')} account. Set it up again on the other side (Messaging → Set up).` : '';
+}
+
 async function rehostAgent(id, name) {
   let peers;
   try { peers = await api('/v1/peers'); } catch (e) { return toast(e.message); }
@@ -4537,7 +4549,7 @@ async function rehostAgent(id, name) {
   if (pick === null) return;
   const peer = peers[Number(pick) - 1];
   if (!peer) return toast('No such server');
-  if (!confirm(`Move "${name}" to the cluster at ${peer.name}?\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
+  if (!confirm(`Move "${name}" to the cluster at ${peer.name}?${channelsLostOnExport(id)}\n\nIt stops here, transfers with its memory and members, and starts there — managed from that server's dashboard from now on. This copy stays STOPPED (not deleted) — never start both, they would fight over the same Telegram bot.`)) return;
   toast(`Moving ${name} to ${peer.name}… this can take a minute — the card shows WORKING until it's done.`, 180000, 'progress');
   setTimeout(() => refresh(false), 800); // by then the POST is in flight — show WORKING without waiting for the next poll
   try {
@@ -7295,7 +7307,7 @@ function closeConsole() {
 }
 
 async function downloadAgent(id, name) {
-  if (!confirm(`Download "${name}"? It's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
+  if (!confirm(`Download "${name}"?${channelsLostOnExport(id)}\n\nIt's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
   // Same-origin navigation carries the session cookie; the browser downloads.
   window.location.href = `/v1/agents/${id}/backup`;
   setTimeout(() => refresh(false), 2500);
@@ -9290,6 +9302,10 @@ async function v2LoadChans(id) {
   let r;
   try { r = await api(`/v1/agents/${id}/channels`); }
   catch (e) { box.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+  // Never trust the shape: an older server, a proxy error page or a partial
+  // answer must not throw inside the sheet and blank the tab.
+  if (!r || !Array.isArray(r.channels)) r = { channels: [], imageSupports: [] };
+  if (!Array.isArray(r.imageSupports)) r.imageSupports = [];
   if (!$('v2Chans') || $('v2Chans').dataset.agent !== id) return; // the sheet moved on meanwhile
   const a = v2Find(id); if (!a) return;
   const canChange = a.state === 'RUNNING' || a.state === 'STOPPED';
@@ -9335,8 +9351,11 @@ async function v2LoadChans(id) {
 async function openChanSetup(id, kind) {
   const a = v2Find(id); if (!a) return;
   chanFor = id; chanKind = kind;
-  if (!chanFields) { try { chanFields = await api('/v1/channels/connectors'); } catch { chanFields = []; } }
-  const fields = (chanFields.find(c => c.kind === kind)?.fields) ?? [];
+  if (!Array.isArray(chanFields)) {
+    try { chanFields = await api('/v1/channels/connectors'); } catch { chanFields = []; }
+    if (!Array.isArray(chanFields)) chanFields = [];
+  }
+  const fields = chanFields.find(c => c.kind === kind)?.fields ?? [];
   $('chanTitle').textContent = `Connect ${a.name} to ${V2_CHAN_LABEL[kind]}`;
   $('chanErr').textContent = '';
   $('chanGo').hidden = false; $('chanGo').disabled = false; $('chanGo').textContent = 'Connect';
@@ -9355,6 +9374,7 @@ async function openChanSetup(id, kind) {
       <li><b>Let it read messages.</b> On <i>Bot</i>, under <i>Privileged Gateway Intents</i>, turn on <i>Message Content Intent</i> and save.</li>
       <li><b>Copy its token.</b> Same page: press <i>Reset Token</i> and copy it. After you connect, you'll add the bot to a server of yours.</li>
     </ol>`;
+  if (!fields.length) { toast("Couldn't reach the server for the setup steps — try again in a moment."); return; }
   $('chanBody').innerHTML = steps + fields.map(f => `
     <label for="chanF-${esc(f.key)}">${esc(f.label)}</label>
     <input type="password" id="chanF-${esc(f.key)}" data-key="${esc(f.key)}" data-pattern="${esc(f.pattern)}" autocomplete="off" spellcheck="false"
@@ -9415,7 +9435,7 @@ function chanShowConnected(c) {
     if (!chanDlg.open) return clearInterval(chanWatch);
     try {
       const r = await api(`/v1/agents/${id}/channels`);
-      if (r.channels.find(x => x.kind === kind)?.youAreLinked) {
+      if (Array.isArray(r?.channels) && r.channels.find(x => x.kind === kind)?.youAreLinked) {
         clearInterval(chanWatch);
         $('chanWait').innerHTML = `✓ Linked. It answers you on ${label} now.`;
         if ($('v2Chans')) void v2LoadChans(id);
