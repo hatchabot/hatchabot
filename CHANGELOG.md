@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.34.0] — 2026-09-19
+
+### Changed
+- **"Rebuild all" is about twice as quick, and says how long it will take.** Rebuilds ran three at a time because a rebuild *can* start with an AI call (summarising the agent's conversation), and many of those at once rate-limit the source. Rebuilding the fleet does not do that, so the two limits are now separate: six rebuilds at a time by default (`HATCHABOT_REBUILD_CONCURRENCY`), of which two may be checkpointing ones (`HATCHABOT_CHECKPOINT_CONCURRENCY`). On this hardware a rebuild takes about a minute, so 42 agents drop from roughly 15 minutes to 7.
+- **An agent waiting its turn says so.** Queued agents showed the same spinning ring as the ones actually rebuilding, so a fleet-wide rebuild looked stuck at two or three. They now read "Waiting its turn to rebuild", and the confirmation and toast give an estimate up front.
+
 ## [1.33.1] — 2026-09-19
 
 ### Fixed (20th audit — docs/audit-2026-09-19-doorman.md)

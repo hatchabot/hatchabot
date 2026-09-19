@@ -7111,10 +7111,15 @@ async function rebuild(id) {
 async function rebuildAll() {
   const list = rebuildableAgents();
   if (!list.length) { toast('Nothing to rebuild right now.'); return; }
+  const atOnce = Number(appConfig?.rebuildConcurrency) || 6;
+  // About a minute each on ordinary hardware, several at a time.
+  const minutes = Math.max(1, Math.round((list.length / atOnce) * 1.1));
   if (!confirm(
     `Rebuild ${list.length} agents on the current runtime image?\n\n` +
     `Each gets a new container (memory kept) and briefly goes offline while it ` +
-    `restarts. A pre-rebuild snapshot is taken automatically.`
+    `restarts. A pre-rebuild snapshot is taken automatically.\n\n` +
+    `They go ${atOnce} at a time, so this takes roughly ${minutes} minute${minutes === 1 ? '' : 's'}. ` +
+    `You can close this page — it carries on.`
   )) return;
 
   const btn = $('rebuildAllBtn'); btn.disabled = true;
@@ -7133,7 +7138,7 @@ async function rebuildAll() {
     } catch { skipped++; }
   }
   btn.disabled = false;
-  toast(`Rebuilding ${started} agent${started === 1 ? '' : 's'}${skipped ? ` — ${skipped} skipped (busy or already changing)` : ''}. Memory is kept.`);
+  toast(`Rebuilding ${started} agent${started === 1 ? '' : 's'}, ${atOnce} at a time — about ${minutes} minute${minutes === 1 ? '' : 's'}${skipped ? `. ${skipped} skipped (busy or already changing)` : ''}. Memory is kept.`, 12000);
   await refresh(false);
 }
 
@@ -8831,6 +8836,7 @@ function v2Status(a) {
   let st;
   if (a.state === 'ARCHIVED') st = { cls: 'archived', glyph: '', label: 'Archived' };
   else if (a.state === 'DELETING') st = { cls: 'working', glyph: '↻', label: 'Deleting' };
+  else if (a.queuedForRebuild) st = { cls: 'working', glyph: '⋯', label: 'Waiting its turn to rebuild' };
   else if (a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING') {
     st = { cls: 'working', glyph: '↻', label: a.state === 'PROVISIONING' ? 'Setting up' : a.state === 'REBUILDING' ? 'Rebuilding' : 'Working on it' };
   }

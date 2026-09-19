@@ -700,23 +700,43 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // limit (13/15 failed) plus 15 container recreations thrashing the box. The
   // inflight entry is set immediately (busy checks / double-kick refusal hold);
   // the work itself waits for a slot.
-  const REBUILD_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.HATCHABOT_REBUILD_CONCURRENCY) || 3));
-  let rebuildSlots = 0;
-  const rebuildWaiters: Array<() => void> = [];
-  const acquireRebuildSlot = (): Promise<void> => {
-    if (rebuildSlots < REBUILD_CONCURRENCY) { rebuildSlots++; return Promise.resolve(); }
-    return new Promise((resolve) => rebuildWaiters.push(resolve));
+  // Two limits, because the two costs are different. A plain rebuild is docker
+  // work — a fleet-wide one is a queue, and on this hardware each takes about a
+  // minute, so the cap decides how long "Rebuild all" takes. A rebuild that
+  // CHECKPOINTS first makes an AI call on the agent's source, and running many
+  // at once rate-limits that source (13 of 15 failed once) — so those stay few.
+  const REBUILD_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.HATCHABOT_REBUILD_CONCURRENCY) || 6));
+  const CHECKPOINT_CONCURRENCY = Math.max(1, Math.min(
+    REBUILD_CONCURRENCY,
+    Math.floor(Number(process.env.HATCHABOT_CHECKPOINT_CONCURRENCY) || 2),
+  ));
+  const semaphore = (limit: number) => {
+    let used = 0;
+    const waiting: Array<() => void> = [];
+    return {
+      acquire: (): Promise<void> => {
+        if (used < limit) { used++; return Promise.resolve(); }
+        return new Promise((resolve) => waiting.push(resolve));
+      },
+      release: (): void => {
+        const next = waiting.shift();
+        if (next) next(); else used--;
+      },
+    };
   };
-  const releaseRebuildSlot = (): void => {
-    const next = rebuildWaiters.shift();
-    if (next) next(); else rebuildSlots--;
-  };
+  const rebuildGate = semaphore(REBUILD_CONCURRENCY);
+  const checkpointGate = semaphore(CHECKPOINT_CONCURRENCY);
+  /** Queued, not yet started: the app says "waiting its turn" rather than spinning silently. */
+  const rebuildQueued = new Set<string>();
   const kickRebuild = (agentId: string, opts: { checkpoint?: boolean } = {}): boolean => {
     if (inflight.has(agentId)) return false;
     const agent = store.getAgent(agentId);
     if (!agent?.runtimeRef) return false;
     const task = (async () => {
-      await acquireRebuildSlot();
+      rebuildQueued.add(agentId);
+      await rebuildGate.acquire();
+      if (opts.checkpoint) await checkpointGate.acquire();
+      rebuildQueued.delete(agentId);
       try {
         await rebuildAgent(
           {
@@ -725,14 +745,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           },
           agentId,
         );
-      } finally { releaseRebuildSlot(); }
+      } finally {
+        if (opts.checkpoint) checkpointGate.release();
+        rebuildGate.release();
+      }
     })();
     inflight.set(
       agentId,
       task
         .then(() => undefined)
         .catch((err) => app.log.error({ err, agentId }, 'rebuild task failed'))
-        .finally(() => inflight.delete(agentId)),
+        .finally(() => { inflight.delete(agentId); rebuildQueued.delete(agentId); }),
     );
     return true;
   };
@@ -812,6 +835,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Surfaced so the UI can show "N of M agents" instead of only revealing the
     // ceiling as a 429 at create time. 0 = no limit. Archived agents don't count.
     maxAgentsPerAccount: Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0),
+    /** How many rebuilds run at once, so the app can estimate a fleet-wide one. */
+    rebuildConcurrency: REBUILD_CONCURRENCY,
     identity:
       deps.authMode === 'identity'
         ? {
@@ -2702,6 +2727,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // one rebuild behind, and /model can switch a single chat session —
           // this is "what it runs by default", which is what the card answers.
           lastActiveAt: await lastActiveFor(a),
+          /** Queued behind other rebuilds: the app says so rather than spinning silently. */
+          queuedForRebuild: rebuildQueued.has(a.id) || undefined,
           unread: role ? await unreadFor(a, ownerIdOf(req)) : undefined,
           modelWarm: await (async () => {
             const p = store.getAIProfile(a.aiProfileId);

@@ -277,8 +277,9 @@ describe('audit 2026-09-11 follow-ups', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'p', message: 'm', everyMinutes: 0.1 } })).statusCode).toBe(400);
   });
 
-  it('runs at most HATCHABOT_REBUILD_CONCURRENCY rebuilds at once (default 3)', async () => {
+  it('runs at most HATCHABOT_REBUILD_CONCURRENCY rebuilds at once', async () => {
     process.env.HATCHABOT_READY_POLL_MS = '1'; process.env.HATCHABOT_READY_TIMEOUT_MS = '2000';
+    process.env.HATCHABOT_REBUILD_CONCURRENCY = '3';
     let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
     let started = 0, armed = false; // gate only the REBUILD provisions, not the seeding ones
     class GatedProvider extends MockProvider {
@@ -307,6 +308,7 @@ describe('audit 2026-09-11 follow-ups', () => {
     while (Date.now() < deadline && ['r1', 'r2', 'r3', 'r4', 'r5'].some((id) => store.getAgent(id)!.state !== 'RUNNING')) await new Promise((r) => setTimeout(r, 25));
     expect(started).toBe(5);
     expect(['r1', 'r2', 'r3', 'r4', 'r5'].map((id) => store.getAgent(id)!.state)).toEqual(Array(5).fill('RUNNING'));
+    delete process.env.HATCHABOT_REBUILD_CONCURRENCY;
   }, 30000);
 
   it('a checkpoint turn gets its own long timeout (not the 60s docker default)', async () => {
