@@ -837,6 +837,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     maxAgentsPerAccount: Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0),
     /** How many rebuilds run at once, so the app can estimate a fleet-wide one. */
     rebuildConcurrency: REBUILD_CONCURRENCY,
+    /** The address /app-qr.svg encodes, so the app can name it beside the code. */
+    appUrl: deps.publicUrl?.replace(/\/$/, '') || undefined,
     identity:
       deps.authMode === 'identity'
         ? {

@@ -2241,8 +2241,11 @@
   <div class="sub" style="margin-bottom:10px">Add Hatchabot to your home screen — it opens full-screen, like an app.</div>
   <div id="installBody"></div>
   <div style="display:flex;gap:14px;align-items:center;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
-    <img src="/app-qr.svg" alt="Scan to open Hatchabot" width="118" height="118" style="background:#fff;border-radius:8px;padding:5px;flex:none">
-    <div class="sub">On a different phone, point its camera at this code to open Hatchabot, then follow the steps for that phone's browser.</div>
+    <img src="/app-qr.svg" alt="Scan to open Hatchabot" width="150" height="150" style="background:#fff;border-radius:8px;padding:6px;flex:none">
+    <div class="sub">
+      <b>On your phone:</b> point its camera at this code to open Hatchabot, then add it to the home screen from that browser's menu.
+      <div id="installUrl" style="margin-top:6px;word-break:break-all"></div>
+    </div>
   </div>
   <div class="actions" style="justify-content:flex-end">
     <button class="primary" onclick="installDlg.close()">Got it</button>
@@ -9963,19 +9966,38 @@ refresh(true);
   }
 
   async function installApp() {
-    // One-tap where the browser supports it (Chrome/Edge/Android/desktop).
-    if (deferredInstall) {
-      deferredInstall.prompt();
-      const { outcome } = await deferredInstall.userChoice;
-      if (outcome === 'accepted' && installBtn) installBtn.hidden = true;
-      deferredInstall = null;
-      return;
-    }
-    // Otherwise (notably iOS Safari, which has no one-tap): show per-browser
-    // steps plus a scannable QR.
-    $('installBody').innerHTML = installSteps();
+    // Always the dialog, never straight to the browser's prompt: the usual
+    // reason for pressing this is to get Hatchabot onto a PHONE, and the code
+    // to scan is in here. Where the browser offers one-tap, that is the first
+    // thing in the dialog.
+    // The code encodes the server's public address when it has one — the
+    // browser's own address may be localhost, which a phone cannot open.
+    const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '');
+    $('installUrl').innerHTML = `It opens <code>${esc(url)}</code>${/^https:/.test(url) ? '' : ' — your phone must be on this network (or your tailnet) to reach it.'}`;
+    $('installBody').innerHTML = deferredInstall
+      ? `<button class="primary" onclick="installHere(this)">Install on this computer</button>
+         <div class="sub" style="margin-top:8px">Or scan the code below to open it on your phone and add it there.</div>`
+      : installSteps();
     installDlg.showModal();
   }
+
+  /** The browser's own install prompt, from inside the dialog. */
+  async function installHere(btn) {
+    if (!deferredInstall) { $('installBody').innerHTML = installSteps(); return; }
+    btn.disabled = true;
+    deferredInstall.prompt();
+    const { outcome } = await deferredInstall.userChoice;
+    deferredInstall = null;
+    if (outcome === 'accepted') {
+      if (installBtn) installBtn.hidden = true;
+      installDlg.close();
+      toast('Installed — Hatchabot is on this computer now.');
+    } else {
+      // They said no: leave the per-browser steps, which still work.
+      $('installBody').innerHTML = installSteps();
+    }
+  }
+  window.installHere = installHere;
 
   // Light/dark theme. The <head> script set the initial theme before paint;
   // here we keep the toggle button label (showing the OTHER mode) and the PWA

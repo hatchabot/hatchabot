@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.35.1] — 2026-09-19
+
+### Changed
+- **"Install as an app" always shows the QR code.** On a desktop browser it used to go straight to the browser's own install prompt, so the scannable code — the usual reason for pressing it, since you want Hatchabot on a *phone* — was never seen. The dialog now opens every time: one-tap install at the top where the browser offers it, and the code below, beside the address it opens (the server's public address, not whatever is in your address bar).
+
 ## [1.35.0] — 2026-09-19
 
 ### Added
