@@ -28,6 +28,8 @@ export interface AuthorSpec {
   base?: string;
   /** build_base_candidate: the OpenClaw version; try/end_base_trial: the tag. */
   version?: string;
+  /** build_base_candidate: extra system packages to bake in (apt names). */
+  packages?: string[];
   tag?: string;
   current?: string;
 }

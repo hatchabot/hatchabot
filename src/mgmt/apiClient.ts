@@ -213,8 +213,8 @@ export class HttpApiClient implements ApiClient {
   async baseBuild(): Promise<{ running?: boolean; version?: string; candidate?: boolean; ok?: boolean; error?: string; log?: string }> {
     return (await this.#req('GET', '/v1/runtime/build')) as { running?: boolean; ok?: boolean; error?: string; log?: string };
   }
-  async buildBaseCandidate(version?: string): Promise<void> {
-    await this.#req('POST', '/v1/runtime/build', { version, candidate: true });
+  async buildBaseCandidate(version?: string, packages?: string[]): Promise<void> {
+    await this.#req('POST', '/v1/runtime/build', { version, candidate: true, ...(packages?.length ? { packages } : {}) });
   }
   async setAgentImage(id: string, image: string | null): Promise<void> {
     await this.#req('PATCH', `/v1/agents/${id}`, { image });

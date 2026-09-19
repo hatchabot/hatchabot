@@ -22,6 +22,11 @@ FROM ${NODE_IMAGE}
 # Keep this in step with scripts/build-runtime-image.sh's default, so a bare
 # `docker build` (no --build-arg) produces the same version the build script
 # ships rather than a silently older one.
+# System packages to add on top of the list above, for a base candidate built
+# with extras ("the base image, plus tcpdump"). Space-separated apt names,
+# validated by whoever asks — see src/api/routes.ts. Empty by default, so the
+# fleet's image is exactly the list above.
+ARG EXTRA_PACKAGES=
 ARG OPENCLAW_VERSION=2026.7.1-2
 # Pinned, not "latest": docker caches this layer per OPENCLAW_VERSION, so
 # "latest" silently means "whatever was latest the FIRST time this host
@@ -48,6 +53,11 @@ ARG EMBED_MODEL_SHA256=6fa0c02a9c302be6f977521d399b4de3a46310a4f2621ee0063747881
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client curl procps \
       python3 python3-pip python3-venv \
+      # "Can it reach X?" is the most common question an agent (or its owner)
+      # asks about its own network, and the answer used to need a derived
+      # image. ping and dig are a few hundred KB and tell nobody anything
+      # curl could not already say.
+      iputils-ping dnsutils \
       # PDF ingestion with OCR (base, not derived, ON PURPOSE): image-only
       # pages in scanned PDFs have no text layer, and without local OCR an
       # agent silently drops them and reports "nothing new" — a silent-fail
@@ -64,6 +74,7 @@ RUN apt-get update \
       # pango/cairo runtime libs.
       pandoc fonts-liberation \
       libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 shared-mime-info \
+ && if [ -n "${EXTRA_PACKAGES}" ]; then apt-get install -y --no-install-recommends ${EXTRA_PACKAGES}; fi \
  && rm -rf /var/lib/apt/lists/*
 
 # PEP 668: bookworm's python is "externally managed"; these are app-level
@@ -168,6 +179,8 @@ RUN export HOME=/tmp/chbuild \
  && chmod -R a+rX /opt/hatchabot
 # Read back by the control plane: which channels this image can run.
 LABEL org.hatchabot.channels="${CHANNEL_PLUGINS}"
+# What this image has beyond the standard list, so the app can say so.
+LABEL org.hatchabot.extra-packages="${EXTRA_PACKAGES}"
 
 # Python 3 + pip are in the base so agents whose workspaces carry scripts can
 # run them (`python3 script.py`, as their cron jobs do). The base stays lean:

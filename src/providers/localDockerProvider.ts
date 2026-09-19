@@ -482,28 +482,30 @@ export class LocalDockerProvider implements RuntimeProvider {
     return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels) };
   }
 
-  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[] }[]> {
+  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[] }[]> {
     const repo = this.image.replace(/:[^:]*$/, '');
     const res = await this.#docker(['images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedAt}}|{{.Size}}', repo]);
     if (res.code !== 0) return [];
-    const tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[] }[] = res.stdout.split('\n').filter(Boolean).map((l) => {
+    const tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[] }[] = res.stdout.split('\n').filter(Boolean).map((l) => {
       const [tag, imageId, createdAt, size] = l.split('|');
       return { tag: tag!, imageId: imageId!, createdAt: createdAt?.slice(0, 19), size };
     }).filter((t) => !t.tag.endsWith(':<none>'));
     // What's inside: the OpenClaw version label, one inspect for all distinct ids.
     const ids = [...new Set(tags.map((t) => t.imageId))];
     if (ids.length) {
-      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}', ...ids]);
+      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.extra-packages" }}', ...ids]);
       const ver = new Map<string, string>();
       const chans = new Map<string, string[]>();
+      const extras = new Map<string, string[]>();
       for (const l of ins.stdout.split('\n')) {
-        const [id, v, c] = l.split('|');
+        const [id, v, c, x] = l.split('|');
         if (!id) continue;
         const key = id.replace(/^sha256:/, '').slice(0, 12);
         if (v) ver.set(key, v);
         chans.set(key, parseChannelsLabel(c));
+        extras.set(key, String(x ?? '').split(/[\s,]+/).filter((p) => /^[a-z0-9][a-z0-9+.-]*$/.test(p)));
       }
-      for (const t of tags) { t.openclawVersion = ver.get(t.imageId); t.channels = chans.get(t.imageId); }
+      for (const t of tags) { t.openclawVersion = ver.get(t.imageId); t.channels = chans.get(t.imageId); t.extraPackages = extras.get(t.imageId); }
     }
     return tags;
   }

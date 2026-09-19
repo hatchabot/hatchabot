@@ -440,6 +440,23 @@ sheet walks through it in three steps; it takes about five minutes.
 
 Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
+## The base image
+
+Every agent runs the same base image: OpenClaw, the Claude CLI, Python, the PDF
+and OCR tools, the messaging plugins, and the usual shell tools — including
+`ping` and `dig`, so "can it reach that?" needs nothing extra.
+
+Need something else in it? Ask your Hatchabot agent: *"build a base candidate
+with tcpdump"*. It comes back as a card naming the packages; confirming builds
+a **candidate** with its own tag (`2026.7.1-2-plus-tcpdump`). Nothing changes
+for any agent until you try it on one from Settings → Base images and then
+promote it. At most eight packages, apt names only, and an image with extras is
+never built as the fleet default directly.
+
+For one agent's own libraries — a Python stack, a CLI only it needs — a
+**derived image** is still the lighter answer: it layers on the base and only
+the agents you pin to it carry the weight.
+
 ## Fleet operations
 
 **📊 Health** (header) is the fleet dashboard: counts (running / stopped /

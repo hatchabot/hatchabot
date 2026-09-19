@@ -895,3 +895,16 @@ describe('one-call tools (restTools.ts) — resolved at propose time, replayed o
     expect(api.calls).toEqual([]);
   });
 });
+
+describe('a base candidate with extra packages', () => {
+  it('names them on the card, and refuses anything that is not a package name', async () => {
+    const { broker } = make({ rw: true });
+    const bad = await broker.handleTool('build_base_candidate', { version: '2026.7.1-2', packages: ['ping; rm -rf /'] }, WHO);
+    expect(JSON.stringify(bad)).toMatch(/not a package name/);
+
+    const ok = await broker.handleTool('build_base_candidate', { version: '2026.7.1-2', packages: ['iputils-ping', 'dnsutils'] }, WHO);
+    const text = JSON.stringify(ok);
+    expect(text).toMatch(/iputils-ping, dnsutils/);   // the card says what it adds
+    expect(text).toMatch(/CANDIDATE/);                 // and that nothing changes yet
+  });
+});

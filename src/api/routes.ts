@@ -172,7 +172,7 @@ export interface ApiDeps {
    *  `docker build`; tests inject a stub so no docker runs. */
   buildImage?: typeof buildDerivedImage;
   /** Override the base-image build (tests). Default spawns scripts/build-runtime-image.sh. */
-  buildBase?: (opts: { version?: string; candidate: boolean; logPath: string }) => Promise<{ ok: boolean; error?: string }>;
+  buildBase?: (opts: { version?: string; candidate: boolean; logPath: string; packages?: string }) => Promise<{ ok: boolean; error?: string }>;
   /** Override the mgmt-LLM proxy's Anthropic call (tests). */
   mgmtLlmComplete?: typeof completeWithProfile;
   /** Override the mgmt-LLM CLI path (tests — the real one spawns `claude`). */
@@ -1222,11 +1222,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const IMAGE_TAG_RE = /^[a-z0-9][a-z0-9._\/-]*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
   let baseBuild: { running: boolean; version?: string; candidate: boolean; startedAt?: string; ok?: boolean; error?: string } = { running: false, candidate: true };
   /** Default base build: the same script an operator runs by hand, output to a log file. */
-  const buildBaseImage = (opts: { version?: string; candidate: boolean; logPath: string }): Promise<{ ok: boolean; error?: string }> =>
+  const buildBaseImage = (opts: { version?: string; candidate: boolean; logPath: string; packages?: string }): Promise<{ ok: boolean; error?: string }> =>
     new Promise((resolve) => {
       const out = createWriteStream(opts.logPath);
       const child = spawn('bash', ['scripts/build-runtime-image.sh'], {
-        env: { ...process.env, ...(opts.version ? { OPENCLAW_VERSION: opts.version } : {}), NO_LATEST: opts.candidate ? '1' : '' },
+        env: {
+          ...process.env,
+          ...(opts.version ? { OPENCLAW_VERSION: opts.version } : {}),
+          ...(opts.packages ? { EXTRA_PACKAGES: opts.packages } : {}),
+          NO_LATEST: opts.candidate ? '1' : '',
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout.pipe(out, { end: false }); child.stderr.pipe(out, { end: false });
@@ -1347,7 +1352,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   /** Build the base runtime image for an OpenClaw version; candidate = don't touch :latest. */
-  app.post<{ Body: { version?: string; candidate?: boolean } }>('/v1/runtime/build', async (req, reply) => {
+  /** apt names only, and few of them: this text becomes an `apt-get install`. */
+  const cleanPackages = (raw: unknown): { ok: true; value?: string } | { ok: false; error: string } => {
+    if (raw === undefined || raw === null || raw === '') return { ok: true };
+    const list = (Array.isArray(raw) ? raw : String(raw).split(/[\s,]+/)).map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+    if (!list.length) return { ok: true };
+    if (list.length > 8) return { ok: false, error: 'Eight extra packages at most — a base image is shared by every agent.' };
+    const bad = list.find((p) => !/^[a-z0-9][a-z0-9+.-]{0,63}$/.test(p));
+    if (bad) return { ok: false, error: `"${bad.slice(0, 40)}" is not a package name.` };
+    return { ok: true, value: list.join(' ') };
+  };
+
+  app.post<{ Body: { version?: string; candidate?: boolean; packages?: unknown } }>('/v1/runtime/build', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     if (baseBuild.running) return reply.code(409).send({ error: 'A base image build is already running.' });
     const b = (req.body ?? {}) as { version?: string; candidate?: boolean };
@@ -1355,14 +1371,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
     if (version && (version === 'latest' || version.startsWith('derived-'))) return reply.code(400).send({ error: 'Build a specific OpenClaw version; :latest is set by Promote.' });
     const candidate = b.candidate !== false;
+    const packages = cleanPackages((req.body as { packages?: unknown } | null)?.packages);
+    if (!packages.ok) return reply.code(400).send({ error: packages.error });
+    // Extras are a candidate's business: the fleet's own image stays the
+    // standard list, so nobody promotes a surprise into every agent.
+    if (packages.value && !candidate) return reply.code(400).send({ error: 'An image with extra packages is built as a candidate; try it on one agent, then promote it.' });
     const logPath = buildLogPath('_base', buildDataDir);
     mkdirSync(dirname(logPath), { recursive: true });
     baseBuild = { running: true, version, candidate, startedAt: new Date().toISOString(), ok: undefined, error: undefined };
     const run = deps.buildBase ?? buildBaseImage;
-    void run({ version, candidate, logPath })
+    void run({ version, candidate, logPath, packages: packages.value })
       .then((r) => { baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error }; })
       .catch((err) => { baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) }; });
-    return reply.code(202).send({ building: true, version, candidate });
+    return reply.code(202).send({ building: true, version, candidate, packages: packages.value });
   });
 
   app.get('/v1/runtime/build', async (req, reply) => {

@@ -122,7 +122,7 @@ export interface ApiClient {
   // Base-image candidates (optional so older fakes/clients still type-check).
   listBaseImages?(): Promise<import('./apiClient.js').BaseImages>;
   baseBuild?(): Promise<{ running?: boolean; version?: string; candidate?: boolean; ok?: boolean; error?: string; log?: string }>;
-  buildBaseCandidate?(version?: string): Promise<void>;
+  buildBaseCandidate?(version?: string, packages?: string[]): Promise<void>;
   setAgentImage?(id: string, image: string | null): Promise<void>;
   /** Any /v1 call as the owner — used by the one-call tools (restTools.ts). */
   raw?(method: string, path: string, body?: unknown): Promise<unknown>;
@@ -571,7 +571,12 @@ export class Broker {
       }
       const running = await this.#need(this.api.baseBuild).call(this.api);
       if (running.running) throw new BrokerError('INVALID_INPUT', 'A base-image build is already running — check get_base_build.');
-      return { agentId: '', agentName: version, spec: { version, current: rt.imageVersion } };
+      const raw = Array.isArray(args.packages) ? args.packages : [];
+      const packages = raw.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+      const badPkg = packages.find((x) => !/^[a-z0-9][a-z0-9+.-]{0,63}$/.test(x));
+      if (badPkg) throw new BrokerError('INVALID_INPUT', `"${badPkg.slice(0, 40)}" is not a package name.`);
+      if (packages.length > 8) throw new BrokerError('INVALID_INPUT', 'Eight extra packages at most — a base image is shared by every agent.');
+      return { agentId: '', agentName: version, spec: { version, current: rt.imageVersion, packages } };
     }
     if (name === 'try_base_candidate' || name === 'end_base_trial') {
       const agent = await this.#resolve(args.agent);
@@ -667,7 +672,7 @@ export class Broker {
       case 'remove_image':
         return this.api.removeImage(r.spec!.name!);
       case 'build_base_candidate':
-        return this.#need(this.api.buildBaseCandidate).call(this.api, r.spec!.version);
+        return this.#need(this.api.buildBaseCandidate).call(this.api, r.spec!.version, r.spec!.packages);
       case 'try_base_candidate':
         await this.#need(this.api.setAgentImage).call(this.api, r.agentId, r.spec!.tag!);
         return this.api.rebuildAgent(r.agentId);
@@ -776,6 +781,7 @@ export function summarize(tool: string, r: Resolved): string {
   }
   if (tool === 'build_base_candidate') {
     return `🧪 Build a base-image CANDIDATE for OpenClaw ${r.spec?.version}` +
+      (r.spec?.packages?.length ? `, with ${r.spec.packages.join(', ')} added` : '') +
       `\nThe fleet keeps running ${r.spec?.current ? `OpenClaw ${r.spec.current}` : 'its current image'}. Nothing changes for any agent until you try the candidate on one agent, and then press Promote in the web app (Settings → Machines → Runtime image).`;
   }
   if (tool === 'try_base_candidate') {

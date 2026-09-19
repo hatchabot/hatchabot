@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.35.0] — 2026-09-19
+
+### Added
+- **`ping` and `dig` are in the base image.** "Can it reach that?" is the most common question an agent or its owner asks about its own network, and until now the answer needed a derived image. A few hundred KB, and nothing `curl` could not already do.
+- **The Hatchabot agent can bake extra packages into a base candidate.** Ask it for *"a base candidate with tcpdump"* and it files a card naming the packages; confirming builds a candidate with its own tag (`2026.7.1-2-plus-tcpdump`). Nothing changes for any agent until you try it on one and promote it. At most eight packages, apt names only (validated in the agent's broker, the route and the build script), and an image with extras can never be built as the fleet default directly — it is always a candidate.
+- Base images rows now say what an image carries: "with Slack and Discord · plus tcpdump".
+
 ## [1.34.3] — 2026-09-19
 
 ### Fixed

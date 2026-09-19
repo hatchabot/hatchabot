@@ -276,11 +276,17 @@ export const MANIFEST: ToolDef[] = [
     name: 'build_base_candidate',
     tier: 'mutate',
     description:
-      'Build a CANDIDATE base image for an OpenClaw version (default: the newest on npm). Nothing changes for any agent: the fleet keeps its current image until a candidate is tried on one agent and then promoted in the web app. Requires confirm; runs in the background — check get_base_build.',
+      'Build a CANDIDATE base image for an OpenClaw version (default: the newest on npm), optionally with extra system packages baked in. Nothing changes for any agent: the fleet keeps its current image until a candidate is tried on one agent and then promoted in the web app. Requires confirm; runs in the background — check get_base_build.',
     input_schema: {
       type: 'object',
       additionalProperties: false,
-      properties: { version: { type: 'string', minLength: 1, maxLength: 64, description: 'OpenClaw version, e.g. 2026.9.1' } },
+      properties: {
+        version: { type: 'string', minLength: 1, maxLength: 64, description: 'OpenClaw version, e.g. 2026.9.1' },
+        packages: {
+          type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 64 },
+          description: 'System packages to add on top of the standard image, by apt name (e.g. ["iputils-ping"]). The candidate gets its own tag; nothing changes for any agent until the owner promotes it.',
+        },
+      },
     },
   },
   {

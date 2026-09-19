@@ -24,3 +24,19 @@ describe('runtime image pins', () => {
     expect(pickPlugin('2026.1.0', list)).toBeUndefined();
   });
 });
+
+describe('extra packages in a base candidate', () => {
+  it('the build script takes only apt names, and gives such an image its own tag', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const run = (env: Record<string, string>) => {
+      try {
+        // Stop right after the naming decisions: nothing is built here.
+        return execFileSync('bash', ['-c',
+          'set -a; ' + Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join('; ') +
+          '; set +a; DRYRUN=1 bash -c "source scripts/build-runtime-image.sh" 2>&1 || true'],
+          { encoding: 'utf8', cwd: process.cwd() });
+      } catch (e) { return String((e as { stdout?: string }).stdout ?? e); }
+    };
+    expect(run({ EXTRA_PACKAGES: 'ping; rm -rf /', BUILD_LOCAL: '1' })).toMatch(/space-separated apt package names/);
+  }, 30_000);
+});

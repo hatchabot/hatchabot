@@ -22,6 +22,21 @@ REPO="${HATCHABOT_IMAGE_REPO:-hatchabot-runtime}"
 # IMAGE_TAG=2026.7.1-2-emb1 (etc.) for a content revision; it defaults to the
 # OpenClaw version for the normal upgrade flow.
 IMAGE_TAG="${IMAGE_TAG:-${OPENCLAW_VERSION}}"
+
+# Extra system packages ("the base image, plus tcpdump"). Space-separated apt
+# names. An image with extras is never the plain version tag: it gets its own
+# name, so a candidate with packages can never be mistaken for the standard one.
+EXTRA_ARG=()
+if [ -n "${EXTRA_PACKAGES:-}" ]; then
+  if ! printf '%s' "${EXTRA_PACKAGES}" | grep -qE '^[a-z0-9][a-z0-9+.-]*( [a-z0-9][a-z0-9+.-]*)*$'; then
+    echo "EXTRA_PACKAGES must be space-separated apt package names." >&2; exit 1
+  fi
+  EXTRA_ARG=(--build-arg "EXTRA_PACKAGES=${EXTRA_PACKAGES}")
+  if [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ]; then
+    IMAGE_TAG="${OPENCLAW_VERSION}-plus-$(printf '%s' "${EXTRA_PACKAGES}" | tr ' ' '-' | cut -c1-40)"
+  fi
+  BUILD_LOCAL=1   # a published image never carries someone's extra packages
+fi
 case "$IMAGE_TAG" in latest|derived-*) echo "IMAGE_TAG=$IMAGE_TAG is reserved (:latest moves only via promote; derived-* via image derive)." >&2; exit 1;; esac
 
 # The embedding plugin declares openclaw as a peerDependency, so its pin must
@@ -129,6 +144,7 @@ docker build \
   "${PLUGIN_ARG[@]}" \
   "${NODE_ARG[@]}" \
   "${CHANNEL_ARG[@]}" \
+  "${EXTRA_ARG[@]}" \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/

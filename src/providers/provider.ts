@@ -227,7 +227,7 @@ export interface RuntimeProvider {
   currentImageInfo(image?: string): Promise<RuntimeInfo>;
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[] }[]>;
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[] }[]>;
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
@@ -309,6 +309,8 @@ export interface RuntimeInfo {
   openclawVersion?: string;
   /** Messaging plugins baked into the image (label org.hatchabot.channels), e.g. ['slack', 'discord']. */
   channels?: string[];
+  /** System packages this image carries beyond the standard list. */
+  extraPackages?: string[];
 }
 
 /** Parse the org.hatchabot.channels label: a comma list, empty when absent. */
