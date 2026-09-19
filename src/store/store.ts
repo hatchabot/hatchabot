@@ -1636,6 +1636,18 @@ export class Store {
     };
   }
 
+  /** Forget a retired management bot, so the app stops offering to manage it. */
+  deleteMgmtHeartbeat(ownerId: string): boolean {
+    return this.db.prepare(`DELETE FROM mgmt_heartbeat WHERE owner_id = ?`).run(ownerId).changes > 0;
+  }
+
+  /** Tokens this owner minted under a label (the legacy bot's, when retiring it). */
+  revokeCliTokensByLabel(ownerId: string, label: string): number {
+    return this.db
+      .prepare(`DELETE FROM cli_tokens WHERE owner_id = ? AND agent_id IS NULL AND label = ?`)
+      .run(ownerId, label).changes;
+  }
+
   // ---- Snapshots ---------------------------------------------------------
 
   insertSnapshot(s: {

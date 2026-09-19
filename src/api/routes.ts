@@ -2395,6 +2395,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { configured: true, online, ...hb };
   });
 
+  /**
+   * Retire the legacy Telegram management bot: forget its heartbeat and revoke
+   * its token, so the app stops showing a bot that no longer runs. Refused
+   * while it is still beating — stop the service first, or it reappears on its
+   * next beat with a token that no longer works.
+   */
+  app.delete('/v1/mgmt/status', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const hb = store.getMgmtHeartbeat(ownerId);
+    if (hb && Date.now() - Date.parse(hb.seenAt) < 90_000) {
+      return reply.code(409).send({ error: 'That bot is still running. Stop it first: systemctl --user disable --now hatchabot-mgmt-bot' });
+    }
+    const forgotten = store.deleteMgmtHeartbeat(ownerId);
+    const revoked = store.revokeCliTokensByLabel(ownerId, 'mgmt-bot');
+    trace()('mgmt_bot.retired', { ownerId, forgotten, revoked });
+    return { forgotten, revoked, botUsername: hb?.botUsername };
+  });
+
   // Which AI source backs the mgmt bot's LLM right now (flagged, else the
   // automatic pick). The bot reads this at boot and on every heartbeat; the
   // web shows it under the source toggle.

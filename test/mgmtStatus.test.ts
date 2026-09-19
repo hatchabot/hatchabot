@@ -65,4 +65,34 @@ describe('management-bot heartbeat → presence', () => {
     expect(other).toEqual({ configured: false });
     await app.close();
   });
+
+  it('retiring it is refused while it still beats, then forgets it and revokes its token', async () => {
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    const app = Fastify();
+    await registerRoutes(app, {
+      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+    });
+    await app.inject({ method: 'POST', url: '/v1/mgmt/heartbeat', payload: BEAT });
+    await app.inject({ method: 'POST', url: '/v1/cli-tokens', payload: { label: 'mgmt-bot' } });
+    await app.inject({ method: 'POST', url: '/v1/cli-tokens', payload: { label: 'CLI' } });
+
+    // Still beating: refused, and the message says how to stop it.
+    const live = await app.inject({ method: 'DELETE', url: '/v1/mgmt/status' });
+    expect(live.statusCode).toBe(409);
+    expect(live.json().error).toMatch(/hatchabot-mgmt-bot/);
+
+    // The service has been stopped: its last beat is old now.
+    db.prepare('UPDATE mgmt_heartbeat SET seen_at = ?').run(new Date(Date.now() - 600_000).toISOString());
+    const gone = await app.inject({ method: 'DELETE', url: '/v1/mgmt/status' });
+    expect(gone.statusCode).toBe(200);
+    expect(gone.json()).toMatchObject({ forgotten: true, revoked: 1, botUsername: 'hatchabot_mgmt_bot' });
+
+    // Forgotten for good — and only ITS token went.
+    expect((await app.inject({ method: 'GET', url: '/v1/mgmt/status' })).json()).toEqual({ configured: false });
+    const left = (await app.inject({ method: 'GET', url: '/v1/cli-tokens' })).json();
+    expect(left.map((t: { label: string }) => t.label)).toEqual(['CLI']);
+    await app.close();
+  });
 });

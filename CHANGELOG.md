@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.41.0] — 2026-09-19
+
+### Changed
+- **The legacy management bot's section only appears if you have one.** It was showing setup instructions for a bot nobody should set up any more, on every install. Now it appears only when this account actually has one, and offers **Forget it** — which refuses while the bot is still beating (it tells you to stop the service), then drops its presence and revokes its `mgmt-bot` token, so the section goes for good. Deleting the bot itself at @BotFather, to free the slot, is still yours to do; the toast names the handle.
+
+### Fixed
+- **That section's status line said "checking…" forever.** It moved to Settings → Telegram bots two releases ago, but the code that fills it still ran when the Accounts tab opened. It now refreshes with the tab it lives on.
+
 ## [1.40.0] — 2026-09-19
 
 ### Changed
