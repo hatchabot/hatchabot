@@ -4026,15 +4026,11 @@ async function loadRuntimeImages() {
     $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
     if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
     if (UI_V2) {
-      // One sentence: what runs, whether something newer exists, what to do.
+      // Only what asks something of you: agents that still need a Rebuild.
+      // Versions and upgrades are the Hatchabot agent's to talk about.
       const lag = (agents ?? []).filter(a => a.updateAvailable).length;
-      $('rtBase').innerHTML = `Your agents run <b>OpenClaw ${esc(rt.imageVersion || '?')}</b>` +
-        (rt.upgradeAvailable && rt.npmLatest
-          ? (rt.upgradeBuildable === false
-              ? `. OpenClaw ${esc(rt.npmLatest)} exists, but Hatchabot can't build images for it yet, so there is nothing to do.`
-              : `. <b>${esc(rt.npmLatest)}</b> is available: ask your Hatchabot agent to “build a candidate for OpenClaw ${esc(rt.npmLatest)}”, then try it on one agent below.`)
-          : rt.npmLatest ? ', the latest.' : '.') +
-        (lag ? ` ${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild to pick up the current image.` : '');
+      $('rtBase').textContent = lag ? `${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild to pick up the current image.` : '';
+      $('rtBase').hidden = !lag;
     }
     renderRuntimeList();
   } catch (e) { $('rtList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -4150,7 +4146,12 @@ async function pollBaseBuild() {
   if (!aiDlg.open) return;
   try {
     const b = await api('/v1/runtime/build');
-    if (b.running || b.log) { $('rtBuildLog').hidden = false; $('rtBuildLog').textContent = (b.running ? `⏳ building ${b.version || '(default version)'}${b.candidate ? ' as a candidate' : ''}…\n\n` : (b.ok === false ? `✗ ${b.error || 'failed'}\n\n` : b.ok ? '✓ done\n\n' : '')) + (b.log || ''); $('rtBuildLog').scrollTop = 1e9; }
+    // New look: no build log here. The Hatchabot agent runs builds and reads
+    // their log; the tab shows one line while one is running, nothing after.
+    if (UI_V2) {
+      $('rtBuildLog').hidden = !b.running;
+      if (b.running) $('rtBuildLog').textContent = `Building an image for OpenClaw ${b.version || '(default version)'}…`;
+    } else if (b.running || b.log) { $('rtBuildLog').hidden = false; $('rtBuildLog').textContent = (b.running ? `⏳ building ${b.version || '(default version)'}${b.candidate ? ' as a candidate' : ''}…\n\n` : (b.ok === false ? `✗ ${b.error || 'failed'}\n\n` : b.ok ? '✓ done\n\n' : '')) + (b.log || ''); $('rtBuildLog').scrollTop = 1e9; }
     $('rtBuildBtn').disabled = !!b.running;
     if (b.running) rtBuildTimer = setTimeout(pollBaseBuild, 3000); else if (b.ok) loadRuntimeImages();
   } catch { /* not host owner / transient */ }
@@ -9832,10 +9833,12 @@ function initV2() {
   strip.hidden = true;
   strip.insertAdjacentHTML('afterend', '<div class="tabs" role="tablist" id="v2SettingsTabs"></div>');
   // Base images: building is the management agent's job here, not a form.
-  // The tab keeps what you act on (try on one agent, promote, delete) and
-  // shows a build's log when one is running.
+  // The tab keeps what you act on (try on one agent, promote, delete) and a
+  // one-line note while a build runs (no log: the agent reads that).
   $('rtBuild').hidden = true;
   $('rtBuild').after($('rtBuildLog'));
+  $('rtBuildLog').className = 'sub';
+  $('rtBuildLog').setAttribute('style', 'font-family:inherit;white-space:normal;margin:0 0 12px');
   // Derived images get their own tab: move their section into a pane of its own.
   $('paneRuntime').insertAdjacentHTML('afterend', '<section id="paneV2Derived" role="tabpanel" hidden><div class="sub v2ownernote">Derived images are managed by the account that set up this machine.</div></section>');
   $('paneV2Derived').append($('derivedSection'));

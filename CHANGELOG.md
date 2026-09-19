@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.31.2] — 2026-09-18
+
+### Changed
+- **Base images is just the list.** The sentence about which OpenClaw runs and what newer version exists is gone, and so is the raw build log that sat under it (it was the log of an earlier failed build). What's left above the list: "N agents still need a Rebuild", only when that's true, and one line while a build is running. The Hatchabot agent runs builds and reads their logs; ask it what happened. The classic view is unchanged.
+
 ## [1.31.1] — 2026-09-18
 
 ### Fixed
