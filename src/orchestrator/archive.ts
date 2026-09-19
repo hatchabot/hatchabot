@@ -78,6 +78,8 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
 
     // Any outstanding invite points at a bot this agent no longer has. Let them
     // go rather than mint a membership with nowhere to talk.
+    // An archived management agent keeps nothing running: its doorman goes too.
+    if (agent.ops) await provider.removeOpsJail?.(agentId).catch(() => {});
     store.expireInvitesFor(agentId, 'agent-archived');
     // A parked human step ("paste a bot token") is meaningless now and would
     // otherwise follow the agent into the archive — the card would sit there

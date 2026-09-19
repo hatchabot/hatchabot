@@ -231,7 +231,28 @@ export interface RuntimeProvider {
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
-  isolatedGateway?(): Promise<string>;
+  /**
+   * Put a management agent's jail in place and return how it is reached
+   * (src/ops/doorman.ts). One jailed network per management agent, with a
+   * doorman container as its only neighbour: that works the same on Linux and
+   * on Docker Desktop, where the host cannot listen on a Docker address.
+   */
+  ensureOpsJail?(opts: {
+    agentId: string;
+    /** The agent's slug (and ref, once it has one): the doorman forwards the console to it. */
+    slug: string;
+    runtimeRef?: string;
+    /** Where Hatchabot's door is listening on this machine. */
+    opsHost: string;
+    opsPort: number;
+    /** Host port the console is published on (the agent's usual gateway port). */
+    consolePort: number;
+  }): Promise<{ network: string; doorHost: string; doorPort: number }>;
+  /** Take a management agent's jail down: the doorman and the network. */
+  removeOpsJail?(agentId: string): Promise<void>;
+  /** The address a container reaches this machine on, if the host can bind it
+   *  (Linux: the docker bridge's gateway; Docker Desktop: nothing bindable). */
+  hostGatewayAddress?(): Promise<string | undefined>;
   /** A running container's address on its network, for host→container calls
    *  where no port is published (isolated runtimes). */
   containerIp?(runtimeRef: string): Promise<string | undefined>;

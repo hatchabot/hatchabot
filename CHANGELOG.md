@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.33.0] — 2026-09-19
+
+### Added
+- **The Hatchabot agent now runs on any host**, including macOS and Windows (Docker Desktop), not only Linux. Its jail used to depend on a Docker address that only Linux lets the host listen on; the agent now reaches Hatchabot through a **doorman** — a tiny forwarder container that is its only neighbour on a network with no route out. The console comes back the same way, so a jailed agent is reached like any other. Nothing new is downloaded: the doorman runs the runtime image you already have.
+  - Each management agent gets its own jail (`<prefix>-ops-<agent>`) and doorman, removed with the agent.
+  - The door binds the docker bridge's gateway where that works (Linux) and this machine's loopback otherwise (Docker Desktop), so one code path covers both.
+  - Verified against real Docker: the agent reaches Hatchabot and gets an answer, the console reaches the agent, and from inside there is no internet, no route to this machine, and no way to the door except through the doorman.
+
+### Changed
+- Existing management agents pick this up on their next **Rebuild** (their memory is kept). The old shared `<prefix>-ops` network is no longer used and can be removed once no agent is on it.
+
 ## [1.32.3] — 2026-09-19
 
 ### Fixed

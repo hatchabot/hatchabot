@@ -11,6 +11,7 @@ import type {
   RuntimeStatus,
 } from './provider.js';
 import { ProviderError, parseChannelsLabel } from './provider.js';
+import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
 const execFileP = promisify(execFile);
@@ -165,7 +166,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // other agent's gateway, bypassing the owner-only proxy (audit
       // 2026-09-18). Host services (Hatchabot at 172.17.0.1:8080, Ollama) stay
       // reachable. HATCHABOT_AGENT_NETWORK=bridge restores the old behaviour.
-      ...(spec.isolated ? ['--network', await this.#isolatedNetwork()] : await this.#agentNetworkArgs()),
+      ...(spec.isolated ? ['--network', this.#opsNetworkName(spec.agentId)] : await this.#agentNetworkArgs()),
       '--memory', process.env.HATCHABOT_AGENT_MEMORY ?? '2g',
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
@@ -681,36 +682,72 @@ export class LocalDockerProvider implements RuntimeProvider {
     });
   }
 
-  #isolatedReady = false;
-  /** The management agents' jail: `--internal` (no route off this host, no
-   *  DNS) and no traffic between the containers on it either. */
-  async #isolatedNetwork(): Promise<string> {
-    // Per installation: two installs on one box must not share a jail (or
-    // fight over the ops server's address).
-    const name = `${this.prefix}-ops`;
-    if (!this.#isolatedReady) {
-      if ((await this.#docker(['network', 'inspect', name])).code !== 0) {
-        const made = await this.#docker([
-          'network', 'create', '--driver', 'bridge', '--internal',
-          '-o', 'com.docker.network.bridge.enable_icc=false',
-          '--label', 'hatchabot.role=ops', name,
-        ]);
-        if (made.code !== 0 && (await this.#docker(['network', 'inspect', name])).code !== 0) {
-          throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, 'Could not create the management agent’s network.');
-        }
+  /** One jail per management agent: `<prefix>-ops-<agent>`, `--internal` so it
+   *  has no route off this machine, with exactly two containers on it — the
+   *  agent and its doorman. */
+  #opsNetworkName(agentId: string): string { return `${this.prefix}-ops-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
+  #doormanName(agentId: string): string { return `${this.prefix}-doorman-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
+
+  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsHost: string; opsPort: number; consolePort: number }): Promise<{ network: string; doorHost: string; doorPort: number }> {
+    const agentContainer = opts.runtimeRef
+      ? this.#names(opts.runtimeRef).container
+      : this.#namesFor({ agentId: opts.agentId, slug: opts.slug }).container;
+    const network = this.#opsNetworkName(opts.agentId);
+    if ((await this.#docker(['network', 'inspect', network])).code !== 0) {
+      // Traffic between containers is ALLOWED here, unlike the shared jail it
+      // replaces — the only other container on this network is the agent's own
+      // doorman, and the agent must be able to reach it.
+      const made = await this.#docker([
+        'network', 'create', '--driver', 'bridge', '--internal',
+        '--label', 'hatchabot.role=ops', '--label', `hatchabot.agent=${opts.agentId}`, network,
+      ]);
+      if (made.code !== 0 && (await this.#docker(['network', 'inspect', network])).code !== 0) {
+        throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, 'Could not create the management agent’s network.');
       }
-      this.#isolatedReady = true;
     }
-    return name;
+    // The doorman is replaced on every build: its routes carry the ports.
+    const name = this.#doormanName(opts.agentId);
+    await this.#docker(['rm', '-f', name]);
+    const routes = JSON.stringify(doormanRoutes({ opsHost: opts.opsHost, opsPort: opts.opsPort, agentContainer }));
+    const run = await this.#docker([
+      'run', '-d', '--name', name,
+      '--network', network, '--network-alias', DOORMAN_ALIAS,
+      // Maps to this machine on every platform — the one thing the doorman may reach.
+      '--add-host', `${HOST_ALIAS}:host-gateway`,
+      '--restart', 'unless-stopped',
+      '--label', 'hatchabot.role=doorman', '--label', `hatchabot.agent=${opts.agentId}`,
+      // The console's way in, on this machine's loopback only.
+      '-p', `127.0.0.1:${opts.consolePort}:${DOORMAN_CONSOLE_PORT}`,
+      '--memory', '128m', '--pids-limit', '64', '--cap-drop', 'ALL',
+      '--security-opt', 'no-new-privileges',
+      '-e', `DOORMAN_ROUTES=${routes}`,
+      '--entrypoint', 'node',
+      this.image, '-e', doormanScript(),
+    ]);
+    if (run.code !== 0) {
+      throw new ProviderError(`doorman failed: ${run.stderr.slice(-500)}`, 'Could not start the management agent’s doorman container.');
+    }
+    // It reaches this machine through an ordinary network; the jail itself has
+    // no route out, so this is the doorman's alone.
+    const connect = await this.#docker(['network', 'connect', 'bridge', name]);
+    if (connect.code !== 0 && !/already exists/i.test(connect.stderr)) {
+      await this.#docker(['rm', '-f', name]);
+      throw new ProviderError(`doorman network connect failed: ${connect.stderr.slice(-500)}`, 'Could not connect the management agent’s doorman to this machine.');
+    }
+    return { network, doorHost: DOORMAN_ALIAS, doorPort: DOORMAN_DOOR_PORT };
   }
 
-  async isolatedGateway(): Promise<string> {
-    const name = await this.#isolatedNetwork();
-    const res = await this.#must(['network', 'inspect', name, '--format', '{{(index .IPAM.Config 0).Gateway}}'], 'Could not read the management agent’s network.');
+  async hostGatewayAddress(): Promise<string | undefined> {
+    const res = await this.#docker(['network', 'inspect', 'bridge', '--format', '{{(index .IPAM.Config 0).Gateway}}']);
     const ip = res.stdout.trim();
-    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new ProviderError(`bad gateway ${ip}`, 'Could not read the management agent’s network.');
-    return ip;
+    return res.code === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
   }
+
+  async removeOpsJail(agentId: string): Promise<void> {
+    await this.#docker(['rm', '-f', this.#doormanName(agentId)]);
+    await this.#docker(['network', 'rm', this.#opsNetworkName(agentId)]);
+  }
+
 
   async containerIp(runtimeRef: string): Promise<string | undefined> {
     const { container } = this.#names(runtimeRef);

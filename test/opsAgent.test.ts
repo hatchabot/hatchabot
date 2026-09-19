@@ -233,7 +233,7 @@ describe('the ops proxy is bounded', () => {
   }, 20_000);
 });
 
-describe('setting up the management agent on a machine that cannot hold the jail', () => {
+describe('setting up the management agent when its door cannot open', () => {
   it('refuses before creating anything, and says why', async () => {
     // A fresh module graph: the ops server is started once per process, and
     // another test in this file has already opened one.
@@ -246,18 +246,20 @@ describe('setting up the management agent on a machine that cannot hold the jail
     const store = new Store(new Database(':memory:'));
     store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
     store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
-    const provider = new MockProvider() as MockProvider & { isolatedGateway?: () => Promise<string> };
-    // Docker Desktop: the jail's gateway address is not an address on this
-    // machine. (TEST-NET-3, which is never a local address.)
-    provider.isolatedGateway = async () => '203.0.113.1';
     const f = Fastify();
     await registerRoutes(f, {
       store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} },
-      providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false } },
+      providers: new Map([['mock', new MockProvider()]]), channel: { kind: 'telegram', pool: { owns: () => false } },
     } as never);
-    const r = await f.inject({ method: 'POST', url: '/v1/ops-agent', headers: { 'x-hatchabot-owner': 'o' }, payload: {} });
-    expect(r.statusCode).toBe(409);
-    expect(r.json().error).toMatch(/Docker Desktop|could not (listen|open)/i);
-    expect(store.getOpsAgent('o')).toBeUndefined(); // nothing half-made
+    // TEST-NET-3 is never an address on this machine, so the door cannot open.
+    process.env.HATCHABOT_OPS_BIND = '203.0.113.1';
+    try {
+      const r = await f.inject({ method: 'POST', url: '/v1/ops-agent', headers: { 'x-hatchabot-owner': 'o' }, payload: {} });
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error).toMatch(/could not (listen|open)/i);
+      expect(store.getOpsAgent('o')).toBeUndefined(); // nothing half-made
+    } finally {
+      delete process.env.HATCHABOT_OPS_BIND;
+    }
   });
 });

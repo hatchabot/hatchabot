@@ -104,23 +104,44 @@ two standing.
 - The same never-in-chat list as today stays app-only: secrets, deleting
   agents, promoting a base image, moving servers, accounts.
 
-### Where it can run
+### Where it can run: every host (the doorman)
 
-The jail rests on a Linux property: the bridge network's gateway is a real
-address on the host, so Hatchabot can listen there and the container can reach
-it while having no route anywhere else. **Docker Desktop (macOS, Windows) does
-not have that**: the gateway lives inside Docker's own virtual machine, so the
-door cannot be bound from the host — confirmed on a MacBook, 2026-09-19
-(`EADDRNOTAVAIL 172.18.0.1:8091`). Setup refuses there, before any agent is
-created, and says so. Ordinary agents are unaffected.
+The jail used to rest on a Linux property — the bridge network's gateway is a
+real address on the host, so Hatchabot could listen there while the container
+had no route anywhere else. **Docker Desktop (macOS, Windows) has no such
+address**: the gateway lives inside Docker's own virtual machine, so the door
+could not be opened at all (`EADDRNOTAVAIL 172.18.0.1:8091`, confirmed on a
+MacBook, 2026-09-19).
 
-If a management agent on Docker Desktop is ever wanted, the honest options are:
-- **Drop layer 2 there** (an ordinary agent network plus the door on the host's
-  loopback, reached at `host.docker.internal`): layers 1 and 3 still hold, but
-  the agent has internet. It would have to be opt-in and labelled as such.
-- **Put the door inside the VM** (a sidecar container on the jail network
-  forwarding to Hatchabot). ICC is off on that network, so the sidecar would
-  need an exception — a second thing to get right.
+So the door is reached through a container instead — one **doorman** per
+management agent (`src/ops/doorman.ts`):
+
+```
+  agent ──► doorman:8091 ──► Hatchabot's door on this machine   (tools + AI)
+   ▲
+   └─── doorman:18790 ◄── 127.0.0.1:<gateway port> on this machine (console)
+```
+
+- Each management agent gets its **own** `--internal` network
+  (`<prefix>-ops-<agent>`) with exactly two containers on it: the agent and its
+  doorman. Traffic between them is allowed — that is the point — and the
+  network has no route off the machine.
+- The doorman runs the runtime image (nothing new to pull) with a 20-line TCP
+  forwarder: two fixed routes, a socket cap, no shell the agent can reach, and
+  no state. It is the agent's only neighbour.
+- It reaches Hatchabot through an ordinary network: on Linux the door binds the
+  docker bridge's gateway, on Docker Desktop it binds loopback and the doorman
+  uses `host.docker.internal`. Hatchabot tries them in that order, so the same
+  code path covers both.
+- The console comes back the same way: the doorman publishes the agent's usual
+  gateway port on `127.0.0.1` and forwards it in, so no special case remains
+  for reaching a jailed agent.
+
+**Verified against real Docker on 2026-09-19** with the real provider code:
+the agent reached Hatchabot's door through the doorman and got its answer; the
+console reached the agent's gateway through the published port; and from the
+agent there was no internet, no route to this machine, and no way to the door
+except through the doorman. Tearing the jail down removes both.
 
 ### The jail (layer 2)
 
@@ -128,8 +149,8 @@ Verified on this machine with throwaway containers:
 
 - A Docker `--internal` network has **no internet and no DNS**, and cannot
   reach containers on other networks.
-- The container **can** reach the host on that network's own gateway address,
-  so Hatchabot is reachable.
+- The container reaches Hatchabot only through its doorman (above); on its own
+  it has no route anywhere.
 - Docker does not publish ports on internal networks, but the host reaches
   the container by its address directly. The console proxy targets that
   instead of a loopback port.

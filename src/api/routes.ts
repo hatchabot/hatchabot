@@ -3357,15 +3357,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * before. Relative asset paths resolve under this prefix, so the UI loads
    * unmodified.
    */
-  /** Where an agent's gateway answers. Normally its loopback-published port;
-   *  a jailed management agent publishes nothing, so its container address. */
+  /** Where an agent's gateway answers: its loopback-published port. A jailed
+   *  management agent publishes nothing itself — its doorman publishes that
+   *  same port and forwards into the jail (src/ops/doorman.ts). */
   const gatewayAddr = async (agent: Agent): Promise<{ host: string; port: number } | undefined> => {
     if (!agent.gatewayToken || agent.state !== 'RUNNING') return undefined;
-    if (agent.ops) {
-      const ip = agent.runtimeRef ? await providerFor(agent.hostId).containerIp?.(agent.runtimeRef) : undefined;
-      return ip ? { host: ip, port: 18789 } : undefined;
-    }
-    return agent.gatewayPort ? { host: '127.0.0.1', port: agent.gatewayPort } : undefined;
+    if (agent.gatewayPort) return { host: '127.0.0.1', port: agent.gatewayPort };
+    // An older management agent, built before the doorman: reached by container address.
+    const ip = agent.ops && agent.runtimeRef ? await providerFor(agent.hostId).containerIp?.(agent.runtimeRef) : undefined;
+    return ip ? { host: ip, port: 18789 } : undefined;
   };
   const gatewayTarget = async (req: FastifyRequest, id: string): Promise<{ host: string; port: number } | undefined> => {
     const agent = ownedAgent(req, id);
@@ -4601,22 +4601,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const host = store.listHosts(ownerId).find((h) => h.kind === 'local');
     if (!host) return reply.code(400).send({ error: 'The Hatchabot agent runs on this machine, and no local host is set up.' });
     const provider = providerFor(host.id);
-    if (!provider.isolatedGateway && process.env.NODE_ENV !== 'test' && !deps.allowUnjailedOps) {
+    if (!provider.ensureOpsJail && process.env.NODE_ENV !== 'test' && !deps.allowUnjailedOps) {
       return reply.code(400).send({ error: 'This machine’s runtime cannot isolate the agent’s network, so it is not offered here.' });
     }
-    // Open the door BEFORE minting an agent: on Docker Desktop the jail's
-    // gateway address lives inside Docker's VM and cannot be bound here, and
-    // the owner was left with a failed agent and a Retry that could only fail
-    // again (reported on a laptop, 2026-09-19). Failing here leaves nothing
-    // behind and says why.
-    if (provider.isolatedGateway) {
-      try {
-        await ensureOpsServer(() => provider.isolatedGateway!());
-      } catch (err) {
-        const why = (err as { userMessage?: string }).userMessage;
-        trace()('ops.door_unavailable', { ownerId, error: String((err as Error)?.message ?? err).slice(0, 200) });
-        return reply.code(409).send({ error: why ?? 'Hatchabot could not open the management agent’s door on this machine.' });
-      }
+    // Open the door BEFORE minting an agent, so a machine that cannot run one
+    // leaves nothing behind and says why (reported on a laptop, 2026-09-19).
+    try {
+      await ensureOpsServer();
+    } catch (err) {
+      const why = (err as { userMessage?: string }).userMessage;
+      trace()('ops.door_unavailable', { ownerId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+      return reply.code(409).send({ error: why ?? 'Hatchabot could not open the management agent’s door on this machine.' });
     }
     const taken = new Set(store.listAllActiveAgents().filter((a) => a.ownerId === ownerId).map((a) => a.slug));
     const name = [OPS_AGENT_NAME, 'Hatchabot agent', 'Hatchabot manager'].find((n) => !taken.has(slugify(n)));
@@ -6953,6 +6948,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(502).send({ error: "Couldn't remove the agent's runtime — try Delete again in a moment." });
       }
     }
+    // A management agent takes its jail with it: the doorman and the network.
+    if (agent.ops) await providerFor(agent.hostId).removeOpsJail?.(agent.id).catch(() => {});
     // The runtime is gone; everything below is idempotent, so a retry after an
     // interrupted delete safely finishes the teardown.
     const channel = store.getChannelForAgent(agent.id);

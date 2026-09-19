@@ -123,18 +123,40 @@ export function opsListenError(err: NodeJS.ErrnoException, host: string, port: n
   return Object.assign(new Error(`ops listen failed on ${host}:${port}: ${err?.code ?? err?.message}`), { userMessage: why });
 }
 
-/** Start (once) on the isolated network's gateway address; returns where the
- *  agent reaches it. `gateway` comes from the provider. */
-export function ensureOpsServer(gateway: () => Promise<string>): Promise<{ host: string; port: number }> {
+/**
+ * Start (once) on this machine's loopback; management agents reach it through
+ * their doorman container (src/ops/doorman.ts). Loopback is deliberate: it
+ * works on Docker Desktop, where no Docker address can be bound from the host,
+ * and it keeps the door off every other container's reach.
+ */
+export function ensureOpsServer(candidates: Array<string | undefined> = []): Promise<{ host: string; port: number }> {
   started ??= (async () => {
     if (!handlersRef) throw new Error('ops handlers not registered');
-    const host = await gateway();
     const port = opsPort();
+    // Where a doorman can reach this machine differs by platform: on Linux it
+    // is the docker bridge's gateway (an address on the host); on Docker
+    // Desktop no Docker address can be bound here, and `host.docker.internal`
+    // reaches the host's loopback instead. Take the first that binds.
+    const wanted = process.env.HATCHABOT_OPS_BIND
+      ? [process.env.HATCHABOT_OPS_BIND]
+      : [...candidates.filter((x): x is string => !!x), '127.0.0.1'];
     const server = createOpsServer(handlersRef);
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', (err: NodeJS.ErrnoException) => reject(opsListenError(err, host, port)));
-      server.listen(port, host, () => resolve());
-    });
+    let host = '';
+    let last: Error | undefined;
+    for (const candidate of wanted) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const onError = (err: NodeJS.ErrnoException) => reject(opsListenError(err, candidate, port));
+          server.once('error', onError);
+          server.listen(port, candidate, () => { server.off('error', onError); resolve(); });
+        });
+        host = candidate;
+        break;
+      } catch (err) {
+        last = err as Error;
+      }
+    }
+    if (!host) throw last ?? new Error('ops server could not bind');
     server.unref();
     return { host, port };
   })().catch((e) => { started = undefined; throw e; });

@@ -258,10 +258,7 @@ await app.listen({ port: PORT, host: bindHost });
 // Management agents reach their tools and their AI provider only through the
 // ops server; bring it up with the control plane whenever one exists.
 if (store.listOpsAgents().length) {
-  const local = providers.get('local-docker');
-  if (local?.isolatedGateway) {
-    void ensureOpsServer(() => local.isolatedGateway!()).catch((err) => app.log.error({ err: String(err) }, 'ops server failed to start'));
-  }
+  void ensureOpsServer().catch((err) => app.log.error({ err: String(err) }, 'ops server failed to start'));
 }
 app.log.info(
   {

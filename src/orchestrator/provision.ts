@@ -492,18 +492,27 @@ export async function buildRuntimeSpec(
     const token = randomBytes(32).toString('base64url');
     store.setOpsToken(agentId, agent.ownerId, token);
     clearOpsDrift(agentId); // this build re-asserts the lockdown
-    const at = deps.provider.isolatedGateway
-      ? await ensureOpsServer(() => deps.provider.isolatedGateway!())
-      : { host: '127.0.0.1', port: opsPort() }; // providers without networks (mock)
+    // Hatchabot's door listens on THIS machine's loopback, and the agent
+    // reaches it through its doorman — the one arrangement that works the same
+    // on Linux and on Docker Desktop, where the host cannot listen on a Docker
+    // address at all (docs/ops-agent-design.md).
+    const at = await ensureOpsServer([await deps.provider.hostGatewayAddress?.()]);
+    const jail = deps.provider.ensureOpsJail
+      ? await deps.provider.ensureOpsJail({
+        agentId, slug: agent.slug, runtimeRef: agent.runtimeRef,
+        // Where the doorman forwards to: the address the door actually bound.
+        opsHost: at.host, opsPort: at.port, consolePort: gateway.port,
+      })
+      : { doorHost: at.host, doorPort: at.port }; // providers without networks (mock)
     ops = {
-      host: at.host,
+      host: jail.doorHost,
       token,
-      mcpUrl: `http://${at.host}:${at.port}/mcp`,
-      proxyUrl: `http://ops:${token}@${at.host}:${at.port}`,
+      mcpUrl: `http://${jail.doorHost}:${jail.doorPort}/mcp`,
+      proxyUrl: `http://ops:${token}@${jail.doorHost}:${jail.doorPort}`,
     };
     Object.assign(perAgentEnv, {
       HTTPS_PROXY: ops.proxyUrl, https_proxy: ops.proxyUrl,
-      NO_PROXY: `${at.host},localhost,127.0.0.1`, no_proxy: `${at.host},localhost,127.0.0.1`,
+      NO_PROXY: `${jail.doorHost},localhost,127.0.0.1`, no_proxy: `${jail.doorHost},localhost,127.0.0.1`,
       NODE_USE_ENV_PROXY: '1',
     });
     // It consults nobody directly (no route to the main port); drop A2A env.
