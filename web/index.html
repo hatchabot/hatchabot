@@ -553,13 +553,14 @@
   .v2sbar .v2unread { width:12px; height:12px; left:-4px; top:-4px; border-width:2px }
   .v2sbar .v2tg { width:16px; height:16px; right:-5px; bottom:-5px }
   .v2sbar .v2tg svg { width:9px; height:9px }
-  /* The same corner mark for Slack and Discord; "+1" when it has more than one app. */
+  /* One corner mark per messaging app, overlapping, Telegram nearest the corner. */
   .v2tg.v2mk-slack { background:#4a154b }
   .v2tg.v2mk-discord { background:#5865f2 }
-  .v2mkn { position:absolute; right:-10px; bottom:12px; min-width:15px; height:15px; border-radius:8px; padding:0 3px; z-index:2;
-           background:var(--panel-2); color:var(--text); border:1.5px solid var(--bg); font-size:9.5px; font-weight:800;
-           display:grid; place-items:center; line-height:1 }
-  .v2sbar .v2mkn { display:none }
+  .v2mks { position:absolute; right:-6px; bottom:-6px; z-index:1; display:flex; flex-direction:row-reverse }
+  .v2mks .v2tg { position:static; right:auto; bottom:auto; flex:none }
+  .v2mks .v2tg + .v2tg { margin-right:-7px }
+  .v2sbar .v2mks { right:-5px; bottom:-5px }
+  .v2sbar .v2mks .v2tg + .v2tg { margin-right:-6px }
   /* Agent classes: name, then the three choices, then Delete — in columns, so
      a long image tag cannot squeeze the name into one word per line. */
   .classrow { display:grid; gap:8px; align-items:center; padding:5px 0;
@@ -2945,12 +2946,23 @@ async function loadBotInventory() {
       'pool-leased': () => 'pool (leased)',
       'pool-free': () => 'pool — free stock',
       'orphan-token': () => '⚠ orphaned token — nothing references it',
-      'mgmt-bot': () => 'the management bot (token in .env.mgmt)',
+      'mgmt-bot': () => 'the legacy management bot — its token is in <code>.env.mgmt</code>, not the database',
+    };
+    // What ❌ actually means, and the one thing to do about it. A dead row used
+    // to be a red cross with no explanation (2026-09-19).
+    const DEAD = {
+      'pool-free': 'Telegram rejects this token, so this spare can never be leased. Remove it here; if the bot still exists at @BotFather, /deletebot frees the slot.',
+      'pool-leased': 'Telegram rejects this token, so the agent holding it cannot talk. Give that agent a different bot.',
+      'agent': 'Telegram rejects this token — this agent cannot send or receive. Replace its bot in its ⚙ Settings → Messaging.',
+      'orphan-token': 'A stored token nothing uses, and Telegram no longer accepts it. Harmless; it disappears when the record is cleaned up.',
+      'mgmt-bot': 'Telegram rejects this token. It is the retired management bot: delete <code>.env.mgmt</code> on the server to stop listing it, and /deletebot the bot at @BotFather to free the slot.',
     };
     $('botInvList').innerHTML = bots.map(b => `
-      <div class="pair" style="gap:8px">
+      <div class="pair" style="gap:8px;align-items:baseline;flex-wrap:wrap">
         <span class="grow"><code class="pii">@${esc(b.username)}</code>
-          <span class="sub">${b.displayName ? `<span class="pii">“${esc(b.displayName)}”</span> · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span></span>
+          <span class="sub">${b.displayName ? `<span class="pii">“${esc(b.displayName)}”</span> · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span>
+          ${b.alive === false ? `<div class="sub" style="color:var(--warn);flex-basis:100%">${DEAD[b.where] ?? 'Telegram rejects this token.'}</div>` : ''}</span>
+        ${b.alive === false && b.where === 'pool-free' ? `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}').then(loadBotInventory)">Remove</button>` : ''}
         <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : 'Telegram unreachable — unknown'}">
           ${b.alive === true ? '✅' : b.alive === false ? '❌' : '❓'}</span>
       </div>`).join('') || '<div class="sub">No bots known to this server.</div>';
@@ -9088,10 +9100,14 @@ function v2ChannelKinds(a) {
   return [...(a.botUsername ? ['telegram'] : []), ...(a.otherChannels ?? []).map(c => c.kind).filter(k => V2_MARK_SVG[k])];
 }
 function v2Marks(a) {
-  const kinds = v2ChannelKinds(a);
+  const kinds = v2ChannelKinds(a).slice(0, 3);
   if (!kinds.length) return '';
-  return `<span class="v2tg v2mk-${kinds[0]}" aria-hidden="true">${V2_MARK_SVG[kinds[0]]}</span>`
-    + (kinds.length > 1 ? `<span class="v2mkn" aria-hidden="true">+${kinds.length - 1}</span>` : '');
+  // One badge per app, overlapping like stacked coins, Telegram nearest the
+  // corner. It used to show the first app and "+1", which said there was
+  // another one but never which (2026-09-19).
+  return `<span class="v2mks" aria-hidden="true">${kinds
+    .map((k) => `<span class="v2tg v2mk-${k}" title="${V2_CHAN_LABEL[k] ?? k}">${V2_MARK_SVG[k]}</span>`)
+    .join('')}</span>`;
 }
 
 // Never flag the console you are looking at.

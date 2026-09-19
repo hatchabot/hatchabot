@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.46.0] — 2026-09-19
+
+### Changed
+- **An agent with two messaging apps shows two marks.** The corner badge showed the first app and a "+1" — which said another app existed but never which one. Now each app gets its own badge, overlapping like stacked coins with Telegram nearest the corner (up to three).
+- **The bot census explains ❌ and offers the fix.** A dead row was a red cross with no words. Each one now says what it means where it is — a spare that can never be leased, an agent that cannot talk, or the retired management bot's token in `.env.mgmt` — and a dead free pool bot has a **Remove** button on the spot. The management-bot row says its token lives in that file rather than the database, which is why it outlives the service.
+
 ## [1.45.0] — 2026-09-19
 
 ### Changed
