@@ -4048,10 +4048,14 @@ function renderRuntimeList() {
   const defV = d.defaultInfo?.openclawVersion;
   $('rtList').innerHTML = d.tags.map(t => {
     // An image named for one version but carrying another is a bad build: say so loudly.
+    // A content revision (the same OpenClaw plus a suffix that starts with a
+    // letter, e.g. 2026.7.1-2-ch1) is a proper name, not a mislabel.
     const named = /:(\d{4}\.\d+\.\d+[\w.-]*)$/.exec(t.tag)?.[1];
-    const mislabelled = t.exists && named && t.openclawVersion && named !== t.openclawVersion
+    const isRevision = named && t.openclawVersion && named.startsWith(t.openclawVersion + '-') && /^[a-z]/i.test(named.slice(t.openclawVersion.length + 1));
+    const mislabelled = t.exists && named && t.openclawVersion && named !== t.openclawVersion && !isRevision
       ? `<div style="color:var(--bad);margin-top:4px">⚠ This image is named ${esc(named)} but contains OpenClaw ${esc(t.openclawVersion)}. It was not built correctly: end any trial on it and delete it.</div>` : '';
-    const facts = t.exists ? [t.openclawVersion ? `OpenClaw <b>${esc(t.openclawVersion)}</b>${defV && t.openclawVersion !== defV && !t.isDefault ? ` <span class="sub">(default runs ${esc(defV)})</span>` : ''}` : '', t.size ? esc(t.size) : '', t.createdAt ? `built ${esc(t.createdAt.slice(0, 10))}` : ''].filter(Boolean).join(' · ') : '';
+    const apps = (t.channels ?? []).map(k => ({ slack: 'Slack', discord: 'Discord' })[k]).filter(Boolean);
+    const facts = t.exists ? [t.openclawVersion ? `OpenClaw <b>${esc(t.openclawVersion)}</b>${defV && t.openclawVersion !== defV && !t.isDefault ? ` <span class="sub">(default runs ${esc(defV)})</span>` : ''}` : '', apps.length ? `with ${apps.join(' and ')}` : '', t.size ? esc(t.size) : '', t.createdAt ? `built ${esc(t.createdAt.slice(0, 10))}` : ''].filter(Boolean).join(' · ') : '';
     const kind = t.isDefault ? '⭐ <b>fleet default</b>' + (d.defaultInfo?.resolvesTo?.length ? ` — same image as ${d.defaultInfo.resolvesTo.map(x => `<code>${esc(x)}</code>`).join(', ')}` : '')
       : t.derived ? `<b>derived</b> · ${esc(t.derived.status.toLowerCase())} · FROM ${esc(t.derived.base)}${t.derived.summary ? ` · <span title="${esc(t.derived.summary)}">${esc(t.derived.summary.slice(0, 70))}${t.derived.summary.length > 70 ? '…' : ''}</span>` : ''}`
       : t.relation === 'same' ? '<b>= fleet default</b> (same image, another name)'

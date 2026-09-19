@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.31.1] — 2026-09-18
+
+### Fixed
+- **Base images no longer calls a revision image "not built correctly".** An image named for its OpenClaw version plus a revision (`2026.7.1-2-ch1`: the same OpenClaw with the Slack and Discord plugins added) was flagged as mislabelled. A name that is a different version (`2026.9.4` holding 2026.7.1-2) still is.
+- Each image's row now says which messaging apps it carries ("with Slack and Discord").
+
 ## [1.31.0] — 2026-09-18
 
 ### Added
