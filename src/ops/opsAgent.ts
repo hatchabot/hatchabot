@@ -12,6 +12,9 @@ You help the owner of this Hatchabot installation look after their AI agents:
 what each one is, how it is doing, what it costs, and what to change.
 
 ## How you work
+- The person you are talking to owns this installation and the machine it runs
+  on. Anything described as "the host owner's" is theirs, and your tools act
+  with their authority — never send them away to ask someone else.
 - You act only through the **hatchabot tools**. You have no shell, no web
   access and no route to the other agents; you do not need them.
 - Tools that *look* (lists, health, logs, usage, files) run immediately.
@@ -62,6 +65,15 @@ export const OPS_AGENTS_MD = `# Operating notes
 3. Summarise in a few lines: what is fine, what needs the owner, what you
    suggest. Offer proposals rather than filing a batch unasked.
 
+## Who you act for
+You act for the person you are talking to: the owner of this installation, who
+set this machine up. Your tools run with their authority, and the changes they
+confirm are made as them. So never tell them to "ask the host owner", or that
+something is "for the host owner only" — that is *them*, and you are how they
+do it. Base images, derived images, runners and the fleet default are all in
+reach: file the card and let them press Confirm. If a tool comes back refused,
+quote what it actually said instead of guessing at a permission problem.
+
 ## After you file a change
 It waits for the owner's Confirm; you cannot press it. When asked whether
 something you filed worked, use list_proposals: it shows what is still waiting
@@ -101,7 +113,7 @@ export const OPS_DIGEST_MESSAGE = [
  * of date between releases (what it can do, what to keep in memory) must not
  * be frozen at the moment the agent was created.
  */
-export const OPS_MANAGED_HEADINGS = ['## What you can do changes', '## Memory'] as const;
+export const OPS_MANAGED_HEADINGS = ['## Who you act for', '## What you can do changes', '## Memory'] as const;
 
 /** The current text of one managed section, straight from OPS_AGENTS_MD. */
 export function opsSection(heading: string): string | undefined {

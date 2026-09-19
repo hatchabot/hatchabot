@@ -109,6 +109,9 @@ export interface MgmtChatDeps {
   disableMcp?: boolean;
   /** May this peer address use the management agents' door? (routes.ts) */
   opsPeerOk?: (ip: string) => Promise<boolean>;
+  /** Tell the owner's management agent what happened to a change it filed
+   *  (routes.ts owns the notifier; see src/ops/notify.ts). */
+  notifyOps?: (ownerId: string, body: string) => void;
 }
 
 export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void {
@@ -407,6 +410,9 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     const ownerId = ownerIdOf(req);
     const s = sessionFor(ownerId); // created on demand: cards outlive a restart
     s.setAuth(req);
+    // Read the card before it resolves: afterwards its author is what tells us
+    // whether the management agent is waiting to hear how it went.
+    const rec = store.getMgmtProposal<PendingConfirm>(id) as PendingConfirm | undefined;
     const out = await s.broker.confirm(id, verb, { ...WEB_WHO, ownerId });
     if (!out.ok) {
       return reply.code(out.reason === 'missing' ? 404 : 409).send({
@@ -416,6 +422,16 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     store.setMgmtProposalOutcome(id, out.text);
     s.transcript.push({ kind: 'assistant', text: out.text });
     s.transcript = s.transcript.slice(-TRANSCRIPT_CAP);
+    // A card the management agent filed: tell it how it went, in its own chat.
+    // Confirming used to be silent there — the owner had to ask it later what
+    // had happened (2026-09-19). Only its own cards, so a change the owner made
+    // elsewhere does not wake it.
+    if (rec?.source === 'agent') {
+      const headline = rec.summary.split('\n')[0] ?? rec.tool;
+      deps.notifyOps?.(ownerId, verb === 'cancel'
+        ? `Your owner cancelled the change you filed: "${headline}". It will not happen.`
+        : `Your owner confirmed the change you filed: "${headline}". Hatchabot reports: ${out.text.slice(0, 600)}`);
+    }
     return { done: out.done, text: out.text };
   };
 

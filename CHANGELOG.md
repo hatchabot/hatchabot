@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.37.0] — 2026-09-19
+
+### Added
+- **The management agent tells you how a change went, without being asked.** Confirming one of its cards used to be silent in its chat: Hatchabot executed the change, a base or derived image built for minutes, and the conversation sat there until you asked what had happened. Hatchabot now posts a short note into the agent's own conversation when a change it filed is confirmed or cancelled, and again when a background build finishes or fails — so the console says "the candidate finished, nothing changes until you try it on an agent" on its own. Notes are a courtesy: they are serialised per agent, and a failed one is logged and dropped rather than touching the change.
+
+### Changed
+- **The agent knows it is talking to the owner of the machine.** It had started sending its owner away to "ask the host owner" about base images and runners — the host owner being the person it was talking to. Its notes now say plainly that its tools act with their authority, that host-owner surfaces are in reach, and that a refusal should be quoted rather than guessed at. The section is Hatchabot's, so it refreshes on every build, including for agents created before this release.
+- **Settings → Telegram bots** lost the "You on Telegram" explainer; linking (and unlinking) your Telegram is one line under **You**, where the rest of your identity lives.
+
 ## [1.36.1] — 2026-09-19
 
 ### Changed

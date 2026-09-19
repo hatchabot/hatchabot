@@ -70,6 +70,7 @@ import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
 import { OPS_DIGEST_MESSAGE } from '../ops/opsAgent.js';
+import { createOpsNotifier } from '../ops/notify.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
@@ -1252,10 +1253,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       .then((res) => {
         store.setDerivedImageStatus(name, res.ok ? 'READY' : 'FAILED', res.ok ? null : res.error);
         app.log.info({ name, ok: res.ok }, 'derived image build finished');
+        opsNotifier.notify(rec.createdBy, res.ok
+          ? `The derived image "${name}" (${rec.tag}) finished building. It can now be pinned to an agent.`
+          : `The derived image "${name}" FAILED to build: ${String(res.error ?? 'no reason given').slice(0, 300)}`);
       })
       .catch((err) => {
         store.setDerivedImageStatus(name, 'FAILED', String(err?.message ?? err));
         app.log.error({ err, name }, 'derived image build threw');
+        opsNotifier.notify(rec.createdBy, `The derived image "${name}" FAILED to build: ${String(err?.message ?? err).slice(0, 300)}`);
       })
       .finally(() => buildingImages.delete(name));
   };
@@ -1376,9 +1381,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     mkdirSync(dirname(logPath), { recursive: true });
     baseBuild = { running: true, version, candidate, startedAt: new Date().toISOString(), ok: undefined, error: undefined };
     const run = deps.buildBase ?? buildBaseImage;
+    const forOwner = ownerIdOf(req);
+    const what = `base image ${candidate ? 'candidate' : 'default'} for OpenClaw ${version ?? 'the newest version'}` +
+      (packages.value ? ` with ${packages.value.split(' ').join(', ')}` : '');
     void run({ version, candidate, logPath, packages: packages.value })
-      .then((r) => { baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error }; })
-      .catch((err) => { baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) }; });
+      .then((r) => {
+        baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error };
+        opsNotifier.notify(forOwner, r.ok
+          ? `The ${what} finished building. Nothing changes for any agent until it is tried on one and promoted.`
+          : `The ${what} FAILED to build: ${String(r.error ?? 'no reason given').slice(0, 300)}`);
+      })
+      .catch((err) => {
+        baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) };
+        opsNotifier.notify(forOwner, `The ${what} FAILED to build: ${String(err?.message ?? err).slice(0, 300)}`);
+      });
     return reply.code(202).send({ building: true, version, candidate, packages: packages.value });
   });
 
@@ -2460,7 +2476,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return !doormen.supported;
   };
 
-  registerMgmtChat(app, { store, secrets, opsPeerOk, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn });
+  registerMgmtChat(app, {
+    store, secrets, opsPeerOk,
+    notifyOps: (ownerId, body) => void opsNotifier.notify(ownerId, body),
+    mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn,
+  });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {
     const parsed = MgmtLlmBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -2665,6 +2685,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
     return value;
   };
+  /**
+   * Notes to the owner's management agent, in its own conversation: the
+   * outcome of a change it filed, and the end of a build that ran for minutes.
+   * Best-effort — the home screen carries the outcome regardless.
+   */
+  const opsNotifier = createOpsNotifier({
+    opsAgent: (ownerId) => store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops),
+    runTurn: async (agent, message) => {
+      if (isBusy(agent.id)) return { ok: false, error: 'busy' };
+      // The note lands in the agent's main conversation, so the console shows
+      // it — and it stays unread, which is the point: it is news for the owner.
+      sessionsCache.delete(agent.id);
+      const res = await providerFor(agent.hostId).exec(
+        agent.runtimeRef!, ['agent', '--agent', agent.slug, '-m', message], { timeoutMs: 180_000 },
+      );
+      sessionsCache.delete(agent.id);
+      return { ok: res.code === 0 && !res.timedOut, error: (res.stderr || res.stdout || '').slice(0, 200) };
+    },
+    log: (event, detail) => app.log.info(detail, event),
+  });
+
   /** Has this agent said something in its console since this person last had it open? */
   const unreadFor = async (a: Agent, ownerId: string): Promise<boolean> => {
     const at = consoleActivity(await sessionsFor(a), { webOnly: !!a.webOnly });

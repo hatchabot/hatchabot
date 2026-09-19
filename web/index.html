@@ -1576,15 +1576,6 @@
       </div>
       <div id="botInvList"></div>
     </details>
-    <h4 style="margin:0 0 4px">You on Telegram</h4>
-    <div class="sub">
-      Your login (email) and your Telegram are separate identities: the login
-      manages agents, Telegram talks to them. Linking them means every agent
-      you create or import admits your Telegram automatically — the pairing
-      dance happens once per account, not once per agent.
-    </div>
-    <div id="tgLinkStatus" class="sub" style="margin:8px 0 18px">Loading…</div>
-
     <h4 style="margin:18px 0 4px">Management bot</h4>
     <div class="sub" style="margin-bottom:4px"><span id="mgmtBotStatus" style="color:var(--dim)">checking…</span></div>
     <div class="sub">
@@ -1658,6 +1649,8 @@
       </div>
       <div class="sub" style="margin:6px 0 18px">Changing it signs this account out everywhere else.</div>
     </div>
+    <h4 style="margin:0 0 4px">Your Telegram</h4>
+    <div id="tgLinkStatus" class="sub" style="margin:4px 0 18px">Loading…</div>
 
   </section>
 
@@ -7646,8 +7639,8 @@ async function loadMyAccount() {
   if (el) el.innerHTML = myAccount.telegramUserId
     ? `✓ Linked (Telegram id <code class="pii">${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
        <button class="hbtn" onclick="unlinkTelegram()">Unlink</button>`
-    : `Not linked. Message one of your agents on Telegram, then choose <b>That's me — link</b> on the request card
-       that appears here. After that, you never pair with your own agents again.`;
+    : `Not linked — message one of your agents on Telegram and choose <b>That's me — link</b> on the request card.
+       Linked, every agent you create admits your Telegram without pairing again.`;
 }
 
 async function unlinkTelegram() {
