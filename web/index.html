@@ -556,6 +556,18 @@
            background:var(--panel-2); color:var(--text); border:1.5px solid var(--bg); font-size:9.5px; font-weight:800;
            display:grid; place-items:center; line-height:1 }
   .v2sbar .v2mkn { display:none }
+  /* Agent classes: name, then the three choices, then Delete — in columns, so
+     a long image tag cannot squeeze the name into one word per line. */
+  .classrow { display:grid; gap:8px; align-items:center; padding:5px 0;
+              grid-template-columns:minmax(120px,1.1fr) repeat(3, minmax(130px,1fr)) auto }
+  .classrow > * { min-width:0 }
+  .classrow select, .classrow input { width:100% }
+  .classrow .cname { overflow-wrap:anywhere }
+  .classrow + .classrow { border-top:1px solid var(--line) }
+  @media (max-width:780px) {
+    .classrow { grid-template-columns:1fr 1fr }
+    .classrow .cname, .classrow .cadd { grid-column:1 / -1 }
+  }
   .v2chan { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; display:flex; flex-direction:column; gap:8px }
   .v2chan-h { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
   .v2chan-h b { font-size:15px }
@@ -609,6 +621,23 @@
   .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
   .v2danger h4 { margin:0; font-size:13px; color:var(--bad) }
   .v2notices:empty { display:none }
+  /* Base images: one row per image, so versions and contents line up. */
+  .rt-wrap { overflow-x:auto; margin-top:4px }
+  table.rt-tbl { border-collapse:collapse; width:100%; font-size:13px; min-width:600px }
+  .rt-tbl th { text-align:left; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim);
+               font-weight:650; padding:0 8px 6px 0; border-bottom:1px solid var(--line); white-space:nowrap }
+  .rt-tbl td { padding:10px 8px 10px 0; border-top:1px solid var(--line); vertical-align:top }
+  .rt-tbl td:last-child, .rt-tbl th:last-child { padding-right:0 }
+  .rt-tbl code { font-size:12.5px; font-weight:600 }
+  .rt-tbl .sub { font-size:12px }
+  .rt-tbl th:nth-child(2), .rt-tbl td:nth-child(2) { min-width:110px }
+  .rt-tbl th:nth-child(3), .rt-tbl td:nth-child(3) { min-width:128px }
+  .rt-nw { white-space:nowrap }
+  .rt-acts { display:flex; gap:4px; flex-wrap:nowrap; justify-content:flex-end }
+  .rt-tbl button { padding:3px 7px; font-size:12px; white-space:nowrap }
+  .rt-tbl td:last-child { white-space:nowrap }
+  .rt-tbl td:last-child, .rt-tbl th:last-child { width:1% }
+  .rt-under td { border-top:0; padding-top:0 }
   /* Base images, v2: one sentence and the list. The long explanations stay in the classic view and the docs. */
   body.v2 #rtIntro, body.v2 #rtIntro + .v2more, body.v2 #rtDerivedHint, body.v2 #runtimeSearch, body.v2 #rtImagesH, body.v2 #rtFleetNote { display:none }
   body.v2 #paneRuntime:has(#rtPanel:not([hidden])) #runtimeStatus { display:none }
@@ -1454,12 +1483,12 @@
       <summary><b>🏷 Agent classes</b> <span class="sub">— reusable model/source tiers (e.g. Light→Sonnet, Heavy→Fable) you assign to agents</span></summary>
       <div class="sub" style="margin:8px 0">Give a class a model and/or an AI source. Assign it to agents (⚡ Bulk actions → Set class, or an agent's ⚙ → AI tab). Editing a class re-applies to every agent in it — model live, a source change needs a rebuild.</div>
       <div id="classList" style="margin-bottom:10px"></div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input type="text" id="className" placeholder="Class name (e.g. Heavy)" maxlength="48" style="flex:1;min-width:120px">
-        <select id="classModel" style="width:auto;min-width:150px"><option value="">— model (optional) —</option></select>
-        <select id="classSource" style="width:auto;min-width:150px"><option value="">— source: leave as-is —</option></select>
-        <select id="classImage" style="width:auto;min-width:150px" title="Runtime image members run on (applied on rebuild)"><option value="">— image: fleet default —</option></select>
-        <button id="classAddBtn" onclick="addClass()">Add class</button>
+      <div class="classrow">
+        <input type="text" id="className" placeholder="Class name (e.g. Heavy)" maxlength="48">
+        <select id="classModel"><option value="">— model (optional) —</option></select>
+        <select id="classSource"><option value="">— source: leave as-is —</option></select>
+        <select id="classImage" title="Runtime image members run on (applied on rebuild)"><option value="">— image: fleet default —</option></select>
+        <button id="classAddBtn" class="cadd" onclick="addClass()">Add class</button>
       </div>
       <div class="sub" id="classErr" style="color:var(--bad);margin-top:6px"></div>
       <div class="sub" style="margin-top:6px">Suggested starters: <a href="#" onclick="event.preventDefault();quickClass('Light')">Light</a> · <a href="#" onclick="event.preventDefault();quickClass('Standard')">Standard</a> · <a href="#" onclick="event.preventDefault();quickClass('Heavy')">Heavy</a> (adds the name — set its model/source after).</div>
@@ -1468,15 +1497,15 @@
 
   <section id="paneHosts" role="tabpanel" hidden>
     <div class="sub">
-      The machines this cluster runs agents on. <b>This machine</b> is the
-      built-in runner; add a <b>runner</b> to run agents on other machines under
-      this dashboard.
-      <details style="margin-top:4px"><summary style="cursor:pointer">How runners &amp; moves work</summary>
-      <div style="margin-top:4px">A runner is a remote Docker endpoint — one Hatchabot, many machines.
-      Agents here can use your <b>Claude Max</b> login; a runner agent uses an <b>API-key</b> source or a
-      <b>Claude Max setup-token</b> (<code>claude setup-token</code>) — the machine-login Max source is
-      desktop-only. Move an agent between runners with <b>Move</b> on its card; <b>Move to another cluster</b>
-      (in the card's ⋯ menu) sends it to a different Hatchabot server entirely.</div></details>
+      The machines this dashboard runs agents on. <b>This machine</b> is built in;
+      add a <b>runner</b> to run agents on another computer too.
+      <details style="margin-top:4px"><summary style="cursor:pointer">Runner or cluster?</summary>
+      <div style="margin-top:4px">A <b>runner</b> is another machine under <i>this</i> Hatchabot: same dashboard,
+      same agent list, and <b>Move</b> on an agent's card shifts it between runners. A <b>cluster</b> is a
+      separate Hatchabot server with its own dashboard — <b>Move to another cluster</b> (the card's ⋯ menu)
+      hands an agent over to one, and you manage it there afterwards. One caveat for runners: the desktop
+      <b>Claude Max</b> machine login only works on this machine, so a runner agent needs an API-key source
+      or a Max setup-token (<code>claude setup-token</code>).</div></details>
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
@@ -1513,24 +1542,7 @@
       <b>shared</b> house bots explicitly donated for everyone on this server.
     </div>
     <div class="pool-status" id="poolStatus"></div>
-    <details class="sec-drawer" id="botInvDrawer">
-      <summary><b>🔎 Bot inventory</b> <span class="sub">— every bot this server holds a token for, live-checked (for the ~40-bots BotFather cap)</span></summary>
-      <div class="sub" style="margin-top:6px">
-        BotFather's <code>/mybots</code> is the full list of bots YOUR Telegram
-        account minted. Anything there that is <i>not</i> below is a stray from
-        an old install or experiment — safe to <code>/deletebot</code> once
-        you've confirmed nothing else uses it. A ❌ token here means Hatchabot's
-        copy was revoked; the bot may still exist (and count) at BotFather.
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
-        <button id="botInvBtn" onclick="loadBotInventory()">Run the live check</button>
-        <span class="sub" id="botInvStatus"></span>
-      </div>
-      <div id="botInvList"></div>
-    </details>
-    <h4 style="margin:16px 0 4px">Bots in your pool</h4>
-    <div id="poolList">Loading…</div>
-    <h4 style="margin:16px 0 4px">Add a bot</h4>
+    <h4 style="margin:0 0 4px">Add a bot</h4>
     <div class="sub">
       Mint one at <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a>
       (<code>/newbot</code>, ~60 seconds), then paste its token — it's verified
@@ -1546,16 +1558,50 @@
       <button class="primary" id="poolAddBtn" onclick="addPoolBot()">Add to pool</button>
     </div>
 
+    <h4 style="margin:18px 0 4px">Spare bots, ready to use</h4>
+    <div class="sub" style="margin-bottom:6px">Parked and unassigned: creating an agent takes one of these instantly. A bot an agent is already using is not here — see the inventory below for those.</div>
+    <div id="poolList">Loading…</div>
+    <details class="sec-drawer" id="botInvDrawer">
+      <summary><b>🔎 Every bot this server has a token for</b> <span class="sub">— the ones your agents use AND the spares, live-checked against BotFather (whose cap is about 40)</span></summary>
+      <div class="sub" style="margin-top:6px">
+        BotFather's <code>/mybots</code> is the full list of bots YOUR Telegram
+        account minted. Anything there that is <i>not</i> below is a stray from
+        an old install or experiment — safe to <code>/deletebot</code> once
+        you've confirmed nothing else uses it. A ❌ token here means Hatchabot's
+        copy was revoked; the bot may still exist (and count) at BotFather.
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;margin:8px 0">
+        <button id="botInvBtn" onclick="loadBotInventory()">Run the live check</button>
+        <span class="sub" id="botInvStatus"></span>
+      </div>
+      <div id="botInvList"></div>
+    </details>
+    <h4 style="margin:0 0 4px">You on Telegram</h4>
+    <div class="sub">
+      Your login (email) and your Telegram are separate identities: the login
+      manages agents, Telegram talks to them. Linking them means every agent
+      you create or import admits your Telegram automatically — the pairing
+      dance happens once per account, not once per agent.
+    </div>
+    <div id="tgLinkStatus" class="sub" style="margin:8px 0 18px">Loading…</div>
+
+    <h4 style="margin:18px 0 4px">Management bot</h4>
+    <div class="sub" style="margin-bottom:4px"><span id="mgmtBotStatus" style="color:var(--dim)">checking…</span></div>
+    <div class="sub">
+      Optionally control your fleet from Telegram: list, start/stop and rebuild
+      agents, and approve join requests — every change confirmed with a tap. It
+      runs as its own process, so set it up from a terminal on the server:
+    </div>
+    <div class="invite-link" style="margin-top:8px">hatchabot mgmt-bot setup</div>
+
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
     <div class="sub">
-      <b>Other Hatchabot servers</b> — each its own cluster with its own login
-      and dashboard. Registering one lets <b>Move to another cluster</b> (on the
-      agent card's ⋯ menu) send an agent there in one step. Paste an access
-      token minted on <i>that</i> server (its Settings → Access). Most setups
-      don't need this — to run agents on more machines under <i>this</i>
-      dashboard, add a <b>runner</b> instead.
+      Another Hatchabot server, with its own login and dashboard. Register one
+      and <b>Move to another cluster</b> (the agent card's ⋯ menu) hands an agent
+      over in one step. Paste an access token minted on <i>that</i> server
+      (its Settings → Security). Most setups never need this.
     </div>
     <div id="peerList"></div>
     <input type="text" id="peerName" placeholder="Name (e.g. Desktop)" maxlength="64">
@@ -1568,10 +1614,8 @@
 
   <section id="paneConn" role="tabpanel" hidden>
     <div class="sub">
-      Google accounts connected to this server — connect once here, then attach
-      an account to any agent under its ⚙ Settings → Connections. The consent
-      happens in your browser with Google; Hatchabot holds only the resulting
-      token, and agents receive it when you attach them.
+      Google accounts this server holds a token for. Connect one here, then
+      attach it to an agent under its ⚙ Settings → Connections.
     </div>
 
     <div id="connClientBox" style="margin-top:12px"></div>
@@ -1615,36 +1659,6 @@
       <div class="sub" style="margin:6px 0 18px">Changing it signs this account out everywhere else.</div>
     </div>
 
-    <h4 style="margin:0 0 4px">Your Telegram</h4>
-    <div class="sub">
-      Your login (email) and your Telegram are separate identities: the login
-      manages agents, Telegram talks to them. Linking them means every agent
-      you create or import admits your Telegram automatically — the pairing
-      dance happens once per account, not once per agent.
-    </div>
-    <div id="tgLinkStatus" class="sub" style="margin:8px 0 18px">Loading…</div>
-
-    <h4 style="margin:0 0 4px">Access tokens</h4>
-    <div class="sub">
-      An access token for this server. Two uses: the <code>hatchabot</code>
-      command line (works with any sign-in method — needed if you sign in with
-      Google, which has no password for the CLI to use), and connecting two
-      <b>cluster servers</b> — paste a token minted here into the other server's
-      Settings → Cluster servers.
-    </div>
-    <div id="cliTokenOut" class="invite-link" style="display:none"></div>
-    <div class="actions" style="justify-content:flex-start">
-      <button class="primary" onclick="newCliToken()">New token</button>
-    </div>
-
-    <hr style="border:none;border-top:1px solid var(--line);margin:18px 0 12px">
-    <div class="sub" style="margin-bottom:4px"><b>Management bot</b> — <span id="mgmtBotStatus" style="color:var(--dim)">checking…</span></div>
-    <div class="sub">
-      Optionally control your fleet from Telegram: list, start/stop and rebuild
-      agents, and approve join requests — every change confirmed with a tap. It
-      runs as its own process, so set it up from a terminal on the server:
-    </div>
-    <div class="invite-link" style="margin-top:8px">hatchabot mgmt-bot setup</div>
   </section>
 
   <section id="paneBackups" role="tabpanel" hidden>
@@ -1703,7 +1717,7 @@
       <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
     </details>
     <div id="rtList">Loading…</div>
-    <div class="sub" id="rtDerivedHint" style="margin-top:10px">Need packages (apt/pip) in an image? <a href="#" onclick="event.preventDefault();if(UI_V2)showTab('derived');const d=$('derivedNew');if(d){d.open=true;d.scrollIntoView({behavior:'smooth'});}">New derived image…</a> below — then pin it to an agent or a class here.</div>
+    <div class="sub" id="rtDerivedHint" style="margin-top:10px">Need extra packages (apt) in an image? Ask the management agent — <a href="#" onclick="event.preventDefault();askMgmtForImage()">ask for a derived image…</a> — then pin it to an agent or a class here.</div>
     <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
     </div>
     <div id="rtCapsHome">
@@ -1714,38 +1728,38 @@
 
     <div id="derivedSection" hidden>
       <h4 style="margin:22px 0 4px">Derived images</h4>
-      <div class="sub">Build an image <code>FROM</code> the base plus your own Dockerfile lines — for
-        system packages (apt) a volume install can't provide. Your lines run as <b>root</b>, then the
-        image restores <code>USER node</code>. Pin an agent to one in its <b>Definition</b> tab.</div>
+      <div class="sub">The base image plus extra system packages, for an agent that needs them.
+        Ask the management agent for one — it writes the Dockerfile lines, you press <b>Confirm</b>.
+        Pin an agent to a finished image in its <b>Definition</b> tab.</div>
+      <div class="actions" style="justify-content:flex-start;margin:8px 0 0">
+        <button class="primary" onclick="askMgmtForImage()">💬 Ask for an image…</button>
+      </div>
       <div id="derivedList" style="margin-top:10px">Loading…</div>
-      <details id="derivedNew" style="margin-top:12px">
-        <summary style="cursor:pointer">➕ New derived image</summary>
-        <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px">
-          <input type="text" id="derivedName" placeholder="name — e.g. media-tools" maxlength="40"
-            style="font-family:ui-monospace,monospace;font-size:13px">
-          <input type="text" id="derivedBase" placeholder="base (default: hatchabot-runtime:latest)" maxlength="160"
-            style="font-family:ui-monospace,monospace;font-size:13px">
-          <textarea id="derivedDockerfile" rows="5" spellcheck="false"
-            placeholder="RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*"
-            style="font-family:ui-monospace,monospace;font-size:13px;width:100%;box-sizing:border-box;resize:vertical"></textarea>
-          <div class="sub">Dockerfile lines appended after <code>FROM</code>. Don't write your own
-            <code>FROM</code> or <code>USER</code> — those are managed.</div>
-          <div class="actions" style="justify-content:flex-start;margin:0">
-            <button class="primary" id="derivedBuildBtn" onclick="createDerivedImage()">Build</button>
-          </div>
-        </div>
-      </details>
       <pre id="derivedBuildOut" hidden style="margin-top:10px;max-height:280px;overflow:auto;background:#0b0b0b;color:#ddd;padding:10px;border-radius:6px;font-size:12px;white-space:pre-wrap"></pre>
     </div>
   </section>
 
   <section id="paneSecurity" role="tabpanel" hidden>
+    <h4 style="margin:0 0 4px">Access tokens</h4>
+    <div class="sub">
+      An access token for this server. Two uses: the <code>hatchabot</code>
+      command line (works with any sign-in method — needed if you sign in with
+      Google, which has no password for the CLI to use), and connecting two
+      <b>cluster servers</b> — paste a token minted here into the other server's
+      Settings → Cluster servers.
+    </div>
+    <div id="cliTokenOut" class="invite-link" style="display:none"></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" onclick="newCliToken()">New token</button>
+    </div>
+
+
     <div class="pair" style="align-items:center">
       <span class="grow"><b>Security posture</b>
-        <span class="sub">A config-risk check — safe to run anytime, especially after adding an agent or a person. Runs automatically once a day too.</span></span>
-      <button class="primary" id="postureRunBtn" onclick="loadPosture()">Run check</button>
+        <span class="sub">A config-risk report: what is exposed, what each agent can do, and what changed since the last one. It runs when you open this tab, and once a day in the background.</span></span>
+      <button class="primary" id="postureRunBtn" onclick="loadPosture()">Check again</button>
     </div>
-    <div id="postureOut" class="sub" style="margin-top:10px">Press <b>Run check</b>.</div>
+    <div id="postureOut" class="sub" style="margin-top:10px">Checking…</div>
   </section>
 
   <section id="paneOperator" role="tabpanel" hidden>
@@ -2819,7 +2833,10 @@ async function loadPosture() {
       : '<div class="sub">No live agents.</div>';
 
     const lim = report.limits;
-    el.innerHTML = `${chg}
+    // Say when: the report runs on open as well, so without this the button
+    // looked like it did nothing.
+    const when = `<div class="sub" style="margin-bottom:8px">Checked ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.</div>`;
+    el.innerHTML = `${when}${chg}
       <div style="margin:6px 0"><b>Install</b></div>${install}
       <div style="margin:14px 0 6px"><b>Agent exposure</b> <span class="sub">(who can reach it × what it can do)</span></div>${agents}
       <div style="margin:14px 0 6px"><b>Limits</b></div>
@@ -2947,7 +2964,7 @@ async function loadPool() {
             <span class="sub">· ${b.shared ? 'shared' : b.mine ? 'yours' : 'another user’s'} · ${b.leasedTo ? `in use by <b>${esc(b.leasedToName || 'an agent')}</b>` : 'available'}</span></span>
           ${b.leasedTo ? '' : `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}')">Remove</button>`}
         </div>`).join('')
-      : '<div class="sub">Empty — add a spare bot below, or park one when deleting an agent.</div>';
+      : '<div class="sub">Empty — add a spare bot above, or park one when deleting an agent.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
@@ -2990,7 +3007,7 @@ async function loadHosts() {
       const del = local || h.agentCount ? '' : `<button class="hbtn" onclick="deleteHost('${jsq(h.id)}','${jsq(h.name)}')">Remove</button>`;
       return `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
         <span class="grow">${local ? '🖥️' : '☁️'} <b>${esc(h.name)}</b>
-          <span class="sub">· ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'}</span>
+          X
           <div class="sub">${where}</div>
           <div class="sub" id="hostping-${esc(h.id)}"></div></span>
         <span style="display:flex;gap:6px">${check}${drain}${del}</span>
@@ -3274,51 +3291,55 @@ async function loadDerivedImages() {
     return;
   }
   sec.hidden = false;
-  populateDerivedDatalist();
   const images = Array.isArray(r?.images) ? r.images : [];
   if (!images.length) {
-    el.innerHTML = `<div class="sub">None yet. Build one below — e.g. a media agent that needs <code>ffmpeg</code>.</div>`;
+    el.innerHTML = `<div class="sub">None yet — ask the management agent for one, e.g. “build an image with ffmpeg for the media agent”.</div>`;
     return;
   }
-  el.innerHTML = images.map(img => {
-    const mark = img.status === 'READY' ? '<span style="color:var(--ok)">✓</span>'
-      : img.status === 'FAILED' ? '<span style="color:var(--warn)">✗</span>' : '<span style="color:var(--dim)">⏳</span>';
-    const pins = img.pinnedBy ? ` · <span class="sub">${img.pinnedBy} agent${img.pinnedBy > 1 ? 's' : ''}</span>` : '';
-    const busy = img.status === 'BUILDING';
-    const err = img.status === 'FAILED' && img.error
-      ? `<div class="sub" style="color:var(--warn);margin-top:2px">${esc(String(img.error).split('\n').pop())}</div>` : '';
-    return `<div style="padding:8px 0;border-top:1px solid var(--line)">
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        ${mark} <b>${esc(img.name)}</b>
-        <code style="font-size:12px;color:var(--dim)">${esc(img.tag)}</code>${pins}
-        <span style="flex:1"></span>
-        <button class="hbtn" ${busy ? 'disabled' : ''} onclick="rebuildDerivedImage('${jsq(img.name)}')">Rebuild</button>
-        <button class="hbtn" onclick="showDerivedLog('${jsq(img.name)}')">Log</button>
-        <button class="hbtn" ${busy ? 'disabled' : ''} onclick="deleteDerivedImage('${jsq(img.name)}')">Delete</button>
-      </div>${err}
-    </div>`;
-  }).join('');
+  el.innerHTML = `<div class="rt-wrap"><table class="rt-tbl">
+    <thead><tr><th>Image</th><th>State</th><th>Contents</th><th>Used by</th><th></th></tr></thead>
+    <tbody>${images.map(img => {
+      const busy = img.status === 'BUILDING';
+      const kind = img.status === 'READY' ? '<span style="color:var(--ok)">✓</span> <b>ready</b>'
+        : img.status === 'FAILED' ? '<span style="color:var(--bad)">✗</span> <b>failed</b>'
+        : '<span style="color:var(--dim)">⏳</span> <b>building…</b>';
+      // The Dockerfile lines, as one readable summary; the full text sits under the row.
+      const steps = String(img.dockerfile || '').split('\n').map(s => s.trim()).filter(Boolean);
+      const contents = steps.length ? `${esc(steps[0].slice(0, 54))}${steps[0].length > 54 ? '…' : ''}${steps.length > 1 ? `<div class="sub">+ ${steps.length - 1} more line${steps.length > 2 ? 's' : ''}</div>` : ''}` : '<span class="sub">—</span>';
+      const who = img.pinnedBy ? `<b>${img.pinnedBy}</b> agent${img.pinnedBy > 1 ? 's' : ''} <span class="sub">pinned</span>` : '<span class="sub">nothing</span>';
+      const err = img.status === 'FAILED' && img.error
+        ? `<div style="color:var(--bad)">${esc(String(img.error).split('\n').filter(Boolean).pop() ?? '')}</div>` : '';
+      const key = img.name.replace(/[^a-z0-9]/gi, '_');
+      return `<tr>
+        <td><b>${esc(img.name)}</b><div class="sub"><code title="${esc(img.tag)}">${esc(img.tag.replace(/^[^:]*:/, ''))}</code></div></td>
+        <td>${kind}<div class="sub">${img.builtAt ? `built ${esc(img.builtAt.slice(0, 10))}` : 'never built'}</div></td>
+        <td>${contents}<div class="sub">FROM ${esc(img.base.replace(/^[^:]*:/, ''))}</div></td>
+        <td>${who}</td>
+        <td><div class="rt-acts">
+          <button onclick="toggleDerivedLines('${jsq(img.name)}','${key}')" title="The Dockerfile lines in this image">🔎</button>
+          <button ${busy ? 'disabled' : ''} onclick="rebuildDerivedImage('${jsq(img.name)}')" title="Build it again from its Dockerfile lines">↻ Rebuild</button>
+          <button onclick="showDerivedLog('${jsq(img.name)}')">Log</button>
+          <button class="danger" ${busy ? 'disabled' : ''} onclick="deleteDerivedImage('${jsq(img.name)}')" title="Delete this derived image">🗑</button>
+        </div></td>
+      </tr><tr class="rt-under"><td colspan="5">${err}<pre id="dvLines_${key}" hidden style="margin:6px 0 0;max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px">${esc(img.dockerfile || '')}</pre></td></tr>`;
+    }).join('')}</tbody></table></div>`;
   // Resume following any build still in progress (e.g. after a page reload).
   for (const img of images) if (img.status === 'BUILDING') pollDerivedBuild(img.name);
 }
 
-async function createDerivedImage() {
-  const name = $('derivedName').value.trim();
-  const dockerfile = $('derivedDockerfile').value;
-  const base = $('derivedBase').value.trim();
-  if (!name || !dockerfile.trim()) { toast('Give it a name and some Dockerfile lines.'); return; }
-  const btn = $('derivedBuildBtn'); btn.disabled = true;
-  try {
-    await api('/v1/images', { method: 'POST', body: { name, dockerfile, ...(base ? { base } : {}) } });
-    $('derivedName').value = ''; $('derivedDockerfile').value = ''; $('derivedBase').value = '';
-    $('derivedNew').open = false;
-    toast(`Building ${name}…`);
-    await loadDerivedImages();
-    pollDerivedBuild(name);
-  } catch (e) { toast(e.message); }
-  finally { btn.disabled = false; }
+function toggleDerivedLines(name, key) {
+  const pre = $('dvLines_' + key);
+  if (pre) pre.hidden = !pre.hidden;
 }
 
+/** Hand the job to the management agent: it writes the Dockerfile, you Confirm. */
+function askMgmtForImage() {
+  const ask = 'Build a derived image called … from the fleet base, adding … ';
+  const fill = () => { const i = $('mgmtChatInput'); if (i) { i.value = ask; i.focus(); i.scrollIntoView({ behavior: 'smooth', block: 'center' }); } };
+  for (const d of document.querySelectorAll('dialog[open]')) d.close();
+  if (UI_V2) { fill(); return; } // the hub's input is already on screen
+  openMgmtChat().then(fill);
+}
 async function rebuildDerivedImage(name) {
   try {
     await api(`/v1/images/${encodeURIComponent(name)}/rebuild`, { method: 'POST', body: {} });
@@ -3526,11 +3547,11 @@ function renderClassList() {
   if (!agentClasses.length) { $('classList').innerHTML = '<div class="sub">No classes yet.</div>'; return; }
   $('classList').innerHTML = agentClasses.map(c => {
     const n = agents.filter(a => a.classId === c.id).length;
-    return `<div class="pair" style="align-items:center;gap:6px;flex-wrap:wrap;padding:4px 0">
-      <span class="grow"><b>${esc(c.name)}</b> <span class="sub">· ${n} agent${n === 1 ? '' : 's'}</span></span>
-      <select onchange="updateClass('${c.id}','model',this.value)" style="width:auto;min-width:140px">${classModelOptions(c.model || '')}</select>
-      <select onchange="updateClass('${c.id}','aiProfileId',this.value)" style="width:auto;min-width:140px">${classSourceOptions(c.aiProfileId || '')}</select>
-      ${myAccount.hostOwner ? `<select onchange="updateClass('${c.id}','image',this.value)" style="width:auto;min-width:140px" title="Runtime image (applied on rebuild)">${classImageOptions(c.image || '')}</select>` : ''}
+    return `<div class="classrow">
+      <span class="cname"><b>${esc(c.name)}</b> <span class="sub">· ${n} agent${n === 1 ? '' : 's'}</span></span>
+      <select onchange="updateClass('${c.id}','model',this.value)">${classModelOptions(c.model || '')}</select>
+      <select onchange="updateClass('${c.id}','aiProfileId',this.value)">${classSourceOptions(c.aiProfileId || '')}</select>
+      ${myAccount.hostOwner ? `<select onchange="updateClass('${c.id}','image',this.value)" title="Runtime image (applied on rebuild)">${classImageOptions(c.image || '')}</select>` : ''}
       <button class="danger" onclick="deleteClass('${c.id}','${jsq(c.name)}')">Delete</button>
     </div>`;
   }).join('');
@@ -4052,45 +4073,55 @@ function renderRuntimeList() {
   if (caps && $('rtList').contains(caps)) { $('rtCapsHome').append(caps); $('rtCapsHome').hidden = false; }
   if (!d.tags.length) { $('rtList').innerHTML = '<div class="sub">No runtime image is built on this machine yet.</div>'; return; }
   const defV = d.defaultInfo?.openclawVersion;
-  $('rtList').innerHTML = d.tags.map(t => {
+  const rows = d.tags.map(t => {
     // An image named for one version but carrying another is a bad build: say so loudly.
     // A content revision (the same OpenClaw plus a suffix that starts with a
     // letter, e.g. 2026.7.1-2-ch1) is a proper name, not a mislabel.
     const named = /:(\d{4}\.\d+\.\d+[\w.-]*)$/.exec(t.tag)?.[1];
     const isRevision = named && t.openclawVersion && named.startsWith(t.openclawVersion + '-') && /^[a-z]/i.test(named.slice(t.openclawVersion.length + 1));
     const mislabelled = t.exists && named && t.openclawVersion && named !== t.openclawVersion && !isRevision
-      ? `<div style="color:var(--bad);margin-top:4px">⚠ This image is named ${esc(named)} but contains OpenClaw ${esc(t.openclawVersion)}. It was not built correctly: end any trial on it and delete it.</div>` : '';
+      ? `<div style="color:var(--bad)">⚠ This image is named ${esc(named)} but contains OpenClaw ${esc(t.openclawVersion)}. It was not built correctly: end any trial on it and delete it.</div>` : '';
     const apps = (t.channels ?? []).map(k => ({ slack: 'Slack', discord: 'Discord' })[k]).filter(Boolean);
     const extras = (t.extraPackages ?? []).filter(Boolean);
-    const facts = t.exists ? [t.openclawVersion ? `OpenClaw <b>${esc(t.openclawVersion)}</b>${defV && t.openclawVersion !== defV && !t.isDefault ? ` <span class="sub">(default runs ${esc(defV)})</span>` : ''}` : '', apps.length ? `with ${apps.join(' and ')}` : '', extras.length ? `plus ${extras.map(esc).join(', ')}` : '', t.size ? esc(t.size) : '', t.createdAt ? `built ${esc(t.createdAt.slice(0, 10))}` : ''].filter(Boolean).join(' · ') : '';
-    const kind = t.isDefault ? '⭐ <b>fleet default</b>' + (d.defaultInfo?.resolvesTo?.length ? ` — same image as ${d.defaultInfo.resolvesTo.map(x => `<code>${esc(x)}</code>`).join(', ')}` : '')
-      : t.derived ? `<b>derived</b> · ${esc(t.derived.status.toLowerCase())} · FROM ${esc(t.derived.base)}${t.derived.summary ? ` · <span title="${esc(t.derived.summary)}">${esc(t.derived.summary.slice(0, 70))}${t.derived.summary.length > 70 ? '…' : ''}</span>` : ''}`
-      : t.relation === 'same' ? '<b>= fleet default</b> (same image, another name)'
-      : t.relation === 'newer' ? '<b>candidate</b> — newer than the default'
-      : t.relation === 'older' ? 'older build — a previous default'
-      : t.exists ? 'candidate' : '<b>not built</b> on this machine';
+    const own = t.derived?.summary ? `<div class="sub" title="${esc(t.derived.summary)}">${esc(t.derived.summary.slice(0, 60))}${t.derived.summary.length > 60 ? '…' : ''}</div>` : '';
+    const contents = !t.exists ? '' : ([apps.length ? `with ${apps.join(' and ')}` : '', extras.length ? `plus ${extras.map(esc).join(', ')}` : ''].filter(Boolean).join(' · ') || 'stock') + own;
+    const version = !t.exists ? '' : t.openclawVersion
+      ? `<b>${esc(t.openclawVersion)}</b>${defV && t.openclawVersion !== defV && !t.isDefault ? `<div class="sub">default: ${esc(defV)}</div>` : ''}`
+      : '<span class="sub">unknown</span>';
+    const built = !t.exists ? '' : [t.size ? esc(t.size) : '', t.createdAt ? `built ${esc(t.createdAt.slice(0, 10))}` : ''].filter(Boolean).join(' · ');
+    const kind = t.isDefault ? '⭐ <b>fleet default</b>' + (d.defaultInfo?.resolvesTo?.length ? `<div class="sub">also tagged ${d.defaultInfo.resolvesTo.map(x => `<code>${esc(x.replace(/^[^:]*:/, ''))}</code>`).join(', ')}</div>` : '')
+      : t.derived ? `<b>derived</b> · ${esc(t.derived.status.toLowerCase())}<div class="sub">FROM ${esc(t.derived.base.replace(/^[^:]*:/, ''))}</div>`
+      : t.relation === 'same' ? '<b>= fleet default</b><div class="sub">same image, another name</div>'
+      : t.relation === 'newer' ? '<b>candidate</b><div class="sub">newer than the default</div>'
+      : t.relation === 'older' ? 'older build<div class="sub">a previous default</div>'
+      : t.exists ? 'candidate' : '<b>not built</b><div class="sub">on this machine</div>';
     const pins = t.pinned.map(a => `<span class="chip" title="${esc(a.state)}">${a.mine ? '' : '👥 '}${a.state === 'REBUILDING' ? '↻ rebuilding · ' : ''}${esc(a.name)}${a.mine && a.state !== 'ARCHIVED' ? ` <a href="#" title="Discard the trial: unpin and rebuild on the fleet default" onclick="event.preventDefault();discardTrial('${a.id}','${jsq(a.name)}')">✕</a>` : ''}</span>`).join(' ');
     const cls = t.classes.map(c => `<span class="chip">🏷 ${esc(c.name)}</span>`).join(' ');
-    const who = t.isDefault ? `<b>${d.unpinned.length}</b> agent${d.unpinned.length === 1 ? '' : 's'} follow it (no pin)` : (pins || cls) ? `${pins ? 'Pinned: ' + pins : ''} ${cls ? 'Classes: ' + cls : ''}` : 'Nothing pinned to it.';
+    const who = t.isDefault ? `<b>${d.unpinned.length}</b> agent${d.unpinned.length === 1 ? '' : 's'} <span class="sub">with no pin</span>` : (pins || cls) ? `${pins}${pins && cls ? ' ' : ''}${cls}` : '<span class="sub">nothing</span>';
     const canPromote = t.exists && !t.isDefault && !t.isLatest && !t.derived;
     const canDelete = t.exists && !t.isDefault && !t.derived;
     const key = t.tag.replace(/[^a-z0-9]/gi, '_');
-    return `<div style="padding:10px 0;border-top:1px solid var(--line)">
-      <div style="display:flex;gap:10px;align-items:baseline;flex-wrap:wrap"><code style="font-size:14px;font-weight:600">${esc(t.tag)}</code><span class="sub">${kind}</span></div>
-      ${facts ? `<div class="sub" style="margin-top:4px">${facts}</div>` : ''}
-      ${mislabelled}
-      <div class="sub" style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${who}</div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-        ${t.exists ? `<button onclick="toggleImageDetails('${jsq(t.tag)}','${key}')" title="What is baked into this image (its build steps)">🔎 Details</button>` : ''}
-        ${t.exists && !t.isDefault ? `<button onclick="tryOnAgent('${jsq(t.tag)}')" title="Pin one agent to this image and rebuild it (memory kept)">🧪 Try on one agent…</button>` : ''}
-        ${canPromote ? `<button class="primary" onclick="promoteImage('${jsq(t.tag)}')" title="Point the fleet default at this image; agents without a pin pick it up on their next rebuild">⬆ Promote to fleet</button>` : ''}
-        ${t.derived ? `<button onclick="rebuildDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)">Rebuild</button><button onclick="showDerivedLog('${jsq(t.derived.name)}')">Log</button><button class="danger" onclick="deleteDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)">Delete</button>` : ''}
-        ${canDelete ? `<button class="danger" onclick="deleteImageTag('${jsq(t.tag)}')" title="Remove this tag (refused while anything is pinned to it or a container still runs on it)">Delete</button>` : ''}
-      </div>
-      <pre id="rtHist_${key}" hidden style="margin:8px 0 0;max-height:260px;overflow:auto;font-size:11px;white-space:pre-wrap;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px"></pre>
-      ${t.isDefault ? `<details class="rt-caps" id="rtCapsBox"${rtCapsOpen ? ' open' : ''} ontoggle="rtCapsOpen = this.open"><summary>What agents can do with this image</summary><div id="rtCapsSlot"></div></details>` : ''}
-    </div>`;
+    const acts = [
+      t.exists ? `<button onclick="toggleImageDetails('${jsq(t.tag)}','${key}')" title="What is baked into this image (its build steps)">🔎</button>` : '',
+      t.exists && !t.isDefault ? `<button onclick="tryOnAgent('${jsq(t.tag)}')" title="Try it on one agent: pin that agent to this image and rebuild it (memory kept)">🧪</button>` : '',
+      canPromote ? `<button class="primary" onclick="promoteImage('${jsq(t.tag)}')" title="Point the fleet default at this image; agents without a pin pick it up on their next rebuild">⬆ Promote</button>` : '',
+      t.derived ? `<button onclick="rebuildDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)" title="Build it again from its Dockerfile lines">↻</button><button onclick="showDerivedLog('${jsq(t.derived.name)}')">Log</button><button class="danger" onclick="deleteDerivedImage('${jsq(t.derived.name)}').then(loadRuntimeImages)" title="Delete this derived image">🗑</button>` : '',
+      canDelete ? `<button class="danger" onclick="deleteImageTag('${jsq(t.tag)}')" title="Delete this tag (refused while anything is pinned to it or a container still runs on it)">🗑</button>` : '',
+    ].join('');
+    const under = mislabelled
+      + (t.exists ? `<pre id="rtHist_${key}" hidden style="margin:6px 0 0;max-height:260px;overflow:auto;font-size:11px;white-space:pre-wrap;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px"></pre>` : '')
+      + (t.isDefault ? `<details class="rt-caps" id="rtCapsBox"${rtCapsOpen ? ' open' : ''} ontoggle="rtCapsOpen = this.open"><summary>What agents can do with this image</summary><div id="rtCapsSlot"></div></details>` : '');
+    return `<tr>
+        <td><code title="${esc(t.tag)}">${esc(t.tag.replace(/^[^:]*:/, ''))}</code>${built ? `<div class="sub">${built}</div>` : ''}</td>
+        <td>${kind}</td>
+        <td>${version}${contents ? `<div class="sub">${contents}</div>` : ''}</td>
+        <td>${who}</td>
+        <td><div class="rt-acts">${acts}</div></td>
+      </tr>${under ? `<tr class="rt-under"><td colspan="5">${under}</td></tr>` : ''}`;
   }).join('');
+  $('rtList').innerHTML = `<div class="rt-wrap"><table class="rt-tbl">
+    <thead><tr><th>Tag <span class="sub">of hatchabot-runtime</span></th><th>What it is</th><th>Contents</th><th>Used by</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
   // The capability list describes the fleet default, so it lives under that
   // image's entry (the element moves; its loader keeps filling it wherever it is).
   const slot = $('rtCapsSlot');
@@ -4457,9 +4488,12 @@ function openMigrate(id, name) {
   // Show exactly who moves: every agent on this source, across accounts.
   api('/v1/agents?all=1').then(all => {
     const on = all.filter(a => a.aiProfileId === id);
+    // Nothing to move: the button would fail on press, so it stays out.
+    $('migrateBtn').disabled = !on.length || !$('migrateTo').options.length;
+    $('migrateBtn').title = on.length ? '' : 'No agents are on this source.';
     $('migrateAgents').innerHTML = on.length
       ? `<b>${on.length} agent${on.length === 1 ? '' : 's'}</b> will move:<br>` + on.map(a => `• ${esc(a.name)} <span style="color:var(--dim)">(${esc(a.state.toLowerCase())}${a.ownerId && a.ownerId !== myAccount.ownerId ? ', other account' : ''})</span>`).join('<br>')
-      : 'No agents are on this source.';
+      : 'No agents are on this source — nothing to migrate.';
   }).catch(() => { $('migrateAgents').textContent = ''; });
 }
 async function runMigrate() {
@@ -9642,10 +9676,13 @@ function v2ConvertPanels() {
     back.title = 'Back';
     back.setAttribute('aria-label', 'Back');
     back.innerHTML = V2_BACK_SVG;
+    // The panel's own Cancel/Done, found NOW, in the static markup: a list row
+    // rendered later can carry a ✕ that deletes something, and Back pressing
+    // that was a real bug (it offered to forget a cluster server).
+    const own = [...d.querySelectorAll('button')].reverse()
+      .find(x => x !== back && /^(Close|Cancel|Done)$/.test(x.textContent.trim()));
     back.addEventListener('click', () => {
-      const own = [...d.querySelectorAll('button')].reverse()
-        .find(x => x !== back && !x.hidden && /^(✕|×|Close|Cancel|Done)$/.test(x.textContent.trim()));
-      if (own) own.click(); else d.close();
+      if (own && !own.hidden && d.contains(own)) own.click(); else d.close();
     });
     const title = document.createElement('div');
     title.className = 'v2ptitle';
@@ -9793,8 +9830,15 @@ async function loadProposals() {
   if (!UI_V2) return;
   let r; try { r = await api('/v1/proposals'); } catch { return; }
   if (!Array.isArray(r?.pending)) r = { pending: [] }; // an older server mid-deploy
-  const sig = r.pending.map(p => p.confirmId).join(',');
-  $('v2Proposals').hidden = !r.pending.length;
+  // A change that failed when you confirmed it used to vanish with its card,
+  // taking the reason with it (2026-09-19). Keep recent failures on screen.
+  const failed = (Array.isArray(r.recent) ? r.recent : [])
+    .filter(x => x.status === 'confirmed' && /^⚠/.test(String(x.outcome ?? '')))
+    .filter(x => Date.now() - (x.resolvedAtMs ?? 0) < 60 * 60_000)
+    .filter(x => !v2PropDismissed.has(x.confirmId))
+    .slice(0, 3);
+  const sig = [...r.pending.map(p => p.confirmId), ...failed.map(f => `f:${f.confirmId}`)].join(',');
+  $('v2Proposals').hidden = !(r.pending.length || failed.length);
   $('v2PropCount').textContent = r.pending.length || '';
   // While you talk to your management agent, what it prepares shows right
   // above the conversation — in Hatchabot's frame, which the agent can't draw in.
@@ -9806,7 +9850,27 @@ async function loadProposals() {
   const list = $('v2PropList');
   list.innerHTML = ''; cp.innerHTML = '';
   for (const p of r.pending) { mgmtProposalCard(p, list); if (inConsole) mgmtProposalCard(p, cp); }
+  for (const f of failed) { mgmtFailedCard(f, list); if (inConsole) mgmtFailedCard(f, cp); }
 }
+
+/** A change you confirmed that did not go through, with the reason and a way
+ *  to put it out of sight. */
+function mgmtFailedCard(f, into) {
+  const card = document.createElement('div');
+  card.style.cssText = 'align-self:stretch;border:1px solid var(--bad);border-radius:10px;padding:10px 12px;font-size:14px';
+  const head = document.createElement('div');
+  head.style.cssText = 'white-space:pre-wrap';
+  head.textContent = String(f.outcome || `⚠ Failed — ${f.summary}`);
+  card.appendChild(head);
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;margin-top:8px;justify-content:flex-end';
+  const hide = document.createElement('button');
+  hide.textContent = 'Dismiss';
+  hide.addEventListener('click', () => { card.remove(); v2PropDismissed.add(f.confirmId); });
+  row.appendChild(hide); card.appendChild(row);
+  into.appendChild(card);
+}
+const v2PropDismissed = new Set();
 setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?.ops) void loadProposals(); }, 4000);
 
 function initV2() {

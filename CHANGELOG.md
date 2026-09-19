@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.36.0] — 2026-09-19
+
+### Changed
+- **Settings reads shorter and sorts itself out.** *Telegram bots* now opens with **Add a bot**, then your spare bots, then the census drawer — and the two lists say plainly which is which: spares are parked and unassigned (an agent takes one instantly), the census is *every* bot this server holds a token for, live-checked against BotFather's ~40 cap. *Connections* and *Machines* lost their wall of text; Machines answers **"Runner or cluster?"** in one place — a runner is another machine under *this* dashboard, a cluster is a separate Hatchabot server you hand an agent over to. *People* is now just accounts and your password: the Telegram and management-bot sections moved to Telegram bots, access tokens to Security.
+- **Base images and derived images are tables.** One row per image — tag, what it is, what it carries, what uses it, and its actions — instead of a stack of paragraphs, so versions and contents line up and you can compare at a glance.
+- **Derived images are built by asking the management agent.** The form that took raw Dockerfile lines is gone: say *"build an image with ffmpeg"*, it writes the lines and files the change, and nothing builds until you press Confirm. Getting a Dockerfile right by hand was expert work sitting in a settings tab.
+- **Security's check says when it ran.** It already runs when you open the tab, so pressing the button looked like it did nothing; the report is now stamped with the time and the button reads **Check again**.
+- **Migrate & rebuild** is greyed out when no agent is on the source you are migrating off.
+- **Agent classes** line up in columns again, instead of wrapping their names.
+
+### Fixed
+- **Back out of Settings no longer offers to forget a cluster server.** The panel's Back arrow pressed the last close-looking button it could find, and a list row's ✕ — *forget this server*, *delete this restore point* — qualified. It now knows the panel's own Cancel/Done from the start and never touches a row.
+- **A change you confirmed that then failed stays on screen, with the reason.** It used to vanish with its card a couple of seconds later, telling neither you nor the agent anything; the agent can now read what happened to what it filed (`list_proposals`), and a derived-image name it cannot use is refused when it files the card, not when you confirm it.
+
 ## [1.35.3] — 2026-09-19
 
 ### Fixed
@@ -10,7 +24,8 @@ All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
 ### Added
 - A test that asks the agent's own door for its tool list and checks the base-candidate tool offers `packages` — the thing it told its owner it could not do.
- — 2026-09-19
+
+## [1.35.2] — 2026-09-19
 
 ### Fixed
 - **After an upgrade, the Hatchabot agent knows about new tools.** It asks Hatchabot for its tool list once, when its gateway starts, so an upgrade that adds a tool left it describing the old set — it told its owner it could not add a package to a base image, one release after that became possible. Hatchabot now records which version an agent's runtime was built against and restarts a management agent whose version has moved on. Its memory is on its volume, so the restart costs nothing.

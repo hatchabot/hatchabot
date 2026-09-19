@@ -64,6 +64,13 @@ export const REST_TOOLS: RestTool[] = [
     call: () => ({ method: 'GET', path: '/v1/ai-profiles/usage' }),
   },
   {
+    name: 'list_proposals', tier: 'read',
+    description:
+      'The changes you have prepared: which are still waiting for the owner to confirm, and what happened to the recent ones — including any that FAILED, with the reason. Check this when asked whether something you filed worked.',
+    input_schema: obj({}),
+    call: () => ({ method: 'GET', path: '/v1/proposals' }),
+  },
+  {
     name: 'list_crons', tier: 'read', agentArg: true,
     description: "An agent's scheduled tasks: id, name, schedule, message, enabled, last run. The agent must be running.",
     input_schema: obj({ agent: agentRef }, ['agent']),

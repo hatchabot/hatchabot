@@ -2,6 +2,7 @@ import { REST_BY_NAME, type RestCtx, type RestTool } from './restTools.js';
 import { z } from 'zod';
 import { toolDef } from './tools.js';
 import { TemplateParamSchema } from '../orchestrator/template.js';
+import { derivedNameProblem } from '../orchestrator/derivedImage.js';
 import { PendingStore, type AuthorSpec, type PendingConfirm, type Resolved } from './pendingStore.js';
 
 /**
@@ -546,6 +547,11 @@ export class Broker {
         if (existing) {
           throw new BrokerError('INVALID_INPUT', `"${imgName}" already exists — use rebuild_image to rebuild it.`);
         }
+        // Check the name HERE, not when the owner confirms: a card that cannot
+        // execute wastes their Confirm and tells the agent nothing (an image
+        // named "2026.7.1-2-ch3" was filed and failed on confirm, 2026-09-19).
+        const nameProblem = derivedNameProblem(imgName);
+        if (nameProblem) throw new BrokerError('INVALID_INPUT', `"${imgName}": ${nameProblem}`);
         const dockerfile = args.dockerfile;
         if (typeof dockerfile !== 'string' || !dockerfile.trim()) {
           throw new BrokerError('INVALID_INPUT', 'Missing Dockerfile lines.');

@@ -645,10 +645,15 @@ rebuild; the card shows 📌 with the pinned tag; a pinned agent stops getting
 "update available" from fleet promotes, since it deliberately doesn't track
 `:latest`. Clearing the field returns it to the default.
 
-**Derived images** (⚙ → Runtime, or `hatchabot image`, host owner only): the
-first-class form of "this agent's owner needs ffmpeg + LaTeX". Build an image
-`FROM hatchabot-runtime:<base>` plus your own Dockerfile lines — for system
-packages (apt) a volume install can't provide — and pin an agent to it. Your
+**Derived images** (⚙ → Derived images, or `hatchabot image`, host owner only):
+the first-class form of "this agent's owner needs ffmpeg + LaTeX". An image
+`FROM hatchabot-runtime:<base>` plus Dockerfile lines — for system packages
+(apt) a volume install can't provide — that an agent is then pinned to. In the
+app you **ask the management agent** for one ("build an image with ffmpeg"): it
+writes the lines and files the change, and nothing builds until you press
+Confirm — the web form that used to take raw Dockerfile lines is gone, since
+getting them right by hand is expert work. The tab lists every derived image in
+one table (state, contents, what pins it) with Rebuild, Log and Delete. Your
 lines run as **root** (the base ends as `USER node`), then the image restores
 `USER node`, the runtime contract the volume (uid 1000) and Claude Code depend
 on; you never write your own `FROM`/`USER`. The image is tagged

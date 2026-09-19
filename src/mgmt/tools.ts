@@ -321,7 +321,7 @@ export const MANIFEST: ToolDef[] = [
       type: 'object',
       additionalProperties: false,
       properties: {
-        name: { type: 'string', minLength: 1, maxLength: 40, description: 'lowercase, digits, dashes' },
+        name: { type: 'string', minLength: 2, maxLength: 40, description: 'lowercase letters, digits and hyphens, STARTING WITH A LETTER — no dots (e.g. "ch3-traceroute", never "2026.7.1-2-ch3")' },
         dockerfile: { type: 'string', minLength: 1, maxLength: 20000 },
         base: { type: 'string', minLength: 1, maxLength: 160, description: 'defaults to the fleet base' },
       },

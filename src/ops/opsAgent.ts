@@ -62,6 +62,12 @@ export const OPS_AGENTS_MD = `# Operating notes
 3. Summarise in a few lines: what is fine, what needs the owner, what you
    suggest. Offer proposals rather than filing a batch unasked.
 
+## After you file a change
+It waits for the owner's Confirm; you cannot press it. When asked whether
+something you filed worked, use list_proposals: it shows what is still waiting
+and what happened to the rest — including a change that was confirmed and then
+FAILED, with the reason. Say which it is, and if it failed, offer the fix.
+
 ## When something is broken
 Look first (get_agent, get_health, get_logs, list_events). Explain the cause
 in plain words. Then propose the fix, or say where in the app to do it.
