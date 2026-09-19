@@ -70,7 +70,7 @@ import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
 import { OPS_DIGEST_MESSAGE } from '../ops/opsAgent.js';
-import { createOpsNotifier } from '../ops/notify.js';
+import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
@@ -1255,12 +1255,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         app.log.info({ name, ok: res.ok }, 'derived image build finished');
         opsNotifier.notify(rec.createdBy, res.ok
           ? `The derived image "${name}" (${rec.tag}) finished building. It can now be pinned to an agent.`
-          : `The derived image "${name}" FAILED to build: ${String(res.error ?? 'no reason given').slice(0, 300)}`);
+          : `The derived image "${name}" FAILED to build. Its last output: "${quoteOutput(res.error)}"`);
       })
       .catch((err) => {
         store.setDerivedImageStatus(name, 'FAILED', String(err?.message ?? err));
         app.log.error({ err, name }, 'derived image build threw');
-        opsNotifier.notify(rec.createdBy, `The derived image "${name}" FAILED to build: ${String(err?.message ?? err).slice(0, 300)}`);
+        opsNotifier.notify(rec.createdBy, `The derived image "${name}" FAILED to build. Its last output: "${quoteOutput(err)}"`);
       })
       .finally(() => buildingImages.delete(name));
   };
@@ -1389,11 +1389,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error };
         opsNotifier.notify(forOwner, r.ok
           ? `The ${what} finished building. Nothing changes for any agent until it is tried on one and promoted.`
-          : `The ${what} FAILED to build: ${String(r.error ?? 'no reason given').slice(0, 300)}`);
+          : `The ${what} FAILED to build. Its last output: "${quoteOutput(r.error)}"`);
       })
       .catch((err) => {
         baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) };
-        opsNotifier.notify(forOwner, `The ${what} FAILED to build: ${String(err?.message ?? err).slice(0, 300)}`);
+        opsNotifier.notify(forOwner, `The ${what} FAILED to build. Its last output: "${quoteOutput(err)}"`);
       });
     return reply.code(202).send({ building: true, version, candidate, packages: packages.value });
   });

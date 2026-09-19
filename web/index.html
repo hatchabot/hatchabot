@@ -539,7 +539,8 @@
   .v2b-blocked { background:var(--bad) }
   .v2b-waiting { background:var(--info) }
   .v2b-stopped { background:var(--off) }
-  .v2b-note { background:var(--warn); color:var(--accent-ink); min-width:14px; height:14px; right:-4px; top:-4px; font-size:0 }
+  .v2b-note { background:var(--warn); color:var(--accent-ink); min-width:18px; height:18px; border-radius:9px;
+              right:-6px; top:-6px; font-size:12px; font-weight:700 }
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
   .v2tg svg { display:block; margin-left:-1px }
@@ -9043,7 +9044,7 @@ function v2Status(a) {
   else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
   else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
   else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
-  else if (why.length && v2Mine(a)) st = { cls: 'note', glyph: '•', label: 'Worth a look' };
+  else if (why.length && v2Mine(a)) st = { cls: 'note', glyph: '⚑', label: 'Worth a look' };
   else st = { cls: 'ok', glyph: '', label: a.state === 'RUNNING' ? 'Ready' : a.state };
   return { ...st, why };
 }
@@ -9063,9 +9064,13 @@ const chanIcon = (kind) => (V2_MARK_SVG[kind] || '')
  *  conversation people actually have with it lives in Telegram, Slack or
  *  Discord — one press away instead of a hunt through the app. */
 function agentChannelLinks(a) {
+  // https only: these links are opened, so a stored value that ever became
+  // javascript: or data: must not be clickable. Everything Hatchabot stores is
+  // an https deep link built server-side; this is the belt.
+  const ok = (u) => typeof u === 'string' && /^https:\/\//i.test(u);
   return [
-    ...(a?.botUsername && a?.deepLink ? [{ kind: 'telegram', url: a.deepLink }] : []),
-    ...((a?.otherChannels ?? []).filter((c) => c.deepLink && V2_MARK_SVG[c.kind]).map((c) => ({ kind: c.kind, url: c.deepLink }))),
+    ...(a?.botUsername && ok(a?.deepLink) ? [{ kind: 'telegram', url: a.deepLink }] : []),
+    ...((a?.otherChannels ?? []).filter((c) => ok(c.deepLink) && V2_MARK_SVG[c.kind]).map((c) => ({ kind: c.kind, url: c.deepLink }))),
   ];
 }
 function renderConsoleChannels(a) {

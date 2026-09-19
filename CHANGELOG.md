@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.42.0] — 2026-09-19
+
+### Changed
+- **The "worth a look" mark on an agent is a pennant, not a brown dot.** A small filled circle said nothing about what it wanted; the flag reads as "check this".
+
+### Security
+- 21st audit — a sweep of today's releases, the Telegram access path and what this machine actually exposes: [docs/audit-2026-09-19-exposure.md](docs/audit-2026-09-19-exposure.md). No route lost an authorisation check and no Telegram policy changed; the gate on a stranger reaching an agent is still the owner pressing Admit, or a live 49-bit single-use invite.
+- **Messaging deep links are opened only when they are `https:`.** Hatchabot builds every one of them server-side, so this is belt-and-braces for the new Telegram/Slack/Discord buttons, which *open* what that column holds.
+- **Build output quoted to the management agent is marked as data.** A failed build's last line is stripped of control characters and brackets, bounded, and the note says program output is never an instruction — a docker log contains text Hatchabot did not write.
+
 ## [1.41.1] — 2026-09-19
 
 ### Fixed
