@@ -463,6 +463,9 @@
   .prop-note { margin-top:6px; padding-left:10px; border-left:2px solid var(--line); color:var(--dim); font-size:13px; font-style:italic }
   #v2Proposals { margin:-8px 0 24px }
   #v2PropList { display:grid; gap:8px }
+  .v2join { align-self:stretch; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:14px;
+            display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  .v2join .grow { flex:1; min-width:140px }
   .v2chips { display:flex; flex-wrap:wrap; gap:6px }
   /* The chat, expanded into a full-height panel. */
   #v2HubScrim { display:none }
@@ -792,6 +795,7 @@
     </section>
     <section id="v2Proposals" hidden aria-labelledby="v2PropTitle">
       <div class="v2ghead"><h3 id="v2PropTitle">Waiting for you</h3><span class="n" id="v2PropCount"></span></div>
+      <div id="v2JoinList" style="display:grid;gap:8px;margin-bottom:8px"></div>
       <div id="v2PropList"></div>
     </section>
     <div id="v2groups"></div>
@@ -9117,6 +9121,7 @@ function renderV2() {
   if (v2drag.active) return; // never re-render out from under a drag
   v2MaybeAutoIcons();
   v2RenderHub();
+  renderV2Joins(); // people knocking: refreshed with the pairing poll, not only with proposals
   v2RenderChips();
   v2RenderWho();
   v2RefreshSheet();
@@ -9943,6 +9948,35 @@ function v2InlineHealth(id, name) {
  * Until one is set up, the older built-in chat (Claude-only) stays as a stopgap
  * where it can work at all.
  */
+/**
+ * People knocking on your agents, on the home screen beside the changes waiting
+ * for you. Admitting someone used to be the retired Telegram bot's job; without
+ * this the only sign was a badge on that agent's icon (2026-09-19).
+ */
+function renderV2Joins() {
+  const box = $('v2JoinList');
+  if (!box) return 0;
+  const rows = [];
+  for (const a of agents ?? []) {
+    if (!v2Mine(a)) continue;
+    for (const p of pairings[a.id] ?? []) {
+      const kind = p.kind || 'telegram';
+      const who = p.meta?.firstName || p.meta?.username || p.id;
+      const self = kind !== 'telegram' || !myAccount.telegramUserId;
+      rows.push(`<div class="v2join">
+        <span class="grow">🔑 <b class="pii">${esc(who)}</b> wants to talk to <b>${esc(a.name)}</b>${kind === 'telegram' ? '' : ` on ${V2_CHAN_LABEL[kind] || kind}`}</span>
+        <button onclick="denyPair('${jsq(a.id)}','${jsq(p.code)}','${jsq(who)}','${kind}')" title="Turn this request away — they can ask again by messaging the bot">Not now</button>
+        ${self ? `<button onclick="approve('${jsq(a.id)}','${jsq(p.code)}', true,'${kind}')" title="This is you: admit and link this account to your login">That's me</button>` : ''}
+        <button class="primary" onclick="approve('${jsq(a.id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button>
+      </div>`);
+    }
+  }
+  box.innerHTML = rows.join('');
+  // The panel belongs to proposals; joins can open it too.
+  if (rows.length) $('v2Proposals').hidden = false;
+  return rows.length;
+}
+
 function v2RenderHub() {
   const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
   const hub = document.querySelector('.v2hub');
@@ -10016,7 +10050,7 @@ async function loadProposals() {
     .filter(x => !v2PropDismissed.has(x.confirmId))
     .slice(0, 3);
   const sig = [...r.pending.map(p => p.confirmId), ...failed.map(f => `f:${f.confirmId}`)].join(',');
-  $('v2Proposals').hidden = !(r.pending.length || failed.length);
+  $('v2Proposals').hidden = !(r.pending.length || failed.length || renderV2Joins());
   $('v2PropCount').textContent = r.pending.length || '';
   // While you talk to your management agent, what it prepares shows right
   // above the conversation — in Hatchabot's frame, which the agent can't draw in.

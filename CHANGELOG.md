@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.43.0] — 2026-09-19
+
+### Added
+- **People knocking are on the home screen.** A join request now appears under **Waiting for you**, beside the changes your management agent has prepared — who is asking, which agent they want, and **Let them in** / **That's me** / **Not now**. Admitting someone was the retired Telegram management bot's job; without this the only sign was a badge on that agent's icon, which is easy to miss on a fleet of forty. The agent's own card still shows the request too, and the management agent can list and admit people in chat (`list_pending`, `approve_member`) with the usual Confirm.
+
 ## [1.42.0] — 2026-09-19
 
 ### Changed
