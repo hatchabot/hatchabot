@@ -16,6 +16,7 @@ import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
+import { ensureOpsServer } from '../ops/opsServer.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
 import { discordConnector } from '../channels/discord.js';
@@ -4602,6 +4603,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const provider = providerFor(host.id);
     if (!provider.isolatedGateway && process.env.NODE_ENV !== 'test' && !deps.allowUnjailedOps) {
       return reply.code(400).send({ error: 'This machine’s runtime cannot isolate the agent’s network, so it is not offered here.' });
+    }
+    // Open the door BEFORE minting an agent: on Docker Desktop the jail's
+    // gateway address lives inside Docker's VM and cannot be bound here, and
+    // the owner was left with a failed agent and a Retry that could only fail
+    // again (reported on a laptop, 2026-09-19). Failing here leaves nothing
+    // behind and says why.
+    if (provider.isolatedGateway) {
+      try {
+        await ensureOpsServer(() => provider.isolatedGateway!());
+      } catch (err) {
+        const why = (err as { userMessage?: string }).userMessage;
+        trace()('ops.door_unavailable', { ownerId, error: String((err as Error)?.message ?? err).slice(0, 200) });
+        return reply.code(409).send({ error: why ?? 'Hatchabot could not open the management agent’s door on this machine.' });
+      }
     }
     const taken = new Set(store.listAllActiveAgents().filter((a) => a.ownerId === ownerId).map((a) => a.slug));
     const name = [OPS_AGENT_NAME, 'Hatchabot agent', 'Hatchabot manager'].find((n) => !taken.has(slugify(n)));

@@ -104,6 +104,24 @@ two standing.
 - The same never-in-chat list as today stays app-only: secrets, deleting
   agents, promoting a base image, moving servers, accounts.
 
+### Where it can run
+
+The jail rests on a Linux property: the bridge network's gateway is a real
+address on the host, so Hatchabot can listen there and the container can reach
+it while having no route anywhere else. **Docker Desktop (macOS, Windows) does
+not have that**: the gateway lives inside Docker's own virtual machine, so the
+door cannot be bound from the host — confirmed on a MacBook, 2026-09-19
+(`EADDRNOTAVAIL 172.18.0.1:8091`). Setup refuses there, before any agent is
+created, and says so. Ordinary agents are unaffected.
+
+If a management agent on Docker Desktop is ever wanted, the honest options are:
+- **Drop layer 2 there** (an ordinary agent network plus the door on the host's
+  loopback, reached at `host.docker.internal`): layers 1 and 3 still hold, but
+  the agent has internet. It would have to be opt-in and labelled as such.
+- **Put the door inside the VM** (a sidecar container on the jail network
+  forwarding to Hatchabot). ICC is off on that network, so the sidecar would
+  need an exception — a second thing to get right.
+
 ### The jail (layer 2)
 
 Verified on this machine with throwaway containers:

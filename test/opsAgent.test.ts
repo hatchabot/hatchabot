@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import http from 'node:http';
@@ -231,4 +231,33 @@ describe('the ops proxy is bounded', () => {
       server.close();
     }
   }, 20_000);
+});
+
+describe('setting up the management agent on a machine that cannot hold the jail', () => {
+  it('refuses before creating anything, and says why', async () => {
+    // A fresh module graph: the ops server is started once per process, and
+    // another test in this file has already opened one.
+    vi.resetModules();
+    const { Store } = await import('../src/store/store.js');
+    const Database = (await import('better-sqlite3')).default;
+    const Fastify = (await import('fastify')).default;
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const { registerRoutes } = await import('../src/api/routes.js');
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
+    const provider = new MockProvider() as MockProvider & { isolatedGateway?: () => Promise<string> };
+    // Docker Desktop: the jail's gateway address is not an address on this
+    // machine. (TEST-NET-3, which is never a local address.)
+    provider.isolatedGateway = async () => '203.0.113.1';
+    const f = Fastify();
+    await registerRoutes(f, {
+      store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} },
+      providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false } },
+    } as never);
+    const r = await f.inject({ method: 'POST', url: '/v1/ops-agent', headers: { 'x-hatchabot-owner': 'o' }, payload: {} });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/Docker Desktop|could not (listen|open)/i);
+    expect(store.getOpsAgent('o')).toBeUndefined(); // nothing half-made
+  });
 });

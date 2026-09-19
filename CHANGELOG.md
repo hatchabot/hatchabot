@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.32.2] — 2026-09-19
+
+### Fixed
+- **Setting up the Hatchabot agent where it can't run now fails before it starts.** It opens the agent's door first; if that address can't be listened on (Docker Desktop, or a port already taken) it says so and creates nothing, instead of leaving a failed agent whose Retry could only fail again.
+
+### Docs
+- `docs/ops-agent-design.md` records where the management agent can run and why, with the two honest options for Docker Desktop if it is ever wanted there.
+
 ## [1.32.1] — 2026-09-19
 
 ### Fixed
