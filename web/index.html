@@ -441,6 +441,10 @@
   .v2hubagent .v2ic::after { inset:-6px; border-radius:31px }
   .v2hubagent .v2name { font-size:13.5px; font-weight:600; max-width:110px }
   .hub-ops .v2hubhead { display:none }
+  /* Before the first agent list arrives, the hub shows its icon and nothing
+     that would have to be taken back a moment later. */
+  .hub-unknown #v2HubLede, .hub-unknown #v2HubLogSlot, .hub-unknown #v2HubInputSlot,
+  .hub-unknown .v2chips, .hub-unknown #v2HubTools, .hub-unknown #v2HubLlm { display:none }
   .hub-ops.v2hub { align-items:center }
   .v2hubmain { min-width:0; display:grid; gap:8px }
   .v2hubhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
@@ -2293,6 +2297,8 @@ const $ = (id) => document.getElementById(id);
 // obvious at a glance rather than something to argue about.
 try { $('appVer').textContent = 'v' + (window.HATCHABOT_VERSION ?? '?'); } catch {}
 let profiles = [], hosts = [], agents = [], pairings = {}, members = {}, editData = [];
+/** False until the first agent list arrives — the screen must not guess before then. */
+let agentsLoaded = false;
 /** ?demo in the URL: screenshot mode — personal details (your email, family members'
  *  Telegram names, bot handles, connected accounts, Telegram ids) are blanked or
  *  blurred. Nothing is changed on the server; drop ?demo to see everything again. */
@@ -6319,7 +6325,7 @@ async function loadFleetUsage() {
   $('fleetUsageBody').innerHTML = 'Loading…';
   try {
     // Keep agents/profiles fresh so billingLine() resolves each row.
-    try { agents = await api('/v1/agents'); } catch { /* keep last-known */ }
+    try { agents = await api('/v1/agents'); agentsLoaded = true; } catch { /* keep last-known */ }
     renderFleetUsage(await api('/v1/usage'));
   } catch (e) {
     $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
@@ -6554,7 +6560,7 @@ async function openFleetSources() {
 }
 
 async function loadFleet() {
-  try { agents = await api('/v1/agents'); } catch { /* keep last-known */ }
+  try { agents = await api('/v1/agents'); agentsLoaded = true; } catch { /* keep last-known */ }
   renderFleet();
   renderFleetOps();
 }
@@ -8764,6 +8770,7 @@ async function refresh(withMeta) {
       el.innerHTML = `<span class="pool-dot"${n > 0 ? '' : ' style="color:var(--off)"'}>●</span> ${n} instant bot${n === 1 ? '' : 's'} ready`;
     }).catch(() => {});
     agents = await api('/v1/agents');
+    agentsLoaded = true;
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
@@ -9721,8 +9728,13 @@ function v2RenderHub() {
   const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
   const hub = document.querySelector('.v2hub');
   hub.classList.toggle('hub-ops', !!ops);
+  hub.classList.toggle('hub-unknown', !ops && !agentsLoaded);
   hub.classList.toggle('hub-nochat', !ops && mgmtChatAvailable === false);
   const box = $('v2OpsBox');
+  // Before the first agent list arrives there is nothing to say: offering to
+  // set up an agent that already exists, then replacing it a moment later,
+  // reads as a glitch.
+  if (!ops && !agentsLoaded) { box.hidden = true; return; }
   let html;
   if (ops) {
     // No buttons of its own: it is an agent like the others, only bigger.

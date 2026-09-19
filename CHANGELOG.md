@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.34.2] — 2026-09-19
+
+### Fixed
+- **The home screen no longer flips when you reload it.** Before the agent list arrived, the hub assumed you had no Hatchabot agent: it offered to set one up (and showed the old chat box), then replaced both a moment later with your manager. It now shows just its icon until it knows, and settles straight into the right state.
+
 ## [1.34.1] — 2026-09-19
 
 ### Fixed
