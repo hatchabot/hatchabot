@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.45.0] — 2026-09-19
+
+### Changed
+- **Rebuild is on an agent's Overview.** It was only under **Advanced**, next to moving the agent between machines and deleting it — a monthly-or-never tab holding the most ordinary maintenance action there is. It now has its own row on the first screen you see, saying what it costs (about a minute, memory kept) and when to reach for it. It is still on Advanced beside the runtime image, and **Fleet → Bulk actions** still rebuilds many at once.
+
 ## [1.44.0] — 2026-09-19
 
 ### Added

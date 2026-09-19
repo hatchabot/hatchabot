@@ -9445,7 +9445,9 @@ function v2Pane(a, tab) {
         : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
       ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
-        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
+        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}
+      ${(run || a.state === 'STOPPED') && built ? row('Rebuild', `${B('↻ Rebuild', `rebuild('${id}')`, 'class="primary" title="A fresh container on the current image. Its memory, files and members are kept."')}
+        <span class="sub">Takes about a minute. Do this after changing its image, its data folders, or the agents it can ask — and whenever Hatchabot says an update is waiting.</span>`) : ''}`;
     case 'personality': return `
       ${slot('paneDef')}
       ${run ? `<h4 class="v2sec">Memory</h4>${row('Conversation', `${B('📝 Chat → Memory', `checkpointAgent('${id}','${n}')`)}${B('📥 Recover context', `recoverContext('${id}','${n}')`)}
