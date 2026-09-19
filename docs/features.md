@@ -8,7 +8,8 @@ is updated as of 2026-09-04.
 
 Hatchabot turns a machine you own into a home for AI agents. Each agent is an
 OpenClaw runtime in its own Docker container with its own durable volume
-(memory, config, sessions), fronted by a Telegram bot — so agents are
+(memory, config, sessions), fronted by a Telegram, Slack or Discord bot — or
+by nothing at all, in which case you talk to it in the app. Agents are
 ephemeral problem-solvers you create, use, and delete, while the Telegram
 bots that front them outlive any one agent and can be recycled into the next. You manage the fleet from a web app
 (installable as a phone PWA), the `hatchabot` CLI, or an optional Telegram
@@ -36,6 +37,11 @@ The header holds:
   group to move it, onto **Archived** to archive it, or onto the strip that
   appears at the bottom to start a new group. On a phone, press and hold,
   then drag; an ordinary swipe still scrolls.
+- **A red dot at the top left** means the agent has said something in its
+  console since you last had that console open — a reply that finished after
+  you closed it, or a scheduled run on an agent with no messaging app.
+  Opening the console clears it. Messages that went to Telegram, Slack or
+  Discord are not flagged; those apps show their own unread marks.
 - **A small mark on the icon** shows which messaging apps reach the agent: a
   blue paper plane for Telegram, a purple hash for Slack, a blurple pad for
   Discord. With more than one, the first shows with a small **+1**.
@@ -59,8 +65,9 @@ The header holds:
 - **Machine settings have seven tabs**: AI (sources and agent classes),
   People (your account, other accounts, "about you"), Telegram bots,
   Connections (Google accounts, plus the voice-notes and web-search keys),
-  Machines (runners, other Hatchabot servers), Base images (the fleet's
-  OpenClaw version, candidates, promote), Derived images (base plus your own
+  Machines (runners, other Hatchabot servers), Base images (the fleet's image:
+  try a candidate on one agent, promote, delete — building one is the
+  Hatchabot agent's job, not a form here), Derived images (base plus your own
   packages), Backups, Security.
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.

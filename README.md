@@ -1,12 +1,13 @@
 # Hatchabot
 
-**Run private AI agents for your family on your own hardware, reachable over Telegram.**
+**Run private AI agents for your family on your own hardware, reachable from
+Telegram, Slack, Discord or the app itself.**
 
 Hatchabot turns a machine you already own into a home for persistent AI agents.
 Each agent lives in its own container, remembers things across conversations,
-and is reachable from anywhere over Telegram — so the people using it never
-install anything or see a terminal. You keep the hardware, the memory, and the
-credentials.
+and is reachable from anywhere over the messaging app you choose — so the
+people using it never install anything or see a terminal. You keep the
+hardware, the memory, and the credentials.
 
 It's a control plane for [OpenClaw](https://docs.openclaw.ai) agent runtimes:
 Hatchabot handles provisioning, messaging identity, memory safety, membership,
@@ -17,7 +18,7 @@ task-first tour of everything the app does today — creating, training, moving,
 adopting, backing up, and operating a fleet of agents.
 
 ```
-   You (web app / CLI)          Family (Telegram)
+   You (web app / CLI)     Family (Telegram / Slack / Discord)
             │                          │
       ┌─────▼──────────────────────────▼─────┐
       │        Hatchabot control plane       │
@@ -33,8 +34,13 @@ adopting, backing up, and operating a fleet of agents.
 - **Agents that remember.** Each has its own `SOUL.md` (who it is), `AGENTS.md`
   (how it works), and `MEMORY.md` (what it knows) — editable from the app, with
   automatic snapshots before every change so a bad edit is always undoable.
-- **Telegram as the front door.** Family members chat with an agent like any
-  other contact. No accounts, no apps, no setup on their side.
+- **A front door they already have.** Family members chat with an agent like
+  any other contact, on Telegram, Slack or Discord — no accounts, no apps, no
+  setup on their side. An agent can also have no messaging app at all and be
+  talked to in the Hatchabot app.
+- **A manager agent.** Your Hatchabot agent reads the fleet and proposes
+  changes in plain words; every change is a card you confirm. It runs on
+  whichever AI source you already have.
 - **Invites with two tiers.** Send a link (or a QR code) for chat-only access,
   or have the invitee sign in so they can also log into Hatchabot and see the
   agents they belong to.

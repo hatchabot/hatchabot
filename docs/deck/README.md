@@ -24,6 +24,8 @@ docker run --rm -v "$PWD/docs/deck":/work -w /work hatchabot-runtime:latest \
 
 Edit the HTML, re-run, look at every page, commit both files.
 
-`screenshot.png` (the fleet) and `screenshot-usage.png` (one AI source's usage) are
-rendered from the real `web/index.html` driven by a stubbed `window.fetch` — invented
-household agents, no real names, tokens or usage. hatchabot.com carries the same two files.
+`screenshot.png` (the fleet), `screenshot-usage.png` (one AI source's usage) and
+`screenshot-agent.png` (one agent's settings) are rendered from the real `web/index.html`
+driven by a stubbed `window.fetch` — invented household agents, no real names, tokens or
+usage. Regenerate them all with `node scripts/screenshots.mjs` (needs docker); the fleet,
+the data and the viewports live in `shot-data.mjs`. hatchabot.com carries the same files.

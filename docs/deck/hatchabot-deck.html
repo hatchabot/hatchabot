@@ -145,10 +145,10 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
 <!-- 6 -->
 <section class="slide accent">
   <p class="eyebrow">Two deliberate choices</p>
-  <h2>Claude Max and Telegram, on purpose</h2>
+  <h2>Claude Max and a front door people already have</h2>
   <div class="row">
     <div class="card"><div class="big">1 plan</div><h3>One subscription, the whole household</h3><p>A Claude Max plan is a flat monthly fee. <code>claude setup-token</code> turns it into a credential Hatchabot keeps on your machine and hands to every agent — revocable, never a shared login.</p><p>The kids' tutor, the family planner, your own advisors: <b>everyone gets their own agents, and you pay for one plan</b>. Nobody else needs an AI account — they message the agents made for them.</p></div>
-    <div class="card"><div class="big">20 bots</div><h3>Telegram: 20 real identities per free account</h3><p>Free, on every platform, and bots are a first-class feature. BotFather makes one in a minute; a free account can own 20, Premium 40, and every household member adds more.</p><p>The alternative — our own app, our own accounts, our own push notifications — would cost more than the whole rest of the product.</p></div>
+    <div class="card"><div class="big">20 bots</div><h3>Telegram, Slack or Discord — no app to build</h3><p>Free, on every platform, and bots are a first-class feature: BotFather makes one in a minute, and a free account carries about 20 identities. Slack and Discord work the same way, one small app per agent, and all three connect outward — nothing of yours is exposed. An agent can also have no messaging app at all and answer in the Hatchabot app.</p></div>
   </div>
   <div class="takeaway">One plan and a free front door: a household of agents that's affordable to leave on.</div>
   <div class="foot"><span>hatchabot.com</span><span>6</span></div>
@@ -191,10 +191,12 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
     </div>
     <div style="flex:1">
       <h3>One page, the whole household</h3>
-      <p>Agents grouped how you like, each with its actions one tap away, and a running account of what the house has been doing.</p>
+      <p>Every agent is an icon you name, colour and drag into groups. The icon carries its state: rebuilding, stopped, waiting on you, unread, and a mark per app that reaches it.</p>
+      <h3 style="margin-top:12pt">A manager you can talk to</h3>
+      <p>The big icon is the Hatchabot agent. Ask it to make, fix, move or share an agent; it reads everything and changes nothing — each change comes back as a card you confirm.</p>
       <h3 style="margin-top:12pt">Know what the plan is spending</h3>
-      <p>Every AI source reports requests and tokens for the last 5 hours and 7 days, names the heaviest agents, and raises a banner the moment calls start being refused.</p>
-      <div class="shot" style="margin-top:9pt"><img src="screenshot-usage.png" alt="Usage for one AI source"></div>
+      <div class="shot" style="margin-top:6pt"><img src="screenshot-usage.png" alt="Usage for one AI source"></div>
+      <p class="shot-note">Requests and tokens per source, the heaviest agents, and a banner the moment calls are refused.</p>
     </div>
   </div>
   <div class="foot"><span>hatchabot.com</span><span>9</span></div>
@@ -206,12 +208,14 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   <h2>What a staff can do that an assistant can't</h2>
   <table class="t">
     <tr><th style="width:2.9in">Capability</th><th>In practice</th></tr>
-    <tr><td class="k">A new agent in a minute</td><td>A name, one paragraph and a bot token → a running, remembering agent. Clone one that works; import a template someone shared; keep a launchpad of ones you're planning.</td></tr>
-    <tr><td class="k">Many humans, one agent</td><td>Private one-to-one threads with the same agent, or a shared room. Invite by link or QR. Memory shared or personal — and everyone is told which.</td></tr>
+    <tr><td class="k">A new agent in a minute</td><td>A name and one paragraph → a running, remembering agent. Clone one that works, or import a template someone shared.</td></tr>
+    <tr><td class="k">Many humans, one agent</td><td>Private one-to-one threads with the same agent, or a shared room. Invite by link or QR. Memory shared or personal.</td></tr>
     <tr><td class="k">A different brain per job</td><td>Claude, Gemini or a local model; switch live; classes retune a whole tier at once; migrate every agent off a source in one step.</td></tr>
     <tr><td class="k">Your accounts and files, scoped</td><td>Per agent: Gmail, Calendar, Drive and Sheets (with “read but never send”), read-only or writable folders, git repos it commits to — public ones need no key at all.</td></tr>
-    <tr><td class="k">Work while you sleep</td><td>Scheduled tasks, and event-triggered tasks where a zero-cost check decides whether to wake the model at all. Agents message you first when something matters.</td></tr>
+    <tr><td class="k">Work while you sleep</td><td>Scheduled tasks, and event-triggered ones where a zero-cost check decides whether to wake the model at all.</td></tr>
     <tr><td class="k">Agents that consult each other</td><td>Your investing agent asks your tax and legal agents mid-task, with scoped tokens, loop guards and rate limits.</td></tr>
+    <tr><td class="k">Reachable where people are</td><td>Telegram, Slack or Discord — one, several or none. Each agent has its own bot; strangers get a code you approve.</td></tr>
+    <tr><td class="k">A manager agent</td><td>Ask in plain words. It reads the fleet and proposes; every change is a card you confirm.</td></tr>
   </table>
   <div class="takeaway">Each agent gets only what its job needs — which is what makes it safe to give them real work.</div>
   <div class="foot"><span>hatchabot.com</span><span>10</span></div>

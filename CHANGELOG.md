@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.31.3] — 2026-09-19
+
+### Changed
+- **Docs, deck and website catch up with the app.** New screenshots (the icon home screen with the manager agent, one agent's settings, and a source's usage), rendered from the real app by a new repeatable script (`node scripts/screenshots.mjs`, data in `docs/deck/shot-data.mjs`). The README, `docs/features.md`, the slide deck and hatchabot.com now say Telegram **or Slack or Discord or nothing**, describe the manager agent and the unread dot, and no longer describe building a base image as a form in Settings.
+
 ## [1.31.2] — 2026-09-18
 
 ### Changed
