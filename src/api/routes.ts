@@ -2406,10 +2406,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const ips = new Set<string>();
     let supported = false;
     for (const a of store.listOpsAgents()) {
-      const read = providerFor(a.hostId).doormanAddresses;
-      if (!read) continue;
+      // Call it ON the provider: detaching the method loses `this`, and the
+      // lookup then throws into the catch below — every doorman looked
+      // unknown and the agent lost its AI (2026-09-19).
+      const provider = providerFor(a.hostId);
+      if (!provider.doormanAddresses) continue;
       supported = true;
-      for (const ip of await read(a.id).catch(() => [])) ips.add(ip);
+      const found = await provider.doormanAddresses(a.id).catch((err: unknown) => {
+        app.log.warn({ agentId: a.id, err: String(err) }, 'ops.doorman_lookup_failed');
+        return [] as string[];
+      });
+      for (const ip of found) ips.add(ip);
     }
     doormen = { at: Date.now(), ips, supported };
   })().finally(() => { doormenRefreshing = undefined; }));

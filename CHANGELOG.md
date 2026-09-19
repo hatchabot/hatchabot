@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.34.3] — 2026-09-19
+
+### Fixed
+- **The management agent gets its AI back.** The door's peer check read the doorman's address by pulling the lookup off the provider and calling it detached, so inside it the provider was gone and it threw — caught, and read as "no doorman here". Every knock was refused (`ops.peer_refused` for the agent's own doorman) and the agent reported "LLM request failed: network connection error". It is now called on the provider, a failed lookup is logged instead of silently meaning "unknown", and the test uses a provider whose method needs its object — it fails on the old code.
+
 ## [1.34.2] — 2026-09-19
 
 ### Fixed

@@ -16,9 +16,18 @@ async function world(addresses: () => string[]) {
   const store = new Store(new Database(':memory:'));
   store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
   store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
-  const provider = new MockProvider() as MockProvider & { doormanAddresses?: (id: string) => Promise<string[]> };
   const looks: string[] = [];
-  provider.doormanAddresses = async (id) => { looks.push(id); return addresses(); };
+  // A real method, using `this` — the real provider's does (it reaches for
+  // docker), and a detached call would throw instead of answering.
+  class Probing extends MockProvider {
+    readonly marker = 'doorman-probe';
+    async doormanAddresses(id: string): Promise<string[]> {
+      if (this?.marker !== 'doorman-probe') throw new TypeError('called without its provider');
+      looks.push(id);
+      return addresses();
+    }
+  }
+  const provider = new Probing();
   const f = Fastify();
   await registerRoutes(f, {
     store, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} },
