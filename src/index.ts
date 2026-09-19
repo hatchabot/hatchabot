@@ -1,4 +1,5 @@
 import { ensureOpsServer } from './ops/opsServer.js';
+import { APP_VERSION } from './domain/appVersion.js';
 import { defaultDbPath } from './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -263,6 +264,29 @@ if (store.listOpsAgents().length) {
   const localProvider = providers.get('local-docker');
   void ensureOpsServer([await localProvider?.hostGatewayAddress?.()])
     .catch((err) => app.log.error({ err: String(err) }, 'ops server failed to start'));
+
+  // A management agent asks Hatchabot for its tool list ONCE, when its gateway
+  // starts. After an upgrade that adds or changes a tool it would keep
+  // describing the old set — and tell its owner it cannot do something it now
+  // can (reported 2026-09-19: it refused to add a package to a base image, a
+  // release after that became possible). Restarting the container is enough;
+  // its memory lives on the volume.
+  for (const a of store.listOpsAgents()) {
+    if (a.state !== 'RUNNING' || !a.runtimeRef) continue;
+    if (store.appliedAppVersion(a.id) === APP_VERSION) continue;
+    void (async () => {
+      try {
+        const provider = providers.get(store.getHost(a.hostId)?.provider ?? 'local-docker');
+        if (!provider) return;
+        await provider.stop(a.runtimeRef!);
+        await provider.start(a.runtimeRef!);
+        store.setAppliedAppVersion(a.id, APP_VERSION);
+        app.log.info({ agentId: a.id, version: APP_VERSION }, 'ops.restarted_for_tools');
+      } catch (err) {
+        app.log.error({ agentId: a.id, err: String(err) }, 'ops.restart_for_tools_failed');
+      }
+    })();
+  }
 }
 app.log.info(
   {

@@ -514,6 +514,10 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN ops INTEGER NOT NULL DEFAULT 0`,
       // Slack/Discord: room access and display details, as JSON.
       `ALTER TABLE channels ADD COLUMN settings TEXT`,
+      // The Hatchabot version this agent's runtime was last built against. A
+      // management agent reads its tool list once, when its gateway starts, so
+      // an upgrade that adds a tool needs it restarted before it can see one.
+      `ALTER TABLE agents ADD COLUMN applied_app_version TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -2333,6 +2337,15 @@ export class Store {
   }
 
   // ---- when each person last had an agent's console open (the unread mark) --
+  /** The Hatchabot version this agent's runtime was built against. */
+  setAppliedAppVersion(agentId: string, version: string): void {
+    this.db.prepare(`UPDATE agents SET applied_app_version = ? WHERE id = ?`).run(version, agentId);
+  }
+  appliedAppVersion(agentId: string): string | undefined {
+    const r = this.db.prepare(`SELECT applied_app_version FROM agents WHERE id = ?`).get(agentId) as { applied_app_version: string | null } | undefined;
+    return r?.applied_app_version ?? undefined;
+  }
+
   getAgentSeen(ownerId: string, agentId: string): number | undefined {
     const r = this.db.prepare(`SELECT seen_at FROM agent_seen WHERE owner_id = ? AND agent_id = ?`).get(ownerId, agentId) as { seen_at: number } | undefined;
     return r?.seen_at;

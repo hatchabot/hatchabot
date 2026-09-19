@@ -60,6 +60,7 @@ export const SEARCH_KEY_REF = 'media/brave-api-key';
 import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
 import type { Agent, Channel, Host } from '../domain/types.js';
 import { briefCause } from '../domain/redact.js';
+import { APP_VERSION } from '../domain/appVersion.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -492,6 +493,10 @@ export async function buildRuntimeSpec(
     const token = randomBytes(32).toString('base64url');
     store.setOpsToken(agentId, agent.ownerId, token);
     clearOpsDrift(agentId); // this build re-asserts the lockdown
+    // Its tools come from Hatchabot, and OpenClaw reads that list once at
+    // start-up: remember which version it was built against so an upgrade can
+    // restart it instead of leaving it describing tools it no longer has.
+    store.setAppliedAppVersion(agentId, APP_VERSION);
     // Hatchabot's door listens on THIS machine's loopback, and the agent
     // reaches it through its doorman — the one arrangement that works the same
     // on Linux and on Docker Desktop, where the host cannot listen on a Docker

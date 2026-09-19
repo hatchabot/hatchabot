@@ -17,6 +17,7 @@ import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer } from '../ops/opsServer.js';
+import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
 import { discordConnector } from '../channels/discord.js';
@@ -364,14 +365,7 @@ async function checkLocalServer(
   return { ok: true };
 }
 
-/** The running version, stamped into the app shell so a stale tab is visible. */
-const APP_VERSION: string = (() => {
-  try {
-    return createRequire(import.meta.url)('../../package.json').version ?? 'dev';
-  } catch {
-    return 'dev';
-  }
-})();
+
 
 /** The Claude models a new Anthropic source is stocked with, and the offline
  *  fallback for available-models. Newest-first; keep in step with pricing.ts. */

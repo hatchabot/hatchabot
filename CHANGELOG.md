@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.35.2] — 2026-09-19
+
+### Fixed
+- **After an upgrade, the Hatchabot agent knows about new tools.** It asks Hatchabot for its tool list once, when its gateway starts, so an upgrade that adds a tool left it describing the old set — it told its owner it could not add a package to a base image, one release after that became possible. Hatchabot now records which version an agent's runtime was built against and restarts a management agent whose version has moved on. Its memory is on its volume, so the restart costs nothing.
+
 ## [1.35.1] — 2026-09-19
 
 ### Changed
