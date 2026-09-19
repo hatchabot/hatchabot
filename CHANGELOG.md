@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.48.0] — 2026-09-19
+
+### Fixed
+- **A derived image whose row is gone can be deleted again.** Deleting one is done from its own row (that path also forgets its Dockerfile), and the tag route refused every `:derived-*` tag to keep it that way. When an image outlived its row — a build recorded by a different install, or a row removed while the image stayed — the Derived images tab had nothing to delete and the tag route refused: a dead end with a 2GB image stuck on the machine. The refusal now applies only while the row exists, names where to go, and a leftover with no row is deletable as an ordinary tag.
+- **The management agent is told at once when it reaches for the wrong tool.** Asking it to delete a derived image by tag (`delete_base_image`) produced a card that could only fail on Confirm. It now refuses while the card is being written and names the tool that works — `remove_image`, with the short name — so the owner's Confirm is never spent on something that cannot run.
+
 ## [1.47.0] — 2026-09-19
 
 ### Added

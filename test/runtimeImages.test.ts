@@ -104,7 +104,12 @@ describe('image history + delete', () => {
     expect(hist.json().steps[0].step).toMatch(/openclaw/);
     const del = (tag: string) => f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent(tag), headers: as });
     expect((await del('hatchabot-runtime:latest')).statusCode).toBe(400);
+    // A derived image that still has its row is deleted from THERE (that path
+    // also forgets its Dockerfile); one whose row is gone is a leftover this
+    // route must take — see 'deleting a derived image tag' below.
+    store.upsertDerivedImage({ name: 'pdf', tag: 'hatchabot-runtime:derived-pdf', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: OWNER });
     expect((await del('hatchabot-runtime:derived-pdf')).statusCode).toBe(400);
+    store.deleteDerivedImage('pdf');
     store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');
     expect((await del('hatchabot-runtime:2026.9.4')).statusCode).toBe(409); // pinned
     store.setAgentImage('a2', null);
@@ -159,3 +164,24 @@ describe('classes carry an image', () => {
     expect((await f.inject({ method: 'POST', url: '/v1/agent-classes', headers: { 'x-hatchabot-owner': 'user-other' }, payload: { name: 'X', image: 'hatchabot-runtime:2026.9.4' } })).statusCode).toBe(403);
   });
 });
+
+describe('deleting a derived image tag', () => {
+  it('points at its own row when it has one, and deletes a leftover that has none', async () => {
+    const { f, store } = await world();
+    const tag = 'hatchabot-runtime:derived-pdf';
+    // With a row: the tag route refuses and names where it IS deleted, because
+    // that path also forgets the Dockerfile.
+    store.upsertDerivedImage({ name: 'pdf', tag, base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: OWNER });
+    store.setDerivedImageStatus('pdf', 'READY');
+    const refused = await f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent(tag), headers: as });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error).toMatch(/Derived images/);
+
+    // Its row gone, the image left behind: the Derived images tab has nothing
+    // to delete, so this route must (2026-09-19 dead end).
+    store.deleteDerivedImage('pdf');
+    const gone = await f.inject({ method: 'DELETE', url: '/v1/runtime/images/' + encodeURIComponent(tag), headers: as });
+    expect(gone.statusCode).toBe(200);
+  });
+});
+

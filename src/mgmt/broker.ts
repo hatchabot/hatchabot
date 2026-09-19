@@ -408,6 +408,19 @@ export class Broker {
   async #execRead(name: string, args: Record<string, unknown>): Promise<unknown> {
     const rt = REST_BY_NAME.get(name);
     if (rt) {
+      // A derived image is deleted from its own row, not as a base tag — the
+      // route refuses it, which used to happen only after the owner pressed
+      // Confirm (2026-09-19). Say so while the card is being written, and name
+      // the tool that works. A derived-looking tag with NO row is a leftover
+      // image and stays deletable here.
+      if (name === 'delete_base_image' && typeof args.tag === 'string' && args.tag.includes(':derived-')) {
+        const imgName = args.tag.split(':derived-')[1] ?? '';
+        const { images } = await this.api.listImages();
+        if (images.some((i) => i.name === imgName)) {
+          throw new BrokerError('INVALID_INPUT',
+            `"${args.tag}" is a derived image. Use remove_image with name "${imgName}" — that deletes the image AND forgets its Dockerfile.`);
+        }
+      }
       const ctx = await this.#restCtx(rt, args);
       const c = await this.#restCall(rt, ctx);
       return this.#need(this.api.raw).call(this.api, c.method, c.path, c.body);

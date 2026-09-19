@@ -1323,7 +1323,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const tag = req.params.tag;
     if (!IMAGE_TAG_RE.test(tag) || !tag.startsWith(`${RUNTIME_REPO}:`)) return reply.code(400).send({ error: `Only ${RUNTIME_REPO}:* tags are managed here.` });
     if (tag === DEFAULT_BASE) return reply.code(400).send({ error: 'That is the fleet default — promote another image first.' });
-    if (tag.includes(':derived-')) return reply.code(400).send({ error: 'Derived images are removed from their own row (it also forgets the Dockerfile).' });
+    // A derived image is deleted from its own row, which also forgets its
+    // Dockerfile. But an image whose row is gone has no row to delete it from —
+    // that was a dead end: the Derived images tab showed nothing and this route
+    // refused (seen live 2026-09-19). A leftover like that is deletable here.
+    if (tag.includes(':derived-')) {
+      const derivedName = tag.split(':derived-')[1] ?? '';
+      if (store.getDerivedImage(derivedName)) {
+        return reply.code(400).send({
+          error: `"${derivedName}" is a derived image: delete it under Settings → Derived images, which also forgets its Dockerfile.`,
+        });
+      }
+      // falls through: a leftover image with no row of its own
+    }
     const pinned = store.listAllActiveAgents().filter((a) => a.image === tag); // archived pins count too: un-archiving would need the image
     if (pinned.length) return reply.code(409).send({ error: `${pinned.length} agent${pinned.length === 1 ? ' is' : 's are'} pinned to it: ${pinned.map((a) => a.name).join(', ')}. Discard those trials first.` });
     const cls = store.listAgentClasses(ownerIdOf(req)).filter((c) => c.image === tag);
