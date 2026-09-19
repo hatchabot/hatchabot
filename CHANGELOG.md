@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.41.1] — 2026-09-19
+
+### Fixed
+- The new retire route was missing from the management-chat coverage ledger, which its own test caught — v1.41.0 was tagged with that test red.
+
 ## [1.41.0] — 2026-09-19
 
 ### Changed

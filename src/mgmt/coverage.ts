@@ -165,5 +165,6 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/mgmt/chat/mode': 'app: internal — arming changes',
   'POST /v1/mgmt/mcp': 'app: internal — the chat’s tool server',
   'POST /v1/mgmt/heartbeat': 'app: internal — the Telegram management bot',
+  'DELETE /v1/mgmt/status': 'app: fleet-wide/irreversible — retires the legacy management bot: revokes its token, and the owner stops its service first',
   'POST /v1/mgmt/llm/complete': 'app: internal — the Telegram management bot’s model calls',
 };
