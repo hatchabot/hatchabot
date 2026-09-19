@@ -1577,14 +1577,21 @@
       </div>
       <div id="botInvList"></div>
     </details>
-    <h4 style="margin:18px 0 4px">Management bot</h4>
+    <h4 style="margin:18px 0 4px">Management bot <span class="sub">— legacy</span></h4>
     <div class="sub" style="margin-bottom:4px"><span id="mgmtBotStatus" style="color:var(--dim)">checking…</span></div>
     <div class="sub">
-      Optionally control your fleet from Telegram: list, start/stop and rebuild
-      agents, and approve join requests — every change confirmed with a tap. It
-      runs as its own process, so set it up from a terminal on the server:
+      A separate Telegram bot with slash commands, from before the Hatchabot
+      agent existed. The agent does the same work in plain language, so new
+      installs don't need it. To retire one that is still running, stop it on
+      the server and hand its bot back at <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a>:
     </div>
-    <div class="invite-link" style="margin-top:8px">hatchabot mgmt-bot setup</div>
+    <div class="invite-link" style="margin-top:8px">systemctl --user disable --now hatchabot-mgmt-bot</div>
+    <div class="sub" style="margin-top:8px">
+      It does still do one thing the app cannot: push each waiting change to
+      Telegram with Confirm and Cancel. To talk to your Hatchabot agent from
+      your phone instead, give it its own bot in its ⚙ Settings → Messaging —
+      confirming a change still happens here.
+    </div>
 
   </section>
 

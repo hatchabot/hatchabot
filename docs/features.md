@@ -113,10 +113,12 @@ More about it:
 - **Cards say who and how risky.** Each card says who prepared it and how much
   care it deserves ("Restarts or interrupts something", "Read carefully"), and
   shows the agent's own reason, marked as its words.
-- **Approve from your phone.** If the Telegram management bot is set up
-  (`hatchabot mgmt-bot setup`), it sends you each change your agent prepares,
-  with Confirm and Cancel. It is a separate bot on purpose: the agent can't
-  speak as it.
+- **Approve from your phone.** The legacy Telegram management bot
+  (`hatchabot mgmt-bot setup`) sends you each change your agent prepares, with
+  Confirm and Cancel. It is a separate bot on purpose: the agent can't speak as
+  it. Everything else it does, the Hatchabot agent now does in plain language —
+  give *that* agent a Telegram bot (its ⚙ Settings → Messaging) to reach it
+  from a phone, and confirm the change in the app.
 - **It can search the web without having internet.** Hatchabot runs the
   search, and the agent can open only the results that came back.
 - **A morning fleet check** is set up as an ordinary scheduled task (08:00).
@@ -699,7 +701,10 @@ the web app shows a slim presence strip above the agent cards (online/offline,
 @handle deep link, read-only vs read-write, LLM model) and a live line in
 ⚙ Settings → Access. Set it up with
 `hatchabot mgmt-bot setup` (needs its own BotFather token; discoverable in
-⚙ Settings → Access). Design and limits:
+⚙ Settings → Telegram bots). **Legacy:** the Hatchabot agent replaces it for
+everything but the Telegram push of waiting cards; retire a running one with
+`systemctl --user disable --now hatchabot-mgmt-bot` and hand its bot back at
+@BotFather. Design and limits:
 [control-interfaces.md](control-interfaces.md) and
 [management-broker.md](management-broker.md).
 

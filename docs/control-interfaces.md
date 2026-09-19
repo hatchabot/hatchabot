@@ -238,6 +238,13 @@ transport). Reads run immediately; mutations require a confirm tap; it starts
 
 Or let the CLI do steps 2–4: `hatchabot mgmt-bot setup`.
 
+**Legacy.** This bot predates the Hatchabot management agent, which does the
+same work in plain language inside the app, on any AI source, and behind the
+jail. Keep the bot only for its one remaining advantage — it pushes waiting
+cards to Telegram with Confirm and Cancel. To retire one:
+`systemctl --user disable --now hatchabot-mgmt-bot`, then `/deletebot` its bot
+at @BotFather (it frees a slot against the ~20-bot account cap).
+
 It refuses to start with an empty allowlist.
 
 **Phase 2 (implemented) — natural language.** Plain-text messages route to an

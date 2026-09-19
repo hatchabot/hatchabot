@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.38.1] — 2026-09-19
+
+### Changed
+- **The Telegram management bot is marked legacy.** It predates the Hatchabot agent, which does the same work in plain language, on any AI source, behind the jail. The app and the docs now say so, and say how to retire a running one (`systemctl --user disable --now hatchabot-mgmt-bot`, then `/deletebot` at @BotFather to free the slot). Its one remaining advantage is named honestly: it pushes each waiting card to Telegram with Confirm and Cancel. To reach the Hatchabot agent from a phone instead, give that agent its own bot in its ⚙ Settings → Messaging — the jail already lets a management agent with a bot talk to Telegram, and nothing else.
+
 ## [1.38.0] — 2026-09-19
 
 ### Added
