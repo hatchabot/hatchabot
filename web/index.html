@@ -852,6 +852,7 @@
     <button id="consoleGearBtn" class="cbtn" hidden title="This agent's settings"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
     <button id="consoleApproveBtn" class="cbtn primary" hidden onclick="approveConsoleBrowser(this)"
             title="OpenClaw asks each new browser to be approved once. Hatchabot can do it for you — you're signed in as this agent's owner."><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg><span class="lbl-long">Approve this browser</span><span class="lbl-short">Approve</span></button>
+    <span id="consoleChans" style="display:contents"></span>
     <button id="consoleNewTab" class="cbtn" title="Open the same console in its own tab"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg><span class="lbl">New tab</span></button>
     <button class="cbtn" onclick="closeConsole()" aria-label="Close" title="Close"><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
   </div>
@@ -7253,6 +7254,7 @@ async function openGateway(id, slug) {
     // (and still refuses every other one).
     const a = (agents || []).find(x => x.id === id);
     $('consoleTitle').textContent = a?.name || slug;
+    renderConsoleChannels(a);
     $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
     $('consoleFrame').src = url;
     $('consoleApproveBtn').hidden = true;
@@ -8893,6 +8895,26 @@ const V2_MARK_SVG = {
   discord: '<svg viewBox="0 0 24 24" width="12" height="12" fill="#fff"><path d="M19.5 5.5A16 16 0 0 0 15.6 4l-.5 1a14 14 0 0 0-6.2 0l-.5-1a16 16 0 0 0-3.9 1.5C2 9.4 1.3 13.2 1.6 17a16 16 0 0 0 4.8 2.4l1-1.6a10 10 0 0 1-1.6-.8l.4-.3a11.5 11.5 0 0 0 11.6 0l.4.3-1.6.8 1 1.6a16 16 0 0 0 4.8-2.4c.4-4.4-.6-8.2-2.9-11.5ZM8.7 14.8c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Zm6.6 0c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Z"/></svg>',
 };
 const V2_CHAN_LABEL = { telegram: 'Telegram', slack: 'Slack', discord: 'Discord' };
+/** The agent's mark, sized for a button and in the button's own colour. */
+const chanIcon = (kind) => (V2_MARK_SVG[kind] || '')
+  .replace(/width="\d+" height="\d+"/, 'width="16" height="16"')
+  .replaceAll('#fff', 'currentColor');
+/** Every messaging app this agent is reachable in, as links, for the console
+ *  bar: the console is Hatchabot's own window on the agent, but the
+ *  conversation people actually have with it lives in Telegram, Slack or
+ *  Discord — one press away instead of a hunt through the app. */
+function agentChannelLinks(a) {
+  return [
+    ...(a?.botUsername && a?.deepLink ? [{ kind: 'telegram', url: a.deepLink }] : []),
+    ...((a?.otherChannels ?? []).filter((c) => c.deepLink && V2_MARK_SVG[c.kind]).map((c) => ({ kind: c.kind, url: c.deepLink }))),
+  ];
+}
+function renderConsoleChannels(a) {
+  const box = $('consoleChans');
+  if (!box) return;
+  box.innerHTML = agentChannelLinks(a).map((l) =>
+    `<button class="cbtn" title="Open this agent in ${V2_CHAN_LABEL[l.kind]}" onclick="window.open('${jsq(l.url)}','_blank','noopener')">${chanIcon(l.kind)}<span class="lbl">${V2_CHAN_LABEL[l.kind]}</span></button>`).join('');
+}
 /** Every messaging app that reaches this agent, Telegram first. */
 function v2ChannelKinds(a) {
   return [...(a.botUsername ? ['telegram'] : []), ...(a.otherChannels ?? []).map(c => c.kind).filter(k => V2_MARK_SVG[k])];
@@ -9250,7 +9272,7 @@ function v2Pane(a, tab) {
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
           <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
       ${a.state !== 'ARCHIVED' ? row('Messaging', v2ChannelKinds(a).length
-        ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open Telegram</a>` : ''}${B('Manage…', goto('messaging'))}`
+        ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run ? agentChannelLinks(a).map(l => `<a class="btn" href="${esc(l.url)}" target="_blank" rel="noopener">Open ${V2_CHAN_LABEL[l.kind]}</a>`).join('') : ''}${B('Manage…', goto('messaging'))}`
         : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
       ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}

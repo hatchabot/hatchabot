@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.38.0] — 2026-09-19
+
+### Added
+- **Open an agent where it actually talks.** The console bar now carries a button per messaging app the agent is reachable in — **Telegram**, **Slack**, **Discord** — beside Settings and New tab, and the agent's Overview offers the same links. The console is Hatchabot's window on an agent; the conversation people have with it lives in the app it is in, and that was a hunt through the settings until now.
+
 ## [1.37.0] — 2026-09-19
 
 ### Added
