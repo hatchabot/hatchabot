@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.40.0] — 2026-09-19
+
+### Changed
+- **Pinning an agent to an image is a dropdown that lists every image, candidates included.** It was a text box with a datalist: the options were cut off, picking one typed the tag into the box, and the list only ever held *derived* images — a base candidate you had just built could not be chosen at all. Now it is a real picker, grouped into **Base images** and **Derived images**, each line saying what the image is ("2026.7.1-2-ch3 — candidate · plus traceroute · OpenClaw 2026.7.1-2"), with **Fleet default** at the top to put an agent back. A pin to an image that is no longer on the machine stays selected rather than silently clearing.
+
 ## [1.39.1] — 2026-09-19
 
 ### Changed

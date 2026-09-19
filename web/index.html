@@ -1352,13 +1352,12 @@
     <div id="imagePinRow" style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
       <label>Runtime image <span style="color:var(--dim)">— pin this agent to a specific image (host owner only)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
-        <input type="text" id="editImage" maxlength="200" list="derivedImageList" placeholder="fleet default (hatchabot-runtime:latest)" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:13px">
-        <datalist id="derivedImageList"></datalist>
+        <select id="editImage" style="flex:1;min-width:0;font-size:13px"><option value="">Loading images…</option></select>
         <button id="imageBtn" onclick="saveImagePin()">Pin</button>
       </div>
-      <div class="sub" style="margin:-4px 0 4px">For testing a candidate build or a derived image with extra packages
-        (build them in ⚙ → Runtime). Applies on the next rebuild. A pinned agent stops getting "update available" from
-        fleet promotes — clear the field and Pin to return it to the default.</div>
+      <div class="sub" style="margin:-4px 0 4px">For trying a candidate build or a derived image with extra packages
+        (build them in ⚙ → Base images). Applies on the next rebuild. A pinned agent stops getting "update available"
+        from fleet promotes — pick <b>Fleet default</b> and Pin to put it back.</div>
     </div>
   </section>
 
@@ -3279,16 +3278,42 @@ async function loadRuntime() {
 
 let derivedBuilding = new Set(); // names currently polling, so we don't double-poll
 
-/** Fill the per-agent pin datalist with built derived tags (best-effort). */
-async function populateDerivedDatalist() {
-  const dl = $('derivedImageList');
-  if (!dl) return;
+/**
+ * The per-agent image picker: every image this machine has, said in words.
+ * It used to be a text box with a datalist — the options were truncated, and
+ * picking one typed the tag into the box (2026-09-19). Candidates were missing
+ * entirely, since the list only ever held derived images.
+ */
+async function populateImagePicker(current) {
+  const sel = $('editImage');
+  if (!sel) return;
+  const pin = current ?? sel.value ?? '';
+  const opt = (value, label) => `<option value="${esc(value)}"${value === pin ? ' selected' : ''}>${esc(label)}</option>`;
+  let html = '';
   try {
-    const r = await api('/v1/images');
-    dl.innerHTML = (r.images || [])
-      .filter(i => i.status === 'READY')
-      .map(i => `<option value="${esc(i.tag)}">${esc(i.name)}</option>`).join('');
-  } catch { /* 403 for non-host-owners — just leave the datalist empty */ }
+    const d = await api('/v1/runtime/images');
+    html += opt('', `Fleet default — ${d.default}${d.defaultInfo?.openclawVersion ? ` (OpenClaw ${d.defaultInfo.openclawVersion})` : ''}`);
+    const base = (d.tags ?? []).filter(t => t.exists && !t.isDefault && !t.derived);
+    const derived = (d.tags ?? []).filter(t => t.exists && t.derived);
+    const say = (t) => {
+      const what = t.relation === 'newer' ? 'candidate' : t.relation === 'older' ? 'older build' : t.relation === 'same' ? 'same as the default' : 'candidate';
+      const extras = [(t.extraPackages ?? []).length ? `plus ${(t.extraPackages ?? []).join(', ')}` : '', t.openclawVersion ? `OpenClaw ${t.openclawVersion}` : ''].filter(Boolean).join(' · ');
+      return `${t.tag.replace(/^[^:]*:/, '')} — ${what}${extras ? ` · ${extras}` : ''}`;
+    };
+    if (base.length) html += `<optgroup label="Base images">${base.map(t => opt(t.tag, say(t))).join('')}</optgroup>`;
+    if (derived.length) {
+      html += `<optgroup label="Derived images">${derived.map(t =>
+        opt(t.tag, `${t.tag.replace(/^[^:]*:/, '')} — ${t.derived.status.toLowerCase()}${t.derived.summary ? ` · ${t.derived.summary.slice(0, 40)}` : ''}`)).join('')}</optgroup>`;
+    }
+  } catch {
+    // Not the host owner, or the daemon hiccuped: at least offer the default.
+    html += opt('', 'Fleet default');
+  }
+  // A pin to something no longer listed stays selectable, so opening this
+  // panel can never silently move the agent off it.
+  if (pin && !html.includes(`value="${esc(pin)}"`)) html += opt(pin, `${pin} — not on this machine`);
+  sel.innerHTML = html;
+  sel.value = pin;
 }
 
 async function loadDerivedImages() {
@@ -5775,8 +5800,7 @@ function prepareEdit(id, name, tab = 'def') {
   renderModelPickerForAgent(cur);
   renderClassPicker(cur);
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
-  $('editImage').value = cur?.image ?? '';
-  populateDerivedDatalist();
+  void populateImagePicker(cur?.image ?? '');
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
   renderSetupValues(cur);
   renderGroupAccess(cur);
