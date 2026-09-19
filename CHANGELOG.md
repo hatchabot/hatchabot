@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.38.2] — 2026-09-19
+
+### Added
+- **Access tokens can be taken back.** Settings → Security lists the tokens this account has minted — what each is called, when it was made, when it was last used — with **Revoke**. The app could mint them and never withdraw one, which mattered the moment a legacy management bot was retired and its token stayed valid.
+
 ## [1.38.1] — 2026-09-19
 
 ### Changed

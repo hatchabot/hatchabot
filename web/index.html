@@ -1753,6 +1753,7 @@
     <div class="actions" style="justify-content:flex-start">
       <button class="primary" onclick="newCliToken()">New token</button>
     </div>
+    <div id="cliTokenList" class="sub" style="margin-top:8px">Loading…</div>
 
 
     <div class="pair" style="align-items:center">
@@ -2786,7 +2787,7 @@ function showTabPane(name) {
   if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
-  if (name === 'security') loadPosture();
+  if (name === 'security') { loadPosture(); void loadCliTokens(); }
   if (name === 'operator') loadOperator();
 }
 
@@ -4678,7 +4679,30 @@ async function newCliToken() {
     out.textContent = t.token;
     toast('Copy it now — it is not shown again', 20000);
     if (await copyText(t.token)) toast('Token copied — run: hatchabot login', 20000);
+    void loadCliTokens();
   } catch (e) { $('aiErr').textContent = e.message; }
+}
+
+/** The tokens this account has minted, so one can be taken back — a retired
+ *  management bot leaves its own behind, and the app could only ever add. */
+async function loadCliTokens() {
+  const el = $('cliTokenList');
+  if (!el) return;
+  try {
+    const rows = await api('/v1/cli-tokens');
+    el.innerHTML = rows.length
+      ? rows.map(t => `<div class="pair" style="align-items:baseline;padding:4px 0;border-top:1px solid var(--line)">
+          <span class="grow"><b>${esc(t.label || 'CLI')}</b> <span class="sub">· made ${ago(t.createdAt)}${t.lastUsedAt ? ` · last used ${ago(t.lastUsedAt)}` : ' · never used'}</span></span>
+          <button class="danger" onclick="revokeCliToken('${jsq(t.id)}','${jsq(t.label || 'CLI')}')">Revoke</button>
+        </div>`).join('')
+      : 'No tokens.';
+  } catch (e) { el.textContent = e.message; }
+}
+
+async function revokeCliToken(id, label) {
+  if (!confirm(`Revoke the "${label}" token?\n\nAnything signed in with it — a terminal, a cluster server, the legacy management bot — stops working immediately.`)) return;
+  try { await api(`/v1/cli-tokens/${id}`, { method: 'DELETE' }); toast('Revoked.'); loadCliTokens(); }
+  catch (e) { toast(e.message); }
 }
 
 async function addAiProfile() {
