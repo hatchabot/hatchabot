@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.39.0] — 2026-09-19
+
+### Changed
+- **Trying an image on agents is a list you tick, not a number you type.** "Try on one agent" used to open a `prompt()` with the agents typed out and numbered — unusable past about twenty of them, and one agent at a time. It is now a proper picker: filter by name or group, **All**/**None** over what the filter shows, checkboxes, and **Pin & rebuild _n_**. Each pinned agent rebuilds with its memory kept, the rest of the fleet is untouched, and anything that fails is named instead of stopping the rest.
+
 ## [1.38.2] — 2026-09-19
 
 ### Added

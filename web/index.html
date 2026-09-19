@@ -2200,6 +2200,22 @@
   </div>
 </dialog>
 
+<dialog id="tryDlg" style="width:min(640px,96vw)">
+  <h3 style="margin:0 0 4px">Try <span id="tryTag"></span> on…</h3>
+  <div class="sub" style="margin-bottom:10px"><code id="tryTagFull"></code> — pick the agents to pin to this image. Each one rebuilds (memory kept) and stays on it until you discard the trial; every other agent keeps the fleet default.</div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+    <input type="search" id="tryFilter" placeholder="Filter by name or group" oninput="renderTryList()" style="flex:1;min-width:0">
+    <button onclick="tryPickAll(true)">All</button>
+    <button onclick="tryPickAll(false)">None</button>
+  </div>
+  <div id="tryList" style="max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:4px 10px"></div>
+  <div class="sub" id="tryErr" style="color:var(--bad);margin-top:8px"></div>
+  <div class="actions" style="justify-content:flex-end;margin-top:12px;gap:8px">
+    <button onclick="tryDlg.close()">Cancel</button>
+    <button class="primary" id="tryBtn" onclick="runTryOnAgents()">Pin &amp; rebuild</button>
+  </div>
+</dialog>
+
 <dialog id="migrateDlg" style="width:min(560px,96vw)">
   <h3 style="margin:0 0 4px">Migrate all agents off <span id="migrateFrom"></span></h3>
   <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick and rebuilds (3 at a time). Then the old source can be deleted.</div>
@@ -4143,21 +4159,89 @@ async function deleteImageTag(tag) {
   try { await api(`/v1/runtime/images/${encodeURIComponent(tag)}`, { method: 'DELETE' }); toast(`Removed ${tag}.`); await loadRuntimeImages(); }
   catch (e) { $('rtErr').textContent = e.message; }
 }
-async function tryOnAgent(tag) {
-  const candidates = agents.filter(a => (a.role ? a.role === 'owner' : true) && ['RUNNING', 'STOPPED'].includes(a.state) && a.image !== tag);
-  if (!candidates.length) { toast('No agent available to try it on.'); return; }
-  const names = candidates.map((a, i) => `${i + 1}. ${a.name}`).join('\n');
-  const pick = prompt(`Try ${tag} on which agent? Enter a number:\n\n${names}`);
-  const a = candidates[Number(pick) - 1]; if (!a) return;
-  if (!confirm(`Pin "${a.name}" to ${tag} and rebuild it now?\n\nChat → Memory runs first; memory is kept. Discard the trial later with ✕ next to its name.`)) return;
-  try {
-    await api(`/v1/agents/${a.id}`, { method: 'PATCH', body: { image: tag } });
-    await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} });
-    toast(UI_V2 ? `"${a.name}" is rebuilding on ${tag} (about a minute). Its icon on the home screen shows the spinning ring until it is back.`
-      : `"${a.name}" is rebuilding on ${tag} — 🧪 in the legend while it's on trial.`, 9000);
-    await refresh(false); await loadRuntimeImages();
-  } catch (e) { $('rtErr').textContent = e.message; }
+/**
+ * Trying a candidate image: a list of every eligible agent with checkboxes.
+ * It used to be a prompt() asking for a NUMBER from a typed-out list, which
+ * stopped being usable at about twenty agents (2026-09-19).
+ */
+let tryState = null;
+function tryOnAgent(tag) {
+  const eligible = tryCandidates(tag);
+  if (!eligible.length) {
+    toast(agents.some(a => a.image === tag) ? 'Every agent that can take it is already on it.' : 'No agent available to try it on.');
+    return;
+  }
+  tryState = { tag, picked: new Set() };
+  $('tryTag').textContent = tag.replace(/^[^:]*:/, '');
+  $('tryTagFull').textContent = tag;
+  $('tryFilter').value = '';
+  $('tryErr').textContent = '';
+  renderTryList();
+  tryDlg.showModal();
 }
+/** Yours, alive enough to rebuild, and not already on this image. */
+function tryCandidates(tag) {
+  return agents.filter(a => (a.role ? a.role === 'owner' : true) && ['RUNNING', 'STOPPED'].includes(a.state) && a.image !== tag);
+}
+function tryVisible() {
+  const q = $('tryFilter').value.trim().toLowerCase();
+  return tryCandidates(tryState?.tag).filter(a => !q || `${a.name} ${a.group ?? ''}`.toLowerCase().includes(q));
+}
+function renderTryList() {
+  if (!tryState) return;
+  const list = tryVisible();
+  $('tryList').innerHTML = list.length
+    ? list.map(a => `<label style="display:flex;gap:10px;align-items:baseline;padding:6px 0;border-top:1px solid var(--line);cursor:pointer;font-weight:400">
+        <input type="checkbox" style="width:auto;flex:none" ${tryState.picked.has(a.id) ? 'checked' : ''} onchange="tryPick('${jsq(a.id)}', this.checked)">
+        <span class="grow">${esc(a.name)}<span class="sub"> · ${esc(a.state.toLowerCase())}${a.group ? ' · ' + esc(a.group) : ''}${a.image ? ` · 📌 ${esc(a.image.replace(/^[^:]*:/, ''))}` : ''}</span></span>
+      </label>`).join('')
+    : '<div class="sub" style="padding:8px 0">No agent matches that.</div>';
+  updateTryBtn();
+}
+function tryPick(id, on) {
+  if (!tryState) return;
+  if (on) tryState.picked.add(id); else tryState.picked.delete(id);
+  updateTryBtn();
+}
+/** All / none applies to what the filter is showing, not the whole fleet. */
+function tryPickAll(on) {
+  for (const a of tryVisible()) { if (on) tryState.picked.add(a.id); else tryState.picked.delete(a.id); }
+  renderTryList();
+}
+function updateTryBtn() {
+  const n = tryState?.picked.size ?? 0;
+  $('tryBtn').disabled = !n;
+  $('tryBtn').textContent = n ? `Pin & rebuild ${n}` : 'Pin & rebuild';
+}
+async function runTryOnAgents() {
+  if (!tryState?.picked.size) return;
+  const { tag } = tryState;
+  const ids = [...tryState.picked];
+  const names = ids.map(id => agents.find(a => a.id === id)?.name).filter(Boolean);
+  const shown = names.slice(0, 12).join(', ') + (names.length > 12 ? `, and ${names.length - 12} more` : '');
+  if (!confirm(`Pin ${ids.length} agent${ids.length === 1 ? '' : 's'} to ${tag} and rebuild ${ids.length === 1 ? 'it' : 'them'} now?\n\n${shown}\n\nChat → Memory runs first; memory is kept. Discard a trial later with ✕ next to the agent's name.`)) return;
+  $('tryBtn').disabled = true;
+  const failed = [];
+  let ok = 0;
+  for (const id of ids) {
+    const name = agents.find(a => a.id === id)?.name ?? id;
+    try {
+      await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: tag } });
+      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+      ok++;
+    } catch (e) { failed.push(`${name}: ${e.message}`); }
+  }
+  if (failed.length) $('tryErr').innerHTML = failed.map(esc).join('<br>');
+  else tryDlg.close();
+  updateTryBtn();
+  if (ok) {
+    toast(UI_V2
+      ? `${ok} agent${ok === 1 ? '' : 's'} rebuilding on ${tag}${ok > 1 ? ' (a few at a time)' : ''}. The spinning ring on the home screen clears when each is back.`
+      : `${ok} agent${ok === 1 ? '' : 's'} rebuilding on ${tag} — 🧪 in the legend while on trial.`, 9000);
+  }
+  await refresh(false); await loadRuntimeImages();
+}
+
 async function discardTrial(id, name) {
   if (!confirm(`Discard the trial: return "${name}" to the fleet default image and rebuild it now?`)) return;
   try {
