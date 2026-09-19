@@ -1764,10 +1764,9 @@
 
   <section id="paneOperator" role="tabpanel" hidden>
     <div class="sub" style="margin-bottom:10px">
-      About you, the operator. This is injected into <b>every one of your agents</b> so
-      they already know who they're serving — no more re-introducing yourself. Write
-      whatever's useful: name, where you live, family, how you like to be addressed,
-      standing preferences. Applies to running agents immediately (no rebuild).
+      <b>Every agent you create is told this</b>, so you never re-introduce
+      yourself: name, where you live, family, how you like to be addressed,
+      standing preferences. Running agents get it immediately — no rebuild.
     </div>
     <textarea id="operatorText" rows="10" maxlength="8000" style="width:100%;box-sizing:border-box;font:inherit"
       placeholder="e.g. I'm Sam, 42, in Lisbon. Two kids (9 and 13). Prefer concise answers and metric units. Partner: Alex."></textarea>
@@ -2749,7 +2748,7 @@ const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'pan
  */
 const V2_SETTINGS = [
   ['ai', 'AI', ['ai']],
-  ['people', 'People', ['access', 'operator']],
+  ['people', 'You', ['access', 'operator']],
   ['pool', 'Telegram bots', ['pool']],
   ['conn', 'Connections', ['conn']],
   ['machines', 'Machines', ['hosts', 'servers']],
@@ -2758,7 +2757,7 @@ const V2_SETTINGS = [
   ['backups', 'Backups', ['backups']],
   ['security', 'Security', ['security']],
 ];
-const V2_SETTINGS_HEAD = { access: 'Accounts & sign-in', operator: 'About you — every agent you create knows this',
+const V2_SETTINGS_HEAD = { access: 'Accounts & sign-in', operator: 'About you',
   hosts: 'Machines that run agents', servers: 'Other Hatchabot servers' };
 let v2SettingsGroup = 'ai';
 function showTab(name) {

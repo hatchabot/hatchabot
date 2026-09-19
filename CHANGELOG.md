@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.36.1] — 2026-09-19
+
+### Changed
+- **Settings → People is now "You".** It holds your accounts, your sign-in and your operator profile, and nothing about anyone else — so it is named for what it is. The operator profile's introduction is four lines instead of a paragraph: every agent you create is told this, running agents get it immediately, no rebuild.
+
 ## [1.36.0] — 2026-09-19
 
 ### Changed
