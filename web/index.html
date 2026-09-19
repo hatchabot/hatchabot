@@ -1562,7 +1562,7 @@
     <div class="sub" style="margin-bottom:6px">Parked and unassigned: creating an agent takes one of these instantly. A bot an agent is already using is not here — see the inventory below for those.</div>
     <div id="poolList">Loading…</div>
     <details class="sec-drawer" id="botInvDrawer">
-      <summary><b>🔎 Every bot this server has a token for</b> <span class="sub">— the ones your agents use AND the spares, live-checked against BotFather (whose cap is about 40)</span></summary>
+      <summary><b>🔎 Every bot this server has a token for</b> <span class="sub">— the ones your agents use AND the spares, live-checked against BotFather, whose cap is about 20 per Telegram account</span></summary>
       <div class="sub" style="margin-top:6px">
         BotFather's <code>/mybots</code> is the full list of bots YOUR Telegram
         account minted. Anything there that is <i>not</i> below is a stray from
@@ -1575,6 +1575,22 @@
         <span class="sub" id="botInvStatus"></span>
       </div>
       <div id="botInvList"></div>
+      <details id="botMatchBox" style="margin-top:12px">
+        <summary style="cursor:pointer"><b>Compare with BotFather's list</b> <span class="sub">— find strays this server knows nothing about</span></summary>
+        <div class="sub" style="margin-top:6px">
+          Telegram has no API that lists the bots an account owns, so the only
+          complete list is <b>@BotFather → <code>/mybots</code></b>. Open it,
+          copy the handles (any format — one per line, commas, or the whole
+          message), and paste them here. Nothing is sent anywhere: the
+          comparison happens in this page.
+        </div>
+        <textarea id="botMatchIn" rows="4" spellcheck="false" placeholder="@my_first_bot&#10;@spare_bot&#10;…"
+          style="width:100%;box-sizing:border-box;margin-top:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+        <div class="actions" style="justify-content:flex-start;margin:6px 0 0">
+          <button class="primary" onclick="matchBotFather()">Compare</button>
+        </div>
+        <div id="botMatchOut" style="margin-top:8px"></div>
+      </details>
     </details>
     <div id="mgmtBotBox" hidden>
       <h4 style="margin:18px 0 4px">Management bot <span class="sub">— legacy</span></h4>
@@ -2936,11 +2952,47 @@ async function removeSearchKey() {
   catch (e) { toast(e.message, 10000); }
 }
 
+let botInvLast = null; // the last live census, for the BotFather comparison
+
+/**
+ * Reconcile BotFather's list against this server's. Telegram offers no way to
+ * enumerate an account's bots, so the owner pastes /mybots and we diff it here
+ * — a bot at BotFather that no token here matches is a stray occupying a slot.
+ */
+function matchBotFather() {
+  const out = $('botMatchOut');
+  if (!botInvLast) { out.innerHTML = '<div class="sub">Run the live check first, so there is something to compare against.</div>'; return; }
+  // Anything that looks like a bot handle, however it was pasted.
+  const listed = [...new Set((($('botMatchIn').value || '').match(/@?[A-Za-z0-9_]{4,32}[Bb][Oo][Tt]\b/g) ?? [])
+    .map(x => x.replace(/^@/, '').toLowerCase()))];
+  if (!listed.length) { out.innerHTML = '<div class="sub">No bot handles found in that text. They end in <code>bot</code> — paste the list from @BotFather.</div>'; return; }
+  const here = new Map(botInvLast.map(b => [String(b.username).toLowerCase(), b]));
+  const strays = listed.filter(u => !here.has(u));
+  const missing = [...here.keys()].filter(u => !listed.includes(u) && u !== '(mgmt bot)');
+  const matched = listed.filter(u => here.has(u));
+  const dead = matched.filter(u => here.get(u).alive === false);
+  const group = (title, colour, items, note) => items.length
+    ? `<div style="margin-top:10px"><b style="color:${colour}">${title} (${items.length})</b>
+        <div class="sub">${note}</div>
+        <div style="margin-top:4px">${items.map(u => `<code class="pii" style="display:inline-block;margin:2px 6px 2px 0">@${esc(u)}</code>`).join('')}</div></div>`
+    : '';
+  out.innerHTML =
+    `<div class="sub">${listed.length} handle${listed.length === 1 ? '' : 's'} pasted · ${here.size} known here · <b>${matched.length}</b> matched.</div>`
+    + group('Strays at BotFather', 'var(--warn)', strays,
+        'At BotFather, unknown to this server. Each one occupies a slot. Check it is not serving another Hatchabot server or another app, then <code>/deletebot</code> it.')
+    + group('Known here but not in what you pasted', 'var(--info)', missing,
+        'This server holds a token for these. Either the paste was partial, or they were minted by a different Telegram account — that account is where they can be deleted.')
+    + group('Matched but dead', 'var(--bad)', dead,
+        'Both lists have them, but Telegram rejects the token here. Delete at BotFather to free the slot, and remove the row above.')
+    + (!strays.length && !missing.length ? '<div class="sub" style="margin-top:10px;color:var(--ok)">✓ The two lists agree — nothing is orphaned.</div>' : '');
+}
+
 async function loadBotInventory() {
   $('botInvBtn').disabled = true;
   $('botInvStatus').textContent = 'asking Telegram about each bot…';
   try {
     const { bots } = await api('/v1/bot-inventory');
+    botInvLast = bots;
     const WHERE = {
       'agent': b => `serving <b>${esc(b.agentName)}</b>${b.agentState !== 'RUNNING' ? ` (${esc(b.agentState)})` : ''}`,
       'pool-leased': () => 'pool (leased)',

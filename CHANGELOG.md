@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.47.0] — 2026-09-19
+
+### Added
+- **Compare this server's bots with BotFather's list, in one paste.** Telegram has no API that lists the bots an account owns — `@BotFather → /mybots` is the only complete list — so the census now takes that list pasted in any shape (one per line, commas, or the whole message) and diffs it against every token this server holds. Three answers, each with what to do: **strays at BotFather** (occupying a slot, nothing here knows them), **known here but not in your paste** (a partial paste, or a bot minted by a different Telegram account), and **matched but dead**. Nothing is sent anywhere — the comparison runs in the page.
+
+### Fixed
+- The census called BotFather's ceiling "about 40". Telegram's is about **20** per account, as the docs and the CLI have always said.
+
 ## [1.46.0] — 2026-09-19
 
 ### Changed
