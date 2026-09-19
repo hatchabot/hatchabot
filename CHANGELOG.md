@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.49.1] — 2026-09-19
+
+### Fixed
+- **Deleting a derived image no longer forgets it when Docker refuses.** The removal resolves a result instead of throwing, and the route ignored it: a `docker rmi` that failed — a stopped container still referencing the image is the usual cause — still dropped the row and reported success, leaving a multi-gigabyte image with nothing left to delete it from. This is where today's orphaned `ch3-traceroute` came from. The row now survives a refusal and the reason is reported ("container 9f2 is using it"), so the delete can be retried once the container is gone.
+- **Dismiss on a failed change now sticks.** It was remembered in memory only, so the card came back on the next page load — including the one that could never succeed.
+
 ## [1.49.0] — 2026-09-19
 
 ### Added

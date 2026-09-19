@@ -200,3 +200,34 @@ describe('GET /v1/images', () => {
     expect((await f.inject({ method: 'GET', url: '/v1/images', headers: H(OTHER) })).statusCode).toBe(403);
   });
 });
+
+describe('deleting a derived image', () => {
+  it('keeps the row when docker refuses, and says why', async () => {
+    const store = new Store(new Database(':memory:'));
+    const f = Fastify();
+    let refuse = true;
+    await registerRoutes(f, {
+      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+      removeImage: async () => (refuse
+        ? { ok: false, error: 'conflict: unable to remove repository reference (must force) - container 9f2 is using it' }
+        : { ok: true }),
+    });
+    const OWNER2 = 'dev-owner';
+    store.insertHost({ id: 'h1', ownerId: OWNER2, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.upsertDerivedImage({ name: 'pdf', tag: 'hatchabot-runtime:derived-pdf', base: 'hatchabot-runtime:latest', dockerfile: 'RUN true', createdBy: OWNER2 });
+    store.setDerivedImageStatus('pdf', 'READY');
+
+    // Docker says no: the row MUST survive, or the image has nothing left to
+    // delete it from (the 2026-09-19 orphan).
+    const stuck = await f.inject({ method: 'DELETE', url: '/v1/images/pdf' });
+    expect(stuck.statusCode).toBe(409);
+    expect(stuck.json().error).toMatch(/container 9f2 is using it/);
+    expect(store.getDerivedImage('pdf')).toBeTruthy();
+
+    refuse = false;
+    const gone = await f.inject({ method: 'DELETE', url: '/v1/images/pdf' });
+    expect(gone.statusCode).toBe(200);
+    expect(store.getDerivedImage('pdf')).toBeUndefined();
+  });
+});

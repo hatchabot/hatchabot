@@ -10152,11 +10152,20 @@ function mgmtFailedCard(f, into) {
   row.style.cssText = 'display:flex;gap:8px;margin-top:8px;justify-content:flex-end';
   const hide = document.createElement('button');
   hide.textContent = 'Dismiss';
-  hide.addEventListener('click', () => { card.remove(); v2PropDismissed.add(f.confirmId); });
+  hide.addEventListener('click', () => { card.remove(); v2DismissProp(f.confirmId); });
   row.appendChild(hide); card.appendChild(row);
   into.appendChild(card);
 }
-const v2PropDismissed = new Set();
+/** Dismissed failure cards, remembered across reloads — Dismiss used to last
+ *  until the page was refreshed, and the card came straight back (2026-09-19).
+ *  A failure is only shown for an hour, so a short list is plenty. */
+const v2PropDismissed = (() => {
+  try { return new Set(JSON.parse(localStorage.getItem('hb-prop-dismissed') || '[]')); } catch { return new Set(); }
+})();
+function v2DismissProp(id) {
+  v2PropDismissed.add(id);
+  try { localStorage.setItem('hb-prop-dismissed', JSON.stringify([...v2PropDismissed].slice(-50))); } catch { /* private window */ }
+}
 setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?.ops) void loadProposals(); }, 4000);
 
 function initV2() {

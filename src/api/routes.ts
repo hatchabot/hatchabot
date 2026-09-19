@@ -174,6 +174,8 @@ export interface ApiDeps {
   /** Override the derived-image builder (tests). Defaults to the real
    *  `docker build`; tests inject a stub so no docker runs. */
   buildImage?: typeof buildDerivedImage;
+  /** Test seam: what actually takes the image off the daemon. */
+  removeImage?: typeof removeDerivedImage;
   /** Override the base-image build (tests). Default spawns scripts/build-runtime-image.sh. */
   buildBase?: (opts: { version?: string; candidate: boolean; logPath: string; packages?: string }) => Promise<{ ok: boolean; error?: string }>;
   /** Override the mgmt-LLM proxy's Anthropic call (tests). */
@@ -1498,7 +1500,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         error: `In use by ${pinned.length} agent(s): ${pinned.map((a) => a.name).join(', ')}. Unpin them first.`,
       });
     }
-    await removeDerivedImage(rec.tag);
+    // Take the image away FIRST, and only forget the row if that worked.
+    // `docker rmi` resolves {ok:false} rather than throwing, and this ignored
+    // it: a failed removal (a stopped container still referencing the image is
+    // the usual cause) dropped the row and left a 2GB image with nothing left
+    // to delete it from — the dead end reported on 2026-09-19.
+    const removed = await (deps.removeImage ?? removeDerivedImage)(rec.tag);
+    if (!removed.ok) {
+      trace()('derived.remove_failed', { name: rec.name, error: String(removed.error ?? '').slice(0, 300) });
+      return reply.code(409).send({
+        error: `Docker would not remove ${rec.tag}: ${String(removed.error ?? 'no reason given').slice(0, 300)}`,
+      });
+    }
     store.deleteDerivedImage(rec.name);
     return { deleted: true };
   });
