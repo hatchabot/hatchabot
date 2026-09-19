@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.49.0] — 2026-09-19
+
+### Added
+- **`scripts/mybots.py` prints every bot your Telegram account owns.** For when the BotFather list is too long to copy by hand. It asks @BotFather for `/mybots` and reads the handles off the reply, following the pagination, and prints one per line — ready to paste into **Compare with BotFather's list**. It is deliberately a script you run on your own computer and not something Hatchabot does: it signs in as your Telegram *account* over MTProto, and that session is a far bigger credential than any bot token. It keeps the session in a temp file and deletes it when it finishes unless you ask otherwise.
+
 ## [1.48.0] — 2026-09-19
 
 ### Fixed

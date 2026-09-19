@@ -669,7 +669,13 @@ host-owner gated and never exposed to a co-tenant.
 
 ## Bots census
 
-Telegram caps an account at about 20 bots and offers no API to list them, so
+Telegram caps an account at about 20 bots and offers no API to list them —
+`@BotFather → /mybots` is the only complete list. Paste it into **Settings →
+Telegram bots → Compare with BotFather's list** and the app names the strays
+(at BotFather, unknown here), the ones known here but missing from the paste,
+and the matched-but-dead. `scripts/mybots.py` prints that list for you, but it
+signs in as your Telegram *account* over MTProto — run it on your own machine,
+never on the server, and delete its session afterwards. Meanwhile,
 `hatchabot bots [--check]` enumerates every bot this install (and each
 registered peer server) uses: **in-use** (a running agent), **reclaimable**
 (a stopped/failed agent, or an unleased pool bot), or **dead** (`--check`
