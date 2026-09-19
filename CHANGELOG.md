@@ -2,7 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
-## [1.35.2] — 2026-09-19
+## [1.35.3] — 2026-09-19
+
+### Fixed
+- **The Hatchabot agent stops refusing work it can now do.** Its tools grow with each release, but it was answering "I have no tool for that" from earlier in the conversation — it kept quoting a tool description from before the upgrade. Its standing notes now tell it to read the tools it has before refusing, and never to record what it cannot do. Those notes are Hatchabot's, so they are refreshed on every build instead of being frozen when the agent was created.
+- A base image built through the app now lands in the repository the app reads (`HATCHABOT_IMAGE`), not a separately-defaulted one; the two could disagree on an install that set only one of them.
+
+### Added
+- A test that asks the agent's own door for its tool list and checks the base-candidate tool offers `packages` — the thing it told its owner it could not do.
+ — 2026-09-19
 
 ### Fixed
 - **After an upgrade, the Hatchabot agent knows about new tools.** It asks Hatchabot for its tool list once, when its gateway starts, so an upgrade that adds a tool left it describing the old set — it told its owner it could not add a package to a base image, one release after that became possible. Hatchabot now records which version an agent's runtime was built against and restarts a management agent whose version has moved on. Its memory is on its volume, so the restart costs nothing.

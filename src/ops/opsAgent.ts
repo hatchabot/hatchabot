@@ -66,10 +66,20 @@ export const OPS_AGENTS_MD = `# Operating notes
 Look first (get_agent, get_health, get_logs, list_events). Explain the cause
 in plain words. Then propose the fix, or say where in the app to do it.
 
+## What you can do changes
+Your tools come from Hatchabot and they grow: a tool you lacked last week may
+be there today, sometimes with new arguments. Before saying you cannot do
+something, look at the tools you have RIGHT NOW and read their arguments.
+Never answer "I have no tool for that" from memory, or because you said it
+earlier in this conversation — check, then answer. If a tool now covers what
+you refused before, say so plainly and offer to do it.
+
 ## Memory
 Keep notes in MEMORY.md on what the owner prefers (which agents matter most,
 upgrade appetite, naming and grouping habits) and on recurring problems and
 their fixes. Do not store secrets or the contents of other agents' memory.
+Never record what you cannot do: that goes out of date every release, and a
+stale note makes you refuse work you can now do.
 `;
 
 export const OPS_DIGEST_MESSAGE = [
@@ -78,3 +88,20 @@ export const OPS_DIGEST_MESSAGE = [
   'Reply with a short digest: what is fine in one line, then only what needs the owner, each with your suggestion.',
   'Do not file proposals from this check; suggest them, and wait to be asked. If everything is fine, say so in one sentence.',
 ].join(' ');
+
+/**
+ * Sections of the management agent's AGENTS.md that Hatchabot keeps current on
+ * every build. Its notes are ours, not the owner's, and the parts that go out
+ * of date between releases (what it can do, what to keep in memory) must not
+ * be frozen at the moment the agent was created.
+ */
+export const OPS_MANAGED_HEADINGS = ['## What you can do changes', '## Memory'] as const;
+
+/** The current text of one managed section, straight from OPS_AGENTS_MD. */
+export function opsSection(heading: string): string | undefined {
+  const start = OPS_AGENTS_MD.indexOf(`${heading}\n`);
+  if (start < 0) return undefined;
+  const rest = OPS_AGENTS_MD.slice(start + heading.length + 1);
+  const next = rest.search(/\n## /);
+  return `${heading}\n${(next < 0 ? rest : rest.slice(0, next + 1)).replace(/\s+$/, '')}\n`;
+}

@@ -61,6 +61,7 @@ import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGi
 import type { Agent, Channel, Host } from '../domain/types.js';
 import { briefCause } from '../domain/redact.js';
 import { APP_VERSION } from '../domain/appVersion.js';
+import { opsSection, OPS_MANAGED_HEADINGS } from '../ops/opsAgent.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -925,6 +926,15 @@ export async function syncDataSourceDocs(
     next = replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory));
     // The operator identity: injected so every agent already knows who it serves.
     next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
+    // The management agent's own notes are Hatchabot's: keep the sections that
+    // go stale between releases current on every build, instead of only when
+    // the agent was first created (it refused work it could do, 2026-09-19).
+    if (agent.ops) {
+      for (const heading of OPS_MANAGED_HEADINGS) {
+        const section = opsSection(heading);
+        if (section) next = replaceSection(next, heading, section);
+      }
+    }
     // Agent-to-agent: install the call-agent tool + peer manifest, and list the
     // granted peers in AGENTS.md so the agent knows it can consult them.
     const peers = store.listAgentPeers(agentId).map((id) => store.getAgent(id)).filter((a): a is Agent => !!a && a.state !== 'DELETED');

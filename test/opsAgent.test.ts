@@ -263,3 +263,21 @@ describe('setting up the management agent when its door cannot open', () => {
     }
   });
 });
+
+describe("the management agent's own notes", () => {
+  it('keeps the sections that go stale between releases current on every build', async () => {
+    const { OPS_AGENTS_MD, OPS_MANAGED_HEADINGS, opsSection } = await import('../src/ops/opsAgent.js');
+    // Every managed heading must exist in the notes, or a build would write nothing.
+    for (const h of OPS_MANAGED_HEADINGS) {
+      expect(OPS_AGENTS_MD, h).toContain(`${h}\n`);
+      const section = opsSection(h)!;
+      expect(section.startsWith(`${h}\n`)).toBe(true);
+      expect(section.endsWith('\n')).toBe(true);
+      expect(section).not.toMatch(/\n## (?!.*$)/); // one section, never the next one too
+    }
+    // The point of the exercise: it is told its tools grow, and not to
+    // remember what it could not do.
+    expect(opsSection('## What you can do changes')).toMatch(/look at the tools you have RIGHT NOW/i);
+    expect(opsSection('## Memory')).toMatch(/Never record what you cannot do/i);
+  });
+});
