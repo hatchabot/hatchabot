@@ -2367,7 +2367,40 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     maxTokens: z.number().int().min(1).max(16_384),
   });
   // Phase C: the web management chat pane — same broker, web transport.
-  registerMgmtChat(app, { store, secrets, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn });
+  /**
+   * Who may use the management agents' door: their own doormen, nobody else.
+   * Every legitimate connection arrives from one of those containers, so an
+   * ordinary agent on this machine is turned away before its key is looked at
+   * (docs/ops-agent-design.md). Addresses change when a doorman is replaced,
+   * so they are re-read on a miss, at most once every few seconds.
+   */
+  let doormen = { at: 0, ips: new Set<string>(), supported: false };
+  let doormenRefreshing: Promise<void> | undefined;
+  const refreshDoormen = async (): Promise<void> => {
+    const ips = new Set<string>();
+    let supported = false;
+    for (const a of store.listOpsAgents()) {
+      const read = providerFor(a.hostId).doormanAddresses;
+      if (!read) continue;
+      supported = true;
+      for (const ip of await read(a.id).catch(() => [])) ips.add(ip);
+    }
+    doormen = { at: Date.now(), ips, supported };
+  };
+  const opsPeerOk = async (ip: string): Promise<boolean> => {
+    if (!ip) return false;
+    if (Date.now() - doormen.at > 30_000) await (doormenRefreshing ??= refreshDoormen().finally(() => { doormenRefreshing = undefined; }));
+    if (doormen.ips.has(ip)) return true;
+    // A rebuilt doorman has a new address: look again, but not on every knock.
+    if (Date.now() - doormen.at > 5_000) {
+      await (doormenRefreshing ??= refreshDoormen().finally(() => { doormenRefreshing = undefined; }));
+      if (doormen.ips.has(ip)) return true;
+    }
+    // A runtime with no doormen at all (the mock in tests) keeps the old behaviour.
+    return !doormen.supported;
+  };
+
+  registerMgmtChat(app, { store, secrets, opsPeerOk, mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {
     const parsed = MgmtLlmBody.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });

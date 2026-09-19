@@ -9,19 +9,13 @@ import { DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, 
 
 describe('what the doorman forwards', () => {
   it('sends the agent to Hatchabot and the console to the agent', () => {
-    const routes = doormanRoutes({ opsHost: '172.17.0.1', opsPort: 8091, agentContainer: 'hatchabot-manager-abc12345' });
+    const routes = doormanRoutes({ opsPort: 8091, agentContainer: 'hatchabot-manager-abc12345' });
     expect(routes).toEqual([
-      { listen: DOORMAN_DOOR_PORT, host: '172.17.0.1', port: 8091 },
+      // Docker's host alias points at this machine on every platform; the door
+      // binds whatever address that is (see ensureOpsServer).
+      { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: 8091 },
       { listen: DOORMAN_CONSOLE_PORT, host: 'hatchabot-manager-abc12345', port: 18789 },
     ]);
-  });
-
-  it('reaches a loopback door through Docker\'s host alias — the Docker Desktop case', () => {
-    for (const host of ['127.0.0.1', 'localhost', '::1']) {
-      expect(doormanRoutes({ opsHost: host, opsPort: 8091, agentContainer: 'a' })[0]!.host).toBe(HOST_ALIAS);
-    }
-    // A door bound on a real address is reached there directly (Linux).
-    expect(doormanRoutes({ opsHost: '172.20.0.1', opsPort: 8091, agentContainer: 'a' })[0]!.host).toBe('172.20.0.1');
   });
 });
 
@@ -63,6 +57,72 @@ describe('the forwarder', () => {
     } finally {
       child.kill();
       far.close();
+    }
+  }, 15_000);
+});
+
+describe('who may use the door', () => {
+  it('turns away a peer that is not a doorman, before the key is looked at', async () => {
+    const { createOpsServer } = await import('../src/ops/opsServer.js');
+    const net = await import('node:net');
+    const asked: string[] = [];
+    let tokenSeen = false;
+    const server = createOpsServer({
+      mcp: async () => { tokenSeen = true; return { jsonrpc: '2.0', id: 1, result: {} }; },
+      allowedHosts: () => ['api.example.com'],
+      peerOk: async (ip) => { asked.push(ip); return false; },
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const http = await import('node:http');
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          { host: '127.0.0.1', port, path: '/mcp', method: 'POST', headers: { authorization: 'Bearer key-123' } },
+          (res) => { res.resume(); resolve(res.statusCode ?? 0); },
+        );
+        req.on('error', reject);
+        req.end('{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+      });
+      expect(status).toBe(403);
+      expect(tokenSeen).toBe(false);       // refused before any key check
+      expect(asked).toEqual(['127.0.0.1']);
+      // The proxy leg refuses the same peer.
+      const proxied = await new Promise<string>((resolve) => {
+        const sock = net.connect(port, '127.0.0.1', () => {
+          sock.write(`CONNECT api.example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic ${Buffer.from('ops:k').toString('base64')}\r\n\r\n`);
+        });
+        sock.once('data', (b: Buffer) => { resolve(b.toString()); sock.destroy(); });
+        sock.once('error', () => resolve('error'));
+        setTimeout(() => resolve('timeout'), 2000);
+      });
+      expect(proxied).toMatch(/403/);
+    } finally {
+      server.close();
+    }
+  }, 15_000);
+
+  it('lets a doorman through', async () => {
+    const { createOpsServer } = await import('../src/ops/opsServer.js');
+    const http = await import('node:http');
+    const server = createOpsServer({
+      mcp: async () => ({ jsonrpc: '2.0', id: 1, result: { ok: true } }),
+      allowedHosts: () => [],
+      peerOk: async () => true,
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const body = await new Promise<string>((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port, path: '/mcp', method: 'POST' }, (res) => {
+          let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve(b));
+        });
+        req.on('error', reject);
+        req.end('{"jsonrpc":"2.0","id":1,"method":"tools/list"}');
+      });
+      expect(JSON.parse(body).result).toEqual({ ok: true });
+    } finally {
+      server.close();
     }
   }, 15_000);
 });

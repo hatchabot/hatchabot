@@ -242,14 +242,16 @@ export interface RuntimeProvider {
     /** The agent's slug (and ref, once it has one): the doorman forwards the console to it. */
     slug: string;
     runtimeRef?: string;
-    /** Where Hatchabot's door is listening on this machine. */
-    opsHost: string;
+    /** The port Hatchabot's door listens on (reached at Docker's host alias). */
     opsPort: number;
     /** Host port the console is published on (the agent's usual gateway port). */
     consolePort: number;
   }): Promise<{ network: string; doorHost: string; doorPort: number }>;
   /** Take a management agent's jail down: the doorman and the network. */
   removeOpsJail?(agentId: string): Promise<void>;
+  /** The addresses this agent's doorman holds — the only peers the door may
+   *  accept. Empty when there is no doorman (or it is not running). */
+  doormanAddresses?(agentId: string): Promise<string[]>;
   /** The address a container reaches this machine on, if the host can bind it
    *  (Linux: the docker bridge's gateway; Docker Desktop: nothing bindable). */
   hostGatewayAddress?(): Promise<string | undefined>;

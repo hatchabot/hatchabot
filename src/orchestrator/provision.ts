@@ -500,8 +500,7 @@ export async function buildRuntimeSpec(
     const jail = deps.provider.ensureOpsJail
       ? await deps.provider.ensureOpsJail({
         agentId, slug: agent.slug, runtimeRef: agent.runtimeRef,
-        // Where the doorman forwards to: the address the door actually bound.
-        opsHost: at.host, opsPort: at.port, consolePort: gateway.port,
+        opsPort: at.port, consolePort: gateway.port,
       })
       : { doorHost: at.host, doorPort: at.port }; // providers without networks (mock)
     ops = {

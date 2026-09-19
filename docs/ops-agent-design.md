@@ -129,10 +129,15 @@ management agent (`src/ops/doorman.ts`):
 - The doorman runs the runtime image (nothing new to pull) with a 20-line TCP
   forwarder: two fixed routes, a socket cap, no shell the agent can reach, and
   no state. It is the agent's only neighbour.
-- It reaches Hatchabot through an ordinary network: on Linux the door binds the
-  docker bridge's gateway, on Docker Desktop it binds loopback and the doorman
-  uses `host.docker.internal`. Hatchabot tries them in that order, so the same
-  code path covers both.
+- It reaches Hatchabot at Docker's host alias (`host.docker.internal`), which
+  every platform maps to this machine. The door binds whatever that alias
+  points at — the bridge gateway on Linux, loopback on Docker Desktop — trying
+  them in that order, so one code path covers both.
+- **Only a doorman may use the door.** Any address on this machine is
+  reachable from any container (checked live: an ordinary agent could reach the
+  old jail-gateway door too), so the door now refuses every peer that is not a
+  current doorman, before it looks at a key. Addresses are re-read when a
+  doorman is replaced.
 - The console comes back the same way: the doorman publishes the agent's usual
   gateway port on `127.0.0.1` and forwards it in, so no special case remains
   for reaching a jailed agent.

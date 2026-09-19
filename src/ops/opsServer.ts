@@ -19,12 +19,21 @@ export interface OpsHandlers {
   mcp(token: string, message: unknown): Promise<unknown>;
   /** Hosts this key may CONNECT to, or undefined for a bad key. */
   allowedHosts(token: string): string[] | undefined;
+  /**
+   * May this peer address use the door at all? Every legitimate connection
+   * arrives from a management agent's own doorman; anything else on this
+   * machine is refused before its key is even looked at.
+   */
+  peerOk?: (ip: string) => Promise<boolean>;
   /** How the tunnel reaches the far side. Tests pass a socket that never answers. */
   dial?: (host: string, port: number, onReady: () => void) => net.Socket;
   log?(event: string, detail: Record<string, unknown>): void;
 }
 
 export class OpsAuthError extends Error {}
+
+/** ::ffff:172.20.0.2 and 172.20.0.2 are the same peer. */
+export const normalizeIp = (ip: string | undefined): string => String(ip ?? '').replace(/^::ffff:/, '');
 
 const bearer = (h: string | undefined): string => (h && /^Bearer\s+/i.test(h) ? h.replace(/^Bearer\s+/i, '').trim() : '');
 function proxyToken(h: string | undefined): string {
@@ -43,12 +52,31 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
     if (req.url !== '/mcp') return send(404, { error: 'Not found' });
     // Streamable HTTP without a server-initiated stream: POST only.
     if (req.method !== 'POST') return send(405, { error: 'POST only' });
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on('data', (c: Buffer) => { size += c.length; if (size > 1_000_000) req.destroy(); else chunks.push(c); });
-    req.on('end', async () => {
+
+    void (async () => {
+      // Only a management agent's own doorman may use the door: anything else
+      // on this machine is turned away before its key is looked at
+      // (docs/ops-agent-design.md).
+      const peer = normalizeIp(req.socket.remoteAddress);
+      if (handlers.peerOk && !(await handlers.peerOk(peer).catch(() => false))) {
+        log('ops.peer_refused', { peer, path: 'mcp' });
+        return send(403, { error: 'Not your door.' });
+      }
+
+      const body = await new Promise<Buffer | undefined>((resolve) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        req.on('data', (c: Buffer) => {
+          size += c.length;
+          if (size > 1_000_000) { req.destroy(); resolve(undefined); } else chunks.push(c);
+        });
+        req.on('end', () => resolve(Buffer.concat(chunks)));
+        req.on('error', () => resolve(undefined));
+      });
+      if (body === undefined) return;
+
       let msg: unknown;
-      try { msg = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return send(400, { error: 'Bad JSON' }); }
+      try { msg = JSON.parse(body.toString('utf8')); } catch { return send(400, { error: 'Bad JSON' }); }
       try {
         const token = bearer(req.headers.authorization);
         const out = Array.isArray(msg)
@@ -61,7 +89,7 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
         log('ops.mcp_error', { error: String((e as Error).message ?? e).slice(0, 300) });
         return send(500, { error: 'Internal error' });
       }
-    });
+    })();
   });
 
   // The allowlisting proxy. Anything not CONNECT host:443 to a listed host is
@@ -70,8 +98,10 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
   const MAX_TUNNELS = Number(process.env.HATCHABOT_OPS_MAX_TUNNELS) || 24;
   let tunnels = 0;
   server.on('connect', (req, client, head) => {
-    const deny = (code: string) => { client.end(`HTTP/1.1 ${code}\r\n\r\n`); };
-    client.on('error', () => {});
+    const sock = client as net.Socket;
+    const deny = (code: string) => { sock.end(`HTTP/1.1 ${code}\r\n\r\n`); };
+    sock.on('error', () => {});
+    const peer = normalizeIp(sock.remoteAddress);
     const allowed = handlers.allowedHosts(proxyToken(req.headers['proxy-authorization']));
     if (!allowed) return deny('407 Proxy Authentication Required');
     const m = /^([A-Za-z0-9.-]+):(\d+)$/.exec(req.url ?? '');
@@ -79,23 +109,38 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
       log('ops.proxy_refused', { target: String(req.url).slice(0, 120) });
       return deny('403 Forbidden');
     }
+    const host = m[1]!;
     if (tunnels >= MAX_TUNNELS) {
       log('ops.proxy_busy', { tunnels });
       return deny('429 Too Many Requests');
     }
-    tunnels++;
-    let closed = false;
-    const done = () => { if (!closed) { closed = true; tunnels--; } };
-    const ready = () => {
-      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      if (head?.length) up.write(head);
-      up.pipe(client); client.pipe(up);
+
+    const openTunnel = () => {
+      tunnels++;
+      let closed = false;
+      const done = () => { if (!closed) { closed = true; tunnels--; } };
+      const ready = () => {
+        sock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head?.length) up.write(head);
+        up.pipe(sock); sock.pipe(up);
+      };
+      const up = handlers.dial ? handlers.dial(host, 443, ready) : net.connect(443, host, ready);
+      up.on('error', () => { deny('502 Bad Gateway'); done(); });
+      sock.on('close', () => { up.destroy(); done(); });
+      up.on('close', () => { sock.destroy(); done(); });
     };
-    const up = handlers.dial ? handlers.dial(m[1]!, 443, ready) : net.connect(443, m[1]!, ready);
-    up.on('error', () => { deny('502 Bad Gateway'); done(); });
-    client.on('close', () => { up.destroy(); done(); });
-    up.on('close', () => { client.destroy(); done(); });
+
+    // Only a management agent's own doorman may use the door — checked before
+    // anything is dialled (docs/ops-agent-design.md).
+    if (!handlers.peerOk) return openTunnel();
+    void handlers.peerOk(peer)
+      .then((ok) => {
+        if (!ok) { log('ops.peer_refused', { peer, path: 'connect' }); return deny('403 Forbidden'); }
+        openTunnel();
+      })
+      .catch(() => deny('403 Forbidden'));
   });
+
   return server;
 }
 
@@ -106,7 +151,12 @@ export function setOpsHandlers(h: OpsHandlers): void { handlersRef = h; }
 /** The registered handlers (tests drive the door through these). */
 export const getOpsHandlers = (): OpsHandlers | undefined => handlersRef;
 
-export const opsPort = (): number => Number(process.env.HATCHABOT_OPS_PORT) || 8091;
+export const opsPort = (): number => {
+  const set = process.env.HATCHABOT_OPS_PORT;
+  // 0 means "any free port" — what the tests use, so a running Hatchabot on
+  // the same machine never collides with them.
+  return set !== undefined && set !== '' && Number.isFinite(Number(set)) ? Number(set) : 8091;
+};
 
 /**
  * Why the door could not open, in words the owner can act on. The address is
@@ -157,8 +207,11 @@ export function ensureOpsServer(candidates: Array<string | undefined> = []): Pro
       }
     }
     if (!host) throw last ?? new Error('ops server could not bind');
+    // With port 0 the kernel picked one: report what it actually bound.
+    const bound = server.address();
+    const actualPort = typeof bound === 'object' && bound ? bound.port : port;
     server.unref();
-    return { host, port };
+    return { host, port: actualPort };
   })().catch((e) => { started = undefined; throw e; });
   return started;
 }

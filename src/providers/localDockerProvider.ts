@@ -688,7 +688,7 @@ export class LocalDockerProvider implements RuntimeProvider {
   #opsNetworkName(agentId: string): string { return `${this.prefix}-ops-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
   #doormanName(agentId: string): string { return `${this.prefix}-doorman-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
 
-  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsHost: string; opsPort: number; consolePort: number }): Promise<{ network: string; doorHost: string; doorPort: number }> {
+  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsPort: number; consolePort: number }): Promise<{ network: string; doorHost: string; doorPort: number }> {
     const agentContainer = opts.runtimeRef
       ? this.#names(opts.runtimeRef).container
       : this.#namesFor({ agentId: opts.agentId, slug: opts.slug }).container;
@@ -708,7 +708,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // The doorman is replaced on every build: its routes carry the ports.
     const name = this.#doormanName(opts.agentId);
     await this.#docker(['rm', '-f', name]);
-    const routes = JSON.stringify(doormanRoutes({ opsHost: opts.opsHost, opsPort: opts.opsPort, agentContainer }));
+    const routes = JSON.stringify(doormanRoutes({ opsPort: opts.opsPort, agentContainer }));
     const run = await this.#docker([
       'run', '-d', '--name', name,
       '--network', network, '--network-alias', DOORMAN_ALIAS,
@@ -735,6 +735,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       throw new ProviderError(`doorman network connect failed: ${connect.stderr.slice(-500)}`, 'Could not connect the management agent’s doorman to this machine.');
     }
     return { network, doorHost: DOORMAN_ALIAS, doorPort: DOORMAN_DOOR_PORT };
+  }
+
+  async doormanAddresses(agentId: string): Promise<string[]> {
+    const res = await this.#docker(['inspect', this.#doormanName(agentId), '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}']);
+    if (res.code !== 0) return [];
+    return res.stdout.trim().split(/\s+/).filter((ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip));
   }
 
   async hostGatewayAddress(): Promise<string | undefined> {

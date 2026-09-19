@@ -60,15 +60,15 @@ export function doormanScript(): string {
 }
 
 /**
- * What the doorman forwards for one management agent. The door's own address
- * decides how the doorman reaches it: a loopback door is only reachable
- * through Docker's host alias (Docker Desktop), while a door bound on the
- * bridge gateway (Linux) is reached at that address directly.
+ * What the doorman forwards for one management agent. Hatchabot's door is
+ * always reached at Docker's host alias, which every platform maps to this
+ * machine — so the door has to bind the address that alias points at (the
+ * bridge gateway on Linux, the host's loopback on Docker Desktop). See
+ * `ensureOpsServer`, which binds them in that order.
  */
-export function doormanRoutes(opts: { opsHost: string; opsPort: number; agentContainer: string }): DoormanRoute[] {
-  const host = /^(127\.|::1$|localhost$)/.test(opts.opsHost) ? HOST_ALIAS : opts.opsHost;
+export function doormanRoutes(opts: { opsPort: number; agentContainer: string }): DoormanRoute[] {
   return [
-    { listen: DOORMAN_DOOR_PORT, host, port: opts.opsPort },
+    { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: opts.opsPort },
     { listen: DOORMAN_CONSOLE_PORT, host: opts.agentContainer, port: 18789 },
   ];
 }

@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.33.1] — 2026-09-19
+
+### Fixed (20th audit — docs/audit-2026-09-19-doorman.md)
+- **The management agent's door could land where its doorman couldn't reach it.** On Linux, a control plane that started with an existing management agent bound the door to loopback instead of the address Docker's host alias points at, so the agent's tools would have been unreachable after its next rebuild. Start-up now uses the same rule as provisioning. (Docker Desktop was unaffected — loopback is right there.)
+- **Only a doorman may use the door.** Any container on a machine can reach any address on it, so the door (and the AI proxy behind it) could be knocked on by any agent, with only the key in the way — true before the doorman as well. Both now refuse every peer that is not a current doorman, before the key is looked at.
+- **`npm test` no longer fights a running Hatchabot for the ops port.** `HATCHABOT_OPS_PORT=0` means "any free port", which the tests now use.
+
 ## [1.33.0] — 2026-09-19
 
 ### Added

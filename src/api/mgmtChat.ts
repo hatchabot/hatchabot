@@ -107,6 +107,8 @@ export interface MgmtChatDeps {
   opsWeb?: Partial<OpsWebDeps>;
   /** Off switch for the MCP path (falls back to the text protocol). */
   disableMcp?: boolean;
+  /** May this peer address use the management agents' door? (routes.ts) */
+  opsPeerOk?: (ip: string) => Promise<boolean>;
 }
 
 export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void {
@@ -506,7 +508,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     if (store.getChannelForAgent(agent.id)) hosts.push('api.telegram.org');
     return hosts;
   };
-  setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, log: (event, detail) => app.log.info(detail, event) });
+  setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, peerOk: deps.opsPeerOk, log: (event, detail) => app.log.info(detail, event) });
 
   /** The home screen's list: what is waiting for you, and what happened to
    *  the last day's. */
