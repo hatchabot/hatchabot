@@ -11,3 +11,8 @@ data/
 *.sqlite-shm
 .env.mgmt
 .env.*
+
+# Python venv for scripts/mybots.py (a one-off admin tool)
+.venv*/
+__pycache__/
+*.pyc

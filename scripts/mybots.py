@@ -14,9 +14,10 @@ you. That is a far bigger secret than any bot token, which is exactly why
 Hatchabot itself never does this and has no way to. Keep the session off the
 server, and delete it when you are done (this script offers to).
 
-    pip install telethon
-    python3 scripts/mybots.py                 # prompts for API id/hash + login
-    python3 scripts/mybots.py --keep-session  # don't delete the session after
+    python3 -m venv .venv-telegram            # a venv of its own; telethon is
+    .venv-telegram/bin/pip install telethon    # not a Hatchabot dependency
+    .venv-telegram/bin/python scripts/mybots.py
+    .venv-telegram/bin/python scripts/mybots.py --keep-session   # keep the login
 
 Get api_id / api_hash once at https://my.telegram.org → API development tools.
 They identify the *app*, not you; the phone login is what authenticates you.
@@ -37,7 +38,11 @@ from pathlib import Path
 try:
     from telethon import TelegramClient
 except ImportError:  # pragma: no cover - a user-run script
-    sys.exit("telethon is not installed:  pip install telethon")
+    sys.exit(
+        "telethon is not installed. In a venv of its own:\n"
+        "  python3 -m venv .venv-telegram && .venv-telegram/bin/pip install telethon\n"
+        "  .venv-telegram/bin/python scripts/mybots.py"
+    )
 
 BOTFATHER = "@BotFather"
 # BotFather paginates /mybots once you have more than a screenful.

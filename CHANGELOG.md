@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.49.2] — 2026-09-19
+
+### Changed
+- `scripts/mybots.py` says how to run it in a virtualenv of its own (telethon is not a Hatchabot dependency and never becomes one), and prints those exact commands when the import fails. `.venv*/` is git-ignored.
+
 ## [1.49.1] — 2026-09-19
 
 ### Fixed
