@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.34.1] — 2026-09-19
+
+### Fixed
+- **The management agent could be refused its own AI for half a minute.** v1.33.1 made the door accept only the agent's doorman, but it remembered that doorman's address for up to 30 seconds — and a rebuild gives the new doorman a different one. The agent then got "LLM request failed: network connection error" while Hatchabot logged `ops.peer_refused` for what was, in fact, its own doorman. An unknown address is now re-checked at once (at most one look per second), and a known one is re-checked every 15 seconds so an address that has moved on cannot keep its welcome.
+
+### Note
+- `ops.proxy_refused` for `openrouter.ai` and `raw.githubusercontent.com` at start-up is the jail working: OpenClaw pings those, and the management agent may not reach them.
+
 ## [1.34.0] — 2026-09-19
 
 ### Changed

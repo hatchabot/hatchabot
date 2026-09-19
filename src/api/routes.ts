@@ -2401,7 +2401,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    */
   let doormen = { at: 0, ips: new Set<string>(), supported: false };
   let doormenRefreshing: Promise<void> | undefined;
-  const refreshDoormen = async (): Promise<void> => {
+  let doormenLastLook = 0;
+  const refreshDoormen = (): Promise<void> => (doormenRefreshing ??= (async () => {
     const ips = new Set<string>();
     let supported = false;
     for (const a of store.listOpsAgents()) {
@@ -2411,14 +2412,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const ip of await read(a.id).catch(() => [])) ips.add(ip);
     }
     doormen = { at: Date.now(), ips, supported };
-  };
+  })().finally(() => { doormenRefreshing = undefined; }));
+
+  const DOORMEN_FRESH_MS = 15_000;  // a known address is re-checked this often
+  const DOORMEN_LOOK_MS = 1_000;    // an unknown one triggers at most one look per second
   const opsPeerOk = async (ip: string): Promise<boolean> => {
     if (!ip) return false;
-    if (Date.now() - doormen.at > 30_000) await (doormenRefreshing ??= refreshDoormen().finally(() => { doormenRefreshing = undefined; }));
-    if (doormen.ips.has(ip)) return true;
-    // A rebuilt doorman has a new address: look again, but not on every knock.
-    if (Date.now() - doormen.at > 5_000) {
-      await (doormenRefreshing ??= refreshDoormen().finally(() => { doormenRefreshing = undefined; }));
+    if (doormen.ips.has(ip)) {
+      // Allow it, but keep the list honest: a doorman that is gone must not
+      // keep an address that docker could hand to some other container.
+      if (Date.now() - doormen.at > DOORMEN_FRESH_MS) void refreshDoormen();
+      return true;
+    }
+    // Unknown: a rebuild replaces the doorman and it comes back with a new
+    // address, so look again before turning it away (this refused a management
+    // agent its AI for half a minute, 2026-09-19).
+    if (Date.now() - doormenLastLook > DOORMEN_LOOK_MS) {
+      doormenLastLook = Date.now();
+      await refreshDoormen();
       if (doormen.ips.has(ip)) return true;
     }
     // A runtime with no doormen at all (the mock in tests) keeps the old behaviour.
