@@ -1173,10 +1173,9 @@
 
   <section id="paneEditData" role="tabpanel" hidden>
     <div class="sub" style="margin-bottom:10px">
-      What this agent can read beyond its own workspace — folders on this
-      machine and git repos. Changes apply on the next <b>Rebuild</b>.
+      Folders on this machine and git repos it may read, beyond its own
+      workspace. Applies on the next <b>Rebuild</b>.
     </div>
-    <label>Data this agent can access <span style="color:var(--dim)">— folders &amp; git repos</span></label>
     <div id="dataList"></div>
     <div style="display:flex;gap:8px;align-items:center">
       <input type="text" id="pathNew" placeholder="/home/you/Documents/notes" style="flex:1;min-width:0">
@@ -1187,9 +1186,8 @@
       <button id="pathAddBtn" onclick="addDataSource()">Add</button>
     </div>
     <div class="sub">
-      The agent sees these at <code>/data/&lt;folder&gt;</code>. Anyone who can message it can ask
-      about their contents — and for <b>writable</b> folders, change or delete them, so grant that
-      sparingly.
+      It sees these at <code>/data/&lt;folder&gt;</code>. Anyone who can message it can read them —
+      and change or delete the <b>writable</b> ones, so grant that sparingly.
     </div>
 
     <details class="sec-drawer">
@@ -1230,10 +1228,8 @@
 
   <section id="paneEditConn" role="tabpanel" hidden>
     <div class="sub" style="margin-bottom:10px">
-      Accounts this agent is signed into. Google connections (Gmail, Calendar,
-      Drive, Sheets, …) are made by the agent itself — ask it in chat to connect
-      an account (it knows the steps). This panel shows what's connected and can
-      cut one off.
+      Google accounts this agent can use — Gmail, Calendar, Drive, Sheets.
+      Attach one you have connected, or ask the agent in chat to connect its own.
     </div>
     <div class="sub" style="margin-bottom:10px;padding:8px 10px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">
       ⚠ <b>Every member of this agent can use these connections.</b> Anyone on
@@ -1250,15 +1246,13 @@
         <input type="checkbox" id="connNoSend" checked style="width:auto;flex:none"> no send</label>
       <button id="connAttachBtn" onclick="attachConnection()">Attach</button>
     </div>
-    <div class="sub" style="margin:4px 0 10px">Applies immediately on a running agent, and again on every rebuild.
-      No account connected yet? Connect one under ⚙ Settings → Connections first — one consent, reusable across agents.</div>
-    <label>Google accounts on this agent <span style="color:var(--dim)">— via its gog tool</span></label>
+    <div class="sub" style="margin:4px 0 10px">Applies at once, and on every rebuild. Nothing in the list?
+      Connect a Google account under ⚙ Settings → Connections — one consent, reusable across agents.</div>
+    <label>Google accounts on this agent</label>
     <div id="connList" class="sub">Loading…</div>
     <div class="sub" style="margin-top:10px">
-      Disconnecting removes the stored refresh token — the agent loses access
-      immediately; the Google account itself is untouched. Other kinds of access
-      live in their own tabs: repos &amp; folders under <b>Data</b>, API
-      credentials under <b>Environment</b>.
+      Disconnecting takes the agent's access away immediately; the Google
+      account itself is untouched.
     </div>
   </section>
 
@@ -5998,7 +5992,7 @@ function renderDataList(sources) {
         ${toggle(d)}
         ${d.kind === 'git' && d.pubKey ? `<button onclick="showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to the repo on GitHub">🔑 Deploy key</button>` : ''}
         <button class="danger" onclick="removeDataSource('${jsq(d.id)}')">×</button></div>`).join('')
-    : '<div class="sub">None — this agent can only see its own workspace.</div>';
+    : '<div class="sub">Nothing yet — it sees only its own workspace.</div>';
 }
 
 function onRepoPublic() {

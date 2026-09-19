@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.39.1] — 2026-09-19
+
+### Changed
+- **An agent's Knowledge tab says the same things in a third of the words.** Data & folders: one line for what it is and when it applies, no label repeating the heading, and the warning about writable folders kept but tightened. Connections: one line for what a Google account on an agent is, and the attach note and disconnect note trimmed to what they actually tell you. The member-access warning is untouched — it earns its space.
+
 ## [1.39.0] — 2026-09-19
 
 ### Changed
