@@ -5222,7 +5222,7 @@ function agentCard(a) {
  * members list. One builder, so the classic card and the v2 settings sheet
  * can never disagree about what needs doing.
  */
-function agentNotices(a) {
+function agentNotices(a, opts = {}) {
   const pending = a.pendingAction?.type === 'bot_token';
   const pairs = pairings[a.id] ?? [];
   return `
@@ -5235,7 +5235,7 @@ function agentNotices(a) {
         <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
       ${a.pendingModel && a.pendingModel !== a.model && !isRechecking(a) ? `<div class="pair">🔄 <span class="grow">Will switch to <b>${esc(a.pendingModel)}</b> on the next rebuild — still running ${esc(a.model ?? '')}.</span>
         <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
-      ${a.state === 'FAILED' && a.stateReason ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
+      ${a.state === 'FAILED' && a.stateReason && !opts.skipFailure ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
       ${botNameNote(a)}
       ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
       ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
@@ -8244,7 +8244,9 @@ function recheckNote(a) {
 
 function agentAttention(a) {
   const out = [];
-  if (a.state === 'FAILED') out.push({ icon: '❗', why: `failed${a.stateReason ? ': ' + a.stateReason : ''}` });
+  // The reason is printed beside the status; the list only says there is one,
+  // so a long explanation isn't repeated twice on the same screen.
+  if (a.state === 'FAILED') out.push({ icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
   if (a.pendingAction) out.push({ icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
   const rechecking = isRechecking(a);
   const unsynced = rechecking ? [] : (a.dataSources || []).filter(d => d.syncError);
@@ -9190,13 +9192,14 @@ function v2Pane(a, tab) {
   const groups = [...new Set(agents.filter(x => v2Mine(x) && x.group).map(x => x.group))].sort();
   switch (tab) {
     case 'overview': return `
-      <div class="v2notices">${agentNotices(a).trim()}</div>
+      <div class="v2notices">${agentNotices(a, { skipFailure: true }).trim()}</div>
       ${row('Status', `<span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : st.cls === 'waiting' ? 'info' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
         ${a.state === 'STOPPED' ? B('Start', `act('${id}','start')`) : ''}
         ${a.state === 'FAILED' ? B('Retry', `act('${id}','provision')`, 'class="primary"') : ''}
         ${a.state === 'ARCHIVED' ? B('📤 Restore', `v2Close();restoreAgent('${id}','${n}')`, 'class="primary"') + B('🔍 Inspect', `openInspect('${id}','${n}')`) : ''}
         ${a.state === 'FAILED' && a.stateReason ? `<span class="sub">${esc(a.stateReason)}</span>` : ''}
-        ${st.why.length ? `<ul class="v2why">${st.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}`)}
+        ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
+          ? `<ul class="v2why">${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}`)}
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
         ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
       ${a.state !== 'ARCHIVED' ? row('AI', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change…', goto('ai'))}`) : ''}

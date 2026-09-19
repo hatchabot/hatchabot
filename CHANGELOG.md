@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.32.3] — 2026-09-19
+
+### Fixed
+- **A failed agent says why once.** Its settings showed the same explanation three times: as a notice, beside the status, and again in the "worth a look" list. The reason now appears once, beside the status; the list says there is one and points at it.
+
 ## [1.32.2] — 2026-09-19
 
 ### Fixed
