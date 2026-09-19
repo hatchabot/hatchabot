@@ -16,6 +16,7 @@ import type {
   LocalAccount,
   Membership,
   MemberRole,
+  ChannelKind,
 } from '../domain/types.js';
 import { assertTransition } from '../domain/stateMachine.js';
 
@@ -405,6 +406,16 @@ export class Store {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS mgmt_proposals_owner ON mgmt_proposals (owner_id, status);
+      -- A member's identity on a channel other than Telegram (Telegram's stays
+      -- on memberships.channel_user_id, unchanged). One per member per kind.
+      CREATE TABLE IF NOT EXISTS member_identities (
+        agent_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        channel_user_id TEXT NOT NULL,
+        bound_at TEXT NOT NULL,
+        PRIMARY KEY (agent_id, user_id, kind)
+      );
       CREATE TABLE IF NOT EXISTS agent_seen (
         owner_id TEXT NOT NULL,
         agent_id TEXT NOT NULL,
@@ -501,6 +512,8 @@ export class Store {
       // No Telegram bot: reached only through Hatchabot itself.
       `ALTER TABLE agents ADD COLUMN web_only INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agents ADD COLUMN ops INTEGER NOT NULL DEFAULT 0`,
+      // Slack/Discord: room access and display details, as JSON.
+      `ALTER TABLE channels ADD COLUMN settings TEXT`,
     ]) {
       try {
         this.db.exec(alter);
@@ -538,6 +551,11 @@ export class Store {
     // Indexes on ALTER-added columns must come AFTER the additive loop — on a
     // fresh DB the CREATE TABLE block doesn't have the column yet.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agents_image ON agents (image)`);
+    // One channel of each kind per agent. Guarded: a database that somehow holds
+    // two rows of one kind keeps working (the old code read only the first).
+    try {
+      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS channels_agent_kind ON channels (agent_id, kind)`);
+    } catch { /* duplicate rows: leave the index off rather than refuse to start */ }
     // The vault health view looks up attachments by connection_id (not the PK's
     // leading agent_id column), so give that its own index.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agent_connections_conn ON agent_connections (connection_id)`);
@@ -1078,24 +1096,26 @@ export class Store {
   insertChannel(c: Channel): void {
     this.db
       .prepare(
-        `INSERT INTO channels (id, agent_id, kind, account_id, secret_ref, deep_link, created_at)
-         VALUES (@id, @agentId, @kind, @accountId, @secretRef, @deepLink, @createdAt)`,
+        `INSERT INTO channels (id, agent_id, kind, account_id, secret_ref, deep_link, created_at, settings)
+         VALUES (@id, @agentId, @kind, @accountId, @secretRef, @deepLink, @createdAt, @settings)`,
       )
-      .run(c);
+      .run({ ...c, settings: c.settings ? JSON.stringify(c.settings) : null });
   }
 
-  getChannelForAgent(agentId: string): Channel | undefined {
-    const r = this.db.prepare(`SELECT * FROM channels WHERE agent_id = ? LIMIT 1`).get(agentId) as any;
-    if (!r) return undefined;
-    return {
-      id: r.id,
-      agentId: r.agent_id,
-      kind: r.kind,
-      accountId: r.account_id,
-      secretRef: r.secret_ref,
-      deepLink: r.deep_link,
-      createdAt: r.created_at,
-    };
+  /** The agent's channel of one kind. Telegram by default: every older caller means Telegram. */
+  getChannelForAgent(agentId: string, kind: ChannelKind = 'telegram'): Channel | undefined {
+    const r = this.db.prepare(`SELECT * FROM channels WHERE agent_id = ? AND kind = ? LIMIT 1`).get(agentId, kind) as any;
+    return r ? rowToChannel(r) : undefined;
+  }
+
+  /** Every channel the agent has, Telegram first. */
+  listChannelsForAgent(agentId: string): Channel[] {
+    return (this.db.prepare(`SELECT * FROM channels WHERE agent_id = ? ORDER BY CASE kind WHEN 'telegram' THEN 0 ELSE 1 END, created_at`).all(agentId) as any[])
+      .map(rowToChannel);
+  }
+
+  setChannelSettings(agentId: string, kind: ChannelKind, settings: Record<string, unknown>): void {
+    this.db.prepare(`UPDATE channels SET settings = ? WHERE agent_id = ? AND kind = ?`).run(JSON.stringify(settings), agentId, kind);
   }
 
   /**
@@ -1103,21 +1123,28 @@ export class Store {
    * against wiring one bot token into two agents — Telegram delivers each
    * message to exactly one poller, so a double-use flip-flops between them.
    */
-  findAgentUsingAccount(accountId: string): Agent | undefined {
+  findAgentUsingAccount(accountId: string, kind: ChannelKind = 'telegram'): Agent | undefined {
     const row = this.db
       .prepare(
         // Telegram usernames are case-insensitive — match that way so this
         // two-poller guard can't be evaded by a differently-cased accountId
         // (e.g. one read verbatim from a hand-edited OpenClaw config).
         `SELECT a.id FROM channels c JOIN agents a ON a.id = c.agent_id
-         WHERE c.account_id = ? COLLATE NOCASE AND a.state != 'DELETED' LIMIT 1`,
+         WHERE c.account_id = ? COLLATE NOCASE AND c.kind = ? AND a.state != 'DELETED' LIMIT 1`,
       )
-      .get(accountId) as { id: string } | undefined;
+      .get(accountId, kind) as { id: string } | undefined;
     return row ? this.getAgent(row.id) : undefined;
   }
 
-  deleteChannelForAgent(agentId: string): void {
-    this.db.prepare(`DELETE FROM channels WHERE agent_id = ?`).run(agentId);
+  /** Remove the agent's channel of one kind (Telegram by default), or with 'all' every one. */
+  deleteChannelForAgent(agentId: string, kind: ChannelKind | 'all' = 'telegram'): void {
+    if (kind === 'all') {
+      this.db.prepare(`DELETE FROM channels WHERE agent_id = ?`).run(agentId);
+      this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ?`).run(agentId);
+      return;
+    }
+    this.db.prepare(`DELETE FROM channels WHERE agent_id = ? AND kind = ?`).run(agentId, kind);
+    if (kind !== 'telegram') this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ? AND kind = ?`).run(agentId, kind);
   }
 
   // ---- Memberships -------------------------------------------------------
@@ -2784,6 +2811,7 @@ export class Store {
   /** Hard delete — used by import rollback, not by revoke (which tombstones). */
   deleteMemberships(agentId: string): void {
     this.db.prepare(`DELETE FROM memberships WHERE agent_id = ?`).run(agentId);
+    this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ?`).run(agentId);
   }
 
   revokeMembership(agentId: string, userId: string): void {
@@ -2806,6 +2834,7 @@ export class Store {
          WHERE agent_id = ? AND user_id = ?`,
       )
       .run(displayName, new Date().toISOString(), agentId, userId);
+    this.clearMemberIdentities(agentId, userId);
   }
 
   /**
@@ -2900,8 +2929,69 @@ export class Store {
       .run(channelUserId, ownerId, ownerId).changes;
   }
 
+  /**
+   * Bind a member's Slack or Discord identity, with the same rules as the
+   * Telegram binding: never overwrite a different identity already bound to
+   * this member, never take one that belongs to another active member.
+   */
+  bindMemberIdentity(agentId: string, userId: string, kind: Exclude<ChannelKind, 'telegram'>, channelUserId: string): boolean {
+    const holder = this.getMemberByIdentity(agentId, kind, channelUserId);
+    if (holder && holder.userId !== userId) return false;
+    const active = this.db
+      .prepare(`SELECT 1 FROM memberships WHERE agent_id = ? AND user_id = ? AND status = 'active'`)
+      .get(agentId, userId);
+    if (!active) return false;
+    const res = this.db
+      .prepare(
+        `INSERT INTO member_identities (agent_id, user_id, kind, channel_user_id, bound_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(agent_id, user_id, kind) DO UPDATE SET bound_at = bound_at
+         WHERE member_identities.channel_user_id = excluded.channel_user_id`,
+      )
+      .run(agentId, userId, kind, channelUserId, new Date().toISOString());
+    return res.changes > 0;
+  }
+
+  /** The active member bound to this Slack or Discord identity, if any. */
+  getMemberByIdentity(agentId: string, kind: ChannelKind, channelUserId: string): { userId: string; role: string } | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT m.user_id, m.role FROM member_identities i
+           JOIN memberships m ON m.agent_id = i.agent_id AND m.user_id = i.user_id AND m.status = 'active'
+         WHERE i.agent_id = ? AND i.kind = ? AND i.channel_user_id = ?`,
+      )
+      .get(agentId, kind, channelUserId) as { user_id: string; role: string } | undefined;
+    return r ? { userId: r.user_id, role: r.role } : undefined;
+  }
+
+  /** A member's identities on every channel, Telegram included, keyed by kind. */
+  memberIdentities(agentId: string, userId: string): Partial<Record<ChannelKind, string>> {
+    const out: Partial<Record<ChannelKind, string>> = {};
+    const tg = this.db
+      .prepare(`SELECT channel_user_id FROM memberships WHERE agent_id = ? AND user_id = ?`)
+      .get(agentId, userId) as { channel_user_id: string | null } | undefined;
+    if (tg?.channel_user_id) out.telegram = tg.channel_user_id;
+    for (const r of this.db
+      .prepare(`SELECT kind, channel_user_id FROM member_identities WHERE agent_id = ? AND user_id = ?`)
+      .all(agentId, userId) as { kind: ChannelKind; channel_user_id: string }[]) out[r.kind] = r.channel_user_id;
+    return out;
+  }
+
+  /** Forget a member's Slack/Discord identities (re-admission, removal). */
+  clearMemberIdentities(agentId: string, userId: string): void {
+    this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ? AND user_id = ?`).run(agentId, userId);
+  }
+
   /** Active members' channel ids — this is what becomes the bot allowlist. */
-  listAllowedChannelUserIds(agentId: string): string[] {
+  listAllowedChannelUserIds(agentId: string, kind: ChannelKind = 'telegram'): string[] {
+    if (kind !== 'telegram') {
+      return (this.db
+        .prepare(
+          `SELECT i.channel_user_id FROM member_identities i
+             JOIN memberships m ON m.agent_id = i.agent_id AND m.user_id = i.user_id AND m.status = 'active'
+           WHERE i.agent_id = ? AND i.kind = ?`,
+        )
+        .all(agentId, kind) as { channel_user_id: string }[]).map((r) => r.channel_user_id);
+    }
     const rows = this.db
       .prepare(
         `SELECT channel_user_id FROM memberships
@@ -2910,6 +3000,21 @@ export class Store {
       .all(agentId) as { channel_user_id: string }[];
     return rows.map((r) => r.channel_user_id);
   }
+}
+
+function rowToChannel(r: any): Channel {
+  let settings: Record<string, unknown> | undefined;
+  try { settings = r.settings ? JSON.parse(r.settings) : undefined; } catch { settings = undefined; }
+  return {
+    id: r.id,
+    agentId: r.agent_id,
+    kind: r.kind,
+    accountId: r.account_id,
+    secretRef: r.secret_ref,
+    deepLink: r.deep_link,
+    createdAt: r.created_at,
+    ...(settings ? { settings } : {}),
+  };
 }
 
 /** Tokens are compared by hash, never stored in the clear. */

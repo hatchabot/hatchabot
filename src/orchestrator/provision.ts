@@ -7,7 +7,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
-import type { RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
+import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
 import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
@@ -58,7 +58,7 @@ if (!hit) { console.error('Unknown peer "' + peer + '". Available: ' + peers.map
  */
 export const SEARCH_KEY_REF = 'media/brave-api-key';
 import { buildGitSyncScript, buildPublicGitSyncScript, gitSyncReason, isPublicGitUrl } from './gitSource.js';
-import type { Agent, Host } from '../domain/types.js';
+import type { Agent, Channel, Host } from '../domain/types.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -442,6 +442,29 @@ export async function buildRuntimeSpec(
   // allowlist would silently reject their first contact. allowFrom seeds the
   // known members on fresh volumes.
   const allowFrom = store.listAllowedChannelUserIds(agentId);
+  // Slack and Discord: written only when the image carries the plugin. A row
+  // whose plugin is missing (an agent pinned to an older image) is left out of
+  // this build rather than failing it; the Messaging tab says why.
+  const slackRow = store.getChannelForAgent(agentId, 'slack');
+  const discordRow = store.getChannelForAgent(agentId, 'discord');
+  let channelPlugins: string[] = [];
+  try { channelPlugins = (await deps.provider.currentImageInfo(agent.image ?? undefined)).channels ?? []; } catch { /* no image info: no new channels this build */ }
+  const roomsOf = (c: Channel): ChannelRooms => {
+    const r = (c.settings?.rooms ?? {}) as { mode?: string; roomId?: unknown };
+    return r.mode === 'room' && typeof r.roomId === 'string' && r.roomId ? { mode: 'room', roomId: r.roomId } : { mode: 'off' };
+  };
+  let slack: OpenClawConfigPatch['slack'];
+  if (slackRow && channelPlugins.includes('slack')) {
+    const t = JSON.parse(await secrets.get(slackRow.secretRef)) as { botToken: string; appToken: string };
+    slack = { botToken: t.botToken, appToken: t.appToken, allowFrom: store.listAllowedChannelUserIds(agentId, 'slack'), rooms: roomsOf(slackRow) };
+  }
+  let discord: OpenClawConfigPatch['discord'];
+  if (discordRow && channelPlugins.includes('discord')) {
+    discord = {
+      token: await secrets.get(discordRow.secretRef), applicationId: discordRow.accountId,
+      allowFrom: store.listAllowedChannelUserIds(agentId, 'discord'), rooms: roomsOf(discordRow),
+    };
+  }
   // Debug door: each agent's Control UI published on a stable host port
   // behind a per-agent gateway token.
   const gateway = store.ensureGatewayAccess(agentId);
@@ -537,6 +560,9 @@ export async function buildRuntimeSpec(
           richMessages: agent.richMessages !== false,
           proxy: ops?.proxyUrl,
         } : undefined,
+        channelPlugins,
+        slack,
+        discord: discord && { ...discord, ...(ops ? { proxy: ops.proxyUrl } : {}) },
       },
     },
     hostname: containerHostname,

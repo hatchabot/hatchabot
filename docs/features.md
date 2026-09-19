@@ -36,7 +36,9 @@ The header holds:
   group to move it, onto **Archived** to archive it, or onto the strip that
   appears at the bottom to start a new group. On a phone, press and hold,
   then drag; an ordinary swipe still scrolls.
-- **A small blue paper-plane on the icon** means the agent is on Telegram.
+- **A small mark on the icon** shows which messaging apps reach the agent: a
+  blue paper plane for Telegram, a purple hash for Slack, a blurple pad for
+  Discord. With more than one, the first shows with a small **+1**.
 - **Status lives on the icon**: a dashed spinning ring while it rebuilds, red
   with **!** when it failed or its AI source is rate-limited, a dotted blue
   ring when it is waiting on you (a bot token, someone asking to join),
@@ -47,7 +49,8 @@ The header holds:
   settings instead.
 - **Settings are one sheet with tabs**: Overview, Personality, AI,
   Knowledge, Messaging, Sharing, Schedule, Advanced. **Messaging** holds the
-  agent's Telegram bot (add, remove, members, group chats, formatting). The editors live right in those
+  agent's Telegram bot (add, remove, members, group chats, formatting) and its
+  Slack and Discord connections (see *Slack and Discord* below). The editors live right in those
   tabs (the files, the AI source, data and connections, people and Telegram,
   other agents it can ask, scheduled tasks, environment), not one panel
   deeper. Every button from the classic card is in one of them.
@@ -384,6 +387,8 @@ To let someone in, tap **Invite…** on the card:
 - **Invite link** — works once, expires in 48 hours; they join as a member
   (they can chat, not change settings). If the agent's memory is shared, the
   join page tells them so before they accept.
+- **Several apps?** The join page asks which one they'll use (Telegram,
+  Slack or Discord) and gives them that app's link.
 - **Off your network?** Send the agent's Telegram link (or the QR code)
   instead. When they message it, a "wants to talk" card appears on the agent
   and **Let them in** makes them a member.
@@ -392,6 +397,41 @@ Members show on the card (when there's more than one) and always under
 ⚙ Settings → Telegram → **Members** — role, Telegram-link status, Remove,
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 `members`, `kick`.
+
+## Slack and Discord
+
+An agent can also be reached on Slack and on Discord, beside or instead of
+Telegram. Both connect outward from this machine, so nothing here has to be
+reachable from the internet. Each agent gets its own Slack app or Discord bot,
+which you make on that platform and paste into **Messaging → Set up…**. The
+sheet walks through it in three steps; it takes about five minutes.
+
+- **Slack** needs two tokens from one app: the bot token (`xoxb-`) and an
+  app-level token (`xapp-`) with `connections:write`. **Copy app manifest**
+  gives Slack everything else (Socket Mode, scopes, events), named for the
+  agent. A free Slack workspace allows 10 apps.
+- **Discord** needs the bot token, with **Message Content Intent** turned on.
+  After connecting, **Add to a server** puts the bot in one of yours; people
+  can only message it once they share a server with it.
+- Hatchabot checks what you pasted with Slack or Discord before saving it,
+  and says in plain words what is wrong (a token in the wrong box, a missing
+  scope, the intent turned off). Tokens are stored like every other secret and
+  never shown to an AI.
+- **People**: your first direct message links you, as with Telegram. Others
+  join with an invite link, where they choose the app they'll use, or by
+  messaging the bot and being let in from the "wants to talk" card, which now
+  says which app they came from. Removing a member takes them off every app.
+- **Group chats** are off by default. You can let it answer in one Slack
+  channel or one Discord server, by its ID; there it answers members only,
+  and only when @mentioned.
+- **Needs a base image that includes them.** Images built from v1.31.0 carry
+  both plugins (label `org.hatchabot.channels`); an agent on an older image
+  shows "its base image can't do Slack yet".
+- The Hatchabot agent can take an agent off Slack or Discord
+  (`remove_channel`), but connecting one is app-only, because it takes tokens.
+  Slack and Discord are not offered for the Hatchabot agent itself yet.
+
+Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
 ## Fleet operations
 

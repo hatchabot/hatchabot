@@ -346,7 +346,7 @@ export interface DerivedImage {
   builtAt: string | null;
 }
 
-export type ChannelKind = 'telegram';
+export type ChannelKind = 'telegram' | 'slack' | 'discord';
 
 export interface Channel {
   id: string;
@@ -359,6 +359,8 @@ export interface Channel {
   /** Deep link handed to the user once the agent is live. */
   deepLink: string;
   createdAt: string;
+  /** Per-channel settings (room access, team/server name). Slack and Discord only so far. */
+  settings?: Record<string, unknown>;
 }
 
 export type MemberRole = 'owner' | 'admin' | 'user';

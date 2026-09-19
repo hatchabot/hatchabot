@@ -10,7 +10,7 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { ProviderError } from './provider.js';
+import { ProviderError, parseChannelsLabel } from './provider.js';
 import { batchConfigCommands, buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
 const execFileP = promisify(execFile);
@@ -445,12 +445,12 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion] = res.stdout.trim().split('|');
-    return { imageId, openclawVersion: openclawVersion || undefined };
+    const [imageId, openclawVersion, channels] = res.stdout.trim().split('|');
+    return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels) };
   }
 
   #daemonId?: string;
@@ -468,34 +468,41 @@ export class LocalDockerProvider implements RuntimeProvider {
     return (this.#daemonId = id);
   }
 
-  async currentImageInfo(): Promise<RuntimeInfo> {
+  async currentImageInfo(image?: string): Promise<RuntimeInfo> {
     const res = await this.#docker([
       'image',
       'inspect',
       '-f',
-      `{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}`,
-      this.image,
+      `{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}`,
+      image ?? this.image,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion] = res.stdout.trim().split('|');
-    return { imageId, openclawVersion: openclawVersion || undefined };
+    const [imageId, openclawVersion, channels] = res.stdout.trim().split('|');
+    return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels) };
   }
 
-  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[]> {
+  async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[] }[]> {
     const repo = this.image.replace(/:[^:]*$/, '');
     const res = await this.#docker(['images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.CreatedAt}}|{{.Size}}', repo]);
     if (res.code !== 0) return [];
-    const tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = res.stdout.split('\n').filter(Boolean).map((l) => {
+    const tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[] }[] = res.stdout.split('\n').filter(Boolean).map((l) => {
       const [tag, imageId, createdAt, size] = l.split('|');
       return { tag: tag!, imageId: imageId!, createdAt: createdAt?.slice(0, 19), size };
     }).filter((t) => !t.tag.endsWith(':<none>'));
     // What's inside: the OpenClaw version label, one inspect for all distinct ids.
     const ids = [...new Set(tags.map((t) => t.imageId))];
     if (ids.length) {
-      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}', ...ids]);
+      const ins = await this.#docker(['image', 'inspect', '--format', '{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}', ...ids]);
       const ver = new Map<string, string>();
-      for (const l of ins.stdout.split('\n')) { const [id, v] = l.split('|'); if (id && v) ver.set(id.replace(/^sha256:/, '').slice(0, 12), v); }
-      for (const t of tags) t.openclawVersion = ver.get(t.imageId);
+      const chans = new Map<string, string[]>();
+      for (const l of ins.stdout.split('\n')) {
+        const [id, v, c] = l.split('|');
+        if (!id) continue;
+        const key = id.replace(/^sha256:/, '').slice(0, 12);
+        if (v) ver.set(key, v);
+        chans.set(key, parseChannelsLabel(c));
+      }
+      for (const t of tags) { t.openclawVersion = ver.get(t.imageId); t.channels = chans.get(t.imageId); }
     }
     return tags;
   }

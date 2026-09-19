@@ -84,7 +84,7 @@ export const SYSTEM_PROMPT = [
   '- Everyday operations: archive_agent/restore_agent/clone_agent/rename_agent, set_group,',
   '  set_source (switches AI source and rebuilds), set_class, pin_image (derived image or candidate),',
   '  scheduled tasks (list_crons/add_cron/set_cron_enabled/run_cron/remove_cron), who may ask whom',
-  '  (list_peers/set_peers), Telegram (add_telegram from the pool, remove_telegram, create_invite),',
+  '  (list_peers/set_peers), Telegram (add_telegram from the pool, remove_telegram, create_invite), Slack and Discord (remove_channel; connecting needs tokens, so the owner does it in the Messaging tab),',
   '  memory (checkpoint_memory, snapshot_agent/list_snapshots/restore_snapshot), run_backup,',
   '  list_sources for AI usage and rate limits. Chain steps in one turn when a job needs several.',
   '- Left to the app on purpose; say so and point there: anything involving a secret (AI keys,',

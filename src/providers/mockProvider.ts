@@ -128,8 +128,10 @@ export class MockProvider implements RuntimeProvider {
     return { imageId: 'mock-image', openclawVersion: 'mock' };
   }
 
-  async currentImageInfo(): Promise<RuntimeInfo> {
-    return { imageId: 'mock-image', openclawVersion: 'mock' };
+  /** What the mock image claims to carry; tests narrow it to check the "image lacks it" path. */
+  imageChannels: string[] = ['slack', 'discord'];
+  async currentImageInfo(_image?: string): Promise<RuntimeInfo> {
+    return { imageId: 'mock-image', openclawVersion: 'mock', channels: this.imageChannels };
   }
 
   tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];

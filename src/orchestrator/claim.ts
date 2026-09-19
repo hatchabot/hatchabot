@@ -1,3 +1,4 @@
+import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 
@@ -39,6 +40,8 @@ export interface ClaimOptions {
   /** Membership (hatchabot user id) the next pairing request binds to —
    *  the owner on first provision, an invitee after a join (§12.3). */
   forUserId: string;
+  /** Which channel to watch. Telegram when absent. */
+  kind?: ChannelKind;
   /** How long to keep watching for the owner's first message. */
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -46,6 +49,8 @@ export interface ClaimOptions {
 
 /** Where OpenClaw keeps pending Telegram pairing requests, on the volume. */
 export const PAIRING_STORE = '/home/node/.openclaw/credentials/telegram-pairing.json';
+/** The same store for any channel: OpenClaw names it `<channel>-pairing.json`. */
+export const pairingStorePath = (kind: ChannelKind = 'telegram') => `/home/node/.openclaw/credentials/${kind}-pairing.json`;
 
 /**
  * Read pending pairing requests by reading the store FILE, not by running
@@ -65,8 +70,9 @@ export async function listPairingRequests(
   provider: RuntimeProvider,
   runtimeRef: string,
   accountId: string,
+  kind: ChannelKind = 'telegram',
 ): Promise<PairingRequest[]> {
-  const res = await provider.execShell(runtimeRef, `cat ${JSON.stringify(PAIRING_STORE)} 2>/dev/null || true`);
+  const res = await provider.execShell(runtimeRef, `cat ${JSON.stringify(pairingStorePath(kind))} 2>/dev/null || true`);
   if (res.code !== 0 || !res.stdout.trim()) return [];
   // The file holds every account's requests for this agent; the CLI filtered by
   // --account, so keep that behaviour where the entry says which one it is.
@@ -80,11 +86,12 @@ export async function approvePairing(
   runtimeRef: string,
   accountId: string,
   code: string,
+  kind: ChannelKind = 'telegram',
 ): Promise<boolean> {
   const res = await provider.exec(runtimeRef, [
     'pairing',
     'approve',
-    'telegram',
+    kind,
     code,
     '--account',
     accountId,
@@ -121,23 +128,30 @@ export async function claimFirstContact(
     }
     // The membership we're binding for was already claimed (e.g. by an earlier
     // window, or pair-once seeded it) — nothing left to do.
-    const target = deps.store.getMembership(opts.agentId, opts.forUserId);
-    if (target?.channelUserId) return target.channelUserId;
+    const kind = opts.kind ?? 'telegram';
+    const bound = kind === 'telegram'
+      ? deps.store.getMembership(opts.agentId, opts.forUserId)?.channelUserId
+      : deps.store.memberIdentities(opts.agentId, opts.forUserId)[kind];
+    if (bound) return bound;
 
     if (agent.state === 'RUNNING') {
-      const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId);
+      const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId, kind);
       // Skip requests whose sender already belongs to another membership on
       // this agent: a concurrent window may have just bound them, and binding
       // that id here would swap two people's identities.
-      const claimable = requests.filter(
-        (r) => !deps.store.getActiveMembershipByChannelUser(opts.agentId, r.id),
-      );
+      const claimable = requests.filter((r) => (kind === 'telegram'
+        ? !deps.store.getActiveMembershipByChannelUser(opts.agentId, r.id)
+        : !deps.store.getMemberByIdentity(opts.agentId, kind, r.id)));
       const first = claimable[0];
       if (first) {
-        const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code);
-        if (ok && deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id)) {
+        const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code, kind);
+        const didBind = ok && (kind === 'telegram'
+          ? deps.store.bindMembershipChannelUser(opts.agentId, opts.forUserId, first.id)
+          : deps.store.bindMemberIdentity(opts.agentId, opts.forUserId, kind, first.id));
+        if (didBind) {
           log('claim.bound', {
             agentId: opts.agentId,
+            kind,
             channelUserId: first.id,
             username: first.meta?.username,
           });

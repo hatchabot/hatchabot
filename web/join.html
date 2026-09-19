@@ -32,17 +32,25 @@
   .err { color: var(--bad); font-size: 14px; margin-top: 10px; min-height: 1em; }
   .steps { font-size: 14.5px; color: var(--dim); padding-left: 18px; }
   .steps li { margin: 6px 0; }
+  .ways { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .way { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; margin: 0; }
+  .way input { width: auto; margin: 0; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Agent<b>Claw</b></h1>
+  <h1>Hatcha<b>bot</b></h1>
   <div class="card" id="card"><div style="color:var(--dim)">Checking your invite…</div></div>
 </div>
 <script>
 const code = location.pathname.split('/').pop();
 const card = document.getElementById('card');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const LABEL = { telegram: 'Telegram', slack: 'Slack', discord: 'Discord' };
+let ways = [];
+const whereText = (w) => w.kind === 'slack' && w.team ? ` <span style="color:var(--dim)">in ${esc(w.team)}</span>`
+  : w.kind === 'discord' && w.servers?.length ? ` <span style="color:var(--dim)">in ${esc(w.servers.join(', '))}</span>` : '';
 
 async function init() {
   const info = await fetch(`/v1/invites/${encodeURIComponent(code)}`).then(r => r.json()).catch(() => null);
@@ -52,6 +60,7 @@ async function init() {
     card.innerHTML = `<div class="agent">Hmm.</div><div class="notice">${why} Ask the person who sent it for a new one.</div>`;
     return;
   }
+  ways = Array.isArray(info.channels) && info.channels.length ? info.channels : [{ kind: 'telegram' }];
   card.innerHTML = `
     <div style="color:var(--dim);font-size:14px">You've been invited to</div>
     <div class="agent">${esc(info.agentName)}</div>
@@ -61,9 +70,16 @@ async function init() {
     </div>` : ''}
     <label>Your name (so others know who's here)</label>
     <input id="name" maxlength="64" placeholder="e.g. Sam">
+    ${ways.length > 1 ? `<label>Which app will you use?</label>
+      <div class="ways" role="radiogroup">${ways.map((w, i) => `
+        <label class="way"><input type="radio" name="way" value="${esc(w.kind)}"${i === 0 ? ' checked' : ''}>
+          <span><b>${LABEL[w.kind] || esc(w.kind)}</b>${whereText(w)}</span></label>`).join('')}</div>` : ''}
     <div id="gsi" style="display:flex;justify-content:center;margin:12px 0"></div>
-    <button id="joinBtn">Join with Telegram only</button>
+    <button id="joinBtn">Join with ${LABEL[ways[0]?.kind] || 'Telegram'} only</button>
     <div class="err" id="err"></div>`;
+  document.querySelectorAll('input[name=way]').forEach((r) => r.addEventListener('change', () => {
+    document.getElementById('joinBtn').textContent = `Join with ${LABEL[r.value] || r.value} only`;
+  }));
   document.getElementById('joinBtn').onclick = () => join();
   setupSignIn();
 }
@@ -106,14 +122,30 @@ async function setupSignIn() {
 
 async function join(idToken) {
   const btn = document.getElementById('joinBtn');
+  const chosen = document.querySelector('input[name=way]:checked')?.value || ways[0]?.kind || 'telegram';
   btn.disabled = true;
   try {
     const res = await fetch('/v1/join', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ code, name: document.getElementById('name').value, idToken }),
+      body: JSON.stringify({ code, name: document.getElementById('name').value, idToken, channel: chosen }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
+    if (chosen !== 'telegram') {
+      const label = LABEL[chosen] || chosen;
+      const w = ways.find((x) => x.kind === chosen) || {};
+      card.innerHTML = `
+      <div class="agent">You're in 🎉</div>
+      <ol class="steps">
+        ${chosen === 'slack' ? `<li>You need to be in the <b>${esc(w.team || 'same')}</b> Slack workspace.</li>`
+          : `<li>You need to share a server with it${w.servers?.length ? `: join <b>${esc(w.servers.join(', '))}</b> first if you haven't` : ''}.</li>`}
+        <li>Open <b>${esc(data.agentName)}</b> in ${label} below and send it a direct message — that links you to the agent.</li>
+        <li>Give it a few seconds, then just chat.</li>
+      </ol>
+      ${data.deepLink ? `<a class="btn" href="${esc(data.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>`
+        : `<div class="notice">The agent isn't running right now — ask the owner to start it, then message it.</div>`}`;
+      return;
+    }
     card.innerHTML = `
       <div class="agent">You're in 🎉</div>
       <ol class="steps">

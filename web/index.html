@@ -545,6 +545,26 @@
   .v2sbar .v2unread { width:12px; height:12px; left:-4px; top:-4px; border-width:2px }
   .v2sbar .v2tg { width:16px; height:16px; right:-5px; bottom:-5px }
   .v2sbar .v2tg svg { width:9px; height:9px }
+  /* The same corner mark for Slack and Discord; "+1" when it has more than one app. */
+  .v2tg.v2mk-slack { background:#4a154b }
+  .v2tg.v2mk-discord { background:#5865f2 }
+  .v2mkn { position:absolute; right:-10px; bottom:12px; min-width:15px; height:15px; border-radius:8px; padding:0 3px; z-index:2;
+           background:var(--panel-2); color:var(--text); border:1.5px solid var(--bg); font-size:9.5px; font-weight:800;
+           display:grid; place-items:center; line-height:1 }
+  .v2sbar .v2mkn { display:none }
+  .v2chan { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; display:flex; flex-direction:column; gap:8px }
+  .v2chan-h { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
+  .v2chan-h b { font-size:15px }
+  .v2chan-mark { width:26px; height:26px; border-radius:8px; display:grid; place-items:center; flex:none }
+  .v2chan-warn { color:var(--warn); font-size:13px; margin:0; padding-left:18px }
+  .v2chan-rooms { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  .v2chan-rooms input { width:auto; flex:1; min-width:180px }
+  .v2steps { margin:6px 0 12px; padding-left:20px; line-height:1.55 }
+  .v2steps li { margin:4px 0 }
+  .v2wait { display:flex; align-items:center; gap:8px; color:var(--dim); font-size:14px }
+  .v2wait .spinner { width:14px; height:14px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:v2spin 0.9s linear infinite; flex:none }
+  @keyframes v2spin { to { transform:rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .v2wait .spinner { animation:none } }
   .v2b-shared { right:auto; left:-8px; top:auto; bottom:-8px; background:var(--panel-2); color:var(--text); font-size:11px }
   @keyframes v2spin { to { transform:rotate(360deg) } }
   @keyframes v2nudge { 0%,100% { transform:none } 50% { transform:translateY(-3px) } }
@@ -750,6 +770,17 @@
   <div class="v2sbar" id="v2AgentBar"></div>
   <div class="v2tabs" role="tablist" id="v2Tabs"></div>
   <div class="v2pane" id="v2Pane"></div>
+</dialog>
+
+<dialog id="chanDlg" style="width:min(560px,94vw)">
+  <h3 style="margin:0 0 8px" id="chanTitle">Connect</h3>
+  <div id="chanBody"></div>
+  <div class="err" id="chanErr"></div>
+  <div class="actions">
+    <span class="spacer" style="flex:1"></span>
+    <button onclick="chanDlg.close()" id="chanClose">Cancel</button>
+    <button class="primary" id="chanGo" onclick="chanConnect(this)">Connect</button>
+  </div>
 </dialog>
 
 <dialog id="v2IconDlg" style="width:min(460px,94vw)">
@@ -5196,15 +5227,20 @@ function agentNotices(a) {
           ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
         </div>`).join('')}
       ${pending ? tokenForm(a) : ''}
-      ${pairs.map(p => `
+      ${pairs.map(p => {
+        const kind = p.kind || 'telegram', tg = kind === 'telegram';
+        // Slack and Discord have no account-level link, so "That's me" is always offered there.
+        const selfBtn = !tg || !myAccount.telegramUserId;
+        return `
         <div class="pair">
-          <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent</span>
-          <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
+          <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent${tg ? '' : ` on ${V2_CHAN_LABEL[kind] || kind}`}</span>
+          <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}','${kind}')"
                   title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
-          ${!myAccount.telegramUserId ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true)"
-                  title="This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.">That's me — link</button>` : ''}
-          <button class="${myAccount.telegramUserId ? 'primary' : ''}" onclick="approve('${a.id}','${jsq(p.code)}')">Let them in</button>
-        </div>`).join('')}
+          ${selfBtn ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true,'${kind}')"
+                  title="${tg ? 'This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.' : `This is you on ${V2_CHAN_LABEL[kind] || kind}: link it to you on this agent.`}">That's me — link</button>` : ''}
+          <button class="${selfBtn ? '' : 'primary'}" onclick="approve('${a.id}','${jsq(p.code)}', false,'${kind}')">Let them in</button>
+        </div>`;
+      }).join('')}
       ${(members[a.id] ?? []).length > 1 ? `
         <div class="members">👥 ${(members[a.id] ?? []).map(m => {
           const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 8))}</span>`;
@@ -7518,10 +7554,12 @@ async function toggleSharedFromEdit() {
   }
 }
 
-async function approve(id, code, asSelf) {
+async function approve(id, code, asSelf, kind = 'telegram') {
   try {
-    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code, ...(asSelf ? { asSelf: true } : {}) } });
-    if (asSelf) {
+    const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code, kind, ...(asSelf ? { asSelf: true } : {}) } });
+    if (asSelf && kind !== 'telegram') {
+      toast(`Linked — that ${V2_CHAN_LABEL[kind] || kind} account is you on this agent.`, 6000);
+    } else if (asSelf) {
       toast('Linked — this Telegram is you now. Every agent you make admits you automatically.', 8000);
       loadMyAccount(); // the card + Settings reflect the link immediately
     } else {
@@ -7556,11 +7594,11 @@ async function unlinkTelegram() {
   } catch (e) { toast(e.message); }
 }
 
-async function denyPair(id, code, who) {
+async function denyPair(id, code, who, kind = 'telegram') {
   // "Not now", not a ban — say so, so nobody assumes this blocks them for good.
   if (!confirm(`Turn away ${who}'s request to talk to this agent?\n\nThey are not blocked — they can ask again by messaging the bot.`)) return;
   try {
-    const r = await api(`/v1/agents/${id}/pairing/deny`, { method: 'POST', body: { code } });
+    const r = await api(`/v1/agents/${id}/pairing/deny`, { method: 'POST', body: { code, kind } });
     toast(r.denied ? `${who}'s request was turned away` : 'That request is no longer pending');
     pairTick = 0; // refetch pairing on the next poll so the card/badge clears
     await refresh(false);
@@ -8787,6 +8825,23 @@ function v2Status(a) {
   return { ...st, why };
 }
 
+const V2_MARK_SVG = {
+  telegram: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg>',
+  slack: '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"><path d="M9 3 7 21M17 3l-2 18M4 8.5h17M3 15.5h17"/></svg>',
+  discord: '<svg viewBox="0 0 24 24" width="12" height="12" fill="#fff"><path d="M19.5 5.5A16 16 0 0 0 15.6 4l-.5 1a14 14 0 0 0-6.2 0l-.5-1a16 16 0 0 0-3.9 1.5C2 9.4 1.3 13.2 1.6 17a16 16 0 0 0 4.8 2.4l1-1.6a10 10 0 0 1-1.6-.8l.4-.3a11.5 11.5 0 0 0 11.6 0l.4.3-1.6.8 1 1.6a16 16 0 0 0 4.8-2.4c.4-4.4-.6-8.2-2.9-11.5ZM8.7 14.8c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Zm6.6 0c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Z"/></svg>',
+};
+const V2_CHAN_LABEL = { telegram: 'Telegram', slack: 'Slack', discord: 'Discord' };
+/** Every messaging app that reaches this agent, Telegram first. */
+function v2ChannelKinds(a) {
+  return [...(a.botUsername ? ['telegram'] : []), ...(a.otherChannels ?? []).map(c => c.kind).filter(k => V2_MARK_SVG[k])];
+}
+function v2Marks(a) {
+  const kinds = v2ChannelKinds(a);
+  if (!kinds.length) return '';
+  return `<span class="v2tg v2mk-${kinds[0]}" aria-hidden="true">${V2_MARK_SVG[kinds[0]]}</span>`
+    + (kinds.length > 1 ? `<span class="v2mkn" aria-hidden="true">+${kinds.length - 1}</span>` : '');
+}
+
 // Never flag the console you are looking at.
 const v2Unread = (a) => !!a.unread && !($('consoleDlg')?.open && consoleAgentId === a.id);
 function v2IconHTML(a, st) {
@@ -8796,8 +8851,9 @@ function v2IconHTML(a, st) {
     + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
     + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
     + (v2Unread(a) ? '<span class="v2unread" title="New messages in its console" aria-hidden="true"></span>' : '')
-    // A small paper-plane mark: this agent is reachable on Telegram.
-    + (a.botUsername ? `<span class="v2tg" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/></svg></span>` : '')
+    // A small corner mark: which messaging apps reach this agent (the first,
+    // then "+N" for the rest). Telegram's paper plane, Slack's hash, Discord's pad.
+    + v2Marks(a)
     + '</span>';
 }
 
@@ -9091,6 +9147,7 @@ function v2RenderSheet() {
   $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
   if (v2Mine(a)) v2EmbedPanes(a, v2Tab);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
+  if ($('v2Chans')) void v2LoadChans(a.id);
 }
 
 function v2MemberPane(a) {
@@ -9129,9 +9186,9 @@ function v2Pane(a, tab) {
       ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
           <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
-      ${a.state !== 'ARCHIVED' ? row('Messaging', a.botUsername
-        ? `<span>Telegram · @${esc(a.botUsername)}</span>${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open</a>` : ''}${B('Manage…', goto('messaging'))}`
-        : `<span>None — you talk to it here.</span>${B('Add Telegram…', goto('messaging'))}`) : ''}
+      ${a.state !== 'ARCHIVED' ? row('Messaging', v2ChannelKinds(a).length
+        ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open Telegram</a>` : ''}${B('Manage…', goto('messaging'))}`
+        : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
       ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
         <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}`;
@@ -9158,16 +9215,17 @@ function v2Pane(a, tab) {
              </div>`
           : '<span class="sub">No Telegram bot.</span>') : ''}
       ${a.botUsername ? slot('paneEditTg') : ''}
-      <div class="sub" style="margin-top:6px">Telegram is the only messaging app wired up so far.</div>`;
+      <h4 class="v2sec">Slack and Discord</h4>
+      <div id="v2Chans" data-agent="${esc(a.id)}"><div class="sub">Loading…</div></div>`;
     case 'knowledge': return `
       ${slot('paneEditData')}
       ${slot('paneEditConn')}
       ${built ? `<h4 class="v2sec">Chat history</h4>${row('Every conversation', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">As a file.</span>`)}` : ''}`;
     case 'sharing': {
       return `
-      ${row('People', a.botUsername
+      ${row('People', v2ChannelKinds(a).length
         ? `<span>${(members[a.id] ?? []).filter(m => m.role !== 'owner').length || 'No'} other ${((members[a.id] ?? []).filter(m => m.role !== 'owner').length === 1) ? 'person' : 'people'}</span>${run ? B('Invite…', `invite('${id}','${n}')`) : ''}${B('Who can talk to it', goto('messaging'))}`
-        : `<span>Only you.</span>${B('Add Telegram…', goto('messaging'))}<span class="sub">Other people reach an agent through a messaging app.</span>`)}
+        : `<span>Only you.</span>${B('Add an app…', goto('messaging'))}<span class="sub">Other people reach an agent through a messaging app.</span>`)}
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
@@ -9214,6 +9272,171 @@ async function v2RemoveTelegram(id, name, bot) {
   try {
     await api(`/v1/agents/${id}/telegram`, { method: 'DELETE' });
     toast(`@${bot} is back in your pool.`, 6000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); }
+}
+
+// ---- Slack and Discord (docs/channels-slack-discord-design.md) ------------------------
+const chanDlg = $('chanDlg');
+let chanFor = null, chanKind = null, chanWatch = null, chanFields = null;
+
+async function v2LoadChans(id) {
+  const box = $('v2Chans'); if (!box || box.dataset.agent !== id) return;
+  let r;
+  try { r = await api(`/v1/agents/${id}/channels`); }
+  catch (e) { box.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
+  if (!$('v2Chans') || $('v2Chans').dataset.agent !== id) return; // the sheet moved on meanwhile
+  const a = v2Find(id); if (!a) return;
+  const canChange = a.state === 'RUNNING' || a.state === 'STOPPED';
+  const card = (kind) => {
+    const c = r.channels.find(x => x.kind === kind);
+    const mark = `<span class="v2chan-mark v2mk-${kind}" style="background:${kind === 'slack' ? '#4a154b' : '#5865f2'}">${V2_MARK_SVG[kind]}</span>`;
+    const label = V2_CHAN_LABEL[kind];
+    if (!c) {
+      const can = r.imageSupports.includes(kind);
+      return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b>
+        ${can && canChange ? `<button onclick="openChanSetup('${jsq(id)}','${kind}')">Set up…</button>` : ''}</div>
+        <div class="sub">${can
+          ? (kind === 'slack' ? 'Talk to it in your Slack workspace. You make a small Slack app for it; this takes about five minutes.'
+                              : 'Talk to it on Discord. You make a bot for it on Discord; this takes about five minutes.')
+          : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Base images), then Rebuild.`}</div></div>`;
+    }
+    const rooms = c.rooms || { mode: 'off' };
+    const roomHelp = kind === 'slack'
+      ? 'The channel ID starts with C: open the channel, click its name, and it is at the bottom. Invite the app to that channel too.'
+      : 'The server ID is a long number: turn on Developer Mode (User Settings → Advanced), then right-click the server → Copy Server ID.';
+    return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b><span>${esc(c.displayName || '')}</span></div>
+      <div class="sub">${c.youAreLinked ? '✓ Linked to you.' : `Not linked to you yet: send it a direct message on ${label} and your first message links you.`}</div>
+      ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+      <div class="v2chan-h">
+        ${c.deepLink ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
+        ${c.addToServerUrl ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
+        ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Remove…</button>` : ''}
+      </div>
+      <div class="v2chan-rooms">
+        <label for="chanRoom-${kind}" style="margin:0">Group chats</label>
+        <select id="chanRoomMode-${kind}" style="width:auto" onchange="$('chanRoom-${kind}').hidden = this.value !== 'room'">
+          <option value="off"${rooms.mode !== 'room' ? ' selected' : ''}>Off: direct messages only</option>
+          <option value="room"${rooms.mode === 'room' ? ' selected' : ''}>One ${kind === 'slack' ? 'channel' : 'server'}</option>
+        </select>
+        <input type="text" id="chanRoom-${kind}" placeholder="${kind === 'slack' ? 'C0123ABCD' : '123456789012345678'}" value="${esc(rooms.roomId || '')}"${rooms.mode === 'room' ? '' : ' hidden'} autocomplete="off">
+        ${canChange ? `<button onclick="chanSaveRooms('${jsq(id)}','${kind}', this)">Save</button>` : ''}
+        <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
+      </div></div>`;
+  };
+  box.innerHTML = card('slack') + card('discord');
+}
+
+async function openChanSetup(id, kind) {
+  const a = v2Find(id); if (!a) return;
+  chanFor = id; chanKind = kind;
+  if (!chanFields) { try { chanFields = await api('/v1/channels/connectors'); } catch { chanFields = []; } }
+  const fields = (chanFields.find(c => c.kind === kind)?.fields) ?? [];
+  $('chanTitle').textContent = `Connect ${a.name} to ${V2_CHAN_LABEL[kind]}`;
+  $('chanErr').textContent = '';
+  $('chanGo').hidden = false; $('chanGo').disabled = false; $('chanGo').textContent = 'Connect';
+  $('chanClose').textContent = 'Cancel';
+  const steps = kind === 'slack' ? `
+    <ol class="v2steps">
+      <li><b>Create the app.</b> <button type="button" onclick="chanCopyManifest(this)">Copy app manifest</button>
+        <a class="btn" href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noopener">Open Slack</a><br>
+        Choose <i>From a manifest</i>, pick your workspace, paste, then <i>Create</i>.</li>
+      <li><b>Install it.</b> On <i>Install App</i>, press <i>Install to Workspace</i> and allow it. Copy the <i>Bot User OAuth Token</i> (starts with <code>xoxb-</code>).</li>
+      <li><b>Make its connection token.</b> On <i>Basic Information</i> → <i>App-Level Tokens</i>, press <i>Generate Token and Scopes</i>, add <code>connections:write</code>, and copy it (starts with <code>xapp-</code>).</li>
+    </ol>` : `
+    <ol class="v2steps">
+      <li><b>Create the bot.</b> <a class="btn" href="https://discord.com/developers/applications" target="_blank" rel="noopener">Open Discord developer portal</a><br>
+        Press <i>New Application</i> and name it <b>${esc(a.name)}</b>.</li>
+      <li><b>Let it read messages.</b> On <i>Bot</i>, under <i>Privileged Gateway Intents</i>, turn on <i>Message Content Intent</i> and save.</li>
+      <li><b>Copy its token.</b> Same page: press <i>Reset Token</i> and copy it. After you connect, you'll add the bot to a server of yours.</li>
+    </ol>`;
+  $('chanBody').innerHTML = steps + fields.map(f => `
+    <label for="chanF-${esc(f.key)}">${esc(f.label)}</label>
+    <input type="password" id="chanF-${esc(f.key)}" data-key="${esc(f.key)}" data-pattern="${esc(f.pattern)}" autocomplete="off" spellcheck="false"
+      oninput="chanCheckField(this)">
+    <div class="sub" id="chanH-${esc(f.key)}">${esc(f.help)}</div>`).join('') +
+    `<div class="sub" style="margin-top:10px">The tokens are stored with this agent's other secrets and never shown to an AI. Connecting restarts the agent; it keeps its memory.</div>`;
+  chanDlg.showModal();
+  chanDlg.querySelector('input')?.focus();
+}
+function chanCheckField(el) {
+  const ok = !el.value.trim() || new RegExp(el.dataset.pattern).test(el.value.trim());
+  el.setAttribute('aria-invalid', ok ? 'false' : 'true');
+  el.style.borderColor = ok ? '' : 'var(--bad)';
+}
+async function chanCopyManifest(btn) {
+  const a = v2Find(chanFor); if (!a) return;
+  try {
+    const m = await api(`/v1/channels/slack/manifest?name=${encodeURIComponent(a.name)}`);
+    const text = JSON.stringify(m, null, 2);
+    try { await navigator.clipboard.writeText(text); btn.textContent = '✓ Copied'; }
+    catch {
+      // No clipboard (plain http off this machine): show it to copy by hand.
+      btn.insertAdjacentHTML('afterend', `<textarea readonly rows="8" style="width:100%;margin-top:6px;font-family:ui-monospace,monospace;font-size:12px">${esc(text)}</textarea>`);
+      btn.remove();
+    }
+  } catch (e) { toast(e.message); }
+}
+async function chanConnect(btn) {
+  const body = {};
+  for (const el of chanDlg.querySelectorAll('input[data-key]')) body[el.dataset.key] = el.value.trim();
+  if (Object.values(body).some(v => !v)) { $('chanErr').textContent = 'Fill in every box first.'; return; }
+  btn.disabled = true; btn.textContent = 'Checking…'; $('chanErr').textContent = '';
+  try {
+    const c = await api(`/v1/agents/${chanFor}/channels/${chanKind}`, { method: 'POST', body });
+    chanShowConnected(c);
+    await refresh(false);
+  } catch (e) {
+    $('chanErr').textContent = e.message;
+    btn.disabled = false; btn.textContent = 'Connect';
+  }
+}
+function chanShowConnected(c) {
+  const label = V2_CHAN_LABEL[chanKind];
+  $('chanTitle').textContent = `Connected to ${label}`;
+  $('chanGo').hidden = true;
+  $('chanClose').textContent = 'Done';
+  $('chanBody').innerHTML = `
+    <p>It is <b>${esc(c.displayName || label)}</b>. It restarts now to pick this up (its memory is kept).</p>
+    ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+    <ol class="v2steps">
+      ${c.addToServerUrl ? `<li><a class="btn primary" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add it to your server</a>. People can only message it once they share a server with it.</li>` : ''}
+      <li><a class="btn${c.addToServerUrl ? '' : ' primary'}" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open ${label}</a> and send it a direct message. Your first message links you to it.</li>
+    </ol>
+    <div class="v2wait" id="chanWait"><span class="spinner" aria-hidden="true"></span> Waiting for your first message…</div>`;
+  clearInterval(chanWatch);
+  const id = chanFor, kind = chanKind;
+  chanWatch = setInterval(async () => {
+    if (!chanDlg.open) return clearInterval(chanWatch);
+    try {
+      const r = await api(`/v1/agents/${id}/channels`);
+      if (r.channels.find(x => x.kind === kind)?.youAreLinked) {
+        clearInterval(chanWatch);
+        $('chanWait').innerHTML = `✓ Linked. It answers you on ${label} now.`;
+        if ($('v2Chans')) void v2LoadChans(id);
+      }
+    } catch { /* keep waiting */ }
+  }, 4000);
+}
+chanDlg.addEventListener('close', () => { clearInterval(chanWatch); chanDlg.querySelectorAll('input').forEach(i => { i.value = ''; }); });
+
+async function chanSaveRooms(id, kind, btn) {
+  const mode = $(`chanRoomMode-${kind}`).value;
+  const roomId = $(`chanRoom-${kind}`).value.trim();
+  btn.disabled = true;
+  try {
+    await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
+    toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : 'Saved: direct messages only. It restarts to apply this.', 6000);
+    await refresh(false);
+  } catch (e) { toast(e.message, 8000); }
+  finally { btn.disabled = false; }
+}
+async function chanRemove(id, kind) {
+  const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
+  if (!confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The ${label} app stays yours; delete it on ${label} if you no longer want it. It restarts to apply this.`)) return;
+  try {
+    await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
+    toast(`${label} removed.`, 5000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }

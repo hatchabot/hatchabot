@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import { approvePairing, listPairingRequests } from './claim.js';
+import { approvePairing, listPairingRequests, pairingStorePath } from './claim.js';
+import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
 
 /**
  * Revoke = flip status + drop the member from the bot's allowlist immediately
@@ -44,6 +46,8 @@ export interface AdmitOptions {
   accountId: string;
   /** OpenClaw pairing code of the pending request being admitted. */
   code: string;
+  /** Which channel the request came in on. Telegram when absent. */
+  kind?: ChannelKind;
   agentName: string;
   sharedMemory: boolean;
   /**
@@ -72,6 +76,8 @@ export interface AdmitResult {
  * shown before joining, is delivered as the bot's first message instead.
  */
 export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise<AdmitResult> {
+  const kind = opts.kind ?? 'telegram';
+  if (kind !== 'telegram') return admitOtherChannel(deps, { ...opts, kind });
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
 
@@ -168,6 +174,63 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
 }
 
 /**
+ * admitMember for Slack and Discord. Same shape as Telegram's, with the
+ * identity kept in member_identities. There is no account-level link for
+ * these yet, so the owner is recognised only by "That's me".
+ */
+async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: Exclude<ChannelKind, 'telegram'> }): Promise<AdmitResult> {
+  const { store, provider } = deps;
+  const log = deps.log ?? (() => {});
+  const { kind } = opts;
+
+  const requests = await listPairingRequests(provider, opts.runtimeRef, opts.accountId, kind);
+  const req = requests.find((r) => r.code === opts.code);
+  if (!req) throw new AdmitError('That request is no longer pending. Ask them to message again.');
+  if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code, kind))) {
+    throw new AdmitError("Couldn't approve the request — try again.");
+  }
+
+  const agent = store.getAgent(opts.agentId);
+  if (agent && opts.asSelf) {
+    if (!store.bindMemberIdentity(opts.agentId, agent.ownerId, kind, req.id)) {
+      throw new AdmitError('You are already linked to a different account on this channel.');
+    }
+    log('member.owner_self_claim', { agentId: opts.agentId, kind, channelUserId: req.id });
+    return { userId: agent.ownerId, displayName: 'You', channelUserId: req.id, alreadyMember: true };
+  }
+
+  const existing = store.getMemberByIdentity(opts.agentId, kind, req.id);
+  if (existing) {
+    const m = store.listMemberships(opts.agentId).find((x) => x.userId === existing.userId);
+    return { userId: existing.userId, displayName: m?.displayName ?? existing.userId, channelUserId: req.id, alreadyMember: true };
+  }
+
+  const displayName =
+    ([req.meta?.firstName, req.meta?.lastName].filter(Boolean).join(' ') ||
+      req.meta?.username ||
+      `Member ${req.id}`).slice(0, 64);
+  const userId = `member-${randomUUID()}`;
+  store.insertMembership({
+    id: randomUUID(), agentId: opts.agentId, userId, role: 'user', displayName,
+    status: 'active', joinedAt: new Date().toISOString(),
+  });
+  store.bindMemberIdentity(opts.agentId, userId, kind, req.id);
+  log('member.admitted', { agentId: opts.agentId, userId, kind, channelUserId: req.id, displayName });
+
+  const disclosure = opts.sharedMemory
+    ? ' Heads up: this is a shared agent — things you tell it may be remembered and shared with the other people who use it.'
+    : '';
+  const sent = await provider
+    .exec(opts.runtimeRef, [
+      'message', 'send', '--channel', kind, '--account', opts.accountId, '--target', `user:${req.id}`,
+      '-m', `You're in! You're now a member of ${opts.agentName}.${disclosure} Say hi whenever you're ready.`,
+    ])
+    .catch(() => ({ code: 1, stdout: '', stderr: 'exec failed' }));
+  if (sent.code !== 0) log('member.welcome_failed', { agentId: opts.agentId, userId, kind, stderr: sent.stderr });
+  return { userId, displayName, channelUserId: req.id, alreadyMember: false };
+}
+
+/**
  * Tell everyone in the agent's chat something — one DM per active member with
  * a bound Telegram identity (bots have no broadcast). Best-effort throughout:
  * an announcement must never fail the operation it documents. Used for bot
@@ -202,6 +265,8 @@ export interface DenyOptions {
   runtimeRef: string;
   /** OpenClaw pairing code of the pending request being turned away. */
   code: string;
+  /** Which channel the request came in on. Telegram when absent. */
+  kind?: ChannelKind;
 }
 
 /**
@@ -228,7 +293,7 @@ export async function denyPairing(
   }
   const script = `node -e '
     const fs = require("fs");
-    const f = "/home/node/.openclaw/credentials/telegram-pairing.json";
+    const f = ${JSON.stringify(pairingStorePath(opts.kind ?? 'telegram'))};
     if (!fs.existsSync(f)) { console.log("0"); process.exit(0); }
     const d = JSON.parse(fs.readFileSync(f, "utf8"));
     const before = Array.isArray(d.requests) ? d.requests.length : 0;
@@ -265,65 +330,80 @@ export async function revokeMember(
   // failed revoke (still 'active') genuinely re-runs when retried.
   if (member.status === 'revoked') return;
 
-  // No Telegram identity → flip the row and we're done; nothing admits them.
-  if (!member.channelUserId) {
+  // Every channel they are known on: Telegram (on the membership row) plus
+  // Slack and Discord (member_identities). None → flip the row; nothing admits them.
+  const ids = store.memberIdentities(agentId, userId);
+  if (!Object.keys(ids).length) {
     store.revokeMembership(agentId, userId);
     log('member.revoked', { agentId, userId });
     return;
   }
 
   const agent = store.getAgent(agentId);
-  const channel = store.getChannelForAgent(agentId);
-  if (!agent?.runtimeRef || !channel) {
-    // No runtime to scrub (mid-provision, no channel). Flip the row so the
-    // NEXT rebuild's config drops them; there is no live allowlist yet.
+  if (!agent?.runtimeRef) {
+    // No runtime to scrub (mid-provision). Flip the row so the NEXT rebuild's
+    // config drops them; there is no live allowlist yet.
     store.revokeMembership(agentId, userId);
     log('member.revoked', { agentId, userId });
     return;
   }
 
-  // Telegram user ids are numeric; anything else never reaches a shell string.
-  if (!/^\d{1,32}$/.test(member.channelUserId)) {
-    throw new RevokeError(
-      'That member has an unexpected chat id, so the bot allowlist was not touched and they ' +
-        'may still be able to chat. Delete the agent to be certain.',
-    );
-  }
-
   // Scrub BEFORE flipping the DB row, so a failure is retryable (the row stays
   // 'active' and "remove them again" actually re-runs this). The runtime
   // admits the UNION of two on-volume files (verified against OpenClaw
-  // 2026.6.11), and both survive rebuilds, so BOTH must be scrubbed:
-  //   - credentials/telegram-<acct>-allowFrom.json  (where pairing approvals land)
-  //   - openclaw.json channels.telegram.accounts.<acct>.allowFrom  (what rebuild seeds)
+  // 2026.6.11), and both survive rebuilds, so BOTH must be scrubbed, on every
+  // channel the member is known on:
+  //   - credentials/<channel>-<acct>-allowFrom.json  (where pairing approvals land)
+  //   - openclaw.json channels.<channel>.accounts.<acct>.allowFrom  (what rebuild seeds)
   // Scrubbing only the credentials file left a member baked into config at the
   // last rebuild still admitted — the exact hole "Revoke for real" missed.
-  const acct = channel.accountId.toLowerCase();
-  const id = member.channelUserId;
+  // The credentials FILENAME is lowercased (OpenClaw's on-disk convention);
+  // the config KEY keeps the case configWriter seeded.
+  const ID_SHAPE: Record<ChannelKind, RegExp> = { telegram: /^\d{1,32}$/, slack: /^[UW][A-Z0-9]{2,31}$/, discord: /^\d{15,25}$/ };
+  const targets: Array<{ channel: string; acct: string; id: string; cred: string }> = [];
+  for (const kind of Object.keys(ids) as ChannelKind[]) {
+    const id = ids[kind]!;
+    const channel = store.getChannelForAgent(agentId, kind);
+    if (!channel) continue; // that channel is gone; its config was rewritten without them
+    const acct = kind === 'telegram' ? channel.accountId : CHANNEL_ACCOUNT;
+    // Identities and account names only ever reach the script if they are the
+    // plain shapes the platforms issue.
+    if (!ID_SHAPE[kind].test(id) || !/^[A-Za-z0-9_]{1,64}$/.test(acct)) {
+      throw new RevokeError(
+        'That member has an unexpected chat id, so the bot allowlist was not touched and they ' +
+          'may still be able to chat. Delete the agent to be certain.',
+      );
+    }
+    targets.push({ channel: kind, acct, id, cred: `/home/node/.openclaw/credentials/${kind}-${acct.toLowerCase()}-allowFrom.json` });
+  }
+  if (!targets.length) {
+    store.revokeMembership(agentId, userId);
+    log('member.revoked', { agentId, userId });
+    return;
+  }
   const script = `node -e '
     const fs = require("fs");
-    const drop = (arr) => (Array.isArray(arr) ? arr.filter((x) => String(x) !== ${JSON.stringify(id)}) : arr);
     const writeAtomic = (f, obj) => {
       const tmp = f + ".tmp";
       fs.writeFileSync(tmp, JSON.stringify(obj, null, 2));
       fs.renameSync(tmp, f);   // atomic: the gateway re-reads per message
     };
-    const cred = "/home/node/.openclaw/credentials/telegram-" + ${JSON.stringify(acct)} + "-allowFrom.json";
-    if (fs.existsSync(cred)) {
-      const d = JSON.parse(fs.readFileSync(cred, "utf8"));
-      d.allowFrom = drop(d.allowFrom || []);
-      writeAtomic(cred, d);
-    }
+    const targets = ${JSON.stringify(targets)};
     const cfgPath = "/home/node/.openclaw/openclaw.json";
-    if (fs.existsSync(cfgPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-      const acc = cfg.channels && cfg.channels.telegram && cfg.channels.telegram.accounts
-        && cfg.channels.telegram.accounts[${JSON.stringify(channel.accountId)}];
-      if (acc && Array.isArray(acc.allowFrom)) {
-        acc.allowFrom = drop(acc.allowFrom);
-        writeAtomic(cfgPath, cfg);
+    const cfg = fs.existsSync(cfgPath) ? JSON.parse(fs.readFileSync(cfgPath, "utf8")) : null;
+    let cfgChanged = false;
+    for (const t of targets) {
+      const drop = (arr) => (Array.isArray(arr) ? arr.filter((x) => String(x) !== t.id) : arr);
+      if (fs.existsSync(t.cred)) {
+        const d = JSON.parse(fs.readFileSync(t.cred, "utf8"));
+        d.allowFrom = drop(d.allowFrom || []);
+        writeAtomic(t.cred, d);
       }
-    }'`;
+      const acc = cfg && cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
+        && cfg.channels[t.channel].accounts[t.acct];
+      if (acc && Array.isArray(acc.allowFrom)) { acc.allowFrom = drop(acc.allowFrom); cfgChanged = true; }
+    }
+    if (cfgChanged) writeAtomic(cfgPath, cfg);'`;
   const res = await provider.execShellOnVolume(agent.runtimeRef, script);
   if (res.code !== 0) {
     // The row is still 'active' (we haven't flipped it), so "remove them
@@ -337,5 +417,5 @@ export async function revokeMember(
 
   store.revokeMembership(agentId, userId);
   log('member.revoked', { agentId, userId });
-  log('member.allowlist_scrubbed', { agentId, userId, channelUserId: member.channelUserId });
+  log('member.allowlist_scrubbed', { agentId, userId, channels: targets.map((t) => t.channel) });
 }

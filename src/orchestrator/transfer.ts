@@ -246,7 +246,7 @@ export async function exportAgent(
       models: profile?.models,
     },
     channel: channel ? {
-      kind: channel.kind,
+      kind: 'telegram',
       accountId: channel.accountId,
       deepLink: channel.deepLink,
       botToken: await secrets.get(channel.secretRef),
@@ -528,7 +528,7 @@ async function importAgentInner(
     if (runtimeRef) await provider.destroy(runtimeRef, { purge: true }).catch(() => {});
     await secrets.delete(secretRef).catch(() => {});
     for (const ref of envSecretRefs) await secrets.delete(ref).catch(() => {});
-    step(() => store.deleteChannelForAgent(agent.id));
+    step(() => store.deleteChannelForAgent(agent.id, 'all'));
     step(() => store.deleteMemberships(agent.id));
     // Env rows too — their secrets are already deleted above; a tombstone
     // keeping references to swept secrets is the residue class the v0.90

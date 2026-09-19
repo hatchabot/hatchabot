@@ -1,4 +1,4 @@
-import type { OpenClawConfigPatch } from '../providers/provider.js';
+import type { ChannelRooms, OpenClawConfigPatch } from '../providers/provider.js';
 
 /**
  * openclaw.json is volatile — its schema moves between releases, and a
@@ -61,6 +61,11 @@ export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent'
  */
 export const EMBED_PLUGIN_DIR = '/opt/agentclaw/llama-cpp/llama-cpp-provider';
 export const EMBED_MODEL_PATH = '/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf';
+
+/** Where the image keeps a baked messaging plugin (docker/Dockerfile.runtime). */
+export const channelPluginDir = (kind: 'slack' | 'discord') => `/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}`;
+/** The one account key Hatchabot uses for Slack and Discord in OpenClaw's config. */
+export const CHANNEL_ACCOUNT = 'hatchabot';
 
 /**
  * Collapse consecutive plain `config set` commands into one `--batch-json`
@@ -409,6 +414,64 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groups', JSON.stringify(groups), '--replace'] });
   }
 
+  // Slack and Discord (docs/channels-slack-discord-design.md). Only for
+  // plugins the image carries: on any other image this writes nothing.
+  //  - Present: link the baked plugin, then write the channel whole.
+  //    `accounts` is replaced as one object, so no stale account survives.
+  //  - Absent: turn it off and empty its accounts, so a removed channel's
+  //    token does not live on in the volume's config. Two small writes, not
+  //    one big one: OpenClaw refuses a write that halves the config's size.
+  const plugins = new Set(patch.channelPlugins ?? []);
+  const groups = (rooms: ChannelRooms | undefined) => (rooms?.mode === 'room' ? 'allowlist' : 'disabled');
+  if (plugins.has('slack')) {
+    if (patch.slack) {
+      const sl = patch.slack;
+      cmds.push({ argv: ['plugins', 'install', '--link', channelPluginDir('slack')] });
+      cmds.push({ argv: ['plugins', 'enable', 'slack'] });
+      cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'true'] });
+      cmds.push({ argv: ['config', 'set', 'channels.slack.mode', 'socket'] });
+      cmds.push({ argv: ['config', 'set', 'channels.slack.groupPolicy', groups(sl.rooms)] });
+      // Rooms by ID only (names never match under allowlist), members only, @mention.
+      const rooms = sl.rooms.mode === 'room'
+        ? { [sl.rooms.roomId]: { enabled: true, requireMention: true, ...(sl.allowFrom.length ? { users: sl.allowFrom } : {}) } }
+        : {};
+      cmds.push({ argv: ['config', 'set', 'channels.slack.channels', JSON.stringify(rooms)] });
+      cmds.push({
+        argv: ['config', 'set', 'channels.slack.accounts', JSON.stringify({
+          [CHANNEL_ACCOUNT]: { enabled: true, botToken: sl.botToken, appToken: sl.appToken, dmPolicy: 'pairing', allowFrom: sl.allowFrom },
+        })],
+        sensitive: true,
+      });
+    } else {
+      cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'false'] });
+      cmds.push({ argv: ['config', 'set', 'channels.slack.accounts', '{}'] });
+    }
+  }
+  if (plugins.has('discord')) {
+    if (patch.discord) {
+      const dc = patch.discord;
+      cmds.push({ argv: ['plugins', 'install', '--link', channelPluginDir('discord')] });
+      cmds.push({ argv: ['plugins', 'enable', 'discord'] });
+      cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
+      cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', groups(dc.rooms)] });
+      const guilds = dc.rooms.mode === 'room'
+        ? { [dc.rooms.roomId]: { requireMention: true, ignoreOtherMentions: true, ...(dc.allowFrom.length ? { users: dc.allowFrom } : {}) } }
+        : {};
+      cmds.push({ argv: ['config', 'set', 'channels.discord.guilds', JSON.stringify(guilds)] });
+      // Discord's websocket ignores HTTPS_PROXY; it has its own setting.
+      if (dc.proxy) cmds.push({ argv: ['config', 'set', 'channels.discord.proxy', dc.proxy], sensitive: true });
+      cmds.push({
+        argv: ['config', 'set', 'channels.discord.accounts', JSON.stringify({
+          [CHANNEL_ACCOUNT]: { enabled: true, token: dc.token, applicationId: dc.applicationId, dmPolicy: 'pairing', allowFrom: dc.allowFrom },
+        })],
+        sensitive: true,
+      });
+    } else {
+      cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'false'] });
+      cmds.push({ argv: ['config', 'set', 'channels.discord.accounts', '{}'] });
+    }
+  }
+
   // Last: `agents add` scaffolds the workspace, sets the agent's model, and
   // writes the route binding in one go.
   const add = [
@@ -423,7 +486,19 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // survives migration and defeats profile edits. Agents follow the
   // re-applied agents.defaults.model.primary — one source of truth.
   if (patch.telegram) add.push('--bind', `telegram:${patch.telegram.accountId}`);
+
   cmds.push({ argv: add });
+  // Route Slack and Discord to this agent on EVERY build: `agents add` runs
+  // only on a fresh volume, so a channel added later would otherwise have no
+  // binding. Both verbs are idempotent (checked on 2026.7.1-2).
+  for (const kind of ['slack', 'discord'] as const) {
+    if (!plugins.has(kind)) continue;
+    const present = kind === 'slack' ? !!patch.slack : !!patch.discord;
+    cmds.push({
+      argv: ['agents', present ? 'bind' : 'unbind', '--agent', patch.agentId, '--bind', `${kind}:${CHANNEL_ACCOUNT}`],
+      optional: !present,
+    });
+  }
   // Name it what the owner calls it. `agents add` takes only the id (the
   // slug), so the Control UI labelled every agent "stock-advisor" rather than
   // "Stock Advisor". Cosmetic, so a failure here must not fail a provision.

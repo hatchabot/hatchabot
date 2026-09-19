@@ -255,6 +255,16 @@ export const REST_TOOLS: RestTool[] = [
     card: ({ agent }) => `✈ Take "${agent!.name}" off Telegram. Its bot returns to your pool, and its Telegram contacts lose access and get a goodbye.`,
   },
   {
+    name: 'remove_channel', tier: 'mutate', agentArg: true,
+    description: "Take an agent off Slack or Discord. It keeps its memory; people stop reaching it there. The owner's Slack or Discord app is left as it is. (Connecting one needs tokens, so that is done in the app, never here.)",
+    input_schema: obj({ agent: agentRef, channel: { type: 'string', enum: ['slack', 'discord'] } }, ['agent', 'channel']),
+    call: ({ agent, input }) => {
+      if (input.channel !== 'slack' && input.channel !== 'discord') throw new Error('channel must be "slack" or "discord".');
+      return { method: 'DELETE', path: `/v1/agents/${agent!.id}/channels/${input.channel}` };
+    },
+    card: ({ agent, input }) => `✂ Take "${agent!.name}" off ${input.channel === 'discord' ? 'Discord' : 'Slack'}. People stop reaching it there; it restarts and keeps its memory.`,
+  },
+  {
     name: 'create_invite', tier: 'mutate', agentArg: true,
     description: "Make a one-time invite link so someone can start talking to the agent on Telegram. The link appears once confirmed.",
     input_schema: obj({ agent: agentRef }, ['agent']),

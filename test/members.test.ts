@@ -380,3 +380,93 @@ describe('announceToMembers', () => {
     expect(sent).toBe(0); // reported honestly, thrown never
   });
 });
+
+describe('revoking across channels', () => {
+  // Run the REAL emitted script against real files: the scrub is what revokes.
+  async function member() {
+    const s = await setup();
+    s.store.insertChannel({ id: 'ct', agentId: 'a1', kind: 'telegram', accountId: 'FamBot', secretRef: 'x', deepLink: 'x', createdAt: 'now' });
+    s.store.insertChannel({ id: 'cs', agentId: 'a1', kind: 'slack', accountId: 'U0BOT', secretRef: 'y', deepLink: 'y', createdAt: 'now' });
+    s.store.insertChannel({ id: 'cd', agentId: 'a1', kind: 'discord', accountId: '1', secretRef: 'z', deepLink: 'z', createdAt: 'now' });
+    s.store.setAgentRuntimeRef('a1', s.opts.runtimeRef);
+    s.store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u2', role: 'user', displayName: 'Gran', channelUserId: '555', status: 'active' });
+    s.store.bindMemberIdentity('a1', 'u2', 'slack', 'U0GRAN');
+    s.store.bindMemberIdentity('a1', 'u2', 'discord', '123456789012345678');
+    return s;
+  }
+
+  it('one script scrubs Telegram, Slack and Discord, files and config', async () => {
+    const { store, provider } = await member();
+    await revokeMember({ store, provider }, 'a1', 'u2');
+    const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
+    const dir = mkdtempSync(join(tmpdir(), 'revoke-'));
+    try {
+      mkdirSync(join(dir, 'credentials'));
+      const cred = (n: string, ids: string[]) => writeFileSync(join(dir, 'credentials', n), JSON.stringify({ version: 1, allowFrom: ids }));
+      cred('telegram-fambot-allowFrom.json', ['555', '777']);
+      cred('slack-hatchabot-allowFrom.json', ['U0GRAN', 'U0OWNER']);
+      cred('discord-hatchabot-allowFrom.json', ['123456789012345678']);
+      writeFileSync(join(dir, 'openclaw.json'), JSON.stringify({ channels: {
+        telegram: { accounts: { FamBot: { allowFrom: ['555', '777'] } } },
+        slack: { accounts: { hatchabot: { allowFrom: ['U0GRAN', 'U0OWNER'] } } },
+        discord: { accounts: { hatchabot: { allowFrom: ['123456789012345678'] } } },
+      } }));
+      execFileSync('sh', ['-c', script.replaceAll('/home/node/.openclaw', dir)]);
+      const read = (n: string) => JSON.parse(readFileSync(join(dir, n), 'utf8'));
+      expect(read('credentials/telegram-fambot-allowFrom.json').allowFrom).toEqual(['777']);
+      expect(read('credentials/slack-hatchabot-allowFrom.json').allowFrom).toEqual(['U0OWNER']);
+      expect(read('credentials/discord-hatchabot-allowFrom.json').allowFrom).toEqual([]);
+      const cfg = read('openclaw.json').channels;
+      expect(cfg.telegram.accounts.FamBot.allowFrom).toEqual(['777']);
+      expect(cfg.slack.accounts.hatchabot.allowFrom).toEqual(['U0OWNER']);
+      expect(cfg.discord.accounts.hatchabot.allowFrom).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(store.getMembership('a1', 'u2')!.status).toBe('revoked');
+    expect(store.listAllowedChannelUserIds('a1', 'slack')).toEqual([]);
+  });
+
+  it('a Slack-only member is scrubbed too (they have no Telegram id)', async () => {
+    const { store, provider } = await member();
+    store.insertMembership({ id: 'm3', agentId: 'a1', userId: 'u3', role: 'user', status: 'active' });
+    store.bindMemberIdentity('a1', 'u3', 'slack', 'U0SIS');
+    await revokeMember({ store, provider }, 'a1', 'u3');
+    const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
+    expect(script).toContain('U0SIS');
+    expect(script).toContain('slack-hatchabot-allowFrom.json');
+    expect(script).not.toContain('telegram-');
+  });
+
+  it('refuses to put an odd-looking id anywhere near a shell', async () => {
+    const { store, provider } = await member();
+    store.insertMembership({ id: 'm4', agentId: 'a1', userId: 'u4', role: 'user', status: 'active' });
+    store.bindMemberIdentity('a1', 'u4', 'slack', "U0X'; rm -rf /");
+    await expect(revokeMember({ store, provider }, 'a1', 'u4')).rejects.toBeInstanceOf(RevokeError);
+    expect(provider.execLog.some((a) => a[0] === 'sh-volume')).toBe(false);
+    expect(store.getMembership('a1', 'u4')!.status).toBe('active');
+  });
+});
+
+describe('admitting on Slack and Discord', () => {
+  it('a new Slack member is created, bound, and welcomed on Slack', async () => {
+    const { store, provider, opts } = await setup();
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: 'U0GRAN', code: 'SLK1', meta: { firstName: 'Gran' } }] }), stderr: '' });
+    const r = await admitMember({ store, provider }, { ...opts, accountId: 'hatchabot', code: 'SLK1', kind: 'slack' });
+    expect(r).toMatchObject({ displayName: 'Gran', channelUserId: 'U0GRAN', alreadyMember: false });
+    expect(store.getMemberByIdentity('a1', 'slack', 'U0GRAN')?.userId).toBe(r.userId);
+    expect(store.getMembership('a1', r.userId)?.channelUserId).toBeUndefined(); // Telegram untouched
+    const argv = provider.execLog.map((a) => a.join(' '));
+    expect(argv).toContain('pairing approve slack SLK1 --account hatchabot');
+    expect(argv.some((a) => a.includes('message send --channel slack --account hatchabot --target user:U0GRAN'))).toBe(true);
+    expect(provider.execLog.find((a) => a[0] === 'sh')![1]).toContain('slack-pairing.json');
+  });
+
+  it('"That\'s me" binds the owner seat on that channel', async () => {
+    const { store, provider, opts } = await setup();
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests: [{ id: '123456789012345678', code: 'DSC1' }] }), stderr: '' });
+    const r = await admitMember({ store, provider }, { ...opts, accountId: 'hatchabot', code: 'DSC1', kind: 'discord', asSelf: true });
+    expect(r).toMatchObject({ userId: 'u1', alreadyMember: true });
+    expect(store.memberIdentities('a1', 'u1')).toEqual({ discord: '123456789012345678' });
+  });
+});

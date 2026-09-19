@@ -142,6 +142,33 @@ RUN mkdir -p /opt/agentclaw/models \
 ENV HATCHABOT_EMBED_PLUGIN=/opt/agentclaw/llama-cpp/llama-cpp-provider \
     HATCHABOT_EMBED_MODEL=/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf
 
+# --- Messaging plugins: Slack and Discord, baked outside /home/node -----------
+# Same idea as the embedding plugin: installed once here with OpenClaw's own
+# installer, and each agent that uses one gets only a `--link` pointer on its
+# volume (about 1.3 MB) instead of its own 40-50 MB copy and an npm fetch from
+# inside the container (impossible in the management agent's jail). The whole
+# project directory moves, because these plugins keep their dependencies nested
+# under the package and point at the global OpenClaw by absolute symlink.
+# Their version follows OpenClaw's; scripts/build-runtime-image.sh picks it.
+# See docs/channels-slack-discord-design.md.
+ARG CHANNEL_PLUGINS=slack,discord
+ARG CHANNEL_PLUGIN_VERSION=2026.7.1
+RUN export HOME=/tmp/chbuild \
+ && mkdir -p "$HOME" /opt/hatchabot/plugins && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
+ && HELP="$(openclaw plugins install --help 2>&1)" \
+ && if echo "$HELP" | grep -q -- '--acknowledge-clawhub-risk'; then ACK="--acknowledge-clawhub-risk"; \
+    else ACK="--accept-capabilities --acknowledge-install-policy-warning --force"; fi \
+ && for p in $(echo "$CHANNEL_PLUGINS" | tr ',' ' '); do \
+      openclaw plugins install "@openclaw/$p@${CHANNEL_PLUGIN_VERSION}" $ACK \
+      && cp -a "$HOME"/.openclaw/npm/projects/openclaw-$p-*/ "/opt/hatchabot/plugins/$p" \
+      && test -f "/opt/hatchabot/plugins/$p/node_modules/@openclaw/$p/dist/index.js" \
+      || exit 1; \
+    done \
+ && rm -rf /tmp/chbuild \
+ && chmod -R a+rX /opt/hatchabot
+# Read back by the control plane: which channels this image can run.
+LABEL org.hatchabot.channels="${CHANNEL_PLUGINS}"
+
 # Python 3 + pip are in the base so agents whose workspaces carry scripts can
 # run them (`python3 script.py`, as their cron jobs do). The base stays lean:
 # it ships NO third-party packages. An agent that needs libraries installs them

@@ -82,6 +82,21 @@ elif [ "${OPENCLAW_VERSION}" != "${DEFAULT_OPENCLAW}" ]; then
   fi
 fi
 
+# Slack and Discord plugins are published in step with OpenClaw, like the
+# embedding plugin. The Dockerfile's pin fits the proven default; other
+# versions get the newest release not newer than that OpenClaw.
+CHANNEL_ARG=()
+if [ -n "${CHANNEL_PLUGIN_VERSION:-}" ]; then
+  CHANNEL_ARG=(--build-arg "CHANNEL_PLUGIN_VERSION=${CHANNEL_PLUGIN_VERSION}")
+elif [ "${OPENCLAW_VERSION}" != "${DEFAULT_OPENCLAW}" ]; then
+  LIST="$(npm view @openclaw/slack versions --json 2>/dev/null || true)"
+  PICK="$(node "$PINS" plugin "${OPENCLAW_VERSION}" "${LIST:-[]}" 2>/dev/null || true)"
+  if [ -n "$PICK" ]; then
+    echo "Slack/Discord plugins for OpenClaw ${OPENCLAW_VERSION}: ${PICK}"
+    CHANNEL_ARG=(--build-arg "CHANNEL_PLUGIN_VERSION=${PICK}")
+  fi
+fi
+
 # Node.js: OpenClaw raises its floor over time (2026.9 needs 24.16+). Read what
 # this version asks for and take the lowest Node line that fits, so the proven
 # default stays on the line it was proven on.
@@ -113,6 +128,7 @@ docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
   "${PLUGIN_ARG[@]}" \
   "${NODE_ARG[@]}" \
+  "${CHANNEL_ARG[@]}" \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/

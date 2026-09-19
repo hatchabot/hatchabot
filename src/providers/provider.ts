@@ -129,7 +129,30 @@ export interface OpenClawConfigPatch {
     /** Reach Telegram through this HTTP proxy (the management agent's jail). */
     proxy?: string;
   };
+  /**
+   * Messaging plugins the image carries (label org.hatchabot.channels). Slack
+   * and Discord config is written only for these — agents on an image without
+   * them get exactly the commands they always did.
+   */
+  channelPlugins?: string[];
+  slack?: {
+    botToken: string;
+    appToken: string;
+    allowFrom: string[];
+    rooms: ChannelRooms;
+  };
+  discord?: {
+    token: string;
+    applicationId: string;
+    allowFrom: string[];
+    rooms: ChannelRooms;
+    /** Reach Discord through this HTTP proxy (the management agent's jail). */
+    proxy?: string;
+  };
 }
+
+/** Where a Slack or Discord agent answers besides DMs: nowhere, or one room (members only, @mention). */
+export type ChannelRooms = { mode: 'off' } | { mode: 'room'; roomId: string };
 
 export type RuntimeStatus =
   /** The runtime host itself could not be reached — say nothing about the agent. */
@@ -200,10 +223,11 @@ export interface RuntimeProvider {
    * info() is how "update available" is detected — by image id, never by tag
    * (tags like :latest are reassigned in place).
    */
-  currentImageInfo(): Promise<RuntimeInfo>;
+  /** The default image, or the named one (an agent's pinned image). */
+  currentImageInfo(image?: string): Promise<RuntimeInfo>;
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[]>;
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[] }[]>;
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
@@ -260,6 +284,13 @@ export interface RuntimeProvider {
 export interface RuntimeInfo {
   imageId?: string;
   openclawVersion?: string;
+  /** Messaging plugins baked into the image (label org.hatchabot.channels), e.g. ['slack', 'discord']. */
+  channels?: string[];
+}
+
+/** Parse the org.hatchabot.channels label: a comma list, empty when absent. */
+export function parseChannelsLabel(v: string | undefined): string[] {
+  return (v ?? '').split(',').map((x) => x.trim()).filter((x) => /^[a-z]+$/.test(x));
 }
 
 export class ProviderError extends Error {

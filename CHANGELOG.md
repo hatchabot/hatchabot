@@ -2,6 +2,23 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.31.0] — 2026-09-18
+
+### Added
+- **Slack and Discord.** An agent can be reached on Slack and on Discord, beside or instead of Telegram. Both connect outward, so nothing on this machine has to be reachable from the internet. Set up from the agent's **Messaging** tab: make a Slack app (a **Copy app manifest** button fills it in) or a Discord bot, paste its tokens, and Hatchabot checks them with Slack or Discord before saving, in plain words when something is wrong. Then send it a direct message; your first message links you.
+  - Group chats are off by default; you can allow one Slack channel or one Discord server by ID, where it answers members only and only when @mentioned.
+  - People: invites let the joiner choose the app; "wants to talk" cards say which app; removing a member scrubs them from every app's allowlist (files and config), in one step.
+  - Icons show a mark per app (Telegram, Slack, Discord), with **+1** for more than one.
+  - The Hatchabot agent can take an agent off Slack or Discord (`remove_channel`). Connecting is app-only (tokens never pass through an AI). Not offered for the Hatchabot agent itself yet.
+- **Runtime image carries the Slack and Discord plugins**, baked once and linked per agent (about 1.3 MB per agent that uses one), labelled `org.hatchabot.channels`. Agents on an older image get exactly the commands they always did, and the Messaging tab says a newer base image is needed.
+
+### Fixed
+- The join page's heading still said the old name.
+
+### Notes
+- Verified against real OpenClaw 2026.7.1-2 with the real built image and fake tokens: the config validates, both channels bind and start, a rebuild is clean, and removing leaves no binding and no token in the agent's config. A real Slack app and Discord bot have not been tried yet.
+- OpenClaw refuses a config write that halves the file's size, so removing a channel is done in two small writes.
+
 ## [1.30.0] — 2026-09-18
 
 ### Added

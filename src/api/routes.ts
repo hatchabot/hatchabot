@@ -15,6 +15,10 @@ import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
+import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
+import { slackConnector, slackManifest } from '../channels/slack.js';
+import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
+import { discordConnector } from '../channels/discord.js';
 import {
   claudeAuthDir,
   createAgentRecord,
@@ -125,7 +129,7 @@ import {
   inspectWorkspace,
   botPollState,
 } from '../orchestrator/adopt.js';
-import type { Agent, AIProfile } from '../domain/types.js';
+import type { Agent, AIProfile, Channel } from '../domain/types.js';
 import { ownerIdOf, principalOf } from './principal.js';
 import type { IdentityVerifier } from './identity.js';
 import {
@@ -178,6 +182,8 @@ export interface ApiDeps {
   selfUrl?: string;
   /** Test seam for the CLI+MCP management turn (see mgmtChat.ts). */
   mgmtMcpTurn?: import('./mgmtChat.js').MgmtChatDeps['mgmtMcpTurn'];
+  /** Slack and Discord connectors (tests inject fakes that never touch the network). */
+  connectors?: Partial<Record<ConnectorKind, ChannelConnector>>;
 }
 
 const LocalProfile = z.object({
@@ -2640,6 +2646,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...(role === 'owner' ? {} : { paramValues: undefined }),
           deepLink: chan?.deepLink,
           botUsername: chan?.accountId,
+          /** Slack and Discord, for the icon marks and the Messaging row. */
+          otherChannels: store.listChannelsForAgent(a.id).filter((c) => c.kind !== 'telegram').map((c) => ({
+            kind: c.kind,
+            displayName: typeof c.settings?.displayName === 'string' ? c.settings.displayName : undefined,
+            deepLink: c.deepLink,
+          })),
           /** Live Telegram display name (cached 10 min) — the Sync-name
            *  button greys out when it already matches the agent. */
           botDisplayName: chan && a.state === 'RUNNING' ? await botDisplayNameFor(a.id, chan.secretRef) : undefined,
@@ -4708,6 +4720,158 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.code(202).send({ released: row.accountId });
   });
 
+  // ---- Slack and Discord (docs/channels-slack-discord-design.md) ----------
+  // Set up by pasting credentials from an app the owner made. Adding is
+  // app-only (it carries secrets); each change rebuilds the agent, memory kept.
+  const connectors: Record<ConnectorKind, ChannelConnector> = {
+    slack: deps.connectors?.slack ?? slackConnector(),
+    discord: deps.connectors?.discord ?? discordConnector(),
+  };
+  const connectorFor = (kind: string): ChannelConnector | undefined =>
+    kind === 'slack' || kind === 'discord' ? connectors[kind] : undefined;
+  /** Messaging plugins in the image this agent (re)builds on. */
+  const imageChannelsFor = async (agent: Agent): Promise<string[]> => {
+    try { return (await providerFor(agent.hostId).currentImageInfo(agent.image ?? undefined)).channels ?? []; }
+    catch { return []; }
+  };
+  const ROOM_ID: Record<ConnectorKind, RegExp> = { slack: /^[CG][A-Z0-9]{8,}$/, discord: /^\d{17,20}$/ };
+  const publicChannel = (c: Channel) => {
+    const st = (c.settings ?? {}) as Record<string, unknown>;
+    return {
+      kind: c.kind,
+      accountId: c.accountId,
+      deepLink: c.deepLink,
+      displayName: typeof st.displayName === 'string' ? st.displayName : undefined,
+      addToServerUrl: typeof st.addToServerUrl === 'string' ? st.addToServerUrl : undefined,
+      warnings: Array.isArray(st.warnings) ? st.warnings : [],
+      rooms: (st.rooms as unknown) ?? { mode: 'off' },
+      createdAt: c.createdAt,
+    };
+  };
+
+  /** What each connector asks for, so the set-up sheet is drawn from one source. */
+  app.get('/v1/channels/connectors', async () =>
+    Object.values(connectors).map((c) => ({
+      kind: c.kind, label: c.label,
+      fields: c.fields.map((f) => ({ key: f.key, label: f.label, pattern: f.pattern.source, help: f.help })),
+    })));
+
+  app.get<{ Querystring: { name?: string } }>('/v1/channels/slack/manifest', async (req) =>
+    slackManifest(String(req.query?.name ?? '').slice(0, 80)));
+
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/channels', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const supported = await imageChannelsFor(agent);
+    const mine = store.memberIdentities(agent.id, agent.ownerId);
+    return {
+      channels: store.listChannelsForAgent(agent.id).map((c) => ({
+        ...(c.kind === 'telegram' ? { kind: 'telegram', accountId: c.accountId, deepLink: c.deepLink } : publicChannel(c)),
+        /** Has the owner's first message on this channel linked them yet? */
+        youAreLinked: !!mine[c.kind],
+      })),
+      imageSupports: ['telegram', ...supported],
+    };
+  });
+
+  app.post<{ Params: { id: string; kind: string }; Body: Record<string, string> }>('/v1/agents/:id/channels/:kind', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const conn = connectorFor(req.params.kind);
+    if (!conn) return reply.code(404).send({ error: 'Unknown channel.' });
+    const kind = conn.kind;
+    if (agent.ops) return reply.code(409).send({ error: `${conn.label} is not available for the Hatchabot agent yet.` });
+    if (store.getChannelForAgent(agent.id, kind)) return reply.code(409).send({ error: `It already has ${conn.label}. Remove it first to connect a different app.` });
+    if (!agent.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) {
+      return reply.code(409).send({ error: `Wait until it is running (it is ${agent.state.toLowerCase()}).` });
+    }
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    if (!(await imageChannelsFor(agent)).includes(kind)) {
+      return reply.code(409).send({
+        needsImage: true,
+        error: `This agent's base image can't do ${conn.label} yet. Promote a base image that includes it (Settings → Base images), then try again.`,
+      });
+    }
+    const body = (req.body ?? {}) as Record<string, string>;
+    let verified;
+    let secretValue: string;
+    try {
+      verified = await conn.verify(body);
+      secretValue = conn.secretValue(body);
+    } catch (err) {
+      if (err instanceof ConnectorError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+    const clash = store.findAgentUsingAccount(verified.accountId, kind);
+    if (clash && clash.id !== agent.id) {
+      return reply.code(409).send({ error: `That ${conn.label} app is already connected to "${clash.name}". Each agent needs its own app.` });
+    }
+    const secretRef = `channel/${agent.id}/${kind}`;
+    await secrets.put(secretRef, secretValue);
+    store.insertChannel({
+      id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
+      deepLink: verified.deepLink, createdAt: new Date().toISOString(),
+      settings: {
+        ...verified.settings,
+        displayName: verified.displayName,
+        ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
+        warnings: verified.warnings,
+        rooms: { mode: 'off' },
+      },
+    });
+    trace(agent.id)('channel.attached', { kind, accountId: verified.accountId });
+    kickRebuild(agent.id);
+    // The owner's first DM on the new channel links them (the same claim as a
+    // new agent's Telegram). The watcher waits out the rebuild by itself.
+    if (!store.memberIdentities(agent.id, agent.ownerId)[kind]) {
+      void claimFirstContact(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: CHANNEL_ACCOUNT, forUserId: agent.ownerId, kind, timeoutMs: 20 * 60_000 },
+      ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim failed'));
+    }
+    return reply.code(202).send(publicChannel(store.getChannelForAgent(agent.id, kind)!));
+  });
+
+  app.patch<{ Params: { id: string; kind: string }; Body: { rooms?: { mode?: string; roomId?: string } } }>('/v1/agents/:id/channels/:kind', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const conn = connectorFor(req.params.kind);
+    if (!conn) return reply.code(404).send({ error: 'Unknown channel.' });
+    const row = store.getChannelForAgent(agent.id, conn.kind);
+    if (!row) return reply.code(404).send({ error: `It has no ${conn.label}.` });
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    const r = req.body?.rooms;
+    const mode = r?.mode;
+    if (mode !== 'off' && mode !== 'room') return reply.code(400).send({ error: 'Choose off, or one room by its ID.' });
+    const roomId = typeof r?.roomId === 'string' ? r.roomId.trim() : '';
+    if (mode === 'room' && !ROOM_ID[conn.kind].test(roomId)) {
+      return reply.code(400).send({
+        error: conn.kind === 'slack'
+          ? 'Give the channel ID (it starts with C and is at the end of the channel\'s link), not its name.'
+          : 'Give the server ID (a long number: right-click the server with Developer Mode on → Copy Server ID).',
+      });
+    }
+    store.setChannelSettings(agent.id, conn.kind, { ...(row.settings ?? {}), rooms: mode === 'room' ? { mode, roomId } : { mode } });
+    trace(agent.id)('channel.rooms', { kind: conn.kind, mode });
+    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) kickRebuild(agent.id);
+    return publicChannel(store.getChannelForAgent(agent.id, conn.kind)!);
+  });
+
+  app.delete<{ Params: { id: string; kind: string } }>('/v1/agents/:id/channels/:kind', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const conn = connectorFor(req.params.kind);
+    if (!conn) return reply.code(404).send({ error: 'Unknown channel.' });
+    const row = store.getChannelForAgent(agent.id, conn.kind);
+    if (!row) return reply.code(404).send({ error: `It has no ${conn.label}.` });
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    await secrets.delete(row.secretRef).catch(() => {});
+    store.deleteChannelForAgent(agent.id, conn.kind);
+    trace(agent.id)('channel.detached', { kind: conn.kind, accountId: row.accountId });
+    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) kickRebuild(agent.id);
+    return reply.code(202).send({ removed: conn.kind });
+  });
+
   // Owner-facing reveal of the agent's bot token — for recycling a hand-made
   // bot into a new agent after deleting this one. Owner-authed like all /v1.
   /**
@@ -6370,14 +6534,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const check = checkInvite(store, req.params.code);
     if (!check.valid) return { valid: false, reason: check.reason };
     const agent = store.getAgent(check.agentId)!;
-    return { valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory };
+    // Which apps the invitee can use to reach it (names only, no links yet).
+    const channels = store.listChannelsForAgent(agent.id).map((c) => ({
+      kind: c.kind,
+      ...(c.kind === 'slack' && typeof c.settings?.team === 'string' ? { team: c.settings.team } : {}),
+      ...(c.kind === 'discord' && Array.isArray(c.settings?.servers)
+        ? { servers: (c.settings.servers as Array<{ name?: string }>).map((g) => String(g.name ?? '')).filter(Boolean).slice(0, 5) } : {}),
+    }));
+    return { valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory, channels };
   });
 
   // Unauthenticated (code-gated): redeem + start watching for the invitee's
   // first Telegram contact, exactly like the owner's claim.
-  app.post<{ Body: { code?: string; name?: string; idToken?: string } }>('/v1/join', async (req, reply) => {
-    const body = (req.body ?? {}) as { code?: string; name?: string; idToken?: string };
+  app.post<{ Body: { code?: string; name?: string; idToken?: string; channel?: string } }>('/v1/join', async (req, reply) => {
+    const body = (req.body ?? {}) as { code?: string; name?: string; idToken?: string; channel?: string };
     if (!body.code) return reply.code(400).send({ error: 'code required' });
+    // Which app the invitee will message. One window per join, on that channel
+    // only: a big Slack workspace or Discord server has strangers in it, and
+    // an open window on every channel would hand the seat to whoever DMs first.
+    const joinKind = pairingKind(body.channel);
+    if (!joinKind) return reply.code(400).send({ error: 'Unknown channel.' });
     try {
       // Full invite (phase 4): when the invitee signs in, the membership is
       // keyed to their real account, so they can log in and see this agent.
@@ -6393,23 +6569,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       const joined = redeemInvite(store, body.code, body.name ?? '', accountId);
       const agent = store.getAgent(joined.agentId)!;
-      const channelRow = store.getChannelForAgent(agent.id);
+      const channelRow = store.getChannelForAgent(agent.id, joinKind);
       if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
         void claimFirstContact(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           {
             agentId: agent.id,
             runtimeRef: agent.runtimeRef,
-            accountId: channelRow.accountId,
+            accountId: joinKind === 'telegram' ? channelRow.accountId : CHANNEL_ACCOUNT,
             forUserId: joined.membershipUserId,
+            kind: joinKind,
             timeoutMs: 30 * 60_000,
           },
         ).catch((err) => app.log.error({ err }, 'invitee claim failed'));
       }
+      // Every way in, so the join page can offer a button per app.
+      const ways = store.listChannelsForAgent(agent.id).map((c) => {
+        const st = (c.settings ?? {}) as Record<string, unknown>;
+        return {
+          kind: c.kind,
+          deepLink: c.deepLink,
+          ...(c.kind === 'slack' ? { team: st.team } : {}),
+          ...(c.kind === 'discord' ? { servers: Array.isArray(st.servers) ? (st.servers as Array<{ name?: string }>).map((g) => g.name) : [] } : {}),
+        };
+      });
       return reply.code(201).send({
         agentName: agent.name,
-        botUsername: channelRow?.accountId,
+        channel: joinKind,
+        botUsername: joinKind === 'telegram' ? channelRow?.accountId : undefined,
         deepLink: channelRow?.deepLink,
+        channels: ways,
       });
     } catch (err) {
       if (err instanceof InviteInvalidError) {
@@ -6443,12 +6632,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // Pending pairing requests on a live agent — the app renders these as
   // "someone wants to talk to <agent>" cards for the owner to approve.
+  /** Pending requests on every channel the agent has, each marked with its channel. */
+  const pairingRequestsFor = async (agent: Agent) => {
+    const out: Array<Awaited<ReturnType<typeof listPairingRequests>>[number] & { kind: Channel['kind'] }> = [];
+    for (const ch of store.listChannelsForAgent(agent.id)) {
+      const acct = ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT;
+      for (const r of await listPairingRequests(providerFor(agent.hostId), agent.runtimeRef!, acct, ch.kind)) out.push({ ...r, kind: ch.kind });
+    }
+    return out;
+  };
+  const pairingKind = (v: unknown): Channel['kind'] | undefined =>
+    v === undefined || v === 'telegram' ? 'telegram' : v === 'slack' || v === 'discord' ? v : undefined;
+  /**
+   * The channel a pending code belongs to, when the caller did not say (the
+   * Telegram management bot and the management tools only know the code).
+   * Codes are random per request, so the match is unambiguous.
+   */
+  const kindForCode = async (agent: Agent, given: unknown, code: string | undefined): Promise<Channel['kind'] | undefined> => {
+    if (given !== undefined) return pairingKind(given);
+    if (!code || !agent.runtimeRef || agent.state !== 'RUNNING' || store.listChannelsForAgent(agent.id).length < 2) return 'telegram';
+    try { return (await pairingRequestsFor(agent)).find((r) => r.code === code)?.kind ?? 'telegram'; }
+    catch { return 'telegram'; }
+  };
+
   app.get<{ Params: { id: string } }>('/v1/agents/:id/pairing', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
-    const channel = agent && store.getChannelForAgent(agent.id);
-    if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
+    if (!agent?.runtimeRef || !store.listChannelsForAgent(agent.id).length) return reply.code(404).send({ error: 'Not found' });
     if (agent.state !== 'RUNNING') return [];
-    return listPairingRequests(providerFor(agent.hostId), agent.runtimeRef, channel.accountId);
+    return pairingRequestsFor(agent);
   });
 
   // Every pending "wants to join" request across the caller's RUNNING agents,
@@ -6457,17 +6668,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get('/v1/pending', async (req) => {
     const mine = store
       .listAgents(ownerIdOf(req))
-      .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.getChannelForAgent(a.id));
+      .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);
     const perAgent = await Promise.all(
       mine.map(async (a) => {
         try {
-          const channel = store.getChannelForAgent(a.id)!;
-          const reqs = await listPairingRequests(providerFor(a.hostId), a.runtimeRef!, channel.accountId);
+          const reqs = await pairingRequestsFor(a);
           return reqs.map((r) => ({
             agentId: a.id,
             agentName: a.name,
+            kind: r.kind,
             code: r.code,
-            telegramId: r.id,
+            channelUserId: r.id,
+            // Kept for the Telegram management bot, which reads this name.
+            ...(r.kind === 'telegram' ? { telegramId: r.id } : {}),
             username: r.meta?.username,
             firstName: r.meta?.firstName,
             lastName: r.meta?.lastName,
@@ -6484,8 +6697,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     '/v1/agents/:id/pairing/approve',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
-      const channel = agent && store.getChannelForAgent(agent.id);
       const code = (req.body as { code?: string } | null)?.code;
+      const kind = agent ? await kindForCode(agent, (req.body as { kind?: unknown } | null)?.kind, code) : 'telegram';
+      if (!kind) return reply.code(400).send({ error: 'Unknown channel.' });
+      const channel = agent && store.getChannelForAgent(agent.id, kind);
       // "That's me — link & approve" (owner-only by construction: ownedAgent
       // gates this route). Binds the owner seat + links the account's Telegram.
       const asSelf = (req.body as { asSelf?: boolean } | null)?.asSelf === true;
@@ -6497,8 +6712,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           {
             agentId: agent.id,
             runtimeRef: agent.runtimeRef,
-            accountId: channel.accountId,
+            accountId: kind === 'telegram' ? channel.accountId : CHANNEL_ACCOUNT,
             code,
+            kind,
             agentName: agent.name,
             sharedMemory: agent.sharedMemory,
             asSelf,
@@ -6519,14 +6735,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     '/v1/agents/:id/pairing/deny',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
-      const channel = agent && store.getChannelForAgent(agent.id);
       const code = (req.body as { code?: string } | null)?.code;
+      const kind = agent ? await kindForCode(agent, (req.body as { kind?: unknown } | null)?.kind, code) : 'telegram';
+      if (!kind) return reply.code(400).send({ error: 'Unknown channel.' });
+      const channel = agent && store.getChannelForAgent(agent.id, kind);
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
       if (!code) return reply.code(400).send({ error: 'code required' });
       try {
         const out = await denyPairing(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-          { agentId: agent.id, runtimeRef: agent.runtimeRef, code },
+          { agentId: agent.id, runtimeRef: agent.runtimeRef, code, kind },
         );
         return out;
       } catch (err) {
@@ -6756,6 +6974,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       store.deleteChannelForAgent(agent.id);
     }
+    // Slack and Discord belong to apps the owner made; nothing to recycle,
+    // but their tokens must not outlive the agent.
+    for (const other of store.listChannelsForAgent(agent.id)) {
+      await secrets.delete(other.secretRef).catch(() => {});
+    }
+    store.deleteChannelForAgent(agent.id, 'all');
     // Scrub the agent's other stored secrets so a tombstone leaves no live
     // credentials: data-source deploy keys and env-var values (both keyed by
     // the source/var id, so release() never touches them).

@@ -1,7 +1,8 @@
 # Design: Slack and Discord for agents
 
-Status, 2026-09-18: design only. Nothing here is built. Written to be coded
-from directly. It does not depend on the OpenClaw 2026.9 port; it works on
+Status, 2026-09-18: **built in v1.31.0** (steps 1–6 and 8). Step 7, Slack and
+Discord for the management agent, is not done: adding a channel is refused for
+it. Not yet tried with a real Slack app or Discord bot. It does not depend on the OpenClaw 2026.9 port; it works on
 today's 2026.7.1-2.
 
 ## What we are adding
@@ -66,7 +67,7 @@ per agent (`getChannelForAgent`, about 30 call sites), and a member has one
 | Store API | `getChannelForAgent(agentId, kind = 'telegram')` so all existing callers keep their meaning. Add `listChannelsForAgent(agentId)` and `deleteChannelForAgent(agentId, kind)`. |
 | `Channel.kind` | `'telegram' \| 'slack' \| 'discord'`. |
 | Secrets | One secret per channel row, as now. Slack's holds JSON: `{ "botToken": "...", "appToken": "..." }`. Discord's holds the token string. |
-| Member identities | New table `member_identities (agent_id, user_id, kind, channel_user_id, PRIMARY KEY (agent_id, user_id, kind))`. Migration copies every non-null `memberships.channel_user_id` in as `telegram`. `listAllowedChannelUserIds(agentId, kind)` reads from it. The old column stays, unread by new code, until a later cleanup. |
+| Member identities | New table `member_identities (agent_id, user_id, kind, channel_user_id, bound_at, PRIMARY KEY (agent_id, user_id, kind))` for **Slack and Discord only**. Telegram identities stay on `memberships.channel_user_id` exactly as today, so no Telegram path changes. `listAllowedChannelUserIds(agentId, kind = 'telegram')` reads the right place per kind. Built in step 2. |
 | `agents.web_only` | Meaning becomes "has no channel rows". Keep the column as the owner's stated intent at creation (skip Telegram); compute `channels: [...]` on the public agent for the UI. |
 
 Templates, sends and clones never carry channel credentials (same as
@@ -145,8 +146,8 @@ slack?:   { botToken; appToken; dmPolicy: 'pairing'; allowFrom: string[]; rooms:
 discord?: { token; applicationId; dmPolicy: 'pairing'; allowFrom: string[]; rooms: RoomAccess; proxy?: string };
 ```
 
-`RoomAccess` is the shape Telegram already uses: `off`, `members`, or
-`room` with one id.
+`rooms` is `{ mode: 'off' }` or `{ mode: 'room', roomId }`. In a room the
+agent answers members only (`users: allowFrom`) and only when @mentioned.
 
 A web-only agent with a Slack row is no longer "channel-less": the "no
 channel" refusal in `buildRuntimeSpec` becomes "no channel **and** not
@@ -162,15 +163,26 @@ Both use a fixed account key, `hatchabot`. For each present slice, in order:
    - `channels.slack.enabled true`, `channels.slack.mode socket`
    - `channels.slack.accounts.hatchabot` = `{ enabled, botToken, appToken, dmPolicy, allowFrom }` (sensitive)
    - `channels.slack.groupPolicy` = `disabled` or `allowlist`, always written
-   - `channels.slack.channels` = `{}` or `{ "<C…>": { allow: true, requireMention: true } }`, with `--replace`, always written
+   - `channels.slack.channels` = `{}` or `{ "<C…>": { enabled: true, requireMention: true, users: allowFrom } }`, always written (the 2026.7.1 schema rejects the `allow` key the docs show)
 3. Discord:
    - `channels.discord.enabled true`
    - `channels.discord.accounts.hatchabot` = `{ enabled, token, applicationId, dmPolicy, allowFrom }` (sensitive)
    - `channels.discord.groupPolicy`, always written
    - `channels.discord.guilds` = `{}` or `{ "<guildId>": { requireMention: true } }`, with `--replace`, always written
    - `channels.discord.proxy` when the slice has one (sensitive)
-4. `agents add … --bind slack:hatchabot --bind discord:hatchabot` beside the
-   Telegram bind.
+4. Bind on **every** build with `agents bind --agent <slug> --bind <kind>:hatchabot`
+   (and `agents unbind` when the channel is gone). Not `agents add --bind`:
+   the provider runs `agents add` only on a fresh volume, so a channel added
+   later would never be routed. Both verbs are idempotent.
+5. Only for plugins the image carries (`channelPlugins`, from the image label).
+   An agent on an image without them gets byte-for-byte the old commands.
+
+Verified end to end against real OpenClaw 2026.7.1-2 (throwaway container,
+fake tokens): the rendered seed runs clean, config validates, both channels
+bind and start, a second run is clean, and the "removed" seed leaves config
+valid, no bindings, and no token in `openclaw.json`. OpenClaw refuses any
+write that halves the config's size, which is why removal is two small writes
+(`enabled false`, `accounts {}`), not one replace.
 
 **Removal must converge too.** When a kind is absent from the patch, write
 `channels.<kind>.enabled false` and drop its account, so a removed channel
@@ -262,9 +274,52 @@ Telegram group access).
 | Server-side request forgery in `verify` | Fixed hostnames only, no redirects, no caller-supplied addresses. |
 | The management agent gaining an exfiltration path | Its proxy allows only the named hosts. Slack and Discord are chat platforms the owner chose, the same trust as Telegram today. |
 
+## Spike findings (2026-09-18, OpenClaw 2026.7.1-2, throwaway containers)
+
+- **Install and move work.** `openclaw plugins install @openclaw/<kind>@2026.7.1`
+  puts each plugin in its own project directory with its dependencies
+  **nested inside the package** (`node_modules/@openclaw/<kind>/node_modules`).
+  The peer link to OpenClaw is an absolute symlink, so copying the project
+  directory to `/opt/hatchabot/plugins/<kind>` keeps it resolving.
+  Size: Slack 40 MB, Discord 53 MB.
+- **Linking works.** As the `node` user on a fresh HOME:
+  `plugins install --link /opt/hatchabot/plugins/<kind>/node_modules/@openclaw/<kind>`
+  then `plugins enable <kind>`. `plugins list` shows both enabled from the
+  image path; `channels list --all` shows them installed. The agent's volume
+  grows by about 1.3 MB.
+- **Config keys validate** (`openclaw config validate`), with one correction:
+  Slack's per-room object takes `enabled`, not `allow`. Its keys are
+  `enabled requireMention ignoreOtherMentions replyToMode tools toolsBySender
+  allowBots botLoopProtection users skills systemPrompt`. `agents add --bind
+  slack:hatchabot --bind discord:hatchabot` works. Removal as designed
+  (`enabled false` plus `config unset …accounts.hatchabot`) leaves the channel
+  "not configured, disabled".
+- **Pairing CLI:** `pairing list slack --json` returns
+  `{"channel":"slack","requests":[]}`; `pairing approve` takes `--account`
+  and `--notify`.
+- **The gateway starts both** from the image path
+  (`[slack] [hatchabot] starting provider`, same for Discord), and a failed
+  channel auto-restarts with backoff (Discord: 10 attempts).
+- **Proxy, through a logging proxy:**
+  - Discord honours `channels.discord.proxy` for REST and for its gateway
+    websocket (`CONNECT discord.com`, `CONNECT gateway.discord.gg`).
+  - Slack's REST calls honour `HTTPS_PROXY` with `NODE_USE_ENV_PROXY=1`
+    (`CONNECT slack.com`). Its Socket Mode websocket
+    (`wss-primary.slack.com`) was not reached with fake tokens, so whether it
+    honours the proxy is **still open**; check it with the first real app
+    before offering Slack to the management agent.
+  - Something at start-up also tried `registry.npmjs.org`. The management
+    agent's proxy refuses it; harmless.
+- **Side effect to handle:** with Discord on, OpenClaw registers every skill
+  as a Discord slash command (it logged truncating descriptions over 100
+  characters). Consider `commands.native: false` for Discord if the command
+  list is noisy in practice.
+- Tool names: the plugins add actions to OpenClaw's message tool rather than
+  new top-level tools, so the management agent's allowlist needs no change.
+
 ## Build order
 
-1. **Image spike, no app code**: bake both plugins into a candidate
+1. **Image spike, no app code** (done, findings above): bake both plugins into a candidate
    (`IMAGE_TAG=2026.7.1-2-ch1`), link them in a throwaway container, confirm
    they load, confirm the project-directory move resolves dependencies, note
    the tool names they add, and test Slack through the ops proxy. Record the
