@@ -71,6 +71,7 @@ import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, 
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
 import { OPS_DIGEST_MESSAGE } from '../ops/opsAgent.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
+import { createOpsPush } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
@@ -2494,9 +2495,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return !doormen.supported;
   };
 
+  /**
+   * "Something is waiting" on the owner's phone, through their management
+   * agent's own Telegram bot — the one thing the retired management bot did
+   * that the app could not. One way only: confirming stays in the app.
+   */
+  const opsPush = createOpsPush({
+    botToken: async (ownerId) => {
+      const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+      const row = ops && store.getChannelForAgent(ops.id, 'telegram');
+      return row ? await secrets.get(row.secretRef).catch(() => undefined) : undefined;
+    },
+    chatId: (ownerId) => {
+      const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+      // The owner's OWN Telegram on that agent: never a member's.
+      return ops
+        ? store.listMemberships(ops.id).find((m) => m.role === 'owner' && m.status === 'active')?.channelUserId
+        : undefined;
+    },
+    appUrl: () => deps.publicUrl?.replace(/\/$/, '') || undefined,
+    log: (event, detail) => app.log.info(detail, event),
+  });
+
   registerMgmtChat(app, {
     store, secrets, opsPeerOk,
     notifyOps: (ownerId, body) => void opsNotifier.notify(ownerId, body),
+    pushOps: (ownerId, headline, detail) => void opsPush.waiting(ownerId, headline, detail),
     mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn,
   });
   app.post('/v1/mgmt/llm/complete', async (req, reply) => {

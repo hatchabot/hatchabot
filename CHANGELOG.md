@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.44.0] — 2026-09-19
+
+### Added
+- **Your manager can tell you on Telegram that something is waiting.** Give the Hatchabot agent its own bot (its ⚙ Settings → Messaging) and, when it prepares a change, Hatchabot messages you through that bot: what it prepared, and the address to confirm it at. This is the one thing the retired Telegram management bot did that the app could not. It is **one way** — nothing is ever approved from Telegram by this path; the card is still pressed in Hatchabot by someone signed in. It sends only to the owner's own linked Telegram, never a member's, and a failed send is logged and dropped. Hatchabot sends with `sendMessage`, which is stateless, so it never competes with the agent's own gateway for updates.
+
+### Fixed
+- **A dead pool bot stops renaming itself forever.** A bot whose token Telegram no longer accepts (deleted or revoked at @BotFather) was treated like a rate limit and retried every five minutes, indefinitely — one was doing exactly that on the author's box. A permanent failure now abandons the rename and logs it once; the live census in Settings → Telegram bots is where a dead token gets dealt with.
+
 ## [1.43.0] — 2026-09-19
 
 ### Added

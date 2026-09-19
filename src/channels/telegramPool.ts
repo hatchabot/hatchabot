@@ -27,6 +27,11 @@ import type {
  */
 const IDLE_RENAME_DELAY_MS = Number(process.env.HATCHABOT_IDLE_RENAME_MS ?? 15 * 60_000);
 
+/** Telegram errors that no retry can fix: the token is not a token any more. */
+export function permanentTelegramFailure(error: unknown): boolean {
+  return /unauthorized|bot was deleted|not found|invalid token/i.test(String(error ?? ''));
+}
+
 export class TelegramPoolProvisioner implements ChannelProvisioner {
   readonly kind = 'telegram' as const;
 
@@ -296,6 +301,16 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       this.db
         .prepare(`UPDATE telegram_pool SET renamed_at = ? WHERE username = ? COLLATE NOCASE`)
         .run(new Date().toISOString(), username);
+      return;
+    }
+    // A token Telegram no longer accepts is not a rate limit: the bot was
+    // deleted or its token revoked at BotFather, and no amount of waiting
+    // fixes it. Stop parking the name — one dead pool bot was renaming itself
+    // every five minutes, forever (seen live 2026-09-19). The live census
+    // (Settings → Telegram bots) is where a dead token gets dealt with.
+    if (permanentTelegramFailure(res.error)) {
+      this.opts.log?.('channel.name_abandoned', { username, name, error: String(res.error).slice(0, 120) });
+      this.#clearParked(username);
       return;
     }
     // Keep the name parked, and respect the deadline Telegram gave us. Without

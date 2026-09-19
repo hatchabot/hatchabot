@@ -112,6 +112,9 @@ export interface MgmtChatDeps {
   /** Tell the owner's management agent what happened to a change it filed
    *  (routes.ts owns the notifier; see src/ops/notify.ts). */
   notifyOps?: (ownerId: string, body: string) => void;
+  /** Push "something is waiting" to the owner's Telegram, through the
+   *  management agent's own bot (routes.ts owns it; see src/ops/push.ts). */
+  pushOps?: (ownerId: string, headline: string, detail?: string) => void;
 }
 
 export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void {
@@ -501,6 +504,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
         }
         const r = await opsBrokerFor(agent.ownerId).handleTool(name, args, { ownerId: agent.ownerId, ...WEB_WHO, source: 'agent', note: typeof why === 'string' ? why : undefined });
         if (r.ok && 'pending' in r) {
+          // The owner may be nowhere near the app. If their management agent
+          // has a Telegram bot, say so there — one way, with no approve button:
+          // the card is still pressed in Hatchabot, signed in.
+          deps.pushOps?.(agent.ownerId,
+            `🔑 Your Hatchabot manager has prepared a change and is waiting for you.`,
+            r.pending.summary.split('\n')[0]);
           return text(`Filed for the owner's approval: "${r.pending.summary.split('\n')[0]}". It is NOT done. It appears under "Waiting for you" on their Hatchabot home screen and only happens if they press Confirm there. Tell them so; never say it succeeded.`);
         }
         if (r.ok) return text(JSON.stringify(r.data).slice(0, 12_000));
