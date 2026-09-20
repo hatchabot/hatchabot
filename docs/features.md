@@ -1,8 +1,15 @@
 # Hatchabot features — a tour
 
-What exists today (v0.99.0), in one place. Each section says how to do the
-thing; where a deeper doc exists, it's linked instead of duplicated. The tour
-is updated as of 2026-09-04.
+What exists today, in one place. Each section says how to do the thing; where a
+deeper doc exists, it's linked instead of duplicated. Updated 2026-09-20.
+
+**Start here: you don't have to do any of it yourself.** Hatchabot ships with a
+manager — *your Hatchabot agent* — that you talk to in plain words: "which
+agents look unhealthy?", "make a travel agent for the Sicily trip", "put Taco
+Agent back on the fleet image". It reads everything and changes nothing:
+anything that would alter your fleet comes back as a card you confirm. Nobody
+else's agent platform hands you an agent whose job is running the platform.
+See [Your Hatchabot agent](#your-hatchabot-agent-the-manager).
 
 ## What Hatchabot is
 
@@ -11,9 +18,12 @@ OpenClaw runtime in its own Docker container with its own durable volume
 (memory, config, sessions), fronted by a Telegram, Slack or Discord bot — or
 by nothing at all, in which case you talk to it in the app. Agents are
 ephemeral problem-solvers you create, use, and delete, while the Telegram
-bots that front them outlive any one agent and can be recycled into the next. You manage the fleet from a web app
-(installable as a phone PWA), the `hatchabot` CLI, or an optional Telegram
-management bot.
+bots that front them outlive any one agent and can be recycled into the next.
+
+You run the fleet three ways, and the first is the one that makes Hatchabot
+different: **ask your Hatchabot agent**, a manager that lives in the fleet it
+manages; the **web app** (installable as a phone PWA); or the **`hatchabot`
+CLI**.
 
 ## The home screen
 

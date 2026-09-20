@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.1.1] — 2026-09-20
+
+### Changed
+- **The manager leads.** An agent whose job is running the fleet is the thing no other setup hands you, so it now opens the features tour and the README, headlines the website, and takes a card on the deck's idea slide and a row in the comparison ("Who runs it — an agent of yours does"). It was previously seventh in a grid.
+
 ## [2.1.0] — 2026-09-20
 
 ### Added

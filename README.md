@@ -13,6 +13,15 @@ It's a control plane for [OpenClaw](https://docs.openclaw.ai) agent runtimes:
 Hatchabot handles provisioning, messaging identity, memory safety, membership,
 and lifecycle; OpenClaw runs the agent.
 
+**It also runs itself.** Every installation can create a **Hatchabot agent** —
+an ordinary agent, on whichever AI source you have, whose job is your fleet.
+Ask it in plain words and it reads everything (health, logs, usage, files) and
+*proposes* the change: a card you confirm in the app, executed with your
+sign-in, never with anything the agent holds. It lives in a network jail with a
+propose-only key, tells you what happened afterwards, and — given its own
+Telegram bot — messages your phone when something is waiting. See
+[docs/ops-agent-design.md](docs/ops-agent-design.md).
+
 **New here or catching up?** [docs/features.md](docs/features.md) is a
 task-first tour of everything the app does today — creating, training, moving,
 adopting, backing up, and operating a fleet of agents.
