@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.50.0] — 2026-09-20
+
+### Added
+- **A dashboard beside your manager.** The empty space next to the Hatchabot agent now carries the fleet in tiles, in the same language as the agent icons — a tinted rounded square with an emoji sticker: **awake** (11/13), **to read**, **to confirm**, **knocking**, **to rebuild**, **asks / 5h**, **spare bots**. The steady-state tiles are always there; the ones that mean something needs you appear only when they are not zero, and take priority when the row runs out of room. Every tile is a button to the screen that acts on it — health, the agent with something new, "Waiting for you", bulk rebuild, usage, the bot pool — because a number you cannot act on is decoration. On a phone the four most urgent survive.
+
 ## [1.49.2] — 2026-09-19
 
 ### Changed

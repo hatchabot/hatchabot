@@ -436,6 +436,31 @@
            grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
   .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
   .v2face.live { background:none; width:auto; height:auto; font-size:inherit; display:block; color:var(--text) }
+  /* The manager's dashboard: the fleet in six tiles, in the same language as
+     the agent icons — a tinted rounded square with an emoji sticker. Each one
+     is a door to the screen that acts on it. */
+  .v2stats { display:flex; flex-wrap:wrap; gap:12px 14px; margin:4px 0 2px }
+  .v2stat { display:grid; gap:5px; justify-items:center; width:72px; background:none; border:0; padding:0; cursor:pointer;
+            font:inherit; color:inherit }
+  .v2stat .tile { width:56px; height:56px; border-radius:17px; display:grid; place-items:center; position:relative;
+                  background:color-mix(in srgb, var(--tone) 16%, var(--panel-2));
+                  border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
+                  transition:transform .12s ease, box-shadow .12s ease }
+  .v2stat:hover .tile, .v2stat:focus-visible .tile { transform:translateY(-2px); box-shadow:0 4px 12px rgba(0,0,0,.18) }
+  .v2stat .num { font-size:19px; font-weight:800; line-height:1; letter-spacing:-.02em; font-variant-numeric:tabular-nums }
+  .v2stat .num small { font-size:12px; font-weight:700; color:var(--dim) }
+  .v2stat .em { position:absolute; right:-5px; top:-7px; font-size:16px; filter:drop-shadow(0 1px 1px rgba(0,0,0,.25)) }
+  .v2stat .lab { font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
+  .v2stat.hot .num { color:var(--tone) }
+  @media (prefers-reduced-motion: reduce) { .v2stat .tile { transition:none } }
+  /* On a phone the tiles share the row with the manager's icon: show the four
+     that matter most rather than wrapping into a wall. */
+  @media (max-width:560px) {
+    .v2stats { gap:10px }
+    .v2stat { width:60px }
+    .v2stat .tile { width:50px; height:50px; border-radius:15px }
+    .v2stat:nth-child(n+5) { display:none }
+  }
   .v2hubagent { padding:8px 6px 2px }
   .v2hubagent .v2ic { width:88px; height:88px; border-radius:26px; font-size:44px }
   .v2hubagent .v2ic::after { inset:-6px; border-radius:31px }
@@ -788,6 +813,7 @@
       <div class="v2hubmain">
         <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
         <div id="v2OpsBox" hidden></div>
+        <div class="v2stats" id="v2Stats" hidden></div>
         <div class="sub" id="v2HubLede">Say what you want in plain words. I create, fix, move and share agents, and I ask before I change anything.</div>
         <div id="v2HubLogSlot"></div>
         <div id="v2HubInputSlot"></div>
@@ -10051,6 +10077,51 @@ function renderV2Joins() {
   return rows.length;
 }
 
+/**
+ * The fleet at a glance, beside the manager: one tile per thing worth knowing,
+ * in the icon language of the home screen. Every tile is a button to the screen
+ * that does something about it — a number you cannot act on is decoration.
+ */
+function renderV2Stats() {
+  const box = $('v2Stats');
+  if (!box) return;
+  const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED');
+  if (!agentsLoaded || !mine.length) { box.hidden = true; return; }
+  const awake = mine.filter(a => a.state === 'RUNNING').length;
+  const unread = mine.filter(v2Unread).length;
+  const knocking = mine.reduce((n, a) => n + (pairings[a.id]?.length ?? 0), 0);
+  const stale = mine.filter(a => a.updateAvailable).length;
+  const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
+  const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');
+  const tiles = [
+    { key: 'awake', emoji: '🐣', tone: 'var(--ok)', num: `${awake}<small>/${mine.length}</small>`,
+      lab: 'awake', hot: awake < mine.length, go: () => openFleetHealth(), title: `${awake} of ${mine.length} agents running` },
+    unread ? { key: 'unread', emoji: '💬', tone: 'var(--info)', num: unread, lab: unread === 1 ? 'to read' : 'to read', hot: true,
+      go: () => { const a = mine.find(v2Unread); if (a) v2Open(a.id); }, title: 'Agents with something new in their console' } : null,
+    v2PendingCount ? { key: 'confirm', emoji: '✅', tone: 'var(--accent)', num: v2PendingCount, lab: 'to confirm', hot: true,
+      go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'Changes your manager has prepared' } : null,
+    knocking ? { key: 'knock', emoji: '🔑', tone: 'var(--info)', num: knocking, lab: 'knocking', hot: true,
+      go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'People waiting to be let in' } : null,
+    stale ? { key: 'stale', emoji: '🔄', tone: 'var(--warn)', num: stale, lab: 'to rebuild', hot: true,
+      go: () => { openFleetActions(); setTimeout(() => faSelect('needs-rebuild'), 50); }, title: 'Agents on an older image' } : null,
+    { key: 'usage', emoji: limited ? '⛔' : '⚡', tone: limited ? 'var(--bad)' : 'var(--accent)', num: fmtN(usage), lab: 'asks / 5h', hot: limited,
+      go: () => openFleetUsage(), title: limited ? 'A source is rate-limited' : 'Requests to your AI sources in the last 5 hours' },
+    { key: 'bots', emoji: '🤖', tone: poolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail, lab: 'spare bots', hot: false,
+      go: () => openAiDlg('pool'), title: 'Telegram bots parked and ready for a new agent' },
+  ].filter(Boolean).slice(0, 6);
+  const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}">
+      <span class="tile"><span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
+      <span class="lab">${esc(t.lab)}</span>
+    </button>`).join('');
+  if (box.__html !== html) {
+    box.__html = html;
+    box.innerHTML = html;
+    for (const t of tiles) box.querySelector(`[data-stat="${t.key}"]`)?.addEventListener('click', t.go);
+  }
+  box.hidden = false;
+}
+let v2PendingCount = 0;
+
 function v2RenderHub() {
   const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
   const hub = document.querySelector('.v2hub');
@@ -10078,6 +10149,7 @@ function v2RenderHub() {
   }
   if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
   box.hidden = false;
+  renderV2Stats();
   // Its icon IS an agent icon: same markup and classes as the grid's, so the
   // ring, badge, tooltip and click all behave identically. Only the size differs.
   const face = hub.querySelector('.v2face');
@@ -10126,6 +10198,7 @@ async function loadProposals() {
   const sig = [...r.pending.map(p => p.confirmId), ...failed.map(f => `f:${f.confirmId}`)].join(',');
   $('v2Proposals').hidden = !(r.pending.length || failed.length || renderV2Joins());
   $('v2PropCount').textContent = r.pending.length || '';
+  v2PendingCount = r.pending.length;
   // While you talk to your management agent, what it prepares shows right
   // above the conversation — in Hatchabot's frame, which the agent can't draw in.
   const inConsole = $('consoleDlg').open && v2Find(consoleAgentId)?.ops;
