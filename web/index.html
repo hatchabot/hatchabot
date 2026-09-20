@@ -736,6 +736,7 @@
         <div class="v2popsep"></div>
         <button role="menuitem" onclick="v2CloseAccount(); openInbox()">Inbox</button>
         <button role="menuitem" onclick="v2CloseAccount(); installApp()">Install as an app</button>
+        <button role="menuitem" onclick="v2CloseAccount(); openSetupGuide()">Setup guide</button>
         <button role="menuitem" onclick="v2CloseAccount(); helpDlg.showModal()">Help</button>
         <button role="menuitem" onclick="location.search = '?ui=classic'">Classic look</button>
         <div class="v2popsep"></div>
@@ -771,6 +772,7 @@
       <button id="fleetBtn" class="hbtn" title="Fleet health — states, activity, backups, and runtime at a glance" onclick="openFleetHealth()">📊 Health</button>
       <button id="fleetUsageBtn" class="hbtn" title="Fleet usage — every running agent ranked by tokens" onclick="openFleetUsage()">📊 Usage</button>
       <button id="fleetSourcesBtn" class="hbtn" title="Which agents are on which AI source, and which models" onclick="openFleetSources()">📊 Sources</button>
+      <button id="setupGuideBtn" class="hbtn" title="The setup checklist — what is done, what is left" onclick="openSetupGuide()">⚑ Setup guide</button>
       <button id="helpBtn" class="hbtn" title="Good to know — key concepts worth remembering" onclick="helpDlg.showModal()">❔ Help</button>
       <button id="tocBtn" class="hbtn" title="Jump to an agent — a clickable table of contents" onclick="toggleToc()" hidden>📑 Jump</button>
       <span class="spacer"></span>
@@ -2645,11 +2647,83 @@ function toast(msg, ms, cls) {
 
 // ---- setup: first-run subscription profile --------------------------------
 
+let setupOpen = false; // the guide is also reachable long after the first agent
+
+/**
+ * The setup checklist, in the order a house actually gets set up: three steps
+ * to the first agent, then the three that decide whether it is any use on a
+ * Tuesday — a manager you can reach from your phone, an address that works
+ * away from home, and a backup that has actually run.
+ *
+ * Every step is marked done from live state, never from a "you have seen
+ * this" flag, so the guide can be reopened any time and still tell the truth.
+ * It used to disappear for good the moment one agent existed, unnamed and
+ * with no way back, which is why nobody knew it was there.
+ */
+function setupSteps() {
+  const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED');
+  const ops = (agents ?? []).find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
+  const aiDone = profiles.length > 0, botDone = poolAvail > 0 || mine.some(a => a.botUsername);
+  const steps = [
+    { key: 'ai', done: aiDone, title: aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', body: `
+      <p class="sub" style="margin:4px 0 6px">A Claude subscription (Pro or Max) powers every agent. On the machine running Hatchabot, run
+        <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.
+        Logged into Claude on this very machine (Linux)? Leave the token blank — it's one tap.</p>
+      <label>Model</label>
+      <select id="setupModel" style="width:auto">
+        <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
+        <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
+      </select>
+      <label>Setup token</label>
+      <input type="password" id="setupToken" placeholder="paste the token printed by: claude setup-token   (blank = use this machine's Claude login)" autocomplete="off">
+      <div class="err" id="setupErr"></div>
+      <div class="actions" style="justify-content:space-between;align-items:center">
+        <span class="sub">Using an API key or a local model instead? <a href="#" onclick="event.preventDefault();openAiDlg('ai')">⚙ AI sources</a></span>
+        <button class="primary" onclick="createSubscriptionProfile()">Use my Claude subscription</button>
+      </div>` },
+    { key: 'bot', done: botDone, title: botDone ? (poolAvail ? `Telegram bot ready (${poolAvail} parked)` : 'Telegram bot in use') : 'Make your first Telegram bot', body: `
+      <p class="sub" style="margin:4px 0 6px">Each agent is a Telegram bot. In Telegram open <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a>,
+        send <code>/newbot</code>, give it a display name (e.g. <i>Kitchen Helper</i>) and a username ending in <code>bot</code>. BotFather replies with a token like
+        <code>123456789:AAH…</code> — paste it here. ${myAccount.hostOwner ? 'It is checked with Telegram and parked, so the next step grabs it instantly.' : 'You will paste it when creating the agent in step 3.'}</p>
+      ${myAccount.hostOwner ? `<div style="display:flex;gap:8px;flex-wrap:wrap"><input type="password" id="wizBotToken" placeholder="bot token from @BotFather" autocomplete="off" style="flex:1;min-width:220px"><button class="primary" id="wizBotBtn" onclick="wizardAddBot()">Check &amp; park it</button></div><div class="err" id="wizBotErr"></div>` : ''}` },
+    { key: 'agent', done: mine.length > 0, title: mine.length ? `${mine.length} agent${mine.length === 1 ? '' : 's'}` : 'Create the agent', body: `
+      <p class="sub" style="margin:4px 0 6px">A name and one paragraph about its job — that becomes its personality, which you can edit any time.
+        Then open the Telegram link on its card and say hi; your first message claims it as yours.</p>
+      <div class="actions" style="justify-content:flex-start"><button class="primary" ${aiDone ? '' : 'disabled title="Connect the AI first"'} onclick="$('fabBtn').click()">➕ Create my first agent</button></div>` },
+  ];
+  if (!myAccount.hostOwner) return steps;
+  const httpsDone = /^https:/i.test(appConfig?.appUrl ?? '');
+  steps.push(
+    { key: 'ops', done: !!ops?.botUsername, title: ops?.botUsername ? `Your manager answers on @${esc(ops.botUsername)}` : 'Give your Hatchabot agent a Telegram bot', body: `
+      <p class="sub" style="margin:4px 0 6px">The Hatchabot agent is the one you ask for changes — "make me an agent that watches the bins", "why is the kitchen one quiet?".
+        Give it its own bot and you can ask from anywhere; Hatchabot pushes what needs you (someone knocking, a change waiting) down the same channel.
+        Confirming still happens here, in the app.</p>
+      ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openV2Agent('${jsq(ops.id)}','messaging')">Open its Telegram tab</button></div>`
+            : `<p class="sub" style="margin:0"><b>It doesn't exist yet</b> — the offer to create it is on the home screen, beside the fleet.</p>`}` },
+    { key: 'https', done: httpsDone, title: httpsDone ? `Reachable at ${esc((appConfig?.appUrl ?? '').replace(/^https:\/\//, ''))}` : 'Reach it from your phone, over HTTPS', body: `
+      <p class="sub" style="margin:4px 0 6px">On <code>http://localhost:8080</code> the app only works on this machine, and the agent consoles need a secure page.
+        One command on the host puts a real certificate in front of it and gives it an address your other devices can open:</p>
+      <p style="margin:4px 0 6px"><code>tailscale serve --bg http://localhost:8080</code></p>
+      <p class="sub" style="margin:0">Then set <code>HATCHABOT_PUBLIC_URL</code> to that <code>https://…ts.net</code> address and restart. Details in <code>docs/tailscale.md</code>.</p>` },
+    { key: 'backup', done: backupAgeH !== null && backupAgeH < 48, title: backupAgeH !== null && backupAgeH < 48 ? 'Backups are running' : 'Check a backup has actually run', body: `
+      <p class="sub" style="margin:4px 0 6px">Agents keep everything on a volume — memory, files, members. A nightly backup set is what stands between that and a bad day,
+        and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old.`}</p>
+      <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('backups')">Open Backups</button></div>` },
+  );
+  return steps;
+}
+
+/** Open the guide deliberately — from the account menu, the header, or the
+ *  Setup tile on the dashboard. */
+function openSetupGuide() {
+  setupOpen = true;
+  renderSetup();
+  $('setup').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function closeSetupGuide() { setupOpen = false; renderSetup(); }
+
 function renderSetup() {
   const el = $('setup');
-  // First-run wizard: shown until the first agent exists. Three steps, each
-  // marked done from real state (an AI source, a parked bot, an agent).
-  if (agents.length > 0) { el.innerHTML = ''; $('fabBtn').hidden = false; return; }
   // An invited member with nothing shared to them used to land on the OWNER's
   // wizard, which tells them to run `claude setup-token` on a machine they
   // have no access to. Say what is actually true for them instead.
@@ -2663,41 +2737,26 @@ function renderSetup() {
     </div>`;
     return;
   }
-  const aiDone = profiles.length > 0, botDone = poolAvail > 0;
+  const steps = setupSteps();
+  const aiDone = steps[0].done, firstAgent = steps[2].done;
   $('fabBtn').hidden = !aiDone;
-  const step = (n, done, title, body) => `
-    <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)${done ? ';opacity:.6' : ''}">
-      <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${done ? 'var(--ok)' : 'var(--accent)'};color:var(--accent-ink);font-weight:800;display:flex;align-items:center;justify-content:center">${done ? '✓' : n}</span>
-      <div class="grow"><div class="name" style="font-size:15px">${title}</div>${done ? '' : body}</div>
+  // Until the first agent exists the guide shows itself; after that it is
+  // opened on purpose, and says so in its heading.
+  if (firstAgent && !setupOpen) { el.innerHTML = ''; return; }
+  const done = steps.filter(s => s.done).length;
+  const step = (n, s) => `
+    <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)${s.done ? ';opacity:.6' : ''}">
+      <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${s.done ? 'var(--ok)' : 'var(--accent)'};color:var(--accent-ink);font-weight:800;display:flex;align-items:center;justify-content:center">${s.done ? '✓' : n}</span>
+      <div class="grow"><div class="name" style="font-size:15px">${s.title}</div>${s.done ? '' : s.body}</div>
     </div>`;
   el.innerHTML = `
-    <div class="card">
-      <div class="name">Welcome 👋 — three steps to your first agent</div>
-      ${step(1, aiDone, aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', `
-        <p class="sub" style="margin:4px 0 6px">A Claude subscription (Pro or Max) powers every agent. On the machine running Hatchabot, run
-          <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.
-          Logged into Claude on this very machine (Linux)? Leave the token blank — it's one tap.</p>
-        <label>Model</label>
-        <select id="setupModel" style="width:auto">
-          <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
-          <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
-        </select>
-        <label>Setup token</label>
-        <input type="password" id="setupToken" placeholder="paste the token printed by: claude setup-token   (blank = use this machine's Claude login)" autocomplete="off">
-        <div class="err" id="setupErr"></div>
-        <div class="actions" style="justify-content:space-between;align-items:center">
-          <span class="sub">Using an API key or a local model instead? <a href="#" onclick="event.preventDefault();openAiDlg('ai')">⚙ AI sources</a></span>
-          <button class="primary" onclick="createSubscriptionProfile()">Use my Claude subscription</button>
-        </div>`)}
-      ${step(2, botDone, botDone ? `Telegram bot ready (${poolAvail} parked)` : 'Make your first Telegram bot', `
-        <p class="sub" style="margin:4px 0 6px">Each agent is a Telegram bot. In Telegram open <a href="https://t.me/BotFather" target="_blank" rel="noopener"><b>@BotFather</b></a>,
-          send <code>/newbot</code>, give it a display name (e.g. <i>Kitchen Helper</i>) and a username ending in <code>bot</code>. BotFather replies with a token like
-          <code>123456789:AAH…</code> — paste it here. ${myAccount.hostOwner ? 'It is checked with Telegram and parked, so the next step grabs it instantly.' : 'You will paste it when creating the agent in step 3.'}</p>
-        ${myAccount.hostOwner ? `<div style="display:flex;gap:8px;flex-wrap:wrap"><input type="password" id="wizBotToken" placeholder="bot token from @BotFather" autocomplete="off" style="flex:1;min-width:220px"><button class="primary" id="wizBotBtn" onclick="wizardAddBot()">Check &amp; park it</button></div><div class="err" id="wizBotErr"></div>` : ''}`)}
-      ${step(3, false, 'Create the agent', `
-        <p class="sub" style="margin:4px 0 6px">A name and one paragraph about its job — that becomes its personality, which you can edit any time.
-          Then open the Telegram link on its card and say hi; your first message claims it as yours.</p>
-        <div class="actions" style="justify-content:flex-start"><button class="primary" ${aiDone ? '' : 'disabled title="Connect the AI first"'} onclick="$('fabBtn').click()">➕ Create my first agent</button></div>`)}
+    <div class="card" id="setupCard">
+      <div class="row">
+        <div class="name grow">${firstAgent ? `Setup guide — ${done} of ${steps.length} done` : 'Welcome 👋 — three steps to your first agent'}</div>
+        ${firstAgent ? '<button onclick="closeSetupGuide()" title="Close the guide — it stays in your account menu">✕ Close</button>' : ''}
+      </div>
+      ${firstAgent && done === steps.length ? '<p class="sub" style="margin:6px 0 0">Everything on the list is done. It stays here so you can check again after a change.</p>' : ''}
+      ${steps.map((s, i) => step(i + 1, s)).join('')}
     </div>`;
 }
 
@@ -9868,9 +9927,17 @@ function renderV2Stats() {
   const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
   const tokens24h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window24h?.tokens ?? 0), 0);
   const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');
+  // The setup guide no longer vanishes after the first agent; while anything
+  // on it is undone, the dashboard says so and opens it.
+  const setup = setupSteps();
+  const setupDone = setup.filter(x => x.done).length, setupTotal = setup.length;
+  const setupLeft = setupTotal - setupDone;
   const tiles = [
     { key: 'awake', emoji: '🐣', tone: 'var(--ok)', num: `${awake}<small>/${mine.length}</small>`,
       lab: 'awake', hot: awake < mine.length, go: () => openFleetHealth(), title: `${awake} of ${mine.length} agents running` },
+    setupLeft ? { key: 'setup', emoji: '⚑', tone: 'var(--accent)', num: `${setupDone}<small>/${setupTotal}</small>`,
+      lab: 'set up', hot: true, go: () => openSetupGuide(),
+      title: `Setup guide — ${setupLeft} step${setupLeft === 1 ? '' : 's'} left` } : null,
     unread ? { key: 'unread', emoji: '💬', tone: 'var(--info)', num: unread, lab: unread === 1 ? 'to read' : 'to read', hot: true,
       go: () => { const a = mine.find(v2Unread); if (a) v2Open(a.id); }, title: 'Agents with something new in their console' } : null,
     v2PendingCount ? { key: 'confirm', emoji: '✅', tone: 'var(--accent)', num: v2PendingCount, lab: 'to confirm', hot: true,
@@ -9889,6 +9956,9 @@ function renderV2Stats() {
       lab: 'last backup', hot: backupAgeH > 36, go: () => openAiDlg('backups'),
       title: backupAgeH > 36 ? 'The nightly backup has not run — open Backups' : 'Age of the newest backup set' } : null,
     { key: 'bots', emoji: '🤖', tone: poolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail, lab: 'spare bots', hot: false,
+      // The same Telegram badge the agent icons wear, so "spare" reads as
+      // "spare Telegram bots" without spelling it out under a 72px tile.
+      art: `<span class="v2tg v2mk-telegram" aria-hidden="true">${V2_MARK_SVG.telegram}</span>`,
       go: () => openAiDlg('pool'), title: 'Telegram bots parked and ready for a new agent' },
   ].filter(Boolean).slice(0, 8);
   const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}">

@@ -46,10 +46,20 @@ The header holds:
 - **The manager's dashboard.** Beside the Hatchabot agent, the fleet in tiles
   drawn like the agent icons: **awake** (11/13), **asks / 5h** (with a
   sparkline of the last hours), **tokens / 24h**, **last backup** (amber past
-  36h), **spare bots**, and — only when they are not zero — **to read**, **to
+  36h), **spare bots** (wearing the same Telegram badge the agent icons do, so it
+  reads as spare *Telegram* bots), and — only when they are not zero — **to read**, **to
   confirm**, **knocking** and **to rebuild**, which take priority when the row
   runs out of room. Each tile opens the screen that acts on it. On a phone the
   four most urgent stay.
+- **The setup guide doesn't disappear.** Until the first agent exists it shows
+  itself — connect the AI, make a Telegram bot, create the agent. After that it
+  keeps going with the three steps that decide whether the house is actually
+  set up: give the **Hatchabot agent its own Telegram bot**, put the app on an
+  **HTTPS address** your phone can reach, and **check a backup has run**. Every
+  step is ticked from live state, never from "you have seen this", so it is
+  still honest a month later. A **set up** tile on the dashboard shows what is
+  left (`3/6`) and opens it; it is also in the account menu under **Setup
+  guide**, and in the classic look's toolbar.
 - **Waiting for you** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — a join request with **Let them in**,

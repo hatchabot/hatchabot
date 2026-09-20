@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.9.0] — 2026-09-20
+
+### Added
+- **The setup guide is a place you can go back to.** It used to vanish the moment your first agent existed — unnamed, unmentioned, with no way to reopen it — so most people met it once and never knew what it was. It is now reachable for good: **Setup guide** in the account menu (the toolbar in the classic look), and a **set up** tile on the dashboard showing what is left (`3/6`) that opens it.
+- **Three steps past the first agent.** The list continues into what actually decides whether a house is set up: give the **Hatchabot agent its own Telegram bot** so you can ask for changes from anywhere, put the app behind an **HTTPS address** your phone can open (`tailscale serve`), and **check a backup has actually run**. Every step is still marked done from live state — an AI source, a parked bot, a manager with a bot, an `https://` public URL, a backup set under 48 hours old — never from a "you have seen this" flag, so reopening it tells the truth rather than a memory.
+
+### Changed
+- **The spare-bots tile wears a Telegram badge**, the same one the agent icons wear, so "spare bots" reads as spare *Telegram* bots without spelling it out under a 72px tile.
+
 ## [2.8.1] — 2026-09-20
 
 ### Changed
