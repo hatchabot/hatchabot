@@ -1,5 +1,11 @@
 # Design: Slack and Discord for agents
 
+> **Status, 2026-09-20: built, hidden, and being worked on.** Shipped in
+> v1.31.0 and never exercised against real apps, so v2.3.0 put the UI behind a
+> per-browser preview switch (`?preview=channels`) while the routes, the
+> connectors and the tests stay live. It comes out of preview when a real Slack
+> app and a real Discord bot have run for a while.
+
 Status, 2026-09-18: **built in v1.31.0** (steps 1–6 and 8). Step 7, Slack and
 Discord for the management agent, is not done: adding a channel is refused for
 it. Not yet tried with a real Slack app or Discord bot. It does not depend on the OpenClaw 2026.9 port; it works on

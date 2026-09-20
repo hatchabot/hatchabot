@@ -1,7 +1,7 @@
 # Hatchabot
 
 **Run private AI agents for your family on your own hardware, reachable from
-Telegram, Slack, Discord or the app itself.**
+Telegram or the app itself** — with Slack and Discord built and coming next.
 
 Hatchabot turns a machine you already own into a home for persistent AI agents.
 Each agent lives in its own container, remembers things across conversations,

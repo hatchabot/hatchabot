@@ -2320,6 +2320,25 @@ let agentsLoaded = false;
  *  blurred. Nothing is changed on the server; drop ?demo to see everything again. */
 const DEMO = new URLSearchParams(location.search).has('demo');
 if (DEMO) document.documentElement.classList.add('demo');
+/**
+ * Work-in-progress surfaces, off for everyone else. Slack and Discord are
+ * built and tested in code but have never run against real apps, so they stay
+ * out of the way until they have (2026-09-20). Turn them on in this browser
+ * with ?preview=channels — like the classic look, it is remembered; ?preview=0
+ * turns it back off. The server keeps its routes either way, which is what
+ * makes it a place to work rather than a demo.
+ */
+const PREVIEW = (() => {
+  const q = new URLSearchParams(location.search).get('preview');
+  try {
+    if (q !== null) {
+      if (q === '0' || q === 'off') localStorage.removeItem('hb-preview');
+      else localStorage.setItem('hb-preview', q || 'all');
+    }
+    return localStorage.getItem('hb-preview') ?? '';
+  } catch { return q ?? ''; }
+})();
+const previewing = (what) => PREVIEW === 'all' || PREVIEW.split(',').includes(what);
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
@@ -9431,7 +9450,12 @@ async function v2LoadChans(id) {
         <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
       </div></div>`;
   };
-  box.innerHTML = card('slack') + card('discord');
+  // Only what this browser is set up to see: an attached channel always
+  // renders (never strand an agent that has one), the rest wait for preview.
+  const kinds = ['slack', 'discord'].filter(k => previewing('channels') || r.channels.some(x => x.kind === k));
+  box.innerHTML = kinds.length
+    ? kinds.map(card).join('')
+    : '<div class="sub">Slack and Discord are coming: the code is here, and they are hidden until they have been tested against real apps.</div>';
 }
 
 async function openChanSetup(id, kind) {
@@ -9997,7 +10021,7 @@ setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?
 
 function initV2() {
   document.body.classList.add('v2');
-  $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}`;
+  $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}${PREVIEW ? ` · preview: ${PREVIEW}` : ''}`;
   $('v2AppVer').textContent = `v${window.HATCHABOT_VERSION ?? '?'}`;
   v2SyncTheme();
   addEventListener('scroll', () => $('v2Header').classList.toggle('scrolled', scrollY > 4), { passive: true });

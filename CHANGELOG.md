@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.3.0] — 2026-09-20
+
+### Changed
+- **Slack and Discord are hidden until they have met a real app.** They are built, tested and in the base image — but they have never run against a real Slack app or Discord bot, and a messaging channel that half-works fails in front of *other people*. An agent's **Messaging** tab now says they are coming, and offers Telegram. Nothing was removed: the routes, the connectors and the tests are live, an agent that already has a channel keeps showing and managing it, and the census and icon marks are unchanged.
+- **A preview switch, for working on them.** `?preview=channels` turns them on in your browser and is remembered (`?preview=0` turns it off), like the classic look; the version line at the bottom of the home screen says `preview: channels` while it is on. It is a development switch, not a demo: the server behaves identically either way.
+- The README, the tour, the design note, the website and the deck all say the same thing now — Telegram today, Slack and Discord next.
+
 ## [2.2.0] — 2026-09-20
 
 ### Removed

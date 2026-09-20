@@ -448,6 +448,15 @@ and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 
 ## Slack and Discord
 
+> **Coming — hidden by default (v2.3.0).** Everything below is built and
+> covered by tests, but it has never been run against real Slack or Discord
+> apps, so the app does not offer it yet: an agent's **Messaging** tab says
+> Slack and Discord are coming. Turn them on in your own browser with
+> `?preview=channels` (remembered, like the classic look; `?preview=0` turns it
+> back off) — the server keeps its routes either way, so this is a place to
+> work, not a demo. An agent that already has a channel attached keeps showing
+> and managing it whether or not preview is on.
+
 An agent can also be reached on Slack and on Discord, beside or instead of
 Telegram. Both connect outward from this machine, so nothing here has to be
 reachable from the internet. Each agent gets its own Slack app or Discord bot,
