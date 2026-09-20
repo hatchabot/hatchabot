@@ -31,6 +31,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/icons/auto': 'app: internal — the home screen fills in icons',
   'POST /v1/agents/:id/checkpoint': 'checkpoint_memory',
   'POST /v1/agents/:id/recover-context': 'app: later — restore earlier conversations',
+  'DELETE /v1/agents/:id/context-reset': 'app: browser — dismissing the "its chat was reset" notice',
   'POST /v1/agents/:id/move-host': 'app: later — move to another runner',
   'POST /v1/agents/:id/rehost': 'app: fleet-wide/irreversible — moves the agent to another Hatchabot server',
   'POST /v1/agents/:id/send': 'app: later — send a copy to another account',

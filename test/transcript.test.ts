@@ -52,6 +52,31 @@ const render = (root: string, extra: Record<string, string> = {}) => JSON.parse(
   env: { ...process.env, AGENTS_DIR: root, SLUG: 'kitchen', NAME_B64: Buffer.from('Kitchen').toString('base64'), TZ: 'UTC', ...extra },
 }).toString());
 
+describe('context stats — did a rebuild eat the chat?', () => {
+  it('reports the newest reset, what it took, and what the agent still has', () => {
+    const root = fixture();
+    const r = render(root, { MODE: 'stats' });
+    // aaa.jsonl was ended by a reset on 2026-08-27; its two messages (after the
+    // doubled-reply de-dup) are what fell out of the agent's context.
+    expect(r.lastReset).toBe('2026-08-27T12:13:47.813Z'); // already normalised to ISO
+    expect(r.lostMessages).toBe(2);
+    // ccc.jsonl is the conversation it is having now.
+    expect(r.liveMessages).toBe(2);
+    expect(r.liveStarted).toBe('2026-08-27T12:14:00Z');
+    expect(r.text).toBeUndefined(); // stats never renders the transcript
+  });
+
+  it('says nothing was lost when no conversation was ever reset', () => {
+    const root = mkdtempSync(join(tmpdir(), 'tx-clean-'));
+    const dir = join(root, 'kitchen', 'sessions');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'only.jsonl'), [sess('2026-09-01T10:00:00Z'), msg('user', 'hello', '2026-09-01T10:00:00Z'), msg('assistant', 'hi', '2026-09-01T10:00:01Z')].join('\n'));
+    const r = render(root, { MODE: 'stats' });
+    expect(r).toMatchObject({ lastReset: null, lostMessages: 0, liveMessages: 2 });
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
 describe('transcript renderer (in-container script)', () => {
   it('renders chat conversations oldest-first across a reset, excluding cron runs', () => {
     const root = fixture();

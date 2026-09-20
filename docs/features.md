@@ -276,6 +276,18 @@ a backend switch resets the live Telegram thread.
 containers are cattle, volumes are not. Only **Delete** purges, and it makes
 you type the agent's name.
 
+**When a rebuild costs the chat.** A rebuild keeps the volume, so memory,
+files and members survive — but OpenClaw can still end the *conversation*
+(an idle reset, or a source switch), and an agent that has forgotten this
+morning's thread is the thing people fear about rebuilding. Hatchabot now
+checks after every rebuild: OpenClaw marks an ended conversation by renaming
+its file to `*.jsonl.reset.<time>`, so the answer is in the session files
+rather than in anyone's memory. If one was reset, the agent's card says so —
+*"Its chat started fresh 2h ago — 148 earlier messages are no longer in its
+context"* — with **📥 Recover context**, which stages the old conversation into
+its workspace and has it save what matters, and **Dismiss**. A later reset is
+news again even if an earlier one was dismissed.
+
 ## Copying & moving
 
 Five distinct verbs, for five intents:

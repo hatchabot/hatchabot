@@ -42,7 +42,7 @@ import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, PUBLIC_REPO_READ_ON
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
-import { exportTranscript, recoverContext } from '../orchestrator/transcript.js';
+import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
 import { addCron, listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
@@ -730,6 +730,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (inflight.has(agentId)) return false;
     const agent = store.getAgent(agentId);
     if (!agent?.runtimeRef) return false;
+    const startedAt = Date.now();
     const task = (async () => {
       rebuildQueued.add(agentId);
       await rebuildGate.acquire();
@@ -751,11 +752,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     inflight.set(
       agentId,
       task
-        .then(() => undefined)
+        .then(() => checkContextAfterRebuild(agentId, startedAt))
         .catch((err) => app.log.error({ err, agentId }, 'rebuild task failed'))
         .finally(() => { inflight.delete(agentId); rebuildQueued.delete(agentId); }),
     );
     return true;
+  };
+
+  /**
+   * Did this rebuild cost the agent its conversation?
+   *
+   * OpenClaw ends a conversation by renaming its file to `*.jsonl.reset.<ts>`,
+   * so the answer is in the session files — no bookkeeping, no guesswork. When
+   * a reset lands after the rebuild started, record it: the app then says so
+   * and offers Recover context, instead of the owner meeting an agent that has
+   * forgotten them mid-chat. Asked for 2026-09-20, after exactly that.
+   */
+  const checkContextAfterRebuild = async (agentId: string, startedAt: number): Promise<void> => {
+    const agent = store.getAgent(agentId);
+    if (!agent?.runtimeRef || agent.state !== 'RUNNING') return;
+    let stats;
+    try { stats = await contextStats(providerFor(agent.hostId), agent); }
+    catch { return; } // a container that will not answer is not evidence
+    const at = stats.lastReset ? Date.parse(stats.lastReset) : 0;
+    if (!at || at < startedAt - 60_000 || !stats.lostMessages) return;
+    store.setContextReset(agentId, { resetAt: stats.lastReset!, lostMessages: stats.lostMessages });
+    trace(agentId)('context.reset_after_rebuild', { resetAt: stats.lastReset, lost: stats.lostMessages });
   };
 
   // ---- app ----------------------------------------------------------------
@@ -2761,6 +2783,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...(role === 'owner' ? {} : { paramValues: undefined }),
           deepLink: chan?.deepLink,
           botUsername: chan?.accountId,
+          /** Its chat lost its context (after a rebuild, or an idle reset) and
+           *  the owner has not dealt with it yet — the app offers Recover. */
+          contextReset: store.getContextReset(a.id),
           /** Slack and Discord, for the icon marks and the Messaging row. */
           otherChannels: store.listChannelsForAgent(a.id).filter((c) => c.kind !== 'telegram').map((c) => ({
             kind: c.kind,
@@ -4235,6 +4260,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Restore what a reset made the agent lose: stage its earlier conversations
    *  in its workspace and have it save the durable parts to memory (background;
    *  it confirms in its own chat). */
+  /** "I have seen it" — stop offering to recover this reset. */
+  app.delete<{ Params: { id: string } }>('/v1/agents/:id/context-reset', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    store.clearContextReset(agent.id);
+    return { cleared: true };
+  });
+
   app.post<{ Params: { id: string }; Body: { includeLive?: boolean } }>('/v1/agents/:id/recover-context', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'recover its earlier conversations');
     if (!agent) return reply;
@@ -4247,6 +4280,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try { r = await recoverContext(providerFor(agent.hostId), agent, { includeLive }); }
     catch (err) { recovering.delete(agent.id); return reply.code(502).send({ error: `Couldn't stage the history: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     trace(agent.id)('transcript.recover_started', r);
+    store.clearContextReset(agent.id); // the offer is taken; stop making it
     if (!r.messages) {
       recovering.delete(agent.id);
       return { started: false, reason: includeLive ? 'Nothing to recover — no chat history found.' : 'Nothing to recover — there are no conversations from before a reset; the current one is already in its context (tick "include the current conversation" right after a source switch).' };

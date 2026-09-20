@@ -571,6 +571,11 @@
   .v2b-stopped { background:var(--off) }
   .v2b-note { background:var(--warn); color:var(--accent-ink); min-width:18px; height:18px; border-radius:9px;
               right:-6px; top:-6px; font-size:12px; font-weight:700 }
+  /* How long an agent has been quiet, bottom-left of its icon: 2h, 3d, 5w. */
+  .v2idle { position:absolute; left:-6px; bottom:-6px; min-width:20px; height:17px; padding:0 4px; border-radius:9px;
+            background:var(--panel-2); color:var(--dim); border:1.5px solid var(--bg); font-size:10px; font-weight:700;
+            display:grid; place-items:center; line-height:1; z-index:1; font-variant-numeric:tabular-nums }
+  .v2sbar .v2idle { display:none }
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
   .v2tg svg { display:block; margin-left:-1px }
@@ -5457,6 +5462,9 @@ function agentNotices(a, opts = {}) {
   const pairs = pairings[a.id] ?? [];
   return `
       ${recheckNote(a)}
+      ${a.contextReset ? `<div class="pair" style="align-items:flex-start">🧠 <span class="grow"><b>Its chat started fresh ${esc(ago(a.contextReset.resetAt))}</b> — ${a.contextReset.lostMessages} earlier message${a.contextReset.lostMessages === 1 ? '' : 's'} are no longer in its context. Its saved memory is untouched; <b>Recover context</b> has it read the old conversation and keep what matters.</span>
+        <button class="primary" onclick="recoverContext('${a.id}','${jsq(a.name)}')">📥 Recover context</button>
+        <button onclick="dismissContextReset('${a.id}')" title="Stop offering this">Dismiss</button></div>` : ''}
       ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
         <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
       ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
@@ -8107,6 +8115,11 @@ async function downloadHistory(id, name) {
     toast(`Downloaded ${file} — ${n} messages across ${c} conversation${c === '1' ? '' : 's'}.`, 7000);
   } catch (e) { toast(`Couldn't download the history: ${e.message}`, 9000); }
 }
+async function dismissContextReset(id) {
+  try { await api(`/v1/agents/${id}/context-reset`, { method: 'DELETE' }); await refresh(false); }
+  catch (e) { toast(e.message); }
+}
+
 async function recoverContext(id, name) {
   if (!confirm(`Recover "${name}"'s earlier conversations?\n\nConversations from before a reset get written into its workspace, and the agent reads them and saves the important parts to memory. Runs in the background (a few minutes, uses tokens); it confirms in its Telegram chat when done.`)) return;
   try {
@@ -9100,10 +9113,21 @@ function v2Marks(a) {
 
 // Never flag the console you are looking at.
 const v2Unread = (a) => !!a.unread && !($('consoleDlg')?.open && consoleAgentId === a.id);
+/** How long an agent has been quiet, in one or two characters: 2h, 3d, 5w.
+ *  Nothing under an hour, and nothing for an agent that is not running — a
+ *  stopped agent's badge already says why it is silent. */
+function v2IdleFor(a) {
+  if (a.state !== 'RUNNING' || !a.lastActiveAt) return '';
+  const h = (Date.now() - Date.parse(a.lastActiveAt)) / 3600_000;
+  if (!(h >= 1)) return '';
+  return h < 24 ? `${Math.floor(h)}h` : h < 24 * 7 ? `${Math.floor(h / 24)}d` : h < 24 * 365 ? `${Math.floor(h / (24 * 7))}w` : '1y+';
+}
 function v2IconHTML(a, st) {
   const color = /^#[0-9a-f]{6}$/i.test(a.iconColor || '') ? a.iconColor : v2ColorFor(a.name);
   const face = a.icon ? esc(a.icon) : esc((a.name.trim()[0] || '?').toUpperCase());
+  const idle = v2IdleFor(a);
   return `<span class="v2ic${a.icon ? '' : ' mono'}"><span class="v2tint" style="background:${color}"></span><span class="v2em">${face}</span>`
+    + (idle ? `<span class="v2idle" title="Quiet for ${esc(idle)} — last said something ${esc(ago(a.lastActiveAt))}">${esc(idle)}</span>` : '')
     + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
     + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
     + (v2Unread(a) ? '<span class="v2unread" title="New messages in its console" aria-hidden="true"></span>' : '')

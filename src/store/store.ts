@@ -422,6 +422,15 @@ export class Store {
         seen_at INTEGER NOT NULL,
         PRIMARY KEY (owner_id, agent_id)
       );
+      -- A conversation that lost its context, so the owner is told instead of
+      -- discovering it mid-chat (2026-09-20). One row per agent, newest only.
+      CREATE TABLE IF NOT EXISTS agent_context_reset (
+        agent_id TEXT PRIMARY KEY,
+        reset_at TEXT NOT NULL,
+        lost_messages INTEGER NOT NULL,
+        found_at TEXT NOT NULL,
+        dismissed_at TEXT
+      );
     `);
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
@@ -1646,6 +1655,33 @@ export class Store {
     return this.db
       .prepare(`DELETE FROM cli_tokens WHERE owner_id = ? AND agent_id IS NULL AND label = ?`)
       .run(ownerId, label).changes;
+  }
+
+  /** Record that an agent's chat was reset (and how much went with it). */
+  setContextReset(agentId: string, r: { resetAt: string; lostMessages: number }): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_context_reset (agent_id, reset_at, lost_messages, found_at, dismissed_at)
+         VALUES (?, ?, ?, ?, NULL)
+         ON CONFLICT(agent_id) DO UPDATE SET reset_at = excluded.reset_at,
+           lost_messages = excluded.lost_messages, found_at = excluded.found_at,
+           -- A NEWER reset is news again, even if the last one was dismissed.
+           dismissed_at = CASE WHEN excluded.reset_at > agent_context_reset.reset_at THEN NULL ELSE agent_context_reset.dismissed_at END`,
+      )
+      .run(agentId, r.resetAt, r.lostMessages, new Date().toISOString());
+  }
+
+  /** The unresolved reset for this agent, if any. */
+  getContextReset(agentId: string): { resetAt: string; lostMessages: number; foundAt: string } | undefined {
+    const row = this.db
+      .prepare(`SELECT reset_at, lost_messages, found_at FROM agent_context_reset WHERE agent_id = ? AND dismissed_at IS NULL`)
+      .get(agentId) as { reset_at: string; lost_messages: number; found_at: string } | undefined;
+    return row ? { resetAt: row.reset_at, lostMessages: row.lost_messages, foundAt: row.found_at } : undefined;
+  }
+
+  /** The owner has recovered or dismissed it. */
+  clearContextReset(agentId: string): void {
+    this.db.prepare(`UPDATE agent_context_reset SET dismissed_at = ? WHERE agent_id = ?`).run(new Date().toISOString(), agentId);
   }
 
   // ---- Snapshots ---------------------------------------------------------

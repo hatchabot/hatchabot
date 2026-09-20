@@ -52,6 +52,25 @@ for (const f of files) {
   convs.push({ started: started || (msgs[0] && msgs[0].ts) || '', reset: r ? r.replace(/T(\d\d)-(\d\d)-(\d\d)/, 'T$1:$2:$3') : null, msgs });
 }
 convs.sort((a, b) => (Date.parse(a.started) || 0) - (Date.parse(b.started) || 0));
+// What a rebuild is feared for: OpenClaw ends a conversation by renaming its
+// file to *.jsonl.reset.<timestamp>, so a lost context is visible without
+// remembering anything — the newest reset, and how much went with it.
+if (mode === 'stats') {
+  const live = [...convs].reverse().find((c) => !c.reset);
+  const ended = convs.filter((c) => c.reset);
+  let lastReset = '', lost = 0;
+  for (const c of ended) {
+    lost += c.msgs.length;
+    if (!lastReset || Date.parse(c.reset) > Date.parse(lastReset)) lastReset = c.reset;
+  }
+  return done({
+    lastReset: lastReset || null,
+    lostMessages: lost,
+    liveMessages: live ? live.msgs.length : 0,
+    liveStarted: live ? live.started : null,
+    conversations: convs.length,
+  });
+}
 // Recovery wants only what the agent LOST: drop the live conversation (the
 // newest one not ended by a reset) — it's already in the agent's context.
 let pick = convs;
@@ -114,6 +133,38 @@ export interface TranscriptResult {
   text: string;
   conversations: number;
   messages: number;
+}
+
+export interface ContextStats {
+  /** When the agent's conversation was last ended by a reset (ISO), or null. */
+  lastReset: string | null;
+  /** Messages in conversations that a reset ended — what is out of its context. */
+  lostMessages: number;
+  /** Messages in the conversation it is having now. */
+  liveMessages: number;
+  liveStarted: string | null;
+  conversations: number;
+}
+
+/**
+ * Did this agent lose its context, and how much? Reads the session files only —
+ * no model call, no writes. This is what makes "my rebuild ate the chat"
+ * answerable instead of a feeling (asked for 2026-09-20).
+ */
+export async function contextStats(provider: RuntimeProvider, agent: Agent): Promise<ContextStats> {
+  const s = script(agent, { MODE: 'stats' });
+  const res = agent.state === 'RUNNING'
+    ? await provider.execShell(agent.runtimeRef!, s)
+    : await provider.execShellOnVolume(agent.runtimeRef!, s, { readOnly: true });
+  if (res.code !== 0) throw new Error((res.stderr || res.stdout || 'context check failed').slice(-300));
+  const j = JSON.parse(res.stdout || '{}') as Partial<ContextStats>;
+  return {
+    lastReset: j.lastReset ?? null,
+    lostMessages: j.lostMessages ?? 0,
+    liveMessages: j.liveMessages ?? 0,
+    liveStarted: j.liveStarted ?? null,
+    conversations: j.conversations ?? 0,
+  };
 }
 
 /** Render the whole chat history. Works on a RUNNING agent (in-container) or a

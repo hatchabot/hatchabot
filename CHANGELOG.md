@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.1.0] — 2026-09-20
+
+### Added
+- **Hatchabot tells you when a rebuild cost an agent its conversation.** This is the fear that makes rebuilding feel risky, and it was only ever discoverable by chatting to an agent that had forgotten you. After every rebuild Hatchabot now reads the agent's session files — OpenClaw ends a conversation by renaming its file to `*.jsonl.reset.<time>`, so the answer is on disk, not in anyone's memory — and if one was reset, the agent's card says so with how much went with it: *"Its chat started fresh 2h ago — 148 earlier messages are no longer in its context."* **📥 Recover context** stages the old conversation and has the agent save what matters; **Dismiss** stops the offer. A later reset is news again even if an earlier one was dismissed. Its saved memory was never at risk — this is about the live thread only.
+- **Each agent icon says how long it has been quiet** — `2h`, `1d`, `1w` in the corner, for running agents only, nothing under an hour, with the exact time on hover.
+
 ## [2.0.0] — 2026-09-20
 
 ### Upgrading
