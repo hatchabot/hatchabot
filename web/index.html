@@ -632,6 +632,9 @@
   .v2k { font-size:13px; color:var(--dim) }
   .v2v { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0 }
   .v2v .sub { flex-basis:100% }
+  .ord { display:inline-flex; flex-direction:column; gap:1px; margin-right:2px }
+  .ordbtn { padding:0 5px; font-size:9px; line-height:1.35; border-radius:5px; min-width:20px }
+  .ordbtn:disabled { opacity:.32; cursor:default }
   .v2pill { font-size:12px; border-radius:999px; padding:2px 9px; border:1px solid var(--line) }
   /* The status lives beside the icon in the sheet's bar, not as a row in the
      pane below it — one statement of how the agent is, where you look first. */
@@ -3828,7 +3831,7 @@ function renderAiList() {
   $('aiList').innerHTML = (sourceUsageData ? `<div class="sub" style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span class="grow">Counted from your agents' own calls${sourceUsageData.sampledAt ? `, updated ${esc(ago(sourceUsageData.sampledAt))}` : ''}.
         <span title="Claude plans limit use per 5-hour window and per week. The exact share left is not available to a setup token — the Claude app's /usage shows it for the account.">How much of a Claude plan is left ⓘ</span></span>
-      ${myAccount.hostOwner ? `<button onclick="refreshSourceUsage(this)">Refresh usage</button>` : ''}</div>` : '') + profiles.map(p => p.mine === false ? `
+      ${myAccount.hostOwner ? `<button onclick="refreshSourceUsage(this)">Refresh usage</button>` : ''}</div>` : '') + profiles.map((p, i) => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
@@ -3837,11 +3840,12 @@ function renderAiList() {
     </div>` : `
     <div class="pair" style="flex-wrap:wrap;gap:8px;align-items:flex-start">
       <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;width:100%">
-        <b>${esc(p.name)}</b>
+        ${aiMoveBtns(p, i)}
+        <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
         <span class="chip">${vendorChip(p)}</span>
         ${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? `
         <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
-               title="The management bot's assistant answers with THIS source — the control plane makes the calls, so the bot never holds the key">
+               title="Your Hatchabot agent's own management calls run on THIS source — the control plane makes them, so nothing else holds the key">
           <input type="checkbox" ${p.mgmtLlm ? 'checked' : ''} onchange="setMgmtLlmSource('${p.id}', this.checked)"> 🛠 Management
         </label>` : ''}
         <label class="sub" style="display:flex;align-items:center;gap:4px;${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? '' : 'margin-left:auto'}"
@@ -3987,6 +3991,23 @@ async function revealSourceCredential(id, btn) {
     catch { toast('Shown below — copy it by hand.'); }
   } catch (e) { toast(e.message, 9000); }
   finally { btn.disabled = false; }
+}
+
+/**
+ * ▲▼ on a source. The order is the one every list of sources shows — the
+ * create form, an agent's AI tab, a class — so a local model that is seldom
+ * the right answer can sit at the bottom instead of being offered first.
+ */
+const aiMoveBtns = (p, i) => p.mine === false ? '' : `<span class="ord">
+    <button class="ordbtn" title="Move up" ${i === 0 ? 'disabled' : ''} onclick="moveAiProfile('${p.id}','up')" aria-label="Move ${esc(p.name)} up">▲</button>
+    <button class="ordbtn" title="Move down" ${i === profiles.length - 1 ? 'disabled' : ''} onclick="moveAiProfile('${p.id}','down')" aria-label="Move ${esc(p.name)} down">▼</button></span>`;
+
+async function moveAiProfile(id, dir) {
+  try {
+    await api(`/v1/ai-profiles/${id}/move`, { method: 'POST', body: { dir } });
+    profiles = await api('/v1/ai-profiles');
+    renderAiList();
+  } catch (e) { toast(e.message); }
 }
 
 async function setDefaultSource(id, on, isShared) {

@@ -655,6 +655,14 @@ Operations section.
 - **Local model server** (Ollama) — no credential anywhere; nothing leaves
   the machine. Point it at the docker bridge address, not localhost.
 
+**The list is in the order you put it in.** ▲▼ on each source moves it, and
+that order is what every list of sources shows — the create form, an agent's
+AI tab, a class. A local model that is rarely the right answer belongs at the
+bottom instead of being the first thing offered; making a source the **⭐
+Default** lifts it to the top, where it belongs. A new source lands at the
+bottom, and a source shared to you by someone else can be moved past but not
+moved.
+
 Each agent picks its source in **⚙ Settings → AI**, and cloud agents can
 additionally pin any **model** from that source's list (or follow its
 default) — one Claude source can drive a cheap model for simple agents and a

@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.11.0] — 2026-09-20
+
+### Added
+- **▲▼ on AI sources.** The list had one order — the order you happened to create things in — and it is the order every list of sources shows: the create form, an agent's AI tab, a class. So a local model that is seldom the right answer kept being the first thing offered. Each source you own now has up and down arrows, the order is stored per source, and a new source lands at the bottom rather than wherever it sorts. Making a source the **⭐ Default** lifts it to the top, and an existing install is migrated the same way — default first, the rest as they were made. A source someone shared with you can be moved past, but not moved.
+
+### Fixed
+- The **🛠 Management** checkbox still described "the management bot's assistant", which was removed in v2.0.0; it now says what it does — your Hatchabot agent's own calls run on that source.
+
 ## [2.10.0] — 2026-09-20
 
 ### Added

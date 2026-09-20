@@ -2264,6 +2264,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // "claude-opus-4.8" provisions green and only fails on first use). Live for
   // a local server (it knows what it has pulled); a curated current list for
   // the cloud vendors. Own profile only.
+  /**
+   * ▲▼ in ⚙ Settings → AI. The order is what every list of sources shows —
+   * the create form, an agent's AI tab, a class — so a local model that is
+   * rarely the right answer can be put at the bottom instead of being the
+   * first thing offered. You may move a source you own; a neighbour shared by
+   * someone else is only ever moved past, never moved.
+   */
+  app.post<{ Params: { id: string } }>('/v1/ai-profiles/:id/move', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const profile = store.getAIProfile(req.params.id);
+    if (!profile || profile.ownerId !== ownerId) return reply.code(404).send({ error: 'Not found' });
+    const parsed = z.object({ dir: z.enum(['up', 'down']) }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const moved = store.moveAIProfile(ownerId, req.params.id, parsed.data.dir);
+    return { moved, profiles: store.listAIProfiles(ownerId).map((p) => p.id) };
+  });
+
   app.get<{ Params: { id: string } }>('/v1/ai-profiles/:id/available-models', async (req, reply) => {
     const profile = store.getAIProfile(req.params.id);
     if (!profile || (profile.ownerId !== ownerIdOf(req) && !profile.shared)) {

@@ -491,6 +491,11 @@ export class Store {
       // silent fallback — the "household default" once per-member profiles
       // are retired. Only applies where the profile is visible (own/shared).
       `ALTER TABLE ai_profiles ADD COLUMN default_source INTEGER NOT NULL DEFAULT 0`,
+      // The order the owner put their sources in (⚙ Settings → AI, ▲▼). A
+      // local model that is rarely picked belongs at the bottom of every list
+      // it appears in, and the default belongs at the top. Nullable like
+      // agents.sort_order, so the backfill below runs once.
+      `ALTER TABLE ai_profiles ADD COLUMN sort_order INTEGER`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -588,6 +593,12 @@ export class Store {
     // insertion sequence, so this preserves the old created-at order. Runs once
     // (new agents get an explicit sort_order); idempotent via the NULL guard.
     this.db.exec(`UPDATE agents SET sort_order = rowid WHERE sort_order IS NULL`);
+    // Sources ordered before ▲▼ existed: the default first, the rest as they
+    // were made. Only NULL rows, so a hand-made order is never clobbered.
+    this.db.exec(
+      `UPDATE ai_profiles SET sort_order = CASE WHEN default_source = 1 THEN -1 ELSE rowid END
+        WHERE sort_order IS NULL`,
+    );
     this.db.exec(`CREATE INDEX IF NOT EXISTS agents_class ON agents (class_id)`);
 
     // Agents provisioned before applied-tracking existed were configured with
@@ -700,9 +711,10 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO ai_profiles (id, owner_id, name, vendor, kind, model, models, base_url,
-                                  secret_ref, shared, created_at)
+                                  secret_ref, shared, created_at, sort_order)
          VALUES (@id, @ownerId, @name, @vendor, @kind, @model, @models, @baseUrl,
-                 @secretRef, @shared, @createdAt)`,
+                 @secretRef, @shared, @createdAt,
+                 (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM ai_profiles))`,
       )
       .run({
         secretRef: null,
@@ -744,7 +756,39 @@ export class Store {
           .prepare(`UPDATE ai_profiles SET default_source = 1 WHERE id = ?`)
           .run(profileId);
         if (set.changes !== 1) throw new Error(`No AI profile ${profileId}`);
+        // The default belongs at the top of every list it appears in.
+        this.db
+          .prepare(
+            `UPDATE ai_profiles SET sort_order = (SELECT MIN(sort_order) - 1 FROM ai_profiles)
+              WHERE id = ?`,
+          )
+          .run(profileId);
       }
+    })();
+  }
+
+  /**
+   * Move a source one place up or down in the owner's list by swapping
+   * sort_order with the neighbour they can actually see — own profiles plus
+   * shared ones — so the arrows move what the list shows, not what the table
+   * happens to hold. Returns false at the ends.
+   */
+  moveAIProfile(ownerId: string, id: string, dir: 'up' | 'down'): boolean {
+    return this.db.transaction(() => {
+      const list = this.listAIProfiles(ownerId);
+      const i = list.findIndex((p) => p.id === id);
+      const j = dir === 'up' ? i - 1 : i + 1;
+      const me = list[i], neighbour = list[j];
+      if (!me || !neighbour) return false;
+      const read = this.db.prepare(`SELECT sort_order AS o FROM ai_profiles WHERE id = ?`);
+      const a = (read.get(me.id) as { o: number | null } | undefined)?.o ?? 0;
+      const b = (read.get(neighbour.id) as { o: number | null } | undefined)?.o ?? 0;
+      const write = this.db.prepare(`UPDATE ai_profiles SET sort_order = ? WHERE id = ?`);
+      // Equal keys (two rows backfilled the same) would make the swap a no-op,
+      // so separate them explicitly.
+      write.run(a === b ? (dir === 'up' ? b - 1 : b + 1) : b, me.id);
+      write.run(a, neighbour.id);
+      return true;
     })();
   }
 
@@ -772,7 +816,7 @@ export class Store {
     // installation (see AIProfile.shared) — the shared-host counterpart for
     // credentials, opt-in instead of automatic because it is shared spend.
     const rows = this.db
-      .prepare(`SELECT * FROM ai_profiles WHERE owner_id = ? OR shared = 1 ORDER BY created_at`)
+      .prepare(`SELECT * FROM ai_profiles WHERE owner_id = ? OR shared = 1 ORDER BY sort_order, created_at`)
       .all(ownerId) as any[];
     return rows.map(rowToAIProfile);
   }
