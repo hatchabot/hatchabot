@@ -2818,7 +2818,7 @@ const V2_SETTINGS = [
   ['backups', 'Backups', ['backups']],
   ['security', 'Security', ['security']],
 ];
-const V2_SETTINGS_HEAD = { access: 'Accounts & sign-in', operator: 'About you',
+const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you',
   hosts: 'Machines that run agents', servers: 'Other Hatchabot servers' };
 let v2SettingsGroup = 'ai';
 function showTab(name) {
@@ -3114,7 +3114,7 @@ async function loadHosts() {
       const del = local || h.agentCount ? '' : `<button class="hbtn" onclick="deleteHost('${jsq(h.id)}','${jsq(h.name)}')">Remove</button>`;
       return `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
         <span class="grow">${local ? '🖥️' : '☁️'} <b>${esc(h.name)}</b>
-          X
+          <span class="sub">· ${h.agentCount ?? 0} agent${h.agentCount === 1 ? '' : 's'}</span>
           <div class="sub">${where}</div>
           <div class="sub" id="hostping-${esc(h.id)}"></div></span>
         <span style="display:flex;gap:6px">${check}${drain}${del}</span>
@@ -10294,6 +10294,9 @@ function initV2() {
   for (const el of document.querySelectorAll('dialog > .sub, section > .sub:first-of-type, #cronBody > .sub, [id$="DlgBody"] > .sub')) {
     if (el.textContent.trim().length < 180 || el.querySelector('input, select, button')) continue;
     el.classList.add('v2clamp');
+    // Only offer "More" when there is more: two lines that happen to be long
+    // got a button that revealed nothing.
+    if (el.scrollHeight <= el.clientHeight + 1) { el.classList.remove('v2clamp'); continue; }
     const more = document.createElement('button');
     more.type = 'button'; more.className = 'v2more'; more.textContent = 'More';
     more.addEventListener('click', () => { const open = el.classList.toggle('v2open'); more.textContent = open ? 'Less' : 'More'; });

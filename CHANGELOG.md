@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [1.51.0] — 2026-09-20
+
+### Fixed
+- **The Machines tab showed a literal "X" where each machine's agent count belongs.** A careless one-line edit in v1.36.0 replaced the count with the letter; the 22nd audit's screen-by-screen pass caught it.
+- **"More" only appears when there is more to read.** The two-line clamp added the button by length, so a long-but-two-line paragraph offered to expand into itself.
+
+### Changed
+- Menus lose another round of words: **Sharing**, **Advanced → Environment**, **Security → Access tokens**, **Backups**, **AI** and the **Telegram bots** intro now say the same thing in a third of the space, with the details behind a disclosure where they earn it. The settings group that holds your accounts is called **Your account**, not "Accounts & sign-in", since it also holds your Telegram and your password.
+- Notes to the management agent are capped at three waiting behind a running turn, so a burst of builds finishing together cannot queue an hour of conversation.
+
 ## [1.50.0] — 2026-09-20
 
 ### Added

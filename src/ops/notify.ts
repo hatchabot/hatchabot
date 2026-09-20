@@ -59,14 +59,24 @@ export interface OpsNotifier {
   notify(ownerId: string, body: string): Promise<void>;
 }
 
+/** At most this many notes wait behind a turn that is still running: a burst of
+ *  builds finishing must not queue an hour of conversation. */
+const MAX_QUEUED = 3;
+
 export function createOpsNotifier(deps: OpsNotifyDeps): OpsNotifier {
   const chains = new Map<string, Promise<void>>();
+  const queued = new Map<string, number>();
   return {
     notify(ownerId, body) {
       const agent = deps.opsAgent(ownerId);
       // No manager, or one that cannot take a turn right now (stopped,
       // rebuilding, moving): the outcome is still on the home screen.
       if (!agent || agent.state !== 'RUNNING' || !agent.runtimeRef) return Promise.resolve();
+      if ((queued.get(agent.id) ?? 0) >= MAX_QUEUED) {
+        deps.log?.('ops.note_dropped', { agentId: agent.id, queued: queued.get(agent.id) });
+        return Promise.resolve();
+      }
+      queued.set(agent.id, (queued.get(agent.id) ?? 0) + 1);
       const prev = chains.get(agent.id) ?? Promise.resolve();
       const next = prev
         .then(async () => {
@@ -75,6 +85,7 @@ export function createOpsNotifier(deps: OpsNotifyDeps): OpsNotifier {
             .catch((err) => ({ ok: false, error: String((err as Error)?.message ?? err) }));
           deps.log?.('ops.note', { agentId: agent.id, ok: r.ok, ...(r.ok ? {} : { error: String(r.error ?? '').slice(0, 200) }) });
         })
+        .finally(() => queued.set(agent.id, Math.max(0, (queued.get(agent.id) ?? 1) - 1)))
         .catch(() => {});
       chains.set(agent.id, next);
       void next.then(() => { if (chains.get(agent.id) === next) chains.delete(agent.id); });

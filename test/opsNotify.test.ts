@@ -118,3 +118,18 @@ describe('quoting build output to an agent', () => {
     expect(quoteOutput(new Error('threw'))).toBe('threw');
   });
 });
+
+describe('a burst of notes', () => {
+  it('queues a few and drops the rest, so builds finishing together cannot fill an hour', async () => {
+    const dropped: Array<Record<string, unknown>> = [];
+    let turns = 0;
+    const n = createOpsNotifier({
+      opsAgent: () => ({ id: 'a1', slug: 'hatchabot', hostId: 'h1', state: 'RUNNING', runtimeRef: 'docker://x' }),
+      runTurn: async () => { turns++; await new Promise((r) => setTimeout(r, 5)); return { ok: true }; },
+      log: (e, d) => { if (e === 'ops.note_dropped') dropped.push(d); },
+    });
+    await Promise.all(Array.from({ length: 10 }, (_, i) => n.notify('o', 'note ' + i)));
+    expect(turns).toBeLessThanOrEqual(3);
+    expect(dropped.length).toBe(10 - turns);
+  });
+});
