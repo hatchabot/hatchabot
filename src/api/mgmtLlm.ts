@@ -4,7 +4,7 @@ import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 
 /**
- * The management bot's LLM rides one of the owner's AI sources, proxied
+ * The management chat's LLM rides one of the owner's AI sources, proxied
  * through the control plane — the answer to "why would I manage a separate
  * key for the mgmt bot?". The credential is decrypted HERE, per call, and
  * never crosses the wire to the bot process; the bot authenticates with its

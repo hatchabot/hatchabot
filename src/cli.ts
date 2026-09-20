@@ -177,10 +177,6 @@ Commands:
                                version (default: latest stable), for the whole
                                fleet. --candidate builds without promoting to
                                :latest so you can smoke-test first. Run on the host.
-  mgmt-bot <setup|status|disable> [--bot-token <tok>] [--yes]
-                               Set up the Telegram management bot: mints a token,
-                               pre-fills your Telegram id, writes .env.mgmt, and
-                               installs the service (needs a BotFather token).
   image [list]                 Derived runtime images (host owner). A derived
                                image is FROM the base + your Dockerfile lines,
                                for system packages (apt) a volume install can't
@@ -620,8 +616,6 @@ export function fmtBots(hosts: any[], live: boolean): string[] {
       const n = `${String(++idx)}.`.padStart(4);
       out.push(`${n} ${uname}  ${tag.padEnd(11)}${live ? `  ${live_.padEnd(13)}` : '  '}${who}${moved}`);
     }
-    if (h.mgmtBotConfigured)
-      out.push(`${`${String(++idx)}.`.padStart(4)} ${'(mgmt bot)'.padEnd(uw)}  ${'in use'.padEnd(11)}${live ? '  ' + ''.padEnd(13) : '  '}management bot — token stored outside the registry`);
   }
   out.push(`\n${idx} line(s) · ${reclaim} reclaimable · ${dead} dead${movedCount ? ` · ${movedCount} bot(s) shared across agents/hosts (⇄)` : ''}`);
   out.push(`Telegram won't list your bots — open @BotFather → /mybots and /deletebot any not shown above.`);
@@ -773,21 +767,6 @@ async function main() {
   const server = await serverConfig(url);
   if (cmd === 'login') {
     await doLogin(url, server, flags);
-    return;
-  }
-
-  // Local host ops that don't touch the control plane — answer before auth.
-  if (cmd === 'mgmt-bot' && (rest[0] === 'status' || rest[0] === 'disable')) {
-    const unit = 'hatchabot-mgmt-bot.service';
-    if (rest[0] === 'status') {
-      console.log(`service: ${systemctlUser(['is-active', unit]).out || 'unknown'} (${systemctlUser(['is-enabled', unit]).out || 'unknown'})`);
-      const envPath = join(repoDir(), '.env.mgmt');
-      console.log(`config : ${existsSync(envPath) ? envPath : 'not set up — run: hatchabot mgmt-bot setup'}`);
-    } else {
-      const r = systemctlUser(['disable', '--now', unit]);
-      console.log(r.code === 0 ? 'Management bot stopped and disabled.' : `systemctl: ${r.out}`);
-      console.log('(.env.mgmt kept — delete it yourself to remove the stored secrets.)');
-    }
     return;
   }
 
@@ -1704,73 +1683,6 @@ async function main() {
       const lines = flags.get('lines') ?? '80';
       const { text } = (await (await api(ctx, `/v1/agents/${a.id}/logs?lines=${lines}`)).json()) as any;
       console.log(text || '(no recent output)');
-      return;
-    }
-    case 'mgmt-bot': {
-      const unit = 'hatchabot-mgmt-bot.service';
-      const envPath = join(repoDir(), '.env.mgmt');
-      // status/disable are handled before auth, above; only setup reaches here.
-      if ((rest[0] ?? 'setup') !== 'setup') fail('usage: hatchabot mgmt-bot <setup|status|disable>');
-
-      console.error('Setting up the Hatchabot management bot.\n');
-      // 1. Mint the bot's own owner-scoped bearer.
-      const minted = (await (await jsonPost('/v1/cli-tokens', { label: 'mgmt-bot' })).json()) as {
-        token: string;
-      };
-      // 2. Pre-fill the allowlist from the owner's Telegram id (the owner seat
-      //    on any existing agent), so you don't have to look up your numeric id.
-      const found = new Set<string>();
-      for (const a of await agents(ctx)) {
-        try {
-          const members = (await (await api(ctx, `/v1/agents/${a.id}/members`)).json()) as any[];
-          for (const m of members) if (m.role === 'owner' && m.channelUserId) found.add(String(m.channelUserId));
-        } catch {
-          /* skip agents we can't read members for */
-        }
-      }
-      let allow = [...found];
-      if (allow.length) {
-        const ans = (await askLine(`Allow these Telegram id(s) to control the fleet: ${allow.join(', ')}? [Y/n] `)).toLowerCase();
-        if (ans === 'n' || ans === 'no') allow = [];
-      }
-      if (!allow.length) {
-        const raw = await askLine('Telegram user id(s) allowed to control (comma-separated): ');
-        allow = raw.split(',').map((s) => s.trim()).filter(Boolean);
-      }
-      if (!allow.length) fail('an allowlist is required — the bot would otherwise accept nobody.');
-      if (!allow.every((id) => /^\d{1,20}$/.test(id))) fail('Telegram ids are numeric.');
-
-      // 3. The one thing no tool can automate: the BotFather token.
-      const botToken =
-        flags.get('bot-token') || (await askLine('Paste the BotFather token for the management bot: '));
-      if (!/^\d{6,}:[A-Za-z0-9_-]{30,}$/.test(botToken)) {
-        fail('that does not look like a BotFather token (e.g. 123456789:AA…).');
-      }
-
-      // 4. Write .env.mgmt (secrets isolated from the control plane's .env).
-      writeFileSync(
-        envPath,
-        [
-          `HATCHABOT_MGMT_BOT_TOKEN=${envQuote(botToken)}`,
-          `HATCHABOT_MGMT_TOKEN=${envQuote(minted.token)}`,
-          `HATCHABOT_MGMT_ALLOWLIST=${allow.join(',')}`,
-          `HATCHABOT_URL=${ctx.url}`,
-          '',
-        ].join('\n'),
-        { mode: 0o600 },
-      );
-      console.error(`wrote ${envPath} (chmod 600)`);
-
-      // 5. Install + start the service (best-effort; falls back to a manual hint).
-      const wantSvc =
-        flags.has('yes') ||
-        (await askLine('Install and start the background service now? [Y/n] ')).toLowerCase() !== 'n';
-      if (wantSvc && installUserUnit(unit)) {
-        console.log('\n✅ Management bot installed and running.');
-        console.log('   DM your bot /list to check. It starts READ-ONLY — send /mode readwrite to arm changes.');
-      } else {
-        console.log(`\nConfig ready. Start it with:  npm run mgmt   (from ${repoDir()})`);
-      }
       return;
     }
     default:

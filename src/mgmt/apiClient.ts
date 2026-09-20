@@ -54,13 +54,6 @@ export class HttpApiClient implements ApiClient {
     return this.#request(method, path, body);
   }
 
-  async listProposals(): Promise<{ pending: import('./proposalNotifier.js').WebProposal[] }> {
-    return (await this.#req('GET', '/v1/proposals')) as { pending: import('./proposalNotifier.js').WebProposal[] };
-  }
-  async resolveProposal(id: string, verb: 'confirm' | 'cancel'): Promise<{ text: string }> {
-    return (await this.#req('POST', `/v1/proposals/${encodeURIComponent(id)}/${verb}`, {})) as { text: string };
-  }
-
   /** One-call tools (restTools.ts) go through here: same auth, same routes. */
   async raw(method: string, path: string, body?: unknown): Promise<unknown> {
     return this.#req(method, path, body);

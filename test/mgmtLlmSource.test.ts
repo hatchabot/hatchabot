@@ -93,102 +93,6 @@ describe('CLI tool-emission protocol', () => {
   });
 });
 
-describe('PATCH mgmtLlm + GET /v1/mgmt/llm', () => {
-  it('flags any anthropic source (machine-login included — CLI backend); local refused', async () => {
-    const { store, f } = await world();
-    store.insertAIProfile(profile({ id: 'ml', name: 'Household Claude', kind: 'subscription', secretRef: undefined }));
-    store.insertAIProfile(profile({ id: 'lq', name: 'Local Qwen', vendor: 'local', secretRef: undefined }));
-
-    const local = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/lq', headers: H, payload: { mgmtLlm: true } });
-    expect(local.statusCode).toBe(400);
-
-    const ml = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/ml', headers: H, payload: { mgmtLlm: true } });
-    expect(ml.statusCode).toBe(200);
-    const s = (await f.inject({ method: 'GET', url: '/v1/mgmt/llm', headers: H })).json();
-    expect(s).toMatchObject({
-      available: true, profileName: 'Household Claude',
-      credential: 'machine-login · claude-cli', flagged: true,
-    });
-  });
-
-  it('a subscription source completes through the CLI seam — no API key anywhere', async () => {
-    const store = new Store(new Database(':memory:'));
-    const f = Fastify();
-    const cliCalls: Array<{ model: string; oauthToken?: string }> = [];
-    await registerRoutes(f, {
-      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
-      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
-      mgmtLlmComplete: async () => { throw new Error('api path must not be used for a subscription source'); },
-      mgmtCliComplete: async (opts) => {
-        cliCalls.push(opts);
-        return { stopReason: 'end_turn', content: [{ type: 'text', text: 'via cli' }] };
-      },
-    });
-    store.insertAIProfile(profile({ id: 'ml', kind: 'subscription', secretRef: undefined, model: 'claude-opus-4-8' }));
-    const res = await f.inject({
-      method: 'POST', url: '/v1/mgmt/llm/complete', headers: H,
-      payload: { system: 's', tools: [], messages: [{ role: 'user', content: 'hi' }], maxTokens: 50 },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().content[0].text).toBe('via cli');
-    expect(cliCalls).toEqual([{ model: 'claude-opus-4-8', oauthToken: undefined }]); // machine login: no token at all
-    await f.close();
-  });
-});
-
-describe('POST /v1/mgmt/llm/complete (server-side proxy)', () => {
-  const BODY = { system: 'sys', tools: [], messages: [{ role: 'user', content: 'hi' }], maxTokens: 100 };
-
-  it('completes with the picked source; the bot never sees a credential', async () => {
-    const { store, f, calls } = await world();
-    store.insertAIProfile(profile({ id: 'ak' }));
-    const res = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: BODY });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().content[0].text).toBe('hi');
-    expect(calls).toEqual([{ profileId: 'ak', maxTokens: 100 }]);
-  });
-
-  it('409s with guidance when nothing can back it, and 400s malformed bodies', async () => {
-    const { f } = await world();
-    const none = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: BODY });
-    expect(none.statusCode).toBe(409);
-    expect(none.json().error).toMatch(/AI sources/);
-    const bad = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: { ...BODY, maxTokens: 1e9 } });
-    expect(bad.statusCode).toBe(400);
-  });
-
-  it('an upstream failure maps to 502 naming the source — never a raw crash', async () => {
-    const store = new Store(new Database(':memory:'));
-    const f = Fastify();
-    await registerRoutes(f, {
-      store, secrets: new MemSecrets(), providers: new Map([['mock', new MockProvider()]]),
-      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
-      mgmtLlmComplete: async () => { throw new Error('401 invalid bearer'); },
-    });
-    store.insertAIProfile(profile({ id: 'ak', name: 'Spare Key' }));
-    const res = await f.inject({ method: 'POST', url: '/v1/mgmt/llm/complete', headers: H, payload: BODY });
-    expect(res.statusCode).toBe(502);
-    expect(res.json().error).toMatch(/Spare Key/);
-    // Raw SDK errors are translated for humans (friendlyLlmError).
-    expect(res.json().error).toMatch(/rejected its credential/);
-    await f.close();
-  });
-});
-
-describe('GET /v1/mgmt/status offline derivation', () => {
-  it('a stale heartbeat reports offline, not vanished', async () => {
-    const { store, f } = await world();
-    store.upsertMgmtHeartbeat(OWNER, { botUsername: 'b', mode: 'read-only', allowlisted: 1 });
-    // Age the beat past the 90s window (in-memory test DB; direct UPDATE is
-    // the clock injection upsert doesn't offer).
-    (store as any).db
-      .prepare(`UPDATE mgmt_heartbeat SET seen_at = ?`)
-      .run(new Date(Date.now() - 5 * 60_000).toISOString());
-    const s = (await f.inject({ method: 'GET', url: '/v1/mgmt/status', headers: H })).json();
-    expect(s).toMatchObject({ configured: true, online: false, botUsername: 'b' });
-  });
-});
-
 describe('sharing a machine-login source is refused (family-member hardening)', () => {
   it('PATCH shared=true on a machine-login profile → 400; setup-token profile → ok', async () => {
     const { store, f } = await world();
@@ -203,5 +107,19 @@ describe('sharing a machine-login source is refused (family-member hardening)', 
     const ok = await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/st', headers: H, payload: { shared: true } });
     expect(ok.statusCode).toBe(200);
     expect(store.getAIProfile('st')!.shared).toBe(true);
+  });
+});
+
+describe('flagging the source behind the management chat', () => {
+  it('accepts an anthropic source and refuses a local one', async () => {
+    const { store, f } = await world();
+    store.insertAIProfile(profile({ id: 'ml', name: 'Household Claude', kind: 'subscription', secretRef: undefined }));
+    store.insertAIProfile(profile({ id: 'lq', name: 'Local Qwen', vendor: 'local', secretRef: undefined }));
+
+    expect((await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/lq', headers: H, payload: { mgmtLlm: true } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'PATCH', url: '/v1/ai-profiles/ml', headers: H, payload: { mgmtLlm: true } })).statusCode).toBe(200);
+    // The flag is what pickMgmtProfile reads for the web chat; the Telegram
+    // bot that also used it is gone (v2.0.0).
+    expect(store.listAIProfiles('user-owner').find((p) => p.id === 'ml')?.mgmtLlm).toBe(true);
   });
 });

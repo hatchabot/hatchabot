@@ -9,14 +9,13 @@ import { fmtBots } from '../src/cli.js';
 const hosts = [
   {
     host: 'studio-mini',
-    mgmtBotConfigured: true,
     bots: [
       { username: 'aReallyLongHandleBot', cls: 'in-use', source: 'agent', agentName: 'Tech', state: 'RUNNING', valid: true },
       { username: 'shrt', cls: 'reclaimable', source: 'agent', agentName: 'History', state: 'STOPPED', valid: true, polling: 'quiet' },
       { username: 'gonebot', cls: 'dead', source: 'agent', agentName: 'Old', state: 'STOPPED', valid: false },
     ],
   },
-  { host: 'Laptop', mgmtBotConfigured: false, bots: [
+  { host: 'Laptop', bots: [
     { username: 'shrt', cls: 'reclaimable', source: 'agent', agentName: 'History', state: 'STOPPED', valid: true, polling: 'quiet' },
   ] },
   { host: 'Desktop', error: 'unreachable (timeout)', bots: [] },
@@ -26,9 +25,9 @@ describe('fmtBots', () => {
   it('numbers every line and aligns the username column to the widest handle', () => {
     const lines = fmtBots(hosts, false);
     const rows = lines.filter((l) => /^\s*\d+\./.test(l));
-    // 3 dgx bots + mgmt + 1 laptop bot = 5 numbered rows, sequential
-    expect(rows).toHaveLength(5);
-    expect(rows.map((r) => r.trim().split('.')[0])).toEqual(['1', '2', '3', '4', '5']);
+    // 3 dgx bots + 1 laptop bot = 4 numbered rows, sequential
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => r.trim().split('.')[0])).toEqual(['1', '2', '3', '4']);
     // widest handle is @aReallyLongHandleBot; every "@..." starts at the same column
     const atCols = rows.filter((r) => r.includes('@')).map((r) => r.indexOf('@'));
     expect(new Set(atCols).size).toBe(1);

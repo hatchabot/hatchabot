@@ -1,4 +1,18 @@
-# Control interfaces: Telegram management bot & mobile app
+# Control interfaces: managing the fleet from chat
+
+> **Removed in v2.0.0 — the Telegram management bot.** Section A described a
+> separate bot process (`src/mgmt/bot.ts`, `npm run mgmt`,
+> `hatchabot mgmt-bot setup`, `deploy/hatchabot-mgmt-bot.service`). It is gone.
+> Its job belongs to the **Hatchabot agent**: an ordinary OpenClaw agent in a
+> jail, on whichever AI source you have, that reads everything and proposes
+> changes as cards you confirm in the app — and, given its own Telegram bot,
+> messages your phone when one is waiting (`src/ops/push.ts`). The design is in
+> `docs/ops-agent-design.md`.
+>
+> **What survived, and is still load-bearing:** the broker
+> (`src/mgmt/broker.ts`, `tools.ts`, `restTools.ts`, `pendingStore.ts`,
+> `coverage.ts`) — the propose→confirm machinery every management surface
+> shares. Section A below is kept as the record of why it is shaped that way.
 
 Two new clients for the existing control plane. Neither needs a backend rewrite —
 the web UI and CLI already prove the `/v1` API is a complete control surface.
@@ -230,20 +244,12 @@ The deterministic broker + slash commands ship in `src/mgmt/` (`grammy`
 transport). Reads run immediately; mutations require a confirm tap; it starts
 **read-only** (send `/mode readwrite` to arm). To run:
 
-1. Create a bot with BotFather → `HATCHABOT_MGMT_BOT_TOKEN`.
-2. Mint a bearer on the control plane: `POST /v1/cli-tokens` → `HATCHABOT_MGMT_TOKEN`.
-3. Put both, plus `HATCHABOT_MGMT_ALLOWLIST=<your telegram id(s)>`, in a
-   `.env.mgmt` (chmod 600); optionally `HATCHABOT_URL`.
-4. `npm run mgmt`, or install `deploy/hatchabot-mgmt-bot.service` as a user unit.
-
-Or let the CLI do steps 2–4: `hatchabot mgmt-bot setup`.
-
-**Legacy.** This bot predates the Hatchabot management agent, which does the
-same work in plain language inside the app, on any AI source, and behind the
-jail. Keep the bot only for its one remaining advantage — it pushes waiting
-cards to Telegram with Confirm and Cancel. To retire one:
-`systemctl --user disable --now hatchabot-mgmt-bot`, then `/deletebot` its bot
-at @BotFather (it frees a slot against the ~20-bot account cap).
+**Removed in v2.0.0.** Setting one up is no longer possible: the process, its
+unit, its CLI commands and the routes it phoned home to (`/v1/mgmt/heartbeat`,
+`/v1/mgmt/status`, `/v1/mgmt/llm`, `/v1/mgmt/llm/complete`) are all gone. If one
+is still running on an older install: `systemctl --user disable --now
+hatchabot-mgmt-bot`, delete `.env.mgmt`, revoke its token under ⚙ Settings →
+Security, and `/deletebot` the bot at @BotFather to free the slot.
 
 It refuses to start with an empty allowlist.
 

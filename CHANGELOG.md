@@ -2,6 +2,49 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.0.0] — 2026-09-20
+
+### Upgrading
+Nothing to do unless you still run the **Telegram management bot**. It is gone:
+the process, its systemd unit, its CLI commands (`hatchabot mgmt-bot …`), the
+`npm run mgmt` script, and the four routes it phoned home to. If one is running
+on this machine, stop it and clean up:
+
+```sh
+systemctl --user disable --now hatchabot-mgmt-bot
+rm ~/hatchabot/.env.mgmt            # its bot token and allowlist
+```
+then revoke its access token under **⚙ Settings → Security** and `/deletebot`
+the bot at @BotFather to free the slot. Everything else — the broker, the
+propose→confirm cards, the web management chat, the Hatchabot agent — is
+untouched.
+
+### Removed
+- **The Telegram management bot (~1,700 lines).** The Hatchabot agent does its
+  job in plain language, on whichever AI source you have, behind the jail, with
+  the same cards — and now messages your phone when one is waiting. What stays
+  is the part that was always the point: the **broker** every management surface
+  shares (`src/mgmt/broker.ts`, `tools.ts`, `restTools.ts`, `pendingStore.ts`,
+  `coverage.ts`). Gone with it: the presence strip on the home screen, the
+  legacy block in Settings → Telegram bots, and the census row for a token
+  living outside the database.
+
+### Added
+- **"Someone is knocking" reaches your phone.** When your Hatchabot agent has
+  its own Telegram bot, a new join request on any of your agents is announced
+  there within five minutes — who, and which agent — with the app's address to
+  let them in. Each request is announced once; one that is answered and comes
+  back is news again. The sweep runs only for an account whose manager *has* a
+  bot, so an install that cannot be pushed to pays nothing.
+- **The dashboard tiles gained a shape and a backup.** The *asks / 5h* tile
+  carries the last 24 hours as a sparkline behind its number, and a **last
+  backup** tile shows the age of the newest set — amber past 36 hours, and it
+  opens Backups.
+- **The manager can see your bots.** A `list_bots` tool (optionally live-checked
+  against Telegram), and its morning check now looks at the spare pool every
+  day and, on Mondays, at dead or unused bots — the ones holding slots against
+  Telegram's ~20-per-account limit.
+
 ## [1.51.0] — 2026-09-20
 
 ### Fixed

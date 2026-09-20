@@ -71,7 +71,7 @@ import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, 
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
 import { OPS_DIGEST_MESSAGE } from '../ops/opsAgent.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
-import { createOpsPush } from '../ops/push.js';
+import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
@@ -1802,14 +1802,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             signal: AbortSignal.timeout(15000),
           });
           if (!res.ok) {
-            hosts.push({ host: peer.name, bots: [], mgmtBotConfigured: false, error: `answered ${res.status}` });
+            hosts.push({ host: peer.name, bots: [], error: `answered ${res.status}` });
             continue;
           }
           const body = (await res.json()) as { hosts?: HostBots[] };
           const peerLocal = body.hosts?.[0];
-          hosts.push(peerLocal ? { ...peerLocal, host: peer.name } : { host: peer.name, bots: [], mgmtBotConfigured: false, error: 'no data' });
+          hosts.push(peerLocal ? { ...peerLocal, host: peer.name } : { host: peer.name, bots: [], error: 'no data' });
         } catch (err) {
-          hosts.push({ host: peer.name, bots: [], mgmtBotConfigured: false, error: `unreachable (${String((err as Error)?.message ?? err).slice(0, 60)})` });
+          hosts.push({ host: peer.name, bots: [], error: `unreachable (${String((err as Error)?.message ?? err).slice(0, 60)})` });
         }
       }
     }
@@ -2398,76 +2398,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // owner-scoped) and the web UI reads the result to show a live presence card
   // instead of guessing from cli-token last-used timestamps.
 
-  const MgmtHeartbeat = z.object({
-    botUsername: z.string().trim().min(1).max(64),
-    mode: z.enum(['read-only', 'read-write']),
-    llm: z.string().trim().max(64).optional(),
-    allowlisted: z.number().int().min(0).max(1000),
-  });
 
-  app.post('/v1/mgmt/heartbeat', async (req, reply) => {
-    const parsed = MgmtHeartbeat.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-    store.upsertMgmtHeartbeat(ownerIdOf(req), parsed.data);
-    return { ok: true };
-  });
 
-  app.get('/v1/mgmt/status', async (req) => {
-    const hb = store.getMgmtHeartbeat(ownerIdOf(req));
-    if (!hb) return { configured: false };
-    // Beats arrive every 30s; three missed beats = offline. Derived here so
-    // the client never has to agree with the bot about the interval.
-    const online = Date.now() - Date.parse(hb.seenAt) < 90_000;
-    return { configured: true, online, ...hb };
-  });
 
-  /**
-   * Retire the legacy Telegram management bot: forget its heartbeat and revoke
-   * its token, so the app stops showing a bot that no longer runs. Refused
-   * while it is still beating — stop the service first, or it reappears on its
-   * next beat with a token that no longer works.
-   */
-  app.delete('/v1/mgmt/status', async (req, reply) => {
-    const ownerId = ownerIdOf(req);
-    const hb = store.getMgmtHeartbeat(ownerId);
-    if (hb && Date.now() - Date.parse(hb.seenAt) < 90_000) {
-      return reply.code(409).send({ error: 'That bot is still running. Stop it first: systemctl --user disable --now hatchabot-mgmt-bot' });
-    }
-    const forgotten = store.deleteMgmtHeartbeat(ownerId);
-    const revoked = store.revokeCliTokensByLabel(ownerId, 'mgmt-bot');
-    trace()('mgmt_bot.retired', { ownerId, forgotten, revoked });
-    return { forgotten, revoked, botUsername: hb?.botUsername };
-  });
 
-  // Which AI source backs the mgmt bot's LLM right now (flagged, else the
-  // automatic pick). The bot reads this at boot and on every heartbeat; the
-  // web shows it under the source toggle.
-  app.get('/v1/mgmt/llm', async (req) => {
-    const p = pickMgmtProfile(store, ownerIdOf(req));
-    if (!p) return { available: false };
-    return {
-      available: true,
-      profileId: p.id,
-      profileName: p.name,
-      model: p.model,
-      credential: mgmtBackendOf(p).credential,
-      flagged: !!p.mgmtLlm,
-    };
-  });
 
-  /**
-   * Server-side LLM proxy for the management bot: the broker's chat loop posts
-   * its (system, tools, messages) here and the control plane makes the
-   * Anthropic call with the picked source's credential — which is decrypted
-   * per-call and never leaves this process. Owner-scoped like everything else;
-   * the mgmt bot's cli-token is what authenticates it.
-   */
-  const MgmtLlmBody = z.object({
-    system: z.string().max(20_000),
-    tools: z.array(z.unknown()).max(32),
-    messages: z.array(z.unknown()).max(200),
-    maxTokens: z.number().int().min(1).max(16_384),
-  });
   // Phase C: the web management chat pane — same broker, web transport.
   /**
    * Who may use the management agents' door: their own doormen, nobody else.
@@ -2547,28 +2482,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     notifyOps: (ownerId, body) => void opsNotifier.notify(ownerId, body),
     pushOps: (ownerId, headline, detail) => void opsPush.waiting(ownerId, headline, detail),
     mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn,
-  });
-  app.post('/v1/mgmt/llm/complete', async (req, reply) => {
-    const parsed = MgmtLlmBody.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
-    const profile = pickMgmtProfile(store, ownerIdOf(req));
-    if (!profile) {
-      return reply.code(409).send({
-        error:
-          'No AI source can back the management bot — add an Anthropic source with an API key ' +
-          'or setup-token, or flag one under ⚙ Settings → AI sources.',
-      });
-    }
-    try {
-      return await runMgmtCompletion(
-        { secrets, apiComplete: deps.mgmtLlmComplete, cliComplete: deps.mgmtCliComplete },
-        profile,
-        parsed.data,
-      );
-    } catch (err) {
-      const msg = friendlyLlmError(String((err as Error).message ?? err));
-      return reply.code(502).send({ error: `LLM call via "${profile.name}" failed: ${msg}` });
-    }
   });
 
   // ---- agents ---------------------------------------------------------------
@@ -5261,28 +5174,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const u = ref.split('/')[2]!.toLowerCase();
       if (!rows.has(u)) rows.set(u, { secretRef: ref, where: 'orphan-token' });
     }
-    // The management bot's token lives OUTSIDE the DB (.env.mgmt) — the one
-    // bot every earlier count missed (2026-09-05: it was one of Chris's five
-    // "unaccounted" bots at the BotFather ceiling).
-    const mgmtToken =
-      process.env.HATCHABOT_MGMT_BOT_TOKEN ??
-      (() => {
-        try {
-          const m = /HATCHABOT_MGMT_BOT_TOKEN='([^']+)'/.exec(readFileSync('.env.mgmt', 'utf8'));
-          return m?.[1];
-        } catch { return undefined; }
-      })();
     const out: Array<Record<string, unknown>> = [];
-    if (mgmtToken) {
-      try {
-        const res = await botFetch(`https://api.telegram.org/bot${mgmtToken}/getMe`, { signal: AbortSignal.timeout(6000) });
-        const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: { username?: string; first_name?: string } };
-        out.push({
-          username: body.result?.username?.toLowerCase() ?? '(mgmt bot)',
-          where: 'mgmt-bot', alive: body.ok === true, displayName: body.result?.first_name,
-        });
-      } catch { out.push({ username: '(mgmt bot)', where: 'mgmt-bot', alive: undefined }); }
-    }
     // getMe each bot CONCURRENTLY (bounded): serial × 6s timeout could stall
     // this admin request for minutes with a slow Telegram and ~40 bots
     // (audit 2026-09-06). A verdict per bot: ✅ alive / ❌ dead / ❓ unknown.
@@ -6878,6 +6770,51 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Every pending "wants to join" request across the caller's RUNNING agents,
   // flattened — one cheap call for the management bot to poll and push an
   // approval prompt, so the owner never has to open the web UI to notice one.
+  /**
+   * "Someone is knocking" on the owner's phone.
+   *
+   * The retired Telegram management bot polled /v1/pending and pushed each
+   * request; nothing did afterwards, so a join request waited until someone
+   * opened the app (2026-09-19). This sweep does it instead — but only for an
+   * owner whose management agent HAS a Telegram bot, so an install that cannot
+   * be pushed to costs nothing: no bot, no docker exec.
+   */
+  const announcedPairings = new Set<string>();
+  const sweepPendingPairings = async (): Promise<void> => {
+    const opsWithBot = store
+      .listAllActiveAgents()
+      .filter((a) => a.ops && a.state === 'RUNNING' && store.getChannelForAgent(a.id, 'telegram'));
+    if (!opsWithBot.length) return;
+    const found = new Map<string, { ownerId: string; headline: string }>();
+    for (const ops of opsWithBot) {
+      const mine = store
+        .listAgents(ops.ownerId)
+        .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);
+      for (const agent of mine) {
+        let reqs: Awaited<ReturnType<typeof pairingRequestsFor>>;
+        try { reqs = await pairingRequestsFor(agent); } catch { continue; } // an unreachable agent is not news
+        for (const r of reqs) {
+          const who = r.meta?.firstName || r.meta?.username || 'Someone';
+          found.set(`${agent.id}:${r.code}`, {
+            ownerId: ops.ownerId,
+            headline: `🔑 ${who} wants to talk to "${agent.name}"${r.kind === 'telegram' ? '' : ` on ${r.kind}`}.`,
+          });
+        }
+      }
+    }
+    for (const key of unannounced(announcedPairings, [...found.keys()])) {
+      const f = found.get(key)!;
+      void opsPush.waiting(f.ownerId, f.headline, 'Let them in — or turn them away — under "Waiting for you".');
+    }
+  };
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    const every = Number(process.env.HATCHABOT_PAIRING_SWEEP_MS ?? 5 * 60_000);
+    if (every > 0) {
+      setTimeout(() => { void sweepPendingPairings().catch(() => {}); }, 60_000).unref();
+      setInterval(() => { void sweepPendingPairings().catch(() => {}); }, every).unref();
+    }
+  }
+
   app.get('/v1/pending', async (req) => {
     const mine = store
       .listAgents(ownerIdOf(req))

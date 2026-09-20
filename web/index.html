@@ -373,7 +373,7 @@
   /* ---- UI v2 (?ui=v2): icon home screen, chat first, settings in a sheet ---- */
   .v2only { display:none }
   body.v2 .v2only { display:revert }
-  body.v2 header > .hrow + .hrow, body.v2 #agents, body.v2 #activityCard, body.v2 #mgmtStrip,
+  body.v2 header > .hrow + .hrow, body.v2 #agents, body.v2 #activityCard,
   body.v2 #limitBanner, body.v2 #toc, body.v2 .fab, body.v2 #tocBtn, body.v2 #installBtn { display:none !important }
   body.v2 .wrap > header:not(#v2Header) { display:none !important }
   /* One button look on the v2 screen (Chris, 2026-09-18: no mix of white and
@@ -447,7 +447,9 @@
                   border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
                   transition:transform .12s ease, box-shadow .12s ease }
   .v2stat:hover .tile, .v2stat:focus-visible .tile { transform:translateY(-2px); box-shadow:0 4px 12px rgba(0,0,0,.18) }
+  .v2spark { position:absolute; left:0; right:0; bottom:0; width:100%; height:16px; color:var(--tone); border-radius:0 0 16px 16px }
   .v2stat .num { font-size:19px; font-weight:800; line-height:1; letter-spacing:-.02em; font-variant-numeric:tabular-nums }
+  .v2stat .num { position:relative }
   .v2stat .num small { font-size:12px; font-weight:700; color:var(--dim) }
   .v2stat .em { position:absolute; right:-5px; top:-7px; font-size:16px; filter:drop-shadow(0 1px 1px rgba(0,0,0,.25)) }
   .v2stat .lab { font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
@@ -796,7 +798,6 @@
   <div id="setup"></div>
   <div id="limitBanner" hidden></div>
   <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
-  <div id="mgmtStrip"></div>
   <div class="card" id="activityCard" hidden>
     <div class="row">
       <span class="name grow">Recent activity</span>
@@ -1617,26 +1618,6 @@
         <div id="botMatchOut" style="margin-top:8px"></div>
       </details>
     </details>
-    <div id="mgmtBotBox" hidden>
-      <h4 style="margin:18px 0 4px">Management bot <span class="sub">— legacy</span></h4>
-      <div class="sub" style="margin-bottom:4px"><span id="mgmtBotStatus" style="color:var(--dim)">checking…</span></div>
-      <div class="sub">
-        A separate Telegram bot with slash commands, from before the Hatchabot
-        agent existed — which now does the same work in plain language. You have
-        one; nothing here sets up another. To retire it: stop it on the server,
-        press <b>Forget it</b> (which revokes its access token), and hand its bot
-        back at <a href="https://t.me/botfather" target="_blank" rel="noopener">@BotFather</a> to free the slot.
-      </div>
-      <div class="invite-link" style="margin-top:8px">systemctl --user disable --now hatchabot-mgmt-bot</div>
-      <div class="actions" style="justify-content:flex-start;margin-top:8px">
-        <button class="danger" id="mgmtForgetBtn" onclick="forgetMgmtBot()">Forget it</button>
-      </div>
-      <div class="sub" style="margin-top:8px">
-        It does one thing the app cannot: push each waiting change to Telegram
-        with Confirm and Cancel. To reach your Hatchabot agent from your phone
-        instead, give it its own bot in its ⚙ Settings → Messaging — confirming
-        a change still happens here.
-      </div>
     </div>
 
   </section>
@@ -2843,7 +2824,7 @@ function showTabPane(name) {
   if (name === 'access') void loadAccounts();
   if (name === 'conn') loadConnections();
   if (name === 'hosts') loadHosts();
-  if (name === 'pool') { loadPool(); void refreshMgmtBotStatus(); }
+  if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
   if (name === 'security') { loadPosture(); void loadCliTokens(); }
@@ -3020,7 +3001,6 @@ async function loadBotInventory() {
       'pool-leased': () => 'pool (leased)',
       'pool-free': () => 'pool — free stock',
       'orphan-token': () => '⚠ orphaned token — nothing references it',
-      'mgmt-bot': () => 'the legacy management bot — its token is in <code>.env.mgmt</code>, not the database',
     };
     // What ❌ actually means, and the one thing to do about it. A dead row used
     // to be a red cross with no explanation (2026-09-19).
@@ -3029,7 +3009,6 @@ async function loadBotInventory() {
       'pool-leased': 'Telegram rejects this token, so the agent holding it cannot talk. Give that agent a different bot.',
       'agent': 'Telegram rejects this token — this agent cannot send or receive. Replace its bot in its ⚙ Settings → Messaging.',
       'orphan-token': 'A stored token nothing uses, and Telegram no longer accepts it. Harmless; it disappears when the record is cleaned up.',
-      'mgmt-bot': 'Telegram rejects this token. It is the retired management bot: delete <code>.env.mgmt</code> on the server to stop listing it, and /deletebot the bot at @BotFather to free the slot.',
     };
     $('botInvList').innerHTML = bots.map(b => `
       <div class="pair" style="gap:8px;align-items:baseline;flex-wrap:wrap">
@@ -3045,7 +3024,7 @@ async function loadBotInventory() {
       `<b>${bots.length}</b> bots — ✅ ${n(b => b.alive === true)} working` +
       `${n(b => b.alive === false) ? ` · ❌ ${n(b => b.alive === false)} dead` : ''}` +
       `${n(b => b.alive === undefined) ? ` · ❓ ${n(b => b.alive === undefined)} unknown` : ''}` +
-      ` <span class="sub">(${n(b => b.where === 'agent')} on agents · ${n(b => b.where.startsWith('pool'))} pool · ${n(b => b.where === 'mgmt-bot')} mgmt${n(b => b.where === 'orphan-token') ? ` · ⚠ ${n(b => b.where === 'orphan-token')} orphaned` : ''})</span>`;
+      ` <span class="sub">(${n(b => b.where === 'agent')} on agents · ${n(b => b.where.startsWith('pool'))} pool · ${n(b => b.where === 'orphan-token')} orphan${n(b => b.where === 'orphan-token') ? ` · ⚠ ${n(b => b.where === 'orphan-token')} orphaned` : ''})</span>`;
   } catch (e) { $('botInvStatus').textContent = e.message; }
   finally { $('botInvBtn').disabled = false; }
 }
@@ -3523,46 +3502,6 @@ async function pollDerivedBuild(name) {
 // Status for Settings → Telegram bots. Prefer the bot's own heartbeat (it says alive
 // vs offline, mode, LLM); fall back to the cli-token heuristic for a bot that
 // predates heartbeats and hasn't been restarted yet.
-async function refreshMgmtBotStatus() {
-  const el = $('mgmtBotStatus'), box = $('mgmtBotBox');
-  if (!el) return;
-  // The whole section only exists for people who already have one of these:
-  // it is legacy, and there is nothing here to set one up with.
-  const show = (on) => { if (box) box.hidden = !on; };
-  try {
-    const s = await api('/v1/mgmt/status');
-    if (s.configured) {
-      show(true);
-      el.textContent = `@${s.botUsername} · ${s.online ? 'online' : `offline, last seen ${ago(s.seenAt)}`} · ${s.mode}${s.llm ? ` · ${s.llm}` : ''}`;
-      el.style.color = s.online ? 'var(--ok)' : 'var(--warn)';
-      return;
-    }
-    const tokens = await api('/v1/cli-tokens');
-    const t = tokens.find(x => x.label === 'mgmt-bot');
-    if (!t) { show(false); return; }
-    show(true);
-    el.textContent = t.lastUsedAt ? `set up · last active ${ago(t.lastUsedAt)}` : 'set up · not used yet';
-    el.style.color = 'var(--accent)';
-  } catch {
-    show(false);
-    el.textContent = '';
-  }
-}
-
-/** Forget a retired legacy bot: drop its heartbeat and revoke its token, so
- *  the section goes away instead of describing a process that no longer runs. */
-async function forgetMgmtBot() {
-  if (!confirm('Forget the legacy management bot?\n\nIts access token is revoked, so it cannot come back without being set up again. Stop its service first, and delete its bot at @BotFather to free the slot.')) return;
-  $('mgmtForgetBtn').disabled = true;
-  try {
-    const r = await api('/v1/mgmt/status', { method: 'DELETE' });
-    toast(`Forgotten${r.revoked ? ` — ${r.revoked} token${r.revoked === 1 ? '' : 's'} revoked` : ''}${r.botUsername ? `. Delete @${r.botUsername} at @BotFather to free the slot.` : ''}`, 12000);
-    await refreshMgmtBotStatus();
-    void loadCliTokens();
-  } catch (e) { toast(e.message, 9000); }
-  finally { $('mgmtForgetBtn').disabled = false; }
-}
-
 async function openAiDlg(tab) {
   $('aiErr').textContent = '';
   // Deep-link the tab so "add a server first" can land you where the work is,
@@ -8717,35 +8656,7 @@ function closeToc() { $('toc').classList.remove('open'); }
 // The mgmt bot is a separate process; it heartbeats to the control plane and
 // this strip is that heartbeat made visible. Deliberately NOT an agent card —
 // it has no container, no volume, no members — just a slim always-on rail.
-let mgmtStatus = null, mgmtTick = 0;
-async function loadMgmtStatus() {
-  try { mgmtStatus = await api('/v1/mgmt/status'); } catch { mgmtStatus = null; }
-  renderMgmtStrip();
-}
-function renderMgmtStrip() {
-  const el = $('mgmtStrip');
-  if (!el) return;
-  // Nothing heartbeating for this account → no strip. The Settings → Telegram bots
-  // block still explains how to set the bot up, so absence isn't a dead end.
-  if (!mgmtStatus?.configured) { el.innerHTML = ''; return; }
-  const s = mgmtStatus;
-  const dot = s.online ? '<span style="color:var(--ok)">●</span>' : '<span style="color:var(--warn)">●</span>';
-  const state = s.online ? 'online' : `offline · last seen ${ago(s.seenAt)}`;
-  const armed = s.mode === 'read-write';
-  const bits = [
-    `<span class="sub" style="${armed ? 'color:var(--warn)' : ''}">${armed ? '🔓 read-write' : '🔒 read-only'}</span>`,
-    s.llm ? `<span class="sub">🧠 ${esc(s.llm)}</span>` : '<span class="sub">slash commands only</span>',
-    `<span class="sub">${s.allowlisted} operator${s.allowlisted === 1 ? '' : 's'}</span>`,
-  ];
-  el.innerHTML = `<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-      border:1px dashed var(--line);border-radius:10px;padding:8px 12px;margin-bottom:10px">
-    ${dot} <b>🛠 Management bot</b>
-    <a class="pii" href="https://t.me/${esc(s.botUsername)}" target="_blank" rel="noopener">@${esc(s.botUsername)}</a>
-    <span class="sub">${state}</span>
-    <span class="spacer" style="flex:1"></span>
-    ${bits.join(' ')}
-  </div>`;
-}
+let mgmtTick = 0; // counts polls, so the heavier meta reads run every 4th
 
 // ---- management chat pane (Phase C) ------------------------------------------
 // The same broker as the Telegram management bot, over the web: reads run,
@@ -9060,7 +8971,7 @@ async function refresh(withMeta) {
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) { void loadMgmtStatus(); void loadSourceUsage(); void loadProposals(); }
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); }
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       const running = agents.filter(a => a.state === 'RUNNING');
@@ -10077,6 +9988,18 @@ function renderV2Joins() {
  * in the icon language of the home screen. Every tile is a button to the screen
  * that does something about it — a number you cannot act on is decoration.
  */
+/** The last 24 hours of fleet requests as a tiny area, drawn behind a tile's
+ *  number — the shape of the day without another chart to read. */
+function v2Spark(hourly) {
+  const pts = (hourly ?? []).slice(-24).map(h => (h.ok ?? 0) + (h.limited ?? 0));
+  if (pts.length < 4 || !pts.some(n => n > 0)) return '';
+  const max = Math.max(...pts), W = 56, H = 16;
+  const d = pts.map((n, i) => `${(i / (pts.length - 1) * W).toFixed(1)},${(H - (n / max) * H).toFixed(1)}`).join(' ');
+  return `<svg class="v2spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <polygon points="0,${H} ${d} ${W},${H}" fill="currentColor" opacity=".13"/>
+    <polyline points="${d}" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".42"/></svg>`;
+}
+
 function renderV2Stats() {
   const box = $('v2Stats');
   if (!box) return;
@@ -10100,12 +10023,17 @@ function renderV2Stats() {
     stale ? { key: 'stale', emoji: '🔄', tone: 'var(--warn)', num: stale, lab: 'to rebuild', hot: true,
       go: () => { openFleetActions(); setTimeout(() => faSelect('needs-rebuild'), 50); }, title: 'Agents on an older image' } : null,
     { key: 'usage', emoji: limited ? '⛔' : '⚡', tone: limited ? 'var(--bad)' : 'var(--accent)', num: fmtN(usage), lab: 'asks / 5h', hot: limited,
-      go: () => openFleetUsage(), title: limited ? 'A source is rate-limited' : 'Requests to your AI sources in the last 5 hours' },
+      art: v2Spark((sourceUsageData?.sources ?? []).find(x => x.hourly?.length)?.hourly),
+      go: () => openFleetUsage(), title: limited ? 'A source is rate-limited' : 'Requests to your AI sources in the last 5 hours — the line is the last 24 hours' },
+    backupAgeH !== null ? { key: 'backup', emoji: '🗄', tone: backupAgeH > 36 ? 'var(--warn)' : 'var(--ok)',
+      num: backupAgeH < 1 ? '<small>just now</small>' : backupAgeH < 48 ? `${Math.round(backupAgeH)}<small>h</small>` : `${Math.round(backupAgeH / 24)}<small>d</small>`,
+      lab: 'last backup', hot: backupAgeH > 36, go: () => openAiDlg('backups'),
+      title: backupAgeH > 36 ? 'The nightly backup has not run — open Backups' : 'Age of the newest backup set' } : null,
     { key: 'bots', emoji: '🤖', tone: poolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail, lab: 'spare bots', hot: false,
       go: () => openAiDlg('pool'), title: 'Telegram bots parked and ready for a new agent' },
-  ].filter(Boolean).slice(0, 6);
+  ].filter(Boolean).slice(0, 7);
   const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}">
-      <span class="tile"><span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
+      <span class="tile">${t.art ?? ''}<span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
       <span class="lab">${esc(t.lab)}</span>
     </button>`).join('');
   if (box.__html !== html) {
@@ -10116,6 +10044,14 @@ function renderV2Stats() {
   box.hidden = false;
 }
 let v2PendingCount = 0;
+let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
+async function loadBackupAge() {
+  try {
+    const r = await api('/v1/backups');
+    const newest = (r.backups ?? [])[0];
+    backupAgeH = newest ? (Date.now() - Date.parse(newest.date + 'T03:30:00')) / 3600_000 : null;
+  } catch { backupAgeH = null; } // not the host owner, or no backups configured
+}
 
 function v2RenderHub() {
   const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');

@@ -71,3 +71,17 @@ describe('a dead pool bot stops being renamed', () => {
     expect(permanentTelegramFailure(undefined)).toBe(false);
   });
 });
+
+describe('announcing a join request once', () => {
+  it('is news the first time, silent the second, and news again after it went away', async () => {
+    const { unannounced } = await import('../src/ops/push.js');
+    const seen = new Set<string>();
+    expect(unannounced(seen, ['a1:AB', 'a2:CD'])).toEqual(['a1:AB', 'a2:CD']);
+    expect(unannounced(seen, ['a1:AB', 'a2:CD'])).toEqual([]);
+    // a2's request was answered; a3 knocks.
+    expect(unannounced(seen, ['a1:AB', 'a3:EF'])).toEqual(['a3:EF']);
+    expect(seen.has('a2:CD')).toBe(false); // forgotten, so it cannot grow forever
+    // The same person knocks again after being turned away.
+    expect(unannounced(seen, ['a1:AB', 'a3:EF', 'a2:CD'])).toEqual(['a2:CD']);
+  });
+});

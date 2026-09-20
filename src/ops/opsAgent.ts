@@ -103,6 +103,9 @@ stale note makes you refuse work you can now do.
 export const OPS_DIGEST_MESSAGE = [
   'Morning fleet check. Look at the agents (list_agents), the health of anything not plainly fine (get_health),',
   'AI source usage and rate limits (list_sources), recent activity (list_events) and whether a newer OpenClaw exists (get_runtime).',
+  'Check the spare bots too (get_pool): if the pool is empty, or an agent has no bot, say so.',
+  'On a Monday, also run list_bots with live=true and report any DEAD token or bot nothing uses — those hold slots against',
+  "Telegram's ~20-per-account limit. Do not run the live check on other days: it calls Telegram once per bot.",
   'Reply with a short digest: what is fine in one line, then only what needs the owner, each with your suggestion.',
   'Do not file proposals from this check; suggest them, and wait to be asked. If everything is fine, say so in one sentence.',
 ].join(' ');

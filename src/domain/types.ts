@@ -81,7 +81,7 @@ export interface AIProfile {
    */
   secretRef?: string;
   /**
-   * Owner's pick: the management bot's LLM rides THIS source, via the control
+   * Owner's pick: the management chat's LLM rides THIS source, via the control
    * plane's server-side proxy (the credential never reaches the bot process).
    * Single-select per owner; needs a portable anthropic credential (api key or
    * setup-token) — machine-login and local sources can't back a raw API call.

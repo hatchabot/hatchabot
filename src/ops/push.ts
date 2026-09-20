@@ -31,6 +31,20 @@ export interface OpsPush {
   waiting(ownerId: string, headline: string, detail?: string): Promise<boolean>;
 }
 
+/**
+ * Which of these are new, forgetting the ones that are gone. Used by the
+ * "someone is knocking" sweep: a request already announced must not be
+ * announced again on the next pass, and a request that was denied and comes
+ * back is news again. Mutates `seen` — it is the caller's memory.
+ */
+export function unannounced(seen: Set<string>, current: readonly string[]): string[] {
+  const live = new Set(current);
+  for (const key of seen) if (!live.has(key)) seen.delete(key);
+  const fresh = current.filter((key) => !seen.has(key));
+  for (const key of fresh) seen.add(key);
+  return fresh;
+}
+
 export function createOpsPush(deps: OpsPushDeps): OpsPush {
   return {
     async waiting(ownerId, headline, detail) {

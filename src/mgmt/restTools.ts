@@ -64,6 +64,15 @@ export const REST_TOOLS: RestTool[] = [
     call: () => ({ method: 'GET', path: '/v1/ai-profiles/usage' }),
   },
   {
+    name: 'list_bots', tier: 'read',
+    description:
+      'Every Telegram bot this server holds a token for: which agent uses it, which are spare, and any orphaned token. '
+      + 'With live=true it also asks Telegram whether each token still works — that is how a DEAD bot (deleted or revoked '
+      + 'at BotFather) is spotted, and it costs one call per bot, so use it when the pool looks wrong, not every day.',
+    input_schema: obj({ live: { type: 'boolean', description: 'ask Telegram about each token (slower)' } }),
+    call: ({ input }) => ({ method: 'GET', path: `/v1/bots${input.live === true ? '?live=1' : ''}` }),
+  },
+  {
     name: 'list_proposals', tier: 'read',
     description:
       'The changes you have prepared: which are still waiting for the owner to confirm, and what happened to the recent ones — including any that FAILED, with the reason. Check this when asked whether something you filed worked.',

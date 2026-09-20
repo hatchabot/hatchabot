@@ -1,6 +1,6 @@
 {
   "name": "hatchabot",
-  "version": "1.51.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
@@ -14,7 +14,6 @@
     "cli": "tsx src/cli.ts",
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
-    "mgmt": "tsx src/mgmt/index.ts",
     "e2e": "tsx scripts/e2e.ts",
     "typecheck": "tsc --noEmit",
     "check:web": "node scripts/check-web.mjs",

@@ -34,7 +34,6 @@ export interface HostBots {
   host: string;
   bots: BotRow[];
   /** whether a management bot has been set up here (its token lives outside the DB) */
-  mgmtBotConfigured: boolean;
   /** set instead of bots when a peer couldn't be reached */
   error?: string;
 }
@@ -113,8 +112,7 @@ export async function auditBots(
     rows.push(row);
   }
 
-  const mgmtBotConfigured = store.listCliTokens(ownerId).some((t) => t.label === 'mgmt-bot');
-  return { host: deps.hostName, bots: rows, mgmtBotConfigured };
+  return { host: deps.hostName, bots: rows };
 
   async function checkLive(row: BotRow, secretRef: string): Promise<void> {
     let token: string | undefined;
