@@ -151,7 +151,7 @@ Every value in that file also works as a plain environment variable —
 including `HATCHABOT_TOKEN` and `HATCHABOT_REFRESH_TOKEN`, for scripts that
 shouldn't touch your config file. Env vars beat the file; flags beat both.
 
-With per-user accounts, mint a token in the app (**⚙ Settings → Access →
+With per-user accounts, mint a token in the app (**⚙ Settings → Security →
 New token**) and run `hatchabot login` — that works with any sign-in method,
 including Google, which has no password for a CLI to use.
 
@@ -279,7 +279,8 @@ src/
   openclaw/     Surgical openclaw.json patching + workspace seeding
   orchestrator/ Provisioning, claim, invites, members, snapshots, transfer
   api/          Fastify routes, auth modes, identity verification
-  mgmt/         Telegram management bot: confirmed tool broker + optional LLM layer + telegram transport
+  mgmt/         the tool broker every management surface shares (web chat, the
+                Hatchabot agent, and the legacy Telegram bot in bot.ts/index.ts)
   cli.ts        The hatchabot command
 web/            The app and the invitee join page: single files, no build step
 ```

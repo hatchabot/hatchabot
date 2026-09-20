@@ -99,7 +99,7 @@ that happens to hold something else.
 If both machines run Hatchabot, register the destination once and move agents
 with a single action — no files to shuttle.
 
-On the **destination**: ⚙ Settings → Access → **New token**, and copy it.
+On the **destination**: ⚙ Settings → Security → **New token**, and copy it.
 
 On the **source**: ⚙ Settings → Cluster servers → add its name, URL and that token.
 Hatchabot checks the token works before saving it.

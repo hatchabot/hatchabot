@@ -33,6 +33,16 @@ The header holds:
 - The account menu: who you're signed in as, light or dark appearance,
   install as an app, help, the classic look, the version, and sign out.
 
+- **The manager's dashboard.** Beside the Hatchabot agent, the fleet in tiles
+  drawn like the agent icons: **awake** (11/13), **asks / 5h**, **spare bots**,
+  and — only when they are not zero — **to read**, **to confirm**, **knocking**
+  and **to rebuild**, which take priority when the row runs out of room. Each
+  tile opens the screen that acts on it. On a phone the four most urgent stay.
+- **Waiting for you** collects what needs you: changes your manager prepared
+  (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
+  reason, and **people knocking** — a join request with **Let them in**,
+  **That's me** and **Not now**, which is where someone is admitted now that
+  the Telegram management bot is retired.
 - **Agents are icons** in their groups. Drag one to reorder it, onto another
   group to move it, onto **Archived** to archive it, or onto the strip that
   appears at the bottom to start a new group. On a phone, press and hold,
@@ -98,6 +108,14 @@ scheduled tasks, images and the rest. It cannot carry any of them out. What it
 prepares appears under **Waiting for you**, on the home screen and above the
 conversation, and happens only when you press **Confirm**, with your own
 sign-in. Replying "yes" in its chat approves nothing, on purpose.
+
+**It tells you what happened.** When a change it filed is confirmed or
+cancelled, and when a background build ends, Hatchabot posts a short note into
+the agent's own conversation, so the console says how it went instead of going
+quiet. Give the agent its own Telegram bot (its ⚙ Settings → Messaging) and a
+waiting change is also pushed to your phone through that bot — one way:
+nothing is ever approved from Telegram, the card is still pressed in the app.
+It can also read the outcome of anything it filed with `list_proposals`.
 
 Three things keep that true even if the agent is misled by something it reads
 (details in `docs/ops-agent-design.md`):
@@ -459,6 +477,15 @@ For one agent's own libraries — a Python stack, a CLI only it needs — a
 **derived image** is still the lighter answer: it layers on the base and only
 the agents you pin to it carry the weight.
 
+**Settings → Base images** lists every image on the machine as one table — tag,
+what it is (fleet default, candidate, older build, derived), what it carries
+("with Slack and Discord · plus traceroute"), what uses it, and its actions.
+**🧪 Try** opens a picker: filter by name or group, tick as many agents as you
+like, and **Pin & rebuild _n_** pins each and queues the rebuilds (memory kept,
+six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image as a
+dropdown of every image with a line saying what each one is, and **Fleet
+default** at the top to put it back.
+
 ## Fleet operations
 
 **📊 Health** (header) is the fleet dashboard: counts (running / stopped /
@@ -688,10 +715,11 @@ move or adopt leftover. Anything it can't see, check at @BotFather →
 The `hatchabot` CLI speaks the same API as the web app — create, list, logs,
 snapshots, moves, adopt, backups, health, usage, and more. Run
 `hatchabot help` for the full list; configure it via
-`~/.config/hatchabot/env` or mint a token in **⚙ Settings → Access** and
-`hatchabot login`.
+`~/.config/hatchabot/env` or mint a token in **⚙ Settings → Security** and
+`hatchabot login`. That tab also lists the tokens this account has minted —
+what each is called, when it was made and last used — with **Revoke**.
 
-An optional **Telegram management bot** controls the fleet from chat: list,
+The legacy **Telegram management bot** controls the fleet from chat: list,
 start/stop, rebuild, approve pairing requests, plus read-only `/health`,
 `/usage`, and `/events` — every change confirmed with a tap. Its assistant
 needs no key of its own: the control plane proxies the LLM calls with the AI
@@ -705,7 +733,7 @@ or written until you approve it. The same assistant lives in the web app as
 content and a Confirm button, armed by an explicit "Allow changes" toggle. The bot heartbeats to the control plane, so
 the web app shows a slim presence strip above the agent cards (online/offline,
 @handle deep link, read-only vs read-write, LLM model) and a live line in
-⚙ Settings → Access. Set it up with
+⚙ Settings → Telegram bots. Set it up with
 `hatchabot mgmt-bot setup` (needs its own BotFather token; discoverable in
 ⚙ Settings → Telegram bots). **Legacy:** the Hatchabot agent replaces it for
 everything but the Telegram push of waiting cards; retire a running one with

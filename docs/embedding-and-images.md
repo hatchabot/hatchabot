@@ -98,7 +98,7 @@ agent's ffmpeg) — heavy things that shouldn't sit in every agent's volume *or*
 in the base image everyone shares. Same discipline: shared, immutable bytes in
 an image layer; only per-agent state on the volume.
 
-Built as a first-class feature (⚙ → Runtime, or `hatchabot image`; see
+Built as a first-class feature (⚙ Settings → Derived images, or `hatchabot image`; see
 `docs/features.md` → Derived images):
 
 - **Build** (`POST /v1/images`, `hatchabot image derive`): the owner supplies a

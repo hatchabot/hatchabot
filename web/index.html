@@ -906,7 +906,7 @@
   </form>
   <form id="acctLogin" style="display:none" onsubmit="event.preventDefault();acctSignIn()">
     <div class="sub" id="acctLoginNote">Sign in with your account on this machine.</div>
-    <div class="sub" style="margin-top:4px">No account? Accounts are created by whoever runs this machine, in ⚙ Settings → Access — there's no public sign-up, because anyone who could reach this page would get their own agents. Forgotten password? They can reset it there; if <b>they</b> are locked out, <code>hatchabot accounts reset-password &lt;user&gt; &lt;new&gt;</code> on the machine itself is the way back in.</div>
+    <div class="sub" style="margin-top:4px">No account? Accounts are created by whoever runs this machine, in ⚙ Settings → You — there's no public sign-up, because anyone who could reach this page would get their own agents. Forgotten password? They can reset it there; if <b>they</b> are locked out, <code>hatchabot accounts reset-password &lt;user&gt; &lt;new&gt;</code> on the machine itself is the way back in.</div>
     <label>Username</label>
     <input type="text" id="loginUser" autocomplete="username">
     <label>Password</label>
@@ -1247,11 +1247,12 @@
 
   <section id="paneEditPeers" role="tabpanel" hidden>
     <div class="sub" style="margin-bottom:10px">
-      Which of your <b>other</b> agents this one may consult. It gets a <code>call-agent</code> tool and can
-      ask a peer a question mid-task — each answers with its own memory and accounts (e.g. an investing
-      agent asking a tax or legal agent). Same-owner only; runs entirely on this machine.
-      <b>Grants are one-way:</b> to let two agents consult each other, tick each in the other's Peers tab —
-      or select several in <b>⚡ Bulk actions → Connect to each other</b>. Only the asking agent needs a rebuild.
+      Which of your other agents this one may ask a question mid-task — each
+      answers from its own memory and accounts.
+      <details style="margin-top:4px"><summary style="cursor:pointer">How asking works</summary>
+      <div style="margin-top:4px">It gets a <code>call-agent</code> tool; your agents only, all on this machine.
+      Grants are <b>one-way</b> — tick each agent in the other's tab for a conversation both ways, or use
+      <b>⚡ Bulk actions → Connect to each other</b>. Only the asking agent needs a rebuild.</div></details>
     </div>
     <label>Can consult</label>
     <div id="agentPeerList" class="sub">Loading…</div>
@@ -1361,10 +1362,8 @@
 
   <section id="paneEditEnv" role="tabpanel" hidden>
     <div class="sub" style="margin-bottom:10px">
-      Extra credentials for the agent's <i>own</i> tools — not its AI. When an
-      agent's scripts or scheduled tasks call an outside service (a market-data
-      API, a home-automation hub, a webhook), the key they read lands here.
-      Most agents need none of these.
+      Keys the agent's <i>own</i> tools need — a market-data API, a home hub, a
+      webhook. Not its AI. Most agents need none.
     </div>
     <label>Environment variables <span style="color:var(--dim)">— secrets &amp; config the agent's own tools need</span></label>
     <div id="envList"></div>
@@ -1374,11 +1373,9 @@
       <button id="envAddBtn" onclick="addEnvVar()">Add</button>
     </div>
     <div class="sub">
-      Injected as environment variables on the next <b>Rebuild</b>. Values are
-      <b>write-only</b> — stored encrypted, never shown again; you can only replace or remove
-      them. Provider/proxy/loader names are reserved for safety.
-      <br>🔎 Special case: <code>BRAVE_API_KEY</code> gives this agent its <b>own</b> Brave
-      search quota, overriding the fleet search key (⚙ Settings → Media).
+      Applied on the next <b>Rebuild</b>. Values are write-only: encrypted, never shown again, replaced or
+      removed but never read back. <code>BRAVE_API_KEY</code> is special — it gives this agent its own search
+      quota instead of the fleet's.
     </div>
 
     <div id="imagePinRow" style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
@@ -1416,9 +1413,8 @@
 
   <section id="paneAi" role="tabpanel">
     <div class="sub">
-      Agents inherit the AI source you pick when creating them. The model list
-      is what <code>/model</code> offers in chat — existing agents pick up
-      changes on their next Rebuild.
+      The AI accounts your agents run on. An agent keeps the source it was made
+      with; the model list is what <code>/model</code> offers it in chat.
     </div>
     <div id="aiList"></div>
 
@@ -1560,12 +1556,11 @@
 
   <section id="panePool" role="tabpanel" hidden>
     <div class="sub">
-      Spare Telegram bots, parked for reuse. When you have bots here, creating
-      an agent grabs one <b>instantly</b> — no BotFather trip — and deleting an
-      agent parks its bot back automatically. <b>Bots are personal</b>: a token
-      belongs to whoever minted it at BotFather (they can rename or revoke it
-      any time), so each user leases only <i>their own</i> bots — plus
-      <b>shared</b> house bots explicitly donated for everyone on this server.
+      Spare Telegram bots. With bots parked here a new agent gets one
+      <b>instantly</b>, and deleting an agent parks its bot back.
+      <details style="margin-top:4px"><summary style="cursor:pointer">Whose bots are whose</summary>
+      <div style="margin-top:4px">A token belongs to whoever minted it at BotFather, so each account leases only
+      its own bots — plus <b>shared</b> house bots donated to everyone on this server.</div></details>
     </div>
     <div class="pool-status" id="poolStatus"></div>
     <h4 style="margin:0 0 4px">Add a bot</h4>
@@ -1715,8 +1710,8 @@
 
   <section id="paneBackups" role="tabpanel" hidden>
     <div class="sub">
-      A nightly job saves each agent's <b>entire</b> memory plus the control-plane
-      registry — one dated set per run, kept <b id="bkKeep">14</b> days.
+      Every night, each agent's whole memory and this server's registry — one
+      dated set per run, kept <b id="bkKeep">14</b> days.
       <details style="margin-top:4px"><summary style="cursor:pointer">What Restore does &amp; where sets live</summary>
       <div style="margin-top:4px"><b>Restore</b> rolls a single agent's whole volume back to that night (more than a
       snapshot, which only reverts SOUL/AGENTS/MEMORY) — it overwrites live memory, so the agent is stopped for
@@ -1794,11 +1789,8 @@
   <section id="paneSecurity" role="tabpanel" hidden>
     <h4 style="margin:0 0 4px">Access tokens</h4>
     <div class="sub">
-      An access token for this server. Two uses: the <code>hatchabot</code>
-      command line (works with any sign-in method — needed if you sign in with
-      Google, which has no password for the CLI to use), and connecting two
-      <b>cluster servers</b> — paste a token minted here into the other server's
-      Settings → Cluster servers.
+      For the <code>hatchabot</code> command line, and for pairing this server
+      with another one (paste it there, under Cluster servers).
     </div>
     <div id="cliTokenOut" class="invite-link" style="display:none"></div>
     <div class="actions" style="justify-content:flex-start">
@@ -3528,7 +3520,7 @@ async function pollDerivedBuild(name) {
   finally { derivedBuilding.delete(name); loadDerivedImages(); }
 }
 
-// Status for Settings → Access. Prefer the bot's own heartbeat (it says alive
+// Status for Settings → Telegram bots. Prefer the bot's own heartbeat (it says alive
 // vs offline, mode, LLM); fall back to the cli-token heuristic for a bot that
 // predates heartbeats and hasn't been restarted yet.
 async function refreshMgmtBotStatus() {
@@ -3835,7 +3827,10 @@ async function refreshSourceUsage(btn) {
 }
 
 function renderAiList() {
-  $('aiList').innerHTML = (sourceUsageData ? `<div class="sub" style="margin-bottom:8px">Usage is measured from your agents' own model calls${sourceUsageData.sampledAt ? ` (updated ${esc(ago(sourceUsageData.sampledAt))})` : ''}. Claude plans limit use per 5-hour window and per week; the exact share left isn't available to setup tokens — the Claude app's <b>/usage</b> shows it for the account.${myAccount.hostOwner ? ` <button onclick="refreshSourceUsage(this)" style="margin-left:6px">Refresh usage</button>` : ''}</div>` : '') + profiles.map(p => p.mine === false ? `
+  $('aiList').innerHTML = (sourceUsageData ? `<div class="sub" style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span class="grow">Counted from your agents' own calls${sourceUsageData.sampledAt ? `, updated ${esc(ago(sourceUsageData.sampledAt))}` : ''}.
+        <span title="Claude plans limit use per 5-hour window and per week. The exact share left is not available to a setup token — the Claude app's /usage shows it for the account.">How much of a Claude plan is left ⓘ</span></span>
+      ${myAccount.hostOwner ? `<button onclick="refreshSourceUsage(this)">Refresh usage</button>` : ''}</div>` : '') + profiles.map(p => p.mine === false ? `
     <div class="pair" style="flex-wrap:wrap;gap:6px">
       <b>${p.defaultSource ? '⭐ ' : ''}${esc(p.name)}</b>
       <span class="chip">${vendorChip(p)}</span>
@@ -7891,7 +7886,7 @@ async function approve(id, code, asSelf, kind = 'telegram') {
 }
 
 // The caller's own account (email + linked Telegram). Drives the "That's me"
-// button on pairing cards and the Telegram block in Settings → Access.
+// button on pairing cards and the Telegram line under Settings → You.
 let myAccount = {};
 async function loadMyAccount() {
   try { myAccount = await api('/v1/account'); } catch { myAccount = {}; }
@@ -8730,7 +8725,7 @@ async function loadMgmtStatus() {
 function renderMgmtStrip() {
   const el = $('mgmtStrip');
   if (!el) return;
-  // Nothing heartbeating for this account → no strip. The Settings → Access
+  // Nothing heartbeating for this account → no strip. The Settings → Telegram bots
   // block still explains how to set the bot up, so absence isn't a dead end.
   if (!mgmtStatus?.configured) { el.innerHTML = ''; return; }
   const s = mgmtStatus;
@@ -9043,7 +9038,7 @@ async function refresh(withMeta) {
     if (withMeta || !profiles.length || !hosts.length) {
       [profiles, hosts] = await Promise.all([api('/v1/ai-profiles'), api('/v1/hosts')]);
       // Who am I (email + linked Telegram) — drives the "That's me" pairing
-      // button and the Telegram block in Settings → Access.
+      // button and the Telegram line under Settings → You.
       void loadMyAccount();
     }
     // The pool count is refreshed on EVERY poll, not just a withMeta one: it

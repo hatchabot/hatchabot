@@ -25,7 +25,7 @@ per-agent: an agent keeps its current image until you **Rebuild** it. (The catch
 once `:latest` moves, *any* Rebuild carries the new version — you can't rebuild an
 agent onto the old one.)
 
-Check where you stand — **⚙ Settings → Runtime**, or:
+Check where you stand — **⚙ Settings → Base images**, or:
 
 ```
 hatchabot runtime         # image's OpenClaw version vs the latest stable on npm

@@ -129,7 +129,7 @@ username and password instead of the shared one.
   the bootstrap route is open exactly until account #1 exists, the same trust
   window as the password screen on a fresh install. That account becomes the
   **host owner** and adopts every row a password-mode install already owned.
-- **More people**: ⚙ Settings → Access → *Accounts on this machine* → add a
+- **More people**: ⚙ Settings → You → *Accounts on this machine* → add a
   username and password, tell them out of band, and they change it themselves
   from the same tab. Each account sees only its own agents; sharing an AI
   source (the Shared toggle) is what lets them spend your plan.
@@ -142,12 +142,12 @@ username and password instead of the shared one.
 - **Removing an account** is refused while it still owns agents — they would
   become unreachable, since every query scopes by owner. Delete or hand them
   over first. The host owner can't be removed at all.
-- **The CLI** uses a token (⚙ Settings → Access → access token), not the
+- **The CLI** uses a token (⚙ Settings → Security → access token), not the
   password: `hatchabot login --token <tok>`.
 
 ### Adding someone (1.11.0)
 
-⚙ Settings → Access → **Invite someone** → a username. You get a one-time link
+⚙ Settings → You → **Invite someone** → a username. You get a one-time link
 that expires in 48 hours; they open it, choose their own password, and are
 signed in. You never invent a password or send one through another app, and an
 unclaimed invitation shows in the roster with a **Copy invitation** button.
@@ -179,14 +179,14 @@ The login screen has no "create an account" button once account #1 exists.
 Anyone who can reach the page — everyone on the tailnet, everyone on the wifi
 of a laptop install — would otherwise mint themselves an owner scope and start
 creating agents on your AI plan. Accounts are handed out by the host owner in
-⚙ Settings → Access instead.
+⚙ Settings → You instead.
 
 ### Getting back in
 
 | Situation | Path |
 |---|---|
-| Someone forgot their password | Host owner → ⚙ Settings → Access → **Reset password** |
-| You want to change your own | ⚙ Settings → Access → **Your password** (needs the current one) |
+| Someone forgot their password | Host owner → ⚙ Settings → You → **Reset password** |
+| You want to change your own | ⚙ Settings → You → **Your password** (needs the current one) |
 | **The host owner is locked out** | On the machine: `hatchabot accounts reset-password <username> <new-password>` |
 
 That last one is deliberately a local command, not an API call: there is no

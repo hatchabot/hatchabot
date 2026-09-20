@@ -58,7 +58,7 @@ function unquoteEnvValue(v: string): string {
 const USAGE = `hatchabot <command> [options]
 
 Commands:
-  login [--token <tok>]        Save an access token from the app (⚙ Settings → Access).
+  login [--token <tok>]        Save an access token from the app (⚙ Settings → Security).
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
   accounts [list]              Local sign-in accounts (HATCHABOT_AUTH=accounts).
@@ -145,7 +145,7 @@ Commands:
   servers                      Other Hatchabot servers you can move agents to
   servers add <name> <url> <token>
                                Register one (token from that server's
-                               ⚙ Settings → Access)
+                               ⚙ Settings → Security)
   rehost <agent> <server> [--drop-pin]
                                Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
@@ -424,7 +424,7 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
     const token =
       flags.get('token') ||
       (await prompt(
-        `Open ${url} → ⚙ Settings → Access → New token, then paste it here.\nToken: `,
+        `Open ${url} → ⚙ Settings → Security → New token, then paste it here.\nToken: `,
       ));
     if (!token.startsWith('hatchabot_') && !token.startsWith('agentclaw_')) fail('that does not look like a Hatchabot token');
     const res = await fetch(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });

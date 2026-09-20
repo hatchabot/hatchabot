@@ -1,6 +1,6 @@
 # Design: an OpenClaw agent as the management agent
 
-Status, 2026-09-18:
+Status, 2026-09-20:
 
 - **Shipped in v1.26.0–v1.27.0:** proposals in the database; the `ops` key
   and the tool door; the network jail and its proxy; the agent itself; the
@@ -18,6 +18,19 @@ Status, 2026-09-18:
   - the lockdown drift check, which suspends the key;
   - risk labels and the agent's "why" on cards;
   - the morning fleet check.
+- **Shipped 2026-09-19/20 (v1.33–v1.50):**
+  - the doorman, so the jail works on Docker Desktop as well as Linux, and the
+    door refuses any peer that is not a current doorman;
+  - it is told what happened: a note into its own conversation when a change it
+    filed resolves and when a background build ends (`src/ops/notify.ts`), and
+    `list_proposals` so it can read the outcome itself;
+  - with its own Telegram bot, a waiting change is pushed to the owner's phone
+    through that bot (`src/ops/push.ts`) — one way, never an approval path;
+  - it knows it is talking to the owner of the machine (its notes said
+    otherwise, and it sent people away to "ask the host owner");
+  - failures are caught while the card is written, not on Confirm: a derived
+    image name it cannot use, and reaching for `delete_base_image` on a derived
+    tag.
 - **Not done, on purpose:** retiring the older built-in chat. That waits until
   the agent has been used for real.
 
