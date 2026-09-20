@@ -697,7 +697,7 @@ version bumps via the candidate → smoke → promote flow in
 `scripts/build-runtime-image.sh`, or a system package no static build can
 substitute for.
 
-**Per-agent image pin** (Settings → Environment, host owner only): pin one agent
+**Per-agent image pin** (an agent's ⚙ Advanced → Runtime, host owner only): pin one agent
 to a specific image — a candidate build under test, or a derived image with
 extra system packages — instead of promoting fleet-wide. Applies on the next
 rebuild; the card shows 📌 with the pinned tag; a pinned agent stops getting

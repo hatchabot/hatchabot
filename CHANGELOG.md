@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.6.0] — 2026-09-20
+
+### Changed
+- **An agent's tabs say what they hold.** *Knowledge* is **Data**, and inside it four named sections in the order you need them: **Folders**, **Git repos** (their own section and their own list, not a drawer inside folders), **Connections**, **History**.
+- **Slack & Discord get a tab of their own**, which says plainly that they are under construction and why — built, not yet tested against real apps, landing in a release of their own. They are no longer a stub at the bottom of the Telegram tab. With `?dev` the tab holds the real controls.
+- **Members and Invite live in Sharing only.** They were on both the Telegram tab and Sharing; people belong with sharing, the Telegram tab is about the bot.
+- **One Runtime row on Advanced.** The image an agent runs, the pin, Rebuild and the OpenClaw console were split across two blocks that each said "Runtime"; they are one row now.
+
 ## [2.5.0] — 2026-09-20
 
 ### Changed
