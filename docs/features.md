@@ -118,6 +118,17 @@ prepares appears under **Waiting for you**, on the home screen and above the
 conversation, and happens only when you press **Confirm**, with your own
 sign-in. Replying "yes" in its chat approves nothing, on purpose.
 
+**It tells you what to add.** Naming what to delegate is the hardest part of
+starting, so the app hands that question to the one thing that can answer it
+from evidence: *Not sure what to make? Ask Hatchabot what you're missing* — in
+the New agent panel, and on the home screen while the fleet is small. It reads
+your agents first and suggests what is **missing beside them**, saying what made
+it think so; with nothing to go on it asks two or three short questions instead.
+What you like becomes ordinary `create_agent` cards — one per agent, nothing
+created until you Confirm. Its Monday check goes further: it looks at the three
+busiest agents' logs for one being asked things outside its job, or carrying
+two, and offers the split with the evidence quoted.
+
 **It tells you what happened.** When a change it filed is confirmed or
 cancelled, and when a background build ends, Hatchabot posts a short note into
 the agent's own conversation, so the console says how it went instead of going

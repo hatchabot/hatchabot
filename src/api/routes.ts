@@ -69,7 +69,7 @@ import {
 import { auditBots, type HostBots } from '../orchestrator/bots.js';
 import { completeWithProfile, friendlyLlmError, mgmtBackendOf, pickMgmtProfile, runMgmtCompletion, usableForMgmt } from './mgmtLlm.js';
 import { checkOpsDrift, opsDriftOf } from '../ops/opsDrift.js';
-import { OPS_DIGEST_MESSAGE } from '../ops/opsAgent.js';
+import { OPS_DIGEST_MESSAGE, OPS_SUGGEST_MESSAGE } from '../ops/opsAgent.js';
 import { createOpsNotifier, quoteOutput } from '../ops/notify.js';
 import { createOpsPush, unannounced } from '../ops/push.js';
 import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_SOUL } from '../ops/opsAgent.js';
@@ -883,6 +883,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // opening this page after a risky change silently reset what the next
     // sweep would have flagged as newly appeared.
     return { report, changes, comparedToPrior: previous !== undefined };
+  });
+
+  /**
+   * "Help me decide what agents to add." Hands the management agent the opener
+   * and returns; it asks its questions (or reads the fleet and names the gaps)
+   * in its own console, and files what the owner wants as ordinary cards.
+   * Naming what to delegate is the hardest part of starting, and it is the one
+   * question an agent that can see the whole fleet is actually equipped for.
+   */
+  app.post('/v1/ops-agent/suggest', async (req, reply) => {
+    const ownerId = ownerIdOf(req);
+    const ops = opsAgentOf(ownerId);
+    if (!ops) return reply.code(409).send({ error: 'Set up your Hatchabot agent first — it is the one that suggests.' });
+    if (ops.state !== 'RUNNING' || !ops.runtimeRef) {
+      return reply.code(409).send({ error: `Your Hatchabot agent is ${ops.state.toLowerCase()} — start it and try again.` });
+    }
+    const r = await runOpsTurn(ops, OPS_SUGGEST_MESSAGE).catch((err) => ({ ok: false, error: String((err as Error)?.message ?? err) }));
+    trace(ops.id)('ops.suggest_asked', { ok: r.ok });
+    if (!r.ok) return reply.code(502).send({ error: `Your Hatchabot agent did not answer: ${String(r.error ?? '').slice(0, 160)}` });
+    return { asked: true, agentId: ops.id, slug: ops.slug };
   });
 
   // ---- profiles & hosts ----------------------------------------------------
@@ -2687,19 +2707,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * outcome of a change it filed, and the end of a build that ran for minutes.
    * Best-effort — the home screen carries the outcome regardless.
    */
+  const opsAgentOf = (ownerId: string) => store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+  /** Hand the management agent one turn, in its own conversation. */
+  const runOpsTurn = async (agent: { id: string; slug: string; hostId: string; runtimeRef?: string }, message: string) => {
+    if (isBusy(agent.id)) return { ok: false, error: 'busy' };
+    // It lands in the agent's main conversation, so the console shows it — and
+    // it stays unread, which is the point: it is for the owner to read.
+    sessionsCache.delete(agent.id);
+    const res = await providerFor(agent.hostId).exec(
+      agent.runtimeRef!, ['agent', '--agent', agent.slug, '-m', message], { timeoutMs: 180_000 },
+    );
+    sessionsCache.delete(agent.id);
+    return { ok: res.code === 0 && !res.timedOut, error: (res.stderr || res.stdout || '').slice(0, 200) };
+  };
   const opsNotifier = createOpsNotifier({
-    opsAgent: (ownerId) => store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops),
-    runTurn: async (agent, message) => {
-      if (isBusy(agent.id)) return { ok: false, error: 'busy' };
-      // The note lands in the agent's main conversation, so the console shows
-      // it — and it stays unread, which is the point: it is news for the owner.
-      sessionsCache.delete(agent.id);
-      const res = await providerFor(agent.hostId).exec(
-        agent.runtimeRef!, ['agent', '--agent', agent.slug, '-m', message], { timeoutMs: 180_000 },
-      );
-      sessionsCache.delete(agent.id);
-      return { ok: res.code === 0 && !res.timedOut, error: (res.stderr || res.stdout || '').slice(0, 200) };
-    },
+    opsAgent: opsAgentOf,
+    runTurn: runOpsTurn,
     log: (event, detail) => app.log.info(detail, event),
   });
 

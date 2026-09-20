@@ -957,6 +957,9 @@
   <div class="sub">It runs on this machine; talk to it here, or on Telegram.
     Or <a href="#" onclick="event.preventDefault(); createDlg.close(); openGallery()">start from a template</a>,
     or <a href="#" onclick="event.preventDefault(); createDlg.close(); $('importFile').click()">open a .hatchabot file</a>.</div>
+  <div class="sub" style="margin-top:6px">Not sure what to make?
+    <a href="#" onclick="event.preventDefault(); createDlg.close(); askOpsSuggest(this)">Ask Hatchabot what you're missing</a>
+    — it reads your fleet, asks a couple of questions, and proposes agents you confirm.</div>
   <div class="sub" id="agentCountNote" style="margin-top:2px"></div>
   <label>Name</label>
   <input type="text" id="agentName" placeholder="Kitchen Helper" maxlength="64">
@@ -9989,7 +9992,12 @@ function v2RenderHub() {
       : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.'
       : ops.state === 'STOPPED' ? 'Stopped. Click it to start it again.'
       : 'Your manager. Click it to ask about your agents or to change something; what it prepares waits below for your Confirm.';
-    html = `<div class="sub">${say}</div>`;
+    const thin = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED').length < 3;
+    html = `<div class="sub">${say}</div>`
+      + (thin && ops.state === 'RUNNING' && !ops.opsDrift
+        ? `<div class="sub" style="margin-top:4px">Not sure what to add?
+             <a href="#" onclick="event.preventDefault();askOpsSuggest(this)">Ask it what you're missing</a>.</div>`
+        : '');
   } else {
     html = `<div class="v2opsrow"><span class="sub" style="flex:1;min-width:220px"><b>Set up your Hatchabot agent.</b> A manager for your agents that you can talk to: it works with whichever AI source you have, remembers how you like things run, and asks before it changes anything.</span>
       <button class="primary" id="v2OpsSetup" onclick="v2SetupOps(this)" ${profiles.length ? '' : 'disabled title="Add an AI source first (Settings → AI)"'}>Set it up</button></div>`;
@@ -10012,6 +10020,21 @@ function v2RenderHub() {
     if (ops) face.removeAttribute('aria-hidden'); else face.setAttribute('aria-hidden', 'true');
   }
 }
+/**
+ * "What should I add?" — the hardest question a new owner has, handed to the
+ * one thing that can answer it from evidence. It asks in its own console; what
+ * it proposes arrives as ordinary cards.
+ */
+async function askOpsSuggest(el) {
+  if (el) { el.dataset.busy = '1'; el.textContent = 'Asking…'; }
+  try {
+    const r = await api('/v1/ops-agent/suggest', { method: 'POST', body: {} });
+    if (UI_V2) v2Close();
+    openGateway(r.agentId, r.slug);
+  } catch (e) { toast(e.message, 9000); }
+  finally { if (el) { delete el.dataset.busy; el.textContent = "Ask Hatchabot what you're missing"; } }
+}
+
 async function v2SetupOps(btn) {
   btn.disabled = true; btn.textContent = 'Setting up…';
   try {

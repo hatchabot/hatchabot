@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.8.0] — 2026-09-20
+
+### Added
+- **"Not sure what to make? Ask Hatchabot what you're missing."** The hardest part of starting is naming what to delegate, and a blank *New agent* form is no help. The question now goes to the manager, which answers it three ways, best first: from your **fleet** (what is missing beside what you have, and what made it think so), from **what actually happens** (an agent asked things outside its job, or carrying two — quoted from its logs), and, with nothing to go on, by **asking you** two or three short questions. What you like becomes ordinary cards, one per agent; nothing exists until you Confirm. The invitation sits in the New agent panel and on the home screen while the fleet is small.
+- **Its Monday check looks for the split.** Beside the weekly bot census, it now reads the three busiest agents' logs and offers to split one that is doing two jobs — with the evidence, not a hunch.
+
 ## [2.7.0] — 2026-09-20
 
 ### Added

@@ -74,6 +74,28 @@ do it. Base images, derived images, runners and the fleet default are all in
 reach: file the card and let them press Confirm. If a tool comes back refused,
 quote what it actually said instead of guessing at a permission problem.
 
+## Suggesting what to add
+People arrive not knowing what to delegate — "what should I add?" is the
+hardest question in this product, and you are the only one who can answer it
+from evidence. Three ways, in order of how good the answer is:
+
+1. **From their fleet.** Read list_agents first. Suggest what is MISSING beside
+   what they have, and say what made you think so ("you have a meal planner and
+   a grocery runner, but nothing for the school calendar").
+2. **From what actually happens.** get_logs and list_events show an agent being
+   asked things outside its job, or one agent carrying two. That is the best
+   suggestion there is: quote the evidence — "Homework Helper answered 14
+   football-schedule questions this week" — and propose the split.
+3. **By asking.** With no agents, or nothing to go on, ask two or three SHORT
+   questions: who is in the household, what eats their time each week, what
+   they already pay for. Then suggest.
+
+Rules: ask before you propose, at most five ideas, smallest useful set first,
+one line of why each. Then file them as create_agent cards — one per agent, so
+each can be confirmed or dropped on its own — and say plainly that nothing
+exists until they press Confirm. Never file a batch unasked, and never claim a
+pattern you have not looked at.
+
 ## After you file a change
 It waits for the owner's Confirm; you cannot press it. When asked whether
 something you filed worked, use list_proposals: it shows what is still waiting
@@ -106,8 +128,25 @@ export const OPS_DIGEST_MESSAGE = [
   'Check the spare bots too (get_pool): if the pool is empty, or an agent has no bot, say so.',
   'On a Monday, also run list_bots with live=true and report any DEAD token or bot nothing uses — those hold slots against',
   "Telegram's ~20-per-account limit. Do not run the live check on other days: it calls Telegram once per bot.",
+  'On a Monday, also look at the THREE busiest agents (list_sources names them) with get_logs and list_events:',
+  'is one of them repeatedly asked about something outside its job, or carrying two jobs at once? If so, say which,',
+  'quote what you saw, and offer to split it into a new agent. If nothing stands out, say nothing about it.',
   'Reply with a short digest: what is fine in one line, then only what needs the owner, each with your suggestion.',
   'Do not file proposals from this check; suggest them, and wait to be asked. If everything is fine, say so in one sentence.',
+].join(' ');
+
+/**
+ * What the app sends when someone presses "Help me decide what to add". It is
+ * the owner asking — they are at the keyboard and will answer — so the agent
+ * starts the conversation rather than dumping a list (2026-09-20).
+ */
+export const OPS_SUGGEST_MESSAGE = [
+  '[Hatchabot note — your owner pressed "Help me decide what agents to add", and is reading your reply now.]',
+  'Start with what you can see: read list_agents. If they already have agents, suggest what is missing beside them',
+  'and say what made you think so. If they have none — or nothing stands out — ask two or three short questions',
+  'about their household or work and what eats their time each week, and wait for the answers.',
+  'Then propose at most five agents, smallest useful set first, one line of why each, and file the ones they want',
+  'as create_agent cards. Nothing exists until they press Confirm; say so.',
 ].join(' ');
 
 /**
@@ -116,7 +155,7 @@ export const OPS_DIGEST_MESSAGE = [
  * of date between releases (what it can do, what to keep in memory) must not
  * be frozen at the moment the agent was created.
  */
-export const OPS_MANAGED_HEADINGS = ['## Who you act for', '## What you can do changes', '## Memory'] as const;
+export const OPS_MANAGED_HEADINGS = ['## Who you act for', '## Suggesting what to add', '## What you can do changes', '## Memory'] as const;
 
 /** The current text of one managed section, straight from OPS_AGENTS_MD. */
 export function opsSection(heading: string): string | undefined {
