@@ -499,7 +499,7 @@ and OCR tools, the messaging plugins, and the usual shell tools — including
 Need something else in it? Ask your Hatchabot agent: *"build a base candidate
 with tcpdump"*. It comes back as a card naming the packages; confirming builds
 a **candidate** with its own tag (`2026.7.1-2-plus-tcpdump`). Nothing changes
-for any agent until you try it on one from Settings → Base images and then
+for any agent until you try it on one from Settings → Images and then
 promote it. At most eight packages, apt names only, and an image with extras is
 never built as the fleet default directly.
 
@@ -507,7 +507,7 @@ For one agent's own libraries — a Python stack, a CLI only it needs — a
 **derived image** is still the lighter answer: it layers on the base and only
 the agents you pin to it carry the weight.
 
-**Settings → Base images** lists every image on the machine as one table — tag,
+**Settings → Images** lists every image on the machine as one table — tag,
 what it is (fleet default, candidate, older build, derived), what it carries
 ("with Slack and Discord · plus traceroute"), what uses it, and its actions.
 **🧪 Try** opens a picker: filter by name or group, tick as many agents as you

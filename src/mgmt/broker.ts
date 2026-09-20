@@ -801,7 +801,7 @@ export function summarize(tool: string, r: Resolved): string {
   if (tool === 'build_base_candidate') {
     return `🧪 Build a base-image CANDIDATE for OpenClaw ${r.spec?.version}` +
       (r.spec?.packages?.length ? `, with ${r.spec.packages.join(', ')} added` : '') +
-      `\nThe fleet keeps running ${r.spec?.current ? `OpenClaw ${r.spec.current}` : 'its current image'}. Nothing changes for any agent until you try the candidate on one agent, and then press Promote in the web app (Settings → Machines → Runtime image).`;
+      `\nThe fleet keeps running ${r.spec?.current ? `OpenClaw ${r.spec.current}` : 'its current image'}. Nothing changes for any agent until you try the candidate on one agent, and then press Promote in the web app (Settings → Images).`;
   }
   if (tool === 'try_base_candidate') {
     return `🧪 Try ${r.spec?.tag}${r.spec?.version ? ` (OpenClaw ${r.spec.version})` : ''} on "${r.agentName}"` +

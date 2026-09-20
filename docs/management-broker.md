@@ -185,7 +185,7 @@ image).
 - `end_base_trial`: unpin, then rebuild.
 - Reads: `list_base_images` and `get_base_build`.
 - **Promote is not a tool.** Moving the whole fleet stays a button in the web
-  app (Settings → Machines → Runtime image). The system prompt tells the model
+  app (Settings → Images). The system prompt tells the model
   to send the owner there, and a test asserts no promote tool exists.
 
 **Forbidden** (never in the tool array — the model literally cannot call them):

@@ -307,7 +307,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // deleted or its token revoked at BotFather, and no amount of waiting
     // fixes it. Stop parking the name — one dead pool bot was renaming itself
     // every five minutes, forever (seen live 2026-09-19). The live census
-    // (Settings → Telegram bots) is where a dead token gets dealt with.
+    // (Settings → Telegram) is where a dead token gets dealt with.
     if (permanentTelegramFailure(res.error)) {
       this.opts.log?.('channel.name_abandoned', { username, name, error: String(res.error).slice(0, 120) });
       this.#clearParked(username);

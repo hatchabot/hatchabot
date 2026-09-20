@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.4.0] — 2026-09-20
+
+### Changed
+- **Settings is nine tabs in the order you use them**: **You**, AI, **Classes**, **Telegram**, Connections, **Hosts**, **Images**, Backups, Security.
+  - *You* moves to the far left — it is where you start.
+  - *Agent classes* leaves the AI tab for its own **Classes** tab; it was a drawer inside a tab about something else.
+  - *Telegram bots* → **Telegram**, *Machines* → **Hosts**.
+  - *Base images* and *Derived images* become one **Images** tab, base first: they are all images on the same machine, and deciding between them meant switching tabs.
+- **A derived image whose record is gone now says so.** It used to sit in the base-image table labelled "candidate" — which is why one looked like a base image it was not. It reads **leftover — a derived image whose record is gone, safe to delete**, with the 🗑 that works.
+- **The work-in-progress switch is `?dev`, and is no longer remembered.** Add it to see Slack and Discord; drop it to hide them. A mode you can get stuck in is worse than one you retype, and the home screen's version line says `· dev` while it is on.
+
 ## [2.3.0] — 2026-09-20
 
 ### Changed

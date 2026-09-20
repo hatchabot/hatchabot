@@ -1168,7 +1168,7 @@
         kept either way — this is only about the <i>current</i> chat.</div>
     </details>
     <div id="classRow" style="margin-bottom:10px">
-      <label>Class <span style="color:var(--dim)">— a reusable model/source tier (manage them in ⚙ Settings → AI sources → Agent classes)</span></label>
+      <label>Class <span style="color:var(--dim)">— a reusable model/source tier (manage them in ⚙ Settings → Classes)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
         <select id="editClass" style="flex:1;min-width:0"></select>
         <button id="editClassBtn" onclick="assignClass()">Set class</button>
@@ -1386,12 +1386,12 @@
     <button class="tab" id="tabAi" role="tab" aria-selected="true" onclick="showTab('ai')">AI sources</button>
     <button class="tab" id="tabOperator" role="tab" aria-selected="false" onclick="showTab('operator')">👤 You</button>
     <button class="tab" id="tabConn" role="tab" aria-selected="false" onclick="showTab('conn')">Connections</button>
-    <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Bot pool</button>
+    <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Telegram</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
     <button class="tab" id="tabSecurity" role="tab" aria-selected="false" onclick="showTab('security')">🛡 Security</button>
     <button class="tab" id="tabAccess" role="tab" aria-selected="false" onclick="showTab('access')">Access</button>
-    <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Runners</button>
+    <button class="tab" id="tabHosts" role="tab" aria-selected="false" onclick="showTab('hosts')">Hosts</button>
     <button class="tab" id="tabServers" role="tab" aria-selected="false" onclick="showTab('servers')">Cluster servers</button>
   </div>
 
@@ -1485,9 +1485,14 @@
       </div>
     </details>
 
-    <details class="sec-drawer">
-      <summary><b>🏷 Agent classes</b> <span class="sub">— reusable model/source tiers (e.g. Light→Sonnet, Heavy→Fable) you assign to agents</span></summary>
-      <div class="sub" style="margin:8px 0">Give a class a model and/or an AI source. Assign it to agents (⚡ Bulk actions → Set class, or an agent's ⚙ → AI tab). Editing a class re-applies to every agent in it — model live, a source change needs a rebuild.</div>
+  </section>
+
+  <section id="paneClasses" role="tabpanel" hidden>
+    <div class="sub">
+      A reusable tier — a model, an AI source, a runtime image — that you assign
+      to agents (⚡ Bulk actions → Set class, or an agent's ⚙ → AI). Editing one
+      re-applies to every agent in it: the model live, a source on its rebuild.
+    </div>
       <div id="classList" style="margin-bottom:10px"></div>
       <div class="classrow">
         <input type="text" id="className" placeholder="Class name (e.g. Heavy)" maxlength="48">
@@ -1498,7 +1503,6 @@
       </div>
       <div class="sub" id="classErr" style="color:var(--bad);margin-top:6px"></div>
       <div class="sub" style="margin-top:6px">Suggested starters: <a href="#" onclick="event.preventDefault();quickClass('Light')">Light</a> · <a href="#" onclick="event.preventDefault();quickClass('Standard')">Standard</a> · <a href="#" onclick="event.preventDefault();quickClass('Heavy')">Heavy</a> (adds the name — set its model/source after).</div>
-    </details>
   </section>
 
   <section id="paneHosts" role="tabpanel" hidden>
@@ -2321,24 +2325,14 @@ let agentsLoaded = false;
 const DEMO = new URLSearchParams(location.search).has('demo');
 if (DEMO) document.documentElement.classList.add('demo');
 /**
- * Work-in-progress surfaces, off for everyone else. Slack and Discord are
- * built and tested in code but have never run against real apps, so they stay
- * out of the way until they have (2026-09-20). Turn them on in this browser
- * with ?preview=channels — like the classic look, it is remembered; ?preview=0
- * turns it back off. The server keeps its routes either way, which is what
- * makes it a place to work rather than a demo.
+ * Work in progress, off for everyone else: Slack and Discord are built and
+ * tested but have never met a real app (2026-09-20). Add `?dev` to the address
+ * to see them; drop it to hide them again. Deliberately NOT remembered — this
+ * is a switch you flick while working, not a mode you end up stuck in. The
+ * server behaves identically either way, so it is a workbench, not a demo.
  */
-const PREVIEW = (() => {
-  const q = new URLSearchParams(location.search).get('preview');
-  try {
-    if (q !== null) {
-      if (q === '0' || q === 'off') localStorage.removeItem('hb-preview');
-      else localStorage.setItem('hb-preview', q || 'all');
-    }
-    return localStorage.getItem('hb-preview') ?? '';
-  } catch { return q ?? ''; }
-})();
-const previewing = (what) => PREVIEW === 'all' || PREVIEW.split(',').includes(what);
+const DEV = new URLSearchParams(location.search).has('dev');
+const previewing = () => DEV;
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
@@ -2758,7 +2752,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
+const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
 /**
  * v2 groups the Settings panel's ten tabs into seven by what people come to do:
@@ -2766,18 +2760,21 @@ const TABS = { ai: 'paneAi', hosts: 'paneHosts', pool: 'panePool', servers: 'pan
  * the runtime image. Old deep links (openAiDlg('hosts')) land on their group.
  */
 const V2_SETTINGS = [
-  ['ai', 'AI', ['ai']],
   ['people', 'You', ['access', 'operator']],
-  ['pool', 'Telegram bots', ['pool']],
+  ['ai', 'AI', ['ai']],
+  ['classes', 'Classes', ['classes']],
+  ['pool', 'Telegram', ['pool']],
   ['conn', 'Connections', ['conn']],
-  ['machines', 'Machines', ['hosts', 'servers']],
-  ['base', 'Base images', ['runtime']],
-  ['derived', 'Derived images', ['derived']],
+  ['machines', 'Hosts', ['hosts', 'servers']],
+  // One tab for every image on the machine: the fleet's own first, then the
+  // ones layered on top of it.
+  ['images', 'Images', ['runtime', 'derived']],
   ['backups', 'Backups', ['backups']],
   ['security', 'Security', ['security']],
 ];
 const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you',
-  hosts: 'Machines that run agents', servers: 'Other Hatchabot servers' };
+  hosts: 'Machines that run agents', servers: 'Other Hatchabot servers',
+  runtime: 'Base images', derived: 'Derived images' };
 let v2SettingsGroup = 'ai';
 function showTab(name) {
   if (UI_V2) {
@@ -2799,6 +2796,7 @@ function showTabPane(name) {
     $('tab' + key[0].toUpperCase() + key.slice(1))?.setAttribute('aria-selected', String(on)); // v2-only panes have no classic tab
   }
   if (name === 'access') void loadAccounts();
+  if (name === 'classes') loadClasses();
   if (name === 'conn') loadConnections();
   if (name === 'hosts') loadHosts();
   if (name === 'pool') loadPool();
@@ -3476,7 +3474,7 @@ async function pollDerivedBuild(name) {
   finally { derivedBuilding.delete(name); loadDerivedImages(); }
 }
 
-// Status for Settings → Telegram bots. Prefer the bot's own heartbeat (it says alive
+// Status for Settings → Telegram. Prefer the bot's own heartbeat (it says alive
 // vs offline, mode, LLM); fall back to the cli-token heuristic for a bot that
 // predates heartbeats and hasn't been restarted yet.
 async function openAiDlg(tab) {
@@ -4164,6 +4162,7 @@ function renderRuntimeList() {
     const kind = t.isDefault ? '⭐ <b>fleet default</b>' + (d.defaultInfo?.resolvesTo?.length ? `<div class="sub">also tagged ${d.defaultInfo.resolvesTo.map(x => `<code>${esc(x.replace(/^[^:]*:/, ''))}</code>`).join(', ')}</div>` : '')
       : t.derived ? `<b>derived</b> · ${esc(t.derived.status.toLowerCase())}<div class="sub">FROM ${esc(t.derived.base.replace(/^[^:]*:/, ''))}</div>`
       : t.relation === 'same' ? '<b>= fleet default</b><div class="sub">same image, another name</div>'
+      : t.tag.includes(':derived-') ? '<b>leftover</b><div class="sub">a derived image whose record is gone — safe to delete</div>'
       : t.relation === 'newer' ? '<b>candidate</b><div class="sub">newer than the default</div>'
       : t.relation === 'older' ? 'older build<div class="sub">a previous default</div>'
       : t.exists ? 'candidate' : '<b>not built</b><div class="sub">on this machine</div>';
@@ -4444,7 +4443,7 @@ function faRenderAction() {
       (agentClasses || []).map(c => `<option value="${esc(c.id)}">${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}${c.aiProfileId ? ' · ' + esc((profiles.find(p => p.id === c.aiProfileId) || {}).name || 'source') : ''}</option>`).join('');
     keep($('faClass'), prevClass);
     $('faApplyBtn').disabled = !sel.length;
-    note = !agentClasses.length ? 'No classes defined yet — add them in ⚙ Settings → AI sources → Agent classes.'
+    note = !agentClasses.length ? 'No classes defined yet — add them in ⚙ Settings → Classes.'
       : 'Assigns the class and applies its model/source: model live on running agents; a source change needs a rebuild (those get the 🔄 flag). Local-source agents skip an incompatible model.';
     $('faActionNote').textContent = note;
     return;
@@ -8777,8 +8776,8 @@ function mgmtProposalCard(p, into) {
 /** The panel a proposal card is about, for its "Open …" link (v2). */
 function mgmtCardPlace(p) {
   const t = p.tool || '';
-  if (/^(build_base_candidate|delete_base_image)$/.test(t)) return { label: 'Open Base images', go: () => openAiDlg('runtime') };
-  if (/^(build_image|rebuild_image|remove_image)$/.test(t)) return { label: 'Open Derived images', go: () => openAiDlg('derived') };
+  if (/^(build_base_candidate|delete_base_image)$/.test(t)) return { label: 'Open Images', go: () => openAiDlg('images') };
+  if (/^(build_image|rebuild_image|remove_image)$/.test(t)) return { label: 'Open Images', go: () => openAiDlg('images') };
   if (!p.agentId) return null;
   const tab = /cron/.test(t) ? 'schedule'
     : /peers/.test(t) ? 'sharing'
@@ -9425,7 +9424,7 @@ async function v2LoadChans(id) {
         <div class="sub">${can
           ? (kind === 'slack' ? 'Talk to it in your Slack workspace. You make a small Slack app for it; this takes about five minutes.'
                               : 'Talk to it on Discord. You make a bot for it on Discord; this takes about five minutes.')
-          : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Base images), then Rebuild.`}</div></div>`;
+          : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Images), then Rebuild.`}</div></div>`;
     }
     const rooms = c.rooms || { mode: 'off' };
     const roomHelp = kind === 'slack'
@@ -9452,10 +9451,10 @@ async function v2LoadChans(id) {
   };
   // Only what this browser is set up to see: an attached channel always
   // renders (never strand an agent that has one), the rest wait for preview.
-  const kinds = ['slack', 'discord'].filter(k => previewing('channels') || r.channels.some(x => x.kind === k));
+  const kinds = ['slack', 'discord'].filter(k => previewing() || r.channels.some(x => x.kind === k));
   box.innerHTML = kinds.length
     ? kinds.map(card).join('')
-    : '<div class="sub">Slack and Discord are coming: the code is here, and they are hidden until they have been tested against real apps.</div>';
+    : '<div class="sub">Slack and Discord are coming: the code is here, and they stay hidden until they have been tested against real apps.</div>';
 }
 
 async function openChanSetup(id, kind) {
@@ -10021,7 +10020,7 @@ setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?
 
 function initV2() {
   document.body.classList.add('v2');
-  $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}${PREVIEW ? ` · preview: ${PREVIEW}` : ''}`;
+  $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}${DEV ? ' · dev' : ''}`;
   $('v2AppVer').textContent = `v${window.HATCHABOT_VERSION ?? '?'}`;
   v2SyncTheme();
   addEventListener('scroll', () => $('v2Header').classList.toggle('scrolled', scrollY > 4), { passive: true });

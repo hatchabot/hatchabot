@@ -79,7 +79,7 @@ export const SYSTEM_PROMPT = [
   '  any agent; try_base_candidate puts ONE agent on it (confirm first which agent: suggest a',
   '  low-stakes one); end_base_trial takes it back. list_base_images / get_base_build inspect.',
   '  PROMOTING a candidate to the whole fleet is deliberately not something you can do: when the',
-  '  owner is happy with a trial, tell them to press Promote in the web app (Settings → Machines →',
+  '  owner is happy with a trial, tell them to press Promote in the web app (Settings → Hosts →',
   '  Runtime image), then Rebuild all. Upgrade only when there is a reason to; say so if asked.',
   '- Everyday operations: archive_agent/restore_agent/clone_agent/rename_agent, set_group,',
   '  set_source (switches AI source and rebuilds), set_class, pin_image (derived image or candidate),',

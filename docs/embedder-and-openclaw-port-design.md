@@ -222,7 +222,7 @@ index and search through the shared service. That script is the gate for
 Each step ships alone and leaves the fleet as it was.
 
 1. **Embedder + front door** (no agent uses it yet): module, provider
-   methods, table, route, ops-door path, Settings → Machines row showing
+   methods, table, route, ops-door path, Settings → Hosts row showing
    "Embedding service: running / stopped" with Restart.
 2. **Per-agent switch on today's OpenClaw**: column, writer branch, re-index
    step, health row. Try it on one low-stakes agent, then a handful, for a few
