@@ -57,9 +57,10 @@ The header holds:
   set up: give the **Hatchabot agent its own Telegram bot**, put the app on an
   **HTTPS address** your phone can reach, and **check a backup has run**. Every
   step is ticked from live state, never from "you have seen this", so it is
-  still honest a month later. A **set up** tile on the dashboard shows what is
-  left (`3/6`) and opens it; it is also in the account menu under **Setup
-  guide**, and in the classic look's toolbar.
+  still honest a month later. **Setup** sits in the top bar next to Settings,
+  with a badge counting what is left; there is also a **set up** tile on the
+  dashboard (`3/6`), an entry in the account menu, and a button in the classic
+  look's toolbar.
 - **Waiting for you** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — a join request with **Let them in**,
@@ -81,7 +82,11 @@ The header holds:
 - **An idle badge** on a quiet agent says how long it has been quiet — `2h`,
   `1d`, `1w` — so a fleet of icons tells you at a glance which ones have
   stopped being used.
-- **Status lives on the icon**: a dashed spinning ring while it rebuilds, red
+- **Status lives on the icon**, in the settings sheet too: its bar carries the
+  agent's icon, its name and one coloured pill — *Ready*, *Worth a look*,
+  *Waiting for a bot* — with Start, Retry or Restore right there, instead of
+  repeating all of it as a row inside Overview. On the home screen: a dashed
+  spinning ring while it rebuilds, red
   with **!** when it failed or its AI source is rate-limited, a dotted blue
   ring when it is waiting on you (a bot token, someone asking to join),
   greyed out when stopped. Hover for the reason.

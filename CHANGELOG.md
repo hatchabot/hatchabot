@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.10.0] — 2026-09-20
+
+### Added
+- **Setup is a button in the top bar**, next to Settings, with a badge counting the steps still undone. The guide shipped in v2.9.0 reachable from the account menu and a dashboard tile — but the tile only appears while something is unfinished, so a house that is already set up had one place to find it, and that place was a menu nobody opens. Now it is on screen next to the buttons people do press.
+
+### Changed
+- **An agent's status moved out of its settings and onto its icon.** The sheet's bar already showed the icon and the name; it now carries the status as a coloured pill beside them — *Ready*, *Worth a look*, *Waiting for a bot* — with **Start**, **Retry** or **📤 Restore** right there. The **Status** row inside Overview, which repeated the same thing one line lower, is gone; the reason a status is what it is still appears at the top of Overview, and in the pill's tooltip.
+
 ## [2.9.0] — 2026-09-20
 
 ### Added

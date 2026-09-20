@@ -406,6 +406,7 @@
   .v2new { font-weight:600 }
   .v2count { position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--bad); color:#fff;
              font-size:11px; font-weight:700; display:grid; place-items:center; border:2px solid var(--bg) }
+  #v2SetupBtn { position:relative }
   .v2acct { position:relative }
   .v2avatar { width:38px; height:38px; border-radius:50%; border:1px solid var(--line); background:var(--panel-2); color:var(--text);
               font:inherit; font-weight:700; font-size:15px; cursor:pointer; display:grid; place-items:center; padding:0 }
@@ -632,6 +633,9 @@
   .v2v { display:flex; gap:8px; align-items:center; flex-wrap:wrap; min-width:0 }
   .v2v .sub { flex-basis:100% }
   .v2pill { font-size:12px; border-radius:999px; padding:2px 9px; border:1px solid var(--line) }
+  /* The status lives beside the icon in the sheet's bar, not as a row in the
+     pane below it — one statement of how the agent is, where you look first. */
+  .v2sbar .v2pill { flex:none; white-space:nowrap }
   .v2pill.ok { color:var(--ok) } .v2pill.bad { color:var(--bad) } .v2pill.warn { color:var(--warn) } .v2pill.info { color:var(--info) }
   .v2why { margin:0; padding-left:18px; font-size:13px; color:var(--dim); flex-basis:100% }
   .v2danger { border:1px solid color-mix(in srgb, var(--bad) 40%, var(--line)); border-radius:12px; padding:12px; display:grid; gap:10px }
@@ -722,6 +726,7 @@
     <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg><span class="lbl">New agent</span></button>
     <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span class="v2count" id="v2InboxCount"></span></button>
     <button class="v2btn" onclick="openFleet()" title="Health, usage and activity across all your agents"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span class="lbl">Fleet</span></button>
+    <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4"/><path d="M4 4h12l-2 4 2 4H4z"/></svg><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
     <button class="v2btn" onclick="openAiDlg()" title="AI sources, people, Telegram bots, machines, backups, security"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
     <div class="v2acct">
       <button class="v2avatar" id="v2AvatarBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="v2AcctPop" onclick="v2ToggleAccount()" title="Your account">?</button>
@@ -2742,8 +2747,11 @@ function renderSetup() {
   $('fabBtn').hidden = !aiDone;
   // Until the first agent exists the guide shows itself; after that it is
   // opened on purpose, and says so in its heading.
+  const left = steps.filter(s => !s.done).length;
+  const badge0 = $('v2SetupCount');
+  if (badge0) { badge0.textContent = String(left); badge0.hidden = !left; }
   if (firstAgent && !setupOpen) { el.innerHTML = ''; return; }
-  const done = steps.filter(s => s.done).length;
+  const done = steps.length - left;
   const step = (n, s) => `
     <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)${s.done ? ';opacity:.6' : ''}">
       <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${s.done ? 'var(--ok)' : 'var(--accent)'};color:var(--accent-ink);font-weight:800;display:flex;align-items:center;justify-content:center">${s.done ? '✓' : n}</span>
@@ -9304,7 +9312,11 @@ function v2RenderSheetBar() {
   const chat = v2CanChat(a) && window.isSecureContext;
   $('v2AgentBar').className = `v2sbar v2st-${st.cls}`;
   $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${jsq(a.id)}')" onkeydown="if(event.key==='Enter')openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
-    <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b><span>${esc(st.label)}${!v2Mine(a) ? ' · shared with you' : ''}</span></div>
+    <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b>${!v2Mine(a) ? '<span>shared with you</span>' : ''}</div>
+    <span class="v2pill ${v2PillCls(st)}"${st.why.length ? ` title="${esc(st.why.join(' · '))}"` : ''}>${st.glyph || '●'} ${esc(st.label)}</span>
+    ${a.state === 'STOPPED' ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
+    ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
+    ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')">📤 Restore</button><button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button>` : ''}
     ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
     <button onclick="v2Close()" aria-label="Close">✕</button>`;
 }
@@ -9333,6 +9345,9 @@ function v2MemberPane(a) {
     <div class="v2row"><div class="v2k">Memory</div><div class="v2v">${a.sharedMemory ? 'Shared — it remembers what everyone who uses it tells it.' : 'Private to each person who talks to it.'}</div></div>`;
 }
 
+/** The pill colour for a status — the bar and anything else that shows one. */
+const v2PillCls = (st) => st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : st.cls === 'waiting' ? 'info' : 'warn';
+
 function v2Pane(a, tab) {
   // id/n go into onclick strings: escaped even though ids are server UUIDs.
   const id = jsq(a.id), n = jsq(a.name), run = a.state === 'RUNNING', built = !!a.runtimeRef;
@@ -9347,13 +9362,9 @@ function v2Pane(a, tab) {
   switch (tab) {
     case 'overview': return `
       <div class="v2notices">${agentNotices(a, { skipFailure: true }).trim()}</div>
-      ${row('Status', `<span class="v2pill ${st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : st.cls === 'waiting' ? 'info' : 'warn'}">${st.glyph || '●'} ${esc(st.label)}</span>
-        ${a.state === 'STOPPED' ? B('Start', `act('${id}','start')`) : ''}
-        ${a.state === 'FAILED' ? B('Retry', `act('${id}','provision')`, 'class="primary"') : ''}
-        ${a.state === 'ARCHIVED' ? B('📤 Restore', `v2Close();restoreAgent('${id}','${n}')`, 'class="primary"') + B('🔍 Inspect', `openInspect('${id}','${n}')`) : ''}
-        ${a.state === 'FAILED' && a.stateReason ? `<span class="sub">${esc(a.stateReason)}</span>` : ''}
-        ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
-          ? `<ul class="v2why">${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}`)}
+      ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
+      ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
+        ? `<ul class="v2why" style="margin:0 0 10px">${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
         ${a.persona ? `<span class="sub">${esc(a.persona)}</span>` : ''}`)}
       ${a.state !== 'ARCHIVED' ? row('AI', `<span>${esc(src?.name || 'unknown')}${a.model ? ' · ' + esc(a.model) : ''}</span>${B('Change…', goto('ai'))}`) : ''}
