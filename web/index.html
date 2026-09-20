@@ -470,8 +470,7 @@
   .hub-ops .v2hubhead { display:none }
   /* Before the first agent list arrives, the hub shows its icon and nothing
      that would have to be taken back a moment later. */
-  .hub-unknown #v2HubLede, .hub-unknown #v2HubLogSlot, .hub-unknown #v2HubInputSlot,
-  .hub-unknown .v2chips, .hub-unknown #v2HubTools, .hub-unknown #v2HubLlm { display:none }
+  .hub-unknown #v2HubTools, .hub-unknown #v2HubLlm { display:none }
   .hub-ops.v2hub { align-items:center }
   .v2hubmain { min-width:0; display:grid; gap:8px }
   .v2hubhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
@@ -479,13 +478,10 @@
   .v2hubhead .spacer { flex:1 }
   #v2HubTools { display:flex; align-items:center; gap:8px }
   #v2HubTools label { margin:0; width:auto }
-  .v2hub #mgmtChatLog { height:auto !important; max-height:min(42vh,420px); margin:0 !important }
-  .v2hub #mgmtChatLog:empty { display:none !important }
   #consoleProps { max-height:40%; overflow:auto; padding:10px 12px; display:grid; gap:8px; border-bottom:1px solid var(--line); background:var(--panel) }
   .v2opsrow { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
-  /* With a management agent (or no way to run the old chat), the old chat's parts go. */
-  .hub-ops #v2HubLede, .hub-ops #v2HubLogSlot, .hub-ops #v2HubInputSlot, .hub-ops .v2chips, .hub-ops #v2HubTools, .hub-ops #v2HubLlm,
-  .hub-nochat #v2HubLede, .hub-nochat #v2HubLogSlot, .hub-nochat #v2HubInputSlot, .hub-nochat .v2chips, .hub-nochat #v2HubTools, .hub-nochat #v2HubLlm { display:none !important }
+  /* The hub's remaining chrome, hidden once the manager is set up. */
+  .hub-ops #v2HubTools, .hub-ops #v2HubLlm { display:none !important }
   .prop-meta { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12.5px; color:var(--dim); margin-bottom:6px }
   .prop-note { margin-top:6px; padding-left:10px; border-left:2px solid var(--line); color:var(--dim); font-size:13px; font-style:italic }
   #v2Proposals { margin:-8px 0 24px }
@@ -493,16 +489,6 @@
   .v2join { align-self:stretch; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:14px;
             display:flex; gap:8px; align-items:center; flex-wrap:wrap }
   .v2join .grow { flex:1; min-width:140px }
-  .v2chips { display:flex; flex-wrap:wrap; gap:6px }
-  /* The chat, expanded into a full-height panel. */
-  #v2HubScrim { display:none }
-  body.hub-expanded #v2HubScrim { display:block; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:48 }
-  body.hub-expanded .v2hub { position:fixed; top:0; right:0; bottom:0; width:min(860px, 100vw); margin:0; border-radius:0; z-index:49;
-    display:flex; flex-direction:column; padding-top:calc(16px + env(safe-area-inset-top, 0px)); animation:v2slide .18s ease-out }
-  body.hub-expanded .v2face, body.hub-expanded #v2HubLede, body.hub-expanded .v2chips { display:none }
-  body.hub-expanded .v2hubmain { flex:1; min-height:0; display:flex; flex-direction:column }
-  body.hub-expanded #v2HubLogSlot { flex:1; min-height:0; display:flex }
-  body.hub-expanded .v2hub #mgmtChatLog { flex:1; max-height:none !important; display:flex !important }
   /* Formatting in the assistant's answers. */
   .md > div { min-height:1em }
   .md .md-gap { height:6px }
@@ -525,11 +511,8 @@
     background:var(--accent); vertical-align:middle; animation:mgmtPulse 1s ease-in-out infinite }
   @keyframes mgmtPulse { 0%,100% { opacity:.25; transform:scale(.8) } 50% { opacity:1; transform:scale(1.1) } }
   @media (prefers-reduced-motion: reduce) { .mgmt-working::before { animation:none } }
-  .v2chips:empty { display:none }
   .v2gear { display:inline-flex; align-items:center; gap:6px }
   .v2gear span { font-size:19px; line-height:1 }
-  .v2chip { background:var(--panel-2); border:1px solid var(--line); border-radius:999px; padding:3px 11px; font-size:12.5px; cursor:pointer; color:inherit; font:inherit; font-size:12.5px }
-  .v2chip:hover { border-color:var(--accent) }
   /* A soft outline per group: the groups read as shelves, not one long list. */
   .v2group { margin-bottom:16px; border:1px solid color-mix(in srgb, var(--line) 70%, transparent); border-radius:16px;
              padding:12px 14px 6px; background:color-mix(in srgb, var(--panel) 45%, transparent) }
@@ -787,7 +770,6 @@
       <button id="fleetActionsBtn" class="hbtn" title="Apply an action (switch model, rebuild, stop/start) to a selection of agents — pick by AI source, group, host, or state" onclick="openFleetActions()" hidden>⚡ Bulk actions</button>
       <button id="rebuildAllBtn" class="hbtn" title="Rebuild every agent on the new runtime image — memory is kept" onclick="rebuildAll()" hidden>Rebuild all</button>
       <button id="inboxBtn" class="hbtn" title="Agents other users have sent you" onclick="openInbox()">📥 Inbox<span id="inboxBadge" class="inbox-badge" hidden></span></button>
-      <button id="mgmtChatBtn" class="hbtn" title="Management chat — ask in plain language; every change needs your Confirm" onclick="openMgmtChat()">💬 Manage</button>
       <button id="importBtn" class="hbtn" title="Open a .hatchabot file — a full backup is restored as the same agent; a shared template becomes a fresh agent you give your own bot" onclick="$('importFile').click()">Import</button>
       <button id="galleryBtn" class="hbtn" title="Start a new agent from one you already have" onclick="openGallery()">📋 Templates</button>
       <button id="fleetBtn" class="hbtn" title="Fleet health — states, activity, backups, and runtime at a glance" onclick="openFleetHealth()">📊 Health</button>
@@ -820,10 +802,6 @@
         <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
         <div id="v2OpsBox" hidden></div>
         <div class="v2stats" id="v2Stats" hidden></div>
-        <div class="sub" id="v2HubLede">Say what you want in plain words. I create, fix, move and share agents, and I ask before I change anything.</div>
-        <div id="v2HubLogSlot"></div>
-        <div id="v2HubInputSlot"></div>
-        <div class="v2chips" id="v2Chips"></div>
       </div>
     </section>
     <section id="v2Proposals" hidden aria-labelledby="v2PropTitle">
@@ -1808,31 +1786,6 @@
 
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:18px;padding-top:14px">
     <button onclick="aiDlg.close()">Close</button>
-  </div>
-</dialog>
-
-<dialog id="mgmtChatDlg" style="width:min(760px,96vw)">
-  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <h3 style="margin:0">💬 Management chat</h3>
-    <span class="sub" id="mgmtChatLlm"></span>
-    <span class="spacer" style="flex:1"></span>
-    <label class="sub" style="display:flex;align-items:center;gap:5px;width:auto;margin:0;cursor:pointer"
-           title="Change tools stay refused until armed. Every change still needs your Confirm on its card.">
-      <input type="checkbox" id="mgmtChatArm" onchange="toggleMgmtMode(this.checked)" style="width:auto;flex:none"> 🔓 Allow changes
-    </label>
-    <button class="hbtn" id="mgmtChatNew" title="Forget this conversation" onclick="resetMgmtChat()">New chat</button>
-  </div>
-  <div id="mgmtChatLog" style="height:min(48vh,460px);overflow:auto;border:1px solid var(--line);border-radius:10px;
-       padding:12px;margin:12px 0;display:flex;flex-direction:column;gap:8px"></div>
-  <div style="display:flex;gap:8px">
-    <input type="text" id="mgmtChatInput" maxlength="8000" placeholder="Ask about the fleet, or say what to create or change…"
-           style="flex:1" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMgmtChat();}">
-    <button class="primary" id="mgmtChatSend" onclick="sendMgmtChat()">Send</button>
-  </div>
-  <div class="sub" style="margin-top:8px">Reads run immediately. Every change becomes a card here showing the
-    <b>full</b> content — nothing happens until you press Confirm on it.</div>
-  <div class="actions" style="justify-content:flex-end;margin-top:10px">
-    <button onclick="mgmtChatDlg.close()">Close</button>
   </div>
 </dialog>
 
@@ -3451,11 +3404,11 @@ function toggleDerivedLines(name, key) {
 
 /** Hand the job to the management agent: it writes the Dockerfile, you Confirm. */
 function askMgmtForImage() {
-  const ask = 'Build a derived image called … from the fleet base, adding … ';
-  const fill = () => { const i = $('mgmtChatInput'); if (i) { i.value = ask; i.focus(); i.scrollIntoView({ behavior: 'smooth', block: 'center' }); } };
+  const ops = (agents ?? []).find(a => a.ops && v2Mine(a) && a.state === 'RUNNING');
+  if (!ops) { toast('Set up your Hatchabot agent first — it writes the Dockerfile for you.', 8000); return; }
   for (const d of document.querySelectorAll('dialog[open]')) d.close();
-  if (UI_V2) { fill(); return; } // the hub's input is already on screen
-  openMgmtChat().then(fill);
+  openGateway(ops.id, ops.slug);
+  toast('Ask it for the image — e.g. “build a derived image called media-tools with ffmpeg”.', 9000);
 }
 async function rebuildDerivedImage(name) {
   try {
@@ -8671,66 +8624,12 @@ function closeToc() { $('toc').classList.remove('open'); }
 // it has no container, no volume, no members — just a slim always-on rail.
 let mgmtTick = 0; // counts polls, so the heavier meta reads run every 4th
 
-// ---- management chat pane (Phase C) ------------------------------------------
-// The same broker as the Telegram management bot, over the web: reads run,
-// changes become cards HERE with the full content, and nothing executes until
-// Confirm. The server acts with this session's own auth — the pane can never
-// do more than the person typing.
+// ---- the cards your Hatchabot agent files ----------------------------------
+// It can only propose; each change arrives here with its full content and
+// executes on Confirm, with the auth of whoever pressed it.
 
-async function openMgmtChat() {
-  mgmtChatDlg.showModal();
-  await loadMgmtChat();
-  $('mgmtChatInput').focus();
-}
 
-/** Fill the chat log from the server's transcript — the dialog's, or (v2) the
- *  home screen's hub, which borrows the same log/input elements. */
-let mgmtChatAvailable = null; // null = not known yet
-async function loadMgmtChat() {
-  const log = $('mgmtChatLog');
-  log.innerHTML = '<div class="sub">Loading…</div>';
-  try {
-    const s = await api('/v1/mgmt/chat');
-    $('mgmtChatArm').checked = s.mode === 'read-write';
-    $('mgmtChatLlm').textContent = s.available ? `${s.llm.model} via ${s.llm.profileName}` : '';
-    mgmtChatAvailable = !!s.available; if (UI_V2) v2RenderHub();
-    log.innerHTML = '';
-    if (!s.available) {
-      mgmtBubble('assistant', 'No AI source can back management chat yet — flag one as 🛠 Management under ⚙ Settings → AI sources.');
-      return;
-    }
-    for (const m of s.transcript) {
-      if (m.kind === 'proposal' && m.proposal) {
-        // A reloaded pane re-renders unconfirmed cards live; resolved ones
-        // show as a plain note (their outcome line follows in the transcript).
-        if (m.pending && !UI_V2) mgmtProposalCard(m.proposal);
-        else if (m.pending) mgmtBubble('assistant', '🗂 A change is waiting for your Confirm below.');
-        else mgmtBubble('assistant', `🗂 (earlier proposal: ${(m.proposal.summary || '').split('\n')[0]})`);
-        continue;
-      }
-      if (m.kind === 'steps') { if (m.steps?.length) $('mgmtChatLog').appendChild(mgmtSteps(m.steps, false)); continue; }
-      mgmtBubble(m.kind, m.text);
-    }
-    if (!s.transcript.length && !UI_V2) {
-      mgmtBubble('assistant', 'Hi — ask about your fleet, or tell me what to create or change. Try: “which agents look unhealthy?” or “draft a recipe-keeper agent with a cuisine setup field”.');
-    }
-  } catch (e) { log.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
-}
 
-function mgmtBubble(kind, text) {
-  const log = $('mgmtChatLog');
-  const el = document.createElement('div');
-  el.style.cssText = kind === 'user'
-    ? 'align-self:flex-end;background:var(--accent);color:var(--accent-ink);border-radius:12px 12px 2px 12px;padding:8px 12px;max-width:85%;white-space:pre-wrap;font-size:14px'
-    : 'align-self:flex-start;background:var(--bg);border:1px solid var(--line);border-radius:12px 12px 12px 2px;padding:8px 12px;max-width:85%;font-size:14px';
-  // The assistant's answers get light formatting (lists, bold, code, tables,
-  // links); what the owner typed stays verbatim.
-  if (kind === 'user') el.textContent = text;
-  else { el.className = 'md'; el.innerHTML = mdToHtml(text); }
-  log.appendChild(el);
-  log.scrollTop = log.scrollHeight;
-  return el;
-}
 
 /**
  * A small, safe Markdown subset for the assistant's answers. Everything is
@@ -8779,21 +8678,11 @@ function mdToHtml(src) {
   return out.join('').replace(/(\d+)/g, (_, n) => `<pre><code>${esc(blocks[+n])}</code></pre>`);
 }
 
-/** The steps a turn took, as a small collapsible list above its answer. */
-function mgmtSteps(steps, live) {
-  const el = document.createElement('details');
-  el.className = 'mgmt-steps';
-  if (live) el.open = true;
-  el.innerHTML = `<summary>${live ? 'Working' : `${steps.length} step${steps.length === 1 ? '' : 's'}`}</summary><ul></ul>`;
-  const ul = el.querySelector('ul');
-  for (const st of steps) { const li = document.createElement('li'); li.textContent = `✓ ${st}`; ul.appendChild(li); }
-  return el;
-}
 
 /** A confirmation card: summary + the FULL spec (expandable) + Confirm/Cancel.
  *  Built with createElement/textContent — file bodies never touch innerHTML. */
 function mgmtProposalCard(p, into) {
-  const log = into || $('mgmtChatLog');
+  const log = into;
   const card = document.createElement('div');
   card.style.cssText = 'align-self:stretch;border:1px solid var(--warn);border-radius:10px;padding:10px 12px;font-size:14px';
   // Who prepared it and how much care it deserves — then Hatchabot's own
@@ -8883,77 +8772,8 @@ function mgmtCardPlace(p) {
   return { label: `Open ${v2Find(p.agentId)?.name ?? 'this agent'}`, go: () => openV2Agent(p.agentId, tab) };
 }
 
-async function sendMgmtChat() {
-  if ($('mgmtChatSend').disabled) return; // Enter while a turn is in flight
-  const input = $('mgmtChatInput');
-  const message = input.value.trim();
-  if (!message) return;
-  input.value = '';
-  mgmtBubble('user', message);
-  const thinking = mgmtBubble('assistant', 'Thinking…');
-  thinking.classList.add('mgmt-working');
-  // A live status line, so a slow turn reads as work and not a hang: what it
-  // is doing (from the server) and for how long.
-  const started = Date.now();
-  let step = 'Thinking';
-  const tick = () => {
-    const secs = Math.round((Date.now() - started) / 1000);
-    thinking.textContent = `${step}… ${secs}s` + (secs > 60 ? ' — still working; a subscription source can take a minute or two' : '');
-  };
-  const ticker = setInterval(tick, 1000);
-  // The steps so far, listed live above the status line.
-  let liveSteps = null;
-  const showSteps = (list) => {
-    if (!list?.length) return;
-    const fresh = mgmtSteps(list, true);
-    if (liveSteps) liveSteps.replaceWith(fresh); else thinking.before(fresh);
-    liveSteps = fresh;
-  };
-  const poller = setInterval(() => {
-    api('/v1/mgmt/chat/progress').then((p) => { if (p.busy && p.step) { step = p.step; tick(); showSteps(p.steps); } }).catch(() => {});
-  }, 1200);
-  $('mgmtChatSend').disabled = true;
-  // v2 arms changes on every send rather than once: the server's chat session
-  // (and its mode) is gone after a restart or "New chat", and each change is
-  // still only a proposal until its Confirm.
-  if (UI_V2) await api('/v1/mgmt/chat/mode', { method: 'POST', body: { readWrite: true } }).catch(() => {});
-  try {
-    const r = await api('/v1/mgmt/chat', { method: 'POST', body: { message } });
-    thinking.remove();
-    liveSteps?.remove();
-    if (r.steps?.length) $('mgmtChatLog').appendChild(mgmtSteps(r.steps, false));
-    for (const t of r.texts) mgmtBubble('assistant', t);
-    // v2: cards live in the "Waiting for you" list under the chat, one place
-    // to approve whatever prepared them; the chat just points there.
-    if (UI_V2 && r.proposals.length) {
-      mgmtBubble('assistant', r.proposals.length === 1 ? 'I’ve prepared that — it’s waiting for your Confirm below.' : `I’ve prepared ${r.proposals.length} changes — they’re waiting for your Confirm below.`);
-      await loadProposals();
-    } else for (const p of r.proposals) mgmtProposalCard(p);
-    if (!r.texts.length && !r.proposals.length) mgmtBubble('assistant', '(no reply)');
-  } catch (e) {
-    thinking.textContent = `⚠ ${e.message}`;
-  } finally {
-    clearInterval(ticker); clearInterval(poller);
-    thinking.classList.remove('mgmt-working');
-    $('mgmtChatSend').disabled = false;
-    input.focus();
-  }
-}
 
-async function toggleMgmtMode(on) {
-  try {
-    const r = await api('/v1/mgmt/chat/mode', { method: 'POST', body: { readWrite: on } });
-    toast(r.mode === 'read-write'
-      ? 'Changes armed — every change still needs your Confirm on its card.'
-      : 'Read-only — change proposals are refused.');
-  } catch (e) { toast(e.message); $('mgmtChatArm').checked = !on; }
-}
 
-async function resetMgmtChat() {
-  try { await api('/v1/mgmt/chat', { method: 'DELETE' }); } catch { /* nothing to clear */ }
-  if (UI_V2) return loadMgmtChat(); // the hub: already on screen
-  openMgmtChat();
-}
 
 let pollTimer, pairTick = 0;
 async function refresh(withMeta) {
@@ -9150,7 +8970,6 @@ function renderV2() {
   v2MaybeAutoIcons();
   v2RenderHub();
   renderV2Joins(); // people knocking: refreshed with the pairing poll, not only with proposals
-  v2RenderChips();
   v2RenderWho();
   v2RefreshSheet();
   const live = liveAgents().filter(a => !(a.ops && v2Mine(a))); // the manager lives in the hub, not the grid
@@ -9813,19 +9632,6 @@ async function v2IconAuto(btn) {
 }
 
 // ---- the hub: the management bot at the centre --------------------------------------------
-function v2RenderChips() {
-  const needs = agents.filter(a => v2Mine(a) && a.state !== 'ARCHIVED' && v2Status(a).cls === 'blocked').slice(0, 2);
-  // Only when something is actually broken — a standing menu of example
-  // questions was noise (Chris, 2026-09-18).
-  const chips = needs.map(a => `What's wrong with ${a.name}?`);
-  const html = chips.map(c => `<button type="button" class="v2chip" data-chip="${esc(c)}">${esc(c)}</button>`).join('');
-  if ($('v2Chips').innerHTML !== html) $('v2Chips').innerHTML = html;
-}
-$('v2Chips').addEventListener('click', (e) => {
-  const c = e.target.closest('[data-chip]'); if (!c) return;
-  $('mgmtChatInput').value = c.dataset.chip;
-  sendMgmtChat();
-});
 
 // ---- the header's account menu ---------------------------------------------------------
 function v2RenderWho() {
@@ -10082,7 +9888,6 @@ function v2RenderHub() {
   const hub = document.querySelector('.v2hub');
   hub.classList.toggle('hub-ops', !!ops);
   hub.classList.toggle('hub-unknown', !ops && !agentsLoaded);
-  hub.classList.toggle('hub-nochat', !ops && mgmtChatAvailable === false);
   const box = $('v2OpsBox');
   // Before the first agent list arrives there is nothing to say: offering to
   // set up an agent that already exists, then replacing it a moment later,
@@ -10129,12 +9934,6 @@ async function v2SetupOps(btn) {
   } catch (e) { toast(e.message, 9000); btn.disabled = false; btn.textContent = 'Set it up'; }
 }
 
-function v2HubExpand(on) {
-  document.body.classList.toggle('hub-expanded', on);
-  $('v2HubExpand').textContent = on ? 'Close' : 'Expand';
-  $('mgmtChatLog').scrollTop = 1e9;
-  if (on) $('mgmtChatInput').focus();
-}
 
 /** Changes the assistant prepared, waiting for Confirm. Survives reloads and
  *  restarts; whatever prepared them (today the chat, later an agent). */
@@ -10198,28 +9997,6 @@ setInterval(() => { if (UI_V2 && $('consoleDlg').open && v2Find(consoleAgentId)?
 
 function initV2() {
   document.body.classList.add('v2');
-  // The hub borrows the management chat's own controls, so the web chat keeps
-  // one implementation (and one set of ids) whichever look is showing.
-  $('v2HubLlm').append($('mgmtChatLlm'));
-  // No "Allow changes" switch here: every change already arrives as a card
-  // that does nothing until Confirm, and on an always-visible chat the extra
-  // arming step only produced "tick Allow changes first" dead ends (Chris,
-  // 2026-09-18). The classic dialog keeps its switch.
-  $('v2HubTools').append($('mgmtChatNew'));
-  // Expand: the chat as a full-height panel, for real work.
-  const exp = document.createElement('button');
-  exp.id = 'v2HubExpand'; exp.className = 'hbtn'; exp.type = 'button';
-  exp.textContent = 'Expand'; exp.title = 'Open the chat as a full-height panel';
-  exp.addEventListener('click', () => v2HubExpand(!document.body.classList.contains('hub-expanded')));
-  $('v2HubTools').append(exp);
-  const scrim = document.createElement('div');
-  scrim.id = 'v2HubScrim';
-  scrim.addEventListener('click', () => v2HubExpand(false));
-  document.body.append(scrim);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.body.classList.contains('hub-expanded') && !document.querySelector('dialog[open]')) v2HubExpand(false); });
-  $('v2HubLogSlot').append($('mgmtChatLog'));
-  $('v2HubInputSlot').append($('mgmtChatInput').parentElement);
-  $('mgmtChatInput').placeholder = 'e.g. “make a travel agent for our Sicily trip and share it with Sophie”';
   $('v2Ver').textContent = `Hatchabot v${window.HATCHABOT_VERSION ?? '?'}`;
   $('v2AppVer').textContent = `v${window.HATCHABOT_VERSION ?? '?'}`;
   v2SyncTheme();
@@ -10283,7 +10060,6 @@ function initV2() {
   }
   $('consoleGearBtn').hidden = false;
   $('consoleGearBtn').onclick = () => { const id = consoleAgentId; closeConsole(); openV2Agent(id); };
-  void loadMgmtChat();
   void loadProposals();
 }
 if (UI_V2) initV2();

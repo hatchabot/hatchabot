@@ -164,8 +164,6 @@ await registerRoutes(app, {
   store,
   secrets,
   providers,
-  // The management chat's MCP tool server calls back over loopback.
-  selfUrl: `${tls ? 'https' : 'http'}://127.0.0.1:${PORT}`,
   channel,
   webIndexPath: resolve(import.meta.dirname, '../web/index.html'),
   webJoinPath: resolve(import.meta.dirname, '../web/join.html'),

@@ -92,11 +92,10 @@ The header holds:
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.
 - Long introductions show two lines; **More** reveals the rest.
-- **Hatchabot itself is at the top**: the management chat, always open. Ask
-  it to create, fix, move or share agents. There is no "Allow changes" switch
-  on this screen: every change arrives as a card showing exactly what it will
-  do, and nothing happens until you press its Confirm. (The classic view's chat
-  dialog keeps the switch.)
+- **Hatchabot itself is at the top**: your manager, with the fleet in tiles
+  beside it. Click it to talk; ask it to create, fix, move or share agents.
+  Every change arrives as a card showing exactly what it will do, and nothing
+  happens until you press its Confirm.
 - **Icons are picked for you.** The first time the new screen sees agents
   without one, your management AI chooses an emoji and colour for each from
   its name and description (or, with no AI set up, a keyword table does).

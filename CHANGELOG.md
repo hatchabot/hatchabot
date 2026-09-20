@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.2.0] — 2026-09-20
+
+### Removed
+- **The built-in management chat.** The Claude-only assistant that lived in the app (💬 Manage, and the chat box on the home screen) is gone, along with its MCP tool server, its transcript, its "Allow changes" toggle and the four routes behind it — about 1,200 lines. Your **Hatchabot agent** does that work on whichever AI source you have, with a console, a memory, a jail and a Telegram bot of its own; keeping a second, weaker assistant meant two places to ask and two things to explain. What was shared stays exactly as it was: the broker, the cards, and the rule that a confirm runs as the person who pressed it.
+- If you have not set one up, the home screen now offers only **Set up your Hatchabot agent** — the same button as before, without the fallback chat beneath it.
+
+### Changed
+- The tour, the control-interfaces design note and the in-app copy stop describing the pane; **Ask for an image…** in Derived images opens your agent's console instead of typing into the removed chat box.
+
 ## [2.1.1] — 2026-09-20
 
 ### Changed

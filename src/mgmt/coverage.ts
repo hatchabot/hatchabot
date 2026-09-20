@@ -157,12 +157,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/connections/google/start': 'app: browser — Google consent',
   'DELETE /v1/connections/:id': 'app: later — disconnect a Google account',
 
-  // ---- the management chat itself ----
+  // ---- the management agent itself ----
   'POST /v1/ops-agent': 'app: browser — setting up the account’s own management agent',
-  'POST /v1/mgmt/chat': 'app: internal — the chat',
-  'DELETE /v1/mgmt/chat': 'app: internal — New chat',
   'POST /v1/proposals/:id/:verb': 'app: internal — pressing Confirm or Cancel on a proposal',
-  'POST /v1/mgmt/chat/confirm': 'app: internal — pressing Confirm',
-  'POST /v1/mgmt/chat/mode': 'app: internal — arming changes',
-  'POST /v1/mgmt/mcp': 'app: internal — the chat’s tool server',
 };

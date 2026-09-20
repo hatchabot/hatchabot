@@ -273,7 +273,7 @@ that path). The model holds no token and no
 `/v1` access; it gains no authority the broker doesn't already gate. Slash
 commands keep working alongside it.
 
-**Phase C (implemented) — the web chat pane.** 💬 Manage in the web app hosts
+**Phase C (removed in v2.2.0) — the web chat pane.** 💬 Manage in the web app hosted
 the SAME broker in-process, per signed-in owner: its `/v1` calls dispatch
 through the server's own router carrying the caller's auth (the pane can
 never do more than the person typing), the LLM runs server-side on the
@@ -395,9 +395,8 @@ membership model rather than extend it.
 
 ### If the goal is "users can talk to the agent without Telegram"
 
-(Distinct from the shipped 💬 Manage pane: that is the OWNER talking to the
-*management assistant* about the fleet. This section is members talking to an
-AGENT — still future.)
+(Distinct from the Hatchabot agent: that is the OWNER talking to a manager
+about the fleet. This section is members talking to an AGENT — still future.)
 
 Build a **chat panel inside Hatchabot**, not access to OpenClaw's console:
 - it reuses the existing login and owner/member roles, so there's no new auth story;

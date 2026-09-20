@@ -184,10 +184,6 @@ export interface ApiDeps {
   mgmtCliComplete?: Parameters<typeof runMgmtCompletion>[0]['cliComplete'];
   /** Tests: allow a management agent on a provider with no network isolation. */
   allowUnjailedOps?: boolean;
-  /** Loopback URL of this server, for the management chat's MCP tool server. */
-  selfUrl?: string;
-  /** Test seam for the CLI+MCP management turn (see mgmtChat.ts). */
-  mgmtMcpTurn?: import('./mgmtChat.js').MgmtChatDeps['mgmtMcpTurn'];
   /** Slack and Discord connectors (tests inject fakes that never touch the network). */
   connectors?: Partial<Record<ConnectorKind, ChannelConnector>>;
 }
@@ -2503,7 +2499,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store, secrets, opsPeerOk,
     notifyOps: (ownerId, body) => void opsNotifier.notify(ownerId, body),
     pushOps: (ownerId, headline, detail) => void opsPush.waiting(ownerId, headline, detail),
-    mgmtLlmComplete: deps.mgmtLlmComplete, mgmtCliComplete: deps.mgmtCliComplete, selfUrl: deps.selfUrl, mgmtMcpTurn: deps.mgmtMcpTurn,
   });
 
   // ---- agents ---------------------------------------------------------------

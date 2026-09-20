@@ -37,9 +37,15 @@ describe('management proposals', () => {
       one.store.insertHost({ id: `h-${o}`, ownerId: o, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
       one.store.insertAIProfile({ id: `p-${o}`, ownerId: o, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/x', createdAt: 'now' });
     }
-    await one.f.inject({ method: 'POST', url: '/v1/mgmt/chat/mode', headers: A, payload: { readWrite: true } });
-    // The scripted model keeps proposing; the step cap ends the turn. One card is enough.
-    await one.f.inject({ method: 'POST', url: '/v1/mgmt/chat', headers: A, payload: { message: 'back everything up' } });
+    // A card as the Hatchabot agent files one: a pending record in the store,
+    // which is what the home screen lists and what Confirm resolves. (The
+    // Claude-only web chat that used to file these was removed in v2.2.0.)
+    const now = Date.now();
+    one.store.putMgmtProposal({
+      id: 'c_1', ownerId: 'owner-a', chatId: 0, fromUserId: 0, messageId: 0, tool: 'run_backup',
+      resolved: { rest: { call: { method: 'POST', path: '/v1/backups/run', body: {} }, card: '💾 Back up every agent' } },
+      summary: '💾 Back up every agent', createdAtMs: now, expiresAtMs: now + 3600_000, status: 'pending', source: 'agent',
+    } as never);
     const listed = (await one.f.inject({ method: 'GET', url: '/v1/proposals', headers: A })).json();
     expect(listed.pending.length).toBeGreaterThan(0);
     expect(listed.pending[0].summary).toMatch(/Back up every agent/);

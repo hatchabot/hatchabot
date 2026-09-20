@@ -278,9 +278,6 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // Agent-to-agent consult: authenticated by the CALLER AGENT's own call
     // token inside the handler (not a user session), so it's exempt here.
     if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
-    // The management chat's MCP tool server: authenticated by a one-turn token
-    // and loopback-only, both checked in the handler (mgmtChat.ts).
-    if (path === '/v1/mgmt/mcp') return;
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
@@ -335,9 +332,6 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     if (path === '/privacy' || path === '/terms') return;
     if (path === '/v1/connections/google/callback') return;
     if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
-    // The management chat's MCP tool server: authenticated by a one-turn token
-    // and loopback-only, both checked in the handler (mgmtChat.ts).
-    if (path === '/v1/mgmt/mcp') return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
@@ -468,9 +462,6 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     // Agent-to-agent consult: authenticated by the CALLER AGENT's own call
     // token inside the handler (not a user session), so it's exempt here.
     if (/^\/v1\/agents\/[^/]+\/message$/.test(path)) return;
-    // The management chat's MCP tool server: authenticated by a one-turn token
-    // and loopback-only, both checked in the handler (mgmtChat.ts).
-    if (path === '/v1/mgmt/mcp') return;
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
