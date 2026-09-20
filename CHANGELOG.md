@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.8.1] — 2026-09-20
+
+### Changed
+- **Documentation caught up with the v2 UI.** `docs/features.md` still described the pre-v2 menus — the old agent tabs (Knowledge, Messaging), "seven" machine tabs with Base and Derived images apart, and "Settings → Messaging" as the place to give an agent its bot. It now lists the nine settings tabs, the nine agent tabs, and the surfaces that shipped without ever being written down: the sparkline, tokens/24h and last-backup tiles, the overlapped channel marks, and the idle badge.
+- **"Approve from your phone" no longer describes a bot that was removed.** It described the legacy Telegram management bot in the present tense as the way to confirm a change; it now describes the manager's own Telegram channel plus confirming in the app. `docs/tailscale.md` and `docs/management-broker.md` lost their last present-tense references to that bot too.
+
+### Removed
+- **`mdToHtml()` and its styles.** The markdown renderer existed only for the built-in management chat, deleted in v2.0.0 — about 60 lines of UI code and a test suite that tested nothing anyone could reach.
+
+### Fixed
+- The `V2_SETTINGS` comment still claimed the panel grouped "ten tabs into seven", two layouts ago.
+
 ## [2.8.0] — 2026-09-20
 
 ### Added

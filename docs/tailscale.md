@@ -57,7 +57,7 @@ HATCHABOT_PUBLIC_URL=https://<your-machine>.<your-tailnet>.ts.net
 ```
 
 `serve` proxies 443 → localhost:8080, so everything that talks to
-`http://localhost:8080` directly (the management bot, the CLI, cron scripts)
+`http://localhost:8080` directly (the CLI, cron scripts, the ops door)
 keeps working unchanged, and cert renewal is Tailscale's problem. If you're
 using Google sign-in, add the new `https://…ts.net` origin to the OAuth
 client's authorized JavaScript origins in the GCP console — the old

@@ -1,6 +1,8 @@
 # Management broker — tool schemas & confirm-token design
 
-Engineering detail behind the hybrid management bot in `control-interfaces.md`.
+Engineering detail behind the management surfaces in `control-interfaces.md`.
+The Telegram management bot it was written for was removed in v2.0.0; the
+broker outlived it and is what the Hatchabot agent files its cards through.
 The broker is the deterministic service between the LLM and `/v1`: it holds the
 `cli-token`, exposes a fixed tool set to the model, enforces tiers, and gates
 every mutation behind a human confirmation. The model never sees the token and

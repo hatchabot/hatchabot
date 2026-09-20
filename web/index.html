@@ -501,22 +501,6 @@
   .v2join { align-self:stretch; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:14px;
             display:flex; gap:8px; align-items:center; flex-wrap:wrap }
   .v2join .grow { flex:1; min-width:140px }
-  /* Formatting in the assistant's answers. */
-  .md > div { min-height:1em }
-  .md .md-gap { height:6px }
-  .md .md-h { font-weight:650; margin-top:4px }
-  .md ul, .md ol { margin:4px 0; padding-left:20px }
-  .md code { font-family:ui-monospace,monospace; font-size:.92em; background:var(--panel-2); padding:1px 4px; border-radius:4px }
-  .md pre { background:var(--panel-2); padding:8px 10px; border-radius:8px; overflow-x:auto; margin:6px 0 }
-  .md pre code { background:none; padding:0 }
-  .md .md-table { overflow-x:auto; margin:6px 0 }
-  .md table { border-collapse:collapse; font-size:13px }
-  .md th, .md td { border-bottom:1px solid var(--line); padding:4px 8px; text-align:left; vertical-align:top }
-  .md th { color:var(--dim); font-weight:600 }
-  .md a { color:var(--accent-text) }
-  .mgmt-steps { align-self:flex-start; font-size:12.5px; color:var(--dim); max-width:85% }
-  .mgmt-steps summary { cursor:pointer }
-  .mgmt-steps ul { margin:4px 0 0; padding-left:18px; list-style:none }
   .mgmt-open { display:inline-block; margin-top:6px; font-size:13px; color:var(--accent-text) }
   .mgmt-working { color:var(--dim) !important; font-style:italic }
   .mgmt-working::before { content:""; display:inline-block; width:8px; height:8px; margin-right:8px; border-radius:50%;
@@ -2746,9 +2730,10 @@ async function createSubscriptionProfile() {
 const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
 /**
- * v2 groups the Settings panel's ten tabs into seven by what people come to do:
- * People joins "You" and "Access"; Machines joins runners, other servers and
- * the runtime image. Old deep links (openAiDlg('hosts')) land on their group.
+ * v2 regroups the Settings panel's classic tabs by what people come to do:
+ * "You" joins the account and the operator profile; Hosts joins runners and
+ * other servers; Images joins base and derived. Old deep links
+ * (openAiDlg('hosts')) land on their group.
  */
 const V2_SETTINGS = [
   ['people', 'You', ['access', 'operator']],
@@ -8685,52 +8670,6 @@ let mgmtTick = 0; // counts polls, so the heavier meta reads run every 4th
 
 
 
-/**
- * A small, safe Markdown subset for the assistant's answers. Everything is
- * HTML-escaped FIRST; only then are these patterns turned into tags, so the
- * model (or text it quotes from logs and agents) can't inject markup. Links
- * must be http(s).
- */
-function mdToHtml(src) {
-  const blocks = [];
-  let t = String(src ?? '').replace(/```[\w-]*\n?([\s\S]*?)```/g, (_, code) => { blocks.push(code.replace(/\n$/, '')); return `${blocks.length - 1}`; });
-  t = esc(t);
-  const inline = (x) => x
-    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
-    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<i>$2</i>')
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
-  const out = [];
-  const lines = t.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*[-*] /.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\s*[-*] /.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*[-*] /, ''))}</li>`);
-      i--; out.push(`<ul>${items.join('')}</ul>`); continue;
-    }
-    if (/^\s*\d+[.)] /.test(line)) {
-      const items = [];
-      while (i < lines.length && /^\s*\d+[.)] /.test(lines[i])) items.push(`<li>${inline(lines[i++].replace(/^\s*\d+[.)] /, ''))}</li>`);
-      i--; out.push(`<ol>${items.join('')}</ol>`); continue;
-    }
-    if (/^\s*\|.*\|\s*$/.test(line)) {
-      const rows = [];
-      while (i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])) rows.push(lines[i++]);
-      i--;
-      const cells = (r) => r.trim().replace(/^\||\|$/g, '').split('|').map((c) => inline(c.trim()));
-      const body = rows.filter((r) => !/^\s*\|[\s:|-]+\|\s*$/.test(r));
-      const [head, ...rest] = body;
-      out.push(`<div class="md-table"><table><thead><tr>${cells(head).map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rest.map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
-      continue;
-    }
-    const h = line.match(/^#{1,4} (.*)$/);
-    if (h) { out.push(`<div class="md-h">${inline(h[1])}</div>`); continue; }
-    out.push(line.trim() ? `<div>${inline(line)}</div>` : '<div class="md-gap"></div>');
-  }
-  return out.join('').replace(/(\d+)/g, (_, n) => `<pre><code>${esc(blocks[+n])}</code></pre>`);
-}
 
 
 /** A confirmation card: summary + the FULL spec (expandable) + Confirm/Cancel.

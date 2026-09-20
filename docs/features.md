@@ -44,10 +44,12 @@ The header holds:
   install as an app, help, the classic look, the version, and sign out.
 
 - **The manager's dashboard.** Beside the Hatchabot agent, the fleet in tiles
-  drawn like the agent icons: **awake** (11/13), **asks / 5h**, **spare bots**,
-  and — only when they are not zero — **to read**, **to confirm**, **knocking**
-  and **to rebuild**, which take priority when the row runs out of room. Each
-  tile opens the screen that acts on it. On a phone the four most urgent stay.
+  drawn like the agent icons: **awake** (11/13), **asks / 5h** (with a
+  sparkline of the last hours), **tokens / 24h**, **last backup** (amber past
+  36h), **spare bots**, and — only when they are not zero — **to read**, **to
+  confirm**, **knocking** and **to rebuild**, which take priority when the row
+  runs out of room. Each tile opens the screen that acts on it. On a phone the
+  four most urgent stay.
 - **Waiting for you** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — a join request with **Let them in**,
@@ -64,7 +66,11 @@ The header holds:
   Discord are not flagged; those apps show their own unread marks.
 - **A small mark on the icon** shows which messaging apps reach the agent: a
   blue paper plane for Telegram, a purple hash for Slack, a blurple pad for
-  Discord. With more than one, the first shows with a small **+1**.
+  Discord. An agent on two apps wears both marks, overlapped, rather than one
+  mark and a **+1** that never said which app it stood for.
+- **An idle badge** on a quiet agent says how long it has been quiet — `2h`,
+  `1d`, `1w` — so a fleet of icons tells you at a glance which ones have
+  stopped being used.
 - **Status lives on the icon**: a dashed spinning ring while it rebuilds, red
   with **!** when it failed or its AI source is rate-limited, a dotted blue
   ring when it is waiting on you (a bot token, someone asking to join),
@@ -73,22 +79,22 @@ The header holds:
   (over HTTPS, see `docs/tailscale.md`). The **⚙ Settings** button in its bar
   opens the agent's settings. An agent that needs you opens straight to
   settings instead.
-- **Settings are one sheet with tabs**: Overview, Personality, AI,
-  Knowledge, Messaging, Sharing, Schedule, Advanced. **Messaging** holds the
-  agent's Telegram bot (add, remove, members, group chats, formatting) and its
-  Slack and Discord connections (see *Slack and Discord* below). The editors live right in those
-  tabs (the files, the AI source, data and connections, people and Telegram,
-  other agents it can ask, scheduled tasks, environment), not one panel
-  deeper. Every button from the classic card is in one of them.
+- **Settings are one sheet with tabs**: Overview, Personality, AI, Data,
+  Telegram, Slack & Discord, Sharing, Schedule, Advanced. **Overview** sets
+  its group and class; **Telegram** holds the agent's bot (add, remove,
+  members, group chats, formatting); **Data** is delineated into Folders, Git
+  repos, Connections and History; **Slack & Discord** is under construction
+  (see *Slack and Discord* below). The editors live right in those tabs, not
+  one panel deeper. Every button from the classic card is in one of them.
 - **Every panel slides in from the right** with **‹ Back** at the top. Panels
   stack: Back returns to whatever opened it.
-- **Machine settings have seven tabs**: AI (sources and agent classes),
-  People (your account, other accounts, "about you"), Telegram bots,
-  Connections (Google accounts, plus the voice-notes and web-search keys),
-  Machines (runners, other Hatchabot servers), Base images (the fleet's image:
-  try a candidate on one agent, promote, delete — building one is the
-  Hatchabot agent's job, not a form here), Derived images (base plus your own
-  packages), Backups, Security.
+- **Machine settings have nine tabs**: You (your account, other accounts,
+  "about you"), AI (sources), Classes (agent classes), Telegram (the bot
+  pool), Connections (Google accounts, plus the voice-notes and web-search
+  keys), Hosts (runners, other Hatchabot servers), Images (base images first —
+  try a candidate on one agent, promote, delete; building one is the Hatchabot
+  agent's job, not a form here — then derived images), Backups, Security.
+  Every section on every tab is drawn inside its own outlined card.
 - **Check an agent's health on its Overview**: the result appears right
   there, not in another panel.
 - Long introductions show two lines; **More** reveals the rest.
@@ -132,7 +138,7 @@ two, and offers the split with the evidence quoted.
 **It tells you what happened.** When a change it filed is confirmed or
 cancelled, and when a background build ends, Hatchabot posts a short note into
 the agent's own conversation, so the console says how it went instead of going
-quiet. Give the agent its own Telegram bot (its ⚙ Settings → Messaging) and a
+quiet. Give the agent its own Telegram bot (its ⚙ Settings → Telegram) and a
 waiting change is also pushed to your phone through that bot — one way:
 nothing is ever approved from Telegram, the card is still pressed in the app.
 It can also read the outcome of anything it filed with `list_proposals`.
@@ -151,12 +157,13 @@ More about it:
 - **Cards say who and how risky.** Each card says who prepared it and how much
   care it deserves ("Restarts or interrupts something", "Read carefully"), and
   shows the agent's own reason, marked as its words.
-- **Approve from your phone.** The legacy Telegram management bot
-  (`hatchabot mgmt-bot setup`) sends you each change your agent prepares, with
-  Confirm and Cancel. It is a separate bot on purpose: the agent can't speak as
-  it. Everything else it does, the Hatchabot agent now does in plain language —
-  give *that* agent a Telegram bot (its ⚙ Settings → Messaging) to reach it
-  from a phone, and confirm the change in the app.
+- **Approve from your phone.** Give the Hatchabot agent its own Telegram bot
+  (its ⚙ Settings → Telegram) and you can ask it for a change from anywhere;
+  Hatchabot also pushes what needs you — someone asking to join, a card
+  waiting — down that channel. The confirmation itself happens in the app,
+  where the card says who prepared it and what it will run. (The separate
+  Telegram management bot that used to carry Confirm/Cancel was removed in
+  v2.0.0.)
 - **It can search the web without having internet.** Hatchabot runs the
   search, and the agent can open only the results that came back.
 - **A morning fleet check** is set up as an ordinary scheduled task (08:00).
@@ -715,7 +722,8 @@ rebuild; the card shows 📌 with the pinned tag; a pinned agent stops getting
 "update available" from fleet promotes, since it deliberately doesn't track
 `:latest`. Clearing the field returns it to the default.
 
-**Derived images** (⚙ → Derived images, or `hatchabot image`, host owner only):
+**Derived images** (⚙ → Images, below the base images, or `hatchabot image`,
+host owner only):
 the first-class form of "this agent's owner needs ffmpeg + LaTeX". An image
 `FROM hatchabot-runtime:<base>` plus Dockerfile lines — for system packages
 (apt) a volume install can't provide — that an agent is then pinned to. In the
