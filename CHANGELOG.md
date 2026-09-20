@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.7.0] — 2026-09-20
+
+### Added
+- **Tokens spent in the last 24 hours, on the dashboard.** A tile beside the others, summing every AI source — the number people actually ask about when a plan feels tight. The window is computed with the others server-side, so it is the same arithmetic as the usage view, not an estimate from the 7-day figure.
+
+### Changed
+- **Every settings section has an outline.** Each heading-delimited block on a settings tab is a card now — the bot pool, the OAuth setup, connecting an account, the spares, the census — so a tab reads as a few things you can act on instead of one column of text. A section whose contents are all hidden draws nothing at all.
+
 ## [2.6.1] — 2026-09-20
 
 ### Fixed

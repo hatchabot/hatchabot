@@ -92,6 +92,20 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     expect(src!.window5h.tokens).toBe(2 * (4000 + 200 + 700)); // two agents of mine: +4000, reset then 200 used, +700
     expect(src!.tokensSince).toBe(new Date(NOW - 3 * 3_600_000).toISOString());
   });
+
+  it('counts a day of tokens separately from five hours and a week', async () => {
+    const { store, provider } = await world();
+    const deps = { store, providerFor: () => provider };
+    const at = (n: number) => provider.execResponses.set('sessions list', { code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: n, updatedAt: NOW }] }), stderr: '' });
+    at(1000); await sampleSourceUsage(deps, NOW - 40 * 3_600_000); // older than a day
+    at(3000); await sampleSourceUsage(deps, NOW - 30 * 3_600_000); // +2000, still older
+    at(9000); await sampleSourceUsage(deps, NOW - 10 * 3_600_000); // +6000, inside the day
+    at(9500); await sampleSourceUsage(deps, NOW);                  // +500, inside five hours
+    const [src] = summarizeSourceUsage(store, OWNER, NOW);
+    expect(src!.window5h.tokens).toBe(2 * 500);
+    expect(src!.window24h.tokens).toBe(2 * (6000 + 500)); // the day, not the week
+    expect(src!.window7d.tokens).toBe(2 * (2000 + 6000 + 500));
+  });
 });
 
 describe('GET /v1/ai-profiles/usage', () => {

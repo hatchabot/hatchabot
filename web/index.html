@@ -489,6 +489,15 @@
   /* A tab that exists so the feature is findable, and honest about its state. */
   .v2wip { border:1px dashed var(--line); border-radius:12px; padding:14px 16px; color:var(--dim); font-size:14px; line-height:1.5 }
   .v2wip b { color:var(--text) }
+  /* Every section of a settings tab in its own card: a tab should read as a
+     few things you can act on, not one column of text (Chris, 2026-09-20). */
+  .v2card { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; background:var(--panel) }
+  .v2card > h4:first-child, .v2card > label:first-child { margin-top:0 }
+  .v2card > .sec-drawer:first-child { margin-top:0 }
+  /* A card whose whole contents are hidden (an admin-only block, say) draws
+     nothing rather than an empty box. */
+  .v2card:not(:has(> *:not([hidden]))) { display:none }
+  body.v2 .v2card .sec-drawer { border:0; padding:0; margin-top:8px }
   .v2join { align-self:stretch; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:14px;
             display:flex; gap:8px; align-items:center; flex-wrap:wrap }
   .v2join .grow { flex:1; min-width:140px }
@@ -2755,11 +2764,36 @@ const V2_SETTINGS_HEAD = { access: 'Your account', operator: 'About you',
   hosts: 'Machines that run agents', servers: 'Other Hatchabot servers',
   runtime: 'Base images', derived: 'Derived images' };
 let v2SettingsGroup = 'ai';
+/**
+ * Wrap each heading-delimited run of a settings pane in a card, so a tab reads
+ * as sections with edges instead of one scroll. Done in the DOM rather than in
+ * the markup so both looks share one source, and idempotent — panes are shown
+ * again every time you switch tabs.
+ */
+function v2Sectionise(pane) {
+  if (!pane || pane.dataset.sectioned === '1') return;
+  pane.dataset.sectioned = '1';
+  let run = [];
+  const flush = () => {
+    if (!run.length) return;
+    const card = document.createElement('div');
+    card.className = 'v2card';
+    run[0].before(card);
+    for (const n of run) card.append(n);
+    run = [];
+  };
+  for (const kid of [...pane.children]) {
+    if (kid.tagName === 'H4') flush();
+    run.push(kid);
+  }
+  flush();
+}
+
 function showTab(name) {
   if (UI_V2) {
     const g = V2_SETTINGS.find(([k, , panes]) => k === name || panes.includes(name)) ?? V2_SETTINGS[0];
     v2SettingsGroup = g[0];
-    for (const pane of g[2]) showTabPane(pane); // runs each pane's loader
+    for (const pane of g[2]) { showTabPane(pane); v2Sectionise($(TABS[pane])); } // runs each pane's loader
     for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
     for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
     $('v2SettingsTabs').innerHTML = V2_SETTINGS.map(([k, label]) =>
@@ -9890,6 +9924,7 @@ function renderV2Stats() {
   const knocking = mine.reduce((n, a) => n + (pairings[a.id]?.length ?? 0), 0);
   const stale = mine.filter(a => a.updateAvailable).length;
   const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
+  const tokens24h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window24h?.tokens ?? 0), 0);
   const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');
   const tiles = [
     { key: 'awake', emoji: '🐣', tone: 'var(--ok)', num: `${awake}<small>/${mine.length}</small>`,
@@ -9902,6 +9937,8 @@ function renderV2Stats() {
       go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'People waiting to be let in' } : null,
     stale ? { key: 'stale', emoji: '🔄', tone: 'var(--warn)', num: stale, lab: 'to rebuild', hot: true,
       go: () => { openFleetActions(); setTimeout(() => faSelect('needs-rebuild'), 50); }, title: 'Agents on an older image' } : null,
+    { key: 'tokens', emoji: '🔢', tone: 'var(--info)', num: fmtN(tokens24h), lab: 'tokens / 24h', hot: false,
+      go: () => openFleetUsage(), title: 'Tokens your agents have spent across every AI source in the last 24 hours' },
     { key: 'usage', emoji: limited ? '⛔' : '⚡', tone: limited ? 'var(--bad)' : 'var(--accent)', num: fmtN(usage), lab: 'asks / 5h', hot: limited,
       art: v2Spark((sourceUsageData?.sources ?? []).find(x => x.hourly?.length)?.hourly),
       go: () => openFleetUsage(), title: limited ? 'A source is rate-limited' : 'Requests to your AI sources in the last 5 hours — the line is the last 24 hours' },
@@ -9911,7 +9948,7 @@ function renderV2Stats() {
       title: backupAgeH > 36 ? 'The nightly backup has not run — open Backups' : 'Age of the newest backup set' } : null,
     { key: 'bots', emoji: '🤖', tone: poolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail, lab: 'spare bots', hot: false,
       go: () => openAiDlg('pool'), title: 'Telegram bots parked and ready for a new agent' },
-  ].filter(Boolean).slice(0, 7);
+  ].filter(Boolean).slice(0, 8);
   const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}">
       <span class="tile">${t.art ?? ''}<span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
       <span class="lab">${esc(t.lab)}</span>

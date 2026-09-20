@@ -116,6 +116,8 @@ export interface SourceUsage {
   name: string;
   agents: number;
   window5h: SourceWindow;
+  /** A day's worth: what the home screen's "tokens / 24h" tile counts. */
+  window24h: SourceWindow;
   window7d: SourceWindow;
   /** limited = the latest call through this source was refused and none has succeeded since. */
   status: 'ok' | 'limited' | 'idle';
@@ -137,9 +139,11 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
   const mine = store.listAgents(ownerId).filter((a) => a.state !== 'DELETED');
   const all = store.listAllActiveAgents();
   const h5 = hourOf(new Date(now - 5 * 3_600_000).toISOString());
+  const h24 = hourOf(new Date(now - 24 * 3_600_000).toISOString());
   const d7 = hourOf(new Date(now - 7 * DAY).toISOString());
   const hours = Array.from({ length: 168 }, (_, i) => hourOf(new Date(now - (167 - i) * 3_600_000).toISOString()));
   const t5 = new Date(now - 5 * 3_600_000).toISOString(), t7 = new Date(now - 7 * DAY).toISOString();
+  const t24 = new Date(now - 24 * 3_600_000).toISOString();
   const out: SourceUsage[] = [];
   for (const p of store.listAIProfiles(ownerId)) {
     // Agents CURRENTLY on this source — what "8 agents" means.
@@ -186,6 +190,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const entry: SourceUsage = {
       id: p.id, name: p.name, agents: my.length,
       window5h: { ...w(h5), tokens: tokensFor(myIds, t5) },
+      window24h: { ...w(h24), tokens: tokensFor(myIds, t24) },
       window7d: { ...w(d7), tokens: tokensFor(myIds, t7) },
       status, limitedSince, lastLimitAt, lastOkAt, limitHits7d: hits.length, topAgents,
       tokensSince: store.firstTokenSampleAt(p.id, myIds),
