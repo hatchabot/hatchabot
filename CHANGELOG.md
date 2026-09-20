@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.6.1] — 2026-09-20
+
+### Fixed
+- **"Save & apply to all my agents" is greyed out when there is nothing to save.** It offered to apply text your agents already had; it now enables on the first edit, and says why it is disabled on hover.
+
 ## [2.6.0] — 2026-09-20
 
 ### Changed

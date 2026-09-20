@@ -1760,7 +1760,7 @@
       yourself: name, where you live, family, how you like to be addressed,
       standing preferences. Running agents get it immediately — no rebuild.
     </div>
-    <textarea id="operatorText" rows="10" maxlength="8000" style="width:100%;box-sizing:border-box;font:inherit"
+    <textarea id="operatorText" rows="10" maxlength="8000" oninput="syncOperatorBtn()" style="width:100%;box-sizing:border-box;font:inherit"
       placeholder="e.g. I'm Sam, 42, in Lisbon. Two kids (9 and 13). Prefer concise answers and metric units. Partner: Alex."></textarea>
     <div class="sub" id="operatorErr" style="color:var(--bad);margin-top:6px"></div>
     <div style="margin-top:8px"><button class="primary" id="operatorSaveBtn" onclick="saveOperator()">Save &amp; apply to all my agents</button></div>
@@ -2785,19 +2785,32 @@ function showTabPane(name) {
   if (name === 'operator') loadOperator();
 }
 
+/** What the server already has, so Save is offered only when there is something
+ *  to save — a live button that does nothing reads as a failure. */
+let operatorSaved = null;
+function syncOperatorBtn() {
+  const btn = $('operatorSaveBtn'); if (!btn) return;
+  const same = operatorSaved !== null && $('operatorText').value === operatorSaved;
+  btn.disabled = same;
+  btn.title = same ? 'Already applied to your agents — edit the text to save again.' : '';
+}
 async function loadOperator() {
   $('operatorErr').textContent = '';
-  try { $('operatorText').value = (await api('/v1/operator-profile')).content || ''; }
-  catch (e) { $('operatorErr').textContent = e.message; }
+  try {
+    operatorSaved = (await api('/v1/operator-profile')).content || '';
+    $('operatorText').value = operatorSaved;
+  } catch (e) { $('operatorErr').textContent = e.message; operatorSaved = null; }
+  syncOperatorBtn();
 }
 async function saveOperator() {
   $('operatorSaveBtn').disabled = true; $('operatorErr').textContent = '';
   try {
     const r = await api('/v1/operator-profile', { method: 'PUT', body: { content: $('operatorText').value } });
+    operatorSaved = r.content;
     $('operatorText').value = r.content;
     toast(`Saved — applying to ${r.pushing} running agent${r.pushing === 1 ? '' : 's'} in the background${r.pushing === 0 ? ' (stopped agents get it on next start)' : ''}.`, 7000);
   } catch (e) { $('operatorErr').textContent = e.message; }
-  finally { $('operatorSaveBtn').disabled = false; }
+  finally { syncOperatorBtn(); }
 }
 
 const POSTURE_DOT = { ok: '🟢', info: '🔵', warn: '🟡', critical: '🔴' };
