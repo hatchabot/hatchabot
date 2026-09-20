@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.5.0] — 2026-09-20
+
+### Changed
+- **An agent's class is set where its group is** — a row on its **Overview**, next to Group, instead of buried in its AI tab. Picking one applies immediately (a source change still asks for a rebuild).
+- **An agent's Messaging tab is called Telegram**, and so is the Overview row — unless the agent really is on more than one app.
+- **The Knowledge tab lost its wall of text.** Seven blocks of prose became three short lines: what a folder mount means and when it applies, the one warning worth keeping about members and Google accounts, and the rest moved into tooltips and the git drawer where it is read at the moment it matters.
+- **Extra credentials (environment variables) fold away.** Most agents never need one, so Advanced no longer opens with a form and two paragraphs about it — it is a drawer that says what it is for, and says the rest when you open it.
+
 ## [2.4.0] — 2026-09-20
 
 ### Changed

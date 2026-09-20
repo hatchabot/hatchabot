@@ -1167,13 +1167,6 @@
         been discussing into its memory (~20s), so it doesn't forget the context. Durable notes it already saved are
         kept either way — this is only about the <i>current</i> chat.</div>
     </details>
-    <div id="classRow" style="margin-bottom:10px">
-      <label>Class <span style="color:var(--dim)">— a reusable model/source tier (manage them in ⚙ Settings → Classes)</span></label>
-      <div style="display:flex;gap:8px;align-items:center">
-        <select id="editClass" style="flex:1;min-width:0"></select>
-        <button id="editClassBtn" onclick="assignClass()">Set class</button>
-      </div>
-    </div>
     <div id="modelRow" style="display:none">
       <label>Model <span style="color:var(--dim)">— which model of that source this agent runs</span></label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -1188,23 +1181,18 @@
   </section>
 
   <section id="paneEditData" role="tabpanel" hidden>
-    <div class="sub" style="margin-bottom:10px">
-      Folders on this machine and git repos it may read, beyond its own
-      workspace. Applies on the next <b>Rebuild</b>.
-    </div>
     <div id="dataList"></div>
     <div style="display:flex;gap:8px;align-items:center">
       <input type="text" id="pathNew" placeholder="/home/you/Documents/notes" style="flex:1;min-width:0">
-      <select id="pathAccess" style="width:auto">
+      <select id="pathAccess" style="width:auto"
+              title="Read-only: it can read the folder. Writable: it can also change and delete what is in it.">
         <option value="ro">Read-only</option>
         <option value="rw">Writable</option>
       </select>
-      <button id="pathAddBtn" onclick="addDataSource()">Add</button>
+      <button id="pathAddBtn" onclick="addDataSource()" title="Applies on the next Rebuild">Add</button>
     </div>
-    <div class="sub">
-      It sees these at <code>/data/&lt;folder&gt;</code>. Anyone who can message it can read them —
-      and change or delete the <b>writable</b> ones, so grant that sparingly.
-    </div>
+    <div class="sub">Mounted at <code>/data/&lt;folder&gt;</code> on its next <b>Rebuild</b>. Anyone who can
+      message this agent can read them — and change <b>writable</b> ones.</div>
 
     <details class="sec-drawer">
       <summary><b>📦 Add a git repo</b> <span class="sub">— cloned into the agent's own space; public repos need no key</span></summary>
@@ -1220,10 +1208,8 @@
         <button id="repoAddBtn" onclick="addGitSource()">Add repo</button>
       </div>
       <div class="sub" style="margin-top:6px">
-        Cloned into the agent's own space (not your disk). <b>Public repo</b>: that's it — it is
-        cloned right away if the agent is running, otherwise on its next Rebuild. <b>Private or writable</b>:
-        Hatchabot generates a deploy key (you don't paste your own) — copy it from the repo's
-        <b>🔑 Deploy key</b> button below, add it on GitHub, then Rebuild.
+        Cloned into the agent's own space, not your disk. A public repo needs nothing else; for a private
+        or writable one, copy the generated <b>🔑 Deploy key</b> below to GitHub, then Rebuild.
       </div>
       <div id="gitKeyOut" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--accent);border-radius:8px;background:var(--panel-2);white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
     </details>
@@ -1244,16 +1230,10 @@
   </section>
 
   <section id="paneEditConn" role="tabpanel" hidden>
-    <div class="sub" style="margin-bottom:10px">
-      Google accounts this agent can use — Gmail, Calendar, Drive, Sheets.
-      Attach one you have connected, or ask the agent in chat to connect its own.
-    </div>
+    <div class="sub" style="margin-bottom:10px">Gmail, Calendar, Drive and Sheets, per account.</div>
     <div class="sub" style="margin-bottom:10px;padding:8px 10px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">
-      ⚠ <b>Every member of this agent can use these connections.</b> Anyone on
-      its allowlist can ask it to read mail, calendars, or files on these
-      accounts — and to send mail as them unless the account was added with
-      <code>--gmail-no-send</code>. Connect only accounts you'd hand the whole
-      member list.
+      ⚠ <b>Every member of this agent can use these accounts</b> — to read mail, calendars and files,
+      and to send mail as them unless you attach with <b>no send</b>.
     </div>
     <label>Attach a connected account <span style="color:var(--dim)">— from ⚙ Settings → Connections</span></label>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1263,14 +1243,9 @@
         <input type="checkbox" id="connNoSend" checked style="width:auto;flex:none"> no send</label>
       <button id="connAttachBtn" onclick="attachConnection()">Attach</button>
     </div>
-    <div class="sub" style="margin:4px 0 10px">Applies at once, and on every rebuild. Nothing in the list?
-      Connect a Google account under ⚙ Settings → Connections — one consent, reusable across agents.</div>
-    <label>Google accounts on this agent</label>
+    <label style="margin-top:12px">Google accounts on this agent</label>
     <div id="connList" class="sub">Loading…</div>
-    <div class="sub" style="margin-top:10px">
-      Disconnecting takes the agent's access away immediately; the Google
-      account itself is untouched.
-    </div>
+
   </section>
 
   <section id="paneEditTg" role="tabpanel" hidden>
@@ -1345,22 +1320,18 @@
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
-    <div class="sub" style="margin-bottom:10px">
-      Keys the agent's <i>own</i> tools need — a market-data API, a home hub, a
-      webhook. Not its AI. Most agents need none.
-    </div>
-    <label>Environment variables <span style="color:var(--dim)">— secrets &amp; config the agent's own tools need</span></label>
-    <div id="envList"></div>
+    <details class="sec-drawer" id="envDrawer">
+      <summary><b>🔑 Extra credentials</b> <span class="sub">— for the agent's own tools, not its AI. Most agents need none.</span></summary>
+    <div id="envList" style="margin-top:8px"></div>
     <div style="display:flex;gap:8px;align-items:center">
       <input type="text" id="envName" placeholder="MARKETDATA_API_KEY" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
       <input type="password" id="envValue" placeholder="value" style="flex:1;min-width:0;font-family:ui-monospace,monospace">
       <button id="envAddBtn" onclick="addEnvVar()">Add</button>
     </div>
-    <div class="sub">
-      Applied on the next <b>Rebuild</b>. Values are write-only: encrypted, never shown again, replaced or
-      removed but never read back. <code>BRAVE_API_KEY</code> is special — it gives this agent its own search
-      quota instead of the fleet's.
-    </div>
+    <div class="sub">A key a script or scheduled task of its own reads — a market-data API, a home hub, a
+      webhook. Applied on the next <b>Rebuild</b>, write-only (encrypted, never shown again).
+      <code>BRAVE_API_KEY</code> gives this agent its own search quota instead of the fleet's.</div>
+    </details>
 
     <div id="imagePinRow" style="margin-top:18px;border-top:1px solid var(--line);padding-top:12px">
       <label>Runtime image <span style="color:var(--dim)">— pin this agent to a specific image (host owner only)</span></label>
@@ -1368,9 +1339,9 @@
         <select id="editImage" style="flex:1;min-width:0;font-size:13px"><option value="">Loading images…</option></select>
         <button id="imageBtn" onclick="saveImagePin()">Pin</button>
       </div>
-      <div class="sub" style="margin:-4px 0 4px">For trying a candidate build or a derived image with extra packages
-        (build them in ⚙ → Base images). Applies on the next rebuild. A pinned agent stops getting "update available"
-        from fleet promotes — pick <b>Fleet default</b> and Pin to put it back.</div>
+      <div class="sub" style="margin:-4px 0 4px">For trying a candidate or a derived image on this one agent
+        (build them in ⚙ Settings → Images). Applies on its next rebuild; a pinned agent stops following fleet
+        promotes until you pick <b>Fleet default</b> again.</div>
     </div>
   </section>
 
@@ -3659,20 +3630,23 @@ async function renderClassPicker(cur) {
   const sel = $('editClass');
   sel.innerHTML = '<option value="">— none —</option>';
   try { agentClasses = (await api('/v1/agent-classes')).classes || []; } catch { /* keep last */ }
-  if (editAgentId !== cur?.id) return;
+  if (!$('editClass') || (typeof v2AgentId !== 'undefined' && v2AgentId && v2AgentId !== cur?.id)) return;
   sel.innerHTML = '<option value="">— none —</option>' + (agentClasses || []).map(c =>
     `<option value="${esc(c.id)}"${c.id === cur?.classId ? ' selected' : ''}>${esc(c.name)}${c.model ? ' · ' + esc(c.model) : ''}</option>`).join('');
 }
+/** Set (or clear) an agent's class from its Overview. */
 async function assignClass() {
-  const classId = $('editClass').value || null;
-  $('editClassBtn').disabled = true;
+  const sel = $('editClass');
+  const id = (typeof v2AgentId !== 'undefined' && v2AgentId) || editAgentId;
+  const classId = sel.value || null;
+  sel.disabled = true;
   try {
-    const r = await api(`/v1/agents/${editAgentId}/class`, { method: 'POST', body: { classId } });
+    const r = await api(`/v1/agents/${id}/class`, { method: 'POST', body: { classId } });
     toast(classId ? (r.rebuild ? 'Class set — it changes the AI source, so Rebuild to apply.' : 'Class set — model applied.') : 'Class cleared.', 7000);
     await refresh(false);
-    renderModelPickerForAgent(agents.find(x => x.id === editAgentId));
-  } catch (e) { $('editErr').textContent = e.message; }
-  finally { $('editClassBtn').disabled = false; }
+    renderModelPickerForAgent(agents.find(x => x.id === id));
+  } catch (e) { toast(e.message, 9000); }
+  finally { sel.disabled = false; }
 }
 
 // ---- AI-source usage (requests, tokens, rate limits) --------------------------
@@ -5650,8 +5624,8 @@ async function renderConnections() {
     el.innerHTML = accounts.length
       ? accounts.map(a => `<div class="pair"><span class="grow"><b class="pii">${esc(a.email)}</b>
           <span class="sub">${esc(a.auth)}${a.client && a.client !== 'default' ? ` · client: ${esc(a.client)}` : ''}</span></span>
-          <button class="danger" onclick="disconnectAccount('${jsq(a.email)}')">Disconnect</button></div>`).join('')
-      : 'No Google accounts on this agent yet — attach one above, or ask the agent in chat to connect one itself.';
+          <button class="danger" title="Takes this agent's access away at once; the Google account itself is untouched" onclick="disconnectAccount('${jsq(a.email)}')">Disconnect</button></div>`).join('')
+      : 'None yet — attach one above, or ask the agent to connect its own.';
   } catch (e) {
     if (editAgentId === forId) el.innerHTML = esc(e.message);
   }
@@ -5836,7 +5810,6 @@ function prepareEdit(id, name, tab = 'def') {
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
-  renderClassPicker(cur);
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
   void populateImagePicker(cur?.image ?? '');
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
@@ -9187,7 +9160,7 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Knowledge'], ['messaging', 'Messaging'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Knowledge'], ['messaging', 'Telegram'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
 /** Where each classic edit tab now lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
 const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
@@ -9265,6 +9238,7 @@ function v2RenderSheet() {
   $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
   if (v2Mine(a)) v2EmbedPanes(a, v2Tab);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
+  if ($('editClass')) void renderClassPicker(a);
   if ($('v2Chans')) void v2LoadChans(a.id);
 }
 
@@ -9305,7 +9279,9 @@ function v2Pane(a, tab) {
       ${a.state !== 'ARCHIVED' ? row('Group', `<select id="v2GroupSel" onchange="v2SetGroup('${id}', this.value)" style="width:auto">
           <option value="">${groups.length ? 'Default' : 'No group'}</option>${groups.map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
           <option value="${V2_NEW_GROUP}">＋ New group…</option></select><span class="sub">Or drag its icon on the home screen.</span>`) : ''}
-      ${a.state !== 'ARCHIVED' ? row('Messaging', v2ChannelKinds(a).length
+      ${a.state !== 'ARCHIVED' ? row('Class', `<select id="editClass" style="width:auto" onchange="assignClass()"></select>
+          <span class="sub">A tier — model, AI source, image — shared with other agents. Make them in ⚙ Settings → Classes.</span>`) : ''}
+      ${a.state !== 'ARCHIVED' ? row(v2ChannelKinds(a).length > 1 ? 'Messaging' : 'Telegram', v2ChannelKinds(a).length
         ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run ? agentChannelLinks(a).map(l => `<a class="btn" href="${esc(l.url)}" target="_blank" rel="noopener">Open ${V2_CHAN_LABEL[l.kind]}</a>`).join('') : ''}${B('Manage…', goto('messaging'))}`
         : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
       ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
