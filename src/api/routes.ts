@@ -900,8 +900,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: `Your Hatchabot agent is ${ops.state.toLowerCase()} — start it and try again.` });
     }
     const r = await runOpsTurn(ops, OPS_SUGGEST_MESSAGE).catch((err) => ({ ok: false, error: String((err as Error)?.message ?? err) }));
-    trace(ops.id)('ops.suggest_asked', { ok: r.ok });
-    if (!r.ok) return reply.code(502).send({ error: `Your Hatchabot agent did not answer: ${String(r.error ?? '').slice(0, 160)}` });
+    trace(ops.id)('ops.suggest_asked', { ok: r.ok, ...(r.ok ? {} : { error: String(r.error ?? '').slice(0, 300) }) });
+    if (!r.ok) {
+      // "It didn't answer" is true but useless. The three things that actually
+      // happen — it is mid-turn, the plan is rate-limited, it took too long —
+      // each want a different response from the person reading this.
+      const why = String(r.error ?? '');
+      if (why === 'busy') {
+        return reply.code(409).send({ error: 'Your Hatchabot agent is in the middle of something — give it a minute and ask again.' });
+      }
+      if (/rate.?limit|429|quota/i.test(why)) {
+        return reply.code(429).send({ error: 'Your AI source is rate-limited right now — the whole household shares it. Try again shortly.' });
+      }
+      if (/timed?.?out|timeout/i.test(why)) {
+        return reply.code(504).send({ error: 'Your Hatchabot agent took too long to answer. Open it and ask "what am I missing?" directly.' });
+      }
+      return reply.code(502).send({ error: `Your Hatchabot agent did not answer: ${why.slice(0, 160) || 'no reason given'}` });
+    }
     return { asked: true, agentId: ops.id, slug: ops.slug };
   });
 

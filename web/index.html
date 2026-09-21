@@ -10210,6 +10210,9 @@ function v2RenderHub() {
  */
 async function askOpsSuggest(el) {
   if (el) { el.dataset.busy = '1'; el.textContent = 'Asking…'; }
+  // It is a real turn on a real model — half a minute is normal, and a silent
+  // button for that long reads as broken.
+  toast('Asking your Hatchabot agent — it reads your fleet first, so give it about half a minute.', 8000);
   try {
     const r = await api('/v1/ops-agent/suggest', { method: 'POST', body: {} });
     if (UI_V2) v2Close();

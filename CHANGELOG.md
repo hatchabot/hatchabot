@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.15.3] — 2026-09-21
+
+### Fixed
+- **"Ask Hatchabot what you're missing" now says why it failed.** Every failure came back as *"Your Hatchabot agent did not answer"*, which is true and useless: the three things that actually happen are that it is mid-turn already, that the shared AI plan is rate-limited, or that the turn ran long. Each now says so, and what to do. The button also says up front that the answer takes about half a minute — it reads the fleet before it replies — instead of sitting silent.
+
 ## [2.15.2] — 2026-09-21
 
 ### Security
