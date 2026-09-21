@@ -4066,7 +4066,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (b.mode !== undefined && b.mode !== null && b.mode !== 'name' && b.mode !== 'time') {
         return reply.code(400).send({ error: 'mode must be "name", "time" or null.' });
       }
-      const mode = (b.mode ?? 'name') as SectionSort | null;
+      // `??` falls through on null as well as undefined, so `b.mode ?? 'name'`
+      // turned "turn the sticky sort OFF" (an explicit null) into "sort A→Z".
+      // Pressing the lit button therefore never switched it off — it re-armed
+      // it, and ⏳ quietly became A→Z. Omitted still means 'name'.
+      const mode: SectionSort | null = b.mode === null ? null : ((b.mode ?? 'name') as SectionSort);
       const sticky = b.sticky !== false;
       const apply = (g: string | null) => {
         if (sticky) store.setSectionSort(ownerId, g, mode);

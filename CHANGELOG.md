@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.16.2] — 2026-09-21
+
+### Fixed
+- **The sort buttons would not switch off.** Pressing the lit A→Z or ⏳ sends "no sticky sort" as an explicit `null`, and the route read it with `b.mode ?? 'name'` — which falls through on `null` as well as `undefined`, so turning a sort off armed A→Z instead. ⏳ therefore appeared stuck (it had quietly become A→Z), and A→Z announced "back to the order you arrange by hand" every time while changing nothing. The buttons also now take their lit state from the server's reply instead of waiting for the next poll, so what you see is what it did.
+
 ## [2.16.1] — 2026-09-21
 
 ### Changed

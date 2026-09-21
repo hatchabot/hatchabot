@@ -8459,7 +8459,10 @@ function sortBtns(g, cls = '') {
 async function sortGroup(g, mode = 'name') {
   const off = sortModeOf(g) === mode;
   try {
-    await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode: off ? null : mode } });
+    // Believe the server's answer rather than waiting for the next poll to
+    // fetch it: the button's lit state is what tells you whether it took.
+    const r = await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode: off ? null : mode } });
+    sectionSorts = r.modes ?? sectionSorts;
     toast(off
       ? `${g || 'Default'} is back to the order you arrange by hand.`
       : `${g || 'Default'} sorted ${SORT_LABEL[mode]} — and kept that way.`);
@@ -8470,7 +8473,8 @@ async function sortGroup(g, mode = 'name') {
 async function sortAllGroups(mode = 'name') {
   if (!confirm(`Sort the agents in every group ${SORT_LABEL[mode]}?\n\nThis replaces the order you arranged by hand, and keeps each group sorted as agents are added (the groups themselves stay where they are).`)) return;
   try {
-    await api('/v1/groups/sort', { method: 'POST', body: { all: true, mode } });
+    const r = await api('/v1/groups/sort', { method: 'POST', body: { all: true, mode } });
+    sectionSorts = r.modes ?? sectionSorts;
     toast(`Every group sorted ${SORT_LABEL[mode]}`);
     await refresh(false);
   } catch (e) { toast(e.message); }

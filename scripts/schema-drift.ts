@@ -21,8 +21,14 @@ import { Store } from '../src/store/store.js';
 // The missing-ALTER bug class, found for the whole schema at once.
 const fresh = new Database(':memory:');
 new Store(fresh);
-const dbPath = process.argv[2] ?? join(homedir(), 'hatchabot-data', 'hatchabot.sqlite');
-const prod = new Database(dbPath, { readonly: true });
+const args = process.argv.slice(2).filter((a) => a !== '--migrate');
+const migrate = process.argv.includes('--migrate');
+const dbPath = args[0] ?? join(homedir(), 'hatchabot-data', 'hatchabot.sqlite');
+// --migrate opens it the way the SERVER does — running the additive migrations
+// first — which is what an upgrade check wants to prove. Without it the file is
+// read as-is, which is what checking a live install wants.
+const prod = new Database(dbPath, { readonly: !migrate });
+if (migrate) new Store(prod);
 const tables = (db: Database.Database) =>
   (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>).map((t) => t.name);
 const cols = (db: Database.Database, t: string) =>

@@ -93,3 +93,53 @@ describe('sorting a section', () => {
     expect(s.sectionSorts(OWNER)).toEqual({ '': 'name' });
   });
 });
+
+describe('the sort buttons toggle (the route)', () => {
+  async function api() {
+    const Fastify = (await import('fastify')).default;
+    const { registerRoutes } = await import('../src/api/routes.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const s = world();
+    const f = Fastify();
+    await registerRoutes(f, {
+      store: s, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never,
+      providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+    } as never);
+    const post = (payload: object) => f.inject({ method: 'POST', url: '/v1/groups/sort', headers: { 'x-hatchabot-owner': OWNER }, payload: payload as never });
+    return { s, f, post };
+  }
+
+  it('mode:null turns the sticky sort OFF — it does not mean "A→Z"', async () => {
+    const { s, post } = await api();
+    expect((await post({ group: '', mode: 'time' })).json().modes).toEqual({ '': 'time' });
+    expect(s.sectionSort(OWNER, null)).toBe('time');
+
+    // Pressing the lit button again. This used to arrive as 'name' (`?? `
+    // falls through on null), so ⏳ silently became A→Z and never switched off.
+    const off = await post({ group: '', mode: null });
+    expect(off.json().modes).toEqual({});
+    expect(s.sectionSort(OWNER, null)).toBeNull();
+  });
+
+  it('an omitted mode still means A→Z, and the order is left alone when switching off', async () => {
+    const { s, post } = await api();
+    expect((await post({ group: '' })).json().modes).toEqual({ '': 'name' });
+    const sorted = s.listAgents(OWNER).map((a) => a.name);
+    await post({ group: '', mode: null });
+    expect(s.listAgents(OWNER).map((a) => a.name)).toEqual(sorted); // unsorting is not re-sorting
+  });
+
+  it('switching from A→Z to ⏳ replaces the mode rather than stacking', async () => {
+    const { s, post } = await api();
+    await post({ group: '', mode: 'name' });
+    const r = await post({ group: '', mode: 'time' });
+    expect(r.json().modes).toEqual({ '': 'time' });
+    expect(s.listAgents(OWNER).map((a) => a.name)).toEqual(['Bravo', 'alpha', 'Charlie']); // newest first
+  });
+
+  it('a bad mode is refused', async () => {
+    const { post } = await api();
+    expect((await post({ group: '', mode: 'sideways' })).statusCode).toBe(400);
+  });
+});
