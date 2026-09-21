@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.17.1] — 2026-09-21
+
+### Fixed
+- **The installer no longer hijacks an existing install.** It installs into `~/hatchabot` and, finding a clone already there, ran `setup-host.sh` inside it — which points the systemd service at *that* directory. On a machine where Hatchabot already runs from somewhere else (a production checkout, or a development one), that silently moves the service and leaves the working install dark. It now reads the installed unit first and stops, offering the three things you actually meant: upgrade the existing install, install a second one under `HATCHABOT_DIR` for testing, or uninstall the first.
+
 ## [2.17.0] — 2026-09-21
 
 ### Added

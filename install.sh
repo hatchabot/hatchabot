@@ -81,5 +81,25 @@ Then re-run this installer. (Your .env, data/ and backups are untouched either w
   git -C "$DIR" checkout --quiet "$LATEST"
 fi
 echo "   release $LATEST"
+
+# Is Hatchabot already installed, from somewhere else? Running setup-host.sh
+# here would point the service at THIS directory — replacing a working install
+# with one that runs from a different checkout. That is how a production box
+# ends up serving a development tree.
+UNIT="$HOME/.config/systemd/user/hatchabot.service"
+if [ -f "$UNIT" ]; then
+  INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -1)"
+  INSTALLED="${INSTALLED/#\%h/$HOME}"
+  if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$DIR" ]; then
+    die "Hatchabot is already installed here, running from:
+    $INSTALLED
+Installing into $DIR would repoint the service at it and leave the other one dark.
+
+  Upgrade the existing install:   cd $INSTALLED && git fetch --tags && git checkout $LATEST && ./scripts/restart.sh
+  Install a SECOND one to test:   HATCHABOT_DIR=$INSTALLED-test bash install.sh   (and give it its own PORT)
+  Remove the existing one first:  cd $INSTALLED && ./scripts/uninstall.sh"
+  fi
+fi
+
 cd "$DIR"
 exec ./scripts/setup-host.sh
