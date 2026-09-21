@@ -24,7 +24,13 @@
 
 ## Cutting a release
 
-1. `npm test && npm run typecheck` green on `main`.
+1. `npm test && npm run typecheck` green on `main`, and
+   **`./scripts/upgrade-check.sh`** — it builds a database with each of a few
+   past releases' own code and opens it with this build, which is the only way
+   to catch a column added to an existing table with no `ALTER` (every unit
+   test starts from a fresh database, where `CREATE TABLE` runs in full). CI
+   runs it too. `npx tsx scripts/schema-drift.ts` does the same against a live
+   install's database.
 2. Bump `version` in `package.json` and finish the CHANGELOG section
    (`## [X.Y.Z] — YYYY-MM-DD`).
 3. Commit, tag, push:

@@ -29,3 +29,24 @@ jobs:
       # Whole provision/rollback loop in-process against the mock provider —
       # sub-second, no docker, no network, no secrets.
       - run: npm run e2e
+
+  # Can a database written by an OLDER release be opened by this one?
+  #
+  # Every unit test starts from a fresh :memory: database, where CREATE TABLE
+  # runs in full — so a column added to an existing table with no ALTER passes
+  # the whole suite and then throws on every real install. v2.14.0 shipped that
+  # and took the Telegram approve flow down. This builds a database with the old
+  # tag's own code and opens it with this one.
+  upgrade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # the script needs the tags, and their source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: ./scripts/upgrade-check.sh

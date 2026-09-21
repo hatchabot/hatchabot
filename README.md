@@ -137,9 +137,11 @@ re-run. **Upgrade** with `git fetch --tags && git checkout vX.Y.Z && ./scripts/r
 
 **Uninstall** with `./scripts/uninstall.sh` — it reverses the install: stops and
 removes the service (systemd units or launchd plists), unlinks the CLI, and
-removes the agent containers. Nothing you would miss is deleted: agent volumes,
-the database, the backups and the runtime image all stay, so re-running
-`setup-host.sh` brings the same fleet back. `--purge` is the clean slate
+**stops** every agent, including the Hatchabot agent itself. Nothing you would
+miss is deleted: the containers are stopped rather than removed, and the agent
+volumes, the database, the backups and the runtime image all stay, so
+re-running `setup-host.sh` brings the same fleet back and you start them
+again. `--purge` is the clean slate
 (volumes, database, images, the docker network, `.env`), `--backups` takes the
 backup sets too, and both ask you to type `purge` first. Telegram bots can only
 be deleted at @BotFather → `/mybots` → `/deletebot`.

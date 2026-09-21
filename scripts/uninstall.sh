@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Removes a Hatchabot install — the reverse of scripts/setup-host.sh.
 #
-#   ./scripts/uninstall.sh              # stop it: service, units, CLI link, containers
+#   ./scripts/uninstall.sh              # stop it: service, units, CLI link; agents stopped
 #   ./scripts/uninstall.sh --purge      # …and the data: volumes, database, images, network
 #   ./scripts/uninstall.sh --purge --backups --yes
 #
@@ -70,8 +70,9 @@ if [ "$PURGE" = 1 ]; then
   echo "  MODE: --purge — agent volumes, the database$([ "$BACKUPS" = 1 ] && echo ", the backups"), the runtime images"
   echo "        and the docker network will be DELETED. Agents cannot be recovered$([ "$BACKUPS" = 1 ] && echo " (not even from a backup)")."
 else
-  echo "  MODE: service only — volumes, database, backups and images are KEPT."
-  echo "        Re-run scripts/setup-host.sh to bring this fleet back."
+  echo "  MODE: service only — agents are STOPPED, not deleted, and their"
+  echo "        volumes, the database, the backups and the images are KEPT."
+  echo "        Re-run scripts/setup-host.sh and start them again."
 fi
 
 if [ "$ASSUME_YES" != 1 ]; then
@@ -106,11 +107,16 @@ npm unlink -g hatchabot >/dev/null 2>&1 && echo "  unlinked" || echo "  (was not
 [ -f "$HOME/.config/hatchabot/env" ] && rm -f "$HOME/.config/hatchabot/env" && echo "  removed ~/.config/hatchabot/env"
 
 if have docker; then
-  say "Stopping agent containers…"
+  # STOPPED, not removed. The control plane only mends states — it never
+  # re-creates a runtime on its own — so removing containers would leave every
+  # agent needing a Rebuild after a reinstall, which is not "nothing you would
+  # miss is deleted". --purge removes them below.
+  say "Stopping agents…"
   CIDS="$(containers)"
   if [ -n "$CIDS" ]; then
     # shellcheck disable=SC2086
-    docker rm -f $CIDS >/dev/null 2>&1 && echo "  removed $(echo "$CIDS" | wc -l | tr -d ' ') containers"
+    docker stop $CIDS >/dev/null 2>&1
+    echo "  stopped $(echo "$CIDS" | wc -l | tr -d ' ') containers (kept, with their volumes)"
   else
     echo "  none running"
   fi
@@ -118,6 +124,12 @@ fi
 
 if [ "$PURGE" = 1 ]; then
   if have docker; then
+    say "Removing agent containers…"
+    CIDS="$(containers)"
+    if [ -n "$CIDS" ]; then
+      # shellcheck disable=SC2086
+      docker rm -f $CIDS >/dev/null 2>&1 && echo "  removed $(echo "$CIDS" | wc -l | tr -d ' ') containers"
+    fi
     say "Deleting agent volumes…"
     VOLS="$(volumes)"
     if [ -n "$VOLS" ]; then

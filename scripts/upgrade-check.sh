@@ -34,7 +34,8 @@ fail=0
 for tag in "${TAGS[@]}"; do
   echo "== upgrading from $tag"
   rm -rf "$TMP/old"
-  git worktree add --detach --quiet "$TMP/old" "$tag"
+  git worktree prune            # a removed directory stays registered otherwise
+  git worktree add --detach --force --quiet "$TMP/old" "$tag"
   # The old tree's own source, the current tree's node_modules (same ABI, and
   # the point of the test is the SCHEMA, not the dependencies).
   ln -s "$REPO/node_modules" "$TMP/old/node_modules"
