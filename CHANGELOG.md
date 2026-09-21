@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.16.1] — 2026-09-21
+
+### Changed
+- **The unread dot is blue, and the "worth a look" flag is no longer a brown disc.** Red means failed or blocked everywhere else in the app, so using it for "this agent has said something" was a second meaning for the same colour — and on an amber icon the red pip went muddy enough to read as brown. It is now the same blue as the **💬 to read** tile, with a ring in the surface it sits on so it keeps an edge on a panel. The flag badge sits on a pale chip instead of a solid brown circle.
+
 ## [2.16.0] — 2026-09-21
 
 ### Added

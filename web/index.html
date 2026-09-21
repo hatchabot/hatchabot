@@ -561,7 +561,10 @@
   .v2b-blocked { background:var(--bad) }
   .v2b-waiting { background:var(--info) }
   .v2b-stopped { background:var(--off) }
-  .v2b-note { background:var(--warn); color:var(--accent-ink); min-width:18px; height:18px; border-radius:9px;
+  /* "Worth a look" is a note, not an alarm: a pale chip with a coloured flag,
+     rather than the solid brown disc that read as a warning light. */
+  .v2b-note { background:var(--panel-2); color:var(--warn); border-color:var(--bg);
+              min-width:18px; height:18px; border-radius:9px;
               right:-6px; top:-6px; font-size:12px; font-weight:700 }
   /* How long an agent has been quiet, bottom-left of its icon: 2h, 3d, 5w. */
   .v2idle { position:absolute; left:-6px; bottom:-6px; min-width:20px; height:17px; padding:0 4px; border-radius:9px;
@@ -571,9 +574,14 @@
   .v2tg { position:absolute; right:-6px; bottom:-6px; width:20px; height:20px; border-radius:50%; background:#2aabee;
           display:grid; place-items:center; border:2px solid var(--bg); z-index:1 }
   .v2tg svg { display:block; margin-left:-1px }
-  /* Unread: the agent said something in its console since you last had it open. */
-  .v2unread { position:absolute; left:-6px; top:-6px; width:16px; height:16px; border-radius:50%; background:var(--bad);
+  /* Unread: the agent said something in its console since you last had it open.
+     Blue, not red — red means failed or blocked everywhere else here, and on an
+     amber icon a red pip went muddy. Matches the 💬 to read tile. The ring is
+     the surface it sits on, so the dot keeps an edge on a panel as well as on
+     the page. */
+  .v2unread { position:absolute; left:-6px; top:-6px; width:16px; height:16px; border-radius:50%; background:var(--info);
               border:2.5px solid var(--bg); z-index:1 }
+  .v2hub .v2unread, .v2card .v2unread, .v2group .v2unread { border-color:var(--panel) }
   .v2sbar .v2unread { width:12px; height:12px; left:-4px; top:-4px; border-width:2px }
   .v2sbar .v2tg { width:16px; height:16px; right:-5px; bottom:-5px }
   .v2sbar .v2tg svg { width:9px; height:9px }
