@@ -31,6 +31,7 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ```sh
 ./scripts/promote.sh v2.31.0          # stable → v2.31.0
 ./scripts/promote.sh v2.32.0 beta     # beta   → v2.32.0
+./scripts/channels.sh                  # where every channel points, and the releases
 ```
 
 So the rhythm is: tag and deploy to your own machines as often as you like;
