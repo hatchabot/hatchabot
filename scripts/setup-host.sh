@@ -25,15 +25,32 @@ say "Installing dependencies…"
 
 if [ ! -f .env ]; then
   say "Creating .env…"
-  read -r -s -p "Choose an app password (what you'll type to open the web app): " PW; echo
-  [ -n "$PW" ] || { echo "Password cannot be empty."; exit 1; }
+  # Family accounts are the default: a home box is usually shared, and one
+  # password means one owner of everything and a terminal trip to reset it.
+  echo "How will people sign in?"
+  echo "  1) An account for each person — their own agents, and a forgotten"
+  echo "     password is a link you send them  (recommended)"
+  echo "  2) One shared password"
+  read -r -p "Choose [1]: " SIGNIN
+  SIGNIN="${SIGNIN:-1}"
+  PW=""
+  if [ "$SIGNIN" = "2" ]; then
+    read -r -s -p "Choose an app password (what you'll type to open the web app): " PW; echo
+    [ -n "$PW" ] || { echo "Password cannot be empty."; exit 1; }
+  fi
   {
     echo "HATCHABOT_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
-    # Two parsers read this line: the macOS launchd wrapper sources .env as
-    # shell, and systemd's EnvironmentFile parses it itself. Single quotes are
-    # the one quoting both understand (systemd strips them, shell honours
-    # them) — %q's backslash escapes would reach systemd literally.
-    printf "HATCHABOT_PASSWORD='%s'\n" "$(printf '%s' "$PW" | sed "s/'/'\\\\''/g")"
+    if [ "$SIGNIN" = "2" ]; then
+      # Two parsers read this line: the macOS launchd wrapper sources .env as
+      # shell, and systemd's EnvironmentFile parses it itself. Single quotes are
+      # the one quoting both understand (systemd strips them, shell honours
+      # them) — %q's backslash escapes would reach systemd literally.
+      printf "HATCHABOT_PASSWORD='%s'\n" "$(printf '%s' "$PW" | sed "s/'/'\\\\''/g")"
+    else
+      # No account yet: the first visit FROM THIS MACHINE creates yours. From
+      # anywhere else it needs the setup code the server prints when it starts.
+      echo "HATCHABOT_AUTH=accounts"
+    fi
     echo "PORT=8080"
     echo "# Set when reachable beyond localhost, e.g. via Tailscale — used in invite links:"
     echo "# HATCHABOT_PUBLIC_URL=http://<this-machine>.<tailnet>.ts.net:8080"
@@ -133,7 +150,9 @@ chmod 600 ~/.config/hatchabot/env
 
 say "Done. Next steps:"
 cat <<'EOF'
-  1. Open http://localhost:8080 and unlock with your password.
+  1. Open http://localhost:8080 on THIS machine. With family accounts you
+     create your own account there (you become its owner); with a shared
+     password you unlock with it.
   2. Connect an AI source (⚙ AI). Three options:
        - a Claude Pro/Max login already on this machine (one tap),
        - an API key,

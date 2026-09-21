@@ -212,8 +212,30 @@ export function registerAccountRoutes(
   /** Is this claim link still good? Lets the page show the username it is for. */
   app.get<{ Querystring: { code?: string } }>('/v1/local-accounts/claim', async (req, reply) => {
     const account = req.query.code ? store.localAccountByClaim(req.query.code) : undefined;
-    if (!account) return reply.code(404).send({ error: 'That invitation has been used already, or it has expired.' });
-    return { username: account.username };
+    if (!account) return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
+    // An account that already has a password is being RESET, not invited: the
+    // page should say so, or people wonder why they are "joining" again.
+    return { username: account.username, reset: account.pwHash !== '' };
+  });
+
+  /**
+   * A reset LINK, not a reset password. The host owner used to type a new
+   * password for somebody and send it to them through some other app; now the
+   * person chooses their own, and the owner never learns it. Their current
+   * password keeps working until they use the link.
+   */
+  app.post<{ Params: { id: string } }>('/v1/local-accounts/:id/reset-link', async (req, reply) => {
+    const me = store.localAccount(req.principal?.ownerId ?? '');
+    if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner can send a reset link.' });
+    const target = store.localAccount(req.params.id);
+    if (!target) return reply.code(404).send({ error: 'Not found' });
+    if (target.id === me.id) {
+      return reply.code(400).send({ error: 'Change your own password under "Your account" — you know the current one.' });
+    }
+    const code = randomBytes(16).toString('base64url');
+    const expiresAt = new Date(Date.now() + CLAIM_TTL_MS).toISOString();
+    store.setLocalAccountClaim(target.id, code, expiresAt);
+    return { username: target.username, claimPath: `/?claim=${code}`, expiresAt };
   });
 
   app.post<{ Body: { username?: string; password?: string } }>('/v1/login', async (req, reply) => {

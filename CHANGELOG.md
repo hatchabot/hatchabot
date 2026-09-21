@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.29.0] — 2026-09-21
+
+### Added
+- **Family accounts are the installer's default.** `setup-host.sh` asks how people will sign in and recommends an account per person — each with their own agents — over one shared password, which makes one person the owner of everything and needs a terminal to reset. With accounts, the first visit from the machine itself creates yours; from anywhere else it needs the setup code the server prints when it starts, so there is no open window for someone else on the network.
+- **"Turn on family accounts" for installs that started with a shared password** (⚙ Settings → You). Choose a username for yourself and Hatchabot makes you the host owner, gives you everything the install already has, writes `HATCHABOT_AUTH=accounts` to its `.env`, and restarts itself — systemd's `Restart=always` and launchd's `KeepAlive` bring it straight back — then you sign in as yourself. The account exists before the mode changes, so there is no first-run moment for anybody else to claim. It is one way, and says so: a shared password again would put every family member's agents behind one person.
+- **Reset links instead of reset passwords.** The host owner used to type a new password for somebody and send it to them through another app. **Send a reset link** issues a one-time link, the same kind as an invitation, and they choose their own; you never learn it. Their old password keeps working until they use the link, so asking for one never locks anybody out, and the page they land on says *reset*, not *welcome*.
+
+### Fixed
+- `hatchabot doctor` warned *"No app password set — the web app is open to anyone"* on installs using family accounts, which have a password per person. It now only warns in shared-password mode.
+- Invitation and reset links use the address people can actually reach — the tailnet one, once it is known — rather than whatever address the owner's browser happened to be on.
+
 ## [2.28.1] — 2026-09-21
 
 ### Changed

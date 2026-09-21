@@ -61,7 +61,10 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   if (!f.envFile.present) out.push({ level: 'fail', text: '.env is missing', fix: './scripts/setup-host.sh writes it (secret key, password, port)' });
   else {
     if (!f.envFile.secretKey) out.push({ level: 'fail', text: '.env has no HATCHABOT_SECRET_KEY — credentials cannot be stored', fix: 'node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))" → HATCHABOT_SECRET_KEY=… in .env' });
-    if (f.envFile.authMode !== 'identity' && !f.envFile.password) out.push({ level: 'warn', text: 'No app password set — the web app is open to anyone who can reach the port', fix: 'HATCHABOT_PASSWORD=… in .env (setup-host.sh asks for one)' });
+    // Only the shared-password mode needs HATCHABOT_PASSWORD: accounts mode
+    // holds a password per person, identity mode uses Google. Warning about it
+    // in either would call a locked install an open one.
+    if (f.envFile.authMode === 'password' && !f.envFile.password) out.push({ level: 'warn', text: 'No app password set — the web app is open to anyone who can reach the port', fix: 'HATCHABOT_PASSWORD=… in .env, or turn on family accounts in Settings → You' });
     if (!f.envFile.publicUrl) out.push({ level: 'warn', text: 'HATCHABOT_PUBLIC_URL not set — invite links and OAuth redirects use localhost', fix: 'Set it to the address others use (with Tailscale: https://<machine>.<tailnet>.ts.net)' });
     else out.push({ level: 'ok', text: `Public URL ${f.envFile.publicUrl}` });
   }

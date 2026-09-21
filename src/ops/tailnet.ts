@@ -130,38 +130,35 @@ export async function tailnetInfo(port: number): Promise<TailnetInfo> {
 }
 
 /**
- * Write `HATCHABOT_PUBLIC_URL` into the .env the service actually reads.
+ * Set one line of the .env the service actually reads.
  *
- * Detection is fine for showing a link, but it depends on a probe succeeding
- * every few minutes; the setting is fixed, survives Tailscale being down when
- * somebody opens an invite, and is what every doc tells people to set. So the
- * app offers to write the line rather than asking them to.
- *
- * Conservative on purpose: it replaces a commented or loopback value, appends
- * when there is none, refuses to overwrite a real address somebody chose, and
- * writes through a temp file so a crash cannot leave a half-written .env.
+ * It is the operator's file, so the rules are conservative: replace a
+ * commented line or a value `replaceable` says may go, append when there is
+ * none, refuse to overwrite anything else, and write through a temp file with
+ * the original mode kept so a crash cannot leave half a .env.
  */
-export async function writePublicUrl(
+export async function writeEnvVar(
   envPath: string,
-  url: string,
+  key: string,
+  value: string,
+  replaceable: (current: string) => boolean,
+  comment?: string,
 ): Promise<{ ok: boolean; replaced?: boolean; error?: string }> {
   const { readFile, writeFile, rename, stat } = await import('node:fs/promises');
-  if (!/^https:\/\/[a-z0-9.-]+$/i.test(url)) return { ok: false, error: 'That does not look like an address to write.' };
   let body: string;
   try { body = await readFile(envPath, 'utf8'); }
   catch { return { ok: false, error: `No .env at ${envPath}` }; }
-  const line = `HATCHABOT_PUBLIC_URL=${url}`;
-  const LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
+  const line = `${key}=${value}`;
+  const re = new RegExp(`^\\s*#?\\s*${key}\\s*=\\s*(.*)$`);
   const lines = body.split('\n');
   let replaced = false;
   for (let i = 0; i < lines.length; i++) {
-    const m = /^\s*#?\s*HATCHABOT_PUBLIC_URL\s*=\s*(.*)$/.exec(lines[i] ?? '');
+    const m = re.exec(lines[i] ?? '');
     if (!m) continue;
     const current = (m[1] ?? '').trim().replace(/^['"]|['"]$/g, '');
     const commented = /^\s*#/.test(lines[i] ?? '');
-    // Somebody's own, working address is not ours to overwrite.
-    if (!commented && current && !LOOPBACK.test(current) && current !== url) {
-      return { ok: false, error: `.env already sets HATCHABOT_PUBLIC_URL=${current} — change it there if you meant to.` };
+    if (!commented && current && current !== value && !replaceable(current)) {
+      return { ok: false, error: `.env already sets ${key}=${current} — change it there if you meant to.` };
     }
     lines[i] = line;
     replaced = true;
@@ -169,7 +166,7 @@ export async function writePublicUrl(
   }
   if (!replaced) {
     if (lines.length && lines[lines.length - 1] !== '') lines.push('');
-    lines.push('# Written by Hatchabot: the address invite links and the install code use.');
+    if (comment) lines.push(`# ${comment}`);
     lines.push(line);
     lines.push('');
   }
@@ -178,4 +175,16 @@ export async function writePublicUrl(
   await writeFile(tmp, lines.join('\n'), { mode });
   await rename(tmp, envPath);
   return { ok: true, replaced };
+}
+
+/** HATCHABOT_PUBLIC_URL: replaces a placeholder or a loopback address, never
+ *  an address somebody chose. */
+export async function writePublicUrl(
+  envPath: string,
+  url: string,
+): Promise<{ ok: boolean; replaced?: boolean; error?: string }> {
+  if (!/^https:\/\/[a-z0-9.-]+$/i.test(url)) return { ok: false, error: 'That does not look like an address to write.' };
+  const LOOPBACK = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i;
+  return writeEnvVar(envPath, 'HATCHABOT_PUBLIC_URL', url, (cur) => LOOPBACK.test(cur),
+    'Written by Hatchabot: the address invite links and the install code use.');
 }

@@ -975,7 +975,7 @@
   </form>
 
   <form id="acctClaim" style="display:none" onsubmit="event.preventDefault();acctClaim()">
-    <div class="sub">You've been invited to <b id="claimFor">this server</b>. Choose a password and you're in.</div>
+    <div class="sub" id="claimLede">You've been invited to <b id="claimFor">this server</b>. Choose a password and you're in.</div>
     <label>Username</label>
     <input type="text" id="claimUser" autocomplete="username" readonly>
     <label>Password <span style="color:var(--dim)">(8 characters or more)</span></label>
@@ -1699,6 +1699,20 @@
   </section>
 
   <section id="paneAccess" role="tabpanel" hidden>
+    <div id="familyOn" hidden>
+      <h4 style="margin:0 0 4px">Family accounts</h4>
+      <div class="sub">Right now everybody signs in with one shared password, so everything belongs to one person.
+        Give everyone their own sign-in instead: each person gets their own agents, and a forgotten password
+        is a link you send them — not a trip to the terminal.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
+        <div><label>Your username or email</label><input type="text" id="famUser" style="width:220px" autocomplete="username" placeholder="chris"></div>
+        <div><label>Your new password</label><input type="password" id="famPw" style="width:180px" autocomplete="new-password"></div>
+        <button class="primary" id="famBtn" onclick="turnOnFamilyAccounts(this)">Turn on family accounts</button>
+      </div>
+      <div class="sub" style="margin-top:6px">Everything you have now becomes yours. It restarts once, then you sign in with this
+        username. <b>This is one way</b> — going back to a shared password would put everyone's agents behind one person.</div>
+      <div class="err" id="famErr"></div>
+    </div>
     <div id="acctAdmin" hidden>
       <h4 style="margin:0 0 4px">Accounts on this machine</h4>
       <div class="sub">Everyone signs in with their own username and password. Each account owns its own agents; share an AI source to let another account spend your plan.</div>
@@ -2566,6 +2580,8 @@ async function loadClaim(code) {
     const r = await api('/v1/local-accounts/claim?code=' + encodeURIComponent(code));
     $('claimFor').textContent = r.username;
     $('claimUser').value = r.username;
+    // A reset reads as one, not as a second invitation.
+    if (r.reset) $('claimLede').innerHTML = `Choose a new password for <b>${esc(r.username)}</b>. Your old one stops working once you do.`;
   } catch (e) {
     $('loginErr').textContent = e.message;
     $('acctClaim').style.display = 'none';
@@ -2624,6 +2640,8 @@ async function acctBootstrap() {
 
 /** Accounts mode only: the roster (host owner) and your own password. */
 async function loadAccounts() {
+  // One shared password: offer the way out of it, and nothing else here.
+  if ($('familyOn')) $('familyOn').hidden = (appConfig.authMode ?? 'password') !== 'password';
   if (appConfig.authMode !== 'accounts') return;
   $('acctSelf').hidden = false;
   let me;
@@ -2636,10 +2654,39 @@ async function loadAccounts() {
       <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
       ${a.pending ? '<span class="chip">invitation not accepted yet</span>' : `<span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>`}
       <span style="margin-left:auto;display:flex;gap:6px">
-        ${a.pending ? `<button onclick="copyInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>` : `<button onclick="resetAccountPassword('${jsq(a.id)}','${jsq(a.username)}')">Reset password</button>`}
+        ${a.pending ? `<button onclick="copyInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>`
+          : a.hostOwner ? '' : `<button onclick="sendResetLink('${jsq(a.id)}','${jsq(a.username)}')" title="They choose a new password themselves; you never see it">Send a reset link</button>`}
         ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${jsq(a.id)}','${jsq(a.username)}')">Remove</button>`}
       </span></div>`).join('');
   } catch (e) { $('acctList').textContent = e.message; }
+}
+
+/**
+ * Shared password → an account per person. The server writes the .env and
+ * restarts itself; this waits for it to come back and sends you to sign in.
+ */
+async function turnOnFamilyAccounts(btn) {
+  const username = $('famUser').value.trim(), password = $('famPw').value;
+  $('famErr').textContent = '';
+  if (!confirm(`Turn on family accounts, with you as "${username}"?\n\nEverything on this machine becomes yours. Hatchabot restarts once and you sign in with this username.\n\nThis can't be undone — a shared password again would put everyone's agents behind one person.`)) return;
+  btn.disabled = true; btn.textContent = 'Switching…';
+  try {
+    const r = await api('/v1/auth/family-accounts', { method: 'POST', body: { username, password } });
+    if (!r.restarting) {
+      $('famErr').innerHTML = 'Done — now restart Hatchabot (<code>./scripts/restart.sh</code>) and sign in as <b>' + esc(username) + '</b>.';
+      return;
+    }
+    toast('Switching to family accounts — back in a few seconds.', 10000);
+    // Wait for the restart, then land on the sign-in screen.
+    for (let i = 0; i < 40; i++) {
+      await new Promise(res => setTimeout(res, 1000));
+      try { const c = await fetch('/v1/config').then(x => x.json()); if (c.authMode === 'accounts') { location.reload(); return; } } catch {}
+    }
+    location.reload();
+  } catch (e) {
+    $('famErr').textContent = e.message;
+    btn.disabled = false; btn.textContent = 'Turn on family accounts';
+  }
 }
 
 async function addAccount(btn) {
@@ -2653,7 +2700,7 @@ async function addAccount(btn) {
       for (const p of shareable.slice(0, 1)) { try { await api(`/v1/ai-profiles/${p.id}`, { method: 'PATCH', body: { shared: true } }); } catch {} }
     }
     $('acctNewUser').value = '';
-    const url = location.origin + r.claimPath;
+    const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
     $('acctInviteOut').style.display = '';
     $('acctInviteOut').textContent = url;
     try { await navigator.clipboard.writeText(url); toast('Invitation copied — send it to them. It expires in 48 hours.', 7000); }
@@ -2664,16 +2711,25 @@ async function addAccount(btn) {
 }
 
 async function copyInvite(path) {
-  const url = location.origin + path;
+  const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + path;
   try { await navigator.clipboard.writeText(url); toast('Invitation copied — it expires 48 hours after it was made.', 7000); }
   catch { toast(url, 12000); }
 }
 
-async function resetAccountPassword(id, username) {
-  const pw = prompt(`New password for ${username} (8 characters or more):`);
-  if (!pw) return;
-  try { await api(`/v1/local-accounts/${id}/password`, { method: 'POST', body: { password: pw } }); toast(`Password reset — ${username} is signed out everywhere.`); }
-  catch (e) { toast(e.message); }
+/**
+ * A reset link, the same kind as an invitation: they choose their own new
+ * password and you never learn it. Their old one keeps working until they use
+ * the link, so sending one never locks anybody out.
+ */
+async function sendResetLink(id, username) {
+  try {
+    const r = await api(`/v1/local-accounts/${id}/reset-link`, { method: 'POST', body: {} });
+    const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + r.claimPath;
+    $('acctInviteOut').style.display = '';
+    $('acctInviteOut').textContent = url;
+    const copied = await copyText(url);
+    toast(`${copied ? 'Reset link copied' : 'Reset link ready below'} — send it to ${username}. It works once and expires in 48 hours.`, 9000);
+  } catch (e) { toast(e.message); }
 }
 
 async function removeAccount(id, username) {

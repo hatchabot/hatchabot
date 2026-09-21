@@ -1322,6 +1322,16 @@ export class Store {
       .run(pwHash, pwSalt, id);
   }
 
+  /**
+   * Arm a one-time link for an EXISTING account: the reset path. It reuses the
+   * invitation mechanism — claiming sets the password and burns the code —
+   * and the current password keeps working until the link is used, so asking
+   * for a reset never locks anybody out on its own.
+   */
+  setLocalAccountClaim(id: string, code: string, expires: string): void {
+    this.db.prepare(`UPDATE local_accounts SET claim_code = ?, claim_expires = ? WHERE id = ?`).run(code, expires, id);
+  }
+
   setLocalAccountPassword(id: string, pwHash: string, pwSalt: string): void {
     this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ? WHERE id = ?`).run(pwHash, pwSalt, id);
   }

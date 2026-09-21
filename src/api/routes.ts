@@ -17,7 +17,8 @@ import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
-import { enableServe, tailnetInfo, writePublicUrl } from '../ops/tailnet.js';
+import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
+import { hashPassword, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -930,6 +931,55 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     detectedUrl = url;   // in force now; the file is for the next restart
     trace()('app.public_url_written', { url, envPath, replaced: (out as { replaced?: boolean }).replaced === true });
     return { written: envPath, url, restartNeeded: false };
+  });
+
+  /**
+   * One shared password → an account per person, without a terminal.
+   *
+   * The owner, already signed in with the shared password, chooses a username
+   * for themselves. Account #1 is created as host owner and adopts everything
+   * the password-mode install made — exactly what the first-run bootstrap does
+   * — then HATCHABOT_AUTH=accounts is written to the .env and the service
+   * restarts itself (systemd's Restart=always and launchd's KeepAlive bring it
+   * straight back). Because the account exists before the mode flips, there
+   * is no first-run window for anyone else to claim.
+   *
+   * One way only: going back to a shared password would put every family
+   * member's agents behind one owner.
+   */
+  app.post<{ Body: { username?: string; password?: string } }>('/v1/auth/family-accounts', async (req, reply) => {
+    if ((deps.authMode ?? 'password') !== 'password') {
+      return reply.code(409).send({ error: 'This installation already has accounts.' });
+    }
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    if (store.countLocalAccounts() > 0) return reply.code(409).send({ error: 'An account already exists — restart to finish switching.' });
+    const username = (req.body?.username ?? '').trim();
+    const password = req.body?.password ?? '';
+    const problem = usernameProblem(username) ?? passwordProblem(password);
+    if (problem) return reply.code(400).send({ error: problem });
+
+    const envPath = join(process.cwd(), '.env');
+    // The .env first: if it cannot be written, nothing has changed yet.
+    const wrote = await writeEnvVar(envPath, 'HATCHABOT_AUTH', 'accounts', (cur) => cur === 'password',
+      'Written by Hatchabot: one account per person (Settings → You).')
+      .catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
+
+    const { hash, salt } = await hashPassword(password);
+    const id = `acct-${randomUUID()}`;
+    store.insertLocalAccount({
+      id, username, pwHash: hash, pwSalt: salt, hostOwner: true, disabled: false,
+      createdAt: new Date().toISOString(),
+    });
+    const adopted = store.adoptLocalOwnerData(id);
+    store.recordAccount(id, username.includes('@') ? username : undefined);
+    trace()('auth.family_accounts_on', { adopted });
+
+    // Only a supervised process may exit to restart: under `npm run dev`
+    // nothing would bring it back, so say so instead.
+    const supervised = !!(process.env.INVOCATION_ID || process.env.XPC_SERVICE_NAME);
+    if (supervised && !process.env.VITEST) setTimeout(() => process.exit(0), 1200).unref();
+    return { ok: true, username, adopted, restarting: supervised };
   });
 
   /** A QR for the tailnet address, so a phone can open it without typing. */
