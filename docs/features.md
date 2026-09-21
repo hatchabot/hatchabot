@@ -490,6 +490,16 @@ signing in is someone you already know. (This is how your own agents have
 always worked for *you*: the first agent binds your Telegram, every later one
 admits you at birth.)
 
+**A window that lapses can be opened again.** The claim window is 30 minutes
+on purpose — outside it the agent is deaf to anyone it does not know, which is
+the point of the door. So when somebody redeems an invite and only gets round
+to messaging two hours later, the answer is to hold the door open again rather
+than to leave it ajar all day: their row under **Members** says *"hasn't
+messaged yet"* with **Let them in again**, which opens a fresh 30 minutes (and
+keeps the named @handle, if the invite had one). Hatchabot also tells you when
+a window closes unused, so you find out while the invite is still fresh instead
+of when they complain the bot ignores them.
+
 **An invite can name who it is for.** Invite… asks for their Telegram
 @handle; give it, and the 30-minute window that opens admits **only** that
 account — anyone else who messages the bot in the meantime is turned away and

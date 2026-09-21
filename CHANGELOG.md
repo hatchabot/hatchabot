@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.16.0] — 2026-09-21
+
+### Added
+- **"Let them in again."** The claim window an invite opens is 30 minutes — it always has been — and since v2.15.0 a message arriving after it closes is dropped in silence rather than answered, so somebody who redeemed an invite and got round to messaging two hours later would simply be ignored, with nothing shown to either of you. Their row under **Members** now says *"hasn't messaged yet"* and offers **Let them in again**, which opens a fresh 30 minutes and keeps the @handle the invite named, if it named one.
+- **You are told when a window closes unused**, on the manager's Telegram channel, so you learn about it while the invite is still fresh instead of when they say the bot is ignoring them.
+
 ## [2.15.3] — 2026-09-21
 
 ### Fixed

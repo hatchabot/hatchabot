@@ -7065,9 +7065,14 @@ async function renderEditMembers() {
     const ms = (members[editAgentId] = await api(`/v1/agents/${editAgentId}/members`));
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
       const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
+      // Someone who redeemed an invite and never messaged: their window has
+      // almost certainly lapsed, and the agent is deaf to them outside it, so
+      // offer to hold the door open again rather than leaving them stuck.
       const linked = m.channelUserId
         ? `<span class="sub" title="Telegram id ${esc(m.channelUserId)}">✓ linked</span>`
-        : '<span class="sub" style="color:var(--warn)">not linked yet</span>';
+        : `<span class="sub" style="color:var(--warn)">hasn't messaged yet</span>
+           <button onclick="reopenDoor('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || 'They')}')"
+                   title="Hold the door open for 30 minutes so their next message is let through">Let them in again</button>`;
       const kickBtn = m.role === 'owner' ? '' :
         `<button class="danger" onclick="kick('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || m.userId)}').then(renderEditMembers)">Remove</button>`;
       return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${kickBtn}</div>`;
@@ -7081,6 +7086,20 @@ async function renderEditMembers() {
  * id, so adding them here needs no invite link and no pairing — they go
  * straight onto this agent's allowlist and can message it at once.
  */
+/**
+ * The claim window is 30 minutes on purpose: outside it the agent is deaf to
+ * anyone it does not know, which is the whole point of the door. The answer to
+ * "they redeemed the invite and got round to it two hours later" is therefore
+ * to open it again, on demand, rather than to leave it ajar for a day.
+ */
+async function reopenDoor(agentId, userId, name) {
+  try {
+    const r = await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/reopen`, { method: 'POST', body: {} });
+    toast(`Door open for ${r.minutes} minutes — tell ${name} to message the bot now.`, 9000);
+    await renderEditMembers();
+  } catch (e) { toast(e.message, 8000); }
+}
+
 async function renderKnownPeople() {
   const el = $('tgKnownPeople');
   if (!el) return;

@@ -3044,6 +3044,19 @@ export class Store {
       .map((r) => ({ userId: r.user_id, name: r.name || 'Member', channelUserId: r.channel_user_id }));
   }
 
+  /** The @handle the invite this person redeemed named, if it named one — so
+   *  reopening the door keeps admitting only them. */
+  inviteHandleFor(agentId: string, userId: string): string | undefined {
+    const r = this.db
+      .prepare(
+        `SELECT expect_handle h FROM invites
+          WHERE agent_id = ? AND redeemed_by = ? AND expect_handle IS NOT NULL
+          ORDER BY redeemed_at DESC LIMIT 1`,
+      )
+      .get(agentId, userId) as { h: string } | undefined;
+    return r?.h ?? undefined;
+  }
+
   /** Anyone who finds the bot may knock, instead of invitees and people the
    *  owner already knows. Off by default, per agent. */
   setAllowKnocks(agentId: string, on: boolean): void {

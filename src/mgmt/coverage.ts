@@ -106,6 +106,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/ai-profiles': 'app: secret — adding a source takes its key or token',
   'PATCH /v1/ai-profiles/:id': 'app: later — rename/share a source, change its default model',
   'DELETE /v1/ai-profiles/:id': 'app: fleet-wide/irreversible — deleting a source strands its agents',
+  'POST /v1/agents/:id/members/:userId/reopen': 'app: later — holding the door open is a live decision the owner makes',
   'POST /v1/agents/:id/members/known': 'app: later — admitting a person is something only the owner does',
   'POST /v1/agents/:id/allow-knocks': 'app: later — who may reach an agent is a setting, not a change to run',
   'POST /v1/ai-profiles/:id/move': 'app: browser — the order the owner wants their sources listed in',

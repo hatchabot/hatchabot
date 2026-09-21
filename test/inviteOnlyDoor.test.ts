@@ -201,3 +201,37 @@ describe('the door rests shut', () => {
     expect(writes).toEqual(['pairing']); // opened, never shut
   });
 });
+
+describe('reopening the door after a window lapses', () => {
+  it('refuses for a linked member, opens a fresh window for one who never messaged', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { registerRoutes } = await import('../src/api/routes.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const s = world();
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} } as never);
+    s.setAgentRuntimeRef('a1', runtimeRef);
+    s.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'TaxBot', secretRef: 's', deepLink: 'https://t.me/TaxBot', createdAt: 'now' } as never);
+    s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-late', role: 'user', status: 'active', displayName: 'Maria' } as never);
+    s.insertMembership({ id: 'm2', agentId: 'a1', userId: 'user-here', role: 'user', status: 'active', displayName: 'Sam' } as never);
+    s.bindMembershipChannelUser('a1', 'user-here', '555');
+    const f = Fastify();
+    await registerRoutes(f, {
+      store: s, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never,
+      providers: new Map([['mock', provider]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+    } as never);
+    const H = { 'x-hatchabot-owner': OWNER };
+
+    const already = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/user-here/reopen', headers: H });
+    expect(already.statusCode).toBe(409);
+
+    const again = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/user-late/reopen', headers: H });
+    expect(again.statusCode).toBe(200);
+    expect(again.json()).toEqual({ reopened: true, minutes: 30 });
+    expect(s.pairingWindowOpen('a1')).toBe(true); // the door is held for them
+
+    const notMine = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/user-late/reopen', headers: { 'x-hatchabot-owner': 'someone-else' } });
+    expect(notMine.statusCode).toBe(404);
+  });
+});

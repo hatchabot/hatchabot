@@ -6819,7 +6819,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             expect: joined.expectHandle,
             timeoutMs: 30 * 60_000,
           },
-        ).catch((err) => app.log.error({ err }, 'invitee claim failed'));
+        ).then(
+          (bound) => {
+            // Redeemed, then never messaged. Under `allowlist` their late
+            // message is dropped in silence — they see nothing and neither
+            // would you, so say it now while the invite is fresh.
+            if (!bound) {
+              void opsPush.waiting(
+                agent.ownerId,
+                `⏳ Someone opened your invite to "${agent.name}" but never messaged it.`,
+                'Open that agent → Telegram → Members and press "Let them in again" when they are ready.',
+              );
+            }
+          },
+          (err) => app.log.error({ err }, 'invitee claim failed'),
+        );
       }
       // Every way in, so the join page can offer a button per app.
       const ways = store.listChannelsForAgent(agent.id).map((c) => {
@@ -7124,6 +7138,40 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     return store.knownPeopleFor(agent.ownerId, agent.id).map((p) => ({ userId: p.userId, name: p.name }));
   });
+
+  /**
+   * Hold the door open again for somebody who redeemed an invite and then got
+   * on with their day. The window is deliberately short — 30 minutes, and the
+   * agent is deaf to strangers outside it — so the answer to "they took two
+   * hours to get round to it" is to reopen it, not to leave it ajar.
+   */
+  app.post<{ Params: { id: string; userId: string } }>(
+    '/v1/agents/:id/members/:userId/reopen',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      const member = store.getMembership(agent.id, req.params.userId);
+      if (!member || member.status !== 'active') return reply.code(404).send({ error: 'Not a member of this agent.' });
+      if (member.channelUserId) return reply.code(409).send({ error: 'They are already linked — nothing to reopen.' });
+      const channelRow = store.getChannelForAgent(agent.id, 'telegram');
+      if (!channelRow) return reply.code(409).send({ error: 'This agent has no Telegram bot.' });
+      if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first.' });
+      void claimFirstContact(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        {
+          agentId: agent.id,
+          runtimeRef: agent.runtimeRef,
+          accountId: channelRow.accountId,
+          forUserId: member.userId,
+          kind: 'telegram',
+          expect: store.inviteHandleFor(agent.id, member.userId),
+          timeoutMs: 30 * 60_000,
+        },
+      ).catch((err) => app.log.error({ err }, 'reopen claim failed'));
+      trace(agent.id)('member.door_reopened', { userId: member.userId });
+      return { reopened: true, minutes: 30 };
+    },
+  );
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/members/known', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
