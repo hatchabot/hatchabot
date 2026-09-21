@@ -7127,10 +7127,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.allowKnocks || !agent.runtimeRef || agent.state !== 'RUNNING') return;
     if (store.pairingWindow(agent.id)) return; // somebody is expected right now
     const channelRow = store.getChannelForAgent(agent.id, 'telegram');
-    if (!channelRow || !store.listAllowedChannelUserIds(agent.id).length) return;
+    const admit = store.listAllowedChannelUserIds(agent.id);
+    if (!channelRow || !admit.length) return;
     await setDmPolicy(
       { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-      { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, policy: 'allowlist' },
+      { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, policy: 'allowlist', allowFrom: admit },
     ).catch(() => false);
   };
 

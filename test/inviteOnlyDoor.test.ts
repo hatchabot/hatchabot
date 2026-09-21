@@ -158,12 +158,18 @@ describe('the door rests shut', () => {
     s.bindMembershipChannelUser('a1', OWNER, '111');
 
     const writes: string[] = [];
+    let admitted: string[] = [];
     let config = { channels: { telegram: { accounts: { bot: { dmPolicy: 'allowlist' } } } } };
     const provider = {
       execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '555', code: 'C1', meta: {} }] }), stderr: '' }),
       execShellOnVolume: async (_ref: string, script: string) => {
         const m = /"policy":"(allowlist|pairing)"/.exec(script);
-        if (m) { writes.push(m[1]!); config.channels.telegram.accounts.bot.dmPolicy = m[1]!; return { code: 0, stdout: 'set', stderr: '' }; }
+        if (m) {
+          writes.push(m[1]!);
+          config.channels.telegram.accounts.bot.dmPolicy = m[1]!;
+          admitted = JSON.parse(/"admit":(\[[^\]]*\])/.exec(script)?.[1] ?? '[]');
+          return { code: 0, stdout: 'set', stderr: '' };
+        }
         return { code: 0, stdout: '', stderr: '' };
       },
       exec: async () => ({ code: 0, stdout: '', stderr: '' }),
@@ -175,6 +181,9 @@ describe('the door rests shut', () => {
     );
     expect(writes[0]).toBe('pairing');                       // opened for them
     expect(writes[writes.length - 1]).toBe('allowlist');     // and shut behind them
+    // …carrying the list it is about to enforce. An allowlist with nobody in
+    // it admits nobody, including the owner (a Mac, 2026-09-21).
+    expect(admitted).toContain('111');
     expect(s.pairingWindow('a1')).toBeUndefined();
   });
 

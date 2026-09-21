@@ -142,10 +142,11 @@ export async function claimFirstContact(
   const restoreDoor = async (): Promise<void> => {
     const agent = deps.store.getAgent(opts.agentId);
     if (!agent || agent.allowKnocks) return;
-    if (!deps.store.listAllowedChannelUserIds(opts.agentId, kindHere).length) return; // nobody yet: stay reachable
+    const admit = deps.store.listAllowedChannelUserIds(opts.agentId, kindHere);
+    if (!admit.length) return; // nobody yet: stay reachable
     await setDmPolicy(policyDeps, {
       agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind: kindHere,
-      accountId: opts.accountId, policy: 'allowlist',
+      accountId: opts.accountId, policy: 'allowlist', allowFrom: admit,
     }).catch(() => false);
   };
 

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.21.1] — 2026-09-21
+
+### Fixed
+- **Closing an agent's door could lock its owner out, silently.** A fresh agent is written with no `allowFrom` key at all — `configWriter` only writes one when there is somebody to write — and approving a pairing request adds the id to OpenClaw's own credentials store, not to the config. So flipping the policy to `allowlist` switched the door to "admit the empty list": the owner was admitted, welcomed by the agent, and then every message they sent was dropped without a word or a log line. The policy and the list it enforces are now written together, everywhere the door is closed.
+
 ## [2.21.0] — 2026-09-21
 
 ### Fixed

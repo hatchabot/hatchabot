@@ -381,11 +381,25 @@ export async function grantChannelAccess(
  */
 export async function setDmPolicy(
   deps: RevokeDeps,
-  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string; policy: 'allowlist' | 'pairing' },
+  opts: {
+    agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string;
+    policy: 'allowlist' | 'pairing';
+    /**
+     * Who the config itself must admit. A fresh agent is written with NO
+     * allowFrom key at all (configWriter only writes one when there is
+     * somebody to write), and approving a pairing request adds the id to
+     * OpenClaw's own credentials store — not to the config. Flipping the
+     * policy alone therefore switched the door to "admit the empty list",
+     * and the owner's messages were dropped in silence (a Mac, 2026-09-21).
+     */
+    allowFrom?: string[];
+  },
 ): Promise<boolean> {
   const log = deps.log ?? (() => {});
   if (!/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) return false;
-  const target = { channel: opts.kind, acct: opts.accountId, policy: opts.policy };
+  const ID_SHAPE: Record<ChannelKind, RegExp> = { telegram: /^\d{1,32}$/, slack: /^[UW][A-Z0-9]{2,31}$/, discord: /^\d{15,25}$/ };
+  const admit = (opts.allowFrom ?? []).filter((id) => ID_SHAPE[opts.kind].test(id));
+  const target = { channel: opts.kind, acct: opts.accountId, policy: opts.policy, admit };
   const script = `node -e '
     const fs = require("fs");
     const t = ${JSON.stringify(target)};
@@ -395,8 +409,13 @@ export async function setDmPolicy(
     const acc = cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
       && cfg.channels[t.channel].accounts[t.acct];
     if (!acc) { console.log("no-account"); process.exit(0); }
-    if (acc.dmPolicy === t.policy) { console.log("unchanged"); process.exit(0); }
+    const have = Array.isArray(acc.allowFrom) ? acc.allowFrom.map(String) : [];
+    const missing = t.admit.filter((id) => !have.includes(String(id)));
+    if (acc.dmPolicy === t.policy && !missing.length) { console.log("unchanged"); process.exit(0); }
     acc.dmPolicy = t.policy;
+    // The config must carry the list it is about to enforce: an allowlist with
+    // nobody in it admits nobody, including the owner.
+    if (t.admit.length) acc.allowFrom = [...have, ...missing];
     const tmp = cfgPath + ".tmp";
     fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
     fs.renameSync(tmp, cfgPath);   // atomic: the gateway re-reads per message
