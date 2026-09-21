@@ -569,7 +569,14 @@ export async function buildRuntimeSpec(
         telegram: channelRow && botToken ? {
           accountId: channelRow.accountId,
           botToken,
-          dmPolicy: 'pairing',
+          // `allowlist` is the resting state: a DM from anyone not on the
+          // list is dropped without a word. `pairing` answers a stranger with
+          // "access not configured" and a code, so it is used only when it
+          // has to be — when nobody is on the list yet (a fresh agent that
+          // would otherwise be unreachable), or when the owner deliberately
+          // opened the agent to anyone who finds it. A claim window flips it
+          // to pairing for its 30 minutes and back again (see claim.ts).
+          dmPolicy: !allowFrom.length || agent.allowKnocks ? 'pairing' : 'allowlist',
           allowFrom,
           groupAccess: agent.groupAccess,
           richMessages: agent.richMessages !== false,

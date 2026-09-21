@@ -302,8 +302,32 @@ describe('buildRuntimeSpec', () => {
     const spec = await buildRuntimeSpec(w.deps, agent.id);
     expect(spec.env.ANTHROPIC_API_KEY).toBe('sk-test');
     expect(spec.hostMounts).toEqual([]);
-    expect(spec.workspace.configPatch.telegram?.dmPolicy).toBe('pairing');
+    // With somebody on the list the door rests SHUT: a DM from anyone else is
+    // dropped in silence rather than answered with a pairing code (v2.15.0).
+    expect(spec.workspace.configPatch.telegram?.dmPolicy).toBe('allowlist');
     expect(spec.workspace.configPatch.telegram?.allowFrom).toEqual(['555']);
+  });
+
+  it('an agent nobody can reach yet stays in pairing, or it would be unreachable', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    // No member carries a telegram id, so allowFrom is empty: allowlist mode
+    // would lock out the owner themself.
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch.telegram?.allowFrom).toEqual([]);
+    expect(spec.workspace.configPatch.telegram?.dmPolicy).toBe('pairing');
+  });
+
+  it('"anyone can knock" keeps the pairing door open by choice', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertMembership({
+      id: 'm3', agentId: agent.id, userId: 'u3', role: 'user',
+      channelUserId: '777', status: 'active',
+    });
+    w.store.setAllowKnocks(agent.id, true);
+    const spec = await buildRuntimeSpec(w.deps, agent.id);
+    expect(spec.workspace.configPatch.telegram?.dmPolicy).toBe('pairing');
   });
 
   it('subscription + stored token: CLAUDE_CODE_OAUTH_TOKEN env, no ~/.claude mount', async () => {

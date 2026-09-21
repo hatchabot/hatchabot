@@ -147,3 +147,57 @@ describe('adding someone you already know', () => {
     expect(nobody.statusCode).toBe(404);
   });
 });
+
+describe('the door rests shut', () => {
+  it('a claim window opens it to pairing and closes it again', async () => {
+    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const s = world();
+    s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active' } as never);
+    // Somebody is already allowed, so the door has somewhere to rest.
+    s.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
+    s.bindMembershipChannelUser('a1', OWNER, '111');
+
+    const writes: string[] = [];
+    let config = { channels: { telegram: { accounts: { bot: { dmPolicy: 'allowlist' } } } } };
+    const provider = {
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '555', code: 'C1', meta: {} }] }), stderr: '' }),
+      execShellOnVolume: async (_ref: string, script: string) => {
+        const m = /"policy":"(allowlist|pairing)"/.exec(script);
+        if (m) { writes.push(m[1]!); config.channels.telegram.accounts.bot.dmPolicy = m[1]!; return { code: 0, stdout: 'set', stderr: '' }; }
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      exec: async () => ({ code: 0, stdout: '', stderr: '' }),
+    } as never;
+
+    await claimFirstContact(
+      { store: s, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef: 'ref', accountId: 'bot', forUserId: 'user-guest', timeoutMs: 40, pollIntervalMs: 5 },
+    );
+    expect(writes[0]).toBe('pairing');                       // opened for them
+    expect(writes[writes.length - 1]).toBe('allowlist');     // and shut behind them
+    expect(s.pairingWindow('a1')).toBeUndefined();
+  });
+
+  it('stays in pairing when the agent is open to anyone', async () => {
+    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const s = world();
+    s.setAllowKnocks('a1', true);
+    s.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
+    s.bindMembershipChannelUser('a1', OWNER, '111');
+    const writes: string[] = [];
+    const provider = {
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: [] }), stderr: '' }),
+      execShellOnVolume: async (_ref: string, script: string) => {
+        const m = /"policy":"(allowlist|pairing)"/.exec(script);
+        if (m) writes.push(m[1]!);
+        return { code: 0, stdout: 'set', stderr: '' };
+      },
+      exec: async () => ({ code: 0, stdout: '', stderr: '' }),
+    } as never;
+    await claimFirstContact(
+      { store: s, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef: 'ref', accountId: 'bot', forUserId: OWNER, timeoutMs: 20, pollIntervalMs: 5 },
+    );
+    expect(writes).toEqual(['pairing']); // opened, never shut
+  });
+});

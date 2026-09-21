@@ -369,6 +369,44 @@ export async function grantChannelAccess(
   log('member.allowlist_granted', { agentId: opts.agentId, kind: opts.kind });
 }
 
+/**
+ * Flip an agent's DM policy on its volume, live.
+ *
+ * `allowlist` is the resting state: OpenClaw drops a DM from anyone not on
+ * the list without a word. `pairing` answers a stranger with "access not
+ * configured" and a pairing code — useful for exactly as long as we are
+ * waiting for somebody specific, and a standing invitation to poke the rest
+ * of the time. The gateway reads the config per message, so this takes effect
+ * immediately; the next rebuild reseeds the same value from provision.
+ */
+export async function setDmPolicy(
+  deps: RevokeDeps,
+  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string; policy: 'allowlist' | 'pairing' },
+): Promise<boolean> {
+  const log = deps.log ?? (() => {});
+  if (!/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) return false;
+  const target = { channel: opts.kind, acct: opts.accountId, policy: opts.policy };
+  const script = `node -e '
+    const fs = require("fs");
+    const t = ${JSON.stringify(target)};
+    const cfgPath = "/home/node/.openclaw/openclaw.json";
+    if (!fs.existsSync(cfgPath)) { console.log("no-config"); process.exit(0); }
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    const acc = cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
+      && cfg.channels[t.channel].accounts[t.acct];
+    if (!acc) { console.log("no-account"); process.exit(0); }
+    if (acc.dmPolicy === t.policy) { console.log("unchanged"); process.exit(0); }
+    acc.dmPolicy = t.policy;
+    const tmp = cfgPath + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+    fs.renameSync(tmp, cfgPath);   // atomic: the gateway re-reads per message
+    console.log("set");'`;
+  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  const out = res.stdout.trim();
+  log('channel.dm_policy', { agentId: opts.agentId, policy: opts.policy, result: res.code === 0 ? out : `failed:${res.code}` });
+  return res.code === 0 && (out === 'set' || out === 'unchanged');
+}
+
 export async function revokeMember(
   deps: RevokeDeps,
   agentId: string,

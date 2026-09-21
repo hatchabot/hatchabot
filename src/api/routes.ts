@@ -97,7 +97,7 @@ import {
 } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError } from '../orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, setDmPolicy } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
@@ -6786,6 +6786,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           );
           store.bindMembershipChannelUser(agent.id, joined.membershipUserId, knownId);
           trace(agent.id)('member.known_admitted', { userId: joined.membershipUserId });
+          await restDoor(agent);
         } catch (err) {
           app.log.error({ err }, 'known-invitee grant failed'); // fall through to pairing
         }
@@ -6973,6 +6974,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const f = found.get(key)!;
       void opsPush.waiting(f.ownerId, f.headline, 'Let them in — or turn them away — under "Waiting for you".');
     }
+    // Agents built before the door rested shut are still in `pairing`, where a
+    // stranger's DM is answered with a code. Their config is on the volume and
+    // the gateway re-reads it, so they can be closed where they stand — no
+    // rebuild, which is the thing nobody wants to do to 45 agents. Idempotent:
+    // setDmPolicy reports "unchanged" and writes nothing.
+    for (const agent of live) await restDoor(agent).catch(() => {});
   };
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     const every = Number(process.env.HATCHABOT_PAIRING_SWEEP_MS ?? 5 * 60_000);
@@ -7037,6 +7044,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             asSelf,
           },
         );
+        // They are on the list now, so the door goes back to silence (unless
+        // a window is still open for someone else, or the agent is open).
+        await restDoor(agent);
         return { approved: true, member: admitted };
       } catch (err) {
         if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
@@ -7070,6 +7080,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  /**
+   * Put an agent's door back to `allowlist` — silence for anyone not on the
+   * list — once there IS a list and nothing is waiting to be claimed. Called
+   * after every path that adds somebody, so an agent never sits in `pairing`
+   * (where a stranger gets "access not configured" and a code) for longer
+   * than it has to. Best-effort: a failure leaves today's behaviour.
+   */
+  const restDoor = async (agent: Agent): Promise<void> => {
+    if (agent.allowKnocks || !agent.runtimeRef || agent.state !== 'RUNNING') return;
+    if (store.pairingWindow(agent.id)) return; // somebody is expected right now
+    const channelRow = store.getChannelForAgent(agent.id, 'telegram');
+    if (!channelRow || !store.listAllowedChannelUserIds(agent.id).length) return;
+    await setDmPolicy(
+      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+      { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, policy: 'allowlist' },
+    ).catch(() => false);
+  };
 
   /**
    * People you have already admitted to another agent, with a Telegram id on
@@ -7112,6 +7140,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       joinedAt: new Date().toISOString(),
     });
     trace(agent.id)('member.added_known', { userId: person.userId });
+    await restDoor(agent);
     return { added: true, name: person.name };
   });
 
@@ -7127,6 +7156,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     store.setAllowKnocks(agent.id, parsed.data.on);
     trace(agent.id)('agent.allow_knocks', { on: parsed.data.on });
+    // Live, not at the next rebuild: "anyone can knock" that only takes
+    // effect in a minute or two is a setting people press twice.
+    const channelRow = store.getChannelForAgent(agent.id, 'telegram');
+    if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
+      if (parsed.data.on) {
+        await setDmPolicy(
+          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+          { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, policy: 'pairing' },
+        ).catch(() => false);
+      } else {
+        await restDoor({ ...agent, allowKnocks: false });
+      }
+    }
     return { allowKnocks: parsed.data.on };
   });
 

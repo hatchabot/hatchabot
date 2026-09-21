@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.15.0] — 2026-09-21
+
+### Security
+- **A stranger who messages an agent now gets nothing back.** Agents ran in OpenClaw's `pairing` mode, which answers an unknown sender with *"OpenClaw: access not configured"*, a pairing code and the CLI command to approve it — telling anyone who finds the bot that it is live, what runs it, and inviting them to keep poking. (v2.13.0 stopped those knocks reaching you, but the reply happens inside the agent, before Hatchabot sees anything.) The resting state is now `allowlist`: the message is dropped in silence. `pairing` is entered only while a claim window is open for someone you invited, while nobody is on the list yet — a brand-new agent would otherwise be unreachable — or when the agent is deliberately set to *Anyone can knock*. The door shuts again as soon as the window closes or the person is admitted.
+- **Existing agents are closed where they stand.** The policy is in the agent's config on its volume and the gateway re-reads it per message, so the same sweep that turns strangers away also puts every eligible agent into `allowlist` — no rebuild.
+
 ## [2.14.0] — 2026-09-21
 
 ### Added

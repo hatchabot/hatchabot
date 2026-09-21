@@ -498,6 +498,17 @@ person to message is admitted. The handle is only ever used to match the knock;
 what gets stored on the allowlist is the numeric Telegram id, so a handle
 changing hands later grants nobody anything.
 
+**The door rests shut, not ajar.** An agent's bot runs in OpenClaw's
+`allowlist` mode: a DM from anyone not on its list is dropped without a word.
+It is only in `pairing` mode — where a stranger gets back *"access not
+configured"* and a pairing code — for as long as it has to be: while a claim
+window is open for somebody you invited, while nobody is on the list yet (a
+brand-new agent would otherwise be unreachable), or when you have deliberately
+set it to **Anyone can knock**. The policy lives in the agent's config on its
+volume and the gateway re-reads it per message, so it changes live; agents
+built before this are closed by the same sweep that turns strangers away,
+without a rebuild.
+
 **The door is shut to strangers.** A Telegram bot username is findable, so
 anyone on Telegram can message an agent — and every one of those knocks used
 to reach you as a card, and a push to your phone. An agent now admits only a
