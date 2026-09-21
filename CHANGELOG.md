@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.15.1] — 2026-09-21
+
+### Fixed
+- **The approve flow was broken on any upgraded install since v2.14.0.** `pairing_window.expect` was added to the table's `CREATE TABLE IF NOT EXISTS` with no `ALTER` — which reaches a fresh database, where the CREATE runs in full, and never an existing one. On the live install every read of a pairing window threw *"no such column: expect"*, so join requests were neither shown nor turned away, claim windows could not open, and the v2.15.0 sweep that closes agents' doors silently did nothing. Added the migration, and a test that opens a database built in the older shape and exercises the paths that read the newer columns — the shape of bug unit tests on a fresh `:memory:` database cannot see.
+
 ## [2.15.0] — 2026-09-21
 
 ### Security

@@ -528,6 +528,11 @@ export class Store {
       // Who an invite is FOR, when the owner said so: a Telegram @handle. The
       // claim window it opens then admits only that person.
       `ALTER TABLE invites ADD COLUMN expect_handle TEXT`,
+      // …and the window the redeemed invite opens carries it. CREATE TABLE IF
+      // NOT EXISTS does nothing to a table that already exists, so a column
+      // added to one after it shipped needs this line or every read of it
+      // throws on an upgraded install (it did: v2.14.0, caught 2026-09-21).
+      `ALTER TABLE pairing_window ADD COLUMN expect TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
