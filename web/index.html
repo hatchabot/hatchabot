@@ -1353,17 +1353,17 @@
       </details>
     </details>
 
-    <details class="sec-drawer">
-      <summary><b>🔑 Bot token</b> <span class="sub">— reveal only to recycle or move the bot; it IS this agent's identity</span></summary>
-      <div class="sub" style="margin-top:8px">
-        Members reach this agent through its bot, and the token <i>is</i> that
-        identity — treat it like a password.
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
-        <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
-        <button id="botTokenBtn" onclick="showBotToken()">Show</button>
-      </div>
-    </details>
+    <label style="margin-top:14px">🔑 The bot <span id="tgBotWho" style="color:var(--dim)"></span></label>
+    <div class="sub">Its token <i>is</i> this agent's identity on Telegram — treat it like a password.
+      Reveal it to move the bot to another machine, or to reuse it somewhere else.</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
+      <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
+      <button id="botTokenBtn" onclick="showBotToken()">Show</button>
+    </div>
+    <div class="sub" style="margin-top:6px">Want a less obvious name? Change the bot's <b>@username</b> at
+      <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → <code>/setusername</code>:
+      the token, this agent, its members and every conversation stay exactly as they are. Swapping in a
+      <i>different</i> bot does not — each member starts an empty chat with it.</div>
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
@@ -7175,6 +7175,8 @@ function renderGroupAccess(a) {
   renderRoomMates(a, ga);
   onGroupModeChange();
   $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
+  const who = $('tgBotWho');
+  if (who) who.textContent = a?.botUsername ? `— @${a.botUsername}` : '';
   renderAllowKnocks(a);
   // A non-default group setting is live state the owner should SEE — open
   // the drawer for it; the default keeps the tab compact.

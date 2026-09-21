@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.22.0] — 2026-09-21
+
+### Changed
+- **The bot token is a section of the Telegram tab, not a drawer inside a drawer.** Revealing it was already possible and nobody could find it. It now sits under **🔑 The bot — @name**, with the value still hidden until you press Show, and says what it is for: moving the bot to another machine, or reusing it elsewhere.
+- **And it says how to rename a bot without losing anything**: change the **@username** at @BotFather, which keeps the token, the agent, its members and every conversation. Swapping in a *different* bot does not — each member starts an empty chat with it.
+
 ## [2.21.1] — 2026-09-21
 
 ### Fixed
