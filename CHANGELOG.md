@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.17.2] — 2026-09-21
+
+### Fixed
+- **Uninstalling on a Mac, or on any host set up before the rename, removed nothing.** The launchd branch looked only for `com.hatchabot.*` jobs, so a laptop still running the pre-2026-09 `com.agentclaw.*` ones was left completely installed while the script reported success — and it read the install directory out of a systemd unit, which a Mac does not have, so it took its paths from whatever clone you happened to run it from. It now handles both spellings on both platforms, reads the install directory back out of the launchd job, says when it found no jobs at all, and names any units it left behind.
+
 ## [2.17.1] — 2026-09-21
 
 ### Fixed

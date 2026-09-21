@@ -37,6 +37,15 @@ INSTALLED_DIR=""
 if [ -f "$UNIT" ]; then
   INSTALLED_DIR="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -1)"
   INSTALLED_DIR="${INSTALLED_DIR/#\%h/$HOME}"
+elif [ "$(uname -s)" = "Darwin" ]; then
+  # launchd has no WorkingDirectory here: setup-host.sh bakes `cd "<repo>"`
+  # into the job's command, so read it back out of whichever plist exists.
+  for p in com.hatchabot.control-plane com.agentclaw.control-plane; do
+    PL="$HOME/Library/LaunchAgents/$p.plist"
+    [ -f "$PL" ] || continue
+    INSTALLED_DIR="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$PL" | head -1)"
+    [ -n "$INSTALLED_DIR" ] && break
+  done
 fi
 ENV_DIR="$REPO"
 if [ -n "$INSTALLED_DIR" ] && [ "$INSTALLED_DIR" != "$REPO" ] && [ -d "$INSTALLED_DIR" ]; then
@@ -87,12 +96,22 @@ fi
 
 say "Stopping the service…"
 if [ "$(uname -s)" = "Darwin" ]; then
-  for p in com.hatchabot.control-plane com.hatchabot.backup; do
+  # Both spellings: a host set up before the 2026-09 rename still runs
+  # com.agentclaw.* jobs, and looking only for the new names uninstalled
+  # nothing at all on it.
+  found=0
+  for p in com.hatchabot.control-plane com.hatchabot.backup com.agentclaw.control-plane com.agentclaw.backup; do
     PLIST="$HOME/Library/LaunchAgents/$p.plist"
-    [ -f "$PLIST" ] && launchctl unload -w "$PLIST" 2>/dev/null; rm -f "$PLIST" && echo "  removed $p"
+    [ -f "$PLIST" ] || continue
+    launchctl unload -w "$PLIST" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "  removed $p"
+    found=1
   done
+  [ "$found" = 1 ] || echo "  no launchd jobs found (nothing was installed, or it runs under a different user)"
 else
-  for unit in hatchabot.service hatchabot-backup.timer hatchabot-backup.service hatchabot-mgmt-bot.service; do
+  for unit in hatchabot.service hatchabot-backup.timer hatchabot-backup.service hatchabot-mgmt-bot.service \
+              agentclaw.service agentclaw-backup.timer agentclaw-backup.service; do
     if systemctl --user list-unit-files "$unit" >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/$unit" ]; then
       systemctl --user disable --now "$unit" >/dev/null 2>&1
       rm -f "$HOME/.config/systemd/user/$unit"
@@ -100,6 +119,8 @@ else
     fi
   done
   systemctl --user daemon-reload
+  [ -n "$(ls -1 "$HOME/.config/systemd/user" 2>/dev/null | grep -E '^(hatchabot|agentclaw)')" ] \
+    && echo "  note: other units remain: $(ls -1 "$HOME/.config/systemd/user" | grep -E '^(hatchabot|agentclaw)' | tr '\n' ' ')"
 fi
 
 say "Unlinking the hatchabot CLI…"
