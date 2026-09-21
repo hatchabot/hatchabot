@@ -72,7 +72,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   <p class="lead">An <b>open-source agentic operating system</b>: many purpose-built agents · on hardware you own · thinking with the AI you choose · reachable by the people you let in · through Telegram · on one subscription.</p>
   <div class="formula"><span class="chip">OpenClaw</span><span class="op">+</span><span class="chip">Docker</span><span class="op">+</span><span class="chip">Telegram</span><span class="op">=</span><span class="eq">Hatchabot</span></div>
   <p style="font-size:12pt;margin-top:9pt;opacity:.85">the open-source agent runtime · one isolated container per agent · the front door everyone already has</p>
-  <div class="foot"><span>hatchabot.com · github.com/hatchabot/hatchabot</span><span>v1.6 · September 2026</span></div>
+  <div class="foot"><span>hatchabot.com · github.com/hatchabot/hatchabot</span><span>v2.30 · September 2026</span></div>
 </section>
 
 <!-- 2 -->
@@ -81,7 +81,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   <h2 style="margin-bottom:10pt">“Can't ChatGPT or Claude already do this?”</h2>
   <p class="lead" style="margin-bottom:16pt">They remember you now. They run tasks on a schedule. They read your Drive. For one person in one app they are excellent — and Hatchabot uses one of them as its brain. Four things change once the assistant has to serve a household.</p>
   <div class="row compact">
-    <div class="card"><h3>Everyone gets agents</h3><p>Sharing an assistant there means everyone signs in — their own ChatGPT account, or a paid Claude seat. Here the family messages a Telegram contact: no app, no login, no second subscription.</p></div>
+    <div class="card"><h3>Everyone gets agents</h3><p>Sharing an assistant there means everyone signs in — their own ChatGPT account, or a paid Claude seat. Here the family messages a Telegram contact: no app, no AI account, no second subscription.</p></div>
     <div class="card"><h3>The memory is yours</h3><p>Both remember you. Neither lets you open that memory, correct a wrong fact, back it up or take it elsewhere. Here it's a text file on your disk that outlives rebuilds and model changes.</p></div>
     <div class="card"><h3>A staff, not a generalist</h3><p>One assistant answers your taxes, the homework and the condo board in one voice from one context. These are separate by design — own persona, model, data, people — and consult each other mid-task.</p></div>
     <div class="card"><h3>Your machine, scoped</h3><p>Their tasks run in their cloud, with their tools, across your whole account. Each agent here gets exactly what its job needs: this folder, that repo, mail it may read but never send.</p></div>
@@ -101,7 +101,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   </div>
   <div class="row" style="margin-top:0.16in">
     <div class="card"><h3>For the people you let in</h3><p>Invite family by link or QR. Talk to one agent privately or together in a group room, with memory shared or personal — and everyone told which.</p></div>
-    <div class="card"><h3>Through Telegram</h3><p>The app everyone already has. Each agent is a real contact with a name and a face. Nothing to install, no accounts to create. Slack and Discord land next.</p></div>
+    <div class="card"><h3>Through Telegram</h3><p>The app everyone already has. Each agent is a real contact with a name and a face. Nothing to install, no AI account to create. Slack and Discord land next.</p></div>
     <div class="card"><h3>And it runs itself</h3><p>Hatchabot has its own agent: a manager you talk to in plain words. It reads health, usage, logs and files, and hands back a card you confirm — so operating the fleet is a conversation, not a console.</p></div>
   </div>
   <div class="takeaway" style="bottom:0.72in;padding:10pt 16pt;font-size:13.5pt;font-weight:400;font-family:'Liberation Sans',sans-serif"><b style="font-family:'Bricolage Grotesque',sans-serif;font-size:15pt">OpenClaw + Docker = Hatchabot.</b> Every agent is a stock OpenClaw gateway — the open-source agent runtime — in its own Docker container with its own volume, bot and credentials. Hatchabot is OpenClaw <i>new and improved for a household</i>: many isolated installs, run as a fleet, by more than one person.</div>
@@ -241,7 +241,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   <h2>Private by default, easy to share</h2>
   <div class="row">
     <div class="card"><h3>The door rests shut</h3><ul><li>A stranger who finds a bot gets <b>silence</b></li><li>Only people you invited — or who already use one of your agents — get through</li><li>An invite can name the one person it is for</li><li>Someone you already trust is added in one tap, with no pairing</li></ul></div>
-    <div class="card"><h3>Everyone signs in as themselves</h3><ul><li>An account per person, each with their own agents</li><li>Forgotten password: a one-time link you send them — you never see the new one</li><li>“Forgot password?” reaches you through your own Telegram</li><li>No email server, no terminal</li></ul></div>
+    <div class="card"><h3>Everyone signs in as themselves</h3><ul><li>An account per person, each with their own agents</li><li>Forgotten password: a one-time link you send them — you never see the new one</li><li>“Forgot password?” reaches you through your linked Telegram</li><li>No email server to set up</li></ul></div>
     <div class="card"><h3>Set up by looking, not reading</h3><ul><li>A setup guide that checks the machine itself</li><li>Finds Tailscale and turns on HTTPS in one press</li><li>Confirms the address actually answers</li><li>A QR code to open it on your phone</li></ul></div>
   </div>
   <div class="takeaway">A household AI has to be private and shareable at once — so the defaults do the first, and the app does the second.</div>
@@ -280,7 +280,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   <p class="eyebrow">How it works</p>
   <h2>One control plane, one container per agent</h2>
   <table class="flow" style="margin-top:-4pt"><tr>
-    <td style="width:2.05in"><div class="box"><b>Your family</b>Telegram on their phones</div><div class="box"><b>You</b>web app · CLI · management bot</div></td>
+    <td style="width:2.05in"><div class="box"><b>Your family</b>Telegram on their phones</div><div class="box"><b>You</b>web app · CLI · the Hatchabot agent</div></td>
     <td class="arr">→</td>
     <td style="width:3.1in"><div class="box" style="padding:14pt 12pt"><b>Hatchabot control plane</b>Node + SQLite on your machine<br><span style="font-size:10pt">registry · encrypted secrets · scheduler · health · backups · audit</span></div></td>
     <td class="arr">→</td>
@@ -291,7 +291,7 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
   <div class="row compact" style="margin-top:0.18in">
     <div class="card"><h3>Persisted</h3><p>Each agent's <code>$HOME</code> is a Docker volume: persona, memory, sessions, tools. The runtime image is shared, versioned, and swapped under an agent without touching the volume.</p></div>
     <div class="card"><h3>Private by default</h3><p>The web app lives on your machine; reach it from anywhere over Tailscale, never a port opened on your router. Telegram works from anywhere regardless.</p></div>
-    <div class="card"><h3>Open source</h3><p>TypeScript, MIT licensed, 978 automated tests and fifteen full audits. Tagged releases with notes; pre-built images for arm64 and amd64.</p></div>
+    <div class="card"><h3>Open source</h3><p>TypeScript, MIT licensed, 1,200+ automated tests and twenty-four full audits, the upgrade path tested in CI. Tagged releases with notes; pre-built images for arm64 and amd64.</p></div>
   </div>
   <div class="foot"><span>hatchabot.com</span><span>14</span></div>
 </section>
@@ -305,11 +305,11 @@ table.flow td.arr { width:0.45in; text-align:center; color:#a3671a; font-size:24
       <div class="s"><span class="n">1</span><p><b>Make a Telegram bot.</b> In Telegram, open @BotFather, send <code>/newbot</code>, and keep the token.</p></div>
       <div class="s"><span class="n">2</span><p><b>Get Claude ready.</b> Install the Claude CLI, log in once, then run <code>claude setup-token</code> and keep that token too.</p></div>
       <div class="s"><span class="n">3</span><p><b>Install Hatchabot</b> on the computer that stays on:</p><div class="cmdline" style="margin-top:6pt;font-size:11.5pt;white-space:nowrap"><b>$</b> bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"</div></div>
-      <div class="s"><span class="n">4</span><p><b>Open the app</b> at <code>http://localhost:8080</code>. The wizard takes both tokens and creates your first agent.</p></div>
+      <div class="s"><span class="n">4</span><p><b>Open the app</b> at <code>http://localhost:8080</code> and create your account. The setup guide takes both tokens, makes your first agent, and can turn on HTTPS for your phone.</p></div>
       <div class="s"><span class="n">5</span><p><b>Say hi</b> on Telegram. It will still remember this conversation next year.</p></div>
     </div>
     <div style="flex:0.8">
-      <div class="card"><h3>You need</h3><ul><li>A Linux or macOS computer that stays on — a Mac mini, a home server, an old laptop</li><li>A Telegram account</li><li>A Claude subscription (Pro for a couple of agents, Max for a household) — or an API key, or a local model</li></ul></div>
+      <div class="card"><h3>You need</h3><ul><li>A Linux or macOS computer that stays on — a Mac mini, a home server, an old laptop</li><li>A Telegram account — optional: agents also answer in the web app</li><li>A Claude subscription (Pro for a couple of agents, Max for a household) — or an API key, or a local model</li></ul></div>
       <div class="card" style="margin-top:12pt"><h3>Made to be easy to run</h3><ul><li>The installer checks git, Docker and Node, and installs what's missing</li><li>The agent image is pre-built — a pull, not a twenty-minute build</li><li><code>hatchabot doctor</code> checks everything and prints the fix</li></ul></div>
     </div>
   </div>

@@ -67,7 +67,7 @@ machine, and links the `hatchabot` command. It is safe to re-run.
 
 Afterwards, `hatchabot doctor` checks the whole installation and says what to fix.
 
-> Releases are git tags (`v1.2.2`, …). Checking one out, as above, means you run
+> Releases are git tags (`v2.30.2`, …). Checking one out, as above, means you run
 > a version that passed its tests and has release notes — not whatever `main`
 > is at this minute.
 
@@ -122,7 +122,7 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 ```sh
 cd hatchabot
 git fetch --tags
-git checkout v1.2.2          # the release you want — see github.com/hatchabot/hatchabot/releases
+git checkout v2.30.2         # the release you want — see github.com/hatchabot/hatchabot/releases
 ./scripts/restart.sh         # installs any new dependencies and restarts the service
 ```
 

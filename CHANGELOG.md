@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.30.3] — 2026-09-21
+
+### Changed
+- **A second pass over the deck, the README and the website**, read end to end as a first-time visitor. The architecture slide still showed the **management bot** retired in v2.0.0 (now the Hatchabot agent); the cover said v1.6; the numbers said 978 tests and fifteen audits. "No login" and "no accounts to create" contradicted per-person sign-in — the point is no *AI* account and no paid seat, and that is what they now say. Getting-started steps start with creating your account, list Telegram as optional, and mention the setup guide's HTTPS step; "no terminal" for a forgotten password is claimed only where it is true. The README lists accounts as the default mode and gains *Private by default*; the quickstart's example release is current. The PDF is rebuilt and every page checked; the website was checked at phone width for overflow.
+
 ## [2.30.2] — 2026-09-21
 
 ### Fixed
