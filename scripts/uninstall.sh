@@ -160,6 +160,24 @@ fi
 
 say "Done."
 echo "Hatchabot is no longer running or installed on this machine."
-[ "$PURGE" = 1 ] || echo "Its data is still here — scripts/setup-host.sh reinstalls onto the same fleet."
+if [ "$PURGE" = 1 ]; then
+  echo "Its agents, volumes and database are gone."
+  if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi
+else
+  # "I uninstalled it and the agents came back" is the predictable surprise:
+  # the default keeps everything on purpose. Say exactly what survived, with
+  # counts, and the one command that does not.
+  echo
+  echo "KEPT ON PURPOSE — a reinstall picks all of this up again:"
+  if have docker; then
+    echo "  · $(containers | wc -l | tr -d " ") agent containers (stopped)"
+    echo "  · $(volumes | wc -l | tr -d " ") agent volumes — their memory, files and members"
+    echo "  · $(images | wc -l | tr -d " ") runtime images"
+  fi
+  [ -f "$DB_PATH" ] && echo "  · the database at $DB_PATH — every agent, member and setting"
+  [ -d "$BACKUP_DIR" ] && echo "  · $(ls -1 "$BACKUP_DIR" 2>/dev/null | wc -l | tr -d " ") backup sets in $BACKUP_DIR"
+  echo
+  echo "For a clean slate instead:  ./scripts/uninstall.sh --purge --backups"
+fi
 echo "The clone itself is untouched. To remove it:  rm -rf \"$REPO\""
 echo "Telegram bots are not deletable from here: @BotFather → /mybots → /deletebot."

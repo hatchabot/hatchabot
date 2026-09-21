@@ -8,6 +8,7 @@ All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 - **`./scripts/upgrade-check.sh` and a CI job to run it.** It builds a database with an older release's *own* code — a real git worktree at that tag — and opens it with this build, then diffs the schema. This is the only way to catch a column added to an existing table with no `ALTER`: every unit test starts from a fresh database, where `CREATE TABLE` runs in full, so that bug class passes the whole suite and then throws on every real install (it did, in v2.14.0). Verified against v1.0.0, v2.0.0 and the previous release, and verified to fail when the v2.14.0 migration is removed. `scripts/schema-drift.ts` does the same against a live install, and `docs/releasing.md` lists both as gates.
 
 ### Changed
+- **Uninstall now ends by listing what it kept**, with counts — the containers, the volumes, the images, the database and the backup sets — and the one command that removes them (`--purge --backups`). Without it, "I uninstalled and reinstalled, and all my agents came back" reads as a bug rather than the documented promise that nothing you would miss is deleted.
 - **Uninstalling stops your agents instead of deleting their containers.** The control plane only mends states — it never re-creates a runtime on its own — so removing the containers meant every agent needed a Rebuild after a reinstall, which is not what "nothing you would miss is deleted" should mean. `--purge` still removes them, with the volumes.
 
 ## [2.16.2] — 2026-09-21
