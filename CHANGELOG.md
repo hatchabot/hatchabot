@@ -2,6 +2,23 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.23.0] — 2026-09-21
+
+### Added
+- **A bin to drag an agent onto**, beside "start a new group" and shown only while you drag. It does **not** delete on the drop: it opens the confirmation that makes you type the agent's name. A drag is a fast, imprecise gesture — especially on a phone, where the bin sits near Archived — and deleting an agent is the only thing in Hatchabot that cannot be undone. Dragging an *archived* agent onto it works too, which is how an archive gets cleared out.
+
+### Changed
+- **The agent says hello the moment it recognises you.** OpenClaw answers a first message with its pairing challenge rather than a reply, so an approval that landed in silence read as "still broken" and people typed "hi" again to check. The agent now sends one line as soon as the claim binds — *"Connected, Christopher — that's you. Ask me anything."*
+
+## [2.23.0] — 2026-09-21
+
+### Added
+- **The HTTPS step reads the machine instead of handing out a command.** Most people running Hatchabot are already on a tailnet, and the machine knows its own name and whether anything is served on it. When `tailscale serve` is already up it now shows the real `https://…ts.net` address, a **Copy link** button and a **QR code** to open it on a phone, and ticks itself off. When Tailscale is connected but nothing is served, it names the machine and gives the one command with the right port already in it. Only a machine with no Tailscale at all sees the install instructions.
+- **A bin to drag an agent onto**, beside "start a new group" and shown only while you drag. It does **not** delete on the drop: it opens the confirmation that makes you type the agent's name. A drag is a fast, imprecise gesture — especially on a phone, where the bin sits near Archived — and deleting an agent is the only thing in Hatchabot that cannot be undone. Dragging an *archived* agent onto it works too, which is how an archive gets cleared out.
+
+### Changed
+- **The agent says hello the moment it recognises you.** OpenClaw answers a first message with its pairing challenge rather than a reply, so an approval that landed in silence read as "still broken" and people typed "hi" again to check. The agent now sends one line as soon as the claim binds — *"Connected, Christopher — that's you. Ask me anything."*
+
 ## [2.22.0] — 2026-09-21
 
 ### Changed

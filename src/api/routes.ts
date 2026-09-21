@@ -17,6 +17,7 @@ import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
+import { tailnetInfo } from '../ops/tailnet.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -836,6 +837,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.header('cache-control', 'no-cache').type('image/svg+xml').send(svg);
     });
   }
+
+  /**
+   * Is this machine on a tailnet, and is Hatchabot already served over HTTPS
+   * on it? The setup guide used to hand out a command and leave the person to
+   * work out their own address; usually the machine knows both.
+   */
+  app.get('/v1/tailscale', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const port = Number(process.env.PORT ?? 8080);
+    const info = await tailnetInfo(port).catch(() => ({ installed: false }));
+    return { ...info, port, publicUrl: deps.publicUrl?.replace(/\/$/, '') || undefined };
+  });
+
+  /** A QR for the tailnet address, so a phone can open it without typing. */
+  app.get('/v1/tailscale/qr.svg', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const info = await tailnetInfo(Number(process.env.PORT ?? 8080)).catch(() => ({ url: undefined }) as { url?: string });
+    const url = info.url ?? deps.publicUrl;
+    if (!url) return reply.code(409).send({ error: 'No HTTPS address to encode yet.' });
+    const svg = await QRCode.toString(url.replace(/\/$/, ''), { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
+    return reply.header('cache-control', 'no-cache').type('image/svg+xml').send(svg);
+  });
 
   app.get('/healthz', async () => ({ ok: true }));
 

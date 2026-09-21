@@ -195,3 +195,37 @@ describe('state machine', () => {
     expect(canTransition('PROVISIONING', 'REBUILDING')).toBe(false);
   });
 });
+
+describe('the claim says hello', () => {
+  it('greets the owner the moment their first contact binds, so they do not type "hi" twice', async () => {
+    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const { Store } = await import('../src/store/store.js');
+    const Database = (await import('better-sqlite3')).default;
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' } as never);
+    store.insertAgent({
+      id: 'a1', ownerId: 'o', name: 'October Agent', slug: 'october', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1',
+      runtimeRef: 'docker://a1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now',
+    } as never);
+    store.insertMembership({ id: 'm0', agentId: 'a1', userId: 'o', role: 'owner', status: 'active' } as never);
+
+    const sent: string[] = [];
+    const provider = {
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '424242', code: 'C6STF628', meta: { firstName: 'Christopher' } }] }), stderr: '' }),
+      execShellOnVolume: async () => ({ code: 0, stdout: 'set', stderr: '' }),
+      exec: async (_ref: string, argv: string[]) => {
+        if (argv[0] === 'message') sent.push(argv[argv.indexOf('-m') + 1]!);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    } as never;
+
+    const bound = await claimFirstContact(
+      { store, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef: 'docker://a1', accountId: 'bot', forUserId: 'o', timeoutMs: 60, pollIntervalMs: 5 },
+    );
+    expect(bound).toBe('424242');
+    expect(sent.join(' ')).toContain('Christopher');
+    expect(sent.join(' ')).toMatch(/Connected/);
+  }, 10_000);
+});

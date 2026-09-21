@@ -624,6 +624,14 @@
   @media (prefers-reduced-motion: reduce) { .v2st-working .v2ic::after, .v2st-waiting .v2ic { animation:none } .v2ic { transition:none } }
   .v2newgroup { border:1px dashed var(--line); border-radius:12px; padding:14px; text-align:center; color:var(--dim); font-size:13px; margin-bottom:20px }
   body:not(.v2dragging) .v2newgroup { display:none }
+  .v2dropstrips { display:grid; gap:10px; grid-template-columns:1fr 1fr }
+  body:not(.v2dragging) .v2dropstrips { display:none }
+  @media (max-width:560px) { .v2dropstrips { grid-template-columns:1fr } }
+  /* Deleting is the one thing that cannot be undone, so its strip says so in
+     its colour as well as its words — and the drop only OPENS the typed
+     confirmation, it never deletes on the gesture alone. */
+  .v2trash { border-color:color-mix(in srgb, var(--bad) 45%, var(--line)); color:var(--bad) }
+  .v2trash.drop { background:color-mix(in srgb, var(--bad) 12%, transparent); outline:1px dashed var(--bad) }
   .v2ghost { position:fixed; z-index:1001; pointer-events:none; opacity:.92; transform:translate(-50%,-60%) scale(1.06) }
   .v2agent.v2src { opacity:.25 }
   .v2caret { position:fixed; width:3px; background:var(--accent); border-radius:2px; z-index:1000; pointer-events:none }
@@ -839,7 +847,10 @@
       <div id="v2PropList"></div>
     </section>
     <div id="v2groups"></div>
-    <div class="v2newgroup" id="v2NewGroup">Drop here to start a new group</div>
+    <div class="v2dropstrips">
+      <div class="v2newgroup" id="v2NewGroup">Drop here to start a new group</div>
+      <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first</div>
+    </div>
   </div>
 </div>
 <div class="v2tip" id="v2Tip" hidden></div>
@@ -2748,11 +2759,11 @@ function setupSteps() {
         — someone knocking, a card waiting — down the same conversation. Confirming still happens here, in the app.</p>
       ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openV2Agent('${jsq(ops.id)}','messaging')">Open its chat apps</button></div>`
             : `<p class="sub" style="margin:0">Set the agent up first — the step above.</p>`}` },
-    { key: 'https', done: httpsDone, title: httpsDone ? `Reachable at ${esc((appConfig?.appUrl ?? '').replace(/^https:\/\//, ''))}` : 'Reach it from your phone, over HTTPS', body: `
-      <p class="sub" style="margin:4px 0 6px">On <code>http://localhost:8080</code> the app only works on this machine, and the agent consoles need a secure page.
-        One command on the host puts a real certificate in front of it and gives it an address your other devices can open:</p>
-      <p style="margin:4px 0 6px"><code>tailscale serve --bg http://localhost:8080</code></p>
-      <p class="sub" style="margin:0">Then set <code>HATCHABOT_PUBLIC_URL</code> to that <code>https://…ts.net</code> address and restart. Details in <code>docs/tailscale.md</code>.</p>` },
+    { key: 'https', done: httpsDone || !!tailnet?.serving,
+      title: httpsDone || tailnet?.serving
+        ? `Reachable at ${esc(((tailnet?.url || appConfig?.appUrl) ?? '').replace(/^https:\/\//, ''))}`
+        : 'Reach it from your phone, over HTTPS',
+      body: tailnetStepBody() },
     { key: 'backup', done: backupAgeH !== null && backupAgeH < 48, title: backupAgeH !== null && backupAgeH < 48 ? 'Backups are running' : 'Check a backup has actually run', body: `
       <p class="sub" style="margin:4px 0 6px">Agents keep everything on a volume — memory, files, members. A nightly backup set is what stands between that and a bad day,
         and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old.`}</p>
@@ -2761,10 +2772,46 @@ function setupSteps() {
   return steps;
 }
 
+/**
+ * The HTTPS step, told from what the machine knows rather than from a manual.
+ * Most people running this are already on a tailnet: in that case it can name
+ * the address, show a QR for the phone, and — when `serve` is not set up yet —
+ * give the one command with the right port already in it.
+ */
+function tailnetStepBody() {
+  const port = tailnet?.port ?? 8080;
+  const cmd = `tailscale serve --bg http://localhost:${port}`;
+  if (tailnet?.serving && tailnet.url) {
+    return `<p class="sub" style="margin:4px 0 6px">This machine is on your tailnet and already serving over HTTPS. Open this on your phone —
+        it works anywhere Tailscale is connected, and nothing is exposed to the internet:</p>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <a class="btn" href="${esc(tailnet.url)}" target="_blank" rel="noopener">${esc(tailnet.url.replace(/^https:\/\//, ''))}</a>
+        <button onclick="copyText('${jsq(tailnet.url)}').then(ok => toast(ok ? 'Link copied' : 'Copy it from the button'))">Copy link</button>
+        <img src="/v1/tailscale/qr.svg" alt="QR code for this address" width="104" height="104"
+             style="background:#fff;border-radius:8px;padding:4px">
+      </div>
+      ${/^https:/i.test(appConfig?.appUrl ?? '') ? '' : `<p class="sub" style="margin:6px 0 0">Invite links still point at this machine:
+        set <code>HATCHABOT_PUBLIC_URL=${esc(tailnet.url)}</code> in <code>.env</code> and restart so they use this address too.</p>`}`;
+  }
+  if (tailnet?.dns) {
+    return `<p class="sub" style="margin:4px 0 6px">This machine is on your tailnet as <b>${esc(tailnet.dns)}</b>, but nothing is served over HTTPS yet —
+        and the agent consoles need a secure page. One command on this machine does it:</p>
+      <p style="margin:4px 0 6px"><code>${esc(cmd)}</code>
+        <button onclick="copyText('${jsq(cmd)}').then(ok => toast(ok ? 'Command copied' : 'Copy it by hand'))">Copy</button></p>
+      <p class="sub" style="margin:0">Then it answers at <code>https://${esc(tailnet.dns)}</code> — come back here and this step will say so.</p>`;
+  }
+  const where = tailnet?.installed ? 'Tailscale is installed here but not connected — run <code>tailscale up</code> first.'
+    : 'Install <a href="https://tailscale.com/download" target="_blank" rel="noopener">Tailscale</a> on this machine and your phone — it is free for personal use, and nothing is exposed to the internet.';
+  return `<p class="sub" style="margin:4px 0 6px">On <code>http://localhost:${port}</code> the app only works on this machine, and the agent consoles need a secure page.
+      ${where}</p>
+    <p class="sub" style="margin:0">Then run <code>${esc(cmd)}</code> and come back — this step will fill itself in. Details in <code>docs/tailscale.md</code>.</p>`;
+}
+
 /** Open the guide deliberately — from the account menu, the header, or the
  *  Setup tile on the dashboard. */
 function openSetupGuide() {
   setupOpen = true;
+  void loadTailnet().then(() => { if (setupOpen) renderSetup(); });
   renderSetup();
   $('setup').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -9081,6 +9128,7 @@ async function refresh(withMeta) {
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
     if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); }
+    if (withMeta && tailnet === null) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
       const running = agents.filter(a => a.state === 'RUNNING');
@@ -9371,6 +9419,7 @@ window.addEventListener('pointermove', (e) => {
 function v2DropTarget(x, y, st) {
   const under = document.elementFromPoint(x, y);
   if (!under) return null;
+  if (under.closest('#v2Trash')) return { zone: $('v2Trash'), trash: true };
   if (under.closest('#v2NewGroup')) return { zone: $('v2NewGroup'), newGroup: true };
   const grid = under.closest('.v2grid[data-v2drop]');
   if (!grid) return null;
@@ -9405,6 +9454,12 @@ window.addEventListener('pointerup', async (e) => {
   v2drag.suppress = true; setTimeout(() => { v2drag.suppress = false; }, 0);
   if (!t) return renderV2();
   try {
+    // Before the archived-agent branch: dragging something out of Archived
+    // and into the bin is exactly how an archive gets cleared out.
+    if (t.trash) {
+      await del(a.id, a.name);   // types-the-name confirmation; a drag alone deletes nothing
+      return renderV2();
+    }
     if (t.archive) {
       if (a.state !== 'ARCHIVED') archiveAgent(a.id, a.name, a.state);
       return renderV2();
@@ -10203,6 +10258,12 @@ function renderV2Stats() {
 }
 let v2PendingCount = 0;
 let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
+/** What this machine knows about its own tailnet, for the HTTPS setup step. */
+let tailnet = null;
+async function loadTailnet() {
+  try { tailnet = await api('/v1/tailscale'); }
+  catch { tailnet = null; } // not the machine owner, or the probe is unavailable
+}
 async function loadBackupAge() {
   try {
     const r = await api('/v1/backups');

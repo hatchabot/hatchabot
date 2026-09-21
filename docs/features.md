@@ -55,7 +55,9 @@ The header holds:
   itself — connect the AI, make a Telegram bot, create the agent. After that it
   keeps going with the four steps that decide whether the house is actually set
   up: **set up the Hatchabot agent**, **connect it to a chat app**, put Hatchabot
-  on an **HTTPS address** your phone can reach, and **check a backup has run**. Every
+  on an **HTTPS address** your phone can reach — on a machine already on a
+  tailnet it names that address and shows a QR for the phone, rather than
+  handing out a command — and **check a backup has run**. Every
   step is ticked from live state, never from "you have seen this", so it is
   still honest a month later. **Setup** sits in the top bar next to Settings,
   with a badge counting what is left; there is also a **set up** tile on the
@@ -74,8 +76,11 @@ The header holds:
   after a reload. Nothing is kept: an agent you drag somewhere stays there
   until you ask for a sort again.
 - **Agents are icons** in their groups. Drag one to reorder it, onto another
-  group to move it, onto **Archived** to archive it, or onto the strip that
-  appears at the bottom to start a new group. On a phone, press and hold,
+  group to move it, onto **Archived** to archive it, or onto one of the two
+  strips that appear at the bottom while you drag: **start a new group**, or
+  the **bin**. Dropping on the bin does not delete anything — it opens the
+  confirmation that makes you type the agent's name, because a drag is a fast,
+  imprecise gesture and deleting is the one thing that cannot be undone. On a phone, press and hold,
   then drag; an ordinary swipe still scrolls.
 - **A red dot at the top left** means the agent has said something in its
   console since you last had that console open — a reply that finished after

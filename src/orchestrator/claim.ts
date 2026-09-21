@@ -198,6 +198,22 @@ export async function claimFirstContact(
           });
           deps.store.closePairingWindow(opts.agentId);
           await restoreDoor();
+          // Say something. OpenClaw answered their first message with the
+          // pairing challenge rather than a reply, so an approval that lands
+          // in silence reads as "still broken" and the person types "hi"
+          // again — which is what it took on a Mac, 2026-09-21. One line from
+          // the agent, straight away, ends the exchange properly.
+          const agentNow = deps.store.getAgent(opts.agentId);
+          const first_name = first.meta?.firstName;
+          const hello = opts.forUserId === agentNow?.ownerId
+            ? `Connected${first_name ? `, ${first_name}` : ''} — that's you. Ask me anything.`
+            : `You're in${first_name ? `, ${first_name}` : ''}. Say what you need whenever you're ready.`;
+          await deps.provider
+            .exec(opts.runtimeRef, [
+              'message', 'send', '--channel', kind, '--account', opts.accountId,
+              '--target', `user:${first.id}`, '-m', hello,
+            ])
+            .catch(() => undefined);
           return first.id;
         }
         log('claim.approve_failed', { agentId: opts.agentId, code: first.code });
