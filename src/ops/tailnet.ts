@@ -21,6 +21,15 @@ export interface TailnetInfo {
   dns?: string;
   /** `tailscale serve` is proxying 443 to the port we asked about. */
   serving?: boolean;
+  /**
+   * The address actually answered. `serving` only says the proxy is
+   * configured — it says nothing about whether a certificate was ever issued,
+   * which is the usual reason a correctly-served machine still fails in a
+   * browser. Only an address that answers is offered as one.
+   */
+  reachable?: boolean;
+  /** Why it did not answer, when it did not. */
+  unreachableWhy?: string;
   /** The address to open on a phone, when there is one. */
   url?: string;
 }
@@ -105,5 +114,17 @@ export async function tailnetInfo(port: number): Promise<TailnetInfo> {
   // the port in either form rather than parsing a schema.
   const serveRaw = (await run(bin, ['serve', 'status'])) ?? (await run(bin, ['serve', 'status', '--json'])) ?? '';
   const serving = new RegExp(`(127\\.0\\.0\\.1|localhost):${port}\\b`).test(serveRaw);
-  return { installed: true, up, dns, serving, cliPath: bin, url: serving ? `https://${dns}` : undefined };
+  if (!serving) return { installed: true, up, dns, serving: false, cliPath: bin };
+  // Ask the address itself. A proxy with no certificate is configured and
+  // useless, and saying "reachable at …" about it sends people to a browser
+  // error (a Mac, 2026-09-21).
+  const probe = await fetch(`https://${dns}/healthz`, { signal: AbortSignal.timeout(6000) })
+    .then((r) => ({ ok: r.ok, why: r.ok ? undefined : `answered ${r.status}` }))
+    .catch((err: unknown) => ({ ok: false, why: String((err as Error)?.message ?? err).slice(0, 160) }));
+  return {
+    installed: true, up, dns, serving, cliPath: bin,
+    reachable: probe.ok,
+    unreachableWhy: probe.ok ? undefined : probe.why,
+    url: probe.ok ? `https://${dns}` : undefined,
+  };
 }

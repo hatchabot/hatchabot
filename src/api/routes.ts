@@ -832,10 +832,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // (like the other PWA shell assets) — it encodes only the reachable URL,
     // which just opens the login screen, and an <img> can't carry auth anyway.
     app.get('/app-qr.svg', async (req, reply) => {
-      const origin = deps.publicUrl?.replace(/\/$/, '') || `${req.protocol}://${req.headers.host}`;
+      const origin = appUrlFor() || `${req.protocol}://${req.headers.host}`;
       const svg = await QRCode.toString(origin, { type: 'svg', margin: 1, errorCorrectionLevel: 'M' });
       return reply.header('cache-control', 'no-cache').type('image/svg+xml').send(svg);
     });
+  }
+
+  /**
+   * The address to SHOW people, when nobody has set `HATCHABOT_PUBLIC_URL`.
+   *
+   * A machine serving itself on a tailnet already has a real HTTPS address,
+   * and printing `http://localhost:8080` on a QR code for a phone is useless
+   * — the phone is not this machine. So the detected address stands in for
+   * display: the install QR, the invite links, the address the app shows.
+   *
+   * Refreshed on a timer and whenever the Tailscale routes run — never inline
+   * from a request, least of all the unauthenticated /v1/config, because the
+   * probe spawns a process.
+   */
+  let detectedUrl: string | undefined;
+  const refreshDetectedUrl = async (): Promise<void> => {
+    if (deps.publicUrl) return; // an explicit setting always wins
+    const info = await tailnetInfo(Number(process.env.PORT ?? 8080)).catch(() => undefined);
+    detectedUrl = info?.url;
+  };
+  const appUrlFor = (): string | undefined => deps.publicUrl?.replace(/\/$/, '') || detectedUrl;
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    setTimeout(() => { void refreshDetectedUrl(); }, 4_000).unref();
+    setInterval(() => { void refreshDetectedUrl(); }, 10 * 60_000).unref();
   }
 
   /**
@@ -847,7 +871,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const port = Number(process.env.PORT ?? 8080);
     const info = await tailnetInfo(port).catch(() => ({ installed: false }));
-    return { ...info, port, publicUrl: deps.publicUrl?.replace(/\/$/, '') || undefined };
+    if (!deps.publicUrl) detectedUrl = (info as { url?: string }).url;
+    return { ...info, port, publicUrl: appUrlFor() };
   });
 
   /**
@@ -872,6 +897,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     }
     const after = await tailnetInfo(port).catch(() => before);
+    if (!deps.publicUrl) detectedUrl = after.url;
     trace()('tailscale.serve_enabled', { dns: after.dns, serving: after.serving === true });
     return { ...after, turnedOn: true };
   });
@@ -906,7 +932,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     /** How many rebuilds run at once, so the app can estimate a fleet-wide one. */
     rebuildConcurrency: REBUILD_CONCURRENCY,
     /** The address /app-qr.svg encodes, so the app can name it beside the code. */
-    appUrl: deps.publicUrl?.replace(/\/$/, '') || undefined,
+    appUrl: appUrlFor(),
     identity:
       deps.authMode === 'identity'
         ? {
@@ -2599,7 +2625,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ? store.listMemberships(ops.id).find((m) => m.role === 'owner' && m.status === 'active')?.channelUserId
         : undefined;
     },
-    appUrl: () => deps.publicUrl?.replace(/\/$/, '') || undefined,
+    appUrl: () => appUrlFor(),
     log: (event, detail) => app.log.info(detail, event),
   });
 
@@ -6762,7 +6788,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       code,
       expiresAt,
       path,
-      url: deps.publicUrl ? `${deps.publicUrl.replace(/\/$/, '')}${path}` : undefined,
+      url: appUrlFor() ? `${appUrlFor()}${path}` : undefined,
     });
   });
 

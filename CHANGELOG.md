@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.26.0] — 2026-09-21
+
+### Fixed
+- **"Reachable at …" now means the address answered.** The step decided it was done by reading `tailscale serve status` — which says a proxy is *configured*, not that it works. A tailnet that has never issued an HTTPS certificate serves a perfectly configured address that every browser refuses, so the guide ticked the step off and the link failed. Hatchabot now fetches `https://<machine>/healthz` before claiming anything, and when it does not answer the step says so and names the three things it actually is: certificates never enabled for the tailnet (with a link to the admin page that turns them on), a certificate still being issued, or the sandboxed macOS App Store build.
+- **The install QR pointed at `localhost`.** With no `HATCHABOT_PUBLIC_URL` set, "Install as an app" encoded `http://localhost:8080` — useless on the phone that is supposed to scan it. When the machine is serving itself on a tailnet, that address now stands in for display: the install QR, the invite links and the address the app shows. Setting `HATCHABOT_PUBLIC_URL` still wins, and is still the durable answer.
+
 ## [2.25.0] — 2026-09-21
 
 ### Added

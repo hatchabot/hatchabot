@@ -2771,8 +2771,8 @@ function setupSteps() {
         — someone knocking, a card waiting — down the same conversation. Confirming still happens here, in the app.</p>
       ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openV2Agent('${jsq(ops.id)}','messaging')">Open its chat apps</button></div>`
             : `<p class="sub" style="margin:0">Set the agent up first — the step above.</p>`}` },
-    { key: 'https', done: httpsDone || !!tailnet?.serving,
-      title: httpsDone || tailnet?.serving
+    { key: 'https', done: httpsDone || !!tailnet?.reachable,
+      title: httpsDone || tailnet?.reachable
         ? `Reachable at ${esc(((tailnet?.url || appConfig?.appUrl) ?? '').replace(/^https:\/\//, ''))}`
         : 'Reach it from your phone, over HTTPS',
       body: tailnetStepBody() },
@@ -2793,6 +2793,20 @@ function setupSteps() {
 function tailnetStepBody() {
   const port = tailnet?.port ?? 8080;
   const cmd = `tailscale serve --bg http://localhost:${port}`;
+  // Configured but not answering: the usual cause is that the tailnet has
+  // never issued an HTTPS certificate, which no amount of `serve` will fix.
+  if (tailnet?.serving && !tailnet.reachable) {
+    return `<p class="sub" style="margin:4px 0 6px"><b style="color:var(--warn)">Almost.</b> Tailscale is serving this machine at
+        <code>https://${esc(tailnet.dns ?? '')}</code>, but that address did not answer${tailnet.unreachableWhy ? ` — <i>${esc(tailnet.unreachableWhy)}</i>` : ''}.</p>
+      <p class="sub" style="margin:0 0 6px">Almost always one of these:</p>
+      <ul class="sub" style="margin:0 0 6px 18px">
+        <li><b>HTTPS certificates are off for your tailnet.</b> Turn them on once, in the Tailscale admin console under
+          <a href="https://login.tailscale.com/admin/dns" target="_blank" rel="noopener">DNS → HTTPS Certificates</a>, then reload this.</li>
+        <li><b>The first certificate is still being issued</b> — it can take a half a minute. Try the address again.</li>
+        <li>On macOS, the <b>App Store build is sandboxed</b>; if it cannot serve, install Tailscale from tailscale.com instead.</li>
+      </ul>
+      <p class="sub" style="margin:0">Meanwhile the app still works here on <code>http://localhost:${port}</code>.</p>`;
+  }
   if (tailnet?.serving && tailnet.url) {
     return `<p class="sub" style="margin:4px 0 6px">This machine is on your tailnet and already serving over HTTPS. Open this on your phone —
         it works anywhere Tailscale is connected, and nothing is exposed to the internet:</p>
