@@ -18,6 +18,7 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
+import { randomBytes } from 'node:crypto';
 import { hashPassword, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
@@ -980,6 +981,90 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const supervised = !!(process.env.INVOCATION_ID || process.env.XPC_SERVICE_NAME);
     if (supervised && !process.env.VITEST) setTimeout(() => process.exit(0), 1200).unref();
     return { ok: true, username, adopted, restarting: supervised };
+  });
+
+  /**
+   * "Forgot password?" — without a terminal, and without an email server.
+   *
+   * Every account that has used Telegram with Hatchabot has a Telegram id
+   * that is provably theirs: the owner linked it with "That's me", a member
+   * was admitted by it. A reset link goes to that id, through a bot it has
+   * already talked to (a bot cannot message someone first), and to nowhere
+   * else. Being able to type a username is not enough to reset anything: you
+   * also have to be holding that person's Telegram.
+   *
+   * The answer is identical whatever happens — an unknown username, an
+   * account with no Telegram, a link sent — so this is not a way to learn who
+   * has an account. The link is one use and short-lived, the old password
+   * keeps working until it is used, and a username can ask at most once every
+   * few minutes.
+   */
+  const recoverySentAt = new Map<string, number>();
+  const RECOVERY_EVERY_MS = 5 * 60_000;
+  const RECOVERY_TTL_MS = 15 * 60_000;
+  app.post<{ Body: { username?: string } }>('/v1/local-accounts/recover', async (req, reply) => {
+    const mode = deps.authMode ?? 'password';
+    if (mode === 'password') return reply.code(404).send({ error: 'Not found' });
+    const same = { ok: true };
+    const started = Date.now();
+    const settle = async () => {
+      // Roughly constant time: a path that sends a message must not answer
+      // measurably later than one that found nothing.
+      const left = 900 - (Date.now() - started);
+      if (left > 0) await new Promise((r) => setTimeout(r, left));
+      return same;
+    };
+    const username = String(req.body?.username ?? '').trim();
+    if (!username || username.length > 64) return settle();
+    const key = username.toLowerCase();
+    // Anyone can post any username here, so the map must not grow without
+    // bound: forget entries past their window once it gets large.
+    if (recoverySentAt.size > 1000) {
+      const cutoff = Date.now() - RECOVERY_EVERY_MS;
+      for (const [k, t] of recoverySentAt) if (t < cutoff) recoverySentAt.delete(k);
+    }
+    const last = recoverySentAt.get(key) ?? 0;
+    if (Date.now() - last < RECOVERY_EVERY_MS) return settle();
+    recoverySentAt.set(key, Date.now());
+
+    const account = store.localAccountByUsername(username);
+    if (!account || account.disabled || account.pwHash === '') return settle();
+    const tgId = store.knownChannelUserId(account.id);
+    if (!tgId) return settle();
+
+    // A bot that has already talked to this person — the manager first.
+    const candidates = store.listAllActiveAgents()
+      .filter((a) => a.state === 'RUNNING' && store.listAllowedChannelUserIds(a.id).includes(tgId))
+      .sort((x, y) => Number(!!y.ops && y.ownerId === account.id) - Number(!!x.ops && x.ownerId === account.id));
+    let token: string | undefined;
+    let via: string | undefined;
+    for (const a of candidates) {
+      const ch = store.getChannelForAgent(a.id, 'telegram');
+      if (!ch) continue;
+      token = await secrets.get(ch.secretRef).catch(() => undefined);
+      if (token) { via = ch.accountId; break; }
+    }
+    if (!token) return settle();
+
+    const code = randomBytes(16).toString('base64url');
+    store.setLocalAccountClaim(account.id, code, new Date(Date.now() + RECOVERY_TTL_MS).toISOString());
+    const base = appUrlFor() || `${req.protocol}://${req.headers.host}`;
+    const text = [
+      `🔑 Hatchabot password reset for ${account.username}.`,
+      `Open this within 15 minutes to choose a new password:`,
+      `${base}/?claim=${code}`,
+      `If you did not ask for this, ignore it — nothing changes unless the link is used.`,
+    ].join('\n\n');
+    const send = deps.oauthFetch ?? fetch;
+    await send(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // No parse_mode: nothing in this message is markup.
+      body: JSON.stringify({ chat_id: tgId, text, disable_web_page_preview: true }),
+      signal: AbortSignal.timeout(8000),
+    }).catch((err: unknown) => app.log.warn({ err: String(err) }, 'recovery send failed'));
+    app.log.warn({ account: account.id, via }, 'account.recovery_link_sent');
+    return settle();
   });
 
   /** A QR for the tailnet address, so a phone can open it without typing. */

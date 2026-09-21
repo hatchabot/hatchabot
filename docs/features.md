@@ -473,6 +473,29 @@ managed AI credential. Details: [agent-environment.md](agent-environment.md).
 *is* the agent's identity — reveal the token only to recycle the bot into a
 future agent or move this one by hand.
 
+## Signing in
+
+A home install gives **each person their own account** — their own agents, AI
+sources and invites — rather than one shared password (`setup-host.sh`
+recommends it; an install that started with a shared password can switch in
+**⚙ Settings → You → Turn on family accounts**, which is one way).
+
+**Forgotten passwords, without a terminal:**
+
+- **Someone in the family** — the host owner presses **Send a reset link** next
+  to their name. It is a one-time link like an invitation: they choose their
+  own new password, and nobody else ever learns it. Their old password keeps
+  working until they use the link.
+- **Anyone, including the host owner** — **Forgot password?** on the sign-in
+  page sends a one-time link, valid for 15 minutes, to the Telegram account
+  already proven to be theirs (linked with *That's me*, or admitted to an
+  agent), through a bot they have talked to. Knowing a username is not enough
+  to reset anything; you also have to be holding that person's Telegram. The
+  page answers the same whether or not the account exists, so it cannot be used
+  to find out who has one.
+- **The host owner, with no Telegram linked** — the break-glass is still there:
+  `hatchabot accounts reset-password <you> <new>` on the machine itself.
+
 ## Members & invites
 
 To let someone in, tap **Invite…** on the card:

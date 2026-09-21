@@ -109,6 +109,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/members/:userId/reopen': 'app: later — holding the door open is a live decision the owner makes',
   'POST /v1/agents/:id/members/known': 'app: later — admitting a person is something only the owner does',
   'POST /v1/tailscale/use-for-links': 'app: later — it edits the .env the service reads',
+  'POST /v1/local-accounts/recover': 'app: secret — it sends a one-time sign-in link, and is used signed out',
   'POST /v1/local-accounts/:id/reset-link': 'app: secret — it mints a one-time sign-in link for another person',
   'POST /v1/auth/family-accounts': 'app: secret — it takes a new password, and cannot be undone',
   'POST /v1/tailscale/serve': 'app: later — putting the app on the tailnet is a decision for whoever runs the machine',

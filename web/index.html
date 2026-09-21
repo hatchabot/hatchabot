@@ -950,14 +950,16 @@
   </form>
   <form id="acctLogin" style="display:none" onsubmit="event.preventDefault();acctSignIn()">
     <div class="sub" id="acctLoginNote">Sign in with your account on this machine.</div>
-    <div class="sub" style="margin-top:4px">No account? Accounts are created by whoever runs this machine, in ⚙ Settings → You — there's no public sign-up, because anyone who could reach this page would get their own agents. Forgotten password? They can reset it there; if <b>they</b> are locked out, <code>hatchabot accounts reset-password &lt;user&gt; &lt;new&gt;</code> on the machine itself is the way back in.</div>
+    <div class="sub" style="margin-top:4px">No account? Accounts are created by whoever runs this machine, in ⚙ Settings → You — there's no public sign-up, because anyone who could reach this page would get their own agents.</div>
     <label>Username</label>
     <input type="text" id="loginUser" autocomplete="username">
     <label>Password</label>
     <input type="password" id="loginAcctPw" autocomplete="current-password">
-    <div class="actions" style="justify-content:flex-end">
+    <div class="actions" style="justify-content:space-between;align-items:center">
+      <a href="#" onclick="event.preventDefault();forgotPassword()">Forgot password?</a>
       <button class="primary" id="acctLoginBtn" type="submit">Sign in</button>
     </div>
+    <div class="sub" id="forgotOut" style="margin-top:8px"></div>
   </form>
   <form id="acctSetup" style="display:none" onsubmit="event.preventDefault();acctBootstrap()">
     <div class="sub">No accounts yet — create the first one. It becomes the host owner, which manages the others.</div>
@@ -2574,6 +2576,24 @@ function showLogin() {
     });
   }
 }
+/**
+ * "Forgot password?" A reset link goes to the Telegram account already proven
+ * to be yours, through a bot you have talked to — and to nowhere else. The
+ * answer is the same whether or not the account exists, so this page cannot
+ * be used to find out who has one; it says what to do in every case instead.
+ */
+async function forgotPassword() {
+  const username = ($('loginUser').value || '').trim() || (prompt('Your username:') || '').trim();
+  if (!username) return;
+  const out = $('forgotOut');
+  out.textContent = 'Sending…';
+  try { await api('/v1/local-accounts/recover', { method: 'POST', body: { username } }); } catch { /* same answer regardless */ }
+  out.innerHTML = `If <b>${esc(username)}</b> has used Telegram with Hatchabot, a reset link is on its way there now —
+    from one of your agents' bots, valid for 15 minutes. Your current password keeps working until you use it.
+    <br><br>No message? Ask whoever runs this machine to send you a reset link from ⚙ Settings → You.
+    If that is <b>you</b>, run <code>hatchabot accounts reset-password ${esc(username)} &lt;new-password&gt;</code> on the machine itself.`;
+}
+
 /** An invitation link: show who it is for, then let them choose a password. */
 async function loadClaim(code) {
   try {

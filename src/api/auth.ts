@@ -327,6 +327,10 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     // An invitation is claimed by someone who cannot sign in yet — the code is
     // the credential, and the route validates it.
     if (path === '/v1/local-accounts/claim') return;
+    // "Forgot password?" is asked by someone who cannot sign in. The route
+    // answers the same whatever the username, rate-limits, and only ever sends
+    // a link to a Telegram account already proven to be that person's.
+    if (path === '/v1/local-accounts/recover') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
     if (path === '/privacy' || path === '/terms') return;

@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.30.0] — 2026-09-21
+
+### Added
+- **"Forgot password?" on the sign-in page, answered over Telegram.** A self-hosted box has no email server, and "SSH in and run a command" is not an answer for most of a family. But anyone who has used Hatchabot through Telegram has a Telegram id already proven to be theirs — linked with *That's me*, or admitted to an agent. The reset link goes there, through a bot that has already talked to them (a bot cannot message someone first), and nowhere else: knowing a username is not enough, you also have to be holding that person's Telegram. The link is one use and lasts 15 minutes; the old password keeps working until it is used.
+
+### Security
+- The recovery route is the one new signed-out surface, so it gives nothing away: it answers identically — in body and, roughly, in time — for an unknown username, an account with no Telegram, and a link actually sent; it lets a username ask at most once every five minutes, case-insensitively; and it bounds the memory it keeps about who asked. The message carries no markup. In shared-password mode the route does not exist.
+
 ## [2.29.0] — 2026-09-21
 
 ### Added
