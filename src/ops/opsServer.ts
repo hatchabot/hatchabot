@@ -147,6 +147,28 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
 // ---- one per process, started the first time a management agent needs it ----
 let started: Promise<{ host: string; port: number }> | undefined;
 let handlersRef: OpsHandlers | undefined;
+let boundHost = '';
+
+/**
+ * Where the door ended up listening. `127.0.0.1` means no Docker address could
+ * be bound — Docker Desktop — and a doorman therefore reaches it through the
+ * VM's forwarder, which rewrites the source address. See `loopbackDoorman`.
+ */
+export const opsBoundHost = (): string => boundHost;
+
+/**
+ * On Docker Desktop a container's connection to `host.docker.internal` arrives
+ * at a loopback listener from the forwarder, never from the container's own
+ * address — so "is this peer one of my doormen?" can never be true there, and
+ * the management agent is refused both its tools and its AI (a Mac, 2026-09-21).
+ *
+ * When the door is on loopback, a loopback peer is therefore accepted: nothing
+ * outside this machine can reach it at all, and both paths still demand the
+ * per-agent key that is the actual authorisation. On Linux the door binds a
+ * Docker address, this returns false, and the doorman check is unchanged.
+ */
+export const loopbackDoorman = (ip: string): boolean =>
+  boundHost === '127.0.0.1' && (normalizeIp(ip) === '127.0.0.1' || ip === '::1');
 export function setOpsHandlers(h: OpsHandlers): void { handlersRef = h; }
 /** The registered handlers (tests drive the door through these). */
 export const getOpsHandlers = (): OpsHandlers | undefined => handlersRef;
@@ -207,6 +229,7 @@ export function ensureOpsServer(candidates: Array<string | undefined> = []): Pro
       }
     }
     if (!host) throw last ?? new Error('ops server could not bind');
+    boundHost = host;
     // With port 0 the kernel picked one: report what it actually bound.
     const bound = server.address();
     const actualPort = typeof bound === 'object' && bound ? bound.port : port;

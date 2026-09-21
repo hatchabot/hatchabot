@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.21.0] — 2026-09-21
+
+### Fixed
+- **The Hatchabot agent could not reach anything on a Mac.** Its tools and its AI both go through its doorman, and the ops door only admits a peer whose address matches that doorman's container. On Docker Desktop a container reaching the host arrives through the VM's forwarder, so the address never matches: the door answered `Not your door.` to its MCP calls and `403` to every outbound request, which surfaced as *"LLM request failed: network connection error"* seconds after the agent started. When the door had to bind loopback — which is what Docker Desktop forces — a loopback peer is now accepted. Nothing outside the machine can reach that port, and both paths still demand the per-agent key that is the actual authorisation; on Linux the door binds a Docker address and the check is unchanged.
+- **A brand-new agent greeted its owner with a pairing code and told nobody.** An agent nobody can reach yet runs in `pairing` mode on purpose — that is how its first person gets in — but the invite-only gate hid the resulting knock and the sweep turned it away, so the owner saw OpenClaw's "access not configured" reply in Telegram, the app showed no request, and nothing ever happened. A knock at an agent with an empty allowlist is now always shown. Once one person is admitted the agent moves to `allowlist` and a stranger cannot knock at all.
+- **The owner's claim window is half an hour**, the same as an invitee's. Ten minutes was a short leash for "make the agent, then go and find it in Telegram".
+
 ## [2.20.0] — 2026-09-21
 
 ### Changed

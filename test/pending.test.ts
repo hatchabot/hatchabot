@@ -83,6 +83,10 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
   it('an invite-only agent hides a knock from a stranger, and shows an expected one', async () => {
     const { store, provider, f } = await world();
     store.setAllowKnocks('a1', false); // the default
+    // Somebody can already reach it — otherwise it is a brand-new agent whose
+    // first knock is how its owner gets in, and those are always shown.
+    store.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
+    store.bindMembershipChannelUser('a1', OWNER, '111');
     pairingByAgent(provider, store, {
       Family: [{ id: '555', code: 'CODEA', meta: { firstName: 'Maria' } }],
     });

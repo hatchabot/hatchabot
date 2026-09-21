@@ -66,3 +66,22 @@ describe('who the door lets in', () => {
     expect(looks.length - after).toBeLessThanOrEqual(2);
   });
 });
+
+describe('Docker Desktop: the door on loopback', () => {
+  it('accepts a loopback peer when no Docker address could be bound, and still refuses container addresses that are not doormen', async () => {
+    const { ensureOpsServer, opsBoundHost, loopbackDoorman } = await import('../src/ops/opsServer.js');
+    const { peerOk } = await world(() => ['172.20.0.2']);
+    // Bind the way a Mac does: no docker address available, loopback taken.
+    await ensureOpsServer([undefined]);
+    expect(opsBoundHost()).toBe('127.0.0.1');
+    expect(loopbackDoorman('127.0.0.1')).toBe(true);
+    expect(loopbackDoorman('::1')).toBe(true);
+
+    // The doorman's connection arrives NAT'd, as loopback: let it in.
+    expect(await peerOk('127.0.0.1')).toBe(true);
+    expect(await peerOk('::ffff:127.0.0.1')).toBe(true);
+    // Its own address still works, and a stranger's still does not.
+    expect(await peerOk('172.20.0.2')).toBe(true);
+    expect(await peerOk('172.20.0.9')).toBe(false);
+  }, 10_000);
+});

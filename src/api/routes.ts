@@ -16,7 +16,7 @@ import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
-import { ensureOpsServer } from '../ops/opsServer.js';
+import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -672,6 +672,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             runtimeRef: result.agent.runtimeRef,
             accountId: channelRow.accountId,
             forUserId: result.agent.ownerId,
+            // The same half hour an invitee gets. Ten minutes is a short leash
+            // for "make the agent, then go and find it in Telegram".
+            timeoutMs: 30 * 60_000,
           },
         ).catch((err) => app.log.error({ err, agentId }, 'owner claim failed'));
       }
@@ -2521,6 +2524,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       await refreshDoormen();
       if (doormen.ips.has(ip)) return true;
     }
+    // Docker Desktop: the door is on loopback and the doorman's connection
+    // arrives from the VM's forwarder, so no container address can ever match.
+    // The key still authorises; this only decides who may present one.
+    if (loopbackDoorman(ip)) return true;
     // A runtime with no doormen at all (the mock in tests) keeps the old behaviour.
     return !doormen.supported;
   };
@@ -6901,6 +6908,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   ): boolean => {
     if (agent.allowKnocks === true) return true;
     if (store.isKnownChannelUser(agent.ownerId, r.kind, r.id)) return true;
+    // An agent NOBODY can reach yet is in pairing mode by our own rule
+    // (provision.ts) — precisely so its first person can get in. Hiding the
+    // knock it just answered would leave a fresh agent greeting its owner with
+    // a pairing code while the app said nothing and the sweep quietly turned
+    // them away. Once one person is admitted the agent goes to `allowlist` and
+    // a stranger cannot knock at all.
+    if (!store.listAllowedChannelUserIds(agent.id, r.kind).length) return true;
     const win = store.pairingWindow(agent.id);
     if (!win) return false;
     // A window opened FOR somebody admits only them: an open door is not an

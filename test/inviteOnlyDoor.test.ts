@@ -235,3 +235,39 @@ describe('reopening the door after a window lapses', () => {
     expect(notMine.statusCode).toBe(404);
   });
 });
+
+describe('the first person into a fresh agent', () => {
+  it('is shown, not hidden: an agent with an empty allowlist must show its knocks', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { registerRoutes } = await import('../src/api/routes.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const s = world();
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} } as never);
+    s.setAgentRuntimeRef('a1', runtimeRef);
+    s.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'TaxBot', secretRef: 's', deepLink: 'https://t.me/TaxBot', createdAt: 'now' } as never);
+    // Brand new: an owner seat with no Telegram id bound, so nobody can reach it.
+    s.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
+    expect(s.listAllowedChannelUserIds('a1')).toEqual([]);
+    provider.execShell = (async () => ({
+      code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '4242', code: 'FIRST', meta: { firstName: 'Chris' } }] }), stderr: '',
+    })) as never;
+
+    const f = Fastify();
+    await registerRoutes(f, {
+      store: s, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never,
+      providers: new Map([['mock', provider]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+    } as never);
+    const pending = await f.inject({ method: 'GET', url: '/v1/pending', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(pending.json()).toHaveLength(1); // the owner knocking at their own new agent
+
+    // Once somebody is on the list, a different stranger is hidden again.
+    s.bindMembershipChannelUser('a1', OWNER, '4242');
+    provider.execShell = (async () => ({
+      code: 0, stdout: JSON.stringify({ version: 1, requests: [{ id: '9999', code: 'LATER', meta: {} }] }), stderr: '',
+    })) as never;
+    const after = await f.inject({ method: 'GET', url: '/v1/pending', headers: { 'x-hatchabot-owner': OWNER } });
+    expect(after.json()).toEqual([]);
+  });
+});
