@@ -518,6 +518,18 @@
   /* A card whose whole contents are hidden (an admin-only block, say) draws
      nothing rather than an empty box. */
   .v2card:not(:has(> *:not([hidden]))) { display:none }
+  /* The agent's settings sheet, in the same outlined sections as ⚙ Settings.
+     Its rows and the sections it borrows from the classic editor are drawn as
+     cards by CSS alone: the rows are regenerated on every render, and the
+     borrowed sections go home again when the sheet closes, so neither is
+     re-parented to get its outline. */
+  .v2sheet .v2pane > .v2row,
+  .v2sheet .v2pane > [data-v2slot]:not(:empty):not([data-v2slot="paneEditTg"]) {
+    border:1px solid var(--line); border-radius:12px; padding:10px 12px; margin:8px 0; background:var(--panel) }
+  .v2sheet .v2pane > .v2row:last-child { border-bottom:1px solid var(--line) }
+  .v2sheet .v2pane > [data-v2slot] > h4.v2sec:first-child { margin-top:0 }
+  .v2sheet .v2pane > h4.v2sec { margin:16px 2px 4px }
+  .v2sheet .v2card { padding:10px 12px; margin:8px 0 }
   body.v2 .v2card .sec-drawer { border:0; padding:0; margin-top:8px }
   .v2join { align-self:stretch; border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:14px;
             display:flex; gap:8px; align-items:center; flex-wrap:wrap }
@@ -1313,7 +1325,7 @@
       </div>
     </div>
 
-    <label style="margin-top:14px">🚪 Who can reach it</label>
+    <label class="v2secstart" style="margin-top:14px">🚪 Who can reach it</label>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select id="tgAllowKnocks" style="width:auto" onchange="saveAllowKnocks()">
         <option value="off">Invite only (default)</option>
@@ -1322,7 +1334,7 @@
       <span class="sub" id="tgAllowKnocksHelp"></span>
     </div>
 
-    <label style="margin-top:14px">✨ Rich messages <span style="color:var(--dim)">— formatting in replies</span></label>
+    <label class="v2secstart" style="margin-top:14px">✨ Rich messages <span style="color:var(--dim)">— formatting in replies</span></label>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select id="tgRichMessages" style="width:auto" onchange="saveRichMessages()">
         <option value="on">On (default)</option>
@@ -1331,7 +1343,7 @@
       <span class="sub">bold, code blocks, links render properly · applies on the next <b>Rebuild</b></span>
     </div>
 
-    <details class="sec-drawer" id="tgGroupDrawer">
+    <details class="sec-drawer v2secstart" id="tgGroupDrawer">
       <summary><b>👥 Group chats</b> <span class="sub">— who it answers in groups, and the BotFather setup</span></summary>
       <label style="margin-top:10px">Who may talk to it in groups</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1372,7 +1384,7 @@
       </details>
     </details>
 
-    <label style="margin-top:14px">🔑 The bot <span id="tgBotWho" style="color:var(--dim)"></span></label>
+    <label class="v2secstart" style="margin-top:14px">🔑 The bot <span id="tgBotWho" style="color:var(--dim)"></span></label>
     <div class="sub">Its token <i>is</i> this agent's identity on Telegram — treat it like a password.
       Reveal it to move the bot to another machine, or to reuse it somewhere else.</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
@@ -2996,7 +3008,7 @@ let v2SettingsGroup = 'ai';
  * the markup so both looks share one source, and idempotent — panes are shown
  * again every time you switch tabs.
  */
-function v2Sectionise(pane) {
+function v2Sectionise(pane, isBreak = (kid) => kid.tagName === 'H4') {
   if (!pane || pane.dataset.sectioned === '1') return;
   pane.dataset.sectioned = '1';
   let run = [];
@@ -3009,7 +3021,7 @@ function v2Sectionise(pane) {
     run = [];
   };
   for (const kid of [...pane.children]) {
-    if (kid.tagName === 'H4') flush();
+    if (isBreak(kid)) flush();
     run.push(kid);
   }
   flush();
@@ -9680,6 +9692,9 @@ function v2EmbedPanes(a, tab) {
     const slot = $('v2Pane').querySelector(`[data-v2slot="${paneId}"]`); if (!slot) continue;
     if (heading) slot.insertAdjacentHTML('beforeend', `<h4 class="v2sec">${esc(heading)}</h4>`);
     const pane = $(paneId); pane.hidden = false; slot.append(pane);
+    // The one borrowed section with sub-sections of its own: card each one,
+    // the way ⚙ Settings does. Idempotent, so reopening the sheet is free.
+    if (paneId === 'paneEditTg') v2Sectionise(pane, (kid) => kid.classList?.contains('v2secstart'));
   }
   for (const [blockId] of V2_MOVED) {
     const blockSlot = $('v2Pane').querySelector(`[data-v2slot="${blockId}"]`);

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.28.1] — 2026-09-21
+
+### Changed
+- **The agent's settings sheet is outlined the way ⚙ Settings is.** Every row of its tabs — Name & icon, AI, Group, Class, Telegram and so on — and every section it borrows from the editor (Folders, Connections, Snapshots, Environment) is its own card. The Telegram tab is split further into Members, Who can reach it, Rich messages, Group chats and The bot. Rows and borrowed sections are outlined by CSS alone, so nothing is re-parented to get a border; only the Telegram section is split into cards, once.
+
 ## [2.28.0] — 2026-09-21
 
 ### Added
