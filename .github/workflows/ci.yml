@@ -50,3 +50,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: ./scripts/upgrade-check.sh
+      # The installer reads channels.json from main: a channel naming a tag
+      # that does not exist would send every new install to "no release".
+      - name: channels.json names real releases
+        run: |
+          for t in $(grep -oE '"v[^"]+"' channels.json | tr -d '"'); do
+            git rev-parse -q --verify "refs/tags/$t" >/dev/null || { echo "channels.json names $t, which is not a tag"; exit 1; }
+          done

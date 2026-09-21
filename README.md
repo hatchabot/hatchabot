@@ -137,8 +137,25 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main
 The script checks prerequisites, installs dependencies, generates a `.env`
 (asking how people will sign in — an account for each person is the default, a single shared password the other choice), pulls the pre-built agent runtime image (or builds it if the pull fails),
 installs a background service, and links the `hatchabot` CLI. `hatchabot doctor` checks the result. It's safe to
-re-run. **Upgrade** with `git fetch --tags && git checkout vX.Y.Z && ./scripts/restart.sh`
-(releases: [github.com/hatchabot/hatchabot/releases](https://github.com/hatchabot/hatchabot/releases)).
+re-run — and re-running it is how you **upgrade**.
+
+**Release channels.** The installer takes the **`stable`** release unless told
+otherwise, and remembers the channel so an upgrade stays on it:
+
+| Channel | What it is |
+|---|---|
+| `stable` (default) | what new users get; moved deliberately, after a release has been in use for a while |
+| `beta` | the next stable, for people willing to try it first |
+| `latest` | the newest tagged release, whatever it is |
+| `v2.30.3` | exactly that release, and stay there |
+
+```sh
+HATCHABOT_CHANNEL=beta bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"
+curl -fsSL https://hatchabot.com/install.sh | bash -s -- latest
+```
+
+`HATCHABOT_DRY_RUN=1` says which release it would install and stops. Releases
+and their notes: [github.com/hatchabot/hatchabot/releases](https://github.com/hatchabot/hatchabot/releases).
 
 **Uninstall** with `./scripts/uninstall.sh` — it reverses the install: stops and
 removes the service (systemd units or launchd plists), unlinks the CLI, and

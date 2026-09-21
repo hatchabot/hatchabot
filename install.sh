@@ -10,6 +10,17 @@
 # `hatchabot` command. Re-running is safe. Set HATCHABOT_DIR to install elsewhere.
 set -euo pipefail
 DIR="${HATCHABOT_DIR:-$HOME/hatchabot}"
+# Which release to install — a channel, or an exact version:
+#   stable  (the default) what new users get; moved deliberately, after a soak
+#   beta    the next stable, for people willing to try it first
+#   latest  the newest tagged release, whatever it is
+#   v2.30.3 exactly that release
+# Set it with HATCHABOT_CHANNEL=beta, or as the first argument. An install
+# remembers its channel, so re-running this upgrades along the same one.
+CHANNEL_FILE="$HOME/.config/hatchabot/channel"
+CHANNEL="${HATCHABOT_CHANNEL:-${1:-}}"
+if [ -z "$CHANNEL" ] && [ -f "$CHANNEL_FILE" ]; then CHANNEL="$(tr -d '[:space:]' < "$CHANNEL_FILE")"; fi
+CHANNEL="${CHANNEL:-stable}"
 REPO="${HATCHABOT_REPO:-https://github.com/hatchabot/hatchabot.git}"
 OS="$(uname -s)"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
@@ -64,8 +75,27 @@ if [ -d "$DIR/.git" ]; then
 else
   git clone --quiet "$REPO" "$DIR"
 fi
-LATEST="$(git -C "$DIR" tag -l 'v[0-9]*' --sort=-v:refname | head -1)"
+newest() { git -C "$DIR" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
+case "$CHANNEL" in
+  latest) LATEST="$(newest)" ;;
+  v[0-9]*)
+    git -C "$DIR" rev-parse -q --verify "refs/tags/$CHANNEL" >/dev/null || die "There is no release $CHANNEL."
+    LATEST="$CHANNEL" ;;
+  stable|beta)
+    # Named releases live in channels.json on main, so promoting one is a
+    # one-line commit and never a new tag.
+    LATEST="$(git -C "$DIR" show origin/main:channels.json 2>/dev/null | grep "\"$CHANNEL\"" | sed -E 's/.*"(v[^"]+)".*/\1/' | head -1)"
+    if [ -z "$LATEST" ]; then
+      echo "   (no $CHANNEL release is named yet — using the newest)"
+      LATEST="$(newest)"
+    fi ;;
+  *) die "Unknown channel '$CHANNEL' — use stable, beta, latest, or a version like v2.30.3." ;;
+esac
 [ -n "$LATEST" ] || die "No release tags found in $REPO."
+if [ "${HATCHABOT_DRY_RUN:-0}" = "1" ]; then
+  echo "   channel $CHANNEL → release $LATEST  (dry run: nothing checked out or installed)"
+  exit 0
+fi
 CUR="$(git -C "$DIR" describe --tags --exact-match 2>/dev/null || echo none)"
 if [ "$CUR" != "$LATEST" ]; then
   if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
@@ -80,7 +110,7 @@ Then re-run this installer. (Your .env, data/ and backups are untouched either w
   fi
   git -C "$DIR" checkout --quiet "$LATEST"
 fi
-echo "   release $LATEST"
+echo "   channel $CHANNEL → release $LATEST"
 
 # Is Hatchabot already installed, from somewhere else? Running setup-host.sh
 # here would point the service at THIS directory — replacing a working install
@@ -100,6 +130,12 @@ Installing into $DIR would repoint the service at it and leave the other one dar
   Remove the existing one first:  cd $INSTALLED && ./scripts/uninstall.sh"
   fi
 fi
+
+mkdir -p "$(dirname "$CHANNEL_FILE")"
+# Remember it OUTSIDE the clone: a file inside would be an untracked change,
+# and the next upgrade's "local changes?" check would refuse to move. A pinned
+# version is remembered too — re-running stays pinned until told otherwise.
+printf '%s\n' "$CHANNEL" > "$CHANNEL_FILE"
 
 cd "$DIR"
 exec ./scripts/setup-host.sh

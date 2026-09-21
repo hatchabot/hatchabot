@@ -22,6 +22,24 @@
 - Protect `main` on GitHub: require the CI check and a linear history. (Settings
   → Branches → Add rule → `main`.)
 
+## Channels — releasing fast without moving new users
+
+A tag is a release, and **tagging makes a release `latest` — nothing more.**
+New installs take **`stable`**, which names a release in `channels.json` on
+`main` and moves only when you say so:
+
+```sh
+./scripts/promote.sh v2.31.0          # stable → v2.31.0
+./scripts/promote.sh v2.32.0 beta     # beta   → v2.32.0
+```
+
+So the rhythm is: tag and deploy to your own machines as often as you like;
+promote to `beta` when a release is worth testers' time; promote to `stable`
+once it has run for a while without surprises. Rolling `stable` back is the
+same command with an older tag (it asks first). CI checks that every tag
+`channels.json` names exists. The installer remembers each machine's channel
+(`~/.config/hatchabot/channel`), so re-running it upgrades along that channel.
+
 ## Cutting a release
 
 1. `npm test && npm run typecheck` green on `main`, and

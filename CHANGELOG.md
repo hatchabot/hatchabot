@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.31.0] — 2026-09-21
+
+### Added
+- **Release channels.** The installer used to check out the newest tag, so every release was what the next stranger installed — the reason rapid development and a public install could not coexist. It now installs **`stable`** by default: a release named in `channels.json` on `main`, which moves only when `./scripts/promote.sh <tag>` says so. Tagging makes a release `latest` and nothing more. `beta` names the next stable for people testing it; `latest` is the newest tag; an exact version pins. Choose with `HATCHABOT_CHANNEL=beta` or as the installer's first argument; the choice is remembered per machine, outside the clone (a file inside would count as a local change and block the next upgrade), so re-running the installer is the upgrade and stays on its channel. `HATCHABOT_DRY_RUN=1` says what it would install and stops. CI checks every tag `channels.json` names exists.
+- `stable` and `beta` both start at this release.
+
+### Changed
+- **The website and deck hint at what you can build instead of telling two long stories.** *Build on it* is four application shapes — an agent anyone can email, one agent per client, agents that check agents, an agent you hand over — in about 200 words instead of 850, and the deck's two build slides are one. The OpenAI Assistants API and Agent Builder dates were checked against OpenAI's deprecations page (shut down 2026-08-26; shutting down 2026-11-30) and stand.
+
 ## [2.30.3] — 2026-09-21
 
 ### Changed
