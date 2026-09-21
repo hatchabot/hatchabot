@@ -24,8 +24,9 @@ server-side, and the web app can log in through Identity Platform's REST API
 
 `auth.ts` has a mode switch (env: `HATCHABOT_AUTH=password|accounts|identity`):
 
-- `password` — today's behavior, unchanged. The default. A home install
-  never needs a Google project.
+- `password` — one shared password, no accounts. Still offered by the
+  installer, no longer its default (2.29.0). A home install never needs a
+  Google project either way.
 - `accounts` — **local accounts, shipped in 1.8.0**: several people, each
   with their own username and password in this installation's database
   (scrypt-hashed). No cloud project, nothing to register — the reason it
@@ -122,8 +123,12 @@ requires Cloud Run to exist yet.
 
 ## Accounts mode — local logins, no cloud (1.8.0)
 
-Set `HATCHABOT_AUTH=accounts` in `.env` and restart. The app then asks for a
-username and password instead of the shared one.
+**The installer's default since 2.29.0.** An install that started with a
+shared password switches from **⚙ Settings → You → Turn on family accounts**:
+the owner picks a username, becomes account #1 and adopts everything, and the
+service writes `HATCHABOT_AUTH=accounts` and restarts itself — no terminal, and
+no first-run window, because the account exists before the mode changes. By
+hand: set `HATCHABOT_AUTH=accounts` in `.env` and restart.
 
 - **First run** shows "create the first account" — nobody can sign in yet, so
   the bootstrap route is open exactly until account #1 exists, the same trust
@@ -185,11 +190,15 @@ creating agents on your AI plan. Accounts are handed out by the host owner in
 
 | Situation | Path |
 |---|---|
-| Someone forgot their password | Host owner → ⚙ Settings → You → **Reset password** |
+| Someone forgot their password | Host owner → ⚙ Settings → You → **Send a reset link** — one use, 48 h, they choose their own |
+| Anyone, including the host owner, with a linked Telegram | **Forgot password?** on the sign-in page → a one-use link, valid 15 minutes, sent to that Telegram through a bot it has talked to |
 | You want to change your own | ⚙ Settings → You → **Your password** (needs the current one) |
-| **The host owner is locked out** | On the machine: `hatchabot accounts reset-password <username> <new-password>` |
+| **The host owner is locked out with no Telegram linked** | On the machine: `hatchabot accounts reset-password <username> <new-password>` |
 
-That last one is deliberately a local command, not an API call: there is no
-email to send a reset link to, so *write access to the database* is the proof
-of ownership — the same trust level as editing `HATCHABOT_PASSWORD` in `.env`.
+The Telegram path proves identity by possession of an account already bound to
+that person; the recovery route answers identically whether or not an account
+exists, and limits each username to one request per five minutes. The last row
+is deliberately a local command: with nothing else to prove ownership, *write
+access to the database* is the proof — the same trust level as editing
+`HATCHABOT_PASSWORD` in `.env`.
 `hatchabot accounts` on its own lists who exists.

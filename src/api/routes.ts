@@ -6350,6 +6350,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       telegramUserId: store.accountTelegram(me.ownerId),
       /** True for the account that owns this machine (admin actions in the UI). */
       hostOwner: ownsLocalHost(req),
+      /**
+       * The machine's OS, for the machine's owner only: what the setup guide
+       * can offer depends on it. "Use this machine's Claude login" only works
+       * where the agents' containers can use the host's own login — Linux —
+       * and on a Mac it silently makes a source that cannot work.
+       */
+      ...(ownsLocalHost(req) ? { hostOs: process.platform } : {}),
     };
   });
 

@@ -130,7 +130,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main
 (or by hand: `git clone https://github.com/hatchabot/hatchabot.git hatchabot && cd hatchabot && git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")" && ./scripts/setup-host.sh`)
 
 The script checks prerequisites, installs dependencies, generates a `.env`
-(asking you to choose an app password), pulls the pre-built agent runtime image (or builds it if the pull fails),
+(asking how people will sign in — an account for each person is the default, a single shared password the other choice), pulls the pre-built agent runtime image (or builds it if the pull fails),
 installs a background service, and links the `hatchabot` CLI. `hatchabot doctor` checks the result. It's safe to
 re-run. **Upgrade** with `git fetch --tags && git checkout vX.Y.Z && ./scripts/restart.sh`
 (releases: [github.com/hatchabot/hatchabot/releases](https://github.com/hatchabot/hatchabot/releases)).
@@ -146,7 +146,7 @@ again. `--purge` is the clean slate
 backup sets too, and both ask you to type `purge` first. Telegram bots can only
 be deleted at @BotFather → `/mybots` → `/deletebot`.
 
-Then open **http://localhost:8080**, unlock with your password, and:
+Then open **http://localhost:8080** on that machine — with accounts you create your own there and become its owner; with a shared password you unlock with it — and:
 
 1. **Connect an AI source** (⚙ Settings → AI sources). If the `claude` CLI is logged in on this
    machine, it's one tap. On macOS, run `claude setup-token` and paste the

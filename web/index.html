@@ -2820,14 +2820,14 @@ function setupSteps() {
     { key: 'ai', done: aiDone, title: aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', body: `
       <p class="sub" style="margin:4px 0 6px">A Claude subscription (Pro or Max) powers every agent. On the machine running Hatchabot, run
         <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.
-        Logged into Claude on this very machine (Linux)? Leave the token blank — it's one tap.</p>
+        ${myAccount.hostOs === 'linux' ? "Logged into Claude on this very machine? Leave the token blank — it's one tap." : ''}</p>
       <label>Model</label>
       <select id="setupModel" style="width:auto">
         <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
         <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
       </select>
       <label>Setup token</label>
-      <input type="password" id="setupToken" placeholder="paste the token printed by: claude setup-token   (blank = use this machine's Claude login)" autocomplete="off">
+      <input type="password" id="setupToken" placeholder="${myAccount.hostOs === 'linux' ? "paste the token printed by: claude setup-token   (blank = use this machine's Claude login)" : 'paste the token printed by: claude setup-token'}" autocomplete="off">
       <div class="err" id="setupErr"></div>
       <div class="actions" style="justify-content:space-between;align-items:center">
         <span class="sub">Using an API key or a local model instead? <a href="#" onclick="event.preventDefault();openAiDlg('ai')">⚙ AI sources</a></span>
@@ -3040,6 +3040,13 @@ async function wizardAddBot() {
 }
 
 async function createSubscriptionProfile() {
+  // A blank token means "use this machine's own Claude login", which only
+  // works where the containers can reach that login — Linux. On a Mac it made
+  // a source that looked fine and could never answer.
+  if (!$('setupToken').value.trim() && myAccount.hostOs && myAccount.hostOs !== 'linux') {
+    $('setupErr').textContent = 'On this machine the agents need a token: run `claude setup-token` in a terminal and paste what it prints.';
+    return;
+  }
   try {
     await api('/v1/ai-profiles', { method: 'POST', body: {
       kind: 'subscription', vendor: 'anthropic',

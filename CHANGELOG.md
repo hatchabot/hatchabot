@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.30.1] — 2026-09-21
+
+### Fixed
+- **The setup wizard no longer tells a Mac to leave the Claude token blank.** "Use this machine's Claude login" only works where the agents' containers can reach that login — Linux — and on a Mac it quietly made a source that could never answer. The option is now offered only on a Linux machine, and a blank token elsewhere is refused with the command to run instead.
+
+### Changed
+- **Docs, deck and website caught up.** README, quickstart and identity docs describe per-person accounts as the default, reset links and Telegram recovery; the deck gains *Private by default, easy to share* and stops describing Slack and Discord as live or strangers as getting a code to approve; the website carries the same corrections and two new questions. `docs/audit-2026-09-21.md` is the 24th audit, with the beta blockers.
+
 ## [2.30.0] — 2026-09-21
 
 ### Added

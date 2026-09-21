@@ -71,7 +71,7 @@ Afterwards, `hatchabot doctor` checks the whole installation and says what to fi
 > a version that passed its tests and has release notes — not whatever `main`
 > is at this minute.
 
-Open **http://localhost:8080** and unlock with your password. On a phone on the
+Open **http://localhost:8080** on this machine. With family accounts (the default) you create your own account there and become the owner; with a shared password you unlock with it. On a phone on the
 same network use the computer's address instead (e.g. `http://192.168.1.20:8080`) —
 and "Add to Home Screen" to get an app icon.
 
@@ -174,7 +174,7 @@ exposed to the internet.
 4. Install the Tailscale app on your phone, sign in with the same account, toggle on. Open `http://<machine>.<tailnet>.ts.net:8080` — add it to your home screen.
 5. To let a family member in: admin console → **Users → Invite users** (or **Machines → your machine → Share** to share only this box). They install the app, accept, and your invite links open on their phone.
 
-**Optional: HTTPS without owning a certificate**
+**Optional: HTTPS without owning a certificate.** The setup guide (**Setup** in the top bar) does this for you: it finds Tailscale — including the macOS app's copy, which is not on the PATH — offers **Turn on HTTPS**, checks the address actually answers before saying so, and offers **Use this address for links**, which writes `HATCHABOT_PUBLIC_URL`. By hand:
 ```sh
 sudo tailscale set --operator=$USER      # once: let your user manage serve
 tailscale serve --bg http://localhost:8080
