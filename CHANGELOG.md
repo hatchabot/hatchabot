@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.31.1] — 2026-09-21
+
+### Security
+- **The first account can no longer be taken over a tailnet without the setup code.** Creating account #1 from the machine itself skips the setup code, and "the machine itself" meant a connection from 127.0.0.1 — which is exactly what `tailscale serve` (the setup guide's HTTPS step) is for every device on the tailnet. A loopback request carrying forwarding headers (`X-Forwarded-For`, `Forwarded`, `Tailscale-User-Login`) now counts as remote. Wrong setup codes are also rate-limited like wrong passwords. Found by the 25th audit; only mattered before account #1 existed.
+- **Every response forbids framing by other sites** (`X-Frame-Options: SAMEORIGIN`), content sniffing, and cross-site referrers — so a page whose address carries a code (an invitation, a reset link) never hands it to another site. The embedded agent console, served through the app, still frames.
+
+### Changed
+- **The installer script follows `stable` too.** hatchabot.com's `install.sh` fetched the installer from `main`, so a change to it reached every new user at once — the one file the channels did not cover. It now fetches it from the release `stable` names.
+- `scripts/channels.sh` prints where `stable`, `beta` and `latest` point, what this machine runs, and every release.
+
 ## [2.31.0] — 2026-09-21
 
 ### Added

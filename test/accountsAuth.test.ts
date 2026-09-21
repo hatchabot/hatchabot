@@ -364,6 +364,36 @@ describe('first-run bootstrap is not open to the network', () => {
     const { f: f2 } = await app(); // inject() with no forwarded header is loopback
     expect((await bootstrap(f2)).statusCode).toBe(201);
   });
+
+  // Production runs without trustProxy, so req.ip is the socket. But
+  // `tailscale serve` connects from 127.0.0.1 for every tailnet device, and
+  // says so with forwarding headers: that is not someone at this machine.
+  it('treats a loopback request relayed by a local proxy as remote', async () => {
+    const { f, store } = await app();
+    for (const headers of [{ 'x-forwarded-for': '100.64.0.9' }, { 'tailscale-user-login': 'someone@example.com' }, { forwarded: 'for=100.64.0.9' }]) {
+      const res = await f.inject({
+        method: 'POST', url: '/v1/local-accounts/bootstrap', headers,
+        payload: { username: 'stranger', password: 'password123' },
+      });
+      expect(res.statusCode).toBe(403);
+    }
+    expect(store.countLocalAccounts()).toBe(0);
+  });
+
+  it('stops answering setup-code guesses after a few wrong ones', async () => {
+    const f = Fastify({ trustProxy: true });
+    const store = new Store(new Database(':memory:'));
+    await registerAuth(f, { secret: SECRET, mode: 'accounts', store });
+    const guess = (setupCode: string) => f.inject({
+      method: 'POST', url: '/v1/local-accounts/bootstrap', headers: remote,
+      payload: { username: 'stranger', password: 'password123', setupCode },
+    });
+    let codes: number[] = [];
+    for (let i = 0; i < 30; i++) codes.push((await guess(`0000000${i % 10}`)).statusCode);
+    expect(codes).toContain(429);
+    expect(codes.slice(codes.indexOf(429))).toEqual(codes.slice(codes.indexOf(429)).map(() => 429));
+    expect(store.countLocalAccounts()).toBe(0);
+  });
 });
 
 describe('removing an account revokes it everywhere', () => {

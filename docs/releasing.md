@@ -41,6 +41,10 @@ same command with an older tag (it asks first). CI checks that every tag
 `channels.json` names exists. The installer remembers each machine's channel
 (`~/.config/hatchabot/channel`), so re-running it upgrades along that channel.
 
+The installer script is on that schedule too: hatchabot.com's `install.sh`
+fetches it from the release `stable` names, not from `main`. A change to
+`install.sh` reaches new users when you promote the release that carries it.
+
 ## Cutting a release
 
 1. `npm test && npm run typecheck` green on `main`, and

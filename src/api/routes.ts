@@ -382,6 +382,19 @@ const CURATED_ANTHROPIC_MODELS = [
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
 
+  // Browser hardening on every response. No other site may frame the app (the
+  // session cookie is SameSite=Strict, so a framed copy would be signed out
+  // anyway — this makes it certain); nothing is content-sniffed; and a page
+  // whose address carries a code (/join/…, a reset link) never sends that
+  // address to another site as a Referer. Set only when a route hasn't: the
+  // console proxy sets its own framing rule.
+  app.addHook('onSend', async (_req, reply, payload) => {
+    if (!reply.hasHeader('x-frame-options')) reply.header('x-frame-options', 'SAMEORIGIN');
+    if (!reply.hasHeader('x-content-type-options')) reply.header('x-content-type-options', 'nosniff');
+    if (!reply.hasHeader('referrer-policy')) reply.header('referrer-policy', 'same-origin');
+    return payload;
+  });
+
   /**
    * Orchestrators already report what they do; this sends it to the log AND
    * to the agent's timeline, so the app can answer "what happened to this

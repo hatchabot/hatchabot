@@ -83,6 +83,18 @@ function isLoopback(ip: string | undefined): boolean {
   return bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.');
 }
 
+/**
+ * Typed on this machine, not merely arriving from 127.0.0.1. A local reverse
+ * proxy — `tailscale serve` above all, which the setup guide turns on —
+ * connects from loopback on behalf of every device on the tailnet, and it
+ * says so with forwarding headers. Those requests are remote.
+ */
+function onThisMachine(req: FastifyRequest): boolean {
+  if (!isLoopback(req.ip)) return false;
+  const h = req.headers;
+  return !h['x-forwarded-for'] && !h['forwarded'] && !h['x-forwarded-host'] && !h['tailscale-user-login'];
+}
+
 /** Session signature. The account's password hash rides in the material, so
  *  changing (or resetting) a password invalidates that account's sessions
  *  everywhere without touching anyone else's. */
@@ -154,7 +166,9 @@ export function registerAccountRoutes(
       if (store.countLocalAccounts() > 0) {
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
       }
-      if (!isLoopback(req.ip) && (req.body?.setupCode ?? '').trim() !== SETUP_CODE) {
+      if (!onThisMachine(req) && (req.body?.setupCode ?? '').trim() !== SETUP_CODE) {
+        if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+        guard.noteFailure(req);
         return reply.code(403).send({
           error:
             'Creating the first account from another machine needs the setup code this server printed when it started. ' +

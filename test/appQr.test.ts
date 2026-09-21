@@ -35,3 +35,23 @@ describe('GET /app-qr.svg', () => {
     expect(res.body).toMatch(/<svg/);
   });
 });
+
+describe('browser hardening headers', () => {
+  it('forbids framing by other sites, sniffing, and cross-site referrers on every response', async () => {
+    const store = new Store(new Database(':memory:'));
+    const f = Fastify();
+    await registerRoutes(f, {
+      store,
+      secrets: new MemSecrets(),
+      providers: new Map([['mock', new MockProvider()]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
+      webIndexPath,
+    });
+    for (const url of ['/', '/healthz', '/v1/config', '/app-qr.svg', '/join/nope']) {
+      const res = await f.inject({ method: 'GET', url });
+      expect(res.headers['x-frame-options'], url).toBe('SAMEORIGIN');
+      expect(res.headers['x-content-type-options'], url).toBe('nosniff');
+      expect(res.headers['referrer-policy'], url).toBe('same-origin');
+    }
+  });
+});
