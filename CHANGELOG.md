@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.15.2] — 2026-09-21
+
+### Security
+- **"That's me" now asks first.** It is the one tap in the approve flow that grants an *identity* rather than a seat: it binds that chat account to your Hatchabot account, so every agent you create from then on admits it without asking. A mis-tap on a stranger's card would hand them the run of the fleet — and the name on that card is chosen by whoever sent it. The confirmation says the name back and spells out what linking means; "Let them in" is unchanged.
+
 ## [2.15.1] — 2026-09-21
 
 ### Fixed

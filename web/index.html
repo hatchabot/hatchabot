@@ -5603,7 +5603,7 @@ function agentNotices(a, opts = {}) {
           <span class="grow">🔑 <b class="pii">${esc(p.meta?.firstName || p.meta?.username || p.id)}</b> wants to talk to this agent${tg ? '' : ` on ${V2_CHAN_LABEL[kind] || kind}`}</span>
           <button onclick="denyPair('${a.id}','${jsq(p.code)}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}','${kind}')"
                   title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
-          ${selfBtn ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true,'${kind}')"
+          ${selfBtn ? `<button class="primary" onclick="approve('${a.id}','${jsq(p.code)}', true,'${kind}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')"
                   title="${tg ? 'This is your own Telegram: bind it to your login so every agent you make admits you automatically — no more pairing with yourself.' : `This is you on ${V2_CHAN_LABEL[kind] || kind}: link it to you on this agent.`}">That's me — link</button>` : ''}
           <button class="${selfBtn ? '' : 'primary'}" onclick="approve('${a.id}','${jsq(p.code)}', false,'${kind}')">Let them in</button>
         </div>`;
@@ -8001,7 +8001,13 @@ async function toggleSharedFromEdit() {
   }
 }
 
-async function approve(id, code, asSelf, kind = 'telegram') {
+async function approve(id, code, asSelf, kind = 'telegram', who = '') {
+  // "That's me" is the one tap that grants an identity rather than a seat: it
+  // binds that chat account to YOUR account, so every agent you make from then
+  // on admits it at birth. A mis-tap on a stranger's card would hand them the
+  // run of the fleet, and the name on that card is theirs to choose — so this
+  // one asks, and says the name back.
+  if (asSelf && !confirm(`Link ${who || 'this account'} to you?\n\nOnly do this if that is YOUR OWN ${V2_CHAN_LABEL[kind] || kind} account. It becomes your identity everywhere: every agent you create will admit it without asking.\n\nIf it is somebody else, press Cancel and use "Let them in" instead.`)) return;
   try {
     const res = await api(`/v1/agents/${id}/pairing/approve`, { method: 'POST', body: { code, kind, ...(asSelf ? { asSelf: true } : {}) } });
     if (asSelf && kind !== 'telegram') {
@@ -10055,7 +10061,7 @@ function renderV2Joins() {
       rows.push(`<div class="v2join">
         <span class="grow">🔑 <b class="pii">${esc(who)}</b> wants to talk to <b>${esc(a.name)}</b>${kind === 'telegram' ? '' : ` on ${V2_CHAN_LABEL[kind] || kind}`}</span>
         <button onclick="denyPair('${jsq(a.id)}','${jsq(p.code)}','${jsq(who)}','${kind}')" title="Turn this request away — they can ask again by messaging the bot">Not now</button>
-        ${self ? `<button onclick="approve('${jsq(a.id)}','${jsq(p.code)}', true,'${kind}')" title="This is you: admit and link this account to your login">That's me</button>` : ''}
+        ${self ? `<button onclick="approve('${jsq(a.id)}','${jsq(p.code)}', true,'${kind}','${jsq(p.meta?.firstName || p.meta?.username || p.id)}')" title="This is you: admit and link this account to your login">That's me</button>` : ''}
         <button class="primary" onclick="approve('${jsq(a.id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button>
       </div>`);
     }
