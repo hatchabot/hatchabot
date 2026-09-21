@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname as osHostname } from 'node:os';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Store } from '../store/store.js';
+import type { SectionSort, Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
@@ -4036,19 +4036,42 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   );
 
   // Sort a section A→Z (group: a name, or '' / null for ungrouped), or every section.
-  app.post<{ Body: { group?: string | null; all?: boolean } }>('/v1/groups/sort', async (req, reply) => {
-    const ownerId = ownerIdOf(req);
-    const b = (req.body ?? {}) as { group?: string | null; all?: boolean };
-    if (b.all === true) {
-      let n = 0;
-      for (const g of store.sectionsOf(ownerId)) n += store.sortSectionByName(ownerId, g);
-      return { ok: true, sorted: n };
-    }
-    if (b.group === undefined || (b.group !== null && typeof b.group !== 'string')) {
-      return reply.code(400).send({ error: 'group (a name, or "" for ungrouped) or all: true is required.' });
-    }
-    return { ok: true, sorted: store.sortSectionByName(ownerId, (b.group ?? '').trim() || null) };
-  });
+  /**
+   * Sort a section — `mode: 'name'` (A→Z) or `'time'` (newest first) — and
+   * make that choice **sticky** unless `sticky: false`: the section re-sorts
+   * itself when agents are added or moved in, instead of the order quietly
+   * decaying. `mode: null` goes back to manual. Dragging an agent by hand
+   * also clears it (see store.moveAgentBefore).
+   */
+  app.post<{ Body: { group?: string | null; all?: boolean; mode?: unknown; sticky?: unknown } }>(
+    '/v1/groups/sort',
+    async (req, reply) => {
+      const ownerId = ownerIdOf(req);
+      const b = (req.body ?? {}) as { group?: string | null; all?: boolean; mode?: unknown; sticky?: unknown };
+      if (b.mode !== undefined && b.mode !== null && b.mode !== 'name' && b.mode !== 'time') {
+        return reply.code(400).send({ error: 'mode must be "name", "time" or null.' });
+      }
+      const mode = (b.mode ?? 'name') as SectionSort | null;
+      const sticky = b.sticky !== false;
+      const apply = (g: string | null) => {
+        if (sticky) store.setSectionSort(ownerId, g, mode);
+        return mode ? store.sortSection(ownerId, g, mode) : 0;
+      };
+      if (b.all === true) {
+        let n = 0;
+        for (const g of store.sectionsOf(ownerId)) n += apply(g);
+        return { ok: true, sorted: n, modes: store.sectionSorts(ownerId) };
+      }
+      if (b.group === undefined || (b.group !== null && typeof b.group !== 'string')) {
+        return reply.code(400).send({ error: 'group (a name, or "" for ungrouped) or all: true is required.' });
+      }
+      const sorted = apply((b.group ?? '').trim() || null);
+      return { ok: true, sorted, modes: store.sectionSorts(ownerId) };
+    },
+  );
+
+  /** Which sections sort themselves, so the buttons can show which is on. */
+  app.get('/v1/groups/sort', async (req) => ({ modes: store.sectionSorts(ownerIdOf(req)) }));
 
   // Reorder a whole group section up/down in the caller's list.
   app.post<{ Body: { group?: string; dir?: string } }>('/v1/groups/move', async (req, reply) => {

@@ -66,6 +66,12 @@ The header holds:
   reason, and **people knocking** — a join request with **Let them in**,
   **That's me** and **Not now**, which is where someone is admitted now that
   the Telegram management bot is retired.
+- **Each group can sort itself.** **A→Z** and **⏳** (newest first) on a group
+  header are sticky: the section keeps that order as agents are added or moved
+  in, instead of the newcomer landing on top and the order you asked for
+  decaying. The button you pressed stays lit; press it again to stop. Dragging
+  an agent by hand also stops it — placing something deliberately is a
+  statement that you want it there.
 - **Agents are icons** in their groups. Drag one to reorder it, onto another
   group to move it, onto **Archived** to archive it, or onto the strip that
   appears at the bottom to start a new group. On a phone, press and hold,

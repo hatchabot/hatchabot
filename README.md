@@ -135,6 +135,15 @@ installs a background service, and links the `hatchabot` CLI. `hatchabot doctor`
 re-run. **Upgrade** with `git fetch --tags && git checkout vX.Y.Z && ./scripts/restart.sh`
 (releases: [github.com/hatchabot/hatchabot/releases](https://github.com/hatchabot/hatchabot/releases)).
 
+**Uninstall** with `./scripts/uninstall.sh` — it reverses the install: stops and
+removes the service (systemd units or launchd plists), unlinks the CLI, and
+removes the agent containers. Nothing you would miss is deleted: agent volumes,
+the database, the backups and the runtime image all stay, so re-running
+`setup-host.sh` brings the same fleet back. `--purge` is the clean slate
+(volumes, database, images, the docker network, `.env`), `--backups` takes the
+backup sets too, and both ask you to type `purge` first. Telegram bots can only
+be deleted at @BotFather → `/mybots` → `/deletebot`.
+
 Then open **http://localhost:8080**, unlock with your password, and:
 
 1. **Connect an AI source** (⚙ Settings → AI sources). If the `claude` CLI is logged in on this

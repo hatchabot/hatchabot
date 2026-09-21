@@ -714,7 +714,8 @@
 <nav id="toc" aria-label="Jump to agent">
   <div class="toc-head">
     <b>Agents</b><span class="sub" id="tocCount"></span>
-    <button class="movebtn" title="Sort the agents in every group A→Z" onclick="sortAllGroups()" style="margin-left:auto">A→Z</button>
+    <button class="movebtn" title="Sort the agents in every group A→Z, and keep them that way" onclick="sortAllGroups('name')" style="margin-left:auto">A→Z</button>
+    <button class="movebtn" title="Sort the agents in every group newest first, and keep them that way" onclick="sortAllGroups('time')">⏳</button>
     <button class="toc-toggle" title="Close" onclick="closeToc()">✕</button>
   </div>
   <div id="tocList"></div>
@@ -8295,19 +8296,43 @@ async function moveAgent(id, dir, ev) {
   } catch (e) { toast(e.message); }
 }
 
-async function sortGroup(g) {
+/**
+ * Which sections sort themselves, keyed by group name ('' = ungrouped). A
+ * sticky section re-sorts when an agent is added or moved in, so the order
+ * you asked for doesn't decay the moment the fleet grows; dragging an agent
+ * by hand turns it back off (the server does that, and we re-read it).
+ */
+let sectionSorts = {};
+const SORT_LABEL = { name: 'A→Z', time: 'newest first' };
+const sortModeOf = (g) => sectionSorts[g || ''] ?? null;
+
+/** The A→Z / ⏳ pair for one group section. Pressing the active one turns the
+ *  stickiness off and leaves the order where it is. */
+function sortBtns(g, cls = '') {
+  const on = sortModeOf(g);
+  const b = (mode, label, title) => `<button class="${cls}${on === mode ? ' pressed' : ''}"
+    title="${esc(title)}${on === mode ? ' — press again to stop' : ''}" aria-pressed="${on === mode}"
+    onclick="sortGroup('${jsq(g ?? '')}','${mode}')">${label}</button>`;
+  return b('name', 'A→Z', 'Keep this group sorted A→Z')
+       + b('time', '⏳', 'Keep this group sorted newest first');
+}
+
+async function sortGroup(g, mode = 'name') {
+  const off = sortModeOf(g) === mode;
   try {
-    await api('/v1/groups/sort', { method: 'POST', body: { group: g } });
-    toast(`${g || 'Default'} sorted A→Z`);
+    await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode: off ? null : mode } });
+    toast(off
+      ? `${g || 'Default'} is back to the order you arrange by hand.`
+      : `${g || 'Default'} sorted ${SORT_LABEL[mode]} — and kept that way.`);
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
 
-async function sortAllGroups() {
-  if (!confirm('Sort the agents in every group A→Z?\n\nThis replaces the order you arranged by hand (the groups themselves stay where they are).')) return;
+async function sortAllGroups(mode = 'name') {
+  if (!confirm(`Sort the agents in every group ${SORT_LABEL[mode]}?\n\nThis replaces the order you arranged by hand, and keeps each group sorted as agents are added (the groups themselves stay where they are).`)) return;
   try {
-    await api('/v1/groups/sort', { method: 'POST', body: { all: true } });
-    toast('Every group sorted A→Z');
+    await api('/v1/groups/sort', { method: 'POST', body: { all: true, mode } });
+    toast(`Every group sorted ${SORT_LABEL[mode]}`);
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
@@ -8500,10 +8525,10 @@ function renderAgents() {
     // Ungrouped agents get a "Default" header too, so every section reads the
     // same as the legend (no move buttons: ungrouped always come first).
     if (!g && lastGroup === null) html += `<div class="group-header" data-group="Default" data-drop-group=""><span class="grow">Default</span>
-      <span class="seg"><button class="mv" title="Sort this group A→Z" onclick="sortGroup('')">A→Z</button></span></div>`;
+      <span class="seg">${sortBtns('', 'mv')}</span></div>`;
     if (g && g !== lastGroup) html += `<div class="group-header" data-group="${esc(g)}" data-drop-group="${esc(g)}">
       <span class="grow">${esc(g)}</span>
-      <span class="seg"><button class="mv" title="Sort this group A→Z" onclick="sortGroup('${jsq(g)}')">A→Z</button><button class="mv" title="Move this group up" aria-label="Move group up" onclick="moveGroup('${jsq(g)}','up')">${MV_ICON.up}</button><button class="mv" title="Move this group down" aria-label="Move group down" onclick="moveGroup('${jsq(g)}','down')">${MV_ICON.down}</button></span>
+      <span class="seg">${sortBtns(g, 'mv')}<button class="mv" title="Move this group up" aria-label="Move group up" onclick="moveGroup('${jsq(g)}','up')">${MV_ICON.up}</button><button class="mv" title="Move this group down" aria-label="Move group down" onclick="moveGroup('${jsq(g)}','down')">${MV_ICON.down}</button></span>
     </div>`;
     lastGroup = g;
     html += agentCard(a) + renderKids(a.id);
@@ -8869,7 +8894,7 @@ async function refresh(withMeta) {
     // The pool count is refreshed on EVERY poll, not just a withMeta one: it
     // changes from plenty of places that don't go through this tab — deleting
     // an agent parks its bot back, creating one leases a bot, and the CLI, the
-    // management bot, or another account can move stock at any time. It's a
+    // Hatchabot agent, or another account can move stock at any time. It's a
     // COUNT plus a tiny roster, so the cost is noise next to /v1/agents.
     api('/v1/pool').then(p => {
       poolAvail = p.availableBots;
@@ -8881,6 +8906,9 @@ async function refresh(withMeta) {
     }).catch(() => {});
     agents = await api('/v1/agents');
     agentsLoaded = true;
+    // Which sections sort themselves — the pressed state of A→Z / ⏳. Cheap,
+    // and wrong-looking buttons are worse than one more tiny read.
+    api('/v1/groups/sort').then(r => { sectionSorts = r.modes ?? {}; }).catch(() => {});
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
@@ -9084,7 +9112,7 @@ function renderV2() {
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
       <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
-          ${s.key.startsWith('g:') && s.items.length > 1 ? `<button onclick="sortGroup('${jsq(s.drop)}')" title="Sort this group A→Z">A→Z</button>` : ''}
+          ${s.key.startsWith('g:') && s.items.length > 1 ? sortBtns(s.drop) : ''}
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
         </span></div>
@@ -9876,7 +9904,9 @@ async function openFleet(tab = v2FleetTab, arg) {
         <span class="sub">Switch model, rebuild, stop or start a selection — by AI source, group, machine or state.</span></div></div>
       <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
         <span class="sub">New container for every agent, memory kept. Picks up a new runtime image or network.</span></div></div>
-      <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups()">Sort every group A→Z</button></div></div>`;
+      <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups('name')">Sort every group A→Z</button>
+        <button onclick="sortAllGroups('time')">⏳ Newest first</button>
+        <span class="sub">Each group stays sorted that way as agents are added, until you drag one by hand.</span></div></div>`;
     return;
   }
   const body = $(`${dlgId}Body`);

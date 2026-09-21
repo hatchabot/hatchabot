@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.12.0] — 2026-09-20
+
+### Added
+- **⏳ beside A→Z: sort a group newest first.** The same button pair sits on every group header, in both looks, and on the Order row in Settings.
+- **Sorting is sticky.** Pressing A→Z or ⏳ used to be a one-shot tidy that the next new agent undid — agents land at the top of their section so you can watch them provision, which quietly wrecked the order you had just asked for. A section now remembers how it sorts and re-sorts itself when an agent is added, or moved in, or restored. The active button stays lit; press it again to go back to arranging by hand, and **dragging an agent by hand does that for you** — placing something deliberately is a statement that you want it there.
+- **`scripts/uninstall.sh`** — the reverse of `setup-host.sh`, for anyone who wants to install and uninstall repeatedly and know it comes back clean. By default it stops and removes the service (systemd units or launchd plists), unlinks the CLI and removes the agent containers, and keeps everything you would miss: volumes, database, backups, images. `--purge` is the clean slate and makes you type the word; `--backups` takes those too. It prints an inventory before it touches anything, and it follows the checkout the *service* runs from rather than the one you are standing in.
+
 ## [2.11.0] — 2026-09-20
 
 ### Added

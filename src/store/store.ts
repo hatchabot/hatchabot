@@ -20,6 +20,9 @@ import type {
 } from '../domain/types.js';
 import { assertTransition } from '../domain/stateMachine.js';
 
+/** How a group section sorts itself: A→Z by name, or newest first. */
+export type SectionSort = 'name' | 'time';
+
 interface LocalAccountRow {
   id: string;
   username: string;
@@ -290,6 +293,15 @@ export class Store {
       -- own list). Absent groups fall back to alphabetical.
       CREATE TABLE IF NOT EXISTS agent_group_order (
         owner_id TEXT NOT NULL, group_name TEXT NOT NULL, sort_order INTEGER NOT NULL,
+        PRIMARY KEY (owner_id, group_name)
+      );
+      -- A section's STICKY sort: once you press A→Z or ⏳ on a group, new agents
+      -- (and agents moved in) are re-sorted the same way instead of landing at
+      -- the top and breaking the order you asked for. Dragging an agent by hand
+      -- clears it — a hand-placed agent is a statement that you want it there.
+      -- group_name '' is the ungrouped section.
+      CREATE TABLE IF NOT EXISTS agent_section_sort (
+        owner_id TEXT NOT NULL, group_name TEXT NOT NULL, mode TEXT NOT NULL,
         PRIMARY KEY (owner_id, group_name)
       );
       -- Verbatim workspace files a template import wants seeded at first provision
@@ -955,6 +967,9 @@ export class Store {
         ops: a.ops ? 1 : 0,
         pendingAction: a.pendingAction ? JSON.stringify(a.pendingAction) : null,
       });
+    // A sticky section re-sorts itself rather than letting the newcomer sit
+    // at the top and break the order the owner asked for.
+    this.reapplySectionSort(a.ownerId, a.group ?? null);
   }
 
   setAgentPendingAction(id: string, action: Agent['pendingAction'] | null): void {
@@ -2761,6 +2776,7 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET group_name = ?, sort_order = ?, updated_at = ? WHERE id = ?`)
       .run(group, this.nextSortOrder(agent.ownerId, group), new Date().toISOString(), id);
+    this.reapplySectionSort(agent.ownerId, group);
   }
 
   /** Ids of one owner's section (a group, or ungrouped when null), in display order. */
@@ -2806,6 +2822,9 @@ export class Store {
       const at = beforeId ? ids.indexOf(beforeId) : -1;
       ids.splice(at < 0 ? ids.length : at, 0, id);
       this.writeSectionOrder(ids);
+      // Placing an agent by hand says where you want it — a sticky sort would
+      // undo that on the next change, so the section goes back to manual.
+      this.setSectionSort(agent.ownerId, target, null);
     })();
     return true;
   }
@@ -2818,18 +2837,68 @@ export class Store {
     return this.moveAgentBefore(id, edge === 'top' ? (others[0] ?? null) : null);
   }
 
-  /** Sort one section A→Z by name — case-insensitive, "Agent 2" before "Agent 10". */
-  sortSectionByName(ownerId: string, group: string | null): number {
+  /**
+   * Sort one section: **name** is A→Z, case-insensitive, "Agent 2" before
+   * "Agent 10"; **time** is newest first, so the thing you just made is at the
+   * top and the one you set up in July is at the bottom.
+   */
+  sortSection(ownerId: string, group: string | null, mode: SectionSort = 'name'): number {
     const rows = this.db
       .prepare(
-        `SELECT id, name FROM agents WHERE owner_id = ? AND state != 'DELETED'
+        `SELECT id, name, created_at FROM agents WHERE owner_id = ? AND state != 'DELETED'
            AND ((group_name IS NULL AND ? IS NULL) OR group_name = ?)`,
       )
-      .all(ownerId, group, group) as Array<{ id: string; name: string }>;
+      .all(ownerId, group, group) as Array<{ id: string; name: string; created_at: string }>;
     const byName = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
-    rows.sort((a, b) => byName.compare(a.name, b.name) || a.id.localeCompare(b.id));
+    rows.sort((a, b) =>
+      mode === 'time'
+        ? b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id)
+        : byName.compare(a.name, b.name) || a.id.localeCompare(b.id));
     this.db.transaction(() => this.writeSectionOrder(rows.map((r) => r.id)))();
     return rows.length;
+  }
+
+  /** Remember (or forget, with null) how a section sorts itself from now on. */
+  setSectionSort(ownerId: string, group: string | null, mode: SectionSort | null): void {
+    const key = group ?? '';
+    if (mode === null) {
+      this.db
+        .prepare(`DELETE FROM agent_section_sort WHERE owner_id = ? AND group_name = ?`)
+        .run(ownerId, key);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO agent_section_sort (owner_id, group_name, mode) VALUES (?, ?, ?)
+           ON CONFLICT(owner_id, group_name) DO UPDATE SET mode = excluded.mode`,
+      )
+      .run(ownerId, key, mode);
+  }
+
+  sectionSort(ownerId: string, group: string | null): SectionSort | null {
+    const r = this.db
+      .prepare(`SELECT mode FROM agent_section_sort WHERE owner_id = ? AND group_name = ?`)
+      .get(ownerId, group ?? '') as { mode: SectionSort } | undefined;
+    return r?.mode ?? null;
+  }
+
+  /** Every sticky section this owner has, keyed by group ('' = ungrouped). */
+  sectionSorts(ownerId: string): Record<string, SectionSort> {
+    const rows = this.db
+      .prepare(`SELECT group_name, mode FROM agent_section_sort WHERE owner_id = ?`)
+      .all(ownerId) as Array<{ group_name: string; mode: SectionSort }>;
+    return Object.fromEntries(rows.map((r) => [r.group_name, r.mode]));
+  }
+
+  /**
+   * Re-apply a section's sticky sort, if it has one. Called wherever the
+   * membership of a section changes — a new agent, one moved in, one restored
+   * — so the order you asked for survives the fleet growing.
+   */
+  reapplySectionSort(ownerId: string, group: string | null): SectionSort | null {
+    const mode = this.sectionSort(ownerId, group);
+    if (mode) this.sortSection(ownerId, group, mode);
+    return mode;
   }
 
   /** Every section an owner has (null = ungrouped). */
