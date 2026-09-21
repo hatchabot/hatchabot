@@ -2807,16 +2807,51 @@ function tailnetStepBody() {
   }
   if (tailnet?.dns) {
     return `<p class="sub" style="margin:4px 0 6px">This machine is on your tailnet as <b>${esc(tailnet.dns)}</b>, but nothing is served over HTTPS yet —
-        and the agent consoles need a secure page. One command on this machine does it:</p>
-      <p style="margin:4px 0 6px"><code>${esc(cmd)}</code>
-        <button onclick="copyText('${jsq(cmd)}').then(ok => toast(ok ? 'Command copied' : 'Copy it by hand'))">Copy</button></p>
-      <p class="sub" style="margin:0">Then it answers at <code>https://${esc(tailnet.dns)}</code> — come back here and this step will say so.</p>`;
+        and the agent consoles need a secure page. Hatchabot can turn it on for you:</p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="primary" id="tsServeBtn" onclick="turnOnServe(this)">Turn on HTTPS</button>
+        <span class="sub">Puts it on your tailnet only — every device signed into it, nothing on the internet.</span>
+      </div>
+      <div class="sub" id="tsServeErr" style="margin-top:6px"></div>
+      <p class="sub" style="margin:6px 0 0">Or run it yourself: <code>${esc(cmd)}</code>
+        <button onclick="copyText('${jsq(cmd)}').then(ok => toast(ok ? 'Command copied' : 'Copy it by hand'))">Copy</button></p>`;
   }
-  const where = tailnet?.installed ? 'Tailscale is installed here but not connected — run <code>tailscale up</code> first.'
+  // The macOS App Store build ships no command on PATH — it lives in the app.
+  if (tailnet?.appOnly) {
+    const bundled = tailnet.cliPath ?? '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
+    const link = `sudo ln -s "${bundled}" /usr/local/bin/tailscale`;
+    return `<p class="sub" style="margin:4px 0 6px">Tailscale is installed here, but its command-line tool is not on the PATH —
+        the macOS build keeps it inside the app. Hatchabot found it at <code>${esc(bundled)}</code> and will use it once Tailscale is
+        <b>connected</b> (open the app and sign in).</p>
+      <p class="sub" style="margin:0">To use it in your own terminal too:
+        <code>${esc(link)}</code>
+        <button onclick="copyText('${jsq(link)}').then(ok => toast(ok ? 'Command copied' : 'Copy it by hand'))">Copy</button></p>`;
+  }
+  const where = tailnet?.installed ? 'Tailscale is installed here but not connected — open it and sign in, or run <code>tailscale up</code>.'
     : 'Install <a href="https://tailscale.com/download" target="_blank" rel="noopener">Tailscale</a> on this machine and your phone — it is free for personal use, and nothing is exposed to the internet.';
   return `<p class="sub" style="margin:4px 0 6px">On <code>http://localhost:${port}</code> the app only works on this machine, and the agent consoles need a secure page.
       ${where}</p>
     <p class="sub" style="margin:0">Then run <code>${esc(cmd)}</code> and come back — this step will fill itself in. Details in <code>docs/tailscale.md</code>.</p>`;
+}
+
+/**
+ * Turn on `tailscale serve` from here. It needs rights the control plane may
+ * not have — on Linux the CLI wants root unless you are its operator — so a
+ * refusal is shown as it came back, with the command to run by hand.
+ */
+async function turnOnServe(btn) {
+  if (!confirm('Serve Hatchabot over HTTPS on your tailnet?\n\nEvery device signed into your tailnet will be able to reach it. Nothing is exposed to the public internet.')) return;
+  btn.disabled = true; btn.textContent = 'Turning on…';
+  $('tsServeErr').textContent = '';
+  try {
+    const r = await api('/v1/tailscale/serve', { method: 'POST', body: {} });
+    tailnet = { ...(tailnet ?? {}), ...r };
+    toast(r.url ? `On — open ${r.url.replace(/^https:\/\//, '')} on your phone.` : 'Turned on.', 9000);
+    renderSetup();
+  } catch (e) {
+    $('tsServeErr').innerHTML = `<b style="color:var(--bad)">Hatchabot could not turn it on:</b> ${esc(e.message)}<br>Run the command below in a terminal instead.`;
+    btn.disabled = false; btn.textContent = 'Turn on HTTPS';
+  }
 }
 
 /** Open the guide deliberately — from the account menu, the header, or the

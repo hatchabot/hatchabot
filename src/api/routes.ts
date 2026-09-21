@@ -17,7 +17,7 @@ import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
-import { tailnetInfo } from '../ops/tailnet.js';
+import { enableServe, tailnetInfo } from '../ops/tailnet.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -848,6 +848,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const port = Number(process.env.PORT ?? 8080);
     const info = await tailnetInfo(port).catch(() => ({ installed: false }));
     return { ...info, port, publicUrl: deps.publicUrl?.replace(/\/$/, '') || undefined };
+  });
+
+  /**
+   * Turn on `tailscale serve`, rather than asking someone to paste a command
+   * into a terminal. It is the machine owner's call and nothing else: serving
+   * puts Hatchabot on the tailnet — every device signed into it, and nothing
+   * on the public internet.
+   */
+  app.post('/v1/tailscale/serve', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const port = Number(process.env.PORT ?? 8080);
+    const before = await tailnetInfo(port).catch(() => ({ installed: false }) as Awaited<ReturnType<typeof tailnetInfo>>);
+    if (!before.installed) return reply.code(409).send({ error: 'Tailscale is not installed on this machine.' });
+    if (!before.dns) return reply.code(409).send({ error: 'Tailscale is installed but not connected — run `tailscale up` first.' });
+    if (before.serving) return { ...before, alreadyOn: true };
+    const run = await enableServe(port);
+    if (!run.ok) {
+      app.log.warn({ error: run.error }, 'tailscale.serve_failed');
+      return reply.code(409).send({
+        error: run.error || 'Could not turn it on.',
+        command: `tailscale serve --bg http://localhost:${port}`,
+      });
+    }
+    const after = await tailnetInfo(port).catch(() => before);
+    trace()('tailscale.serve_enabled', { dns: after.dns, serving: after.serving === true });
+    return { ...after, turnedOn: true };
   });
 
   /** A QR for the tailnet address, so a phone can open it without typing. */

@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.25.0] — 2026-09-21
+
+### Added
+- **"Turn on HTTPS" is a button.** The setup step handed out `tailscale serve --bg …` and left you to paste it into a terminal; Hatchabot can run it. It asks first — serving puts the app on your tailnet, reachable by every device signed into it and nothing on the public internet — and if the CLI refuses (on Linux it wants root unless you are its operator) it shows the refusal as it came back, with the command to run by hand.
+
+### Fixed
+- **The Tailscale CLI is found where macOS actually keeps it.** The App Store build ships nothing on the PATH — the command lives inside the app bundle — so a Mac with Tailscale installed and running was reported as not having it at all. The probe now looks in the app bundle (both `/Applications` and `~/Applications`), in Homebrew's path on Apple Silicon, and in `/usr/local/bin`; when only the app is found, the step says so, gives the path it found, and offers the one-line symlink to get `tailscale` into your own terminal too.
+
 ## [2.24.1] — 2026-09-21
 
 ### Changed
