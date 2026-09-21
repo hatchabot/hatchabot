@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.13.2] — 2026-09-20
+
+### Fixed
+- **The dashboard no longer stops at four tiles on a phone.** A rule from when the tiles shared a row with the manager's icon hid every tile past the fourth below 560px — so on the device most likely to be glanced at, half the dashboard (tokens, backups, spare bots) silently vanished. The manager's icon drops out at 640px and the tiles have the full width, so they wrap onto a second row instead.
+
 ## [2.13.1] — 2026-09-20
 
 ### Added

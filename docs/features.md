@@ -49,8 +49,8 @@ The header holds:
   36h), **spare bots** (wearing the same Telegram badge the agent icons do, so it
   reads as spare *Telegram* bots), and — only when they are not zero — **to read**, **to
   confirm**, **knocking** and **to rebuild**, which take priority when the row
-  runs out of room. Each tile opens the screen that acts on it. On a phone the
-  four most urgent stay.
+  runs out of room. Each tile opens the screen that acts on it. On a phone they
+  wrap onto a second row rather than being cut off.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
   keeps going with the three steps that decide whether the house is actually

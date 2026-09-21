@@ -465,13 +465,14 @@
   .v2stat .lab { font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
   .v2stat.hot .num { color:var(--tone) }
   @media (prefers-reduced-motion: reduce) { .v2stat .tile { transition:none } }
-  /* On a phone the tiles share the row with the manager's icon: show the four
-     that matter most rather than wrapping into a wall. */
+  /* On a phone the tiles get the hub's full width (the manager's icon drops
+     out at 640px), so they WRAP onto a second row. They used to be cut off at
+     four, which silently hid half the dashboard on the device most likely to
+     be glanced at. */
   @media (max-width:560px) {
     .v2stats { gap:10px }
     .v2stat { width:60px }
     .v2stat .tile { width:50px; height:50px; border-radius:15px }
-    .v2stat:nth-child(n+5) { display:none }
   }
   .v2hubagent { padding:8px 6px 2px }
   .v2hubagent .v2ic { width:88px; height:88px; border-radius:26px; font-size:44px }
