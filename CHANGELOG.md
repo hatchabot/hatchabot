@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.24.1] — 2026-09-21
+
+### Changed
+- **The Hatchabot agent looks like what it is.** It is the one agent that is not part of the fleet, and it sat on the hub card in exactly the same weight as the dashboard tiles beside it. It now carries a heavier edge and a real shadow, so it reads as raised above the card before you read a word — and it lifts a little further on hover. Its status ring is unchanged, so a rebuilding or paused manager still says so the usual way.
+
 ## [2.24.0] — 2026-09-21
 
 ### Added

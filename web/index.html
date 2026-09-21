@@ -477,8 +477,16 @@
     .v2stat .tile { width:50px; height:50px; border-radius:15px }
   }
   .v2hubagent { padding:8px 6px 2px }
-  .v2hubagent .v2ic { width:88px; height:88px; border-radius:26px; font-size:44px }
-  .v2hubagent .v2ic::after { inset:-6px; border-radius:31px }
+  /* The manager is the one agent that is not one of the fleet, and the page
+     should say so before you read a word: a heavier edge and a real shadow, so
+     it sits above the card rather than on it. The status ring (::after) keeps
+     its own inset, so a rebuilding or paused manager still reads normally. */
+  .v2hubagent .v2ic { width:88px; height:88px; border-radius:26px; font-size:44px;
+                      border:2px solid color-mix(in srgb, var(--text) 34%, var(--line));
+                      box-shadow:0 8px 20px rgba(0,0,0,.22), 0 2px 5px rgba(0,0,0,.14) }
+  .v2hubagent:hover .v2ic { box-shadow:0 12px 26px rgba(0,0,0,.26), 0 3px 7px rgba(0,0,0,.16) }
+  .v2hubagent .v2ic::after { inset:-8px; border-radius:33px }
+  .v2hubagent .v2name { font-weight:650 }
   .v2hubagent .v2name { font-size:13.5px; font-weight:600; max-width:110px }
   .hub-ops .v2hubhead { display:none }
   /* Before the first agent list arrives, the hub shows its icon and nothing
