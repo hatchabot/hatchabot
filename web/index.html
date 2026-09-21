@@ -411,7 +411,9 @@
      and Fleet drops out of the bar (it stays in the account menu, and the
      dashboard tiles open the same screens). */
   .v2brandtext { display:flex; flex-direction:column; align-items:flex-start; line-height:1.1 }
-  .v2top #v2AppVer { font-size:10px; line-height:1; margin:1px 0 0 }
+  /* .appver centres itself in the classic header's row; under the wordmark it
+     lines up with the H instead. */
+  .v2top #v2AppVer { font-size:10px; line-height:1; margin:1px 0 0; align-self:flex-start }
   @media (max-width: 640px) {
     body.v2 #v2FleetBtn { display:none }
   }

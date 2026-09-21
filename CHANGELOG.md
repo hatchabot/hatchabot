@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.13.4] — 2026-09-20
+
+### Fixed
+- The version under the wordmark centred itself instead of lining up with the H — `.appver` carries `align-self: center` for the classic header's row.
+
 ## [2.13.3] — 2026-09-20
 
 ### Changed
