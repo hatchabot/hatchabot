@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname as osHostname } from 'node:os';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { SectionSort, Store } from '../store/store.js';
+import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
@@ -97,7 +97,7 @@ import {
 } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { admitMember, AdmitError, announceToMembers, denyPairing, revokeMember, RevokeError } from '../orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
@@ -6691,7 +6691,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const ownerId = ownerIdOf(req);
-    const { code, expiresAt } = createInvite(store, agent.id, ownerId);
+    const forParsed = z.object({ for: z.string().trim().max(64).optional() }).safeParse(req.body ?? {});
+    if (!forParsed.success) return reply.code(400).send({ error: zodMessage(forParsed.error) });
+    const { code, expiresAt } = createInvite(store, agent.id, ownerId, forParsed.data.for);
     const path = `/join/${code}`;
     return reply.code(201).send({
       code,
@@ -6767,7 +6769,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const joined = redeemInvite(store, body.code, body.name ?? '', accountId);
       const agent = store.getAgent(joined.agentId)!;
       const channelRow = store.getChannelForAgent(agent.id, joinKind);
-      if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
+      // Someone who already uses another of this owner's agents is not a
+      // stranger: their Telegram id is on file, so admit them outright rather
+      // than making them do the pairing dance a second time. The allowlist is
+      // written on the volume and the gateway re-reads it per message, so
+      // their first message just works — and no pairing window is opened,
+      // which is one fewer moment when the door stands ajar.
+      const knownId = joinKind === 'telegram' && accountId
+        ? store.knownChannelUserId(accountId)
+        : undefined;
+      if (knownId && agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
+        try {
+          await grantChannelAccess(
+            { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+            { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, channelUserId: knownId },
+          );
+          store.bindMembershipChannelUser(agent.id, joined.membershipUserId, knownId);
+          trace(agent.id)('member.known_admitted', { userId: joined.membershipUserId });
+        } catch (err) {
+          app.log.error({ err }, 'known-invitee grant failed'); // fall through to pairing
+        }
+      }
+      if (!store.getMembership(agent.id, joined.membershipUserId)?.channelUserId
+          && agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
         void claimFirstContact(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           {
@@ -6776,6 +6800,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             accountId: joinKind === 'telegram' ? channelRow.accountId : CHANNEL_ACCOUNT,
             forUserId: joined.membershipUserId,
             kind: joinKind,
+            expect: joined.expectHandle,
             timeoutMs: 30 * 60_000,
           },
         ).catch((err) => app.log.error({ err }, 'invitee claim failed'));
@@ -6848,10 +6873,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * by the sweep below. OpenClaw never answered them either way — this only
    * decides whether the owner is bothered.
    */
-  const expectedKnock = (agent: Agent, r: { id: string; kind: Channel['kind'] }): boolean =>
-    agent.allowKnocks === true ||
-    store.pairingWindowOpen(agent.id) ||
-    store.isKnownChannelUser(agent.ownerId, r.kind, r.id);
+  const expectedKnock = (
+    agent: Agent,
+    r: { id: string; kind: Channel['kind']; meta?: { username?: string } },
+  ): boolean => {
+    if (agent.allowKnocks === true) return true;
+    if (store.isKnownChannelUser(agent.ownerId, r.kind, r.id)) return true;
+    const win = store.pairingWindow(agent.id);
+    if (!win) return false;
+    // A window opened FOR somebody admits only them: an open door is not an
+    // open invitation to whoever knocks first.
+    if (!win.expect) return true;
+    return normalizeHandle(r.id) === win.expect || normalizeHandle(r.meta?.username) === win.expect;
+  };
 
   const pairingRequestsFor = async (agent: Agent, includeStrangers = false) => {
     const out: Array<Awaited<ReturnType<typeof listPairingRequests>>[number] & { kind: Channel['kind'] }> = [];
@@ -7036,6 +7070,50 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  /**
+   * People you have already admitted to another agent, with a Telegram id on
+   * file. Adding one of them needs no invite link and no pairing: we know who
+   * they are, so they go straight onto this agent's allowlist.
+   */
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/known-people', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    return store.knownPeopleFor(agent.ownerId, agent.id).map((p) => ({ userId: p.userId, name: p.name }));
+  });
+
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/members/known', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    const parsed = z.object({ userId: z.string().min(1) }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    const person = store.knownPeopleFor(agent.ownerId, agent.id).find((p) => p.userId === parsed.data.userId);
+    if (!person) return reply.code(404).send({ error: 'Not someone you have admitted elsewhere — send them an invite instead.' });
+    const channelRow = store.getChannelForAgent(agent.id, 'telegram');
+    if (!channelRow) return reply.code(409).send({ error: 'This agent has no Telegram bot yet.' });
+    if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first — its allowlist lives in the container.' });
+    try {
+      await grantChannelAccess(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, channelUserId: person.channelUserId },
+      );
+    } catch (err) {
+      if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+    store.insertMembership({
+      id: randomUUID(),
+      agentId: agent.id,
+      userId: person.userId,
+      role: 'user',
+      displayName: person.name,
+      channelUserId: person.channelUserId,
+      status: 'active',
+      joinedAt: new Date().toISOString(),
+    });
+    trace(agent.id)('member.added_known', { userId: person.userId });
+    return { added: true, name: person.name };
+  });
 
   /**
    * Who may reach this agent on a messaging app. Off (the default) means

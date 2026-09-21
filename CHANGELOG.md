@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.14.0] — 2026-09-21
+
+### Added
+- **Add someone you already know, with no invite and no pairing.** Their Telegram id has been on file since the first agent they used, so the Members block now lists them with an **Add** button: they go straight onto this agent's allowlist — written on the volume, which the gateway re-reads per message — and can talk to it at once. Redeeming an invite does the same automatically when the person signing in is already known. Until now every person re-did the pairing dance for every agent, which is both tedious and one more knock to approve.
+- **An invite can name who it is for.** Give Invite… their Telegram @handle and the 30-minute claim window admits **only** that account; anyone else who messages the bot meanwhile is turned away and never shown. Leave it blank for the old behaviour (first to message is admitted). The handle only matches the knock — what lands on the allowlist is the numeric id, so a handle changing hands later grants nobody anything.
+
+### Security
+- **A claim window is no longer "whoever knocks first wins"** when you name the invitee. Previously the oldest unbound pairing request was bound to the person redeeming an invite, so a stranger's knock could take the seat meant for them.
+
 ## [2.13.4] — 2026-09-20
 
 ### Fixed

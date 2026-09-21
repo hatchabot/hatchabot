@@ -481,6 +481,23 @@ To let someone in, tap **Invite…** on the card:
   instead. When they message it, a "wants to talk" card appears on the agent
   and **Let them in** makes them a member.
 
+**Someone who already uses another of your agents never pairs twice.** Their
+Telegram id is on file, so they can be added outright: **⚙ Settings → Telegram
+→ Members** lists them under *"already uses another of your agents"* with an
+**Add** button — no invite link, no pairing, and they can message the agent
+immediately. Redeeming an invite does the same automatically when the person
+signing in is someone you already know. (This is how your own agents have
+always worked for *you*: the first agent binds your Telegram, every later one
+admits you at birth.)
+
+**An invite can name who it is for.** Invite… asks for their Telegram
+@handle; give it, and the 30-minute window that opens admits **only** that
+account — anyone else who messages the bot in the meantime is turned away and
+never shown to you. Leave it blank and the window behaves as before: the first
+person to message is admitted. The handle is only ever used to match the knock;
+what gets stored on the allowlist is the numeric Telegram id, so a handle
+changing hands later grants nobody anything.
+
 **The door is shut to strangers.** A Telegram bot username is findable, so
 anyone on Telegram can message an agent — and every one of those knocks used
 to reach you as a card, and a push to your phone. An agent now admits only a

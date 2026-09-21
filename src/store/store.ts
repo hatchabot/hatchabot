@@ -301,7 +301,11 @@ export class Store {
       -- the bot is a stranger knocking, and an invite-only agent turns it away
       -- without ever bothering the owner (2026-09-20).
       CREATE TABLE IF NOT EXISTS pairing_window (
-        agent_id TEXT PRIMARY KEY, until TEXT NOT NULL, opened_for TEXT
+        agent_id TEXT PRIMARY KEY, until TEXT NOT NULL, opened_for TEXT,
+        -- Who the window is FOR, when the owner said so when inviting: a
+        -- Telegram @handle or numeric id. Only a knock that matches is
+        -- claimed, so an open window is not "whoever messages first wins".
+        expect TEXT
       );
       -- A section's STICKY sort: once you press A→Z or ⏳ on a group, new agents
       -- (and agents moved in) are re-sorted the same way instead of landing at
@@ -521,6 +525,9 @@ export class Store {
       // the bot knock and wait for approval, which is how every agent behaved
       // before 2026-09-20.
       `ALTER TABLE agents ADD COLUMN allow_knocks INTEGER NOT NULL DEFAULT 0`,
+      // Who an invite is FOR, when the owner said so: a Telegram @handle. The
+      // claim window it opens then admits only that person.
+      `ALTER TABLE invites ADD COLUMN expect_handle TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -1850,13 +1857,14 @@ export class Store {
     createdBy: string;
     createdAt: string;
     expiresAt: string;
+    expectHandle?: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO invites (id, agent_id, code, role, created_by, created_at, expires_at)
-         VALUES (@id, @agentId, @code, @role, @createdBy, @createdAt, @expiresAt)`,
+        `INSERT INTO invites (id, agent_id, code, role, created_by, created_at, expires_at, expect_handle)
+         VALUES (@id, @agentId, @code, @role, @createdBy, @createdAt, @expiresAt, @expectHandle)`,
       )
-      .run(i);
+      .run({ ...i, expectHandle: normalizeHandle(i.expectHandle) ?? null });
   }
 
   getInviteByCode(code: string):
@@ -1867,6 +1875,7 @@ export class Store {
         role: string;
         expiresAt: string;
         redeemedAt?: string;
+        expectHandle?: string;
       }
     | undefined {
     const r = this.db.prepare(`SELECT * FROM invites WHERE code = ?`).get(code) as any;
@@ -1877,6 +1886,7 @@ export class Store {
       code: r.code,
       role: r.role,
       expiresAt: r.expires_at,
+      expectHandle: r.expect_handle ?? undefined,
       redeemedAt: r.redeemed_at ?? undefined,
     };
   }
@@ -3001,6 +3011,34 @@ export class Store {
     return { userId: r.user_id, role: r.role, displayName: r.display_name ?? undefined };
   }
 
+  /**
+   * People this owner has already admitted somewhere, with a Telegram id on
+   * file — the ones who can be added to another agent outright, with no
+   * invite link and no pairing. The owner is excluded (they are every agent's
+   * owner already), as is anyone already on the target agent.
+   */
+  knownPeopleFor(ownerId: string, exceptAgentId?: string): Array<{ userId: string; name: string; channelUserId: string }> {
+    const rows = this.db
+      .prepare(
+        `SELECT m.user_id, m.channel_user_id, MAX(m.display_name) AS name
+           FROM memberships m JOIN agents a ON a.id = m.agent_id
+          WHERE a.owner_id = ? AND m.status = 'active' AND m.channel_user_id IS NOT NULL
+            AND m.user_id != ? AND m.role != 'owner'
+          GROUP BY m.user_id, m.channel_user_id`,
+      )
+      .all(ownerId, ownerId) as Array<{ user_id: string; channel_user_id: string; name: string | null }>;
+    const already = new Set(
+      exceptAgentId
+        ? (this.db
+            .prepare(`SELECT user_id FROM memberships WHERE agent_id = ? AND status = 'active'`)
+            .all(exceptAgentId) as Array<{ user_id: string }>).map((r) => r.user_id)
+        : [],
+    );
+    return rows
+      .filter((r) => !already.has(r.user_id))
+      .map((r) => ({ userId: r.user_id, name: r.name || 'Member', channelUserId: r.channel_user_id }));
+  }
+
   /** Anyone who finds the bot may knock, instead of invitees and people the
    *  owner already knows. Off by default, per agent. */
   setAllowKnocks(agentId: string, on: boolean): void {
@@ -3008,13 +3046,31 @@ export class Store {
   }
 
   /** Open the door on this agent until `until` — a claim window is running. */
-  openPairingWindow(agentId: string, until: string, openedFor?: string): void {
+  openPairingWindow(
+    agentId: string,
+    until: string,
+    openedFor?: string,
+    opts?: { expect?: string },
+  ): void {
     this.db
       .prepare(
-        `INSERT INTO pairing_window (agent_id, until, opened_for) VALUES (?, ?, ?)
-           ON CONFLICT(agent_id) DO UPDATE SET until = excluded.until, opened_for = excluded.opened_for`,
+        `INSERT INTO pairing_window (agent_id, until, opened_for, expect)
+         VALUES (?, ?, ?, ?)
+           ON CONFLICT(agent_id) DO UPDATE SET until = excluded.until,
+             opened_for = excluded.opened_for, expect = excluded.expect`,
       )
-      .run(agentId, until, openedFor ?? null);
+      .run(agentId, until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null);
+  }
+
+  /** The open window's terms, or undefined when the door is shut. */
+  pairingWindow(agentId: string, now = new Date()):
+    | { until: string; openedFor?: string; expect?: string }
+    | undefined {
+    const r = this.db
+      .prepare(`SELECT until, opened_for, expect FROM pairing_window WHERE agent_id = ?`)
+      .get(agentId) as { until: string; opened_for: string | null; expect: string | null } | undefined;
+    if (!r || Date.parse(r.until) <= now.getTime()) return undefined;
+    return { until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined };
   }
 
   closePairingWindow(agentId: string): void {
@@ -3288,6 +3344,12 @@ function safeJson<T>(raw: unknown, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+/** A Telegram handle or numeric id, in one comparable shape: lower-case, no @. */
+export function normalizeHandle(v: string | undefined | null): string | undefined {
+  const t = String(v ?? '').trim().replace(/^@/, '').toLowerCase();
+  return t || undefined;
 }
 
 function rowToAgent(r: any): Agent {

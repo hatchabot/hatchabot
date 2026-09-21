@@ -36,6 +36,9 @@ export function createInvite(
   store: Store,
   agentId: string,
   createdBy: string,
+  /** Who it is for — a Telegram @handle. The claim window it opens then
+   *  admits only that person, instead of whoever knocks first. */
+  expectHandle?: string,
 ): { code: string; expiresAt: string } {
   const code = generateInviteCode();
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
@@ -47,6 +50,7 @@ export function createInvite(
     createdBy,
     createdAt: new Date().toISOString(),
     expiresAt,
+    expectHandle,
   });
   return { code, expiresAt };
 }
@@ -73,6 +77,8 @@ export function checkInvite(store: Store, code: string): InviteCheck {
 export interface JoinResult {
   membershipUserId: string;
   agentId: string;
+  /** Who the invite named, if anyone — the claim window narrows to them. */
+  expectHandle?: string;
 }
 
 /**
@@ -92,6 +98,7 @@ export function redeemInvite(
 ): JoinResult {
   const check = checkInvite(store, code);
   if (!check.valid) throw new InviteInvalidError(check.reason);
+  const invite = store.getInviteByCode(code.trim().toUpperCase());
 
   // Keying the membership on the account id is what lets them log in later
   // and see this agent; otherwise it's an opaque per-invite id.
@@ -125,7 +132,7 @@ export function redeemInvite(
       });
     }
   });
-  return { membershipUserId: userId, agentId: check.agentId };
+  return { membershipUserId: userId, agentId: check.agentId, expectHandle: invite?.expectHandle };
 }
 
 export class InviteInvalidError extends Error {

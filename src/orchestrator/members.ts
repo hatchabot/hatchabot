@@ -314,6 +314,61 @@ export async function denyPairing(
   return { denied };
 }
 
+/**
+ * Add a channel identity to an agent's LIVE allowlist, without a pairing
+ * request — the mirror of the scrub in revokeMember, and the reason someone
+ * you already know never has to do the pairing dance twice.
+ *
+ * Both on-volume files the runtime unions are written (verified against
+ * OpenClaw 2026.6.11): the credentials allowFrom where approvals land, and the
+ * config the next rebuild seeds from. The gateway re-reads per message, so it
+ * takes effect immediately — no rebuild.
+ */
+export async function grantChannelAccess(
+  deps: RevokeDeps,
+  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string; channelUserId: string },
+): Promise<void> {
+  const log = deps.log ?? (() => {});
+  const ID_SHAPE: Record<ChannelKind, RegExp> = { telegram: /^\d{1,32}$/, slack: /^[UW][A-Z0-9]{2,31}$/, discord: /^\d{15,25}$/ };
+  if (!ID_SHAPE[opts.kind].test(opts.channelUserId) || !/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) {
+    throw new AdmitError('That chat id has an unexpected shape, so the allowlist was not touched.');
+  }
+  const target = {
+    channel: opts.kind,
+    acct: opts.accountId,
+    id: opts.channelUserId,
+    cred: `/home/node/.openclaw/credentials/${opts.kind}-${opts.accountId.toLowerCase()}-allowFrom.json`,
+  };
+  const script = `node -e '
+    const fs = require("fs");
+    const writeAtomic = (f, obj) => {
+      const tmp = f + ".tmp";
+      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp, f);   // atomic: the gateway re-reads per message
+    };
+    const t = ${JSON.stringify(target)};
+    const add = (arr) => {
+      const a = Array.isArray(arr) ? arr.slice() : [];
+      if (!a.some((x) => String(x) === t.id)) a.push(t.id);
+      return a;
+    };
+    const d = fs.existsSync(t.cred) ? JSON.parse(fs.readFileSync(t.cred, "utf8")) : {};
+    d.allowFrom = add(d.allowFrom);
+    writeAtomic(t.cred, d);
+    const cfgPath = "/home/node/.openclaw/openclaw.json";
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+      const acc = cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
+        && cfg.channels[t.channel].accounts[t.acct];
+      if (acc) { acc.allowFrom = add(acc.allowFrom); writeAtomic(cfgPath, cfg); }
+    }'`;
+  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  if (res.code !== 0) {
+    throw new AdmitError('Adding them to the bot allowlist failed — try again in a moment.');
+  }
+  log('member.allowlist_granted', { agentId: opts.agentId, kind: opts.kind });
+}
+
 export async function revokeMember(
   deps: RevokeDeps,
   agentId: string,

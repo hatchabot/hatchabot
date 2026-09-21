@@ -1279,9 +1279,10 @@
     <div id="tgMembersBlock">
       <label>👤 Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
       <div id="tgMemberList" style="margin-bottom:6px"></div>
+      <div id="tgKnownPeople" style="margin-bottom:6px"></div>
       <div style="display:flex;gap:8px;align-items:center">
         <button onclick="invite(editAgentId, $('editName')?.value || '')">Invite…</button>
-        <span class="sub">Anyone new starts by messaging the bot; Invite mints them the link.</span>
+        <span class="sub">Someone new starts by messaging the bot; Invite mints them the link.</span>
       </div>
     </div>
 
@@ -2296,6 +2297,7 @@
     Send them this link. It works once, expires in 48 hours, and they join as a
     member — they can chat, not change settings.
   </div>
+  <div class="sub" id="invFor" style="margin:4px 0"></div>
   <div class="invite-link" id="invLink"></div>
   <div class="sub">They'll see a note that this agent's memory is shared.</div>
   <div class="sub" style="margin-top:10px">
@@ -7071,6 +7073,34 @@ async function renderEditMembers() {
       return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${kickBtn}</div>`;
     }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  void renderKnownPeople();
+}
+
+/**
+ * People already admitted to another of your agents. We hold their Telegram
+ * id, so adding them here needs no invite link and no pairing — they go
+ * straight onto this agent's allowlist and can message it at once.
+ */
+async function renderKnownPeople() {
+  const el = $('tgKnownPeople');
+  if (!el) return;
+  el.innerHTML = '';
+  try {
+    const people = await api(`/v1/agents/${editAgentId}/known-people`);
+    if (!people.length) return;
+    el.innerHTML = `<div class="sub" style="margin-bottom:4px">Already uses another of your agents — add without an invite:</div>`
+      + people.map(p => `<div class="pair"><span class="grow"><b class="pii">${esc(p.name)}</b></span>
+          <button onclick="addKnownPerson('${jsq(p.userId)}','${jsq(p.name)}')">Add</button></div>`).join('');
+  } catch { /* a server that doesn't offer it yet, or no agents: show nothing */ }
+}
+
+async function addKnownPerson(userId, name) {
+  if (!confirm(`Let ${name} message this agent?\n\nThey can already talk to another of your agents, so no invite or pairing is needed — they are added straight away.`)) return;
+  try {
+    await api(`/v1/agents/${editAgentId}/members/known`, { method: 'POST', body: { userId } });
+    toast(`${name} can now message this agent.`);
+    await renderEditMembers();
+  } catch (e) { toast(e.message); }
 }
 
 function onGroupModeChange() {
@@ -7412,9 +7442,20 @@ const tgWebLink = (username) =>
   `https://web.telegram.org/k/#?tgaddr=${encodeURIComponent(`tg://resolve?domain=${username}`)}`;
 
 let invShare = null; // { name, link, message } for the current invite dialog
+/**
+ * An invite may name WHO it is for. The claim window it opens then admits
+ * only that Telegram account, instead of binding whoever messages the bot
+ * first — the difference between a door left ajar and one held open for a
+ * named person. Optional, because you don't always know their handle.
+ */
 async function invite(id, name) {
   try {
-    const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: {} });
+    const who = prompt(
+      `Who is this invite for?\n\nTheir Telegram @handle — then only they can use it, and anyone else who messages the bot is turned away.\n\nLeave blank if you don't know it: the first person to message within 30 minutes is admitted instead.`,
+      '',
+    );
+    if (who === null) return; // cancelled
+    const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: { for: who.trim() || undefined } });
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
     const a = agents.find(x => x.id === id);
@@ -7425,6 +7466,13 @@ async function invite(id, name) {
     if (link) qr.src = `/v1/agents/${id}/qr.svg`;
     // A ready-to-send message, not just the bare URL.
     invShare = { name, link, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
+    const forWho = $('invFor');
+    if (forWho) {
+      forWho.textContent = who.trim()
+        ? `Only @${who.trim().replace(/^@/, '')} can use this link.`
+        : 'Anyone with this link can use it — the first to message the bot within 30 minutes is admitted.';
+      forWho.style.color = who.trim() ? 'var(--ok)' : 'var(--warn)';
+    }
     $('invShareBtn').style.display = (link && navigator.share) ? '' : 'none';
     inviteDlg.showModal();
   } catch (e) { toast(e.message); }

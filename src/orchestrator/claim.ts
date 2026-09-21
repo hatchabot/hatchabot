@@ -1,6 +1,6 @@
 import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
-import type { Store } from '../store/store.js';
+import { normalizeHandle, type Store } from '../store/store.js';
 
 /**
  * First-contact claim (the §12.4 owner-lockout fix), built on OpenClaw's
@@ -44,6 +44,9 @@ export interface ClaimOptions {
   kind?: ChannelKind;
   /** How long to keep watching for the owner's first message. */
   timeoutMs?: number;
+  /** Who this window is for — a Telegram @handle or numeric id. Set, only a
+   *  matching knock is ever claimed. */
+  expect?: string;
   pollIntervalMs?: number;
 }
 
@@ -113,10 +116,18 @@ export async function claimFirstContact(
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
   const pollIntervalMs = opts.pollIntervalMs ?? 3_000;
   const deadline = Date.now() + timeoutMs;
-  // An OPEN DOOR for as long as we are watching: while this window stands, a
-  // DM from a stranger is the person we are expecting, so an invite-only agent
-  // lets it through to be claimed. Closed again the moment we stop watching.
-  deps.store.openPairingWindow(opts.agentId, new Date(deadline).toISOString(), opts.forUserId);
+  // An OPEN DOOR for as long as we are watching — and a narrow one when the
+  // owner said WHO the invite is for: only a knock from that @handle or id is
+  // ever claimed, so an open window is not "whoever messages first wins".
+  //
+  // Deliberately NOT ignoring requests that were already pending: the owner
+  // who messages the bot before the app gets round to watching, and the
+  // request that survived a rebuild, are both normal — refusing them would
+  // strand the very person we are waiting for.
+  deps.store.openPairingWindow(opts.agentId, new Date(deadline).toISOString(), opts.forUserId, {
+    expect: opts.expect,
+  });
+  const expect = normalizeHandle(opts.expect);
 
   while (Date.now() < deadline) {
     // The watcher runs detached from the provision task, so the agent can be
@@ -144,9 +155,12 @@ export async function claimFirstContact(
       // Skip requests whose sender already belongs to another membership on
       // this agent: a concurrent window may have just bound them, and binding
       // that id here would swap two people's identities.
-      const claimable = requests.filter((r) => (kind === 'telegram'
-        ? !deps.store.getActiveMembershipByChannelUser(opts.agentId, r.id)
-        : !deps.store.getMemberByIdentity(opts.agentId, kind, r.id)));
+      const claimable = requests.filter((r) => {
+        if (expect && normalizeHandle(r.id) !== expect && normalizeHandle(r.meta?.username) !== expect) return false;
+        return kind === 'telegram'
+          ? !deps.store.getActiveMembershipByChannelUser(opts.agentId, r.id)
+          : !deps.store.getMemberByIdentity(opts.agentId, kind, r.id);
+      });
       const first = claimable[0];
       if (first) {
         const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code, kind);

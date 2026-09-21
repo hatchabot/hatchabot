@@ -78,3 +78,72 @@ describe('the security report names who can reach an agent', () => {
     expect((a1.audience ?? []).find((m) => m.name === 'Maria')!.channels).toEqual(['telegram']);
   });
 });
+
+describe('a window held open for a named person', () => {
+  it('only that @handle or id is claimable; anyone else knocking is not', async () => {
+    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const s = world();
+    s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active' } as never);
+
+    const requests = [
+      { id: '999', code: 'STRANGER', meta: { username: 'randomer' } },
+      { id: '555', code: 'MARIA', meta: { username: 'maria_k' } },
+    ];
+    const provider = {
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests }), stderr: '' }),
+      execShellOnVolume: async () => ({ code: 0, stdout: '', stderr: '' }),
+      exec: async () => ({ code: 0, stdout: '', stderr: '' }),
+    } as never;
+
+    const bound = await claimFirstContact(
+      { store: s, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef: 'ref', accountId: 'bot', forUserId: 'user-guest',
+        expect: '@Maria_K', timeoutMs: 40, pollIntervalMs: 5 },
+    );
+    // The stranger knocked FIRST and is not bound; Maria is.
+    expect(bound).toBe('555');
+    expect(s.getMembership('a1', 'user-guest')!.channelUserId).toBe('555');
+  });
+
+  it('records who the window is for, and reports it while open', () => {
+    const s = world();
+    s.openPairingWindow('a1', new Date(Date.now() + 60_000).toISOString(), 'user-guest', { expect: '@Maria_K' });
+    expect(s.pairingWindow('a1')!.expect).toBe('maria_k'); // normalized
+    expect(s.pairingWindow('a1', new Date(Date.now() + 120_000))).toBeUndefined();
+  });
+});
+
+describe('adding someone you already know', () => {
+  it('lists them, admits them without an invite, and refuses a stranger', async () => {
+    const Fastify = (await import('fastify')).default;
+    const { registerRoutes } = await import('../src/api/routes.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const s = world();
+    const provider = new MockProvider();
+    // Maria already uses a2; a1 has a bot and is running.
+    s.insertMembership({ id: 'm1', agentId: 'a2', userId: 'user-maria', role: 'user', status: 'active', displayName: 'Maria' } as never);
+    s.bindMembershipChannelUser('a2', 'user-maria', '555');
+    s.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'TaxBot', secretRef: 's', deepLink: 'https://t.me/TaxBot', createdAt: 'now' } as never);
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} } as never);
+    s.setAgentRuntimeRef('a1', runtimeRef);
+    const f = Fastify();
+    await registerRoutes(f, {
+      store: s, secrets: { put: async () => {}, get: async () => 'x', delete: async () => {} } as never,
+      providers: new Map([['mock', provider]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
+    } as never);
+    const H = { 'x-hatchabot-owner': OWNER };
+
+    const list = await f.inject({ method: 'GET', url: '/v1/agents/a1/known-people', headers: H });
+    expect(list.json()).toEqual([{ userId: 'user-maria', name: 'Maria' }]);
+
+    const add = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/known', headers: H, payload: { userId: 'user-maria' } });
+    expect(add.statusCode).toBe(200);
+    expect(s.getMembership('a1', 'user-maria')!.channelUserId).toBe('555'); // admitted, no pairing
+    // …and she is no longer offered, being a member now.
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/known-people', headers: H })).json()).toEqual([]);
+
+    const nobody = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/known', headers: H, payload: { userId: 'user-nobody' } });
+    expect(nobody.statusCode).toBe(404);
+  });
+});
