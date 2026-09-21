@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.13.1] — 2026-09-20
+
+### Added
+- **The security check names who can reach each agent.** It reported *how many* people could message an agent ("3 people can message it") and never *which* — the question a security review actually asks. Each agent now lists its audience by name, with anyone invited who has not linked their Telegram yet marked as pending, since they cannot reach it until they do.
+
 ## [2.13.0] — 2026-09-20
 
 ### Security

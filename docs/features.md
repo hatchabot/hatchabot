@@ -498,6 +498,12 @@ agent never answered them either way; this only decides whether *you* are
 bothered. Per agent, **⚙ Settings → Telegram → Who can reach it** switches it
 back to **Anyone can knock** if you want an agent the world may ask for.
 
+**Who can reach what, in one place.** ⚙ Settings → **Security** lists every
+agent by exposure and now names its audience — *"can message it: Chris (you),
+Maria"* — with anyone invited but not yet linked marked as such, since they
+cannot reach it until they message the bot. Per agent, the same people are
+under ⚙ Settings → Telegram → **Members**, with Remove.
+
 Members show on the card (when there's more than one) and always under
 ⚙ Settings → Telegram → **Members** — role, Telegram-link status, Remove,
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,

@@ -28,6 +28,9 @@ export interface AgentExposure {
   group: 'off' | 'members' | 'room';
   capabilities: string[]; // e.g. ['send email as chris@…', 'read-write host folder', 'shared memory']
   exposure: 'low' | 'medium' | 'high';
+  /** WHO, not just how many: a security review asks "which people can reach
+   *  this agent", and a count never answered it. */
+  audience?: Array<{ name: string; role: string; channels: string[]; pending?: boolean }>;
   reasons: string[];
 }
 export interface PostureReport {
@@ -152,7 +155,27 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
     if (wideAudience && powerful) exposure = 'high';
     else if (wideAudience || powerful) exposure = 'medium';
 
-    agents.push({ id: a.id, name: a.name, audienceCount, group, capabilities, exposure, reasons });
+    // Name them. An active membership with no channel id bound yet is someone
+    // invited who has not messaged the bot — worth showing as pending rather
+    // than counting as access they do not have.
+    const audience = store.listMemberships(a.id)
+      .filter((m) => m.status === 'active')
+      .map((m) => {
+        const ids = store.memberIdentities(a.id, m.userId);
+        const channels = [
+          ...(m.channelUserId ? ['telegram'] : []),
+          ...Object.keys(ids).filter((k) => k !== 'telegram'),
+        ];
+        return {
+          name: m.displayName || (m.role === 'owner' ? 'You' : m.userId),
+          role: m.role,
+          channels,
+          ...(channels.length ? {} : { pending: true }),
+        };
+      })
+      .sort((x, y) => (x.role === 'owner' ? -1 : y.role === 'owner' ? 1 : x.name.localeCompare(y.name)));
+
+    agents.push({ id: a.id, name: a.name, audienceCount, group, capabilities, exposure, reasons, audience });
   }
   agents.sort((x, y) => ({ high: 0, medium: 1, low: 2 })[x.exposure] - ({ high: 0, medium: 1, low: 2 })[y.exposure]);
 

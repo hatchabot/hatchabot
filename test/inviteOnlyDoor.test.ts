@@ -58,3 +58,23 @@ describe('the invite-only door', () => {
     expect(s.isKnownChannelUser(OWNER, 'telegram', '555')).toBe(false);
   });
 });
+
+describe('the security report names who can reach an agent', () => {
+  it('lists members by name, marks an invitee who has not linked yet', async () => {
+    const { computePosture } = await import('../src/orchestrator/posture.js');
+    const s = world();
+    s.insertMembership({ id: 'mo', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active', displayName: 'Chris' } as never);
+    s.bindMembershipChannelUser('a1', OWNER, '111');
+    s.insertMembership({ id: 'm2', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active', displayName: 'Maria' } as never);
+    s.bindMembershipChannelUser('a1', 'user-guest', '555');
+    s.insertMembership({ id: 'm3', agentId: 'a1', userId: 'user-later', role: 'user', status: 'active', displayName: 'Sam' } as never);
+    s.insertMembership({ id: 'm4', agentId: 'a1', userId: 'user-gone', role: 'user', status: 'revoked', displayName: 'Ex' } as never);
+
+    const report = computePosture(s, { ownerId: OWNER, isHostOwner: true, authMode: 'password' });
+    const a1 = report.agents.find((x) => x.id === 'a1')!;
+    const names = (a1.audience ?? []).map((m) => m.name);
+    expect(names).toEqual(['Chris', 'Maria', 'Sam']); // owner first, revoked absent
+    expect((a1.audience ?? []).find((m) => m.name === 'Sam')!.pending).toBe(true);
+    expect((a1.audience ?? []).find((m) => m.name === 'Maria')!.channels).toEqual(['telegram']);
+  });
+});

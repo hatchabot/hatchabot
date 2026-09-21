@@ -2947,10 +2947,21 @@ async function loadPosture() {
           <span class="grow"><b>${esc(c.title)}</b><span class="sub"> — ${esc(c.detail)}</span></span></div>`).join('')
       : '<div class="sub">(install-level checks are shown to the host owner)</div>';
 
+    // WHO can reach it, by name — a count never answered the question a
+    // security review actually asks. Someone invited who has not messaged the
+    // bot yet is shown as pending: they cannot reach it until they do.
+    const audienceLine = (a) => {
+      const who = a.audience ?? [];
+      if (!who.length) return '<br>nobody but you can message it';
+      return `<br>can message it: ` + who.map(m =>
+        `${esc(m.name)}${m.role === 'owner' ? ' (you)' : ''}${m.pending ? ' <i>— invited, not yet linked</i>'
+          : m.channels.length > 1 ? ` <span class="sub">(${m.channels.map(esc).join(', ')})</span>` : ''}`).join(', ');
+    };
+
     const agents = report.agents.length
       ? report.agents.map(a => `<div class="pair" style="align-items:baseline;gap:6px${a.exposure === 'high' ? ';color:var(--warn)' : ''}">
           <span>${EXPOSURE_DOT[a.exposure]}</span>
-          <span class="grow"><b>${esc(a.name)}</b> <span class="sub">— ${a.exposure} exposure${a.reasons.length ? ': ' + a.reasons.map(esc).join(' + ') : ''}${a.capabilities.length ? `<br>can: ${a.capabilities.map(esc).join(', ')}` : ''}</span></span></div>`).join('')
+          <span class="grow"><b>${esc(a.name)}</b> <span class="sub">— ${a.exposure} exposure${a.reasons.length ? ': ' + a.reasons.map(esc).join(' + ') : ''}${a.capabilities.length ? `<br>can: ${a.capabilities.map(esc).join(', ')}` : ''}${audienceLine(a)}</span></span></div>`).join('')
       : '<div class="sub">No live agents.</div>';
 
     const lim = report.limits;
