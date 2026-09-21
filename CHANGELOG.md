@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.13.3] — 2026-09-20
+
+### Changed
+- **"Bot pool"**, not "Spare bots, ready to use" plus two sentences explaining what a spare bot is — the top of the same tab already says it.
+
 ## [2.13.2] — 2026-09-20
 
 ### Fixed
