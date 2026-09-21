@@ -108,6 +108,7 @@ export const COVERAGE: Record<string, string> = {
   'DELETE /v1/ai-profiles/:id': 'app: fleet-wide/irreversible — deleting a source strands its agents',
   'POST /v1/agents/:id/members/:userId/reopen': 'app: later — holding the door open is a live decision the owner makes',
   'POST /v1/agents/:id/members/known': 'app: later — admitting a person is something only the owner does',
+  'POST /v1/agents/:id/channel/swap': 'app: fleet-wide/irreversible — it hands the agent a new identity and ends every conversation on the old one',
   'POST /v1/agents/:id/allow-knocks': 'app: later — who may reach an agent is a setting, not a change to run',
   'POST /v1/ai-profiles/:id/move': 'app: browser — the order the owner wants their sources listed in',
   'POST /v1/ai-profiles/:id/adopt-agents': 'set_source (one agent at a time)',

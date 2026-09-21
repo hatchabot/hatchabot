@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.24.0] — 2026-09-21
+
+### Added
+- **🔁 Change bot** — move an agent to a different Telegram bot without losing it. It takes a spare from the pool, tells every member **on the old bot** where the agent went, parks the old bot back in the pool, and rebuilds so the whole Telegram block is written from the new row rather than edited in place. Memory, files, settings and members survive — members are keyed to each person's Telegram id, so nobody pairs again — and the response says how many people were told. What cannot survive is the conversation: Telegram scrollback belongs to the bot, and a bot cannot message someone who has never opened a chat with it, which is why the farewell goes out first and why the confirmation says everyone must open the new bot.
+
+### Fixed
+- **A bot's @handle cannot be changed, and v2.22.0 said it could.** That release told people to use `/setusername` at @BotFather; there is no such command, and Telegram has no way to rename a bot's handle. The Telegram tab now says what is true: the handle is fixed for life, the *display name* follows the agent's name, and a different handle means a different bot — which is what **Change bot** is for.
+
 ## [2.23.0] — 2026-09-21
 
 ### Added

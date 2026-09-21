@@ -7238,6 +7238,81 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   /**
+   * Change the bot an agent answers on, keeping the agent.
+   *
+   * Everything that matters survives, because none of it belongs to the bot:
+   * memory and files are on the volume, and members are keyed to each
+   * *person's* Telegram id, so nobody re-pairs. What cannot survive is the
+   * conversation itself — Telegram scrollback belongs to the bot — so the
+   * agent says where it is going on the old bot first, while it still can. A
+   * bot cannot message someone who has never started a chat with it, so that
+   * farewell is the only chance to tell them.
+   *
+   * The new identity comes from the pool: leasing is the path that renames the
+   * bot, announces the handover and keeps the ledger straight. Paste a fresh
+   * BotFather token into the pool first if you want a specific one.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/channel/swap', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
+    if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
+      return reply.code(409).send({ error: `It is ${agent.state.toLowerCase()} — wait for it to settle first.` });
+    }
+    const old = store.getChannelForAgent(agent.id, 'telegram');
+    if (!old) return reply.code(409).send({ error: 'This agent has no Telegram bot to change.' });
+    if (!deps.channel.pool.availableCount(agent.ownerId)) {
+      return reply.code(409).send({
+        error: 'No spare bot to move to. Add one under ⚙ Settings → Telegram → Add a bot, then try again.',
+      });
+    }
+
+    // Lease the new identity BEFORE letting go of the old one: the farewell
+    // has to name it, and a failure here must leave the agent as it was.
+    let fresh;
+    try {
+      fresh = await deps.channel.provision({
+        agentId: agent.id, agentName: agent.name, slug: agent.slug, ownerId: agent.ownerId,
+      });
+    } catch (err) {
+      return reply.code(409).send({ error: `Could not take a spare bot: ${String((err as Error)?.message ?? err).slice(0, 160)}` });
+    }
+    const clash = store.findAgentUsingAccount(fresh.accountId);
+    if (clash && clash.id !== agent.id) {
+      await deps.channel.release(fresh.accountId).catch(() => {});
+      return reply.code(409).send({ error: `@${fresh.accountId} already belongs to "${clash.name}".` });
+    }
+
+    // Say goodbye on the bot that still works, and where to find it next.
+    const told = await announceToMembers(
+      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+      {
+        agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: old.accountId,
+        text: `📮 ${agent.name} is moving to @${fresh.accountId}. Open that bot and say hi — this chat will stop answering. Everything it knows comes with it.`,
+      },
+    ).catch(() => 0);
+
+    await deps.channel.release(old.accountId).catch((err: unknown) =>
+      app.log.warn({ agentId: agent.id, err: String(err) }, 'old bot release failed'));
+    store.deleteChannelForAgent(agent.id, 'telegram');
+    store.insertChannel({
+      id: randomUUID(), agentId: agent.id, kind: 'telegram',
+      accountId: fresh.accountId, secretRef: fresh.secretRef, deepLink: fresh.deepLink,
+      createdAt: new Date().toISOString(),
+    } as never);
+    trace(agent.id)('channel.swapped', { from: old.accountId, to: fresh.accountId, told });
+
+    // A rebuild writes the whole Telegram block from the new row — the account
+    // key, the token, the allowlist and the door policy together. Doing that by
+    // hand on a live config is the class of edit that has bitten us twice.
+    const started = kickRebuild(agent.id);
+    return {
+      swapped: true, from: old.accountId, to: fresh.accountId,
+      deepLink: fresh.deepLink, told, rebuilding: started,
+    };
+  });
+
+  /**
    * Who may reach this agent on a messaging app. Off (the default) means
    * invitees and people you already know; on restores the old behaviour where
    * anyone who finds the bot can knock and wait for you to approve.

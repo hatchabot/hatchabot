@@ -552,6 +552,18 @@ Members show on the card (when there's more than one) and always under
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 `members`, `kick`.
 
+**Changing the bot an agent answers on.** A Telegram bot's **@handle is fixed
+for life** — there is no BotFather command to change it; only the *display
+name* can change, and that follows the agent's name, so renaming the agent
+renames the bot. For a different handle the agent has to move to a different
+bot: **⚙ Settings → Telegram → 🔁 Change bot** takes a spare from the pool,
+tells every member on the old bot where it went (a bot cannot message someone
+who has never opened a chat with it, so that farewell is the only chance),
+parks the old bot back in the pool, and rebuilds. Memory, files, settings and
+members all come with it — nobody pairs again — but the Telegram conversation
+does not: scrollback belongs to the bot, so everyone opens the new one on an
+empty screen.
+
 ## Chat apps
 
 **Chat app** is what Hatchabot calls the places an agent can be talked to:

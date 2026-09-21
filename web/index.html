@@ -1371,10 +1371,14 @@
       <input type="text" id="editBotToken" readonly placeholder="Hidden — tap Show" style="flex:1;min-width:0;font-family:ui-monospace,monospace;font-size:12px">
       <button id="botTokenBtn" onclick="showBotToken()">Show</button>
     </div>
-    <div class="sub" style="margin-top:6px">Want a less obvious name? Change the bot's <b>@username</b> at
-      <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a> → <code>/setusername</code>:
-      the token, this agent, its members and every conversation stay exactly as they are. Swapping in a
-      <i>different</i> bot does not — each member starts an empty chat with it.</div>
+    <div class="sub" style="margin-top:6px">A bot's <b>@handle is fixed for life</b> — Telegram has no way to change it.
+      Its <b>display name</b> is not: that follows this agent's name, so renaming the agent renames the bot.
+      For a different handle the agent has to move to a different bot, which is what <b>Change bot</b> does.</div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
+      <button onclick="swapBot()">🔁 Change bot…</button>
+      <span class="sub">Takes a spare from the pool. Members and memory come with it; the Telegram
+        conversation does not — it tells everyone where it went first.</span>
+    </div>
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
@@ -7312,6 +7316,29 @@ async function checkGroupReadiness() {
         'Privacy mode is ON — @BotFather → /setprivacy → Disable (then remove & re-add the bot to existing groups)');
   } catch (e) { st.textContent = ''; out.innerHTML = `<div class="sub">⚠ ${esc(e.message)}</div>`; }
   finally { btn.disabled = false; }
+}
+
+/**
+ * Move this agent to a different bot. Everything that matters survives —
+ * memory and files are on the volume, members are keyed to each person's
+ * Telegram id — but the conversation cannot: scrollback belongs to the bot,
+ * and a bot cannot message someone who has never started a chat with it. So
+ * the old bot carries the farewell, and everyone has to open the new one.
+ */
+async function swapBot() {
+  const a = agents.find(x => x.id === editAgentId);
+  const people = (members[editAgentId] ?? []).filter(m => m.status !== 'revoked').length;
+  if (!confirm(`Move "${a?.name ?? 'this agent'}" to a different bot?\n\n`
+    + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
+    + `• Everyone (${people === 1 ? 'just you' : `${people} people`}) must open the NEW bot and say hi. Telegram will not move the old chat.\n`
+    + `• The old bot goes back to the pool, and its chat stops answering.\n\n`
+    + `The agent rebuilds afterwards — about a minute.`)) return;
+  try {
+    const r = await api(`/v1/agents/${editAgentId}/channel/swap`, { method: 'POST', body: {} });
+    toast(`Moved to @${r.to}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. Rebuilding…`, 10000);
+    await refresh(true);
+    v2Close();
+  } catch (e) { toast(e.message, 9000); }
 }
 
 async function showBotToken() {
