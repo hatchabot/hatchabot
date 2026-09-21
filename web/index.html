@@ -8436,46 +8436,46 @@ async function moveAgent(id, dir, ev) {
 }
 
 /**
- * Which sections sort themselves, keyed by group name ('' = ungrouped). A
- * sticky section re-sorts when an agent is added or moved in, so the order
- * you asked for doesn't decay the moment the fleet grows; dragging an agent
- * by hand turns it back off (the server does that, and we re-read it).
+ * Sorting a group is a one-shot, and the same button reverses it — the way a
+ * table column does. Which way "again" means is read off the order on screen
+ * rather than remembered: if the group already reads A→Z, A→Z gives you Z→A.
+ * That survives a reload, and it cannot disagree with what you are looking at.
  */
-let sectionSorts = {};
-const SORT_LABEL = { name: 'A→Z', time: 'newest first' };
-const sortModeOf = (g) => sectionSorts[g || ''] ?? null;
+const SORT_LABEL = { name: 'A→Z', 'name-desc': 'Z→A', time: 'oldest first', 'time-desc': 'newest first' };
 
-/** The A→Z / ⏳ pair for one group section. Pressing the active one turns the
- *  stickiness off and leaves the order where it is. */
+/** Is this section already in ascending order for `mode`? */
+function sortedAscending(g, mode) {
+  const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED' && (a.group || '') === (g || ''));
+  if (mine.length < 2) return false;
+  const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  const cmp = (x, y) => mode === 'time'
+    ? String(x.createdAt || '').localeCompare(String(y.createdAt || ''))
+    : coll.compare(x.name, y.name);
+  return mine.every((a, i) => i === 0 || cmp(mine[i - 1], a) <= 0);
+}
+
+/** The A→Z / ⏳ pair for one group section. */
 function sortBtns(g, cls = '') {
-  const on = sortModeOf(g);
-  const b = (mode, label, title) => `<button class="${cls}${on === mode ? ' pressed' : ''}"
-    title="${esc(title)}${on === mode ? ' — press again to stop' : ''}" aria-pressed="${on === mode}"
-    onclick="sortGroup('${jsq(g ?? '')}','${mode}')">${label}</button>`;
-  return b('name', 'A→Z', 'Keep this group sorted A→Z')
-       + b('time', '⏳', 'Keep this group sorted newest first');
+  const b = (mode, label, title) =>
+    `<button class="${cls}" title="${esc(title)}" onclick="sortGroup('${jsq(g ?? '')}','${mode}')">${label}</button>`;
+  return b('name', 'A→Z', 'Sort this group A→Z — again for Z→A')
+       + b('time', '⏳', 'Sort this group oldest first — again for newest first');
 }
 
 async function sortGroup(g, mode = 'name') {
-  const off = sortModeOf(g) === mode;
+  const desc = sortedAscending(g, mode); // already that way? then the other way
   try {
-    // Believe the server's answer rather than waiting for the next poll to
-    // fetch it: the button's lit state is what tells you whether it took.
-    const r = await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode: off ? null : mode } });
-    sectionSorts = r.modes ?? sectionSorts;
-    toast(off
-      ? `${g || 'Default'} is back to the order you arrange by hand.`
-      : `${g || 'Default'} sorted ${SORT_LABEL[mode]} — and kept that way.`);
+    await api('/v1/groups/sort', { method: 'POST', body: { group: g, mode, desc } });
+    toast(`${g || 'Default'} sorted ${SORT_LABEL[desc ? `${mode}-desc` : mode]}.`);
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
 
-async function sortAllGroups(mode = 'name') {
-  if (!confirm(`Sort the agents in every group ${SORT_LABEL[mode]}?\n\nThis replaces the order you arranged by hand, and keeps each group sorted as agents are added (the groups themselves stay where they are).`)) return;
+async function sortAllGroups(mode = 'name', desc = false) {
+  if (!confirm(`Sort the agents in every group ${SORT_LABEL[desc ? `${mode}-desc` : mode]}?\n\nThis replaces the order you arranged by hand (the groups themselves stay where they are).`)) return;
   try {
-    const r = await api('/v1/groups/sort', { method: 'POST', body: { all: true, mode } });
-    sectionSorts = r.modes ?? sectionSorts;
-    toast(`Every group sorted ${SORT_LABEL[mode]}`);
+    await api('/v1/groups/sort', { method: 'POST', body: { all: true, mode, desc } });
+    toast(`Every group sorted ${SORT_LABEL[desc ? `${mode}-desc` : mode]}`);
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
@@ -9049,9 +9049,6 @@ async function refresh(withMeta) {
     }).catch(() => {});
     agents = await api('/v1/agents');
     agentsLoaded = true;
-    // Which sections sort themselves — the pressed state of A→Z / ⏳. Cheap,
-    // and wrong-looking buttons are worse than one more tiny read.
-    api('/v1/groups/sort').then(r => { sectionSorts = r.modes ?? {}; }).catch(() => {});
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
@@ -10048,8 +10045,8 @@ async function openFleet(tab = v2FleetTab, arg) {
       <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
         <span class="sub">New container for every agent, memory kept. Picks up a new runtime image or network.</span></div></div>
       <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups('name')">Sort every group A→Z</button>
-        <button onclick="sortAllGroups('time')">⏳ Newest first</button>
-        <span class="sub">Each group stays sorted that way as agents are added, until you drag one by hand.</span></div></div>`;
+        <button onclick="sortAllGroups('time', true)">⏳ Newest first</button>
+        <span class="sub">A one-off tidy. On a group's own header, pressing the same button again reverses it.</span></div></div>`;
     return;
   }
   const body = $(`${dlgId}Body`);

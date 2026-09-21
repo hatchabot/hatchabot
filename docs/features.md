@@ -67,12 +67,12 @@ The header holds:
   never get this far; see *Members & invites*) with **Let them in**,
   **That's me** and **Not now**, which is where someone is admitted now that
   the Telegram management bot is retired.
-- **Each group can sort itself.** **A→Z** and **⏳** (newest first) on a group
-  header are sticky: the section keeps that order as agents are added or moved
-  in, instead of the newcomer landing on top and the order you asked for
-  decaying. The button you pressed stays lit; press it again to stop. Dragging
-  an agent by hand also stops it — placing something deliberately is a
-  statement that you want it there.
+- **Each group sorts on demand.** **A→Z** and **⏳** on a group header sort
+  that section once, and pressing the same button again reverses it — Z→A, or
+  newest first — the way a table column does. Which way "again" means is read
+  off the order on screen, not remembered, so it still does the right thing
+  after a reload. Nothing is kept: an agent you drag somewhere stays there
+  until you ask for a sort again.
 - **Agents are icons** in their groups. Drag one to reorder it, onto another
   group to move it, onto **Archived** to archive it, or onto the strip that
   appears at the bottom to start a new group. On a phone, press and hold,

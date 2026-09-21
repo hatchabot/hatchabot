@@ -41,6 +41,6 @@ describe('opening a database that predates the current columns', () => {
     expect(cols('invites')).toContain('expect_handle');
     expect(cols('agents')).toContain('allow_knocks');
     expect(cols('ai_profiles')).toContain('sort_order');
-    expect(store.sectionSorts('nobody')).toEqual({});
+    expect(store.sectionsOf('nobody')).toEqual([]);
   });
 });

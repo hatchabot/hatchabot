@@ -64,6 +64,14 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
   [ "${OPENCLAW_VERSION}" = "${DEFAULT_VERSION}" ] || RELEASE_TAG=""
   PULLED=""
   for cand in ${RELEASE_TAG:+"${PUBLISHED}:${RELEASE_TAG}"} "${PUBLISHED}:${OPENCLAW_VERSION}"; do
+    # Ask before pulling. Not every release publishes its own image, and a
+    # plain `docker pull` on a missing tag prints a red "Error response from
+    # daemon: … not found" — which, on a first install, is the first thing a
+    # new user ever sees from Hatchabot, right before it works perfectly.
+    if ! docker manifest inspect "$cand" >/dev/null 2>&1; then
+      echo "No image published as ${cand} — trying the next one."
+      continue
+    fi
     echo "Trying the published image ${cand}…"
     if docker pull "$cand"; then
       HAS="$(docker inspect "$cand" --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"

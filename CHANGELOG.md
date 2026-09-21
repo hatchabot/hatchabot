@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.18.0] — 2026-09-21
+
+### Changed
+- **The sort buttons reverse instead of sticking.** A→Z sorts A→Z, and pressing it again gives Z→A; ⏳ sorts earliest first, and again gives newest first — the way a table column behaves. Which way "again" means is read off the order on screen rather than remembered, so it stays right across a reload and can never disagree with what you are looking at. The sticky behaviour is gone entirely, with the table and the re-sort hooks behind it: a sort writes the order and stops, so an agent you dragged somewhere stays where you put it.
+
+### Fixed
+- **A first install no longer opens with a red Docker error.** The runtime image is published per OpenClaw version, and only sometimes per release, so pulling the release-tagged one printed `Error response from daemon: … not found` before quietly succeeding with the next candidate — the first thing a new user ever saw. It now asks the registry whether a tag exists before pulling it.
+
 ## [2.17.2] — 2026-09-21
 
 ### Fixed

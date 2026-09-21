@@ -4,9 +4,9 @@ import { Store } from '../src/store/store.js';
 import type { Agent } from '../src/domain/types.js';
 
 /**
- * Sorting a group is sticky: press A→Z or ⏳ once and the section keeps that
- * order as agents arrive, instead of the newcomer landing on top and the
- * order quietly decaying. Dragging one by hand ends it.
+ * Sorting a group is a one-shot: it writes the order and stops, so an agent
+ * you dragged somewhere stays there. Pressing the same button again reverses
+ * it, the way a table column does.
  */
 const OWNER = 'user-owner';
 function agent(id: string, name: string, createdAt: string, group: string | null = null): Agent {
@@ -34,67 +34,49 @@ describe('sorting a section', () => {
     expect(order(world())).toEqual(['Bravo', 'alpha', 'Charlie']); // newest first, by insert
   });
 
-  it('A→Z is case-insensitive and numeric-aware', () => {
+  it('A→Z is case-insensitive and numeric-aware, and reverses on the second press', () => {
     const s = world();
     s.insertAgent(agent('d', 'agent 10', '2026-04-01T00:00:00Z'));
     s.insertAgent(agent('e', 'agent 2', '2026-05-01T00:00:00Z'));
     s.sortSection(OWNER, null, 'name');
     expect(order(s)).toEqual(['agent 2', 'agent 10', 'alpha', 'Bravo', 'Charlie']);
+    s.sortSection(OWNER, null, 'name', true);
+    expect(order(s)).toEqual(['Charlie', 'Bravo', 'alpha', 'agent 10', 'agent 2']);
   });
 
-  it('⏳ is newest first', () => {
+  it('⏳ is earliest first, and latest first reversed', () => {
     const s = world();
     s.sortSection(OWNER, null, 'time');
+    expect(order(s)).toEqual(['Charlie', 'alpha', 'Bravo']); // made Jan, Feb, Mar
+    s.sortSection(OWNER, null, 'time', true);
     expect(order(s)).toEqual(['Bravo', 'alpha', 'Charlie']);
   });
 
-  it('a sticky section re-sorts itself when an agent is added', () => {
-    const s = world();
-    s.setSectionSort(OWNER, null, 'name');
-    s.sortSection(OWNER, null, 'name');
-    expect(order(s)).toEqual(['alpha', 'Bravo', 'Charlie']);
-    s.insertAgent(agent('d', 'Bandit', '2026-04-01T00:00:00Z'));
-    expect(order(s)).toEqual(['alpha', 'Bandit', 'Bravo', 'Charlie']); // not on top
-  });
-
-  it('and when an agent is moved into it', () => {
-    const s = world();
-    s.insertAgent(agent('d', 'Aardvark', '2026-04-01T00:00:00Z', 'Home'));
-    s.setSectionSort(OWNER, null, 'name');
-    s.sortSection(OWNER, null, 'name');
-    s.setAgentGroup('d', null);
-    expect(order(s)).toEqual(['Aardvark', 'alpha', 'Bravo', 'Charlie']);
-  });
-
-  it('a section without a sticky sort is left alone', () => {
-    const s = world();
-    s.sortSection(OWNER, null, 'name'); // a one-off sort, not sticky
-    s.insertAgent(agent('d', 'Bandit', '2026-04-01T00:00:00Z'));
-    expect(order(s)[0]).toBe('Bandit'); // newcomer still lands on top
-  });
-
-  it('dragging an agent by hand ends the stickiness', () => {
-    const s = world();
-    s.setSectionSort(OWNER, null, 'time');
-    expect(s.sectionSort(OWNER, null)).toBe('time');
-    s.moveAgentBefore('a', 'b'); // put Charlie above alpha by hand
-    expect(s.sectionSort(OWNER, null)).toBeNull();
-    s.insertAgent(agent('d', 'Bandit', '2026-04-01T00:00:00Z'));
-    expect(order(s).indexOf('Charlie')).toBeLessThan(order(s).indexOf('alpha')); // hand order kept
-  });
-
-  it('each section keeps its own mode, reported together', () => {
+  it('sorting one section leaves the others alone', () => {
     const s = world();
     s.insertAgent(agent('d', 'Zeta', '2026-04-01T00:00:00Z', 'Home'));
-    s.setSectionSort(OWNER, null, 'name');
-    s.setSectionSort(OWNER, 'Home', 'time');
-    expect(s.sectionSorts(OWNER)).toEqual({ '': 'name', Home: 'time' });
-    s.setSectionSort(OWNER, 'Home', null);
-    expect(s.sectionSorts(OWNER)).toEqual({ '': 'name' });
+    s.insertAgent(agent('e', 'Alpha House', '2026-05-01T00:00:00Z', 'Home'));
+    s.sortSection(OWNER, null, 'name');
+    expect(order(s, 'Home')).toEqual(['Alpha House', 'Zeta']); // untouched insert order
+    expect(order(s)).toEqual(['alpha', 'Bravo', 'Charlie']);
+  });
+
+  it('nothing is remembered: a later agent still lands on top', () => {
+    const s = world();
+    s.sortSection(OWNER, null, 'name');
+    s.insertAgent(agent('d', 'Bandit', '2026-04-01T00:00:00Z'));
+    expect(order(s)[0]).toBe('Bandit');
+  });
+
+  it('a hand-dragged agent stays where it was put', () => {
+    const s = world();
+    s.moveAgentBefore('a', 'b'); // Charlie above alpha, by hand
+    const after = order(s);
+    expect(after.indexOf('Charlie')).toBeLessThan(after.indexOf('alpha'));
   });
 });
 
-describe('the sort buttons toggle (the route)', () => {
+describe('the sort route', () => {
   async function api() {
     const Fastify = (await import('fastify')).default;
     const { registerRoutes } = await import('../src/api/routes.js');
@@ -107,35 +89,29 @@ describe('the sort buttons toggle (the route)', () => {
       channel: { pool: { availableCount: () => 0 }, release: async () => {} } as never,
     } as never);
     const post = (payload: object) => f.inject({ method: 'POST', url: '/v1/groups/sort', headers: { 'x-hatchabot-owner': OWNER }, payload: payload as never });
-    return { s, f, post };
+    return { s, post };
   }
 
-  it('mode:null turns the sticky sort OFF — it does not mean "A→Z"', async () => {
+  it('sorts and reports what it did', async () => {
     const { s, post } = await api();
-    expect((await post({ group: '', mode: 'time' })).json().modes).toEqual({ '': 'time' });
-    expect(s.sectionSort(OWNER, null)).toBe('time');
-
-    // Pressing the lit button again. This used to arrive as 'name' (`?? `
-    // falls through on null), so ⏳ silently became A→Z and never switched off.
-    const off = await post({ group: '', mode: null });
-    expect(off.json().modes).toEqual({});
-    expect(s.sectionSort(OWNER, null)).toBeNull();
+    const r = await post({ group: '', mode: 'name' });
+    expect(r.json()).toMatchObject({ ok: true, sorted: 3, mode: 'name', desc: false });
+    expect(order(s)).toEqual(['alpha', 'Bravo', 'Charlie']);
   });
 
-  it('an omitted mode still means A→Z, and the order is left alone when switching off', async () => {
+  it('desc reverses, and an omitted mode still means A→Z', async () => {
     const { s, post } = await api();
-    expect((await post({ group: '' })).json().modes).toEqual({ '': 'name' });
-    const sorted = s.listAgents(OWNER).map((a) => a.name);
-    await post({ group: '', mode: null });
-    expect(s.listAgents(OWNER).map((a) => a.name)).toEqual(sorted); // unsorting is not re-sorting
+    await post({ group: '', desc: true });
+    expect(order(s)).toEqual(['Charlie', 'Bravo', 'alpha']);
   });
 
-  it('switching from A→Z to ⏳ replaces the mode rather than stacking', async () => {
+  it('all: true covers every section', async () => {
     const { s, post } = await api();
-    await post({ group: '', mode: 'name' });
-    const r = await post({ group: '', mode: 'time' });
-    expect(r.json().modes).toEqual({ '': 'time' });
-    expect(s.listAgents(OWNER).map((a) => a.name)).toEqual(['Bravo', 'alpha', 'Charlie']); // newest first
+    s.insertAgent(agent('d', 'Zeta', '2026-04-01T00:00:00Z', 'Home'));
+    s.insertAgent(agent('e', 'Alpha House', '2026-05-01T00:00:00Z', 'Home'));
+    await post({ all: true, mode: 'name' });
+    expect(order(s, 'Home')).toEqual(['Alpha House', 'Zeta']);
+    expect(order(s)).toEqual(['alpha', 'Bravo', 'Charlie']);
   });
 
   it('a bad mode is refused', async () => {
