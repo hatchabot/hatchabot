@@ -3147,12 +3147,30 @@ async function loadPool() {
     $('poolStatus').innerHTML = `<span class="pool-dot"${ready > 0 ? '' : ' style="color:var(--off)"'}>●</span>
       <b>${ready}</b> instant bot${ready === 1 ? '' : 's'} ready${inUse ? ` <span class="sub">· ${inUse} in use by agents</span>` : ''}
       ${ready ? '' : '<span class="sub">· a new agent will ask for a BotFather token, or can go without Telegram</span>'}`;
+    // Four answers to four different questions — "can I make an agent right
+    // now?", "what is this bot doing?", "what has the house lent me?" — rather
+    // than one flat list you have to read every line of. Empty groups are not
+    // drawn at all.
+    const GROUPS = [
+      ['Free — yours', b => b.mine && !b.leasedTo, 'Ready for your next agent.'],
+      ['In use — yours', b => b.mine && b.leasedTo, ''],
+      ['Free — shared with you', b => !b.mine && !b.leasedTo, 'Parked by someone else on this server; your next agent can take one.'],
+      ['In use — someone else’s', b => !b.mine && b.leasedTo, ''],
+    ];
+    const row = (b) => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
+        <span class="grow">🤖 <b class="pii">@${esc(b.username)}</b>${b.shared ? ' <span class="chip">shared</span>' : ''}
+          ${b.leasedTo ? `<span class="sub">· ${esc(b.leasedToName || 'an agent')}</span>` : ''}</span>
+        ${b.leasedTo
+          ? `<span class="sub" title="Its agent would lose the bot it answers on. Delete or archive the agent instead — that parks the bot back here.">in use</span>`
+          : `<button class="hbtn danger" onclick="removePoolBot('${jsq(b.username)}')" title="Discard the stored token. The bot itself still exists at @BotFather.">🗑 Delete</button>`}
+      </div>`;
     el.innerHTML = bots.length
-      ? bots.map(b => `<div class="pair" style="align-items:center;padding:6px 0;border-top:1px solid var(--line)">
-          <span class="grow">🤖 <b class="pii">@${esc(b.username)}</b>
-            <span class="sub">· ${b.shared ? 'shared' : b.mine ? 'yours' : 'another user’s'} · ${b.leasedTo ? `in use by <b>${esc(b.leasedToName || 'an agent')}</b>` : 'available'}</span></span>
-          ${b.leasedTo ? '' : `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}')">Remove</button>`}
-        </div>`).join('')
+      ? GROUPS.map(([label, pick, hint]) => {
+          const mine = bots.filter(pick);
+          if (!mine.length) return '';
+          return `<div style="margin:10px 0 0"><b style="font-size:13px">${label}</b> <span class="sub">· ${mine.length}</span>
+            ${hint ? `<div class="sub" style="margin:2px 0 0">${hint}</div>` : ''}</div>${mine.map(row).join('')}`;
+        }).join('')
       : '<div class="sub">Empty — add a spare bot above, or park one when deleting an agent.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -3173,7 +3191,7 @@ async function addPoolBot() {
 }
 
 async function removePoolBot(username) {
-  if (!confirm(`Remove @${username} from the pool?\n\nIts stored token is discarded (the bot itself still exists at BotFather).`)) return;
+  if (!confirm(`Delete @${username} from the pool?\n\nHatchabot discards its stored token and forgets the bot. The bot itself still exists — remove it for good at @BotFather → /mybots → /deletebot, which also frees one of your ~20 bot slots.`)) return;
   try {
     await api(`/v1/pool/${encodeURIComponent(username)}`, { method: 'DELETE' });
     await loadPool();

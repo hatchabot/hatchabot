@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.19.0] — 2026-09-21
+
+### Changed
+- **The bot pool is grouped by what each bot is actually doing.** One flat list meant reading every line to answer "can I make an agent right now?". It now reads as **Free — yours**, **In use — yours** (with the agent that holds it), **Free — shared with you**, and **In use — someone else's**, each with a count, and empty groups are not drawn at all.
+- **Delete is a button, not a guess.** Every free bot carries **🗑 Delete**; a leased one says *in use* and explains that deleting or archiving its agent is what parks the bot back. The confirmation now also says what deleting does *not* do — the bot still exists at @BotFather, and removing it there is what frees one of your ~20 bot slots.
+
 ## [2.18.0] — 2026-09-21
 
 ### Changed
