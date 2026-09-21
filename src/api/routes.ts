@@ -5155,9 +5155,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     });
     store.setAgentWebOnly(agent.id, false);
     await deps.channel.syncDisplayName?.(result.accountId, agent.name).catch(() => {});
-    trace(agent.id)('channel.attached', { accountId: result.accountId });
+
+    // Pair once, not once per agent. A NEW agent is born knowing the owner's
+    // Telegram (createAgentRecord seeds it); a bot added later to an existing
+    // one skipped that, so the owner's first message hit a pairing code and a
+    // "That's me / Let them in" card — on their own Hatchabot agent (a Mac,
+    // 2026-09-21). Seed it here too, before the rebuild writes the allowlist.
+    const known = store.knownChannelUserId(agent.ownerId);
+    const seat = store.getMembership(agent.id, agent.ownerId);
+    if (known && seat && !seat.channelUserId) store.bindMembershipChannelUser(agent.id, agent.ownerId, known);
+    const ownerKnown = !!store.getMembership(agent.id, agent.ownerId)?.channelUserId;
+
+    trace(agent.id)('channel.attached', { accountId: result.accountId, ownerKnown });
     kickRebuild(agent.id);
-    return reply.code(202).send({ username: result.accountId, deepLink: result.deepLink });
+    // Nobody to seed — the owner has never used Telegram here. Watch for their
+    // first message the way a brand-new agent does, rather than leaving it to a
+    // card. (claimFirstContact waits out the rebuild that is starting now.)
+    if (!ownerKnown && agent.runtimeRef) {
+      void claimFirstContact(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: result.accountId, forUserId: agent.ownerId, timeoutMs: 30 * 60_000 },
+      ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim after attach failed'));
+    }
+    return reply.code(202).send({ username: result.accountId, deepLink: result.deepLink, ownerKnown });
   });
 
   app.delete<{ Params: { id: string } }>('/v1/agents/:id/telegram', async (req, reply) => {

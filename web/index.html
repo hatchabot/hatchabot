@@ -4293,17 +4293,26 @@ aiDlg?.addEventListener('close', () => {
   document.querySelectorAll('#aiList code[id^="cred-"]').forEach(el => { el.textContent = ''; el.style.display = 'none'; });
 });
 
+/**
+ * Show, then Copy — the same two presses as a bot token, so revealing a secret
+ * works one way everywhere. Copying goes through copyText, which also works on
+ * a plain-http page where the clipboard API does not exist.
+ */
 async function revealSourceCredential(id, btn) {
   const out = $('cred-' + id);
-  if (out.style.display !== 'none') { out.style.display = 'none'; out.textContent = ''; btn.textContent = 'Show'; return; }
+  if (out.style.display !== 'none' && out.textContent) {
+    toast(await copyText(out.textContent)
+      ? 'Copied — add it on the other machine as a ' + (btn.dataset.kind === 'setup-token' ? 'setup-token' : 'API key') + ' source.'
+      : 'Select it and copy by hand.');
+    return;
+  }
   btn.disabled = true;
   try {
     const r = await api(`/v1/ai-profiles/${id}/credential`);
     out.textContent = r.credential;
     out.style.display = '';
-    btn.textContent = 'Hide';
-    try { await navigator.clipboard.writeText(r.credential); toast('Copied — add it on the other machine as a ' + (r.kind === 'setup-token' ? 'setup-token' : 'API key') + ' source.'); }
-    catch { toast('Shown below — copy it by hand.'); }
+    btn.dataset.kind = r.kind;
+    btn.textContent = 'Copy';
   } catch (e) { toast(e.message, 9000); }
   finally { btn.disabled = false; }
 }

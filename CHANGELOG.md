@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.30.2] — 2026-09-21
+
+### Fixed
+- **Adding a bot to an agent that had none now knows who you are.** A new agent is born with its owner's Telegram already on its allowlist — pair once, not once per agent. Adding a bot *later* to an existing agent (a web-only one, or the Hatchabot agent) skipped that, so its owner's first message got OpenClaw's pairing code and a "That's me / Let them in" card on their own agent. The owner's known Telegram is now seeded before the rebuild writes the allowlist, so the first message is simply answered; and when nobody is known yet, the agent watches for the owner's first message the way a new agent does.
+- **Revealing an AI source's credential works like revealing a bot token**: Show, then Copy. It used to flip to Hide and try the clipboard API, which does not exist on a plain-http page.
+
 ## [2.30.1] — 2026-09-21
 
 ### Fixed
