@@ -3254,8 +3254,10 @@ async function loadBotInventory() {
           <span class="sub">${b.displayName ? `<span class="pii">“${esc(b.displayName)}”</span> · ` : ''}${WHERE[b.where] ? WHERE[b.where](b) : esc(b.where)}</span>
           ${b.alive === false ? `<div class="sub" style="color:var(--warn);flex-basis:100%">${DEAD[b.where] ?? 'Telegram rejects this token.'}</div>` : ''}</span>
         ${b.alive === false && b.where === 'pool-free' ? `<button class="hbtn" onclick="removePoolBot('${jsq(b.username)}').then(loadBotInventory)">Remove</button>` : ''}
+        <button class="hbtn" onclick="revealInvToken(this,'${jsq(b.username)}')" title="Show this bot's token — for moving it to another machine">🔑 Show</button>
         <span title="${b.alive === true ? 'token works' : b.alive === false ? 'token revoked/dead — the bot may still exist at BotFather' : 'Telegram unreachable — unknown'}">
           ${b.alive === true ? '✅' : b.alive === false ? '❌' : '❓'}</span>
+        <code class="invtok" hidden style="flex-basis:100%;word-break:break-all;font-size:11.5px"></code>
       </div>`).join('') || '<div class="sub">No bots known to this server.</div>';
     const n = (f) => bots.filter(f).length;
     $('botInvStatus').innerHTML =
@@ -3308,6 +3310,27 @@ async function loadPool() {
         }).join('')
       : '<div class="sub">Empty — add a spare bot above, or park one when deleting an agent.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+/**
+ * Reveal one bot's token from the inventory — the only place that can show a
+ * spare's, an orphaned token's, or one whose agent is archived. One bot at a
+ * time, on purpose; the second press copies it.
+ */
+async function revealInvToken(btn, username) {
+  const out = btn.parentElement.querySelector('.invtok');
+  if (out && !out.hidden && out.textContent) {
+    toast(await copyText(out.textContent) ? 'Token copied' : 'Select it and copy');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await api(`/v1/bots/${encodeURIComponent(username)}/token`);
+    out.textContent = r.token;
+    out.hidden = false;
+    btn.textContent = 'Copy';
+  } catch (e) { toast(e.message, 8000); }
+  finally { btn.disabled = false; }
 }
 
 async function addPoolBot() {

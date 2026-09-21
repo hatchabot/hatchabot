@@ -552,6 +552,15 @@ Members show on the card (when there's more than one) and always under
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 `members`, `kick`.
 
+**Getting a token back out.** Every row of **⚙ Settings → Telegram → Every bot
+this server has a token for** has **🔑 Show** — the second press copies. It is
+the only place that can reveal the token of a *spare* in the pool, an
+*orphaned* token, or a bot whose agent is archived, which is what you need
+before moving bots to another machine or before `uninstall.sh --purge`
+(which discards Hatchabot's copies; the bots themselves survive at
+@BotFather). One bot at a time and logged — there is deliberately no "reveal
+all". An agent's own bot can also be revealed from its Telegram tab.
+
 **Changing the bot an agent answers on.** A Telegram bot's **@handle is fixed
 for life** — there is no BotFather command to change it; only the *display
 name* can change, and that follows the agent's name, so renaming the agent

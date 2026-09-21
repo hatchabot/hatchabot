@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.28.0] — 2026-09-21
+
+### Added
+- **🔑 Show on every bot in the inventory.** A token could only be revealed from the agent that uses it, so a spare in the pool, an orphaned token, or a bot whose agent was archived had no way back out — exactly the bots you need when moving to another machine or before `uninstall.sh --purge`. Each row of *Every bot this server has a token for* now reveals its own token; the second press copies it. Machine owner only, one bot per request, logged, and there is deliberately no "reveal all". The inventory and the reveal share one lookup, so they can never disagree about which bots exist.
+
 ## [2.27.0] — 2026-09-21
 
 ### Added

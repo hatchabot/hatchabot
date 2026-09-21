@@ -5367,11 +5367,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * (Chris hit the cap with 5 unaccounted bots, 2026-09-05). Host-owner
    * gated: it decrypts every bot token to ask Telegram about it.
    */
-  app.get('/v1/bot-inventory', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
-    const botFetch = deps.oauthFetch ?? fetch;
-    // username → {ref, where}: channels first (live agents), then pool rows,
-    // then any telegram/bot/* secret nothing references (orphaned tokens).
+  /**
+   * Every bot this server holds a token for, username → where its secret is:
+   * agents' channels first, then pool rows, then any telegram/bot/* secret
+   * nothing references (an orphaned token). One lookup for the inventory and
+   * for revealing a single token, so they can never disagree about what exists.
+   */
+  const botSecretRefs = (): Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string }> => {
     const rows = new Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string }>();
     for (const a of store.listAllActiveAgents()) {
       const ch = store.getChannelForAgent(a.id);
@@ -5385,6 +5387,30 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const u = ref.split('/')[2]!.toLowerCase();
       if (!rows.has(u)) rows.set(u, { secretRef: ref, where: 'orphan-token' });
     }
+    return rows;
+  };
+
+  /**
+   * One bot's token, from the inventory — including the ones with no agent to
+   * reveal them from: a spare in the pool, an orphaned token, a bot whose agent
+   * is archived. Machine owner only, one bot per request, and logged: there is
+   * deliberately no "reveal all".
+   */
+  app.get<{ Params: { username: string } }>('/v1/bots/:username/token', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const username = req.params.username.replace(/^@/, '').toLowerCase();
+    const row = botSecretRefs().get(username);
+    if (!row) return reply.code(404).send({ error: `This server holds no token for @${username}.` });
+    const token = await secrets.get(row.secretRef).catch(() => undefined);
+    if (!token) return reply.code(409).send({ error: 'The stored token is missing.' });
+    app.log.warn({ username, where: row.where, ownerId: ownerIdOf(req) }, 'telegram.bot_token_revealed');
+    return { username, where: row.where, token };
+  });
+
+  app.get('/v1/bot-inventory', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const botFetch = deps.oauthFetch ?? fetch;
+    const rows = botSecretRefs();
     const out: Array<Record<string, unknown>> = [];
     // getMe each bot CONCURRENTLY (bounded): serial × 6s timeout could stall
     // this admin request for minutes with a slow Telegram and ~40 bots
