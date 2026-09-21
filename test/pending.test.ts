@@ -28,6 +28,10 @@ async function world() {
   }
   await seed('a1', 'fam', 'Family', 'RUNNING');
   await seed('a2', 'condo', 'Condo', 'RUNNING');
+  // These agents are the open kind — the invite-only default (v2.13.0) is
+  // covered on its own below, and every assertion here is about listing.
+  store.setAllowKnocks('a1', true);
+  store.setAllowKnocks('a2', true);
   await seed('a3', 'stop', 'Stopped', 'STOPPED');       // not RUNNING → skipped
   await seed('x9', 'theirs', 'Theirs', 'RUNNING', 'other'); // another owner → invisible
   const f = Fastify();
@@ -74,6 +78,25 @@ describe('GET /v1/pending (fleet-wide join requests)', () => {
     pairingByAgent(provider, store, { Theirs: [{ id: '999', code: 'SECRET', meta: {} }] });
     const res = await f.inject({ method: 'GET', url: '/v1/pending', headers: as });
     expect(res.json()).toEqual([]);
+  });
+
+  it('an invite-only agent hides a knock from a stranger, and shows an expected one', async () => {
+    const { store, provider, f } = await world();
+    store.setAllowKnocks('a1', false); // the default
+    pairingByAgent(provider, store, {
+      Family: [{ id: '555', code: 'CODEA', meta: { firstName: 'Maria' } }],
+    });
+    expect((await f.inject({ method: 'GET', url: '/v1/pending', headers: as })).json()).toEqual([]);
+
+    // …until a window is open (an invite was just redeemed).
+    store.openPairingWindow('a1', new Date(Date.now() + 60_000).toISOString(), 'user-guest');
+    expect((await f.inject({ method: 'GET', url: '/v1/pending', headers: as })).json()).toHaveLength(1);
+    store.closePairingWindow('a1');
+
+    // …or the sender is already a member of another agent of mine.
+    store.insertMembership({ id: 'm1', agentId: 'a2', userId: 'user-guest', role: 'user', status: 'active' } as never);
+    store.bindMembershipChannelUser('a2', 'user-guest', '555');
+    expect((await f.inject({ method: 'GET', url: '/v1/pending', headers: as })).json()).toHaveLength(1);
   });
 
   it('POST /pairing/deny turns a request away, owner-scoped', async () => {

@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.13.0] — 2026-09-20
+
+### Security
+- **Agents are invite-only.** A Telegram bot username is findable, so strangers do message agents — and every one of those knocks reached the owner as a card and, since the manager got a Telegram channel, as a push to their phone. The answer was almost always "deny". An agent now admits only a knock it is expecting: an open **invite window** (a fresh agent waiting for its owner, or someone who just redeemed an invite link), or a sender the owner **already knows** — their linked Telegram, or an active member of any agent they own. Everyone else is turned away silently, and their pending request is removed from the agent instead of piling up on the volume. On for every agent, old and new; **⚙ Settings → Telegram → Who can reach it** switches a chosen agent back to *Anyone can knock*. Nothing changes for members, and nothing changes for what a stranger sees — OpenClaw never answered them either way; this decides whether *you* are bothered.
+
+### Changed
+- **The top bar fits on a phone.** The version tucks under the wordmark instead of taking a slot beside it, and **Fleet** drops out of the bar below 640px — it is in the account menu, and the dashboard tiles open the same screens.
+- **"Ask it anything."** The line beside the Hatchabot agent was three clauses explaining what a manager is; the fleet below it already says the rest.
+
+### Fixed
+- `docs/features.md` still told people to turn Slack and Discord on with `?preview=channels`; it has been `?dev` since v2.3.0.
+
 ## [2.12.0] — 2026-09-20
 
 ### Added

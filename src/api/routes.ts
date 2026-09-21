@@ -6830,11 +6830,37 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Pending pairing requests on a live agent — the app renders these as
   // "someone wants to talk to <agent>" cards for the owner to approve.
   /** Pending requests on every channel the agent has, each marked with its channel. */
-  const pairingRequestsFor = async (agent: Agent) => {
+  /**
+   * Is this knock worth the owner's attention?
+   *
+   * A bot username is findable, so anyone on Telegram can message an agent and
+   * land a pairing request. Every one of them used to reach the owner — as a
+   * card, and since v2.x as a push to their phone — and the answer was almost
+   * always "deny". So an agent now admits only people it is expecting:
+   *
+   *   - an **invite window** is open (a fresh agent waiting for its owner, or
+   *     an invitee who just redeemed a link), or
+   *   - the sender is **already known** to this owner — their own linked
+   *     Telegram, or an active member of any agent they own, or
+   *   - the agent is deliberately set to let **anyone knock**.
+   *
+   * Everyone else is a stranger: never surfaced, never pushed, and turned away
+   * by the sweep below. OpenClaw never answered them either way — this only
+   * decides whether the owner is bothered.
+   */
+  const expectedKnock = (agent: Agent, r: { id: string; kind: Channel['kind'] }): boolean =>
+    agent.allowKnocks === true ||
+    store.pairingWindowOpen(agent.id) ||
+    store.isKnownChannelUser(agent.ownerId, r.kind, r.id);
+
+  const pairingRequestsFor = async (agent: Agent, includeStrangers = false) => {
     const out: Array<Awaited<ReturnType<typeof listPairingRequests>>[number] & { kind: Channel['kind'] }> = [];
     for (const ch of store.listChannelsForAgent(agent.id)) {
       const acct = ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT;
-      for (const r of await listPairingRequests(providerFor(agent.hostId), agent.runtimeRef!, acct, ch.kind)) out.push({ ...r, kind: ch.kind });
+      for (const r of await listPairingRequests(providerFor(agent.hostId), agent.runtimeRef!, acct, ch.kind)) {
+        const one = { ...r, kind: ch.kind };
+        if (includeStrangers || expectedKnock(agent, one)) out.push(one);
+      }
     }
     return out;
   };
@@ -6873,25 +6899,40 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    */
   const announcedPairings = new Set<string>();
   const sweepPendingPairings = async (): Promise<void> => {
-    const opsWithBot = store
+    const live = store
       .listAllActiveAgents()
-      .filter((a) => a.ops && a.state === 'RUNNING' && store.getChannelForAgent(a.id, 'telegram'));
-    if (!opsWithBot.length) return;
+      .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);
+    if (!live.length) return;
+    // An owner can only be pushed to if their manager has a Telegram bot.
+    const pushable = new Set(
+      store
+        .listAllActiveAgents()
+        .filter((a) => a.ops && a.state === 'RUNNING' && store.getChannelForAgent(a.id, 'telegram'))
+        .map((a) => a.ownerId),
+    );
     const found = new Map<string, { ownerId: string; headline: string }>();
-    for (const ops of opsWithBot) {
-      const mine = store
-        .listAgents(ops.ownerId)
-        .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);
-      for (const agent of mine) {
-        let reqs: Awaited<ReturnType<typeof pairingRequestsFor>>;
-        try { reqs = await pairingRequestsFor(agent); } catch { continue; } // an unreachable agent is not news
-        for (const r of reqs) {
-          const who = r.meta?.firstName || r.meta?.username || 'Someone';
-          found.set(`${agent.id}:${r.code}`, {
-            ownerId: ops.ownerId,
-            headline: `🔑 ${who} wants to talk to "${agent.name}"${r.kind === 'telegram' ? '' : ` on ${r.kind}`}.`,
-          });
+    for (const agent of live) {
+      let reqs: Awaited<ReturnType<typeof pairingRequestsFor>>;
+      try { reqs = await pairingRequestsFor(agent, true); } catch { continue; } // an unreachable agent is not news
+      for (const r of reqs) {
+        if (!expectedKnock(agent, r)) {
+          // A stranger. Turn it away here rather than leaving it on the volume
+          // to be re-read every sweep — and never mention it to anyone.
+          void denyPairing(
+            { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+            { agentId: agent.id, runtimeRef: agent.runtimeRef!, code: r.code, kind: r.kind },
+          ).then(
+            () => trace(agent.id)('pairing.stranger_turned_away', { kind: r.kind, username: r.meta?.username }),
+            () => {},
+          );
+          continue;
         }
+        if (!pushable.has(agent.ownerId)) continue;
+        const who = r.meta?.firstName || r.meta?.username || 'Someone';
+        found.set(`${agent.id}:${r.code}`, {
+          ownerId: agent.ownerId,
+          headline: `🔑 ${who} wants to talk to "${agent.name}"${r.kind === 'telegram' ? '' : ` on ${r.kind}`}.`,
+        });
       }
     }
     for (const key of unannounced(announcedPairings, [...found.keys()])) {
@@ -6995,6 +7036,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  /**
+   * Who may reach this agent on a messaging app. Off (the default) means
+   * invitees and people you already know; on restores the old behaviour where
+   * anyone who finds the bot can knock and wait for you to approve.
+   */
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/allow-knocks', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const parsed = z.object({ on: z.boolean() }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    store.setAllowKnocks(agent.id, parsed.data.on);
+    trace(agent.id)('agent.allow_knocks', { on: parsed.data.on });
+    return { allowKnocks: parsed.data.on };
+  });
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/stop', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);

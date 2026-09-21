@@ -63,7 +63,8 @@ The header holds:
   look's toolbar.
 - **Waiting for you** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
-  reason, and **people knocking** — a join request with **Let them in**,
+  reason, and **people knocking** — an *expected* join request (strangers
+  never get this far; see *Members & invites*) with **Let them in**,
   **That's me** and **Not now**, which is where someone is admitted now that
   the Telegram management bot is retired.
 - **Each group can sort itself.** **A→Z** and **⏳** (newest first) on a group
@@ -480,6 +481,23 @@ To let someone in, tap **Invite…** on the card:
   instead. When they message it, a "wants to talk" card appears on the agent
   and **Let them in** makes them a member.
 
+**The door is shut to strangers.** A Telegram bot username is findable, so
+anyone on Telegram can message an agent — and every one of those knocks used
+to reach you as a card, and a push to your phone. An agent now admits only a
+knock it is expecting:
+
+- an **invite window** is open — a fresh agent waiting for its owner, or
+  somebody who has just redeemed an invite link (30 minutes), or
+- the sender is **someone you already know**: your own linked Telegram, or an
+  active member of any agent you own — let someone into one agent and they are
+  not a stranger at the next.
+
+Anyone else is turned away silently: never a card, never a push, and the
+pending request is removed from the agent rather than left to pile up. The
+agent never answered them either way; this only decides whether *you* are
+bothered. Per agent, **⚙ Settings → Telegram → Who can reach it** switches it
+back to **Anyone can knock** if you want an agent the world may ask for.
+
 Members show on the card (when there's more than one) and always under
 ⚙ Settings → Telegram → **Members** — role, Telegram-link status, Remove,
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
@@ -491,9 +509,9 @@ and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 > covered by tests, but it has never been run against real Slack or Discord
 > apps, so the app does not offer it yet: an agent's **Messaging** tab says
 > Slack and Discord are coming. Turn them on in your own browser with
-> `?preview=channels` (remembered, like the classic look; `?preview=0` turns it
-> back off) — the server keeps its routes either way, so this is a place to
-> work, not a demo. An agent that already has a channel attached keeps showing
+> `?dev` (not remembered, so removing it from the URL turns it straight back
+> off) — the server keeps its routes either way, so this is a place to work,
+> not a demo. An agent that already has a channel attached keeps showing
 > and managing it whether or not preview is on.
 
 An agent can also be reached on Slack and on Discord, beside or instead of

@@ -295,6 +295,14 @@ export class Store {
         owner_id TEXT NOT NULL, group_name TEXT NOT NULL, sort_order INTEGER NOT NULL,
         PRIMARY KEY (owner_id, group_name)
       );
+      -- An OPEN DOOR, for as long as a claim window lasts. A fresh agent opens
+      -- one for its owner; redeeming an invite opens one for the invitee. While
+      -- no window is open and the sender is nobody we know, a Telegram DM to
+      -- the bot is a stranger knocking, and an invite-only agent turns it away
+      -- without ever bothering the owner (2026-09-20).
+      CREATE TABLE IF NOT EXISTS pairing_window (
+        agent_id TEXT PRIMARY KEY, until TEXT NOT NULL, opened_for TEXT
+      );
       -- A section's STICKY sort: once you press A→Z or ⏳ on a group, new agents
       -- (and agents moved in) are re-sorted the same way instead of landing at
       -- the top and breaking the order you asked for. Dragging an agent by hand
@@ -508,6 +516,11 @@ export class Store {
       // it appears in, and the default belongs at the top. Nullable like
       // agents.sort_order, so the backfill below runs once.
       `ALTER TABLE ai_profiles ADD COLUMN sort_order INTEGER`,
+      // Who may reach this agent on a messaging app: 0 (the default, fleet-wide)
+      // admits only people you invited or already know; 1 lets anyone who finds
+      // the bot knock and wait for approval, which is how every agent behaved
+      // before 2026-09-20.
+      `ALTER TABLE agents ADD COLUMN allow_knocks INTEGER NOT NULL DEFAULT 0`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -2988,6 +3001,58 @@ export class Store {
     return { userId: r.user_id, role: r.role, displayName: r.display_name ?? undefined };
   }
 
+  /** Anyone who finds the bot may knock, instead of invitees and people the
+   *  owner already knows. Off by default, per agent. */
+  setAllowKnocks(agentId: string, on: boolean): void {
+    this.db.prepare(`UPDATE agents SET allow_knocks = ? WHERE id = ?`).run(on ? 1 : 0, agentId);
+  }
+
+  /** Open the door on this agent until `until` — a claim window is running. */
+  openPairingWindow(agentId: string, until: string, openedFor?: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO pairing_window (agent_id, until, opened_for) VALUES (?, ?, ?)
+           ON CONFLICT(agent_id) DO UPDATE SET until = excluded.until, opened_for = excluded.opened_for`,
+      )
+      .run(agentId, until, openedFor ?? null);
+  }
+
+  closePairingWindow(agentId: string): void {
+    this.db.prepare(`DELETE FROM pairing_window WHERE agent_id = ?`).run(agentId);
+  }
+
+  pairingWindowOpen(agentId: string, now = new Date()): boolean {
+    const r = this.db
+      .prepare(`SELECT until FROM pairing_window WHERE agent_id = ?`)
+      .get(agentId) as { until: string } | undefined;
+    return !!r && Date.parse(r.until) > now.getTime();
+  }
+
+  /**
+   * Is this channel identity somebody the owner already knows — their own
+   * linked Telegram, or an active member of any agent they own? A person you
+   * have already let into one agent is not a stranger at the next one.
+   */
+  isKnownChannelUser(ownerId: string, kind: string, channelUserId: string): boolean {
+    if (kind === 'telegram') {
+      if (this.knownChannelUserId(ownerId) === channelUserId) return true;
+      const r = this.db
+        .prepare(
+          `SELECT 1 FROM memberships m JOIN agents a ON a.id = m.agent_id
+            WHERE a.owner_id = ? AND m.channel_user_id = ? AND m.status = 'active' LIMIT 1`,
+        )
+        .get(ownerId, channelUserId);
+      return !!r;
+    }
+    const r = this.db
+      .prepare(
+        `SELECT 1 FROM member_identities i JOIN agents a ON a.id = i.agent_id
+          WHERE a.owner_id = ? AND i.kind = ? AND i.channel_user_id = ? LIMIT 1`,
+      )
+      .get(ownerId, kind, channelUserId);
+    return !!r;
+  }
+
   /** Hard delete — used by import rollback, not by revoke (which tombstones). */
   deleteMemberships(agentId: string): void {
     this.db.prepare(`DELETE FROM memberships WHERE agent_id = ?`).run(agentId);
@@ -3238,6 +3303,7 @@ function rowToAgent(r: any): Agent {
     runtimeRef: r.runtime_ref ?? undefined,
     persona: r.persona,
     sharedMemory: !!r.shared_memory,
+    allowKnocks: !!r.allow_knocks,
     model: r.model ?? undefined,
     pendingAction: r.pending_action ? safeJson(r.pending_action, undefined) : undefined,
     migratedTo: r.migrated_to ?? undefined,

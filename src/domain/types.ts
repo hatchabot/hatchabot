@@ -135,6 +135,9 @@ export interface Agent {
   persona: string;
   /** One-to-many agents share MEMORY.md across members (§12.5). */
   sharedMemory: boolean;
+  /** Anyone who finds the bot may knock and wait for approval. Off by
+   *  default: only invitees and people the owner already knows get through. */
+  allowKnocks?: boolean;
   /**
    * Optional per-agent model override, chosen from the profile's model menu.
    * Absent = follow the profile's default. Ignored for local profiles (only

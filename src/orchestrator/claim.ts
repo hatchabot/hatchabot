@@ -113,6 +113,10 @@ export async function claimFirstContact(
   const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
   const pollIntervalMs = opts.pollIntervalMs ?? 3_000;
   const deadline = Date.now() + timeoutMs;
+  // An OPEN DOOR for as long as we are watching: while this window stands, a
+  // DM from a stranger is the person we are expecting, so an invite-only agent
+  // lets it through to be claimed. Closed again the moment we stop watching.
+  deps.store.openPairingWindow(opts.agentId, new Date(deadline).toISOString(), opts.forUserId);
 
   while (Date.now() < deadline) {
     // The watcher runs detached from the provision task, so the agent can be
@@ -124,6 +128,7 @@ export async function claimFirstContact(
     const agent = deps.store.getAgent(opts.agentId);
     if (!agent || agent.state === 'DELETING' || agent.state === 'DELETED' || agent.state === 'FAILED') {
       log('claim.window_abandoned', { agentId: opts.agentId, state: agent?.state });
+      deps.store.closePairingWindow(opts.agentId);
       return null;
     }
     // The membership we're binding for was already claimed (e.g. by an earlier
@@ -132,7 +137,7 @@ export async function claimFirstContact(
     const bound = kind === 'telegram'
       ? deps.store.getMembership(opts.agentId, opts.forUserId)?.channelUserId
       : deps.store.memberIdentities(opts.agentId, opts.forUserId)[kind];
-    if (bound) return bound;
+    if (bound) { deps.store.closePairingWindow(opts.agentId); return bound; }
 
     if (agent.state === 'RUNNING') {
       const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId, kind);
@@ -155,6 +160,7 @@ export async function claimFirstContact(
             channelUserId: first.id,
             username: first.meta?.username,
           });
+          deps.store.closePairingWindow(opts.agentId);
           return first.id;
         }
         log('claim.approve_failed', { agentId: opts.agentId, code: first.code });
@@ -163,6 +169,7 @@ export async function claimFirstContact(
     await sleep(pollIntervalMs);
   }
   log('claim.window_closed', { agentId: opts.agentId });
+  deps.store.closePairingWindow(opts.agentId);
   return null;
 }
 

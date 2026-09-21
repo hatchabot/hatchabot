@@ -31,6 +31,9 @@ async function setup(files: Record<string, unknown>) {
   store.insertAgent({ id, ownerId: OWNER, name: 'Tax', slug: id, state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', runtimeRef: ref,
     persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
   store.insertMembership({ id: 'mo', agentId: id, userId: OWNER, role: 'owner', status: 'active' });
+  // This fixture is about listing requests per channel, not about who is let
+  // through: the invite-only door (v2.13.0) is covered in pending.test.ts.
+  store.setAllowKnocks(id, true);
   store.insertChannel({ id: 'ct', agentId: id, kind: 'telegram', accountId: 'TaxBot', secretRef: 's', deepLink: 'https://t.me/TaxBot', createdAt: 'now' });
   store.insertChannel({ id: 'cs', agentId: id, kind: 'slack', accountId: 'U0BOT', secretRef: 's2', deepLink: 'https://slack', createdAt: 'now', settings: { team: 'Home' } });
   const inject = (method: string, url: string, payload?: unknown) => f.inject({ method: method as never, url, headers: H, payload: payload as never });
