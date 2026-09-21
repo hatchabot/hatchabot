@@ -585,7 +585,7 @@
   .v2sbar .v2unread { width:12px; height:12px; left:-4px; top:-4px; border-width:2px }
   .v2sbar .v2tg { width:16px; height:16px; right:-5px; bottom:-5px }
   .v2sbar .v2tg svg { width:9px; height:9px }
-  /* One corner mark per messaging app, overlapping, Telegram nearest the corner. */
+  /* One corner mark per chat app, overlapping, Telegram nearest the corner. */
   .v2tg.v2mk-slack { background:#4a154b }
   .v2tg.v2mk-discord { background:#5865f2 }
   .v2mks { position:absolute; right:-6px; bottom:-6px; z-index:1; display:flex; flex-direction:row-reverse }
@@ -2735,12 +2735,19 @@ function setupSteps() {
   if (!myAccount.hostOwner) return steps;
   const httpsDone = /^https:/i.test(appConfig?.appUrl ?? '');
   steps.push(
-    { key: 'ops', done: !!ops?.botUsername, title: ops?.botUsername ? `Your manager answers on @${esc(ops.botUsername)}` : 'Give your Hatchabot agent a Telegram bot', body: `
-      <p class="sub" style="margin:4px 0 6px">The Hatchabot agent is the one you ask for changes — "make me an agent that watches the bins", "why is the kitchen one quiet?".
-        Give it its own bot and you can ask from anywhere; Hatchabot pushes what needs you (someone knocking, a change waiting) down the same channel.
-        Confirming still happens here, in the app.</p>
-      ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openV2Agent('${jsq(ops.id)}','messaging')">Open its Telegram tab</button></div>`
-            : `<p class="sub" style="margin:0"><b>It doesn't exist yet</b> — the offer to create it is on the home screen, beside the fleet.</p>`}` },
+    { key: 'ops', done: !!ops, title: ops ? 'Your Hatchabot agent is set up' : 'Set up your Hatchabot agent', body: `
+      <p class="sub" style="margin:4px 0 6px">The manager: the one you ask for changes — "make me an agent that watches the bins",
+        "why is the kitchen one quiet?" — and the one that tells you when something needs you. It prepares each change as a card;
+        nothing happens until you Confirm.</p>
+      <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="v2Close();scrollTo({top:0,behavior:'smooth'})">Set it up on the home screen</button></div>` },
+    { key: 'opschat', done: !!ops && v2ChannelKinds(ops).length > 0,
+      title: ops && v2ChannelKinds(ops).length
+        ? `Your manager answers in ${v2ChannelKinds(ops).map(k => V2_CHAN_LABEL[k] ?? k).join(' and ')}`
+        : 'Connect your Hatchabot agent to a chat app', body: `
+      <p class="sub" style="margin:4px 0 6px">Give it its own bot and you can ask for a change from anywhere; Hatchabot pushes what needs you
+        — someone knocking, a card waiting — down the same conversation. Confirming still happens here, in the app.</p>
+      ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openV2Agent('${jsq(ops.id)}','messaging')">Open its chat apps</button></div>`
+            : `<p class="sub" style="margin:0">Set the agent up first — the step above.</p>`}` },
     { key: 'https', done: httpsDone, title: httpsDone ? `Reachable at ${esc((appConfig?.appUrl ?? '').replace(/^https:\/\//, ''))}` : 'Reach it from your phone, over HTTPS', body: `
       <p class="sub" style="margin:4px 0 6px">On <code>http://localhost:8080</code> the app only works on this machine, and the agent consoles need a secure page.
         One command on the host puts a real certificate in front of it and gives it an address your other devices can open:</p>
@@ -9163,7 +9170,7 @@ const V2_CHAN_LABEL = { telegram: 'Telegram', slack: 'Slack', discord: 'Discord'
 const chanIcon = (kind) => (V2_MARK_SVG[kind] || '')
   .replace(/width="\d+" height="\d+"/, 'width="16" height="16"')
   .replaceAll('#fff', 'currentColor');
-/** Every messaging app this agent is reachable in, as links, for the console
+/** Every chat app this agent is reachable in, as links, for the console
  *  bar: the console is Hatchabot's own window on the agent, but the
  *  conversation people actually have with it lives in Telegram, Slack or
  *  Discord — one press away instead of a hunt through the app. */
@@ -9183,7 +9190,7 @@ function renderConsoleChannels(a) {
   box.innerHTML = agentChannelLinks(a).map((l) =>
     `<button class="cbtn" title="Open this agent in ${V2_CHAN_LABEL[l.kind]}" onclick="window.open('${jsq(l.url)}','_blank','noopener')">${chanIcon(l.kind)}<span class="lbl">${V2_CHAN_LABEL[l.kind]}</span></button>`).join('');
 }
-/** Every messaging app that reaches this agent, Telegram first. */
+/** Every chat app that reaches this agent, Telegram first. */
 function v2ChannelKinds(a) {
   return [...(a.botUsername ? ['telegram'] : []), ...(a.otherChannels ?? []).map(c => c.kind).filter(k => V2_MARK_SVG[k])];
 }
@@ -9218,7 +9225,7 @@ function v2IconHTML(a, st) {
     + (st.glyph ? `<span class="v2badge v2b-${st.cls}" aria-hidden="true">${st.glyph}</span>` : '')
     + (!v2Mine(a) ? '<span class="v2badge v2b-shared" aria-hidden="true">👥</span>' : '')
     + (v2Unread(a) ? '<span class="v2unread" title="New messages in its console" aria-hidden="true"></span>' : '')
-    // A small corner mark: which messaging apps reach this agent (the first,
+    // A small corner mark: which chat apps reach this agent (the first,
     // then "+N" for the rest). Telegram's paper plane, Slack's hash, Discord's pad.
     + v2Marks(a)
     + '</span>';
@@ -9625,8 +9632,8 @@ function v2Pane(a, tab) {
       return `
       ${v2ChannelKinds(a).length
         ? `<div data-v2slot="tgMembersBlock"></div>`
-        : row('People', `<span>Only you — it has no messaging app yet.</span>${B('Add Telegram…', goto('messaging'))}
-            <span class="sub">Other people reach an agent through a messaging app.</span>`)}
+        : row('People', `<span>Only you — it is not in a chat app yet.</span>${B('Add Telegram…', goto('messaging'))}
+            <span class="sub">Other people reach an agent through a chat app: Telegram today, Slack and Discord soon.</span>`)}
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}

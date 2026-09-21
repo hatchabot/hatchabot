@@ -53,9 +53,9 @@ The header holds:
   wrap onto a second row rather than being cut off.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
-  keeps going with the three steps that decide whether the house is actually
-  set up: give the **Hatchabot agent its own Telegram bot**, put the app on an
-  **HTTPS address** your phone can reach, and **check a backup has run**. Every
+  keeps going with the four steps that decide whether the house is actually set
+  up: **set up the Hatchabot agent**, **connect it to a chat app**, put Hatchabot
+  on an **HTTPS address** your phone can reach, and **check a backup has run**. Every
   step is ticked from live state, never from "you have seen this", so it is
   still honest a month later. **Setup** sits in the top bar next to Settings,
   with a badge counting what is left; there is also a **set up** tile on the
@@ -79,10 +79,10 @@ The header holds:
   then drag; an ordinary swipe still scrolls.
 - **A red dot at the top left** means the agent has said something in its
   console since you last had that console open — a reply that finished after
-  you closed it, or a scheduled run on an agent with no messaging app.
+  you closed it, or a scheduled run on an agent with no chat app.
   Opening the console clears it. Messages that went to Telegram, Slack or
   Discord are not flagged; those apps show their own unread marks.
-- **A small mark on the icon** shows which messaging apps reach the agent: a
+- **A small mark on the icon** shows which chat apps reach the agent: a
   blue paper plane for Telegram, a purple hash for Slack, a blurple pad for
   Discord. An agent on two apps wears both marks, overlapped, rather than one
   mark and a **+1** that never said which app it stood for.
@@ -546,6 +546,15 @@ Members show on the card (when there's more than one) and always under
 ⚙ Settings → Telegram → **Members** — role, Telegram-link status, Remove,
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 `members`, `kick`.
+
+## Chat apps
+
+**Chat app** is what Hatchabot calls the places an agent can be talked to:
+Telegram today, Slack and Discord next. Not "channel" — Slack and Discord both
+use that word for a *room*, so "connect a channel" would mean two things on one
+screen. (The API and the code keep `channel` as the internal name; it never
+reaches a person.) An agent can be in more than one at a time, and its icon
+wears one mark per app.
 
 ## Slack and Discord
 

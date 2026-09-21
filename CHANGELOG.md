@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.20.0] — 2026-09-21
+
+### Changed
+- **Setting up the Hatchabot agent and connecting it to a chat app are two steps now**, because they are two decisions: one creates the manager, the other decides where you talk to it. Seven steps in all, each still ticked from live state.
+- **"Chat app" is the name for Telegram, Slack and Discord together.** They needed one before there were three of them. Not "channel" — Slack and Discord both call a *room* a channel, so "connect a channel" would mean two different things on the same screen; the code keeps `channel` internally, where nobody reads it. `docs/features.md` says so under its own heading.
+
 ## [2.19.0] — 2026-09-21
 
 ### Changed
