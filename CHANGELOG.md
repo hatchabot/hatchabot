@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.27.0] — 2026-09-21
+
+### Added
+- **"Use this address for links" writes `HATCHABOT_PUBLIC_URL` for you.** Detection covers what is on screen, but it depends on a probe succeeding — an invite opened next week should not need Tailscale to have answered five minutes ago. One press writes the line into the `.env` the service reads: it replaces the commented placeholder `setup-host.sh` leaves, replaces a localhost value, appends when there is none, and **refuses to overwrite an address somebody chose**, saying which one is already there. Written through a temp file, keeping the file's mode, so a crash cannot leave half a `.env`.
+
+### Fixed
+- **A localhost `HATCHABOT_PUBLIC_URL` is no longer used for links.** Set to `http://localhost:8080`, it was faithfully printed on the install QR code — an address the phone scanning it can never open. A loopback address is not a public address: when one is set, a working tailnet address is preferred for the QR, invite links and the address the app shows.
+
 ## [2.26.0] — 2026-09-21
 
 ### Fixed

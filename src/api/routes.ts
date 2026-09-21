@@ -17,7 +17,7 @@ import { InvalidBotTokenError, verifyBotToken } from '../channels/telegramManual
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../channels/connector.js';
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
-import { enableServe, tailnetInfo } from '../ops/tailnet.js';
+import { enableServe, tailnetInfo, writePublicUrl } from '../ops/tailnet.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -850,13 +850,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * from a request, least of all the unauthenticated /v1/config, because the
    * probe spawns a process.
    */
+  /** A loopback address is not a public address: it is useless on a QR code,
+   *  in an invite link, or anywhere else it would be sent to another device.
+   *  A machine that set HATCHABOT_PUBLIC_URL to localhost meant well; prefer
+   *  the address the machine is actually reachable at. */
+  const loopbackUrl = (u: string | undefined): boolean =>
+    !!u && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(u);
   let detectedUrl: string | undefined;
   const refreshDetectedUrl = async (): Promise<void> => {
-    if (deps.publicUrl) return; // an explicit setting always wins
+    if (deps.publicUrl && !loopbackUrl(deps.publicUrl)) return; // a real setting wins
     const info = await tailnetInfo(Number(process.env.PORT ?? 8080)).catch(() => undefined);
     detectedUrl = info?.url;
   };
-  const appUrlFor = (): string | undefined => deps.publicUrl?.replace(/\/$/, '') || detectedUrl;
+  const appUrlFor = (): string | undefined => {
+    const set = deps.publicUrl?.replace(/\/$/, '') || undefined;
+    if (set && !loopbackUrl(set)) return set;
+    return detectedUrl ?? set;
+  };
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setTimeout(() => { void refreshDetectedUrl(); }, 4_000).unref();
     setInterval(() => { void refreshDetectedUrl(); }, 10 * 60_000).unref();
@@ -871,7 +881,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const port = Number(process.env.PORT ?? 8080);
     const info = await tailnetInfo(port).catch(() => ({ installed: false }));
-    if (!deps.publicUrl) detectedUrl = (info as { url?: string }).url;
+    if (!deps.publicUrl || loopbackUrl(deps.publicUrl)) detectedUrl = (info as { url?: string }).url;
     return { ...info, port, publicUrl: appUrlFor() };
   });
 
@@ -897,9 +907,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     }
     const after = await tailnetInfo(port).catch(() => before);
-    if (!deps.publicUrl) detectedUrl = after.url;
+    if (!deps.publicUrl || loopbackUrl(deps.publicUrl)) detectedUrl = after.url;
     trace()('tailscale.serve_enabled', { dns: after.dns, serving: after.serving === true });
     return { ...after, turnedOn: true };
+  });
+
+  /**
+   * Remember this address for links, by writing it into the .env the service
+   * reads. Detection already covers the screen; this covers an invite opened
+   * next week, when the probe may not have run.
+   */
+  app.post('/v1/tailscale/use-for-links', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const info = await tailnetInfo(Number(process.env.PORT ?? 8080)).catch(() => undefined);
+    const url = info?.url;
+    if (!url) {
+      return reply.code(409).send({ error: 'There is no working HTTPS address to write yet — turn on HTTPS first.' });
+    }
+    const envPath = join(process.cwd(), '.env');
+    const out = await writePublicUrl(envPath, url).catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!out.ok) return reply.code(409).send({ error: out.error ?? 'Could not write .env' });
+    detectedUrl = url;   // in force now; the file is for the next restart
+    trace()('app.public_url_written', { url, envPath, replaced: (out as { replaced?: boolean }).replaced === true });
+    return { written: envPath, url, restartNeeded: false };
   });
 
   /** A QR for the tailnet address, so a phone can open it without typing. */

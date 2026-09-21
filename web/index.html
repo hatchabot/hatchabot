@@ -2816,8 +2816,10 @@ function tailnetStepBody() {
         <img src="/v1/tailscale/qr.svg" alt="QR code for this address" width="104" height="104"
              style="background:#fff;border-radius:8px;padding:4px">
       </div>
-      ${/^https:/i.test(appConfig?.appUrl ?? '') ? '' : `<p class="sub" style="margin:6px 0 0">Invite links still point at this machine:
-        set <code>HATCHABOT_PUBLIC_URL=${esc(tailnet.url)}</code> in <code>.env</code> and restart so they use this address too.</p>`}`;
+      ${/^https:/i.test(appConfig?.appUrl ?? '') ? '' : `<div class="sub" style="margin:8px 0 0">
+        Invite links and the install code follow this address while Hatchabot can see it. Write it down and they always will:
+        <div style="margin-top:6px"><button id="tsRememberBtn" onclick="rememberPublicUrl(this)">Use this address for links</button>
+          <span class="sub" id="tsRememberMsg"></span></div></div>`}`;
   }
   if (tailnet?.dns) {
     return `<p class="sub" style="margin:4px 0 6px">This machine is on your tailnet as <b>${esc(tailnet.dns)}</b>, but nothing is served over HTTPS yet —
@@ -2865,6 +2867,24 @@ async function turnOnServe(btn) {
   } catch (e) {
     $('tsServeErr').innerHTML = `<b style="color:var(--bad)">Hatchabot could not turn it on:</b> ${esc(e.message)}<br>Run the command below in a terminal instead.`;
     btn.disabled = false; btn.textContent = 'Turn on HTTPS';
+  }
+}
+
+/** Write the tailnet address into .env, so links keep working even when the
+ *  probe that found it has not run. */
+async function rememberPublicUrl(btn) {
+  btn.disabled = true;
+  const msg = $('tsRememberMsg');
+  msg.textContent = '';
+  try {
+    const r = await api('/v1/tailscale/use-for-links', { method: 'POST', body: {} });
+    msg.innerHTML = `✓ written to <code>${esc(r.written)}</code>`;
+    appConfig = { ...(appConfig ?? {}), appUrl: r.url };
+    toast(`Links now use ${r.url.replace(/^https:\/\//, '')}.`, 8000);
+    renderSetup();
+  } catch (e) {
+    msg.innerHTML = `<b style="color:var(--bad)">${esc(e.message)}</b>`;
+    btn.disabled = false;
   }
 }
 
