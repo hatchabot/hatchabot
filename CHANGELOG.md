@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.33.4] — 2026-09-22
+
+### Fixed
+- **`hatchabot doctor` told a Mac with Tailscale running that Tailscale was not installed**, and warned about `HATCHABOT_PUBLIC_URL` on a machine whose tailnet address the app already uses. It looked for `tailscale` on the PATH, where the Mac app never puts it. It now uses the same lookup as the setup guide's HTTPS step (the app bundle, Homebrew, `serve` state), reports "serving https://…" when HTTPS is on, and treats a tailnet address that answers as the public URL rather than a warning.
+
 ## [2.33.3] — 2026-09-22
 
 ### Fixed

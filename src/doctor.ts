@@ -7,6 +7,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { defaultBackupsDir, defaultDbPath } from './envCompat.js';
+import { tailnetInfo } from './ops/tailnet.js';
 
 export interface DoctorFacts {
   nodeVersion: string;
@@ -19,7 +20,7 @@ export interface DoctorFacts {
   controlPlane: { url: string; ok: boolean; version?: string; error?: string };
   diskFreeGb?: number;
   backups: { dir: string; lastSet?: string; ageDays?: number };
-  tailscale?: { installed: boolean; up?: boolean; dns?: string };
+  tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean };
   containers?: { running: number; total: number };
   /** Which release this checkout sits on, and whether a newer tag is present. */
   checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
@@ -65,8 +66,11 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     // holds a password per person, identity mode uses Google. Warning about it
     // in either would call a locked install an open one.
     if (f.envFile.authMode === 'password' && !f.envFile.password) out.push({ level: 'warn', text: 'No app password set — the web app is open to anyone who can reach the port', fix: 'HATCHABOT_PASSWORD=… in .env, or turn on family accounts in Settings → You' });
-    if (!f.envFile.publicUrl) out.push({ level: 'warn', text: 'HATCHABOT_PUBLIC_URL not set — invite links and OAuth redirects use localhost', fix: 'Set it to the address others use (with Tailscale: https://<machine>.<tailnet>.ts.net)' });
-    else out.push({ level: 'ok', text: `Public URL ${f.envFile.publicUrl}` });
+    // A tailnet address that answers is what the app uses for links and QR
+    // codes when nothing is set (appUrlFor), so it is not a warning.
+    if (f.envFile.publicUrl) out.push({ level: 'ok', text: `Public URL ${f.envFile.publicUrl}` });
+    else if (f.tailscale?.reachable && f.tailscale.url) out.push({ level: 'ok', text: `Public URL not set; links use the tailnet address ${f.tailscale.url} (the setup guide's Turn on HTTPS step makes it explicit)` });
+    else out.push({ level: 'warn', text: 'HATCHABOT_PUBLIC_URL not set — invite links and OAuth redirects use localhost', fix: 'Set it to the address others use (with Tailscale: https://<machine>.<tailnet>.ts.net)' });
   }
   out.push(f.db.present ? { level: 'ok', text: `Database ${f.db.path}${f.db.sizeMb !== undefined ? ` (${f.db.sizeMb.toFixed(1)} MB)` : ''}` } : { level: 'warn', text: `Database not created yet at ${f.db.path}`, fix: 'It appears on first start' });
   if (f.service.manager === 'none') out.push({ level: 'warn', text: 'No background service installed — Hatchabot will not start with the machine', fix: './scripts/install-service.sh' });
@@ -77,7 +81,14 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   if (!f.backups.lastSet) out.push({ level: 'warn', text: `No backup set in ${f.backups.dir} yet`, fix: 'systemctl --user start hatchabot-backup (or wait for 03:30); scripts/restore-drill.sh proves a set restores' });
   else if ((f.backups.ageDays ?? 0) > 2) out.push({ level: 'warn', text: `Last backup set is ${f.backups.ageDays} days old (${f.backups.lastSet})`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
   else out.push({ level: 'ok', text: `Backups: last set ${f.backups.lastSet}` });
-  if (f.tailscale) out.push(!f.tailscale.installed ? { level: 'warn', text: 'Tailscale not installed — the app is reachable on your LAN only', fix: 'docs/tailscale.md — private access from anywhere, nothing opened to the internet' } : f.tailscale.up ? { level: 'ok', text: `Tailscale up${f.tailscale.dns ? ` (${f.tailscale.dns})` : ''}` } : { level: 'warn', text: 'Tailscale installed but not connected', fix: 'sudo tailscale up' });
+  if (f.tailscale) {
+    const t = f.tailscale;
+    out.push(!t.installed ? { level: 'warn', text: 'Tailscale not installed — the app is reachable on your LAN only', fix: 'docs/tailscale.md — private access from anywhere, nothing opened to the internet' }
+      : t.appOnly ? { level: 'warn', text: 'Tailscale app found, but it is not signed in or its command did not answer', fix: 'Open the Tailscale app and sign in; the setup guide\'s Turn on HTTPS step does the rest' }
+      : !t.up ? { level: 'warn', text: 'Tailscale installed but not connected', fix: 'sudo tailscale up (or open the Tailscale app)' }
+      : t.serving && t.reachable ? { level: 'ok', text: `Tailscale up, serving ${t.url}` }
+      : { level: 'ok', text: `Tailscale up${t.dns ? ` (${t.dns})` : ''}${t.serving ? ' — serving, but the address did not answer yet' : ' — HTTPS not turned on (setup guide → Turn on HTTPS)'}` });
+  }
   return out;
 }
 
@@ -145,8 +156,12 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     const last = sets.pop();
     if (last) backups = { dir: bdir, lastSet: last, ageDays: Math.floor((Date.now() - new Date(last).getTime()) / 86_400_000) };
   } catch { /* no dir */ }
-  const tsBin = sh('tailscale', ['--version']);
-  const tailscale: DoctorFacts['tailscale'] = tsBin ? { installed: true, up: /^100\./.test(sh('tailscale', ['ip', '-4']) ?? ''), dns: (sh('tailscale', ['status', '--json']) ?? '').match(/"DNSName":\s*"([^"]+)\."/)?.[1] } : { installed: false };
+  // The same lookup the app's HTTPS step uses: it knows the Mac app bundle,
+  // Homebrew's path and `serve`. A plain `tailscale` on PATH missed the Mac
+  // app entirely and told a working install it had no Tailscale (2026-09-22).
+  const port = Number(process.env.PORT ?? env.PORT ?? 8080) || 8080;
+  const ti = await tailnetInfo(port).catch(() => ({ installed: false }) as Awaited<ReturnType<typeof tailnetInfo>>);
+  const tailscale: DoctorFacts['tailscale'] = { installed: ti.installed, appOnly: ti.appOnly, up: ti.up, dns: ti.dns, serving: ti.serving, reachable: ti.reachable, url: ti.url };
   return {
     nodeVersion: process.version, dockerCli, dockerDaemon, runtimeImage,
     envFile: { present: existsSync('.env'), secretKey: !!env.HATCHABOT_SECRET_KEY, password: !!env.HATCHABOT_PASSWORD, authMode: env.HATCHABOT_AUTH ?? 'password', publicUrl: env.HATCHABOT_PUBLIC_URL || undefined },

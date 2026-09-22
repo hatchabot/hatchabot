@@ -62,3 +62,19 @@ describe('checkout freshness', () => {
     expect(lines.some((l) => l.text.includes('local changes'))).toBe(false);
   });
 });
+
+describe('doctor and Tailscale on a Mac (2026-09-22)', () => {
+  it('a tailnet address that answers stands in for an unset public URL, and serving reads as ✓', () => {
+    const lines = doctorReport({ ...healthy, envFile: { ...healthy.envFile, publicUrl: undefined },
+      tailscale: { installed: true, up: true, dns: 'mac.tail.ts.net', serving: true, reachable: true, url: 'https://mac.tail.ts.net' } });
+    expect(lines.every((l) => l.level === 'ok')).toBe(true);
+    expect(lines.map((l) => l.text).join('\n')).toMatch(/links use the tailnet address https:\/\/mac\.tail\.ts\.net/);
+    expect(lines.map((l) => l.text).join('\n')).toMatch(/serving https:\/\/mac\.tail\.ts\.net/);
+  });
+  it('the Mac app without a working command is named, not reported as "not installed"', () => {
+    const lines = doctorReport({ ...healthy, tailscale: { installed: true, appOnly: true } });
+    const t = lines.find((l) => /Tailscale app found/.test(l.text));
+    expect(t?.level).toBe('warn');
+    expect(t?.fix).toMatch(/sign in/);
+  });
+});
