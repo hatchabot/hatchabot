@@ -4409,7 +4409,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       cron: parsed.data.cron,
       everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
       tz: parsed.data.tz,
-      announce: parsed.data.announce,
+      // An agent with no chat app has nowhere to post a result: announcing
+      // would only fail each run. Its runs are read with `tasks … runs`.
+      announce: parsed.data.announce !== false && store.listChannelsForAgent(agent.id).length > 0,
     });
     if (!out.ok) return reply.code(502).send({ error: out.error });
     trace(agent.id)('cron.created', { name: parsed.data.name, cron: parsed.data.cron, everyMinutes: parsed.data.everyMinutes });

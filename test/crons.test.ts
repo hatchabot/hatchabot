@@ -167,7 +167,9 @@ describe('cron routes', () => {
 describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () => {
   const as = { 'x-hatchabot-owner': 'user-owner' };
   it('creates a cron job with expression, tz, and announce delivery', async () => {
-    const { provider, f } = await world();
+    const { provider, f, store } = await world();
+    // Announcing needs somewhere to post: this agent has a Telegram bot.
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'channel/a1/bot-token', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
     provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-9"}', stderr: '' });
     const res = await f.inject({
       method: 'POST', url: '/v1/agents/a1/crons', headers: as,
@@ -249,5 +251,27 @@ describe('POST /v1/agents/:id/ask', () => {
     expect(bad.body).not.toContain('config detail'); // stderr stays on the server
     const stopped = await world('STOPPED');
     expect((await stopped.f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: as, payload: { text: 'hi' } })).statusCode).toBe(409);
+  });
+});
+
+describe('delivery (regression: tasks on a web-only agent failed every run)', () => {
+  it('a task that does not announce says --no-deliver', async () => {
+    const { addCron } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    await addCron(p, ref, 'kitchen', { name: 'q', message: 'm', everyMs: 60_000, announce: false });
+    expect(p.execLog.at(-1)).toContain('--no-deliver');
+    await addCron(p, ref, 'kitchen', { name: 'a', message: 'm', everyMs: 60_000 });
+    expect(p.execLog.at(-1)).toEqual(expect.arrayContaining(['--announce', '--best-effort-deliver']));
+    expect(p.execLog.at(-1)).not.toContain('--no-deliver');
+  });
+
+  it('an agent with no chat app never announces, whatever was asked', async () => {
+    const { provider, f } = await world();
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'brief', message: 'm', everyMinutes: 60 } });
+    expect(res.statusCode).toBe(201);
+    const add = provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add')!;
+    expect(add).toContain('--no-deliver');
+    expect(add).not.toContain('--announce');
   });
 });

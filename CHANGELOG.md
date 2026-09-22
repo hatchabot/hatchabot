@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.33.1] — 2026-09-22
+
+### Fixed
+- **Scheduled tasks on an agent with no chat app failed every run.** The agent did the work, but the gateway then tried to deliver the result, found no channel ("Channel is required (no configured channels detected)") and marked the run an error — so every task on a web-only agent read as failing. A task now says `--no-deliver` when it shouldn't post (`--quiet`, or no chat app to post to), and its result is read with `hbt tasks <agent> runs`. Found by the new `scripts/regress-autonomous.sh` on its first run. Tasks created before this keep their old setting: re-create them to fix them.
+
 ## [2.33.0] — 2026-09-22
 
 ### Added

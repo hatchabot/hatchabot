@@ -184,7 +184,12 @@ export async function addCron(
   else if (opts.everyMs) argv.push('--every', msToEvery(opts.everyMs));
   else return { ok: false, error: 'Give a cron expression or an interval.' };
   if (opts.tz) argv.push('--tz', opts.tz);
+  // Not announcing must say so: left unset, the gateway still delivers by
+  // default, and on an agent with no chat app that delivery FAILS THE RUN —
+  // "Channel is required (no configured channels detected)" — though the agent
+  // did its work (found by scripts/regress-autonomous.sh, v2.33.0).
   if (opts.announce !== false) argv.push('--announce', '--best-effort-deliver');
+  else argv.push('--no-deliver');
   const res = await provider.exec(runtimeRef, argv);
   if (res.code !== 0) {
     return { ok: false, error: (res.stderr || res.stdout || 'cron add failed').slice(0, 300) };

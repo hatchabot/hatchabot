@@ -29,7 +29,9 @@ ok()   { PASS=$((PASS + 1)); RESULTS+=("✓ $STEP"); echo "ok ($(( $(date +%s) -
 bad()  { FAILED=$((FAILED + 1)); RESULTS+=("✗ $STEP — $1"); echo "FAILED — $1"; }
 json() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);console.log(String(($1)(v)??''))}catch(e){console.log('')}})"; }
 
+DONE=0
 cleanup() {
+  [ "$DONE" = 1 ] && return
   if [ "$KEEP" = 1 ]; then echo "kept: $NAME"; return; fi
   $HB delete "$NAME" --yes >/dev/null 2>&1 && echo "cleaned up: $NAME deleted" || true
 }
@@ -119,7 +121,7 @@ if [ "$KEEP" = 1 ]; then RESULTS+=("– delete skipped (--keep)"); echo "skipped
   sleep 3
   st=$($HB list --json | json "v=>(v.find(a=>a.name==='$NAME')||{}).state")
   [ -z "$st" ] || [ "$st" = DELETED ] || [ "$st" = DELETING ] && ok || bad "still listed as $st"
-  KEEP=1  # already done; the exit trap has nothing left to clean
+  DONE=1  # already deleted; the exit trap has nothing left to do
 fi
 
 echo
