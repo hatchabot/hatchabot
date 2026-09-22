@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.33.2] — 2026-09-22
+
+### Added
+- **`scripts/link-cli.sh`** — puts `hatchabot` and `hbt` on your PATH and runs `doctor`. For a machine where the checkout exists but the command does not: after Migration Assistant moves an install to a new Mac, a fresh shell profile, or an `npm link` that failed during setup. Falls back to `~/.npm-global` when the global folder is root-owned; safe to re-run.
+
 ## [2.33.1] — 2026-09-22
 
 ### Fixed

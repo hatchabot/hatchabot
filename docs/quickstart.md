@@ -117,6 +117,17 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 - **Back up / move / share** — every card: Download (a single file), Rehost (to another Hatchabot), Share (as a template with no secrets).
 - **Share a screenshot** — add `?demo` to the app's address (e.g. `http://localhost:8080/?demo`): your email is hidden and family members' names, bot handles, connected accounts and Telegram ids are blurred. Nothing changes on the server; remove `?demo` to see everything again.
 
+## Moved to a new machine, or `hatchabot: command not found`?
+
+```sh
+cd ~/hatchabot && ./scripts/link-cli.sh
+```
+
+It links `hatchabot` and `hbt`, adds npm's folder to your shell's PATH if it
+is missing, and runs `hatchabot doctor`. After moving with Migration Assistant,
+stop the **old** machine's Hatchabot first (`./scripts/uninstall.sh` there — it
+keeps the data), or both will fight over the same Telegram bots.
+
 ## Upgrading
 
 `hbt` is the same command, shorter (installed unless another program here already has that name).
