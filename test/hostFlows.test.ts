@@ -211,3 +211,28 @@ describe('Drain — POST /v1/hosts/:id/drain', () => {
     expect((await w.f.inject({ method: 'POST', url: '/v1/hosts/h1/drain', headers: as('intruder'), payload: {} })).statusCode).toBe(403);
   });
 });
+
+
+describe('Move — a pinned image the runner does not have (2026-09-22)', () => {
+  it('refuses up front with a code, then moves on the default image when asked', async () => {
+    const w = await makeWorld();
+    const mock2 = new MockProvider();
+    w.providers.set('mock2', mock2);
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Laptop', settings: {}, createdAt: 'now' });
+    const created = { id: await seedRunningAgent(w) };
+    w.store.setAgentImage(created.id, 'hatchabot-runtime:2026.7.1-2-plus-traceroute');
+    mock2.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'x' }] as any;
+
+    const refused = await w.f.inject({ method: 'POST', url: `/v1/agents/${created.id}/move-host`, headers: as(), payload: { hostId: 'h2' } });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ code: 'pinned_image_missing', image: 'hatchabot-runtime:2026.7.1-2-plus-traceroute' });
+    expect(refused.json().error).toMatch(/Laptop does not have/);
+    // Nothing stopped: the refusal came before the move began.
+    expect(w.store.getAgent(created.id)!.hostId).toBe('h1');
+
+    const moved = await w.f.inject({ method: 'POST', url: `/v1/agents/${created.id}/move-host`, headers: as(), payload: { hostId: 'h2', dropPin: true } });
+    expect(moved.statusCode).toBe(200);
+    expect(w.store.getAgent(created.id)!.image ?? null).toBeNull();
+    expect(w.store.getAgent(created.id)!.hostId).toBe('h2');
+  });
+});

@@ -6258,6 +6258,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (host.id === agent.hostId) {
         return reply.code(400).send({ error: 'The agent is already on that host.' });
       }
+      // A pinned image lives on the daemon that built it. A runner without it
+      // failed deep inside the seed with docker's "pull access denied", after
+      // the agent had already been stopped (2026-09-22). Say so up front, and
+      // let the caller choose the runner's default image instead.
+      if (agent.image) {
+        const there = await providerFor(host.id).listImageTags().then((t) => t.some((x) => x.tag === agent.image), () => false);
+        if (!there) {
+          const dropPin = (req.body as { dropPin?: boolean } | null)?.dropPin === true;
+          if (!dropPin) {
+            return reply.code(409).send({
+              error: `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have. ` +
+                'Move it on that runner\'s default image instead (its extra packages will be missing there), or build the image on the runner first.',
+              code: 'pinned_image_missing',
+              image: agent.image,
+            });
+          }
+          store.setAgentImage(agent.id, null);
+          trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
+        }
+      }
       // Same split as create: a machine-login Max profile mounts THIS box's
       // ~/.claude, which can't reach a runner; a setup-token one travels.
       const profile = store.getAIProfile(agent.aiProfileId);

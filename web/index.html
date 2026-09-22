@@ -2436,7 +2436,11 @@ const api = async (path, opts = {}) => {
       (typeof data.message === 'string' && data.message) ||
       (typeof data.error === 'string' && data.error) ||
       'Request failed';
-    throw new Error(msg);
+    const err = new Error(msg);
+    // A route that wants the caller to decide something (a pinned image the
+    // runner lacks) names the case in `code`; keep it, and what it refers to.
+    if (typeof data.code === 'string') { err.code = data.code; err.image = data.image; }
+    throw err;
   }
   return data;
 };
@@ -5135,10 +5139,22 @@ async function moveHostAgent(id, name) {
   toast(`Moving ${name} to ${host.name}… this takes a minute — the card shows WORKING until it's done.`, 180000, 'progress');
   setTimeout(() => refresh(false), 800); // by then the POST is in flight — show WORKING without waiting for the next poll
   try {
-    await api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id } });
+    await moveHostPost(id, host, name);
     toast(`✅ ${name} now runs on ${host.kind === 'local' ? 'this machine' : host.name}.`, 10000);
   } catch (e) { toast(`Move failed: ${e.message}`, 20000); }
   await refresh(false);
+}
+
+// A pinned image the runner lacks: the server refuses first (nothing has
+// stopped yet) and the owner decides whether to go on the runner's default.
+async function moveHostPost(id, host, name) {
+  try {
+    return await api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id } });
+  } catch (e) {
+    if (e.code !== 'pinned_image_missing') throw e;
+    if (!confirm(`"${name}" is pinned to the image ${e.image}, which ${host.name} does not have.\n\nMove it on ${host.name}'s default image instead? Its extra packages will be missing there.`)) throw new Error('kept where it is');
+    return api(`/v1/agents/${id}/move-host`, { method: 'POST', body: { hostId: host.id, dropPin: true } });
+  }
 }
 
 /**

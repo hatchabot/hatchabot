@@ -965,6 +965,11 @@ async function main() {
     const apiKey = server.identity?.apiKey;
     if (!refresh || !apiKey) fail('this server uses accounts — run: hatchabot login');
     ctx = { url, cookie: '', bearer: await idTokenFrom(refresh, apiKey) };
+  } else if (server.authMode === 'accounts') {
+    // Accounts have no shared password: a stale HATCHABOT_PASSWORD from an
+    // older install (or a copied laptop) got a bare "login failed (401) — check
+    // HATCHABOT_PASSWORD", which sent people looking for the wrong thing.
+    fail('this server uses per-person accounts, not a shared password — sign in once with: hatchabot login\n  (open the app → ⚙ Settings → Security → New token, then paste it)');
   } else {
     ctx = await login(url, password);
   }

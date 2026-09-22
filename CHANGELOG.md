@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.33.3] — 2026-09-22
+
+### Fixed
+- **Moving a pinned agent to a runner that lacks its image failed halfway** — after the agent had been stopped, with docker's "pull access denied for hatchabot-runtime" as the only explanation. The move now checks the runner's images first and refuses before anything stops, naming the image; the app then offers to move the agent on the runner's default image instead (`dropPin` on the API), and says its extra packages will be missing there.
+- **`hatchabot list` on an accounts-mode install said "login failed (401) — check HATCHABOT_PASSWORD"** when there is no shared password to check — a stale one from an older install, or a copied laptop, sent people looking in the wrong place. It now says the install uses per-person accounts and to run `hatchabot login` once.
+
 ## [2.33.2] — 2026-09-22
 
 ### Added
