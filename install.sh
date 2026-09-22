@@ -51,7 +51,17 @@ if ! have docker; then
   else die "Install Docker (https://docs.docker.com/engine/install/), then re-run."; fi
 fi
 if ! docker info >/dev/null 2>&1; then
-  if [ "$OS" = Darwin ]; then die "Docker Desktop isn't running. Start it, then re-run."; fi
+  if [ "$OS" = Darwin ]; then
+    # Installed but not running is the usual state after a reboot: start it
+    # rather than send the user off to do it. The first launch after install
+    # can stop at Docker's terms screen, which only the user can accept.
+    open -a Docker 2>/dev/null || die "Docker Desktop isn't running, and it could not be started. Start it, then re-run."
+    printf '   starting Docker Desktop'
+    for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; printf .; sleep 2; done; echo
+    docker info >/dev/null 2>&1 || die "Docker Desktop did not finish starting. If it is showing a window (terms, sign-in), answer it, wait for the whale in the menu bar to stop moving, then re-run."
+  fi
+fi
+if ! docker info >/dev/null 2>&1; then
   if id -nG "${USER:-$(id -un)}" | grep -qw docker; then die "Docker isn't reachable. Is the daemon running? (sudo systemctl start docker)"; fi
   if ask "Your user isn't in the docker group. Add it now?"; then sudo usermod -aG docker "${USER:-$(id -un)}"; die "Added. Log out and back in, then re-run this installer."; fi
   die "Run: sudo usermod -aG docker $(id -un) — then log out and back in."

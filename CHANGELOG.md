@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.31.3] — 2026-09-22
+
+### Changed
+- **On a Mac, the installer starts Docker Desktop instead of stopping.** Installed-but-not-running is the normal state after a reboot, and the installer used to exit with "Docker Desktop isn't running. Start it, then re-run." It now opens Docker Desktop and waits for it (up to two minutes), and only stops if Docker is waiting on a window only the user can answer — its terms or sign-in on a first launch — saying so.
+
 ## [2.31.2] — 2026-09-22
 
 ### Security
