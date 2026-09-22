@@ -5,6 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { hashPassword } from '../src/api/accountsAuth.js';
+import { _resetLoginThrottle, registerAuth } from '../src/api/auth.js';
 
 /**
  * "Forgot password?" over Telegram. A reset link goes only to a Telegram id
@@ -12,7 +13,7 @@ import { hashPassword } from '../src/api/accountsAuth.js';
  * and the route answers identically whatever it finds, so it cannot be used to
  * learn who has an account.
  */
-async function world() {
+async function world(opts: { withAuth?: boolean } = {}) {
   const store = new Store(new Database(':memory:'));
   const sent: Array<{ chat: string; text: string }> = [];
   const { hash, salt } = await hashPassword('the-old-password');
@@ -28,6 +29,8 @@ async function world() {
   store.insertMembership({ id: 'm0', agentId: 'a1', userId: 'acct-chris', role: 'owner', status: 'active' } as never);
   store.bindMembershipChannelUser('a1', 'acct-chris', '424242');
   const f = Fastify();
+  // The real server's order: the sign-in layer (claim, login) then the routes.
+  if (opts.withAuth) await registerAuth(f, { secret: Buffer.alloc(32, 7), mode: 'accounts', store });
   await registerRoutes(f, {
     store, secrets: { put: async () => {}, get: async () => '123:bot-token', delete: async () => {} } as never,
     providers: new Map([['mock', new MockProvider()]]),
@@ -39,7 +42,7 @@ async function world() {
     }) as never,
   } as never);
   const recover = (username: string) => f.inject({ method: 'POST', url: '/v1/local-accounts/recover', payload: { username } });
-  return { store, sent, recover };
+  return { store, sent, recover, f };
 }
 
 describe('forgot password, over Telegram', () => {
@@ -72,4 +75,39 @@ describe('forgot password, over Telegram', () => {
     await w.recover('CHRIS');
     expect(w.sent).toHaveLength(1);
   }, 15_000);
+});
+
+
+describe('forgot password, over Telegram — following the link (2026-09-23)', () => {
+  it('signed out: ask, open the link, choose a password; the old one dies and the link is spent', async () => {
+    _resetLoginThrottle();
+    const w = await world({ withAuth: true });
+    const signIn = (password: string) => w.f.inject({ method: 'POST', url: '/v1/login', payload: { username: 'chris', password } });
+
+    // Asked with no session at all.
+    expect((await w.recover('chris')).statusCode).toBe(200);
+    const code = /\?claim=([A-Za-z0-9_-]+)/.exec(w.sent[0]!.text)![1]!;
+
+    // The old password still works until the link is used.
+    expect((await signIn('the-old-password')).statusCode).toBe(200);
+
+    // Opening the link reads as a reset for this person, not an invitation.
+    const peek = await w.f.inject({ method: 'GET', url: `/v1/local-accounts/claim?code=${code}` });
+    expect(peek.statusCode).toBe(200);
+    expect(peek.json()).toMatchObject({ username: 'chris', reset: true });
+
+    const claim = await w.f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'the-new-password' } });
+    expect(claim.statusCode).toBe(200);
+    expect(claim.cookies.some((c) => c.name === 'hatchabot_session')).toBe(true); // signed in by it
+
+    _resetLoginThrottle();
+    expect((await signIn('the-old-password')).statusCode).toBe(401);
+    expect((await signIn('the-new-password')).statusCode).toBe(200);
+
+    // Spent: the same link cannot set a password again.
+    const again = await w.f.inject({ method: 'POST', url: '/v1/local-accounts/claim', payload: { code, password: 'a-third-password' } });
+    expect(again.statusCode).toBeGreaterThanOrEqual(400);
+    _resetLoginThrottle();
+    expect((await signIn('the-new-password')).statusCode).toBe(200);
+  }, 20_000);
 });
