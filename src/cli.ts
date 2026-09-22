@@ -11,7 +11,7 @@
  * HATCHABOT_PASSWORD, or --url/--password flags.
  */
 import './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
-import { readFile, writeFile } from 'node:fs/promises';
+import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -55,7 +55,7 @@ function unquoteEnvValue(v: string): string {
   return v;
 }
 
-const USAGE = `hatchabot <command> [options]
+const USAGE = `hatchabot <command> [options]      (hbt is the same command, shorter)
 
 Commands:
   login [--token <tok>]        Save an access token from the app (⚙ Settings → Security).
@@ -100,12 +100,30 @@ Commands:
                                Move agents onto one AI source in a single call
                                (default: all of yours). --rebuild applies now,
                                else each shows "rebuild to apply".
-  create <name> [--persona <text>] [--profile <id>] [--host <id>]
-         [--private] [--bot-token <tok>] [--no-telegram]
-                               Create an agent and wait for it to boot.
+  create <name> [--persona <text>] [--profile <id|name>] [--host <id>]
+         [--private] [--bot-token <tok>] [--no-telegram] [--timeout <min>]
+                               Create an agent and wait for it to boot (up to
+                               15 min). Without --profile it gets your ⭐
+                               default AI source, as in the app.
                                Prompts for a BotFather token if the bot pool
                                is empty. --no-telegram: no bot at all; talk
                                to it in the web app instead.
+  ask <agent> <message>        Say something to an agent and print its answer —
+                               the console, from a terminal. No message: read
+                               it from stdin. --json for scripts.
+  tasks <agent>                Its scheduled tasks: schedule, on/off, how the
+                               last run went, when the next one is due.
+  tasks <agent> add <name> (--every 30m | --cron "0 8 * * *") [--tz <zone>]
+         [--message <text>] [--quiet]
+                               Something it does on its own, on a schedule. The
+                               message is what it is told each time (stdin if
+                               omitted). --quiet: don't post the result to its chat.
+  tasks <agent> run <task> [--wait] [--timeout <min>]
+                               Run it now; --wait prints the result and exits
+                               non-zero if the run failed.
+  tasks <agent> runs <task> [--limit <n>]
+                               What its recent runs produced.
+  tasks <agent> pause|resume|rm <task>
   delete <agent> [--yes]       Delete an agent and its memory forever
                                (retypes the name unless --yes)
   archive <agent> [--yes]      Park an agent and hand its Telegram bot back for
@@ -130,7 +148,9 @@ Commands:
                                still needs
   clone <agent> [new name]     Duplicate an agent here — a faithful copy with its
                                own bot and name
-  start|stop|rebuild <agent>   Lifecycle controls
+  start|stop|rebuild <agent> [--wait]
+                               Lifecycle controls; --wait returns once it is
+                               RUNNING (or STOPPED)
   retry <agent>                Retry a FAILED agent's provisioning
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
@@ -204,8 +224,18 @@ Commands:
 Global options:
   --url <url>        Control plane (env HATCHABOT_URL, default http://localhost:8080)
   --password <pw>    Shared password (env HATCHABOT_PASSWORD)
+  --json             Machine-readable output (list, ask, tasks)
 
-<agent> matches an agent's name, slug, or id prefix.`;
+<agent> is an agent's name or slug (any case), or 4+ characters of its id.
+Options must be ones listed here: a mistyped one is an error, not a guess.`;
+
+// Only on the machine Hatchabot is developed on (HATCHABOT_DEV_DIR is set).
+const MAINTAINER_USAGE = `
+
+Release (this is the development machine):
+  deploy [vX.Y.Z]              Put a release on this machine now (default: the newest tag)
+  promote [vX.Y.Z] [channel]   New installs get it (default: what this machine runs → stable)
+  channels [all]               Where stable, beta and latest point, and every release`;
 
 // `hatchabot list | head` must not crash when the pipe closes early.
 process.stdout.on('error', (err: NodeJS.ErrnoException) => {
@@ -270,6 +300,37 @@ async function idTokenFrom(refreshToken: string, apiKey: string): Promise<string
   return data.id_token as string;
 }
 
+/**
+ * Read a secret without echoing it. The old prompts echoed passwords to the
+ * screen (and to any terminal recording) — CLI audit. Not a terminal (a pipe,
+ * a script): read one plain line.
+ */
+async function askSecret(q: string): Promise<string> {
+  process.stderr.write(q);
+  const stdin = process.stdin;
+  if (!stdin.isTTY) {
+    const { createInterface } = await import('node:readline');
+    const rl = createInterface({ input: stdin, terminal: false });
+    return new Promise((r) => { let got = false; rl.once('line', (l) => { got = true; rl.close(); r(l); }); rl.once('close', () => { if (!got) r(''); }); });
+  }
+  return new Promise((resolveSecret) => {
+    let buf = '';
+    const done = () => { stdin.setRawMode(false); stdin.pause(); stdin.off('data', onData); process.stderr.write('\n'); resolveSecret(buf); };
+    const onData = (chunk: string) => {
+      for (const c of chunk) {
+        if (c === '\r' || c === '\n' || c === '\u0004') return done();
+        if (c === '\u0003') { stdin.setRawMode(false); process.stderr.write('\n'); process.exit(130); }
+        if (c === '\u007f' || c === '\b') buf = buf.slice(0, -1);
+        else buf += c;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.setEncoding('utf8');
+    stdin.resume();
+    stdin.on('data', onData);
+  });
+}
+
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
   process.exit(1);
@@ -316,19 +377,37 @@ function envQuote(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'no-checkpoint', 'recover', 'public']);
+// Every flag the CLI knows. An unknown one is an error, not a guess: the old
+// parser took any unlisted flag to have a value, so `--no-telegram` (missing
+// from the list) swallowed the next argument — `create --no-telegram Foo` lost
+// its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit']);
 
-function parseArgs(argv: string[]) {
+export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
   const positional: string[] = [];
+  const value = (name: string, i: number): string => {
+    const v = argv[i];
+    if (v === undefined || (v.startsWith('--') && v.length > 2)) throw new Error(`--${name} needs a value`);
+    return v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
+    if (a === '--') { positional.push(...argv.slice(i + 1)); break; }
     if (a.startsWith('--')) {
-      const name = a.slice(2);
-      if (BOOL_FLAGS.has(name)) flags.set(name, '1');
-      else flags.set(name, argv[++i] ?? '');
-    } else if (a === '-o') flags.set('out', argv[++i] ?? '');
-    else if (a === '-n') flags.set('lines', argv[++i] ?? '');
+      const eq = a.indexOf('=');
+      const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+      if (BOOL_FLAGS.has(name)) {
+        if (eq > 0) throw new Error(`--${name} takes no value`);
+        flags.set(name, '1');
+      } else if (VALUE_FLAGS.has(name)) {
+        flags.set(name, eq > 0 ? a.slice(eq + 1) : value(name, ++i));
+      } else {
+        throw new Error(`unknown option --${name}`);
+      }
+    } else if (a === '-o') flags.set('out', value('o', ++i));
+    else if (a === '-n') flags.set('lines', value('n', ++i));
     else positional.push(a);
   }
   return { flags, positional };
@@ -391,14 +470,58 @@ async function streamImageBuild(ctx: Ctx, name: string): Promise<void> {
   }
 }
 
+/**
+ * `<agent>` → one agent. An exact name or slug wins; then a case-insensitive
+ * name; an id prefix only from 4 characters. The old rule matched ANY id
+ * prefix, so `hatchabot delete a` picked whichever agent's id began with "a".
+ */
+export function matchAgent<T extends { id: string; name: string; slug: string }>(list: T[], ref: string): { hit?: T; problem?: string } {
+  const r = ref.trim();
+  if (!r) return { problem: 'give an agent (name, slug or id)' };
+  const one = (xs: T[], what: string) =>
+    xs.length === 1 ? { hit: xs[0] } : xs.length > 1 ? { problem: `"${r}" ${what} ${xs.length} agents: ${xs.map((a) => a.name).join(', ')}` } : undefined;
+  return one(list.filter((a) => a.name === r || a.slug === r), 'names')
+    ?? one(list.filter((a) => a.name.toLowerCase() === r.toLowerCase()), 'names')
+    ?? (r.length >= 4 ? one(list.filter((a) => a.id.startsWith(r)), 'starts the id of') : undefined)
+    ?? { problem: `no agent matches "${r}"${r.length < 4 ? ' (an id needs at least 4 characters)' : ''} — try \`hatchabot list\`` };
+}
+
 async function resolveAgent(ctx: Ctx, ref: string): Promise<any> {
-  const list = await agents(ctx);
-  const hit = list.filter(
-    (a) => a.name === ref || a.slug === ref || a.id.startsWith(ref),
-  );
-  if (hit.length === 1) return hit[0];
-  if (hit.length === 0) fail(`no agent matches "${ref}" — try \`hatchabot list\``);
-  fail(`"${ref}" is ambiguous: ${hit.map((a) => a.name).join(', ')}`);
+  const { hit, problem } = matchAgent(await agents(ctx), ref);
+  return hit ?? fail(problem!);
+}
+
+/** A task by id, name, or id prefix (4+). */
+export function matchTask<T extends { id: string; name?: string }>(list: T[], ref: string): { hit?: T; problem?: string } {
+  const r = ref.trim();
+  const exact = list.filter((t) => t.id === r || t.name === r);
+  if (exact.length === 1) return { hit: exact[0] };
+  if (exact.length > 1) return { problem: `"${r}" matches more than one task — use its id` };
+  const loose = list.filter((t) => (t.name ?? '').toLowerCase() === r.toLowerCase() || (r.length >= 4 && t.id.startsWith(r)));
+  if (loose.length === 1) return { hit: loose[0] };
+  if (loose.length > 1) return { problem: `"${r}" matches more than one task — use its id` };
+  return { problem: `no task matches "${r}" — see: hatchabot tasks <agent>` };
+}
+
+/** The AI source an agent should get: the one named, else your ⭐ default. */
+export function pickProfile<T extends { id: string; name: string; defaultSource?: boolean; mine?: boolean }>(profiles: T[], ref?: string): { hit?: T; problem?: string } {
+  if (ref) {
+    const hit = profiles.find((p) => p.id === ref) ?? profiles.find((p) => p.name.toLowerCase() === ref.toLowerCase());
+    return hit ? { hit } : { problem: `no AI source "${ref}" — see: hatchabot sources` };
+  }
+  // Not simply the first: that could be a local model nobody meant, or another
+  // account's shared source. The app picks the ⭐ default; so does the CLI.
+  const hit = profiles.find((p) => p.defaultSource) ?? profiles.find((p) => p.mine !== false) ?? profiles[0];
+  return hit ? { hit } : { problem: 'no AI source — set one up first (web ⚙ Settings → AI sources)' };
+}
+
+/** Durations as people type them: 90s, 15m, 2h, 1d (bare number = minutes) → minutes. */
+export function durationMinutes(v: string): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)\s*(s|m|h|d)?$/i.exec(v.trim());
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  const unit = (m[2] ?? 'm').toLowerCase();
+  return unit === 's' ? n / 60 : unit === 'h' ? n * 60 : unit === 'd' ? n * 1440 : n;
 }
 
 const ago = (iso?: string) => {
@@ -446,7 +569,7 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
     return new Promise((r) => rl.once('line', (l) => { rl.close(); r(l.trim()); }));
   };
   const email = flags.get('email') || (await ask('Email: '));
-  const password = await ask('Password: ');
+  const password = await askSecret('Password: ');
   const res = await fetch(
     `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
     {
@@ -684,8 +807,34 @@ export function fmtFleetUsage(f: any): string {
 async function main() {
   const { flags, positional } = parseArgs(process.argv.slice(2));
   const [cmd, ...rest] = positional;
+  const devDir = process.env.HATCHABOT_DEV_DIR ?? configDefaults().HATCHABOT_DEV_DIR;
   if (!cmd || cmd === 'help' || flags.has('help')) {
-    console.log(USAGE);
+    console.log(USAGE + (devDir ? MAINTAINER_USAGE : ''));
+    return;
+  }
+
+  // Release commands for the machine Hatchabot is DEVELOPED on: HATCHABOT_DEV_DIR
+  // names the development checkout (the scripts, your push rights). Anywhere else
+  // they do not exist — nobody else publishes releases, and `upgrade` is their verb.
+  if (cmd === 'deploy' || cmd === 'promote' || cmd === 'channels') {
+    if (!devDir) fail(`"${cmd}" is for the machine Hatchabot is developed on. To update this machine: hatchabot upgrade`);
+    const git = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    let argv: string[];
+    if (cmd === 'deploy') {
+      git(devDir, 'fetch', '--tags', '--force', '--quiet', 'origin');
+      const tag = rest[0] ?? git(devDir, 'tag', '-l', 'v[0-9]*', '--sort=-v:refname').split('\n').find((t) => t && !/-(rc|beta|alpha)/.test(t));
+      argv = [join(devDir, 'scripts', 'deploy-release.sh'), tag ?? fail('no release tags')];
+    } else if (cmd === 'promote') {
+      // Default: what this machine runs — you promote what you have been running.
+      let tag = rest[0];
+      if (!tag) { try { tag = git(repoDir(), 'describe', '--tags', '--exact-match'); } catch { fail('this machine is not on a release — say which: hatchabot promote vX.Y.Z'); } }
+      argv = [join(devDir, 'scripts', 'promote.sh'), tag!, rest[1] ?? 'stable'];
+    } else {
+      argv = [join(devDir, 'scripts', 'channels.sh'), ...rest];
+    }
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync('bash', argv, { stdio: 'inherit' });
+    process.exitCode = r.status ?? 1;
     return;
   }
 
@@ -733,9 +882,10 @@ async function main() {
     }
     if (sub === 'reset-password' || sub === 'reset') {
       const username = rest[1];
-      const newPassword = rest[2] ?? flags.get('new-password');
+      // Typed at a hidden prompt when not given: an argument lands in shell history.
+      const newPassword = rest[2] ?? flags.get('new-password') ?? (username ? await askSecret(`New password for ${username}: `) : '');
       if (!username || !newPassword) {
-        console.error('Usage: hatchabot accounts reset-password <username> <new-password>');
+        console.error('Usage: hatchabot accounts reset-password <username>   (prompts for the password)');
         process.exitCode = 1;
         return;
       }
@@ -839,10 +989,19 @@ async function main() {
     });
   };
 
+  const minutesFlag = (fallback: number): number => {
+    const v = Number(flags.get('timeout') ?? fallback);
+    return Number.isFinite(v) && v > 0 ? v : fallback;
+  };
+  // Bounded: an agent stuck provisioning used to hold the command forever,
+  // which a script or a regression run can't tell from progress (CLI audit).
   const pollAgent = async (id: string): Promise<any> => {
+    const limit = minutesFlag(15);
+    const deadline = Date.now() + limit * 60_000;
     for (;;) {
       const a = (await (await api(ctx, `/v1/agents/${id}`)).json()) as any;
       if (a.state === 'RUNNING' || a.state === 'FAILED' || a.pendingAction) return a;
+      if (Date.now() > deadline) fail(`still ${a.state} after ${limit} min — it may yet finish; check: hatchabot list`);
       await new Promise((r) => setTimeout(r, 3000));
     }
   };
@@ -932,7 +1091,8 @@ async function main() {
       const name = rest.join(' ').trim() || fail('usage: hatchabot create <name> [options]');
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
       const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
-      const profile = flags.get('profile') ?? profiles[0]?.id ?? fail('no AI profile — set one up first (web ⚙ Settings → AI sources)');
+      const picked = pickProfile(profiles, flags.get('profile'));
+      const profile = picked.hit?.id ?? fail(picked.problem!);
       const host = flags.get('host') ?? (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
       const res = await jsonPost('/v1/agents', {
         name,
@@ -1298,8 +1458,10 @@ async function main() {
     }
     case 'servers': {
       if (rest[0] === 'add') {
-        const [, name, url, token] = rest;
-        if (!name || !url || !token) fail('usage: hatchabot servers add <name> <url> <token>');
+        const [, name, url] = rest;
+        if (!name || !url) fail('usage: hatchabot servers add <name> <url>   (prompts for its token)');
+        const token = rest[3] ?? await askSecret(`Token from ${url} (⚙ Settings → Security): `);
+        if (!token) fail('no token given');
         const p: any = await (await jsonPost('/v1/peers', { name, url, token })).json();
         console.log(`added "${p.name}" (${p.url})`);
         return;
@@ -1507,6 +1669,10 @@ async function main() {
       const all = flags.has('all');
       const res = await api(ctx, `/v1/agents${all ? '?all=1' : ''}`);
       const list = (await res.json()) as any[];
+      if (flags.has('json')) return console.log(JSON.stringify(list.map((a) => ({
+        id: a.id, name: a.name, slug: a.slug, state: a.state, model: a.model ?? null,
+        webOnly: !!a.webOnly, lastActiveAt: a.lastActiveAt ?? null, ...(all ? { ownerId: a.ownerId } : {}),
+      })), null, 2));
       if (!list.length) return console.log('no agents');
       const w = Math.max(...list.map((a) => a.name.length));
       for (const a of list) {
@@ -1525,6 +1691,9 @@ async function main() {
       // 0600: this archive embeds the live bot token, so it must not be
       // readable by other accounts on the machine (the note below says as much).
       await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
+      // `mode` only applies when the file is CREATED: writing over an existing,
+      // world-readable file kept its old mode. Set it explicitly (CLI audit).
+      await chmod(out, 0o600);
       console.log(`backed up to ${out}`);
       console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
       console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once restored elsewhere.`);
@@ -1556,6 +1725,9 @@ async function main() {
       const res = await api(ctx, `/v1/agents/${a.id}/export${withMemory ? '' : '?excludeMemory=1'}`);
       const out = flags.get('out') ?? `${a.slug}.template.hatchabot`;
       await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
+      // `mode` only applies when the file is CREATED: writing over an existing,
+      // world-readable file kept its old mode. Set it explicitly (CLI audit).
+      await chmod(out, 0o600);
       console.log(`exported template to ${out}`);
       console.log(withMemory
         ? 'a trained copy INCLUDING MEMORY.md — it may hold personal facts the agent was told. Share only with someone you trust.'
@@ -1657,8 +1829,22 @@ async function main() {
         headers: { 'content-type': 'application/json' },
         body: '{}',
       });
-      console.log(`${cmd} requested for "${a.name}"`);
-      return;
+      if (!flags.has('wait')) {
+        console.log(`${cmd} requested for "${a.name}"${cmd === 'stop' ? '' : ' — add --wait to wait until it is running'}`);
+        return;
+      }
+      // --wait: scripts need "stopped" / "running", not "requested" (CLI audit).
+      const want = cmd === 'stop' ? 'STOPPED' : 'RUNNING';
+      const limit = minutesFlag(15);
+      const deadline = Date.now() + limit * 60_000;
+      await new Promise((r) => setTimeout(r, 2000));
+      for (;;) {
+        const now = (await (await api(ctx, `/v1/agents/${a.id}`)).json()) as any;
+        if (now.state === want) { console.log(`"${a.name}" is ${want}.`); return; }
+        if (now.state === 'FAILED') fail(`"${a.name}" failed: ${now.stateReason ?? 'unknown'}`);
+        if (Date.now() > deadline) fail(`"${a.name}" is still ${now.state} after ${limit} min`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
     }
     case 'snapshot': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot snapshot <agent> [--label text]'));
@@ -1695,9 +1881,130 @@ async function main() {
     case 'logs': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot logs <agent> [-n lines]'));
       const lines = flags.get('lines') ?? '80';
+      if (!/^\d{1,5}$/.test(lines)) fail('-n takes a number of lines');
       const { text } = (await (await api(ctx, `/v1/agents/${a.id}/logs?lines=${lines}`)).json()) as any;
       console.log(text || '(no recent output)');
       return;
+    }
+    case 'ask': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot ask <agent> <message>   (or pipe the message in)'));
+      let text = rest.slice(1).join(' ').trim();
+      if (!text || text === '-') {
+        if (process.stdin.isTTY) console.error('type the message (end with Ctrl-D):');
+        text = readFileSync(0, 'utf8').trim();
+      }
+      if (!text) fail('nothing to say');
+      const r: any = await (await jsonPost(`/v1/agents/${a.id}/ask`, { text })).json();
+      if (flags.has('json')) console.log(JSON.stringify({ agent: a.name, reply: r.reply }));
+      else console.log(r.reply);
+      return;
+    }
+    case 'tasks':
+    case 'task': {
+      const usage = 'usage: hatchabot tasks <agent> [add <name> (--every 30m | --cron "<expr>") [--message <text>] | run <task> [--wait] | runs <task> | pause <task> | resume <task> | rm <task>]';
+      const a = await resolveAgent(ctx, rest[0] ?? fail(usage));
+      const sub = rest[1];
+      const base = `/v1/agents/${a.id}/crons`;
+      const listTasks = async (): Promise<any[]> => ((await (await api(ctx, base)).json()) as any).crons ?? [];
+      const pick = async (ref?: string): Promise<any> => {
+        const { hit, problem } = matchTask(await listTasks(), ref ?? fail(usage));
+        return hit ?? fail(problem!);
+      };
+      const runsOf = async (id: string, n: number): Promise<any[]> =>
+        ((await (await api(ctx, `${base}/${encodeURIComponent(id)}/runs?limit=${n}`)).json()) as any).runs ?? [];
+      const whenAgo = (ms?: number) => (ms ? ago(new Date(ms).toISOString()) : '-');
+      const whenIn = (ms?: number) => {
+        if (!ms) return '-';
+        const m = Math.round((ms - Date.now()) / 60_000);
+        return m <= 0 ? 'due now' : m < 90 ? `in ${m}m` : m < 2880 ? `in ${Math.round(m / 60)}h` : `in ${Math.round(m / 1440)}d`;
+      };
+      const schedule = (t: any) =>
+        t.scheduleKind === 'every' && t.everyMs ? `every ${t.everyMs % 3_600_000 === 0 ? `${t.everyMs / 3_600_000}h` : t.everyMs % 60_000 === 0 ? `${t.everyMs / 60_000}m` : `${Math.round(t.everyMs / 1000)}s`}`
+        : t.scheduleKind === 'cron' ? `${t.scheduleExpr}${t.scheduleTz ? ` ${t.scheduleTz}` : ''}`
+        : t.scheduleKind === 'at' && t.atMs ? `once ${new Date(t.atMs).toISOString().slice(0, 16).replace('T', ' ')}`
+        : String(t.scheduleKind ?? '?');
+      const printRun = (r: any) => {
+        console.log(`${new Date(r.runAtMs).toISOString().slice(0, 19).replace('T', ' ')}  ${r.status}${r.durationMs ? ` in ${Math.round(r.durationMs / 1000)}s` : ''}${r.delivered === false ? ' (not delivered)' : ''}`);
+        if (r.error) console.log(`  error: ${r.error}`);
+        if (r.summary) console.log(r.summary.split('\n').map((l: string) => `  ${l}`).join('\n'));
+      };
+
+      if (!sub) {
+        const list = await listTasks();
+        if (flags.has('json')) return console.log(JSON.stringify(list, null, 2));
+        if (!list.length) return console.log(`"${a.name}" has no scheduled tasks. Add one: hatchabot tasks "${a.name}" add <name> --every 1h --message "…"`);
+        const w = Math.max(4, ...list.map((t) => (t.name ?? '').length));
+        for (const t of list) {
+          console.log(`${t.id.slice(0, 8)}  ${(t.name ?? '').padEnd(w)}  ${schedule(t).padEnd(26)} ${t.enabled ? 'on ' : 'off'}  last: ${t.lastStatus ?? 'never'} ${t.lastRunAtMs ? whenAgo(t.lastRunAtMs) : ''}${t.consecutiveErrors ? ` (${t.consecutiveErrors} failing)` : ''}  next: ${t.enabled ? whenIn(t.nextRunAtMs) : 'paused'}`);
+        }
+        return;
+      }
+      if (sub === 'add') {
+        const name = rest.slice(2).join(' ').trim() || fail(usage);
+        const every = flags.get('every');
+        const cron = flags.get('cron');
+        if (!!every === !!cron) fail('give exactly one of --every <90s|30m|2h|1d> or --cron "<expr>"');
+        const everyMinutes = every !== undefined
+          ? durationMinutes(every) ?? fail(`--every "${every}" is not a duration like 90s, 30m, 2h or 1d`)
+          : undefined;
+        let message = flags.get('message');
+        if (!message) {
+          if (process.stdin.isTTY) console.error('what should it do each time? (end with Ctrl-D):');
+          message = readFileSync(0, 'utf8').trim();
+        }
+        if (!message) fail('the task needs a message: what the agent is told each time it runs');
+        const r: any = await (await jsonPost(base, {
+          name, message, cron, everyMinutes, tz: flags.get('tz'), announce: !flags.has('quiet'),
+        })).json();
+        if (flags.has('json')) return console.log(JSON.stringify(r));
+        console.log(`task "${name}" added${r.id ? ` (${String(r.id).slice(0, 8)})` : ''} — ${flags.has('quiet') ? 'runs without posting to its chat' : 'each result is posted to its chat'}.`);
+        return;
+      }
+      if (sub === 'run') {
+        const t = await pick(rest[2]);
+        const before = Math.max(t.lastRunAtMs ?? 0, ...(await runsOf(t.id, 1)).map((r) => r.runAtMs));
+        await jsonPost(`${base}/${encodeURIComponent(t.id)}/run`, {});
+        if (!flags.has('wait')) return console.log(`"${t.name}" is running. How it went: hatchabot tasks "${a.name}" runs ${t.id.slice(0, 8)}`);
+        const limit = minutesFlag(10);
+        const deadline = Date.now() + limit * 60_000;
+        for (;;) {
+          const [latest] = await runsOf(t.id, 1);
+          if (latest && latest.runAtMs > before) {
+            if (flags.has('json')) console.log(JSON.stringify(latest));
+            else printRun(latest);
+            if (latest.status !== 'ok') process.exitCode = 1;
+            return;
+          }
+          if (Date.now() > deadline) fail(`no finished run of "${t.name}" within ${limit} min`);
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+      if (sub === 'runs') {
+        const t = await pick(rest[2]);
+        const n = Math.min(Math.max(Number(flags.get('limit') ?? 5) || 5, 1), 50);
+        const runs = await runsOf(t.id, n);
+        if (flags.has('json')) return console.log(JSON.stringify(runs, null, 2));
+        if (!runs.length) return console.log(`"${t.name}" has not run yet.`);
+        for (const r of runs) printRun(r);
+        return;
+      }
+      if (sub === 'pause' || sub === 'resume') {
+        const t = await pick(rest[2]);
+        await jsonPost(`${base}/${encodeURIComponent(t.id)}`, { enabled: sub === 'resume' }, 'PATCH');
+        console.log(`"${t.name}" ${sub === 'resume' ? 'resumed' : 'paused'}.`);
+        return;
+      }
+      if (sub === 'rm' || sub === 'remove' || sub === 'delete') {
+        const t = await pick(rest[2]);
+        if (!flags.has('yes')) {
+          const ok = await askLine(`Remove the task "${t.name}" from "${a.name}"? [y/N] `);
+          if (!/^y(es)?$/i.test(ok.trim())) fail('nothing removed');
+        }
+        await api(ctx, `${base}/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
+        console.log(`task "${t.name}" removed.`);
+        return;
+      }
+      fail(usage);
     }
     default:
       fail(`unknown command "${cmd}"\n\n${USAGE}`);

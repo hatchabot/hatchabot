@@ -119,6 +119,8 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 
 ## Upgrading
 
+`hbt` is the same command, shorter (installed unless another program here already has that name).
+
 ```sh
 hatchabot upgrade              # the newest release on your channel (stable unless you chose another)
 hatchabot upgrade beta         # switch channel: stable | beta | latest — remembered

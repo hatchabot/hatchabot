@@ -34,12 +34,13 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ./scripts/channels.sh                  # where every channel points, and the releases
 ```
 
-Shorthands (`ln -s ~/hatchabot/scripts/hb ~/.local/bin/hb` once):
+On the development machine the CLI has the release verbs too — set
+`HATCHABOT_DEV_DIR=<your checkout>` in `~/.config/hatchabot/env` once:
 
 ```sh
-hb deploy            # this machine: the newest tag, now   (hb deploy v2.31.3 for a specific one)
-hb promote           # stable ← what this machine runs     (hb promote v2.31.4 beta)
-hb channels          # where everything points
+hbt deploy           # this machine: the newest tag, now   (hbt deploy v2.31.3 for a specific one)
+hbt promote          # stable ← what this machine runs     (hbt promote v2.32.0 beta)
+hbt channels         # where everything points
 ```
 
 The machine you develop on can run every release first, automatically:

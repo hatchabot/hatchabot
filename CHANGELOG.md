@@ -2,6 +2,24 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.33.0] — 2026-09-22
+
+### Added
+- **Autonomous agents from the command line.** `hbt ask <agent> "…"` says something to an agent and prints its answer (the console, from a terminal; the message can be piped in). `hbt tasks <agent>` lists its scheduled tasks with how each last run went and when the next is due; `tasks … add <name> --every 30m | --cron "0 8 * * *" --message "…"` gives it something to do on its own; `tasks … run <task> --wait` runs it now, prints what it produced and exits non-zero if it failed; `runs`, `pause`, `resume`, `rm` round it out. `--json` on `list`, `ask` and `tasks` for scripts. New routes behind them: `POST /v1/agents/:id/ask` (owner only, one turn at a time, 280 s) and `GET /v1/agents/:id/crons/:jobId/runs`. The task list now carries the scheduler's own run state (last status, last/next run, failure streak), which it used to drop.
+- **`scripts/regress-autonomous.sh`** — the regression for all of the above: builds a web-only agent entirely from the CLI and proves it answers, remembers, runs a task on demand and on its own schedule, stops when paused, and keeps its tasks and memory across a restart; then deletes it. Real model turns (about eight), against the live install.
+- **`hbt`** — the same command, shorter. The installer links it only where nothing else already answers to that name.
+- **`hbt deploy` / `promote` / `channels`** on the development machine (`HATCHABOT_DEV_DIR`); elsewhere they say to use `hbt upgrade`. The separate `scripts/hb` is gone.
+
+### Fixed (CLI audit)
+- **Flags that swallowed the next argument.** `--no-telegram` and `--rebuild` were missing from the on/off list, so `create --no-telegram Foo` lost its name and `switch-source --rebuild --to X` lost its target; any mistyped flag did the same silently. Unknown options are now an error, and a flag missing its value says so.
+- **`<agent>` matched any id prefix** — `hatchabot delete a` picked whichever agent's id began with "a". An exact name or slug wins, then a name in any case; an id prefix needs 4 characters.
+- **`create` gave a new agent the first AI source in the list**, which could be a local model or another account's shared source. It now takes your ⭐ default, as the app does; `--profile` accepts a name.
+- **`create` could wait forever** on an agent stuck provisioning. It gives up after 15 minutes (`--timeout`).
+- **A re-downloaded `.hatchabot` file kept the old file's permissions** — a world-readable copy of a bot token. Downloads and shares are set to 0600 every time.
+- **Passwords echoed at the prompt**, and `accounts reset-password` and `servers add` took secrets only as arguments (shell history, `ps`). The prompts are hidden and both ask when the secret is left off.
+- `logs -n` passed its value into the URL unchecked.
+- **`start` / `stop` / `rebuild` returned at "requested"**, so a script's next step raced the agent. `--wait` returns once it is RUNNING (or STOPPED), and fails on FAILED.
+
 ## [2.32.0] — 2026-09-22
 
 ### Added

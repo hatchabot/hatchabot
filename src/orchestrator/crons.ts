@@ -29,6 +29,26 @@ export interface Cron {
   payloadKind?: string;
   /** The prompt (agentTurn) or command (command), for a preview. */
   message?: string;
+  /** What the scheduler knows about its runs — without these nothing could
+   *  tell a task that fires from one that silently never does. */
+  nextRunAtMs?: number;
+  lastRunAtMs?: number;
+  /** 'ok' | 'error' | 'skipped' … as the gateway reports it. */
+  lastStatus?: string;
+  lastDurationMs?: number;
+  consecutiveErrors?: number;
+  lastDelivered?: boolean;
+}
+
+/** One past run of a task: what the agent produced, and whether it arrived. */
+export interface CronRun {
+  runAtMs: number;
+  status: string;
+  summary?: string;
+  error?: string;
+  durationMs?: number;
+  delivered?: boolean;
+  model?: string;
 }
 
 function normalizeCron(j: Record<string, any>): Cron {
@@ -53,7 +73,55 @@ function normalizeCron(j: Record<string, any>): Cron {
       : typeof p.command === 'string' ? p.command
       : typeof p.shell === 'string' ? p.shell
       : undefined,
+    ...cronState(j),
   };
+}
+
+const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+
+/** The scheduler's run state, read from `state` with the top-level mirrors as fallback. */
+function cronState(j: Record<string, any>): Partial<Cron> {
+  const st = (j.state ?? {}) as Record<string, any>;
+  const status = st.lastRunStatus ?? st.lastStatus ?? j.lastRunStatus;
+  const delivered = st.lastDelivered ?? j.lastDelivered;
+  return {
+    nextRunAtMs: num(st.nextRunAtMs) ?? num(j.nextRunAtMs),
+    lastRunAtMs: num(st.lastRunAtMs) ?? num(j.lastRunAtMs),
+    lastStatus: typeof status === 'string' ? status : undefined,
+    lastDurationMs: num(st.lastDurationMs),
+    consecutiveErrors: num(st.consecutiveErrors),
+    lastDelivered: typeof delivered === 'boolean' ? delivered : undefined,
+  };
+}
+
+/** A task's recent runs, newest first — the only record of what it actually did. */
+export async function listCronRuns(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  jobId: string,
+  limit = 10,
+): Promise<CronRun[]> {
+  const res = await provider.exec(runtimeRef, ['cron', 'runs', '--id', jobId, '--limit', String(Math.min(Math.max(limit, 1), 50))]);
+  if (res.code !== 0) return [];
+  try {
+    const body = res.stdout.slice(res.stdout.indexOf('{'));
+    const entries = JSON.parse(body).entries;
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .filter((e: any) => e && (e.action === undefined || e.action === 'finished'))
+      .map((e: any): CronRun => ({
+        runAtMs: num(e.runAtMs) ?? num(e.ts) ?? 0,
+        status: String(e.status ?? 'unknown'),
+        summary: typeof e.summary === 'string' ? e.summary.slice(0, 4000) : undefined,
+        error: typeof e.error === 'string' ? e.error.slice(0, 1000) : undefined,
+        durationMs: num(e.durationMs),
+        delivered: typeof e.delivered === 'boolean' ? e.delivered : undefined,
+        model: typeof e.model === 'string' ? e.model : undefined,
+      }))
+      .sort((a: CronRun, b: CronRun) => b.runAtMs - a.runAtMs);
+  } catch {
+    return [];
+  }
 }
 
 /** List the agent's scheduled tasks, including disabled ones. */

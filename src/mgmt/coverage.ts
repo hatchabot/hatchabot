@@ -82,6 +82,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/crons': 'add_cron',
   'PATCH /v1/agents/:id/crons/:jobId': 'set_cron_enabled',
   'POST /v1/agents/:id/crons/:jobId/run': 'run_cron',
+  'POST /v1/agents/:id/ask': 'app: browser — the owner talking to their agent is the console (and `hatchabot ask`); the management agent consults peers instead',
   'DELETE /v1/agents/:id/crons/:jobId': 'remove_cron',
 
   // ---- groups, classes, plans ----

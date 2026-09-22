@@ -140,6 +140,17 @@ if ! npm link >/dev/null; then
   echo "    npm config set prefix ~/.npm-global"
   echo "    add ~/.npm-global/bin to your PATH, then re-run: npm link"
 fi
+# `hbt` is the short name for the same command — only where nothing else already
+# answers to it. (Not a package.json bin: npm link fails outright on a name
+# another package owns, and would take `hatchabot` down with it.)
+HB="$(command -v hatchabot 2>/dev/null || true)"
+if [ -n "$HB" ]; then
+  if ! command -v hbt >/dev/null 2>&1; then
+    ln -s "$HB" "$(dirname "$HB")/hbt" 2>/dev/null && echo "   hbt is the short name for hatchabot."
+  elif [ "$(readlink -f "$(command -v hbt)")" != "$(readlink -f "$HB")" ]; then
+    echo "   note: another program here is already called hbt, so use the full name: hatchabot."
+  fi
+fi
 mkdir -p ~/.config/hatchabot
 if ! grep -q '^HATCHABOT_PASSWORD=' ~/.config/hatchabot/env 2>/dev/null; then
   # A hand-written .env may have no password line (e.g. identity mode) —

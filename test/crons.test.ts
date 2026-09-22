@@ -200,3 +200,54 @@ describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () 
     expect(bad.json().error).toContain('bad expression');
   });
 });
+
+describe('task run state and history (CLI regression groundwork)', () => {
+  it('list keeps what the scheduler knows about each task\'s runs', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [{
+      id: 'j', name: 'brief', enabled: true, schedule: { kind: 'every', everyMs: 60000 }, payload: { kind: 'agentTurn', message: 'm' },
+      state: { nextRunAtMs: 2000, lastRunAtMs: 1000, lastRunStatus: 'ok', lastDurationMs: 1450, consecutiveErrors: 0, lastDelivered: true },
+    }] }) });
+    expect((await listCrons(p, ref, 'kitchen'))[0]).toMatchObject({
+      nextRunAtMs: 2000, lastRunAtMs: 1000, lastStatus: 'ok', lastDurationMs: 1450, consecutiveErrors: 0, lastDelivered: true,
+    });
+  });
+
+  it('GET …/runs returns the finished runs newest first, with what each produced', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron runs', { code: 0, stderr: '', stdout: 'banner line\n' + JSON.stringify({ entries: [
+      { action: 'finished', status: 'ok', summary: 'older', runAtMs: 100, durationMs: 5 },
+      { action: 'started', runAtMs: 300 },
+      { action: 'finished', status: 'error', error: 'boom', runAtMs: 200 },
+    ] }) });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/crons/job-1/runs?limit=5', headers: as });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().runs.map((r: any) => [r.runAtMs, r.status])).toEqual([[200, 'error'], [100, 'ok']]);
+    expect(provider.execLog).toContainEqual(['cron', 'runs', '--id', 'job-1', '--limit', '5']);
+  });
+});
+
+describe('POST /v1/agents/:id/ask', () => {
+  it('runs one agent turn and returns the answer', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('agent --agent kitchen', { code: 0, stdout: 'Pasta tonight.\n', stderr: '' });
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: as, payload: { text: 'What is for dinner?' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ reply: 'Pasta tonight.' });
+    expect(provider.execLog).toContainEqual(['agent', '--agent', 'kitchen', '-m', 'What is for dinner?']);
+  });
+
+  it('is the owner\'s alone, needs a running agent and a message, and reports a failed turn', async () => {
+    const { provider, f } = await world();
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: { 'x-hatchabot-owner': 'someone-else' }, payload: { text: 'hi' } })).statusCode).toBe(404);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: as, payload: { text: '   ' } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: as, payload: { text: 'x'.repeat(8001) } })).statusCode).toBe(413);
+    provider.execResponses.set('agent --agent kitchen', { code: 1, stdout: '', stderr: 'gateway said no, with config detail' });
+    const bad = await f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: as, payload: { text: 'hi' } });
+    expect(bad.statusCode).toBe(502);
+    expect(bad.body).not.toContain('config detail'); // stderr stays on the server
+    const stopped = await world('STOPPED');
+    expect((await stopped.f.inject({ method: 'POST', url: '/v1/agents/a1/ask', headers: as, payload: { text: 'hi' } })).statusCode).toBe(409);
+  });
+});

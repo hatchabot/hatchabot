@@ -48,7 +48,7 @@ import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
-import { addCron, listCrons, setCronEnabled, runCronNow, deleteCron } from '../orchestrator/crons.js';
+import { addCron, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -650,6 +650,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const A2A_MAX_CONCURRENT = Math.max(1, envNum('HATCHABOT_A2A_MAX_CONCURRENT', 8));
   const A2A_PER_HOUR = Math.max(1, envNum('HATCHABOT_A2A_PER_HOUR', 60));
   const A2A_TIMEOUT_MS = Math.max(10_000, envNum('HATCHABOT_A2A_TIMEOUT_MS', 120_000));
+  /** An owner's `ask` can be real work (research, a report): longer than a
+   *  consult, and under the 300 s a client's fetch waits for response headers. */
+  const ASK_TIMEOUT_MS = Math.max(10_000, envNum('HATCHABOT_ASK_TIMEOUT_MS', 280_000));
   const a2aBucket = new Map<string, number[]>();
   const a2aRateOk = (callerId: string): boolean => {
     const now = Date.now();
@@ -4967,6 +4970,48 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     },
   );
+
+  // A task's recent runs — what it produced, whether it arrived. The list above
+  // says when a task last ran; only this says what it did.
+  app.get<{ Params: { id: string; jobId: string }; Querystring: { limit?: string } }>(
+    '/v1/agents/:id/crons/:jobId/runs',
+    async (req, reply) => {
+      const agent = runningAgent(req, req.params.id, reply, 'read its scheduled tasks');
+      if (!agent) return reply;
+      const limit = Math.min(Math.max(Number(req.query.limit ?? 10) || 10, 1), 50);
+      return { runs: await listCronRuns(providerFor(agent.hostId), agent.runtimeRef!, req.params.jobId, limit) };
+    },
+  );
+
+  // The owner says something to their agent and gets its answer back — the
+  // command-line twin of typing in the agent's console. It lands in the same
+  // conversation the owner has with it in the app. Owner only: a member talks
+  // to an agent through its chat app, where the door decides who is heard.
+  app.post<{ Params: { id: string }; Body: { text?: string } }>('/v1/agents/:id/ask', async (req, reply) => {
+    const agent = runningAgent(req, req.params.id, reply, 'talk to it');
+    if (!agent) return reply;
+    const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim();
+    if (!text) return reply.code(400).send({ error: 'Say something.' });
+    if (text.length > 8000) return reply.code(413).send({ error: 'That message is over 8,000 characters.' });
+    if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy (rebuilding or moving) — try again shortly.' });
+    // One turn at a time, shared with agent-to-agent consults: two turns racing
+    // into one conversation interleave.
+    if (a2aInFlight.has(agent.id)) return reply.code(429).send({ error: 'It is already answering something — try again when that finishes.' });
+    a2aInFlight.add(agent.id);
+    try {
+      trace(agent.id)('owner.ask', { chars: text.length, via: principalOf(req).via });
+      sessionsCache.delete(agent.id);
+      const res = await providerFor(agent.hostId).exec(agent.runtimeRef!, ['agent', '--agent', agent.slug, '-m', text], { timeoutMs: ASK_TIMEOUT_MS });
+      sessionsCache.delete(agent.id);
+      // The owner just read the answer; it is not news waiting in the app.
+      store.setAgentSeen(ownerIdOf(req), agent.id, Date.now());
+      if (res.timedOut) return reply.code(504).send({ error: `No answer within ${Math.round(ASK_TIMEOUT_MS / 1000)} s.` });
+      if (res.code !== 0) return reply.code(502).send({ error: 'The turn did not complete — see: hatchabot logs ' + agent.slug });
+      return { reply: res.stdout.trim().slice(0, 50_000) || '(no reply)' };
+    } finally {
+      a2aInFlight.delete(agent.id);
+    }
+  });
 
   // Delete a task.
   app.delete<{ Params: { id: string; jobId: string } }>(

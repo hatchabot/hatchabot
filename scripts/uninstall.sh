@@ -124,6 +124,9 @@ else
 fi
 
 say "Unlinking the hatchabot CLI…"
+# The short name first, and only if it is ours (it points at the hatchabot CLI).
+HBT="$(command -v hbt 2>/dev/null || true)"
+if [ -n "$HBT" ] && [ -L "$HBT" ] && readlink -f "$HBT" | grep -qE '/bin/hatchabot(\.mjs)?$|/hatchabot$'; then rm -f "$HBT" && echo "  removed hbt"; fi
 npm unlink -g hatchabot >/dev/null 2>&1 && echo "  unlinked" || echo "  (was not linked)"
 [ -f "$HOME/.config/hatchabot/env" ] && rm -f "$HOME/.config/hatchabot/env" && echo "  removed ~/.config/hatchabot/env"
 
