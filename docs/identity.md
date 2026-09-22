@@ -193,7 +193,17 @@ creating agents on your AI plan. Accounts are handed out by the host owner in
 | Someone forgot their password | Host owner → ⚙ Settings → You → **Send a reset link** — one use, 48 h, they choose their own |
 | Anyone, including the host owner, with a linked Telegram | **Forgot password?** on the sign-in page → a one-use link, valid 15 minutes, sent to that Telegram through a bot it has talked to |
 | You want to change your own | ⚙ Settings → You → **Your password** (needs the current one) |
-| **The host owner is locked out with no Telegram linked** | On the machine: `hatchabot accounts reset-password <username> <new-password>` |
+| **Anyone with their recovery code** — the host owner above all | Sign-in page → **Use a recovery code** → username, code, new password. One use; a new code is shown at once |
+| Locked out with no Telegram and no code | On the machine: `hatchabot accounts reset-password <username>` (prompts for the new one) |
+
+**Recovery codes.** The first account gets one the moment it is created,
+shown once with *Copy* and *Download*; anyone can make one (or replace theirs)
+in ⚙ Settings → You, which asks for the current password so a borrowed session
+cannot mint one. A code is 20 characters in four groups from an alphabet with no
+look-alikes (about 100 bits), stored only as a scrypt hash, and spent on use;
+using it ends every other session and issues the next code in the same step.
+Every failure gets the same answer in about the same time, and the route shares
+the sign-in throttle.
 
 The Telegram path proves identity by possession of an account already bound to
 that person; the recovery route answers identically whether or not an account

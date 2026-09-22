@@ -331,6 +331,8 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     // answers the same whatever the username, rate-limits, and only ever sends
     // a link to a Telegram account already proven to be that person's.
     if (path === '/v1/local-accounts/recover') return;
+    // …and so is using a recovery code: it IS the credential, checked in the route.
+    if (path === '/v1/local-accounts/recover-with-code') return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
     if (path === '/privacy' || path === '/terms') return;
@@ -455,7 +457,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (path === '/v1/session' || path === '/v1/logout') return;
     // Sign-in, claiming an invitation, and the bootstrap route (which answers
     // with "this installation signs in with Google" rather than a bare 401).
-    if (localAccounts && (path === '/v1/login' || path === '/v1/local-accounts/claim' || path === '/v1/local-accounts/bootstrap')) return;
+    // Recovery too: local accounts forget passwords here as anywhere (the
+    // Telegram link was unreachable in this mode — 24th audit, low).
+    if (localAccounts && (path === '/v1/login' || path === '/v1/local-accounts/claim' || path === '/v1/local-accounts/bootstrap'
+      || path === '/v1/local-accounts/recover' || path === '/v1/local-accounts/recover-with-code')) return;
     if (path.startsWith('/join/') || path === '/v1/join' || path.startsWith('/v1/invites/')) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;

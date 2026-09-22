@@ -956,10 +956,26 @@
     <label>Password</label>
     <input type="password" id="loginAcctPw" autocomplete="current-password">
     <div class="actions" style="justify-content:space-between;align-items:center">
-      <a href="#" onclick="event.preventDefault();forgotPassword()">Forgot password?</a>
+      <span style="display:flex;gap:14px;flex-wrap:wrap">
+        <a href="#" onclick="event.preventDefault();forgotPassword()">Forgot password?</a>
+        <a href="#" onclick="event.preventDefault();showRecoverForm()">Use a recovery code</a>
+      </span>
       <button class="primary" id="acctLoginBtn" type="submit">Sign in</button>
     </div>
     <div class="sub" id="forgotOut" style="margin-top:8px"></div>
+  </form>
+  <form id="acctRecover" style="display:none" onsubmit="event.preventDefault();acctRecover()">
+    <div class="sub">The recovery code you saved when the account was made (or later, in ⚙ Settings → You). It works once; you get a new one straight away.</div>
+    <label>Username</label>
+    <input type="text" id="recUser" autocomplete="username">
+    <label>Recovery code</label>
+    <input type="text" id="recCode" autocomplete="off" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" style="font-family:ui-monospace,monospace;letter-spacing:.04em">
+    <label>New password <span style="color:var(--dim)">(8 characters or more)</span></label>
+    <input type="password" id="recPw" autocomplete="new-password">
+    <div class="actions" style="justify-content:space-between;align-items:center">
+      <a href="#" onclick="event.preventDefault();hideRecoverForm()">Back to sign in</a>
+      <button class="primary" id="recBtn" type="submit">Set password &amp; sign in</button>
+    </div>
   </form>
   <form id="acctSetup" style="display:none" onsubmit="event.preventDefault();acctBootstrap()">
     <div class="sub">No accounts yet — create the first one. It becomes the host owner, which manages the others.</div>
@@ -1000,6 +1016,21 @@
     </div>
   </div>
   <div class="err" id="loginErr"></div>
+</dialog>
+
+<dialog id="recoveryDlg" style="max-width:520px">
+  <h3 style="margin:0 0 6px">Your recovery code</h3>
+  <div class="sub" id="recoveryLede">If you ever forget your password, this code lets you choose a new one — with no Telegram, no email and no one else's help. Keep it somewhere safe, away from this computer: a password manager, or on paper.</div>
+  <div id="recoveryCode" style="font:600 22px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;text-align:center;margin:16px 0;padding:14px;border:1px dashed var(--line);border-radius:10px;user-select:all;word-break:break-all"></div>
+  <div class="sub">It is shown <b>only now</b>. It works once; using it gives you a new one. Making a new code in ⚙ Settings → You replaces this one.</div>
+  <div class="actions" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+    <span style="display:flex;gap:8px">
+      <button type="button" onclick="copyText($('recoveryCode').textContent).then(ok => toast(ok ? 'Copied' : 'Select it and copy'))">Copy</button>
+      <button type="button" onclick="downloadRecoveryCode()">Download</button>
+    </span>
+    <label style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" id="recoverySaved" onchange="$('recoveryDone').disabled = !this.checked"> I've saved it</label>
+    <button class="primary" id="recoveryDone" disabled onclick="recoveryDlg.close()">Done</button>
+  </div>
 </dialog>
 
 <dialog id="createDlg">
@@ -1738,6 +1769,13 @@
         <button onclick="changeMyPassword(this)">Change</button>
       </div>
       <div class="sub" style="margin:6px 0 18px">Changing it signs this account out everywhere else.</div>
+      <h4 style="margin:0 0 4px">Recovery code</h4>
+      <div class="sub" id="recoveryStatus" style="margin-bottom:6px">Loading…</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div><label>Current password</label><input type="password" id="recCurPw" style="width:170px" autocomplete="current-password"></div>
+        <button onclick="newRecoveryCode(this)">Make a new code</button>
+      </div>
+      <div class="sub" style="margin:6px 0 18px">A new code replaces the old one.</div>
     </div>
     <h4 style="margin:0 0 4px">Your Telegram</h4>
     <div id="tgLinkStatus" class="sub" style="margin:4px 0 18px">Loading…</div>
@@ -2423,11 +2461,15 @@ const api = async (path, opts = {}) => {
     headers: opts.body ? { 'content-type': 'application/json' } : undefined,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  if (res.status === 401 && path !== '/v1/login') {
+  const data = await res.json().catch(() => ({}));
+  // Only the sign-in hook's own 401 means the session is gone. A route that
+  // answers 401 with its own reason — a wrong current password, a recovery
+  // code that doesn't match — is an answer, not a reason to sign out: showing
+  // the sign-in screen then hid the message behind "auth required".
+  if (res.status === 401 && path !== '/v1/login' && (!data.error || data.error === 'auth required')) {
     showLogin();
     throw new Error('auth required');
   }
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     // App errors send {error: "friendly text"}; framework errors send a
     // generic error ("Bad Request") plus a specific message — prefer the
@@ -2594,8 +2636,9 @@ async function forgotPassword() {
   try { await api('/v1/local-accounts/recover', { method: 'POST', body: { username } }); } catch { /* same answer regardless */ }
   out.innerHTML = `If <b>${esc(username)}</b> has used Telegram with Hatchabot, a reset link is on its way there now —
     from one of your agents' bots, valid for 15 minutes. Your current password keeps working until you use it.
-    <br><br>No message? Ask whoever runs this machine to send you a reset link from ⚙ Settings → You.
-    If that is <b>you</b>, run <code>hatchabot accounts reset-password ${esc(username)} &lt;new-password&gt;</code> on the machine itself.`;
+    <br><br>No message? Use your <a href="#" onclick="event.preventDefault();showRecoverForm()">recovery code</a>,
+    or ask whoever runs this machine to send you a reset link from ⚙ Settings → You.
+    If that is <b>you</b> and you have no code, run <code>hatchabot accounts reset-password ${esc(username)}</code> on the machine itself.`;
 }
 
 /** An invitation link: show who it is for, then let them choose a password. */
@@ -2658,6 +2701,7 @@ async function acctBootstrap() {
     loginDlg.close(); $('setupPw').value = '';
     if (r.adopted) toast(`Account created — it adopted ${r.adopted} existing record${r.adopted === 1 ? '' : 's'}.`);
     await loadConfig(); await refresh(true);
+    if (r.recoveryCode) showRecoveryCode(r.recoveryCode);
   } catch (e) { $('loginErr').textContent = e.message; }
   finally { $('setupBtn').disabled = false; }
 }
@@ -2670,6 +2714,7 @@ async function loadAccounts() {
   $('acctSelf').hidden = false;
   let me;
   try { me = await api('/v1/local-accounts/me'); } catch { return; }
+  renderRecoveryStatus(me.recoveryCodeCreatedAt);
   if (!me.hostOwner) { $('acctAdmin').hidden = true; return; }
   $('acctAdmin').hidden = false;
   try {
@@ -2760,6 +2805,69 @@ async function removeAccount(id, username) {
   if (!confirm(`Remove the account ${username}? Their agents must be gone first.`)) return;
   try { await api(`/v1/local-accounts/${id}`, { method: 'DELETE' }); toast('Account removed'); await loadAccounts(); }
   catch (e) { toast(e.message); }
+}
+
+/** Shown once, with no way to see it again — so it asks to be saved, and
+ *  Escape does not dismiss it before that. */
+document.addEventListener('DOMContentLoaded', () => {
+  $('recoveryDlg')?.addEventListener('cancel', (e) => { if (!$('recoverySaved').checked) e.preventDefault(); });
+});
+function showRecoveryCode(code, lede) {
+  $('recoveryCode').textContent = code;
+  if (lede) $('recoveryLede').innerHTML = lede;
+  $('recoverySaved').checked = false;
+  $('recoveryDone').disabled = true;
+  recoveryDlg.showModal();
+}
+function downloadRecoveryCode() {
+  const who = ($('recUser').value || $('setupUser').value || '').trim();
+  const text = `Hatchabot recovery code${who ? ` for ${who}` : ''}\n${location.origin}\n\n${$('recoveryCode').textContent}\n\n` +
+    'Use it on the sign-in screen: "Use a recovery code". It works once.\n';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+  a.download = 'hatchabot-recovery-code.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function newRecoveryCode(btn) {
+  btn.disabled = true;
+  try {
+    const r = await api('/v1/local-accounts/me/recovery-code', { method: 'POST', body: { current: $('recCurPw').value } });
+    $('recCurPw').value = '';
+    showRecoveryCode(r.recoveryCode);
+    renderRecoveryStatus(new Date().toISOString());
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
+}
+function renderRecoveryStatus(createdAt) {
+  const el = $('recoveryStatus');
+  if (!el) return;
+  el.innerHTML = createdAt
+    ? `You have one, made ${esc(new Date(createdAt).toLocaleDateString())}. If you have lost it, make a new one.`
+    : '<b style="color:var(--warn)">You have none.</b> Without one, a forgotten password needs Telegram or a terminal on this machine. Make one and keep it somewhere safe.';
+}
+function showRecoverForm() {
+  $('recUser').value = ($('loginUser').value || '').trim();
+  $('acctLogin').style.display = 'none';
+  $('acctRecover').style.display = '';
+  $('loginErr').textContent = '';
+  ($('recUser').value ? $('recCode') : $('recUser')).focus();
+}
+function hideRecoverForm() {
+  $('acctRecover').style.display = 'none';
+  $('acctLogin').style.display = '';
+  $('loginErr').textContent = '';
+}
+async function acctRecover() {
+  $('recBtn').disabled = true;
+  try {
+    const r = await api('/v1/local-accounts/recover-with-code', { method: 'POST', body: { username: $('recUser').value.trim(), code: $('recCode').value, password: $('recPw').value } });
+    await rememberPassword(r.username, $('recPw').value);
+    loginDlg.close(); $('recPw').value = ''; $('recCode').value = ''; hideRecoverForm();
+    await loadConfig(); await refresh(true);
+    showRecoveryCode(r.recoveryCode, '<b>You are back in.</b> Your old code is used up — this is your new one. Save it somewhere safe, away from this computer.');
+  } catch (e) { $('loginErr').textContent = e.message; }
+  finally { $('recBtn').disabled = false; }
 }
 
 async function changeMyPassword(btn) {
@@ -10300,7 +10408,8 @@ function v2SetTheme(t) {
  */
 const V2_BACK_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>';
 function v2ConvertPanels() {
-  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg']);
+  // recoveryDlg: a secret shown once stays until it is saved — no Back arrow.
+  const skip = new Set(['loginDlg', 'consoleDlg', 'v2AgentDlg', 'recoveryDlg']);
   for (const d of document.querySelectorAll('dialog')) {
     if (skip.has(d.id) || d.classList.contains('v2panel')) continue;
     d.classList.add('v2panel');

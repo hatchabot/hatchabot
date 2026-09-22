@@ -50,8 +50,8 @@ adopting, backing up, and operating a fleet of agents.
 - **Private by default.** A stranger who finds an agent's bot gets silence:
   only people you invited, or who already use one of your agents, get
   through. Everyone who uses the web app signs in as themselves, and a
-  forgotten password is a link you send them — or one "Forgot password?" sends
-  to their own Telegram.
+  forgotten password is a link you send them, one "Forgot password?" sends
+  to their own Telegram, or the recovery code each person keeps.
 - **A manager agent.** Your Hatchabot agent reads the fleet and proposes
   changes in plain words; every change is a card you confirm. It runs on
   whichever AI source you already have.

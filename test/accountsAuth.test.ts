@@ -559,3 +559,92 @@ describe('reset links', () => {
     expect(made.statusCode).toBe(201);
   });
 });
+
+describe('recovery codes (beta blocker #3: the host owner with no Telegram)', () => {
+  const recover = (f: any, body: Record<string, string>) =>
+    f.inject({ method: 'POST', url: '/v1/local-accounts/recover-with-code', payload: body });
+
+  it('account #1 gets a code at creation, and the code resets a forgotten password once', async () => {
+    const { f, store } = await app();
+    const made = await bootstrap(f);
+    const code: string = made.json().recoveryCode;
+    expect(code).toMatch(/^[A-Z2-9]{5}(-[A-Z2-9]{5}){3}$/);
+    expect(store.localAccountByUsername('chris')!.recoveryHash).toBeTruthy();
+    // Only the hash is stored.
+    expect(JSON.stringify(store.localAccountByUsername('chris'))).not.toContain(code);
+    const oldCookie = cookieOf(made);
+
+    // Typed sloppily: lower case, spaces instead of dashes.
+    const ok = await recover(f, { username: 'CHRIS', code: code.toLowerCase().replace(/-/g, ' '), password: 'a-brand-new-one' });
+    expect(ok.statusCode).toBe(200);
+    const fresh: string = ok.json().recoveryCode;
+    expect(fresh).toBeTruthy();
+    expect(fresh).not.toBe(code);
+    // Signed in by the answer; the old session and the old password are dead.
+    expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: cookieOf(ok) } })).statusCode).toBe(200);
+    expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie: oldCookie } })).statusCode).toBe(401);
+    expect((await signIn(f, 'chris', 'correct-horse')).statusCode).toBe(401);
+    expect((await signIn(f, 'chris', 'a-brand-new-one')).statusCode).toBe(200);
+
+    // One use: the old code no longer works; the new one does.
+    _resetLoginThrottle();
+    expect((await recover(f, { username: 'chris', code, password: 'another-password' })).statusCode).toBe(401);
+    expect((await recover(f, { username: 'chris', code: fresh, password: 'another-password' })).statusCode).toBe(200);
+  });
+
+  it('answers the same for an unknown user, a wrong code, and an account without one', async () => {
+    const { f, store } = await app();
+    const cookie = cookieOf(await bootstrap(f));
+    await f.inject({ method: 'POST', url: '/v1/local-accounts', headers: { cookie }, payload: { username: 'partner', password: 'their-password' } });
+    expect(store.localAccountByUsername('partner')!.recoveryHash).toBeUndefined();
+    const answers = [];
+    for (const body of [
+      { username: 'nobody', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
+      { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
+      { username: 'partner', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'whatever-fake' },
+    ]) {
+      _resetLoginThrottle();
+      const r = await recover(f, body);
+      answers.push([r.statusCode, r.json().error]);
+    }
+    expect(new Set(answers.map((a) => JSON.stringify(a))).size).toBe(1);
+    expect(answers[0]![0]).toBe(401);
+  });
+
+  it('is throttled, and a weak new password is refused before the code is checked', async () => {
+    const { f } = await app();
+    const code: string = (await bootstrap(f)).json().recoveryCode;
+    expect((await recover(f, { username: 'chris', code, password: 'short' })).statusCode).toBe(400);
+    const codes: number[] = [];
+    // Each wrong guess is padded to ~0.9 s, so stop at the first refusal.
+    for (let i = 0; i < 30 && !codes.includes(429); i++) codes.push((await recover(f, { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' })).statusCode);
+    expect(codes).toContain(429);
+    // Throttled even with the right code — the limit is on the caller, not the guess.
+    expect((await recover(f, { username: 'chris', code, password: 'long-enough-fake' })).statusCode).toBe(429);
+  }, 60_000);
+
+  it('a new code needs the current password, replaces the old one, and shows in /me', async () => {
+    const { f } = await app();
+    const made = await bootstrap(f);
+    const cookie = cookieOf(made);
+    const first: string = made.json().recoveryCode;
+    expect((await f.inject({ method: 'GET', url: '/v1/local-accounts/me', headers: { cookie } })).json().recoveryCodeCreatedAt).toBeTruthy();
+    const wrong = await f.inject({ method: 'POST', url: '/v1/local-accounts/me/recovery-code', headers: { cookie }, payload: { current: 'not-it' } });
+    expect(wrong.statusCode).toBe(401);
+    const again = await f.inject({ method: 'POST', url: '/v1/local-accounts/me/recovery-code', headers: { cookie }, payload: { current: 'correct-horse' } });
+    expect(again.statusCode).toBe(200);
+    const second: string = again.json().recoveryCode;
+    expect(second).not.toBe(first);
+    _resetLoginThrottle();
+    expect((await recover(f, { username: 'chris', code: first, password: 'long-enough-fake' })).statusCode).toBe(401);
+    expect((await recover(f, { username: 'chris', code: second, password: 'long-enough-fake' })).statusCode).toBe(200);
+  });
+
+  it('is reachable signed out', async () => {
+    const { f } = await app();
+    await bootstrap(f);
+    const r = await recover(f, { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' });
+    expect(r.statusCode).toBe(401);
+    expect(r.json().error).toMatch(/recovery code do not match/); // the route answered, not the sign-in hook
+  });
+});

@@ -493,8 +493,15 @@ recommends it; an install that started with a shared password can switch in
   to reset anything; you also have to be holding that person's Telegram. The
   page answers the same whether or not the account exists, so it cannot be used
   to find out who has one.
-- **The host owner, with no Telegram linked** — the break-glass is still there:
-  `hatchabot accounts reset-password <you> <new>` on the machine itself.
+- **Anyone with their recovery code — the host owner above all.** The first
+  account is shown a recovery code the moment it is created (*Copy*, *Download*,
+  and *I've saved it* before the dialog lets go); anyone can make or replace
+  theirs in ⚙ Settings → You. On the sign-in page, **Use a recovery code**
+  takes the username, the code and a new password. It works once, signs out
+  every other session, and shows the next code straight away.
+- **No Telegram and no code** — the break-glass is still there, on the machine
+  itself: `hatchabot accounts reset-password <username>` (it prompts for the
+  new password).
 
 ## Members & invites
 

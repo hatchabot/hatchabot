@@ -116,6 +116,11 @@ export interface LocalAccount {
   /** Set while the account is waiting for its person to choose a password. */
   claimCode?: string;
   claimExpires?: string;
+  /** scrypt of the account's recovery code; the code itself is never stored.
+   *  One use: spent (and replaced) when it resets the password. */
+  recoveryHash?: string;
+  recoverySalt?: string;
+  recoveryCreatedAt?: string;
 }
 
 export interface Agent {

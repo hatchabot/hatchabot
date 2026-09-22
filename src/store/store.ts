@@ -34,6 +34,9 @@ interface LocalAccountRow {
   created_at: string;
   claim_code: string | null;
   claim_expires: string | null;
+  recovery_hash?: string | null;
+  recovery_salt?: string | null;
+  recovery_created?: string | null;
 }
 
 function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
@@ -48,6 +51,9 @@ function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
     createdAt: r.created_at,
     claimCode: r.claim_code ?? undefined,
     claimExpires: r.claim_expires ?? undefined,
+    recoveryHash: r.recovery_hash ?? undefined,
+    recoverySalt: r.recovery_salt ?? undefined,
+    recoveryCreatedAt: r.recovery_created ?? undefined,
   };
 }
 
@@ -546,6 +552,11 @@ export class Store {
       // The agent class (model/source tier) this agent belongs to, if any.
       `ALTER TABLE local_accounts ADD COLUMN claim_code TEXT`,
       `ALTER TABLE local_accounts ADD COLUMN claim_expires TEXT`,
+      // A recovery code: the way back in for someone with no Telegram and no
+      // one else to send them a reset link — the host owner, above all.
+      `ALTER TABLE local_accounts ADD COLUMN recovery_hash TEXT`,
+      `ALTER TABLE local_accounts ADD COLUMN recovery_salt TEXT`,
+      `ALTER TABLE local_accounts ADD COLUMN recovery_created TEXT`,
       `ALTER TABLE agent_peers ADD COLUMN allow_actions INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE agents ADD COLUMN class_id TEXT`,
       // Home-screen icon: an emoji and a #rrggbb tint (ui v2). Cosmetic.
@@ -1328,12 +1339,19 @@ export class Store {
    * and the current password keeps working until the link is used, so asking
    * for a reset never locks anybody out on its own.
    */
-  setLocalAccountClaim(id: string, code: string, expires: string): void {
+  setLocalAccountClaim(id: string, code: string | null, expires: string | null): void {
     this.db.prepare(`UPDATE local_accounts SET claim_code = ?, claim_expires = ? WHERE id = ?`).run(code, expires, id);
   }
 
   setLocalAccountPassword(id: string, pwHash: string, pwSalt: string): void {
     this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ? WHERE id = ?`).run(pwHash, pwSalt, id);
+  }
+
+  /** Replace (or, with null, remove) an account's recovery code hash. */
+  setLocalAccountRecovery(id: string, hash: string | null, salt: string | null): void {
+    this.db
+      .prepare(`UPDATE local_accounts SET recovery_hash = ?, recovery_salt = ?, recovery_created = ? WHERE id = ?`)
+      .run(hash, salt, hash ? new Date().toISOString() : null, id);
   }
 
   setLocalAccountDisabled(id: string, disabled: boolean): void {

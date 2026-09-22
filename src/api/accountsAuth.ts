@@ -42,6 +42,31 @@ export function usernameProblem(username: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Recovery codes: the way back in for someone who forgot their password and
+ * has no Telegram bound and nobody to send them a reset link — typically the
+ * host owner, who otherwise needed a terminal on the machine.
+ *
+ * 20 characters, four groups, from an alphabet with no look-alikes (no 0/O,
+ * 1/I/L, U): 32^20 = 100 bits. Stored only as scrypt, like a password; one use.
+ */
+const RECOVERY_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+export function newRecoveryCode(): string {
+  let out = '';
+  while (out.length < 20) {
+    for (const b of randomBytes(32)) {
+      if (b >= 240) continue; // 240 = 8 × 30: keep the draw uniform
+      out += RECOVERY_ALPHABET[b % 30];
+      if (out.length === 20) break;
+    }
+  }
+  return out.match(/.{5}/g)!.join('-');
+}
+/** As typed: any case, any spacing or dashes. */
+export function normalizeRecoveryCode(v: string): string {
+  return v.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
 export function passwordProblem(password: string): string | undefined {
   if (password.length < 8) return 'Password must be at least 8 characters.';
   if (password.length > 200) return 'Password must be at most 200 characters.';
@@ -149,6 +174,13 @@ export function registerAccountRoutes(
 ): void {
   const { store, secret } = deps;
   const allowBootstrap = opts.bootstrap !== false;
+  /** A new recovery code for an account: stored as a hash, returned once. */
+  const issueRecoveryCode = async (id: string): Promise<string> => {
+    const code = newRecoveryCode();
+    const { hash, salt } = await hashPassword(normalizeRecoveryCode(code));
+    store.setLocalAccountRecovery(id, hash, salt);
+    return code;
+  };
 
   /**
    * First run: with no accounts yet, anyone who can reach the port may create
@@ -196,8 +228,11 @@ export function registerAccountRoutes(
       const adopted = store.adoptLocalOwnerData(id);
       store.recordAccount(id, username.includes('@') ? username : undefined);
       if (adopted > 0) app.log.warn({ ownerId: id, rows: adopted }, 'first account adopted this installation\'s data');
+      // The host owner is the one person nobody can send a reset link to: give
+      // them their way back in now, while they are here to write it down.
+      const recoveryCode = await issueRecoveryCode(id);
       setSessionCookie(reply, req, mintSession(secret, id, hash, Date.now() + TTL_MS));
-      return reply.code(201).send({ ok: true, id, username, hostOwner: true, adopted });
+      return reply.code(201).send({ ok: true, id, username, hostOwner: true, adopted, recoveryCode });
     },
   );
 
@@ -274,7 +309,67 @@ export function registerAccountRoutes(
   app.get('/v1/local-accounts/me', async (req, reply) => {
     const account = store.localAccount(req.principal?.ownerId ?? '');
     if (!account) return reply.code(404).send({ error: 'Not found' });
-    return { id: account.id, username: account.username, displayName: account.displayName, hostOwner: account.hostOwner };
+    return {
+      id: account.id, username: account.username, displayName: account.displayName, hostOwner: account.hostOwner,
+      recoveryCodeCreatedAt: account.recoveryHash ? account.recoveryCreatedAt ?? null : null,
+    };
+  });
+
+  /**
+   * Make (or replace) your recovery code. Your current password is required:
+   * a code resets the password, so a borrowed or stolen session must not be
+   * able to mint one and keep the account.
+   */
+  app.post<{ Body: { current?: string } }>('/v1/local-accounts/me/recovery-code', async (req, reply) => {
+    const me = store.localAccount(req.principal?.ownerId ?? '');
+    if (!me) return reply.code(401).send({ error: 'Sign in first.' });
+    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    if (!(await verifyPassword(req.body?.current ?? '', me.pwHash, me.pwSalt))) {
+      guard.noteFailure(req);
+      return reply.code(401).send({ error: 'Current password is wrong.' });
+    }
+    const recoveryCode = await issueRecoveryCode(me.id);
+    app.log.warn({ account: me.id }, 'account.recovery_code_created');
+    return { recoveryCode };
+  });
+
+  /**
+   * Signed out: username + recovery code + new password. Every failure gets
+   * the same answer in about the same time, so this cannot tell anyone which
+   * usernames exist or which of them have a code. The code is spent on use and
+   * a new one is issued in the same answer — nobody is left without one.
+   */
+  app.post<{ Body: { username?: string; code?: string; password?: string } }>('/v1/local-accounts/recover-with-code', async (req, reply) => {
+    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const started = Date.now();
+    const username = String(req.body?.username ?? '').trim();
+    const code = normalizeRecoveryCode(String(req.body?.code ?? ''));
+    const password = String(req.body?.password ?? '');
+    const problem = passwordProblem(password);
+    if (problem) return reply.code(400).send({ error: problem });
+    const account = username && username.length <= 64 ? store.localAccountByUsername(username) : undefined;
+    // Always pay for one scrypt, so a missing account or code answers as slowly
+    // as a wrong code does.
+    const hash = account?.recoveryHash ?? '00'.repeat(32);
+    const salt = account?.recoverySalt ?? 'no-account';
+    const match = (await verifyPassword(code, hash, salt)) && !!account?.recoveryHash && !account.disabled && code.length === 20;
+    if (!account || !match) {
+      guard.noteFailure(req);
+      const left = 900 - (Date.now() - started);
+      if (left > 0) await new Promise((r) => setTimeout(r, left));
+      return reply.code(401).send({ error: 'That username and recovery code do not match.' });
+    }
+    const pw = await hashPassword(password);
+    store.transact(() => {
+      store.setLocalAccountPassword(account.id, pw.hash, pw.salt);
+      store.setLocalAccountClaim(account.id, null, null); // a pending reset link is moot now
+    });
+    const recoveryCode = await issueRecoveryCode(account.id);
+    app.log.warn({ account: account.id }, 'account.recovered_with_code');
+    // The new hash signs out every other session; this browser gets a fresh one.
+    setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS));
+    deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
+    return { ok: true, username: account.username, recoveryCode };
   });
 
   /** The roster. Host owner only: who else can reach this installation is not

@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.0] — 2026-09-23
+
+### Added
+- **Recovery codes — the way back in for the host owner with no Telegram** (beta blocker #3). The first account is shown a recovery code the moment it is created, once, with *Copy*, *Download* and an *I've saved it* the dialog waits for. Anyone can make or replace theirs in ⚙ Settings → You (the current password is required, so a borrowed session cannot mint one); the section warns when you have none. On the sign-in page, **Use a recovery code** takes the username, the code and a new password: it works once, ends every other session, and shows the next code in the same step, so nobody is left without one. Codes are 20 characters from an alphabet with no look-alikes (~100 bits), stored only as a scrypt hash, accepted in any case and spacing. Every failure answers the same, in about the same time, under the sign-in throttle.
+
+### Fixed
+- **A route's own "401" signed you out of the app.** Any 401 was treated as an expired session: a wrong *current* password when changing yours threw you to the sign-in screen, and the message was replaced with "auth required". Only the sign-in hook's own 401 does that now.
+- **Telegram password recovery was unreachable on an identity-mode install with local accounts** (24th audit, low): its route is now exempt from the sign-in hook there too.
+
+### Upgrading
+Existing accounts have no recovery code yet. Make one in ⚙ Settings → You → **Recovery code** — the host owner especially.
+
 ## [2.33.4] — 2026-09-22
 
 ### Fixed

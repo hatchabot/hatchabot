@@ -151,6 +151,8 @@ export const COVERAGE: Record<string, string> = {
   'DELETE /v1/local-accounts/:id': 'app: fleet-wide/irreversible — removing an account',
   'POST /v1/local-accounts/bootstrap': 'app: browser — first sign-in',
   'POST /v1/local-accounts/claim': 'app: browser — claiming an invitation',
+  'POST /v1/local-accounts/me/recovery-code': 'app: secret — it returns a recovery code, and needs the current password',
+  'POST /v1/local-accounts/recover-with-code': 'app: secret — a recovery code and a new password, used signed out',
   'POST /v1/login': 'app: browser — signing in to this machine',
   'POST /v1/logout': 'app: browser — signing out of this machine',
   'POST /v1/session': 'app: browser — Google sign-in',
