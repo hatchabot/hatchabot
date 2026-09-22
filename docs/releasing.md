@@ -34,6 +34,17 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ./scripts/channels.sh                  # where every channel points, and the releases
 ```
 
+The machine you develop on can run every release first, automatically:
+
+```sh
+./scripts/follow-latest.sh --install   # deploy the newest tag within 10 minutes of tagging
+./scripts/follow-latest.sh --uninstall # back to deploying by hand
+```
+
+It deploys through `deploy-release.sh` (health check, automatic rollback). A tag
+that fails is not retried; the next tag is. It never moves `stable` — so the
+rhythm becomes: tag → it runs here → promote when it has held up.
+
 So the rhythm is: tag and deploy to your own machines as often as you like;
 promote to `beta` when a release is worth testers' time; promote to `stable`
 once it has run for a while without surprises. Rolling `stable` back is the

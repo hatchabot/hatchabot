@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.31.4] — 2026-09-22
+
+### Added
+- **`scripts/follow-latest.sh` — a machine that runs every release first.** `--install` adds a systemd timer that, every 10 minutes, deploys the newest release tag to this machine's production install through `deploy-release.sh`, with its health check and rollback. A tag that fails is remembered and not retried; the next one is. It only moves forward, never overrides a newer hand deploy, and never touches `stable` — new installs still get only what is promoted. It runs from a private copy of itself and of the new release's deploy script, because a deploy replaces both files mid-run.
+
 ## [2.31.3] — 2026-09-22
 
 ### Changed
