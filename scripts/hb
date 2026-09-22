@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Release shorthands for the machine you develop on.
+#
+#   hb deploy [vX.Y.Z]             put a release on this machine now (default: the newest tag)
+#   hb promote [vX.Y.Z] [channel]  new installs get it (default: what this machine runs; stable)
+#   hb channels                    where stable, beta and latest point, and what runs here
+#
+# Link it once:  ln -s ~/hatchabot/scripts/hb ~/.local/bin/hb
+set -euo pipefail
+REPO="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+PROD="${HATCHABOT_PROD_DIR:-$HOME/hatchabot-prod}"
+cmd="${1:-help}"; shift || true
+
+newest() { git -C "$REPO" fetch --tags --force --quiet origin; git -C "$REPO" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
+
+case "$cmd" in
+  deploy)
+    TAG="${1:-$(newest)}"
+    exec "$REPO/scripts/deploy-release.sh" "$TAG" ;;
+  promote)
+    # Default to what this machine runs: you promote what you have tested.
+    TAG="${1:-$(git -C "$PROD" describe --tags --exact-match 2>/dev/null || true)}"
+    [ -n "$TAG" ] || { echo "This machine is not on a release tag — say which: hb promote vX.Y.Z"; exit 1; }
+    exec "$REPO/scripts/promote.sh" "$TAG" "${2:-stable}" ;;
+  channels)
+    exec "$REPO/scripts/channels.sh" "$@" ;;
+  *)
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; [ "$cmd" = help ] || exit 1 ;;
+esac

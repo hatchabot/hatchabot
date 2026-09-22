@@ -119,23 +119,15 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 
 ## Upgrading
 
-Run the installer again. It stays on the channel you installed from —
-`stable` unless you chose otherwise — and moves you to whatever that channel
-now names:
-
 ```sh
-bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"
-HATCHABOT_CHANNEL=beta bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"   # switch channel
+hatchabot upgrade              # the newest release on your channel (stable unless you chose another)
+hatchabot upgrade beta         # switch channel: stable | beta | latest — remembered
+hatchabot upgrade v2.31.3      # exactly that release — also how you roll back
 ```
 
-By hand, for an exact release:
-
-```sh
-cd hatchabot
-git fetch --tags
-git checkout v2.31.0         # see github.com/hatchabot/hatchabot/releases
-./scripts/restart.sh         # installs any new dependencies and restarts the service
-```
+If the new release does not come up, the previous one is restored. A channel
+only ever moves you forward. Installs older than v2.32.0 do not have the
+command yet: re-run the installer once, which upgrades the same way.
 
 Agents keep running throughout; only the control plane restarts (~10 s). If a
 release changes the runtime image, the app shows "newer image available" on each

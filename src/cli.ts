@@ -65,6 +65,11 @@ Commands:
   accounts reset-password <user> <new>
                                Reset a password from the machine itself — the
                                way back in when the host owner is locked out.
+  upgrade [channel|vX.Y.Z]     Move this machine to the newest release on its
+                               channel (stable unless you chose another), or
+                               to stable | beta | latest | an exact version —
+                               which is also how you roll back. Restores the
+                               previous release if the new one does not start.
   doctor                       Check this installation: Node, Docker, runtime
                                image, .env, database, service, control plane,
                                disk, backups, Tailscale — with the fix for
@@ -750,6 +755,15 @@ async function main() {
     }
     console.error(`Unknown: accounts ${sub}. Try: list | reset-password <username> <new-password>`);
     process.exitCode = 1;
+    return;
+  }
+
+  if (cmd === 'upgrade') {
+    // A shell script, not TypeScript: it checks out a different release of the
+    // very code this process is running from, then restarts the service.
+    const { spawnSync } = await import('node:child_process');
+    const r = spawnSync('bash', [join(repoDir(), 'scripts', 'upgrade.sh'), ...rest.slice(0, 1)], { stdio: 'inherit' });
+    process.exitCode = r.status ?? 1;
     return;
   }
 

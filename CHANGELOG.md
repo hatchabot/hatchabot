@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.32.0] — 2026-09-22
+
+### Added
+- **`hatchabot upgrade`.** Upgrading meant re-running the installer from the website. Now any install moves itself: `hatchabot upgrade` takes the newest release on its channel, `hatchabot upgrade beta|stable|latest` switches channel (remembered, even when there is nothing new yet), and `hatchabot upgrade v2.31.3` pins a release — which is also how you roll back. A channel only moves forward. If the new release does not come up, the previous one is restored. Works on Linux and macOS (it restarts through `scripts/restart.sh`).
+- **`hb`, release shorthands for the maintainer's machine** — `hb deploy` (the newest tag, now), `hb promote` (stable ← what this machine runs), `hb channels`.
+
 ## [2.31.4] — 2026-09-22
 
 ### Added

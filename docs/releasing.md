@@ -34,6 +34,14 @@ New installs take **`stable`**, which names a release in `channels.json` on
 ./scripts/channels.sh                  # where every channel points, and the releases
 ```
 
+Shorthands (`ln -s ~/hatchabot/scripts/hb ~/.local/bin/hb` once):
+
+```sh
+hb deploy            # this machine: the newest tag, now   (hb deploy v2.31.3 for a specific one)
+hb promote           # stable ← what this machine runs     (hb promote v2.31.4 beta)
+hb channels          # where everything points
+```
+
 The machine you develop on can run every release first, automatically:
 
 ```sh

@@ -137,7 +137,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main
 The script checks prerequisites, installs dependencies, generates a `.env`
 (asking how people will sign in — an account for each person is the default, a single shared password the other choice), pulls the pre-built agent runtime image (or builds it if the pull fails),
 installs a background service, and links the `hatchabot` CLI. `hatchabot doctor` checks the result. It's safe to
-re-run — and re-running it is how you **upgrade**.
+re-run. To **upgrade** later: `hatchabot upgrade` (the newest release on your channel; `hatchabot upgrade v2.31.3` rolls back).
 
 **Release channels.** The installer takes the **`stable`** release unless told
 otherwise, and remembers the channel so an upgrade stays on it:
