@@ -71,7 +71,7 @@ echo "   node $(node --version)"
 
 say "4/4 Hatchabot → $DIR"
 if [ -d "$DIR/.git" ]; then
-  git -C "$DIR" fetch --tags --quiet origin
+  git -C "$DIR" fetch --tags --force --quiet origin
 else
   git clone --quiet "$REPO" "$DIR"
 fi
@@ -125,7 +125,7 @@ if [ -f "$UNIT" ]; then
     $INSTALLED
 Installing into $DIR would repoint the service at it and leave the other one dark.
 
-  Upgrade the existing install:   cd $INSTALLED && git fetch --tags && git checkout $LATEST && ./scripts/restart.sh
+  Upgrade the existing install:   cd $INSTALLED && git fetch --tags --force && git checkout $LATEST && ./scripts/restart.sh
   Install a SECOND one to test:   HATCHABOT_DIR=$INSTALLED-test bash install.sh   (and give it its own PORT)
   Remove the existing one first:  cd $INSTALLED && ./scripts/uninstall.sh"
   fi

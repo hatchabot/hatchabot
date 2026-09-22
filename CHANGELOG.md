@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.31.2] — 2026-09-22
+
+### Security
+- **The owner's real Telegram id is gone from the repository, history included.** Three test files (added in v2.23.0, v2.30.0 and v2.30.2) used it as a fixture; a PII scan caught it. Tests now use a made-up six-digit id, and the history was rewritten so no commit carries it — every release tag was re-pointed at its rewritten commit, with the same names and the same code.
+
+### Fixed
+- **Existing installs follow a re-pointed tag instead of stopping.** The installer, `deploy-release.sh`, `promote.sh`, `channels.sh` and the rename migration fetched tags without `--force`, and git refuses to move a tag it already has — so after a history rewrite every upgrade would have failed with "would clobber existing tag". They now fetch with `--force`: the remote's tags are the truth.
+
 ## [2.31.1] — 2026-09-21
 
 ### Security

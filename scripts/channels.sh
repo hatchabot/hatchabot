@@ -4,7 +4,7 @@
 #   ./scripts/channels.sh all    # every release
 set -euo pipefail
 cd "$(dirname "$0")/.."
-git fetch -q --tags origin main 2>/dev/null || echo "(offline — showing what this clone already knows)"
+git fetch -q --tags --force origin main 2>/dev/null || echo "(offline — showing what this clone already knows)"
 
 chan() { git show origin/main:channels.json 2>/dev/null | grep "\"$1\"" | sed -E 's/.*"(v[^"]+)".*/\1/' | head -1; }
 STABLE="$(chan stable)"; BETA="$(chan beta)"

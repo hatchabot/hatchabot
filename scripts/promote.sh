@@ -16,7 +16,7 @@ die() { echo "✗ $*" >&2; exit 1; }
 TAG="${1:-}"; CH="${2:-stable}"
 [ -n "$TAG" ] || die "Usage: ./scripts/promote.sh <tag> [stable|beta]"
 case "$CH" in stable|beta) ;; *) die "Channel must be stable or beta (latest is always the newest tag)." ;; esac
-git fetch --tags --quiet origin
+git fetch --tags --force --quiet origin
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "No tag $TAG — tag and push the release first."
 [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "Promote from main."
 [ -z "$(git status --porcelain channels.json)" ] || die "channels.json has uncommitted changes."

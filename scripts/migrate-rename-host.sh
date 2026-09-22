@@ -47,7 +47,7 @@ done
 
 say "2. Production checkout at $NEW ($TAG)"
 if [ ! -d "$NEW/.git" ]; then git clone --quiet "$REPO" "$NEW"; fi
-git -C "$NEW" fetch --tags --quiet origin
+git -C "$NEW" fetch --tags --force --quiet origin
 git -C "$NEW" checkout --quiet "$TAG"
 ( cd "$NEW" && npm ci --silent )
 

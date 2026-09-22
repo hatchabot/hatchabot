@@ -15,7 +15,7 @@ PROD="${HATCHABOT_PROD_DIR:-$HOME/hatchabot-prod}"
 SVC="${HATCHABOT_SERVICE:-hatchabot}"
 [ -d "$PROD/.git" ] || { echo "No production checkout at $PROD — clone the repo there first (docs/releasing.md)."; exit 1; }
 cd "$PROD"
-git fetch --tags --quiet origin
+git fetch --tags --force --quiet origin
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "Tag $TAG not found on origin."; exit 1; }
 # Refusing is right; refusing without saying WHAT is not. An untracked stray —
 # a note saved into the wrong directory — reads identically to a hand-edit here,
