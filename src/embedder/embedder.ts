@@ -52,6 +52,8 @@ export interface EmbedderSpec {
   doorBind: string;
   /** Host path of the keys file (sha256 → agent id), mounted read-only. */
   keysFile: string;
+  /** Host path of the file holding the server's key (0600, beside keysFile). */
+  serverKeyFile: string;
   perMin: number;
   /** Run the door as this user so it can read the 0600 keys file. */
   uid: number;
@@ -106,6 +108,8 @@ export class EmbedderService {
   get dir(): string { return join(this.#o.dataDir, 'embed'); }
   get enabledFile(): string { return join(this.dir, 'enabled'); }
   get keysFile(): string { return join(this.dir, 'keys.json'); }
+  /** The server's key: a file, never an argument (argv is world-readable in /proc). */
+  get serverKeyFile(): string { return join(this.dir, 'server-key'); }
   get modelPath(): string { return join(this.#o.dataDir, 'models', EMBED_MODEL_FILE); }
   get external(): string | undefined { return process.env.HATCHABOT_EMBED_URL?.trim() || undefined; }
   get enabled(): boolean { return existsSync(this.enabledFile); }
@@ -150,9 +154,12 @@ export class EmbedderService {
   /** The door's key file: every live agent's key hash. Rewritten whenever keys change. */
   syncKeys(): void {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    const live = new Set(['RUNNING', 'PROVISIONING', 'REBUILDING']);
+    // Every agent that still exists: a STOPPED one cannot call, and must find
+    // its key valid when started again without a rebuild (27th audit). Only
+    // archive and delete retire a key (setAgentState drops the row).
+    const gone = new Set(['ARCHIVED', 'DELETING', 'DELETED']);
     const keys: Record<string, string> = {};
-    for (const t of this.#o.store.listEmbedTokens()) if (live.has(t.state)) keys[t.tokenHash] = t.agentId;
+    for (const t of this.#o.store.listEmbedTokens()) if (!gone.has(t.state)) keys[t.tokenHash] = t.agentId;
     const tmp = `${this.keysFile}.tmp`;
     writeFileSync(tmp, JSON.stringify(keys), { mode: 0o600 });
     chmodSync(tmp, 0o600);
@@ -167,11 +174,15 @@ export class EmbedderService {
   }
 
   async #spec(): Promise<EmbedderSpec> {
+    const key = await this.#key();
+    writeFileSync(this.serverKeyFile, `${key}\n`, { mode: 0o600 });
+    chmodSync(this.serverKeyFile, 0o600);
     return {
       image: process.env.HATCHABOT_EMBEDDER_IMAGE?.trim() || EMBEDDER_IMAGE,
       modelPath: this.modelPath,
       modelAlias: EMBED_MODEL_ALIAS,
-      key: await this.#key(),
+      key,
+      serverKeyFile: this.serverKeyFile,
       doorImage: this.#o.runtimeImage,
       doorScript: this.#o.doorScript,
       doorPort: this.doorPort,
@@ -183,17 +194,28 @@ export class EmbedderService {
     };
   }
 
-  /** Bring both containers up (idempotent) and remember that they should stay up. */
-  start(): Promise<EmbedderView> {
+  /**
+   * Bring both containers up (idempotent) and remember that they should stay
+   * up. `onlyIfEnabled` (the health loop): a Stop that landed meanwhile wins.
+   */
+  start(opts: { onlyIfEnabled?: boolean } = {}): Promise<EmbedderView> {
     return this.#serial(async () => {
+      if (opts.onlyIfEnabled && !this.enabled) return this.status();
       if (this.external) throw new Error(`An external embedding server is configured (HATCHABOT_EMBED_URL=${this.external}); nothing to start here.`);
       const provider = this.#o.provider();
       if (!provider.ensureEmbedder) throw new Error('This host cannot run the embedding service.');
       await this.ensureModel();
+      mkdirSync(this.dir, { recursive: true, mode: 0o700 });
       this.syncKeys();
       const spec = await this.#spec();
-      const s = await provider.ensureEmbedder(spec);
-      mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+      let s: EmbedderStatus;
+      try {
+        s = await provider.ensureEmbedder(spec);
+      } catch (err) {
+        // Half up is worse than down: nothing would manage what was left running.
+        await provider.stopEmbedder?.().catch(() => {});
+        throw err;
+      }
       writeFileSync(this.enabledFile, `${new Date().toISOString()}\n`);
       this.#o.log?.('embedder.started', { door: s.doorAddress });
       return this.status();
@@ -218,10 +240,13 @@ export class EmbedderService {
   async healthTick(): Promise<'ok' | 'restarted' | 'off'> {
     if (!this.enabled || this.external) return 'off';
     const s = await this.status();
-    if (s.embedder === 'running' && s.door === 'running') return 'ok';
+    if (s.embedder === 'running' && s.door === 'running') {
+      this.syncKeys(); // retired keys (archive, delete) leave the file within a tick
+      return 'ok';
+    }
     this.#o.log?.('embedder.unhealthy', { embedder: s.embedder, door: s.door });
-    await this.start();
-    return 'restarted';
+    await this.start({ onlyIfEnabled: true });
+    return this.enabled ? 'restarted' : 'off';
   }
 }
 

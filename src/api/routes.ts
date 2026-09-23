@@ -1561,30 +1561,56 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     log: (e, d) => trace()(e, d),
   });
   (app as unknown as { embedder?: EmbedderService }).embedder = embedder;
-  /** What provisioning needs of the service: it up, and a key for the agent. */
+  /** What provisioning needs of the service: it up, and a key for the agent. (Exposed on app for tests.) */
   const embedderForProvision: NonNullable<ProvisionDeps['embedder']> = {
-    async ensure() {
+    async credentialsFor(agentId) {
+      // A server the operator already runs (Ollama speaks the same API): its
+      // address as given, its one key, its model — no container, no door.
+      if (embedder.external) {
+        return {
+          baseUrl: embedder.external.replace(/\/$/, ''),
+          token: process.env.HATCHABOT_EMBED_KEY?.trim() || '',
+          model: process.env.HATCHABOT_EMBED_MODEL?.trim() || EMBED_MODEL_ALIAS,
+        };
+      }
+      // Only a service the machine owner turned on: an agent owner switching
+      // their agent must not start a machine-level container by the back door
+      // (27th audit). The health loop, not this, brings an enabled one back up.
+      if (!embedder.enabled) throw new Error('the memory search service is not turned on (Settings → Hosts)');
       let v = await embedder.status();
       if (!(v.embedder === 'running' && v.door === 'running')) v = await embedder.start();
       if (!v.doorAddress) throw new Error('the embedding service has no address');
       // Docker Desktop publishes on loopback, which a container reaches as host.docker.internal.
       const doorAddress = v.doorAddress.replace(/^(127\.[\d.]+|localhost)(?=:)/, 'host.docker.internal');
-      return { doorAddress, model: EMBED_MODEL_ALIAS };
-    },
-    async mintKey(agentId) {
       const token = randomBytes(24).toString('base64url');
       store.setEmbedToken(agentId, embedKeyHash(token));
       embedder.syncKeys();
-      return token;
+      return { baseUrl: `http://${doorAddress}/v1`, token, model: EMBED_MODEL_ALIAS };
     },
   };
-  app.get('/v1/embedder', async () => embedder.status());
+  (app as unknown as { embedderForProvision?: typeof embedderForProvision }).embedderForProvision = embedderForProvision;
+  app.get('/v1/embedder', async (req) => {
+    const v = await embedder.status();
+    // The external server's address may carry credentials: the owner's to see.
+    return ownsLocalHost(req) ? v : { ...v, external: v.external ? 'an external server' : undefined, doorAddress: undefined };
+  });
 
   /**
    * Live CPU and memory, per agent and per machine (docker stats, one call per
    * host). Your own and shared agents; the machine owner also sees the
    * machine-level containers (the memory search service, doormen).
    */
+  // docker samples every container for a second per call: one sample per host
+  // per 3 s serves every viewer, however many keep the tab open (27th audit).
+  const statsCache = new Map<string, { at: number; value: Promise<ContainerStats[]> }>();
+  const statsFor = (hostId: string, provider: RuntimeProvider): Promise<ContainerStats[]> => {
+    const hit = statsCache.get(hostId);
+    if (hit && Date.now() - hit.at < 3_000) return hit.value;
+    const value = provider.stats!();
+    statsCache.set(hostId, { at: Date.now(), value });
+    value.catch(() => statsCache.delete(hostId));
+    return value;
+  };
   app.get('/v1/resources', async (req) => {
     const ownerId = ownerIdOf(req);
     const owner = ownsLocalHost(req);
@@ -1594,13 +1620,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const provider = providerFor(h.id);
       if (!provider.stats) return { id: h.id, name: h.name, kind: h.kind, containers: [], error: 'not measurable' };
       try {
-        const rows = await provider.stats();
-        type Row = ContainerStats & { agentId?: string; agentName?: string; role: 'agent' | 'hatchabot' | 'embedder' | 'embed-door' | 'doorman'; mine?: boolean };
+        const rows = await statsFor(h.id, provider);
+        type Row = ContainerStats & { agentId?: string; agentName?: string; role: 'agent' | 'hatchabot' | 'embedder' | 'embed-door' | 'doorman'; mine?: boolean; shared?: boolean };
         const containers = rows.flatMap((r): Row[] => {
           const a = everyone.get(r.name);
           if (a) {
             if (!visible.has(r.name) && !owner) return [];
-            return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId }];
+            return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId, shared: a.ownerId !== ownerId && visible.has(r.name) }];
           }
           if (!owner) return [];
           const role = /-embedder$/.test(r.name) ? 'embedder' : /-embed-door$/.test(r.name) ? 'embed-door' : /-doorman-/.test(r.name) ? 'doorman' : 'other';
@@ -3077,50 +3103,51 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return value;
   };
 
-  // "Last active" = newest OpenClaw session update inside the runtime. The
-  // CLI costs ~1s to start in-container, and the app polls the agent list
-  // every few seconds — so cache per agent and refresh at most once a minute.
-  const lastActiveCache = new Map<string, { fetchedAt: number; value?: string }>();
-  const lastActiveFor = async (a: Agent): Promise<string | undefined> => {
-    if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
-    const hit = lastActiveCache.get(a.id);
-    if (hit && Date.now() - hit.fetchedAt < 60_000) return hit.value;
-    let value: string | undefined;
-    try {
-      const res = await providerFor(a.hostId).exec(a.runtimeRef, [
-        'sessions', 'list', '--agent', a.slug, '--json',
-      ]);
-      if (res.code === 0) {
-        const sessions: Array<{ updatedAt?: number }> = JSON.parse(res.stdout).sessions ?? [];
-        const newest = Math.max(0, ...sessions.map((s) => s.updatedAt ?? 0));
-        if (newest > 0) value = new Date(newest).toISOString();
-      }
-    } catch {
-      /* diagnostic only — omit rather than fail the list */
-    }
-    lastActiveCache.set(a.id, { fetchedAt: Date.now(), value });
-    return value;
-  };
-
-  // The agent's own record of its conversations, read once a minute at most.
-  // Feeds the unread mark here and the "last seen" column of the people list.
-  const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry> }>();
-  const sessionsFor = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
-    if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
-    const hit = sessionsCache.get(a.id);
-    if (hit && Date.now() - hit.fetchedAt < 60_000) return hit.value;
-    let value: Record<string, SessionEntry> | undefined;
+  /**
+   * The agent's sessions file, read with one `cat` in its container: "last
+   * active" and the unread mark both come from it. The app polls the list
+   * every few seconds, so: cached per agent; after a minute the CACHED value
+   * is answered at once and a refresh runs behind it (stale-while-revalidate).
+   * The list used to run `openclaw sessions list` per agent as well — the CLI
+   * takes a second to start, so 30 running agents cost 8 s per cold list.
+   */
+  const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry>; refreshing?: boolean }>();
+  const readSessions = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     try {
       const res = await providerFor(a.hostId).execShell(
-        a.runtimeRef,
+        a.runtimeRef!,
         `cat ${JSON.stringify(`/home/node/.openclaw/agents/${a.slug}/sessions/sessions.json`)} 2>/dev/null || true`,
       );
-      if (res.code === 0 && res.stdout.trim()) value = JSON.parse(res.stdout) as Record<string, SessionEntry>;
+      if (res.code === 0 && res.stdout.trim()) return JSON.parse(res.stdout) as Record<string, SessionEntry>;
     } catch {
       /* a container hiccup: no mark this minute */
     }
+    return undefined;
+  };
+  const sessionsFor = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
+    if (!a.runtimeRef || a.state !== 'RUNNING') return undefined;
+    const hit = sessionsCache.get(a.id);
+    if (hit) {
+      if (Date.now() - hit.fetchedAt >= 60_000 && !hit.refreshing) {
+        hit.refreshing = true;
+        void readSessions(a).then((value) => sessionsCache.set(a.id, { fetchedAt: Date.now(), value }))
+          .catch(() => { hit.refreshing = false; });
+      }
+      return hit.value;
+    }
+    const value = await readSessions(a); // first look: wait for it
     sessionsCache.set(a.id, { fetchedAt: Date.now(), value });
     return value;
+  };
+  /** "Last active" = the newest session update in that file. */
+  const lastActiveFor = async (a: Agent): Promise<string | undefined> => {
+    const sessions = await sessionsFor(a);
+    let newest = 0;
+    for (const s of Object.values(sessions ?? {})) {
+      if (!s || typeof s !== 'object') continue;
+      newest = Math.max(newest, Number(s.updatedAt) || 0, Number(s.lastInteractionAt) || 0);
+    }
+    return newest > 0 ? new Date(newest).toISOString() : undefined;
   };
   /**
    * Notes to the owner's management agent, in its own conversation: the
@@ -3473,6 +3500,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAgentRichMessages(agent.id, parsed.data.richMessages);
       }
       if (parsed.data.embedMode !== undefined) {
+        // `shared` needs the machine's service, which its owner turns on; anyone
+        // else switching first would only get the baked engine and a warning.
+        if (parsed.data.embedMode === 'shared' && !embedder.enabled && !embedder.external && !ownsLocalHost(req)) {
+          return reply.code(400).send({ error: "The memory search service is not turned on. The machine's owner turns it on under Settings → Hosts; then agents can be switched to it." });
+        }
         store.setAgentEmbedMode(agent.id, parsed.data.embedMode);
         trace(agent.id)('embed.mode', { mode: parsed.data.embedMode });
       }
@@ -6533,7 +6565,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       try {
         const moved = await moveAgentToHost(
-          { store, secrets, channel: deps.channel, log: trace(agent.id),
+          { store, secrets, channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision,
             source: providerFor(agent.hostId), target: providerFor(host.id) },
           agent.id,
           host.id,
@@ -6656,7 +6688,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       try {
         const agent = await importAgent(
           // No id yet — trace() picks it up from the orchestrator's log detail.
-          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace() },
+          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId) },
         );
@@ -7292,7 +7324,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return reply.code(201).send({ ...publicAgent(agent), kind: 'template', needs });
         }
         const agent = await importAgent(
-          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace() },
+          { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
           { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId) },
         );

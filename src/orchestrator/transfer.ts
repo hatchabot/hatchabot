@@ -6,6 +6,7 @@ import type { Agent, MemberRole } from '../domain/types.js';
 import {
   buildRuntimeSpec,
   recordApplied,
+  reindexMemoryIfSwitched,
   runRebuildHook,
   slugify,
   waitForHealthy,
@@ -630,6 +631,7 @@ async function importAgentInner(
     // landing in the first ~30s starts a fresh session and archives the
     // imported conversation thread — the same guard rebuild uses (audit 2026-09-08).
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))), log);
+    await reindexMemoryIfSwitched(deps, agent.id, runtimeRef, log);
     log('agent.imported', { agentId: agent.id, slug: agent.slug, from: manifest.exportedAt });
     return store.setAgentState(agent.id, 'RUNNING');
   } catch (err) {

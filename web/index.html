@@ -3907,7 +3907,7 @@ async function loadRuntimeCaps() {
     if (t.openclaw) rows.push(row('Agent runtime', 'conversations, memory, Telegram gateway, scheduled tasks', t.openclaw));
     if (t['claude-code']) rows.push(row('Claude Code', 'the Anthropic model runtime agents think with', t['claude-code']));
     rows.push(row('Web search', 'DuckDuckGo, enabled per agent (keyless)'));
-    rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings, keyless'));
+    rows.push(row('Memory search', 'semantic recall over MEMORY.md — local embeddings (or the machine\'s shared service, per agent)'));
     rows.push(row('Voice notes', mk.set ? 'transcribed via the Gemini media key' : 'needs the Gemini media key (Settings → Connections)', '', mk.set ? 'var(--ok)' : 'var(--warn)'));
     if (t.gog) rows.push(row('Google Workspace', 'Gmail / Drive / Calendar / Sheets / Docs via <code>gog</code> — each agent connects its own account in chat', t.gog));
     if (t.python) rows.push(row('Python', 'agents run scripts; libraries install per agent (<code>pip install --target ~/.openclaw/pylibs</code>)', t.python));
@@ -6512,6 +6512,7 @@ function prepareEdit(id, name, tab = 'def') {
   renderModelPickerForAgent(cur);
   const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
   void populateImagePicker(cur?.image ?? '');
+  if ($('editEmbedMode')) { $('editEmbedMode').value = cur?.embedMode || 'baked'; $('embedModeStatus').textContent = cur ? embedModeText(cur) : ''; }
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
   renderSetupValues(cur);
   renderGroupAccess(cur);
@@ -7404,7 +7405,7 @@ function fleetResDraw(r) {
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
         <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
       ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}<th style="text-align:right">of limit</th></tr></thead><tbody>
-        ${rows.map(c => `<tr><td>${who(c)}${c.mine === false ? ' <span class="sub">(shared with you)</span>' : ''}</td>
+        ${rows.map(c => `<tr><td>${who(c)}${c.shared ? ' <span class="sub">(shared with you)</span>' : c.mine === false ? ' <span class="sub">(another account’s)</span>' : ''}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '%' : '—'}</td></tr>`).join('')}
@@ -7421,7 +7422,12 @@ async function openFleetResources() {
   };
   await draw();
   clearInterval(fleetResTimer);
-  fleetResTimer = setInterval(() => { if (fleetResDlg.open || v2FleetDlg?.open) draw(); else clearInterval(fleetResTimer); }, 5000);
+  // Only while this view is the one showing: another Fleet tab, or a closed
+  // panel, must not keep `docker stats` running on every machine.
+  fleetResTimer = setInterval(() => {
+    const showing = fleetResDlg.open || (v2FleetDlg?.open && v2FleetTab === 'resources');
+    if (showing) draw(); else { clearInterval(fleetResTimer); fleetResTimer = null; }
+  }, 5000);
 }
 
 async function openFleetSources() {
@@ -9743,6 +9749,9 @@ async function refresh(withMeta) {
     // A failed refresh with a stale shell showing is silent and misleading (the
     // old cached page has no way to know it's old). Say it, name the usual cause.
     if (/fetch|network|Failed to fetch|Load failed/i.test(String(e.message || e))) $('offlineBanner').hidden = false;
+    // The first list never arrived: say so where the spinner is, rather than
+    // spin forever over a 500 or a proxy page (27th audit).
+    if (!agentsLoaded) for (const el of document.querySelectorAll('.hb-loading')) el.textContent = `Couldn't load your agents: ${e.message || e}. Retrying…`;
   }
   const busy = agents.some(a => a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
@@ -10728,14 +10737,15 @@ function v2ConvertPanels() {
     }
   }
 }
-// ---- the Fleet panel: health, usage, AI in use, activity, fleet-wide tools ----------------
+// ---- the Fleet panel: health, usage, resources, activity, fleet-wide tools ----------------
+// ("AI in use" left the panel in v2.43.0: View by → AI source / Model on the
+// home screen show the same thing. The classic look keeps its 📊 Sources dialog.)
 // Four views that used to be separate panels become tabs of one. Each view's
 // own dialog body is borrowed into the tab (ids and loaders unchanged) and put
 // back when the tab changes or the panel closes.
 const V2_FLEET = [
   ['health', 'Health', 'fleetDlg'],
   ['usage', 'Usage', 'fleetUsageDlg'],
-  ['sources', 'AI in use', 'fleetSourcesDlg'],
   ['resources', 'Resources', 'fleetResDlg'],
   ['activity', 'Activity', 'auditDlg'],
   ['tools', 'Tools', null],
@@ -10743,6 +10753,7 @@ const V2_FLEET = [
 const V2_FLEET_OPEN = {}; // the original openers, captured by initV2
 let v2FleetTab = 'health';
 function v2ParkFleet() {
+  if (fleetResTimer) { clearInterval(fleetResTimer); fleetResTimer = null; }
   for (const el of $('v2FleetBody').querySelectorAll(':scope > [data-v2from]')) $(el.dataset.v2from).append(el);
   $('v2FleetBody').innerHTML = '';
 }
@@ -11070,10 +11081,9 @@ function initV2() {
   };
   for (const [, , dlgId] of V2_FLEET) if (dlgId) wrapBody($(dlgId), `${dlgId}Body`, true);
   wrapBody(healthDlg, 'healthDlgBody', false);
-  Object.assign(V2_FLEET_OPEN, { health: openFleetHealth, usage: openFleetUsage, sources: openFleetSources, resources: openFleetResources, activity: openAudit });
+  Object.assign(V2_FLEET_OPEN, { health: openFleetHealth, usage: openFleetUsage, resources: openFleetResources, activity: openAudit });
   openFleetHealth = () => openFleet('health');
   openFleetUsage = () => openFleet('usage');
-  openFleetSources = () => openFleet('sources');
   openAudit = (agentId) => openFleet('activity', agentId);
   // The voice and web-search keys are outside services an agent can use —
   // they sit with the Google accounts under Connections, not with AI sources.

@@ -37,11 +37,12 @@ beforeAll(async () => {
   await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
   upstreamPort = (upstream.address() as { port: number }).port;
   writeFileSync(keysFile, JSON.stringify({ [embedKeyHash(KEY_A)]: 'agent-a', [embedKeyHash(KEY_R)]: 'agent-r' }));
+  writeFileSync(join(keysFile, '..', 'server-key'), 'server-secret\n');
   door = spawn(process.execPath, ['-e', doorScript()], {
     env: {
       ...process.env,
       EMBED_UPSTREAM: `http://127.0.0.1:${upstreamPort}`,
-      EMBED_UPSTREAM_KEY: 'server-secret',
+      EMBED_SERVER_KEY_FILE: join(keysFile, '..', 'server-key'),
       EMBED_KEYS_FILE: keysFile,
       EMBED_PER_MIN: '3',
       EMBED_KEYS_TTL_MS: '0',

@@ -1,5 +1,11 @@
 # Local memory embeddings & the runtime image
 
+> Since v2.40/2.41 an agent may instead use the machine's **shared memory
+> search service** (its Settings → Advanced → *Memory search engine*; see
+> docs/embedder-and-openclaw-port-design.md). That engine is keyed and reached
+> over the docker network. This page covers the **baked** default, which every
+> agent still uses unless switched.
+
 ## The problem this closes
 
 OpenClaw's `memory_search` does two things: keyword (FTS) and **semantic

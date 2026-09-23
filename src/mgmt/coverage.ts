@@ -24,7 +24,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/restore': 'restore_agent',
   'POST /v1/agents/:id/clone': 'clone_agent',
   'POST /v1/agents/:id/derive': 'app: later — new child from a template master',
-  'PATCH /v1/agents/:id': 'rename_agent, set_group, set_source, pin_image, update_definition (persona/fields)',
+  'PATCH /v1/agents/:id': 'rename_agent, set_group, set_source, pin_image, update_definition (persona/fields); embedMode: app: later',
   'POST /v1/agents/:id/model': 'set_model',
   'POST /v1/agents/:id/class': 'set_class',
   'POST /v1/agents/:id/move': 'set_group',

@@ -193,8 +193,9 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // Memory search: OpenClaw's default points at OpenAI embeddings, which no
   // Hatchabot agent has a key for — so semantic recall over MEMORY.md was
   // silently dead fleet-wide (doctor flagged it once the lint sweep landed).
-  // The bundled local embedding model needs no key and no network at query
-  // time; keyed remote embeddings stay a per-agent choice via config.
+  // Two engines: the bundled local model (no key, no network at query time),
+  // or — when the agent is switched to it — the machine's shared service,
+  // keyed per agent and reached over the docker network.
   if (patch.embed) {
     // The machine's shared embedding service (src/embedder): OpenClaw's
     // openai-compatible provider, pointed at the door with this agent's own

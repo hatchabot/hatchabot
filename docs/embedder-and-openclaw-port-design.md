@@ -1,6 +1,7 @@
 # Design: a shared embedding service, and the road to OpenClaw 2026.9
 
-Status, 2026-09-18: design only. Nothing here is built. Written to be coded
+Status, 2026-09-23: steps 1–2 of the build order are built (v2.40.0, v2.41.0),
+with the door as its own container (see "Revised" below); steps 3–6 are open. Written to be coded
 from directly.
 
 ## The problem
@@ -81,6 +82,19 @@ on a host or run several times behind one door.
 The sections below describe the first draft's Hatchabot-side route; step 1
 replaced it with the door container, and step 2 (the per-agent switch) writes
 the door's address into each agent's config instead of a Hatchabot route.
+Superseded by what was built: `POST /v1/embed/v1/embeddings` and
+`src/api/embed.ts` (the door is `src/embedder/door.ts`), the ops-door path,
+`baseUrl=${HATCHABOT_INTERNAL_URL}/v1/embed/v1/` (it is the door's address),
+`settings.embedDefault` and the label forcing `shared` (step 3/4, not yet),
+the server "published on 127.0.0.1 only" (it has no published port; the door
+is on the bridge gateway), "Hatchabot is in the data path" (it is not), the
+server key "known only to Hatchabot" (the door holds it too), "when set,
+Hatchabot forwards there" for `HATCHABOT_EMBED_URL` (switched agents are
+given that server's address, key and model directly), the "inline health"
+row (the result is on the agent's Settings → Advanced engine row), and a
+runner agent reaching the control plane (runners are built baked, for now).
+The test files are test/embedDoor.test.ts, test/embedder.test.ts and
+test/embedSwitch.test.ts.
 
 ### The embedder
 
@@ -240,7 +254,9 @@ Each step ships alone and leaves the fleet as it was.
 
 1. **Embedder + front door** (no agent uses it yet): module, provider
    methods, table, route, ops-door path, Settings → Hosts row showing
-   "Embedding service: running / stopped" with Restart.
+   "Embedding service: running / stopped" with Restart. *Built in v2.40.0 as
+   a door container: no Hatchabot route, no ops-door path; the row is
+   "Memory search service" with Start/Stop/Restart.*
 2. **Per-agent switch on today's OpenClaw**: column, writer branch, re-index
    step, health row. Try it on one low-stakes agent, then a handful, for a few
    days. *Built in v2.41.0 (`agents.embed_mode`, `reindexMemoryIfSwitched`);

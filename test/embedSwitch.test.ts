@@ -63,8 +63,7 @@ function world(hostKind: 'local' | 'cloud' = 'local') {
   store.setAgentEmbedMode('todo', 'shared');
   const minted: string[] = [];
   const embedder: NonNullable<ProvisionDeps['embedder']> = {
-    async ensure() { return { doorAddress: '172.17.0.1:8093', model: 'embeddinggemma' }; },
-    async mintKey(id) { const t = `key-for-${id}`; minted.push(t); store.setEmbedToken(id, embedKeyHash(t)); return t; },
+    async credentialsFor(id) { const t = `key-for-${id}`; minted.push(t); store.setEmbedToken(id, embedKeyHash(t)); return { baseUrl: 'http://172.17.0.1:8093/v1', token: t, model: 'embeddinggemma' }; },
   };
   const deps = (withEmbedder: boolean): ProvisionDeps => ({ store, secrets, provider, channel: channelStub, log: (e) => events.push(e), sleep: async () => {}, ...(withEmbedder ? { embedder } : {}) });
   return { store, provider, events, minted, deps };
@@ -122,6 +121,10 @@ describe('re-indexing after a switch', () => {
     const a = w.store.getAgent('todo')!;
     expect(a.embedIndexedAt).toBeTruthy();
     expect(a.embedIndexError).toBeUndefined();
+    // Once accepted, only the new key is valid; a live model change later stamps nothing.
+    expect(w.store.listEmbedTokens()).toHaveLength(1);
+    recordApplied(w.store, 'todo');
+    expect(w.store.getAgent('todo')!.appliedEmbedMode).toBe('shared');
     // The next build on the same engine does not re-index.
     await buildRuntimeSpec(w.deps(true), 'todo');
     recordApplied(w.store, 'todo');
@@ -139,6 +142,23 @@ describe('re-indexing after a switch', () => {
     expect(a.embedIndexError).toMatch(/provider unreachable/);
     expect(a.embedIndexedAt).toBeUndefined();
     expect(w.events).toContain('memory.reindex_failed');
+  });
+
+  it('a baked agent with no index record is left alone: no fleet-wide re-index on a rebuild', async () => {
+    const w = world();
+    w.store.setAgentEmbedMode('todo', 'baked');
+    const calls: string[][] = [];
+    w.provider.exec = async (_ref: string, argv: string[]) => { calls.push(argv); return { code: 0, stdout: '', stderr: '' }; };
+    await buildRuntimeSpec(w.deps(true), 'todo');
+    recordApplied(w.store, 'todo');
+    await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', () => {});
+    expect(calls).toEqual([]);
+  });
+
+  it('the fallback reason lands on the agent, where the engine row shows it', async () => {
+    const w = world('cloud');
+    await buildRuntimeSpec(w.deps(true), 'todo');
+    expect(w.store.getAgent('todo')!.embedIndexError).toMatch(/own engine — it runs on a runner/);
   });
 
   it('switching back re-indexes too', async () => {
@@ -169,7 +189,7 @@ describe('over the API', () => {
     expect((await f.inject({ method: 'PATCH', url: '/v1/agents/todo', headers: H, payload: { embedMode: 'sideways' } })).statusCode).toBe(400);
     const r = await f.inject({ method: 'PATCH', url: '/v1/agents/todo', headers: H, payload: { embedMode: 'shared' } });
     expect(r.statusCode).toBe(200);
-    expect(r.json().embedMode).toBe('shared');
+    expect(r.json().embedMode).toBe('shared'); // the machine owner may, service on or off
     expect((await f.inject({ method: 'PATCH', url: '/v1/agents/todo', headers: { 'x-hatchabot-owner': 'someone-else' }, payload: { embedMode: 'baked' } })).statusCode).toBe(404);
     expect(store.getAgent('todo')!.embedMode).toBe('shared');
   });

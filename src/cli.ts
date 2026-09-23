@@ -81,8 +81,6 @@ Commands:
                                anything wrong. --json: for a program (the same
                                lines plus the facts; exit 1 on any ✗).
   list [--all]                 Agents with state, model, and last activity.
-  top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
-                               (docker's own measurement; a second per machine).
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
   users [--all]                Every Telegram user across your agents: which
@@ -214,6 +212,8 @@ Commands:
   logs <agent> [-n <lines>]    Recent runtime output
   health <agent>               Live gateway health — is it actually answering
   usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
+  top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
+                               (docker's own measurement; a second per machine).
   embedder [status|start|stop|restart]
                                The machine's embedding service: one engine for
                                every agent's semantic memory search (Settings →

@@ -908,10 +908,15 @@ export class LocalDockerProvider implements RuntimeProvider {
         '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder',
         '--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
         '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '1g', '--pids-limit', '64',
+        // As this user, so it can read the 0600 key file; the key is a FILE,
+        // never an argument — argv is world-readable in /proc (27th audit).
+        '--user', `${spec.uid}:${spec.gid}`,
         '-v', `${spec.modelPath}:/models/${EMBED_MODEL_BASENAME(spec.modelPath)}:ro`,
+        '-v', `${dirname(spec.serverKeyFile)}:/keys:ro`,
         spec.image,
         '--embeddings', '-m', `/models/${EMBED_MODEL_BASENAME(spec.modelPath)}`, '--alias', spec.modelAlias,
-        '-c', '2048', '-ub', '2048', '--host', '0.0.0.0', '--port', '8080', '--api-key', spec.key, '--no-webui',
+        '-c', '2048', '-ub', '2048', '--host', '0.0.0.0', '--port', '8080',
+        '--api-key-file', `/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`, '--no-webui',
       ], IO_TIMEOUT_MS);
       if (run.code !== 0) throw new ProviderError(`embedder failed: ${run.stderr.slice(-500)}`, 'Could not start the embedding service.');
     } else if ((await this.#containerState(embedder)) === 'stopped') {
@@ -935,7 +940,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // and a bind-mounted file would keep the old inode — a re-minted key
       // would never be seen until the door restarted.
       '-v', `${dirname(spec.keysFile)}:/keys:ro`, '-e', `EMBED_KEYS_FILE=/keys/${EMBED_MODEL_BASENAME(spec.keysFile)}`,
-      '-e', 'EMBED_UPSTREAM=http://embedder:8080', '-e', `EMBED_UPSTREAM_KEY=${spec.key}`,
+      '-e', 'EMBED_UPSTREAM=http://embedder:8080', '-e', `EMBED_SERVER_KEY_FILE=/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`,
       '-e', `EMBED_PER_MIN=${spec.perMin}`, '-e', 'EMBED_DOOR_PORT=8093',
       '--entrypoint', 'node', spec.doorImage, '-e', spec.doorScript,
     ]);

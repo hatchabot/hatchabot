@@ -88,16 +88,31 @@ describe('the embedding service', () => {
     const agent = (id: string, state: string) => w.store.insertAgent({
       id, ownerId: OWNER, name: id, slug: id, state, aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now',
     } as never);
-    agent('live', 'RUNNING'); agent('parked', 'STOPPED'); agent('building', 'REBUILDING');
-    for (const id of ['live', 'parked', 'building']) w.store.setEmbedToken(id, embedKeyHash(`${id}-key`));
+    agent('live', 'RUNNING'); agent('parked', 'STOPPED'); agent('building', 'REBUILDING'); agent('gone', 'ARCHIVED');
+    for (const id of ['live', 'parked', 'building', 'gone']) w.store.setEmbedToken(id, embedKeyHash(`${id}-key`));
     await svc.start();
+    // A stopped agent keeps its key (it will be started without a rebuild); an archived one does not.
     expect(JSON.parse(readFileSync(svc.keysFile, 'utf8'))).toEqual({
       [embedKeyHash('live-key')]: 'live',
+      [embedKeyHash('parked-key')]: 'parked',
       [embedKeyHash('building-key')]: 'building',
     });
+    // A rebuild's new key joins the old one until the build is accepted.
+    w.store.setEmbedToken('live', embedKeyHash('live-key-2'));
+    svc.syncKeys();
+    let keys = JSON.parse(readFileSync(svc.keysFile, 'utf8'));
+    expect(keys[embedKeyHash('live-key')]).toBe('live');
+    expect(keys[embedKeyHash('live-key-2')]).toBe('live');
+    w.store.commitEmbedToken('live');
+    svc.syncKeys();
+    keys = JSON.parse(readFileSync(svc.keysFile, 'utf8'));
+    expect(keys[embedKeyHash('live-key')]).toBeUndefined();
+    expect(keys[embedKeyHash('live-key-2')]).toBe('live');
+    expect(fileMode(svc.serverKeyFile)).toBe(0o600);
+    expect(w.provider.embedderSpecs.at(-1)!.serverKeyFile).toBe(svc.serverKeyFile);
     w.store.deleteEmbedToken('live');
     svc.syncKeys();
-    expect(Object.values(JSON.parse(readFileSync(svc.keysFile, 'utf8')))).toEqual(['building']);
+    expect(Object.values(JSON.parse(readFileSync(svc.keysFile, 'utf8'))).sort()).toEqual(['building', 'parked']);
     const off = await svc.stop();
     expect(off).toMatchObject({ enabled: false, embedder: 'absent', door: 'absent' });
     expect(existsSync(svc.enabledFile)).toBe(false);
@@ -142,6 +157,50 @@ describe('the embedding service', () => {
     process.env.HATCHABOT_EMBED_URL = 'http://ollama.local:11434/v1';
     await expect(w.svc.start()).rejects.toThrow(/external/);
     expect((await w.svc.status()).external).toBe('http://ollama.local:11434/v1');
+  });
+});
+
+describe('what provisioning is handed', () => {
+  afterEach(() => { delete process.env.HATCHABOT_EMBED_URL; delete process.env.HATCHABOT_EMBED_KEY; delete process.env.HATCHABOT_EMBED_MODEL; });
+  async function app() {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
+    store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'a1', slug: 'a1', state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    const provider = new MockProvider();
+    const f = Fastify();
+    await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { kind: 'telegram', pool: { owns: () => false } } } as never);
+    const adapter = (f as unknown as { embedderForProvision: { credentialsFor(id: string): Promise<{ baseUrl: string; token: string; model: string }> } }).embedderForProvision;
+    const svc = (f as unknown as { embedder: EmbedderService }).embedder;
+    return { store, provider, adapter, svc };
+  }
+
+  it('an external server: its address, key and model as given, nothing started, no key minted', async () => {
+    process.env.HATCHABOT_EMBED_URL = 'http://ollama.lan:11434/v1/';
+    process.env.HATCHABOT_EMBED_KEY = 'ollama-key';
+    process.env.HATCHABOT_EMBED_MODEL = 'nomic-embed-text';
+    const w = await app();
+    expect(await w.adapter.credentialsFor('a1')).toEqual({ baseUrl: 'http://ollama.lan:11434/v1', token: 'ollama-key', model: 'nomic-embed-text' });
+    expect(w.provider.embedder.embedder).toBe('absent');
+    expect(w.store.listEmbedTokens()).toEqual([]);
+  });
+
+  it('the machine\'s own service, already on: a key minted and written for the door; loopback becomes host.docker.internal', async () => {
+    const w = await app();
+    Object.defineProperty(w.svc, 'enabled', { value: true });
+    w.svc.status = async () => ({ embedder: 'running', door: 'running', doorAddress: '127.0.0.1:8093', enabled: true, modelPresent: true });
+    w.svc.syncKeys = () => { mkdirSync(w.svc.dir, { recursive: true }); writeFileSync(w.svc.keysFile, JSON.stringify(Object.fromEntries(w.store.listEmbedTokens().map((t) => [t.tokenHash, t.agentId])))); };
+    const creds = await w.adapter.credentialsFor('a1');
+    expect(creds.baseUrl).toBe('http://host.docker.internal:8093/v1');
+    expect(creds.model).toBe('embeddinggemma');
+    expect(w.store.listEmbedTokens().map((t) => t.agentId)).toEqual(['a1']);
+    expect(JSON.parse(readFileSync(w.svc.keysFile, 'utf8'))).toEqual({ [embedKeyHash(creds.token)]: 'a1' });
+  });
+
+  it('the service off: nothing is started on an agent owner\'s behalf — the agent is built on its own engine', async () => {
+    const w = await app();
+    await expect(w.adapter.credentialsFor('a1')).rejects.toThrow(/turned on/);
+    expect(w.provider.embedder.embedder).toBe('absent');
+    expect(w.store.listEmbedTokens()).toEqual([]);
   });
 });
 

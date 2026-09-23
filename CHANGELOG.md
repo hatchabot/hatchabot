@@ -2,6 +2,30 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.43.0] — 2026-09-23 — 27th audit
+
+Three reviews of everything since the 26th audit (the memory search service
+and its door; the app, CLI and UI changes; documentation), each finding
+verified before the fix. Record: docs/audit-2026-09-23-2.md.
+
+### Security
+- **Switching an agent to the shared memory search no longer starts the service**: any account could have started a machine-level container (and kept it enabled) by switching its own agent and rebuilding. The machine's owner turns the service on; provisioning only uses it, and an agent switched while it is off is built on its own engine and says why on its engine row.
+- **The server's key is a file, not an argument** (argv is readable by every local user in /proc), the engine runs as the Hatchabot user, and the door reads the key from the same 0600 file. The door also caps in-flight calls (4 per agent, 32 in all) beside its per-minute limit.
+- `GET /v1/embedder` shows the external server's address and the door's address to the machine owner only; `/v1/resources` samples each machine at most every 3 s however many viewers keep the tab open.
+
+### Fixed
+- **A stopped agent lost its memory-search key**: the door's file carried running agents only, so an agent stopped, then started without a rebuild, got 401 at the door with nothing on its record. Every existing agent's key stays; archive and delete retire it (within a health tick).
+- **A rebuild re-minted the key before the new container existed**, so the running one lost recall during the build — for good, if the build failed. The old key now stays valid until the build is accepted.
+- **A never-indexed agent would have re-indexed on every rebuild** (the whole fleet on the next Rebuild all). Only a switch re-indexes, or a shared agent whose index was never confirmed; "ready" is read from OpenClaw's own status line.
+- A decision from a build that failed could be stamped by a later live model change and skip a needed re-index; it is forgotten on failure and consumed once used. Moves and imports now carry the service and re-index too.
+- `HATCHABOT_EMBED_URL` was documented as "use a server you already run" but only disabled the built-in service; switched agents are now given that server's address, key and model.
+- The Resources poll kept `docker stats` running on every machine while another Fleet tab was open; the classic layout never showed an agent's engine; the machine owner saw other accounts' agents captioned "shared with you"; a failed first agent list left the page on "Loading…" with no message; a failed service start left half of it running unmanaged; a health tick could restart a service the owner had just stopped.
+- The agent list ran a one-second `openclaw sessions list` in every running agent to get "last active"; the value is in a file the list already reads, so a cold list of 47 agents fell from about 8 s to under a second.
+- The Fleet panel's *AI in use* tab is gone: View by → AI source / Model on the home screen shows the same thing (the classic look keeps 📊 Sources).
+
+### Documentation
+- The design record says what was built (steps 1–2, the door as its own container) and which of its first-draft sections are superseded; the baked-engine page points at the alternative; the CLI help puts `top` in its own place; env vars, file locations and the Resources sorting are described.
+
 ## [2.42.2] — 2026-09-23
 
 ### Added

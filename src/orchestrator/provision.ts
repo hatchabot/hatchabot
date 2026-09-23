@@ -95,8 +95,9 @@ export interface ProvisionDeps {
    * the agent is built on the baked engine and told so.
    */
   embedder?: {
-    ensure(): Promise<{ doorAddress: string; model: string }>;
-    mintKey(agentId: string): Promise<string>;
+    /** Bring the service up if need be and mint this agent's key — or, with an
+     *  external server configured, that server's address, key and model. */
+    credentialsFor(agentId: string): Promise<{ baseUrl: string; token: string; model: string }>;
   };
   /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
    *  Injectable so tests stay off the network. */
@@ -473,18 +474,21 @@ export async function buildRuntimeSpec(
   // baked engine — never left without one — and the reason is on its record.
   const wantShared = agent.embedMode === 'shared';
   let embed: OpenClawConfigPatch['embed'];
-  if (wantShared && host.kind !== 'local') {
-    deps.log?.('embed.baked_instead', { agentId, why: 'runner' });
-  } else if (wantShared && !deps.embedder) {
-    deps.log?.('embed.baked_instead', { agentId, why: 'no service' });
-  } else if (wantShared) {
+  let bakedWhy: string | undefined;
+  if (wantShared && host.kind !== 'local') bakedWhy = 'it runs on a runner, and the service is on the main machine';
+  else if (wantShared && !deps.embedder) bakedWhy = 'no memory search service is available on this path';
+  else if (wantShared) {
     try {
-      const { doorAddress, model } = await deps.embedder!.ensure();
-      const token = await deps.embedder!.mintKey(agentId);
-      embed = { baseUrl: `http://${doorAddress}/v1`, token, model };
+      embed = await deps.embedder!.credentialsFor(agentId);
     } catch (err) {
-      deps.log?.('embed.baked_instead', { agentId, why: String(err).slice(0, 200) });
+      bakedWhy = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     }
+  }
+  if (bakedWhy) {
+    deps.log?.('embed.baked_instead', { agentId, why: bakedWhy });
+    // On the record, where the agent's engine row can show it — the log alone
+    // left the row promising a switch that would not happen (27th audit).
+    store.setAgentEmbedIndex(agentId, null, `built on its own engine — ${bakedWhy}`);
   }
   embedDecision.set(agentId, { used: embed ? 'shared' : 'baked', before: agent.appliedEmbedMode ?? 'baked' });
   const roomsOf = (c: Channel): ChannelRooms => {
@@ -825,6 +829,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   } catch (err) {
     const reason = userMessageFor(err);
     log('rebuild.failed', { agentId, reason, error: String(err) });
+    forgetEmbedDecision(agentId);
     // The container may be up and POLLING THE BOT (a health timeout means
     // "slow", not "dead") while the card says FAILED — and reconcile never
     // mends running+FAILED. Stop it so a failed rebuild is actually stopped,
@@ -846,11 +851,24 @@ export function recordApplied(store: Store, agentId: string): void {
   const profile = agent && store.getAIProfile(agent.aiProfileId);
   if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
   const d = embedDecision.get(agentId);
-  if (d) store.setAgentEmbedApplied(agentId, d.used);
+  if (d) {
+    store.setAgentEmbedApplied(agentId, d.used);
+    store.commitEmbedToken(agentId); // the old key retires now that the new container is accepted
+    embedDecision.delete(agentId);   // consumed: a later live model apply must not stamp a stale one
+    embedToIndex.set(agentId, d);
+  }
 }
 
-/** What buildRuntimeSpec decided about memory search, for recordApplied and the re-index. */
+/** A build that never got accepted: its decision must not be applied later (27th audit). */
+export function forgetEmbedDecision(agentId: string): void {
+  embedDecision.delete(agentId);
+  embedToIndex.delete(agentId);
+}
+
+/** What buildRuntimeSpec decided about memory search, until the provider accepts the build… */
 const embedDecision = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared' }>();
+/** …and then, for the re-index step that follows. */
+const embedToIndex = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared' }>();
 
 /**
  * Changing the memory-search engine changes OpenClaw's index identity: vector
@@ -865,10 +883,17 @@ export async function reindexMemoryIfSwitched(
   log: (event: string, detail: Record<string, unknown>) => void,
 ): Promise<void> {
   const { store, provider } = deps;
-  const d = embedDecision.get(agentId);
+  const d = embedToIndex.get(agentId);
+  embedToIndex.delete(agentId);
   const agent = store.getAgent(agentId);
   if (!d || !agent) return;
-  if (d.used === d.before && agent.embedIndexedAt && !agent.embedIndexError) return;
+  // Only a SWITCH re-indexes — plus a shared agent whose index was never
+  // confirmed. A baked agent with no record is simply how every agent has
+  // always been; treating that as "never indexed" forced a fleet-wide
+  // re-index on the next Rebuild all (27th audit).
+  const switched = d.used !== d.before;
+  const sharedUnconfirmed = d.used === 'shared' && !agent.embedIndexedAt;
+  if (!switched && !sharedUnconfirmed) return;
   log('memory.reindex', { agentId, engine: d.used, was: d.before });
   const res = await provider.exec(runtimeRef, ['memory', 'index', '--force', '--agent', agent.slug], { timeoutMs: 10 * 60_000 })
     .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
@@ -882,7 +907,8 @@ export async function reindexMemoryIfSwitched(
   const status = await provider.exec(runtimeRef, ['memory', 'status', '--deep', '--agent', agent.slug], { timeoutMs: 120_000 })
     .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
   const text = `${status.stdout}\n${status.stderr}`;
-  const ready = status.code === 0 && !/unavailable|error|failed/i.test(text);
+  // What OpenClaw prints when the provider answers: "Embeddings: ready".
+  const ready = status.code === 0 && /embeddings:\s*ready/i.test(text);
   store.setAgentEmbedIndex(agentId, ready ? new Date().toISOString() : null, ready ? null : `memory search not ready: ${text.trim().slice(-300)}`);
   log(ready ? 'memory.reindexed' : 'memory.reindex_not_ready', { agentId, engine: d.used });
 }

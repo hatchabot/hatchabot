@@ -423,7 +423,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS embed_tokens (
         agent_id TEXT PRIMARY KEY,
         token_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        prev_token_hash TEXT
       );
       CREATE TABLE IF NOT EXISTS ops_tokens (
         agent_id TEXT PRIMARY KEY,
@@ -512,6 +513,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN applied_embed_mode TEXT`,
       `ALTER TABLE agents ADD COLUMN embed_indexed_at TEXT`,
       `ALTER TABLE agents ADD COLUMN embed_index_error TEXT`,
+      // The key a build re-mints joins the old one until the build is accepted.
+      `ALTER TABLE embed_tokens ADD COLUMN prev_token_hash TEXT`,
       // An "application" class = model + source + runtime image.
       `ALTER TABLE agent_classes ADD COLUMN image TEXT`,
       // Template-carried schedules awaiting the gateway (applied on RUNNING).
@@ -1692,22 +1695,32 @@ export class Store {
 
   /** The owner this token belongs to, or undefined. Records the use. */
   // ---- embed keys: one per agent, for the embedding service's door ----------
-  /** Replace the agent's embed key hash (minted on every build, like the ops key). */
+  /**
+   * A new key for the agent (minted on every build). The old one stays valid
+   * beside it until commitEmbedToken: the container still running keeps its
+   * recall through the build, and keeps it if the build fails (27th audit).
+   */
   setEmbedToken(agentId: string, tokenHash: string): void {
     this.db
-      .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at) VALUES (?, ?, ?)
-                ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at`)
+      .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at, prev_token_hash) VALUES (?, ?, ?, NULL)
+                ON CONFLICT(agent_id) DO UPDATE SET prev_token_hash = embed_tokens.token_hash, token_hash = excluded.token_hash, created_at = excluded.created_at`)
       .run(agentId, tokenHash, new Date().toISOString());
+  }
+  /** The build was accepted: only the new key from here. */
+  commitEmbedToken(agentId: string): void {
+    this.db.prepare(`UPDATE embed_tokens SET prev_token_hash = NULL WHERE agent_id = ?`).run(agentId);
   }
   deleteEmbedToken(agentId: string): void {
     this.db.prepare(`DELETE FROM embed_tokens WHERE agent_id = ?`).run(agentId);
   }
-  /** Every key with its agent's state, so the door's file can carry only live agents. */
+  /** Every valid key (a build's previous one included) with its agent's state, for the door's file. */
   listEmbedTokens(): Array<{ agentId: string; tokenHash: string; state: string }> {
-    return this.db
-      .prepare(`SELECT e.agent_id AS agentId, e.token_hash AS tokenHash, a.state AS state
+    const rows = this.db
+      .prepare(`SELECT e.agent_id AS agentId, e.token_hash AS tokenHash, e.prev_token_hash AS prev, a.state AS state
                 FROM embed_tokens e JOIN agents a ON a.id = e.agent_id`)
-      .all() as Array<{ agentId: string; tokenHash: string; state: string }>;
+      .all() as Array<{ agentId: string; tokenHash: string; prev: string | null; state: string }>;
+    return rows.flatMap((r) => [{ agentId: r.agentId, tokenHash: r.tokenHash, state: r.state },
+      ...(r.prev ? [{ agentId: r.agentId, tokenHash: r.prev, state: r.state }] : [])]);
   }
 
   /** A token's scope (see createCliToken), or undefined for a full token. */

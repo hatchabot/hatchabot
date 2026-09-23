@@ -4,6 +4,7 @@ import { whileBusy } from './busy.js';
 import {
   buildRuntimeSpec,
   recordApplied,
+  reindexMemoryIfSwitched,
   runRebuildHook,
   waitForHealthy,
   waitForSkillsSettled,
@@ -153,6 +154,7 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       // Settle skills/gateway before RUNNING so an early message doesn't start a
       // fresh session and archive the moved conversation (audit 2026-09-08).
       await waitForSkillsSettled(target, newRef, agent.slug, sleep, log);
+      await reindexMemoryIfSwitched(tdeps, agentId, newRef, log);
       store.setAgentState(agentId, 'RUNNING');
     }
   } catch (err) {

@@ -36,7 +36,7 @@ remembered in that browser; **✨ New look** in the classic header, or
 The header holds:
 - **New agent**, whose panel also offers *start from a template* and *open a
   .hatchabot file*.
-- **Fleet**: one panel with tabs for Health, Usage, AI in use, Activity, and
+- **Fleet**: one panel with tabs for Health, Usage, Resources, Activity, and
   Tools (bulk actions, rebuild all, sort A→Z).
 - **Settings**: this machine's settings, opened directly.
 - An inbox button, which appears only when someone has sent you an agent.
@@ -717,7 +717,7 @@ not counted (live-only)" rather than as zero. On the CLI, `hatchabot usage` (no
 agent name) prints the same ranked table with cost; `hatchabot usage <agent>`
 still shows one agent's breakdown by model.
 
-**Fleet → AI in use** (📊 Sources in the classic look) answers "who runs on what": each AI source with its
+**View by → AI source / Model** on the home screen (📊 Sources in the classic look) answers "who runs on what": each AI source with its
 credential kind, the agents on it and each agent's current model (pins and
 pending switches flagged), plus a models-in-use tally. The card's status line
 also names each agent's AI source (when more than one exists) alongside its
@@ -939,17 +939,22 @@ host-owner gated and never exposed to a co-tenant.
 you made — drag to reorder, drag between groups. The other views bin the same
 agents by **Machine**, **AI source**, **Model**, **Image** (the fleet default,
 a pinned base image, or each derived image by name), **Class** or **Status**,
-read-only, remembered per device.
+read-only, remembered per device. The bar appears once there is more than
+one agent; the read-only views list their bins alphabetically, with *Shared
+with me* and *Archived* last.
 
-**Resources** (Fleet → Resources; `hatchabot top`): live CPU and memory per
-agent, per machine, as Docker measures it — one call per machine, refreshed
-every few seconds while the view is open. The machine owner also sees the
+**Resources** (Fleet → Resources; `hatchabot top [--sort cpu|mem|name]`): live
+CPU and memory per agent, per machine, as Docker measures it — one call per
+machine, refreshed every few seconds while the view is open; click Agent, CPU
+or Memory to sort (again to flip). A runner shows "not measurable" until its
+provider reports stats. The machine owner also sees the
 machine-level containers (the memory search service and its door, the
 Hatchabot agent's doorman); everyone else sees their own and shared agents.
 
 **Memory search engine** (an agent's ⚙ Settings → Advanced): where its
 semantic memory search runs — the engine built into its image (today's
-default), or *this machine's shared service* below. Applies on the agent's
+default), or *this machine's shared service* below, which the machine's owner
+turns on first (an agent owner cannot start it by switching). Applies on the agent's
 next Rebuild, which then re-indexes its memory (minutes; keyword search and
 replies continue meanwhile) and checks the engine answers; the row says
 "memory index ready" or what went wrong. An agent whose service cannot be had
@@ -962,16 +967,19 @@ machine owner; `hatchabot embedder [status|start|stop|restart]`). One engine
 on this machine for every agent's semantic memory search, instead of one
 inside each agent (about 290 MB each). Two hardened containers: the engine
 (llama.cpp serving the same EmbeddingGemma model the runtime image bakes,
-copied out of it on first start so nothing downloads) on an internal network,
+copied out of it on first start, or downloaded and checksum-verified if the
+image lacks it) on an internal network,
 and a small *door* that checks each agent's own key, rate-limits per agent
 (`HATCHABOT_EMBED_PER_MIN`, 600), caps bodies and inputs, and logs only the
 agent id, count, bytes and time — never a body. The door is published on the
 address agents reach this machine at (`HATCHABOT_EMBED_BIND`, port
 `HATCHABOT_EMBED_PORT`, 8093). Once on, a health loop restarts it if it falls
-over; a deploy of Hatchabot itself does not touch it. **Nothing uses it until
-an agent is switched to it** (the next step); it is safe to leave off.
-`HATCHABOT_EMBED_URL` points at a server you already run (Ollama speaks the
-same API) instead of a container.
+over; a deploy of Hatchabot itself does not touch it. Nothing uses it until
+an agent is switched to it; it is safe to leave off. `HATCHABOT_EMBED_URL`
+(with `HATCHABOT_EMBED_KEY` and `HATCHABOT_EMBED_MODEL`) points switched agents
+at a server you already run instead (Ollama speaks the same API); no container
+is started then. The service keeps its files beside the database: the model
+in `<data>/models/`, the key file and the on/off marker in `<data>/embed/`.
 
 **A pin travels as its recipe.** An image is never copied between machines;
 its recipe is: the plain base (`hatchabot-runtime:<OpenClaw version>`, pulled
