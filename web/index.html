@@ -8366,7 +8366,7 @@ function imageDecision(d) {
   const r = d.recipe;
   const what = r ? `\n\nFROM ${r.base}${r.packages?.length ? `\napt packages: ${r.packages.join(' ')}` : ''}${r.lines ? `\n${r.lines}` : ''}` : '';
   if (d.mayBuild && confirm(`${d.error}${what}\n\nBuild this image here? These lines run as root while it builds (a few minutes).`)) return 'build';
-  return confirm(`Run it on this machine's default image instead? Whatever the pinned image adds will be missing.${d.mayBuild ? '' : what}`) ? 'drop' : null;
+  return confirm(`Run it on the default image instead? Whatever the pinned image adds will be missing.${d.mayBuild ? '' : what}`) ? 'drop' : null;
 }
 
 // Share = a trained copy for someone else. It downloads a file (you send it);

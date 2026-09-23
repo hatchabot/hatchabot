@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.36.1] — 2026-09-23
+
+### Fixed
+- Importing onto a runner named the wrong machine when its image was missing ("this machine does not have"); it names the runner now. Found by the first real import onto a MacBook runner, which then built the image there and ran.
+
 ## [2.36.0] — 2026-09-23
 
 ### Added

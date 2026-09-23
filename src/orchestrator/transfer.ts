@@ -116,14 +116,15 @@ export class ImageDecisionNeeded extends TransferError {
     readonly recipe: ImageRecipe | undefined,
     readonly problem: string | undefined,
     readonly mayBuild: boolean,
+    where = 'this machine',
   ) {
     super(
-      `This agent is pinned to the image ${image}, which this machine does not have. ` +
+      `This agent is pinned to the image ${image}, which ${where} does not have. ` +
         (problem
           ? `It can't be built here (${problem}), so it can only run on the default image.`
           : mayBuild
             ? 'Build it here from the recipe in the file, or run it on the default image.'
-            : "Only this machine's owner can build images, so it can run on the default image, or ask them to import it."),
+            : `Only the owner of ${where} can build images, so it can run on the default image, or ask them to import it.`),
     );
     this.name = 'ImageDecisionNeeded';
   }
@@ -364,6 +365,7 @@ async function settleImage(
   deps: ProvisionDeps,
   image: NonNullable<ExportManifest['image']>,
   opts: ImportOptions,
+  where: string,
 ): Promise<{ pin?: string; build?: ImageRecipe }> {
   const { store, provider } = deps;
   const here = await provider.listImageTags().then((t) => t.some((x) => x.tag === image.tag), () => false);
@@ -378,7 +380,7 @@ async function settleImage(
     problem = `a different image here already has the name ${image.tag}`;
   }
   if (opts.image !== 'build' || problem || !opts.mayBuild) {
-    throw new ImageDecisionNeeded(image.tag, recipe, problem ?? undefined, !!opts.mayBuild);
+    throw new ImageDecisionNeeded(image.tag, recipe, problem ?? undefined, !!opts.mayBuild, where);
   }
   return { pin: image.tag, build: recipe! };
 }
@@ -480,7 +482,7 @@ async function importAgentInner(
       store.listHosts(opts.ownerId)[0]);
   if (!host) throw new TransferError('No host available to import onto.');
   // Before anything is created: the decision may be the caller's to make.
-  const image = manifest.image ? await settleImage(deps, manifest.image, opts) : {};
+  const image = manifest.image ? await settleImage(deps, manifest.image, opts, host.kind === 'local' ? 'this machine' : host.name) : {};
 
   const now = new Date().toISOString();
   const agent: Agent = {
