@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.35.1] — 2026-09-23
+
+### Fixed
+- **Moving an agent on an image with Slack/Discord built in was refused** even when the runner could rebuild it: the plugins come from the base, and the published bases carry them. It is now refused only when the runner's base lacks plugins the image has. Found by the first real move to a MacBook runner.
+
 ## [2.35.0] — 2026-09-23
 
 ### Added

@@ -8,9 +8,10 @@
  * derived image's Dockerfile lines. Minutes, on the destination, on its own CPU
  * architecture.
  *
- * What cannot be rebuilt this way — an image with messaging-app plugins baked
- * in, or a base with no published twin — says why, and the caller falls back
- * to offering the destination's default image.
+ * What cannot be rebuilt this way — messaging-app plugins the destination's
+ * base doesn't have (they come only from the base; the published ones carry
+ * them), a base with no published twin, a failed build — says why, and the
+ * caller falls back to offering the destination's default image.
  */
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { DerivedImage } from '../domain/types.js';
@@ -24,6 +25,8 @@ export interface ImageRecipe {
   packages: string[];
   /** A derived image's own Dockerfile lines (validated when it was created), or none. */
   lines?: string;
+  /** Messaging-app plugins the image has, which only its BASE can supply. */
+  channels: string[];
 }
 
 const PKG = /^[a-z0-9][a-z0-9+.-]*$/;
@@ -38,16 +41,13 @@ export async function recipeFor(
   const d = derived(tag);
   if (d) {
     // A derived image is FROM a plain base plus the owner's lines.
-    return { tag, base: d.base, packages: [], lines: d.dockerfile };
+    return { tag, base: d.base, packages: [], lines: d.dockerfile, channels: [] };
   }
   const info = (await source.listImageTags().catch(() => [])).find((t) => t.tag === tag);
   if (!info) return { problem: `${tag} is not on this machine either, so there is nothing to rebuild it from` };
-  if (info.channels?.length) {
-    return { problem: `${tag} has ${info.channels.join(' and ')} built in, which can't be rebuilt from a recipe` };
-  }
   if (!info.openclawVersion) return { problem: `${tag} does not say which OpenClaw it runs` };
   const packages = (info.extraPackages ?? []).filter((p) => PKG.test(p));
-  return { tag, base: `${repo}:${info.openclawVersion}`, packages };
+  return { tag, base: `${repo}:${info.openclawVersion}`, packages, channels: info.channels ?? [] };
 }
 
 /** The thin layer that turns the base into the pinned image. */
@@ -78,6 +78,13 @@ export async function ensureImageOn(
   if ('problem' in r) return { ok: false, problem: r.problem };
   if (!(await target.ensureBaseImage(r.base))) {
     return { ok: false, problem: `the base ${r.base} is not on that machine and has no published copy to pull` };
+  }
+  // Messaging-app plugins come only from the base. The published bases carry
+  // them, so usually this is a match; a local base built without them is not.
+  if (r.channels.length) {
+    const baseInfo = (await target.listImageTags().catch(() => [])).find((t) => t.tag === r.base);
+    const missing = r.channels.filter((c) => !(baseInfo?.channels ?? []).includes(c));
+    if (missing.length) return { ok: false, problem: `it has ${missing.join(' and ')} built in, and that machine's ${r.base} does not` };
   }
   if (r.base === tag) return { ok: true, built: false }; // the pin WAS a plain base: pulling was enough
   const built = await target.buildImage(tag, recipeDockerfile(r), {

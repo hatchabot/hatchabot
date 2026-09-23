@@ -275,13 +275,20 @@ describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)',
     expect(mock2.built).toHaveLength(0);
   });
 
+  it('messaging plugins come from the base: rebuilt when the runner\'s base has them', async () => {
+    const { mock2, move } = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-plus-traceroute', imageId: 'src', openclawVersion: '2026.7.1-2', channels: ['slack', 'discord'], extraPackages: ['traceroute'] });
+    mock2.tags.push({ tag: 'hatchabot-runtime:2026.7.1-2', imageId: 'b', channels: ['slack', 'discord'] } as any);
+    expect((await move()).statusCode).toBe(200);
+    expect(mock2.built).toHaveLength(1);
+  });
+
   it('what cannot be rebuilt says why, and still offers the default image', async () => {
     const { w, mock2, id, move } = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-ch1', imageId: 'src', openclawVersion: '2026.7.1-2', channels: ['slack', 'discord'] });
-    mock2.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    mock2.tags.push({ tag: 'hatchabot-runtime:2026.7.1-2', imageId: 'b', channels: [] } as any); // a base built without them
     const refused = await move();
     expect(refused.statusCode).toBe(409);
     expect(refused.json()).toMatchObject({ code: 'pinned_image_missing' });
-    expect(refused.json().error).toMatch(/slack and discord built in/);
+    expect(refused.json().error).toMatch(/slack and discord built in, and that machine's hatchabot-runtime:2026\.7\.1-2 does not/);
     expect(w.store.getAgent(id)!.hostId).toBe('h1'); // nothing moved
     expect((await move({ dropPin: true })).statusCode).toBe(200);
     expect(w.store.getAgent(id)!.image ?? null).toBeNull();
