@@ -935,6 +935,21 @@ then `hatchabot image pin <agent> media`. Building runs a Dockerfile on the box,
 a privilege the local-host owner already has — so it, and the pin, are
 host-owner gated and never exposed to a co-tenant.
 
+**View by** (the home screen, above the agents): *Groups* is the arrangement
+you made — drag to reorder, drag between groups. The other views bin the same
+agents by **Machine**, **AI source**, **Model**, **Class** or **Status**, read-only,
+remembered per device.
+
+**Memory search engine** (an agent's ⚙ Settings → Advanced): where its
+semantic memory search runs — the engine built into its image (today's
+default), or *this machine's shared service* below. Applies on the agent's
+next Rebuild, which then re-indexes its memory (minutes; keyword search and
+replies continue meanwhile) and checks the engine answers; the row says
+"memory index ready" or what went wrong. An agent whose service cannot be had
+(on a runner, or the service down) is built on its own engine and says so —
+never left without one. Switching back re-indexes the same way. CLI:
+`hatchabot embedder use <agent> shared|baked`.
+
 **Memory search service** (⚙ Settings → Hosts → *Memory search service*,
 machine owner; `hatchabot embedder [status|start|stop|restart]`). One engine
 on this machine for every agent's semantic memory search, instead of one

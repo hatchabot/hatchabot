@@ -205,6 +205,15 @@ export interface Agent {
    *  way an inbox poll wakes only when mail exists. Runs inside the agent's own
    *  container with its tool policy; off by default. */
   cronTriggers?: boolean;
+  /** Which engine does its semantic memory search: the one baked into the
+   *  image (default), or the machine's shared service. Applies on rebuild. */
+  embedMode?: 'baked' | 'shared';
+  /** What the running container was actually built with. */
+  appliedEmbedMode?: 'baked' | 'shared';
+  /** When its memory index was last rebuilt for the engine it runs on, and
+   *  why the last attempt failed, if it did. */
+  embedIndexedAt?: string;
+  embedIndexError?: string;
   /** Lineage: the same-installation master this agent was derived from. */
   parentAgentId?: string;
   /** Host port publishing the agent's own OpenClaw Control UI (debug). */

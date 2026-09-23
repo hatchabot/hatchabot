@@ -507,6 +507,11 @@ export class Store {
       // Telegram rich formatting: NULL = managed default (on), 0 = opt-out.
       `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
       `ALTER TABLE agents ADD COLUMN cron_triggers INTEGER`,
+      // Memory search engine: baked (NULL) or the machine's shared service.
+      `ALTER TABLE agents ADD COLUMN embed_mode TEXT`,
+      `ALTER TABLE agents ADD COLUMN applied_embed_mode TEXT`,
+      `ALTER TABLE agents ADD COLUMN embed_indexed_at TEXT`,
+      `ALTER TABLE agents ADD COLUMN embed_index_error TEXT`,
       // An "application" class = model + source + runtime image.
       `ALTER TABLE agent_classes ADD COLUMN image TEXT`,
       // Template-carried schedules awaiting the gateway (applied on RUNNING).
@@ -2641,6 +2646,16 @@ export class Store {
   }
 
   /** null = back to the managed default (rich ON). */
+  setAgentEmbedMode(id: string, mode: 'baked' | 'shared'): void {
+    this.db.prepare(`UPDATE agents SET embed_mode = ?, updated_at = ? WHERE id = ?`).run(mode === 'shared' ? 'shared' : null, new Date().toISOString(), id);
+  }
+  /** What a build actually used — recorded only once the provider accepted the spec. */
+  setAgentEmbedApplied(id: string, mode: 'baked' | 'shared'): void {
+    this.db.prepare(`UPDATE agents SET applied_embed_mode = ? WHERE id = ?`).run(mode, id);
+  }
+  setAgentEmbedIndex(id: string, indexedAt: string | null, error: string | null): void {
+    this.db.prepare(`UPDATE agents SET embed_indexed_at = ?, embed_index_error = ? WHERE id = ?`).run(indexedAt, error, id);
+  }
   setAgentCronTriggers(id: string, on: boolean): void {
     this.db.prepare(`UPDATE agents SET cron_triggers = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
   }
@@ -3427,6 +3442,10 @@ function rowToAgent(r: any): Agent {
     groupAccess: r.group_access ? safeJson(r.group_access, undefined) : undefined,
     richMessages: r.rich_messages === null || r.rich_messages === undefined ? undefined : !!r.rich_messages,
     cronTriggers: !!r.cron_triggers,
+    embedMode: r.embed_mode === 'shared' ? 'shared' : undefined,
+    appliedEmbedMode: r.applied_embed_mode === 'shared' ? 'shared' : r.applied_embed_mode === 'baked' ? 'baked' : undefined,
+    embedIndexedAt: r.embed_indexed_at ?? undefined,
+    embedIndexError: r.embed_index_error ?? undefined,
     parentAgentId: r.parent_agent_id ?? undefined,
     createdAt: r.created_at,
     updatedAt: r.updated_at,

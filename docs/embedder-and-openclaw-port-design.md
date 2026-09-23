@@ -243,7 +243,8 @@ Each step ships alone and leaves the fleet as it was.
    "Embedding service: running / stopped" with Restart.
 2. **Per-agent switch on today's OpenClaw**: column, writer branch, re-index
    step, health row. Try it on one low-stakes agent, then a handful, for a few
-   days.
+   days. *Built in v2.41.0 (`agents.embed_mode`, `reindexMemoryIfSwitched`);
+   first real agent: To Do Agent, 2026-09-23.*
 3. **Flip the fleet default** to `shared` for new agents; a Fleet action
    "Move all to the shared memory engine" rebuilds the rest in batches.
 4. **Engine-free images**: `EMBED_ENGINE=none`, the label, the build-script

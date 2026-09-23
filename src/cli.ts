@@ -216,6 +216,10 @@ Commands:
                                The machine's embedding service: one engine for
                                every agent's semantic memory search (Settings →
                                Hosts). Nothing uses it until an agent is switched to it.
+  embedder use <agent> shared|baked
+                               Which engine an agent's memory search uses —
+                               the shared service, or the one in its image.
+                               Applies on its next rebuild (it re-indexes then).
   runtime                      Runtime image's OpenClaw version vs the npm latest
   upgrade-image [--version <X>] [--candidate]
                                Rebuild the shared runtime image to a new OpenClaw
@@ -1985,7 +1989,15 @@ async function main() {
     }
     case 'embedder': {
       const sub = rest[0] ?? 'status';
-      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart]');
+      if (sub === 'use') {
+        const a = await resolveAgent(ctx, rest[1] ?? fail('usage: hatchabot embedder use <agent> shared|baked'));
+        const mode = rest[2];
+        if (mode !== 'shared' && mode !== 'baked') fail('usage: hatchabot embedder use <agent> shared|baked');
+        await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ embedMode: mode }) });
+        console.log(`"${a.name}" will use the ${mode === 'shared' ? 'shared memory search service' : "image's own engine"} from its next rebuild: hatchabot rebuild ${JSON.stringify(a.name)}`);
+        return;
+      }
+      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart|use <agent> shared|baked]');
       const r: any = sub === 'status'
         ? await (await api(ctx, '/v1/embedder')).json()
         : await (await api(ctx, `/v1/embedder/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();

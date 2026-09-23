@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.41.0] — 2026-09-23
+
+### Added
+- **View by** on the home screen: group the same agents by Machine, AI source, Model, Class or Status, besides your own groups (the only view you can rearrange). Remembered per device.
+- **An agent can use the shared memory search service** (its Settings → Advanced → *Memory search engine*; `hatchabot embedder use <agent> shared|baked`). Applies on its next Rebuild: OpenClaw is pointed at the service's door with a key minted for that agent alone, the memory index is rebuilt (minutes; keyword search and replies continue), and the engine is checked — the row shows "memory index ready" or the failure. An agent that cannot reach the service (a runner, or the service down) is built on its own engine and says so. Step 2 of docs/embedder-and-openclaw-port-design.md; the fleet default stays *built into the agent*.
+
 ## [2.40.0] — 2026-09-23
 
 ### Added

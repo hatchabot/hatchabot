@@ -108,6 +108,13 @@ export interface OpenClawConfigPatch {
   gatewayToken?: string;
   /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
   cronTriggers?: boolean;
+  /**
+   * Semantic memory search through the machine's embedding service instead of
+   * the engine baked into the image (src/embedder). Absent = baked, as today.
+   */
+  embed?: { baseUrl: string; token: string; model: string };
+  /** The image's OpenClaw version: which config keys memory search lives under. */
+  openclawVersion?: string;
   /** The management agent: lock its tools down to Hatchabot's tool server
    *  (an HTTP MCP server reached with its propose-only key) plus its memory. */
   ops?: { mcpUrl: string; token: string };

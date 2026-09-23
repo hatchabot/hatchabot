@@ -60,6 +60,16 @@ export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent'
  * These MUST match the Dockerfile; a mismatch degrades semantic recall to FTS.
  */
 export const EMBED_PLUGIN_DIR = '/opt/agentclaw/llama-cpp/llama-cpp-provider';
+
+/**
+ * Where OpenClaw keeps its memory-search settings: 2026.8 moved them from
+ * `agents.defaults.memorySearch` to `memory.search`. One rule, here.
+ */
+export function memoryKeyPrefix(openclawVersion: string | undefined): string {
+  const m = /^(\d{4})\.(\d+)/.exec(openclawVersion ?? '');
+  const moved = !!m && (Number(m[1]) > 2026 || (Number(m[1]) === 2026 && Number(m[2]) >= 8));
+  return moved ? 'memory.search' : 'agents.defaults.memorySearch';
+}
 export const EMBED_MODEL_PATH = '/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf';
 
 /** Where the image keeps a baked messaging plugin (docker/Dockerfile.runtime). */
@@ -165,8 +175,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // memorySearch.provider=local has no `local` provider and semantic recall is
   // silently dead (the fleet-wide gap this closes). `--link` + `enable` are not
   // `config set`, so they break the batch run — harmless, they just run alone.
-  cmds.push({ argv: ['plugins', 'install', '--link', EMBED_PLUGIN_DIR] });
-  cmds.push({ argv: ['plugins', 'enable', 'llama-cpp'] });
+  if (!patch.embed) {
+    cmds.push({ argv: ['plugins', 'install', '--link', EMBED_PLUGIN_DIR] });
+    cmds.push({ argv: ['plugins', 'enable', 'llama-cpp'] });
+  }
 
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
 
@@ -183,13 +195,24 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // silently dead fleet-wide (doctor flagged it once the lint sweep landed).
   // The bundled local embedding model needs no key and no network at query
   // time; keyed remote embeddings stay a per-agent choice via config.
-  cmds.push({ argv: ['config', 'set', 'agents.defaults.memorySearch.provider', 'local'] });
-  // Point at the image-baked model, not the plugin's default `hf:` URI — the URI
-  // would download 314MB to the volume on first index. Absolute path = shared,
-  // offline, deterministic. Batches with the provider set above.
-  cmds.push({
-    argv: ['config', 'set', 'agents.defaults.memorySearch.local.modelPath', EMBED_MODEL_PATH],
-  });
+  if (patch.embed) {
+    // The machine's shared embedding service (src/embedder): OpenClaw's
+    // openai-compatible provider, pointed at the door with this agent's own
+    // key. Nothing baked is touched; the image can drop the engine later.
+    const k = memoryKeyPrefix(patch.openclawVersion);
+    cmds.push({ argv: ['config', 'set', `${k}.provider`, 'openai-compatible'] });
+    cmds.push({ argv: ['config', 'set', `${k}.model`, patch.embed.model] });
+    cmds.push({ argv: ['config', 'set', `${k}.remote.baseUrl`, patch.embed.baseUrl] });
+    cmds.push({ argv: ['config', 'set', `${k}.remote.apiKey`, patch.embed.token], sensitive: true });
+  } else {
+    cmds.push({ argv: ['config', 'set', 'agents.defaults.memorySearch.provider', 'local'] });
+    // Point at the image-baked model, not the plugin's default `hf:` URI — the URI
+    // would download 314MB to the volume on first index. Absolute path = shared,
+    // offline, deterministic. Batches with the provider set above.
+    cmds.push({
+      argv: ['config', 'set', 'agents.defaults.memorySearch.local.modelPath', EMBED_MODEL_PATH],
+    });
+  }
 
   // Session continuity (Chris, 2026-09-06 — a Cross Country conversation was
   // abruptly forgotten). OpenClaw's default idle reset rolled a conversation

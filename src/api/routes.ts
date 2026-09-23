@@ -31,6 +31,7 @@ import {
   effectiveModel,
   prefixedModelRef,
   recordApplied,
+  type ProvisionDeps,
   sharePathProblem,
   rebuildAgent,
   runProvisionSteps,
@@ -112,7 +113,7 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
-import { EmbedderService } from '../embedder/embedder.js';
+import { EMBED_MODEL_ALIAS, EmbedderService, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
@@ -678,7 +679,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const provider = providerFor(agent.hostId);
       const log = trace(agentId);
       const result = await runProvisionSteps(
-        { store, secrets, provider, channel: deps.channel, log },
+        { store, secrets, provider, channel: deps.channel, log, embedder: embedderForProvision },
         agentId,
       );
       // Fresh agent went live in pairing mode → watch for the owner's first
@@ -768,7 +769,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         await rebuildAgent(
           {
             store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
-            log: trace(agentId), checkpointMemory: opts.checkpoint,
+            log: trace(agentId), checkpointMemory: opts.checkpoint, embedder: embedderForProvision,
           },
           agentId,
         );
@@ -1560,6 +1561,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     log: (e, d) => trace()(e, d),
   });
   (app as unknown as { embedder?: EmbedderService }).embedder = embedder;
+  /** What provisioning needs of the service: it up, and a key for the agent. */
+  const embedderForProvision: NonNullable<ProvisionDeps['embedder']> = {
+    async ensure() {
+      let v = await embedder.status();
+      if (!(v.embedder === 'running' && v.door === 'running')) v = await embedder.start();
+      if (!v.doorAddress) throw new Error('the embedding service has no address');
+      // Docker Desktop publishes on loopback, which a container reaches as host.docker.internal.
+      const doorAddress = v.doorAddress.replace(/^(127\.[\d.]+|localhost)(?=:)/, 'host.docker.internal');
+      return { doorAddress, model: EMBED_MODEL_ALIAS };
+    },
+    async mintKey(agentId) {
+      const token = randomBytes(24).toString('base64url');
+      store.setEmbedToken(agentId, embedKeyHash(token));
+      embedder.syncKeys();
+      return token;
+    },
+  };
   app.get('/v1/embedder', async () => embedder.status());
   const embedderAction = (action: 'start' | 'stop' | 'restart') => async (req: FastifyRequest, reply: FastifyReply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
@@ -3370,6 +3388,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
            *  clears back to the managed default (on). */
           richMessages: z.boolean().nullable().optional(),
           cronTriggers: z.boolean().optional(),
+          /** Memory search engine: the image's own, or the machine's shared service. Applies on rebuild. */
+          embedMode: z.enum(['baked', 'shared']).optional(),
           /** Home-screen icon: one emoji, and a #rrggbb tint. Cosmetic and
            *  immediate. `null` clears (the app then shows a picked default). */
           icon: z.string().refine(validIcon, { message: 'icon must be a single emoji' }).nullable().optional(),
@@ -3392,6 +3412,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.groupAccess === undefined &&
         parsed.data.richMessages === undefined &&
         parsed.data.cronTriggers === undefined &&
+        parsed.data.embedMode === undefined &&
         parsed.data.icon === undefined &&
         parsed.data.iconColor === undefined
       ) {
@@ -3412,6 +3433,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       if (parsed.data.richMessages !== undefined) {
         store.setAgentRichMessages(agent.id, parsed.data.richMessages);
+      }
+      if (parsed.data.embedMode !== undefined) {
+        store.setAgentEmbedMode(agent.id, parsed.data.embedMode);
+        trace(agent.id)('embed.mode', { mode: parsed.data.embedMode });
       }
       if (parsed.data.cronTriggers !== undefined) {
         store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);

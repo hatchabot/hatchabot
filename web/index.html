@@ -560,6 +560,9 @@
   .v2group.collapsed { padding-bottom:12px }
   .v2group.collapsed .v2ghead { margin-bottom:0 }
   .v2ghead { display:flex; align-items:baseline; gap:10px; margin-bottom:6px }
+  .v2viewbar { display:flex; gap:4px; flex-wrap:wrap; margin:2px 0 10px }
+  .v2viewbar button { font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--dim); cursor:pointer }
+  .v2viewbar button.on { background:var(--accent); border-color:transparent; color:var(--accent-ink, #fff) }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2ghead .n { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums }
   .v2ghead .v2gtools { margin-left:auto; display:flex; gap:4px }
@@ -1460,6 +1463,17 @@
       <code>BRAVE_API_KEY</code> gives this agent its own search quota instead of the fleet's.</div>
     </details>
 
+    <div id="embedModeRow">
+      <label style="margin-top:0">Memory search engine <span style="color:var(--dim)">— where its semantic memory search runs</span></label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select id="editEmbedMode" style="flex:1;min-width:0;font-size:13px">
+          <option value="baked">Built into the agent (one engine per agent)</option>
+          <option value="shared">This machine's shared service (Settings → Hosts)</option>
+        </select>
+        <button onclick="saveEmbedMode()">Save</button>
+      </div>
+      <div class="sub" id="embedModeStatus" style="margin:-4px 0 4px"></div>
+    </div>
     <div id="imagePinRow">
       <label style="margin-top:0">Image <span style="color:var(--dim)">— which one this agent runs (host owner only)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -8873,6 +8887,25 @@ async function syncBotName(id, name) {
   } catch (e) { toast(e.message); }
 }
 
+/** Which engine does the agent's semantic memory search. Applies on its next rebuild, which re-indexes. */
+async function saveEmbedMode() {
+  const mode = $('editEmbedMode').value;
+  try {
+    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { embedMode: mode } });
+    toast(mode === 'shared' ? 'Will use the shared service from its next rebuild — memory search re-indexes then (a few minutes).' : 'Back on its own engine from its next rebuild.');
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+function embedModeText(a) {
+  const want = a.embedMode || 'baked', have = a.appliedEmbedMode;
+  const engine = (m) => m === 'shared' ? 'the shared service' : 'its own engine';
+  let t = have ? `Running on ${engine(have)}` : 'Not built yet';
+  if (have && want !== have) t += ` — switches to ${engine(want)} on the next Rebuild`;
+  if (a.embedIndexError) t += ` · ⚠ ${a.embedIndexError}`;
+  else if (a.embedIndexedAt) t += ` · memory index ready (${ago(a.embedIndexedAt)})`;
+  return t;
+}
+
 /** Pin (or clear) the runtime image. Empty input = back to the fleet default. */
 async function saveImagePin() {
   const v = $('editImage').value.trim();
@@ -9777,6 +9810,26 @@ function v2IconHTML(a, st) {
     + '</span>';
 }
 
+// How the home screen is grouped: by the groups you made, or by where and on
+// what the agents run. A per-device choice; "group" is the one you can rearrange.
+const V2_VIEWS = [['group', 'Groups'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['class', 'Class'], ['state', 'Status']];
+let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return V2_VIEWS.some(([k]) => k === v) ? v : 'group'; } catch { return 'group'; } })();
+function v2SetView(v) {
+  v2View = V2_VIEWS.some(([k]) => k === v) ? v : 'group';
+  try { localStorage.setItem('hb-v2-view', v2View); } catch {}
+  renderV2();
+}
+/** The section an agent belongs to under the current view: [key, label]. */
+function v2ViewKey(a) {
+  switch (v2View) {
+    case 'host': { const h = hosts.find(x => x.id === a.hostId); return ['h:' + a.hostId, h ? (h.kind === 'local' ? 'This machine' : h.name) : 'Unknown machine']; }
+    case 'source': { const p = profiles.find(x => x.id === a.aiProfileId); return ['s:' + a.aiProfileId, p ? p.name : 'Unknown source']; }
+    case 'model': { const m = (a.model || a.profileDefaultModel || '').replace(/^.*\//, ''); return ['m:' + m, m || 'No model']; }
+    case 'class': return ['c:' + (a.classId || ''), a.className || 'No class'];
+    case 'state': { const st = v2Status(a); return ['st:' + st.cls, st.label]; }
+    default: return null;
+  }
+}
 let v2Collapsed = (() => { try { return JSON.parse(localStorage.getItem('hb-v2-collapsed') || '{}') || {}; } catch { return {}; } })();
 function v2Fold(key) {
   v2Collapsed[key] = !v2IsCollapsed(key);
@@ -9807,7 +9860,11 @@ function renderV2() {
     s.items.push({ a, child: depth > 0 });
     for (const k of live.filter(k => k.parentAgentId === a.id && !emitted.has(k.id))) withKids(s, k, depth + 1);
   };
-  const groupSection = (a) => section('g:' + (a.group || ''), a.group || (named ? 'Default' : 'Agents'), a.group || '');
+  // Under another view, sections are read-only bins: no drag between them, no reordering.
+  const groupSection = (a) => {
+    const k = v2ViewKey(a);
+    return k ? section(k[0], k[1], null) : section('g:' + (a.group || ''), a.group || (named ? 'Default' : 'Agents'), a.group || '');
+  };
   for (const a of live) {
     if (a.parentAgentId && liveIds.has(a.parentAgentId)) continue;
     if (!v2Mine(a)) continue; // shared with me: its own section, below
@@ -9819,7 +9876,10 @@ function renderV2() {
   if (parked.length) for (const a of parked) section('archived', 'Archived', V2_ARCHIVE).items.push({ a, child: false });
   else if (live.some(v2Mine)) section('archived', 'Archived', V2_ARCHIVE); // somewhere to drop one
 
-  const html = sections.map(s => `
+  if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || x.label.localeCompare(y.label));
+  const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${V2_VIEWS.map(([k, l]) =>
+    `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}</div>` : '';
+  const html = viewBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
       <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
@@ -9830,7 +9890,7 @@ function renderV2() {
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
-          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
+          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || v2View !== 'group' ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
@@ -10014,7 +10074,7 @@ let v2EditFor = null;
 /** Put borrowed edit sections back in their dialog before the pane is redrawn,
  *  or setting innerHTML would destroy them (and every id the edit code uses). */
 /** [block id, the pane it lives in when parked] */
-const V2_MOVED = [['tgMembersBlock', 'paneEditTg'], ['imagePinRow', 'paneEditEnv']];
+const V2_MOVED = [['tgMembersBlock', 'paneEditTg'], ['imagePinRow', 'paneEditEnv'], ['embedModeRow', 'paneEditEnv']];
 function v2ParkPanes() {
   // Blocks that live in one classic pane but belong in a different place here:
   // members under Sharing (people, not plumbing), the image picker inside the
@@ -10060,6 +10120,7 @@ function v2EmbedPanes(a, tab) {
     blockSlot.append($(blockId));
     if (blockId === 'tgMembersBlock') void renderEditMembers();
     if (blockId === 'imagePinRow') void populateImagePicker(a.image ?? '');
+    if (blockId === 'embedModeRow') { $('editEmbedMode').value = a.embedMode || 'baked'; $('embedModeStatus').textContent = embedModeText(a); }
   }
   $('v2Pane').append($('editErr'));
   if (list.some(([p]) => p === 'paneEditConn')) void renderConnections();
@@ -10205,7 +10266,8 @@ function v2Pane(a, tab) {
         ${(run || a.state === 'STOPPED') && built ? B('Move to another cluster', `rehostAgent('${id}','${n}')`) : ''}`)}
       ${built ? row('Runtime', `${run || a.state === 'STOPPED' ? B('Rebuild', `rebuild('${id}')`, 'title="New container, memory kept"') : ''}
         ${run && a.hasGateway ? B('OpenClaw console', `v2Close();openGateway('${id}','${jsq(a.slug)}')`) : ''}
-        <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>`) : ''}
+        <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
+        <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">

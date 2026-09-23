@@ -89,6 +89,15 @@ export interface ProvisionDeps {
    * summary is what survives the reset. Best-effort; never blocks the rebuild.
    */
   checkpointMemory?: boolean;
+  /**
+   * The machine's embedding service (src/embedder), for agents switched to
+   * it: bring it up, and mint this agent's key. Absent (a runner, a test):
+   * the agent is built on the baked engine and told so.
+   */
+  embedder?: {
+    ensure(): Promise<{ doorAddress: string; model: string }>;
+    mintKey(agentId: string): Promise<string>;
+  };
   /** Post a line to the agent's chat (default: Telegram via notifyAgentChat).
    *  Injectable so tests stay off the network. */
   notify?: (agentId: string, text: string) => Promise<unknown>;
@@ -300,6 +309,7 @@ async function runProvisionStepsInner(
     // Step 7.9: let the agent stop moving before anyone can talk to it — a
     // message that lands mid-settle has started a fresh session.
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
+    await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
 
     // Step 7.95: template-carried schedules — declarations parked at import
     // become real gateway crons now that the gateway exists. Best-effort per
@@ -451,7 +461,32 @@ export async function buildRuntimeSpec(
   const slackRow = store.getChannelForAgent(agentId, 'slack');
   const discordRow = store.getChannelForAgent(agentId, 'discord');
   let channelPlugins: string[] = [];
-  try { channelPlugins = (await deps.provider.currentImageInfo(agent.image ?? undefined)).channels ?? []; } catch { /* no image info: no new channels this build */ }
+  let openclawVersion: string | undefined;
+  try {
+    const info = await deps.provider.currentImageInfo(agent.image ?? undefined);
+    channelPlugins = info.channels ?? [];
+    openclawVersion = info.openclawVersion;
+  } catch { /* no image info: no new channels this build */ }
+
+  // Memory search engine. `shared` needs the service on THIS machine; when
+  // it cannot be had (a runner, the service down), the agent is built on the
+  // baked engine — never left without one — and the reason is on its record.
+  const wantShared = agent.embedMode === 'shared';
+  let embed: OpenClawConfigPatch['embed'];
+  if (wantShared && host.kind !== 'local') {
+    deps.log?.('embed.baked_instead', { agentId, why: 'runner' });
+  } else if (wantShared && !deps.embedder) {
+    deps.log?.('embed.baked_instead', { agentId, why: 'no service' });
+  } else if (wantShared) {
+    try {
+      const { doorAddress, model } = await deps.embedder!.ensure();
+      const token = await deps.embedder!.mintKey(agentId);
+      embed = { baseUrl: `http://${doorAddress}/v1`, token, model };
+    } catch (err) {
+      deps.log?.('embed.baked_instead', { agentId, why: String(err).slice(0, 200) });
+    }
+  }
+  embedDecision.set(agentId, { used: embed ? 'shared' : 'baked', before: agent.appliedEmbedMode ?? 'baked' });
   const roomsOf = (c: Channel): ChannelRooms => {
     const r = (c.settings?.rooms ?? {}) as { mode?: string; roomId?: unknown };
     return r.mode === 'room' && typeof r.roomId === 'string' && r.roomId ? { mode: 'room', roomId: r.roomId } : { mode: 'off' };
@@ -550,6 +585,8 @@ export async function buildRuntimeSpec(
         models: profile.models,
         authMode: subscription ? 'oauth-claude-cli' : 'api-key',
         cronTriggers: agent.cronTriggers === true,
+        embed,
+        openclawVersion,
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
         provider: local
@@ -780,6 +817,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await syncInstallDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
+    await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
     const live = store.setAgentState(agentId, 'RUNNING');
     void explainFailedCheckpoint();
@@ -807,6 +845,46 @@ export function recordApplied(store: Store, agentId: string): void {
   const agent = store.getAgent(agentId);
   const profile = agent && store.getAIProfile(agent.aiProfileId);
   if (agent && profile) store.setAgentApplied(agentId, profile.id, effectiveModel(agent, profile));
+  const d = embedDecision.get(agentId);
+  if (d) store.setAgentEmbedApplied(agentId, d.used);
+}
+
+/** What buildRuntimeSpec decided about memory search, for recordApplied and the re-index. */
+const embedDecision = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared' }>();
+
+/**
+ * Changing the memory-search engine changes OpenClaw's index identity: vector
+ * search pauses until the index is rebuilt, and it does not rebuild itself.
+ * After a build that switched (either way), rebuild it — minutes, in the
+ * container, with a warning on the agent if it fails, never a failed build.
+ */
+export async function reindexMemoryIfSwitched(
+  deps: ProvisionDeps,
+  agentId: string,
+  runtimeRef: string,
+  log: (event: string, detail: Record<string, unknown>) => void,
+): Promise<void> {
+  const { store, provider } = deps;
+  const d = embedDecision.get(agentId);
+  const agent = store.getAgent(agentId);
+  if (!d || !agent) return;
+  if (d.used === d.before && agent.embedIndexedAt && !agent.embedIndexError) return;
+  log('memory.reindex', { agentId, engine: d.used, was: d.before });
+  const res = await provider.exec(runtimeRef, ['memory', 'index', '--force', '--agent', agent.slug], { timeoutMs: 10 * 60_000 })
+    .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+  if (res.code !== 0) {
+    const error = `memory index failed: ${(res.stderr || res.stdout).trim().slice(-300)}`;
+    store.setAgentEmbedIndex(agentId, null, error);
+    log('memory.reindex_failed', { agentId, error });
+    return;
+  }
+  // Ask OpenClaw itself whether the provider answers; a bad door address or key shows here.
+  const status = await provider.exec(runtimeRef, ['memory', 'status', '--deep', '--agent', agent.slug], { timeoutMs: 120_000 })
+    .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+  const text = `${status.stdout}\n${status.stderr}`;
+  const ready = status.code === 0 && !/unavailable|error|failed/i.test(text);
+  store.setAgentEmbedIndex(agentId, ready ? new Date().toISOString() : null, ready ? null : `memory search not ready: ${text.trim().slice(-300)}`);
+  log(ready ? 'memory.reindexed' : 'memory.reindex_not_ready', { agentId, engine: d.used });
 }
 
 /**
