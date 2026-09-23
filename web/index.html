@@ -522,7 +522,11 @@
   .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:12px 14px; margin:4px 0 2px }
   .v2hubrow .v2stats { margin:0 }
   .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 14px; margin-left:auto }
-  .v2hubactions .v2btn, .v2hubactions .v2btn:hover { display:grid; gap:5px; justify-items:center; width:72px; height:auto; padding:0; border:0; background:none; border-radius:0; position:relative; --tone:var(--dim) }
+  /* Written with body.v2 in front: the v2-wide "every main action shares a
+     surface" rule (body.v2 .v2new) otherwise paints the tile's button grey. */
+  body.v2 .v2hubactions .v2btn, body.v2 .v2hubactions .v2btn:hover, body.v2 .v2hubactions .v2btn.v2new, body.v2 .v2hubactions .v2btn.v2new:hover {
+    display:grid; gap:5px; justify-items:center; width:72px; height:auto; padding:0; border:0; background:none; box-shadow:none; filter:none; border-radius:0; position:relative; --tone:var(--dim) }
+  .v2hubactions .v2btn.v2new { margin-left:10px } /* the New tile stands at the far right, a little apart */
   .v2hubactions .v2btn .v2glyph { width:56px; height:56px; box-sizing:border-box; border-radius:17px; display:grid; place-items:center;
                                   font-size:26px; line-height:1;
                                   background:color-mix(in srgb, var(--tone) 16%, var(--panel-2)); border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
@@ -905,11 +909,11 @@
         <div class="v2hubrow">
           <div class="v2stats" id="v2Stats" hidden></div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
-          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true">+</span><span class="lbl">New</span></button>
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
           <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true">💓</span><span class="lbl">Status</span></button>
           <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><span class="v2glyph em" aria-hidden="true">🧭</span><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
           <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
+          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true">+</span><span class="lbl">New</span></button>
         </div>
         </div>
       </div>
