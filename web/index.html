@@ -532,11 +532,9 @@
                                   background:color-mix(in srgb, var(--tone) 16%, var(--panel-2)); border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
                                   transition:transform .12s ease, box-shadow .12s ease }
   .v2hubactions .v2btn:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
-  /* New: solid accent, a bold plus in the accent's ink — no grey under it. */
-  .v2hubactions .v2btn.v2new .v2glyph { background:var(--accent); border-color:var(--accent); font-size:28px; position:relative }
-  /* An egg about to hatch: the plus sits as a small badge at its foot. */
-  .v2hubactions .v2btn.v2new .v2glyph img { width:36px; height:36px; display:block }
-  .v2hubactions .v2btn.v2new .v2glyph .plus { position:absolute; right:5px; bottom:1px; color:#14161a; font:800 20px/1 system-ui, sans-serif }
+  /* New: one big plus, nothing around it (Chris, 2026-09-23: simpler). */
+  .v2hubactions .v2btn.v2new .v2glyph { background:none; border:0; color:var(--accent); font:500 48px/1 system-ui, sans-serif; box-shadow:none }
+  .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:none; color:var(--text) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
   .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
   .hub-unknown .v2hubactions { display:none }
@@ -916,7 +914,7 @@
           <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true">🎛️</span><span class="lbl">Status</span></button>
           <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><span class="v2glyph em" aria-hidden="true">🧭</span><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
           <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
-          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><img src="/icons/icon-192.png" alt="" width="36" height="36"><span class="plus">+</span></span><span class="lbl">New</span></button>
+          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true">+</span><span class="lbl">New</span></button>
         </div>
         </div>
       </div>
