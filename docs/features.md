@@ -36,7 +36,7 @@ remembered in that browser; **✨ New look** in the classic header, or
 The header holds:
 - **New agent**, whose panel also offers *start from a template* and *open a
   .hatchabot file*.
-- **Status** (the 💓 tile in the Hatchabot panel; called Fleet until v2.47.2): one panel with tabs for Health, Usage, Resources, Activity, and
+- **Status** (the 🎛️ tile in the Hatchabot panel; called Fleet until v2.47.2): one panel with tabs for Health, Usage, Resources, Activity, and
   Tools (bulk actions, rebuild all, sort A→Z).
 - **Settings**: this machine's settings, opened directly.
 - An inbox button, which appears only when someone has sent you an agent.

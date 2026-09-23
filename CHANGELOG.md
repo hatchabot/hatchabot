@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.4] — 2026-09-23
+
+### Changed
+- The Status tile shows an instrument panel (🎛️) instead of a heartbeat.
+
 ## [2.47.3] — 2026-09-23
 
 ### Fixed
