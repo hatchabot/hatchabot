@@ -48,7 +48,11 @@ Hatchabot can inject into every agent. So a household of always-on agents
 (schedulers polling inboxes, advisors reading mail, a dozen personas) runs on
 one flat fee instead of per-token metering from any lab. For this kind of
 fleet that's the difference between "affordable" and "a bill you watch".
-Usage limits still apply (a burst of simultaneous turns can hit them), and the
+Usage limits still apply (a burst of simultaneous turns can hit them). Anthropic's
+rules for third-party use of a plan changed several times in 2026 — a May
+announcement of a separate, metered "Agent SDK credit" was paused on June 15,
+and as of September 2026 such use draws from the plan's normal limits — so check
+its current terms before relying on it. The
 setup-token is exactly what makes the credential portable: one token per
 account, injected per agent, revocable, never a shared login directory.
 

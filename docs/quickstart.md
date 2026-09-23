@@ -13,7 +13,7 @@ covers everything else.
 |---|---|
 | **A computer that stays on** — Linux or macOS, with **Docker** and **Node.js 22+** | Agents run here, one container each. A Mac mini, a home server, a spare laptop that never sleeps. Docker: [Engine on Linux](https://docs.docker.com/engine/install/) (then `sudo usermod -aG docker $USER`, log out and in) or [Docker Desktop on macOS](https://docs.docker.com/desktop/setup/install/mac-install/). Node: [nodejs.org](https://nodejs.org) LTS, or `brew install node`. |
 | **A Telegram account** (the app on your phone) | Telegram is the front door. Agents are Telegram bots you create. |
-| **An AI to think with** — recommended: a **Claude subscription** (Pro or Max) | One subscription powers every agent. Alternatives: an Anthropic or Google API key, or a local model server (Ollama) that needs no account at all. |
+| **An AI to think with** — recommended: a **Claude subscription** (Pro or Max) | One subscription powers every agent, within the plan's usage limits (the agents share them). Alternatives: an Anthropic or Google API key, or a local model server (Ollama) that needs no account at all. |
 
 > Claude **Max** is the comfortable choice for a household of agents; **Pro**
 > works for one or two light ones. You can also mix: a cheap or local model for
