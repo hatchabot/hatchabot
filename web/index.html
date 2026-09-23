@@ -1830,6 +1830,15 @@
     <h4 style="margin:18px 0 4px" id="rtImagesH">Images on this machine</h4>
     <div class="sub" style="margin-bottom:10px" id="rtFleetNote"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
     <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
+    <div class="pair" style="align-items:center;gap:8px;margin-bottom:10px">
+      <label for="rbPolicy"><b>Rebuilds</b></label>
+      <select id="rbPolicy" style="width:auto" onchange="setRebuildPolicy(this.value)">
+        <option value="required-only">Required ones on their own</option>
+        <option value="auto">Required, plus the rest overnight</option>
+        <option value="manual">Only when I press Rebuild</option>
+      </select>
+      <span id="rbPolicyNote" class="sub grow"></span>
+    </div>
     <details id="rtBuild" class="sec-drawer" style="margin-bottom:12px">
       <summary><b>🧪 Try a newer OpenClaw version, safely</b> <span class="sub">— build a candidate, test it on one agent, then promote</span></summary>
       <ol class="rt-steps">
@@ -3847,7 +3856,7 @@ async function loadRuntime() {
   if (myAccount.hostOwner) api('/v1/search-key').then(k => { $('runtimeSearch').innerHTML = k.set
     ? '🔎 Web search: <b>Brave</b> — the fleet search key is set and injected into every agent at provision/rebuild (agents built before the key was set stay on DuckDuckGo until rebuilt).'
     : '🔎 Web search: <b>DuckDuckGo</b> (keyless baseline). A <b>Fleet search key</b> in AI sources upgrades every agent to Brave on its next rebuild.'; }).catch(() => {});
-  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); }
+  if (myAccount.hostOwner) { $('rtErr').textContent = ''; loadRuntimeImages(); pollBaseBuild(); loadRebuildPolicy(); }
   const el = $('runtimeStatus');
   try {
     const r = await api('/v1/runtime');
@@ -3856,7 +3865,7 @@ async function loadRuntime() {
     if (!r.npmLatest) latestLine = `<div class="sub">Couldn't reach npm to check the latest stable.</div>`;
     else if (r.upgradeAvailable) latestLine = `<div style="color:var(--warn)">⬆ OpenClaw <b>${esc(r.npmLatest)}</b> is the latest stable — you're on ${cur}.</div>`;
     else latestLine = `<div style="color:var(--ok)">✓ up to date with the latest stable (${esc(r.npmLatest)}).</div>`;
-    const lagging = (agents ?? []).filter(a => a.updateAvailable).length;
+    const lagging = (agents ?? []).filter(a => a.rebuild).length;
     // The machine owner gets buttons below (candidate → try → promote), so
     // the command-line hints and the repeated "newer version" line only
     // confuse there; everyone else still needs them.
@@ -3865,7 +3874,7 @@ async function loadRuntime() {
       `<div style="font-size:15px"><b>Runtime image:</b> OpenClaw ${cur}</div>
        ${owner && r.upgradeAvailable ? '' : `<div style="margin-top:4px">${latestLine}</div>`}
        ${r.npmExtendedStable ? `<div class="sub" style="margin-top:2px">extended-stable track: <code>${esc(r.npmExtendedStable)}</code></div>` : ''}
-       ${lagging ? `<div class="sub" style="margin-top:8px">${lagging} agent${lagging > 1 ? 's are' : ' is'} on an older image — <b>Rebuild</b> each to adopt the current one.</div>` : ''}
+       ${lagging ? `<div class="sub" style="margin-top:8px">${lagging} agent${lagging > 1 ? 's need' : ' needs'} a <b>Rebuild</b> (each card says why).</div>` : ''}
        ${owner ? '' : `<div class="sub" style="margin-top:12px">Upgrading is done by whoever runs this machine.</div>`}`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
@@ -4704,8 +4713,8 @@ async function loadRuntimeImages() {
     if (UI_V2) {
       // Only what asks something of you: agents that still need a Rebuild.
       // Versions and upgrades are the Hatchabot agent's to talk about.
-      const lag = (agents ?? []).filter(a => a.updateAvailable).length;
-      $('rtBase').textContent = lag ? `${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild to pick up the current image.` : '';
+      const lag = (agents ?? []).filter(a => a.rebuild).length;
+      $('rtBase').textContent = lag ? `${lag} agent${lag > 1 ? 's' : ''} still need${lag > 1 ? '' : 's'} a Rebuild (each card says why).` : '';
       $('rtBase').hidden = !lag;
     }
     renderRuntimeList();
@@ -4941,7 +4950,7 @@ async function openFleetActions() {
   }
   chips.push(['running', `Running (${list.filter(a => a.state === 'RUNNING').length})`]);
   chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED').length})`]);
-  const needsRebuild = (a) => !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
+  const needsRebuild = (a) => !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
   const needs = list.filter(needsRebuild).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
   const attn = list.filter(a => agentAttention(a).length).length;
@@ -4969,7 +4978,7 @@ function faSelect(key) {
     : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED'
     : key === 'needs-rebuild' ? (cb) => {
         const a = agents.find(x => x.id === cb.dataset.id);
-        return !!a && !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.updateAvailable || a.peersPending);
+        return !!a && !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
       }
     : key === 'attention' ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && agentAttention(a).length > 0; }
     : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
@@ -6025,6 +6034,8 @@ function agentNotices(a, opts = {}) {
         <button onclick="dismissContextReset('${a.id}')" title="Stop offering this">Dismiss</button></div>` : ''}
       ${a.updateAvailable && !isRechecking(a) ? `<div class="pair">⬆ <span class="grow">${updateBlurb(a)}</span>
         <button class="primary" onclick="rebuild('${a.id}')">Update</button></div>` : ''}
+      ${rebuildOtherReasons(a).length && !isRechecking(a) ? `<div class="pair">${a.rebuild.level === 'required' ? '⚠' : '🛠'} <span class="grow">Needs a rebuild: ${esc(rebuildOtherReasons(a).join('; '))}. ${a.rebuild.level === 'required' && rebuildPolicyNow !== 'manual' ? 'This machine does it on its own once the agent is idle — or now:' : 'Memory is kept.'}</span>
+        <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
       ${a.migratedTo ? `<div class="pair">📦 <span class="grow">Moved to <b>${esc(a.migratedTo)}</b>. This copy is a leftover — starting it would make two agents fight over the same Telegram bot.</span>
         <button onclick="runsHere('${a.id}','${jsq(a.name)}')">Runs here again</button></div>` : ''}
       ${a.peersPending && !isRechecking(a) ? `<div class="pair">🔗 <span class="grow">Peer changes apply on the next rebuild — that's what installs its consult tool.</span>
@@ -8538,6 +8549,7 @@ async function approve(id, code, asSelf, kind = 'telegram', who = '') {
 let myAccount = {};
 async function loadMyAccount() {
   try { myAccount = await api('/v1/account'); } catch { myAccount = {}; }
+  loadRebuildPolicy(); // the cards' wording depends on it
   const el = $('tgLinkStatus');
   if (el) el.innerHTML = myAccount.telegramUserId
     ? `✓ Linked (Telegram id <code class="pii">${esc(myAccount.telegramUserId)}</code>) — agents you create admit you automatically.
@@ -8574,6 +8586,35 @@ function updateBlurb(a) {
   if (from && to && from !== to)
     return `OpenClaw ${esc(from)} → ${esc(to)} is ready. Rebuild applies it — memory is kept.`;
   return `A newer runtime image is ready${to ? ` (same OpenClaw ${esc(to)})` : ''}. Rebuild applies it — memory is kept.`;
+}
+
+/** Rebuild reasons other than the newer image (which has its own ⬆ Update row). */
+function rebuildOtherReasons(a) {
+  return (a.rebuild?.reasons ?? []).filter(r => !/newer runtime image/.test(r));
+}
+
+// The machine's rebuild policy (Runtime tab; machine owner sets it).
+let rebuildPolicyNow = 'required-only';
+const REBUILD_POLICY_TEXT = {
+  'required-only': 'Required rebuilds happen on their own, once an agent is idle. Others wait for you.',
+  auto: 'Required rebuilds happen once an agent is idle; the rest overnight (quiet hours).',
+  manual: 'Nothing happens on its own — the cards say what needs a rebuild.',
+};
+async function loadRebuildPolicy() {
+  try {
+    const r = await api('/v1/rebuild-policy');
+    rebuildPolicyNow = r.policy;
+    const sel = $('rbPolicy'); if (!sel) return;
+    sel.value = r.policy;
+    $('rbPolicyNote').textContent = REBUILD_POLICY_TEXT[r.policy] + (r.policy === 'auto' ? ` Quiet hours: ${r.quietHours}h.` : '');
+  } catch { /* older server — leave the default */ }
+}
+async function setRebuildPolicy(policy) {
+  try {
+    await api('/v1/rebuild-policy', { method: 'PUT', body: { policy } });
+    toast('Rebuild policy saved');
+  } catch (e) { toast(e.message, 12000); }
+  loadRebuildPolicy();
 }
 
 function rebuildableAgents() {
@@ -9211,7 +9252,7 @@ function isRechecking(a) {
 }
 /** How many rebuild-fixable issues are currently hidden by isRechecking(). */
 function recheckHiddenCount(a) {
-  return (a.updateAvailable ? 1 : 0) + (a.pendingModel && a.pendingModel !== a.model ? 1 : 0)
+  return (a.rebuild ? 1 : 0) + (a.pendingModel && a.pendingModel !== a.model ? 1 : 0)
     + (a.peersPending ? 1 : 0) + (a.dataSources || []).filter(d => d.syncError).length;
 }
 function recheckNote(a) {
@@ -9235,9 +9276,9 @@ function agentAttention(a) {
   if (a.imageTrial) out.push({ icon: '🧪', why: `on trial image ${a.image} (Runtime → ✕ to discard)` });
   const rebuild = [];
   if (a.pendingModel && a.pendingModel !== a.model) rebuild.push(`switches to ${a.pendingModel} on rebuild`);
-  if (a.updateAvailable) rebuild.push('a newer runtime image is available');
+  if (a.rebuild) rebuild.push(...a.rebuild.reasons);
   if (a.peersPending) rebuild.push('peer changes need a rebuild');
-  if (rebuild.length && !rechecking) out.push({ icon: '🔄', why: rebuild.join('; ') });
+  if (rebuild.length && !rechecking) out.push({ icon: a.rebuild?.level === 'required' ? '⚠' : '🔄', why: rebuild.join('; ') });
   if (a.botNamePending) out.push({ icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
   return out;
 }
@@ -10618,7 +10659,7 @@ function renderV2Stats() {
   const awake = mine.filter(a => a.state === 'RUNNING').length;
   const unread = mine.filter(v2Unread).length;
   const knocking = mine.reduce((n, a) => n + (pairings[a.id]?.length ?? 0), 0);
-  const stale = mine.filter(a => a.updateAvailable).length;
+  const stale = mine.filter(a => a.rebuild).length;
   const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
   const tokens24h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window24h?.tokens ?? 0), 0);
   const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');

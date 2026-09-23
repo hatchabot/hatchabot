@@ -153,6 +153,13 @@ Commands:
   start|stop|rebuild <agent> [--wait]
                                Lifecycle controls; --wait returns once it is
                                RUNNING (or STOPPED)
+  rebuild --outdated [--required] [--dry-run]
+                               Rebuild every running agent that needs it (says
+                               why); a stopped one is rebuilt when started
+  rebuild-policy [required-only|auto|manual]
+                               When this machine rebuilds agents on its own:
+                               required ones once idle (default), those plus
+                               the rest in the quiet hours, or never
   retry <agent>                Retry a FAILED agent's provisioning
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
@@ -384,7 +391,7 @@ function envQuote(v: string): string {
 // parser took any unlisted flag to have a value, so `--no-telegram` (missing
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'outdated', 'required', 'dry-run', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit']);
 
 export function parseArgs(argv: string[]) {
@@ -1861,6 +1868,24 @@ async function main() {
     case 'start':
     case 'stop':
     case 'rebuild': {
+      if (cmd === 'rebuild' && flags.has('outdated')) {
+        // Every agent the app says needs one — the Rebuild button, in bulk,
+        // through the server's own queue (a few at a time).
+        const outdated = (await agents(ctx)).filter((x) => x.rebuild && (!flags.has('required') || x.rebuild.level === 'required'));
+        // A rebuild STARTS an agent; a stopped one gets its rebuild when it is next started.
+        const all = outdated.filter((x) => x.state === 'RUNNING');
+        const parked = outdated.length - all.length;
+        if (parked) console.log(`(${parked} stopped agent${parked > 1 ? 's' : ''} left alone — rebuilt when started)`);
+        if (!all.length) { console.log(`No running agent needs a${flags.has('required') ? ' required' : ''} rebuild.`); return; }
+        for (const x of all) {
+          console.log(`${x.rebuild.level === 'required' ? '!' : '-'} ${x.name}: ${x.rebuild.reasons.join('; ')}`);
+          if (flags.has('dry-run')) continue;
+          await api(ctx, `/v1/agents/${x.id}/rebuild`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+            .catch((e: Error) => console.log(`  not started: ${e.message}`));
+        }
+        console.log(flags.has('dry-run') ? `${all.length} would be rebuilt.` : `${all.length} rebuild(s) queued; they run a few at a time.`);
+        return;
+      }
       const a = await resolveAgent(ctx, rest[0] ?? fail(`usage: hatchabot ${cmd} <agent>`));
       await api(ctx, `/v1/agents/${a.id}/${cmd}`, {
         method: 'POST',
@@ -1883,6 +1908,18 @@ async function main() {
         if (Date.now() > deadline) fail(`"${a.name}" is still ${now.state} after ${limit} min`);
         await new Promise((r) => setTimeout(r, 3000));
       }
+    }
+    case 'rebuild-policy': {
+      if (rest[0]) {
+        const res = await api(ctx, '/v1/rebuild-policy', {
+          method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ policy: rest[0] }),
+        });
+        console.log(`rebuild policy: ${((await res.json()) as any).policy}`);
+        return;
+      }
+      const r: any = await (await api(ctx, '/v1/rebuild-policy')).json();
+      console.log(`rebuild policy: ${r.policy}  (choices: ${r.policies.join(', ')}; quiet hours ${r.quietHours})`);
+      return;
     }
     case 'snapshot': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot snapshot <agent> [--label text]'));

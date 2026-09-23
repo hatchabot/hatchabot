@@ -23,7 +23,9 @@ export interface DoctorFacts {
   diskFreeGb?: number;
   backups: { dir: string; lastSet?: string; ageDays?: number };
   tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean };
-  containers?: { running: number; total: number };
+  containers?: { running: number; total: number;
+    /** Agent containers still on docker's shared bridge network (made before v1.16's isolation). */
+    sharedNetwork?: number };
   /** Which release this checkout sits on, and whether a newer tag is present. */
   checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
 }
@@ -41,6 +43,13 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     if (!f.runtimeImage) out.push({ level: 'fail', text: 'Runtime image hatchabot-runtime:latest is missing — agents cannot start', fix: './scripts/build-runtime-image.sh (pulls the published image, builds only if that fails)' });
     else out.push({ level: 'ok', text: `Runtime image: OpenClaw ${f.runtimeImage.openclawVersion ?? '?'}${f.runtimeImage.sizeGb ? ` · ${f.runtimeImage.sizeGb.toFixed(1)} GB` : ''}` });
     if (f.containers) out.push({ level: 'ok', text: `Agent containers: ${f.containers.running} running of ${f.containers.total}` });
+    if (f.containers?.sharedNetwork) {
+      out.push({
+        level: 'warn',
+        text: `${f.containers.sharedNetwork} agent container${f.containers.sharedNetwork > 1 ? 's are' : ' is'} still on the shared network, where other agents can reach ${f.containers.sharedNetwork > 1 ? 'them' : 'it'} — made before the isolated network`,
+        fix: 'hatchabot rebuild --outdated   (running ones; a stopped one is rebuilt when started). Unless set to manual, this machine also does it on its own once each is idle.',
+      });
+    }
   }
   // A checkout behind the latest tag, or one the installer will refuse to
   // move because it is dirty, is the quiet cause of "I upgraded but nothing
@@ -136,8 +145,12 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     if (img) runtimeImage = { openclawVersion: img.split('|')[0] || undefined, sizeGb: Number(img.split('|')[1]) / 1e9 };
   }
   const prefix = process.env.HATCHABOT_PREFIX ?? env.HATCHABOT_PREFIX ?? 'hatchabot';
-  const ps = dockerDaemon.ok ? sh('docker', ['ps', '-a', '--format', '{{.Names}}|{{.State}}']) : undefined;
+  const ps = dockerDaemon.ok ? sh('docker', ['ps', '-a', '--format', '{{.Names}}|{{.Networks}}|{{.State}}']) : undefined;
   const rows = (ps ?? '').split('\n').filter((l) => l.startsWith(`${prefix}-`) || l.startsWith('agentclaw-'));
+  const agentNet = (process.env.HATCHABOT_AGENT_NETWORK ?? env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+  const sharedNetwork = agentNet && agentNet !== 'bridge' && agentNet !== 'default'
+    ? rows.filter((l) => l.split('|')[1] === 'bridge').length
+    : 0;
   const dbPath = process.env.HATCHABOT_DB ?? env.HATCHABOT_DB ?? defaultDbPath();
   const service: DoctorFacts['service'] = process.platform === 'darwin'
     ? { manager: existsSync(join(homedir(), 'Library/LaunchAgents/com.hatchabot.control-plane.plist')) || existsSync(join(homedir(), 'Library/LaunchAgents/com.agentclaw.control-plane.plist')) ? 'launchd' : 'none', active: !!sh('launchctl', ['list', 'com.hatchabot.control-plane']) || !!sh('launchctl', ['list', 'com.agentclaw.control-plane']) }
@@ -170,7 +183,7 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     envFile: { present: existsSync('.env'), secretKey: !!env.HATCHABOT_SECRET_KEY, password: !!env.HATCHABOT_PASSWORD, authMode: env.HATCHABOT_AUTH ?? 'password', publicUrl: env.HATCHABOT_PUBLIC_URL || undefined },
     db: { path: dbPath, present: existsSync(dbPath), sizeMb: existsSync(dbPath) ? statSync(dbPath).size / 1e6 : undefined },
     service, controlPlane, diskFreeGb, backups, tailscale,
-    containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length },
+    containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length, sharedNetwork },
     checkout: checkoutFacts(),
   };
 }

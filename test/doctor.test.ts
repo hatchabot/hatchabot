@@ -18,6 +18,13 @@ describe('hatchabot doctor report', () => {
     expect(lines.every((l) => l.level === 'ok')).toBe(true);
     expect(lines.map((l) => l.text).join('\n')).toMatch(/Node v22.*Docker 27.1.*OpenClaw 2026.7.1-2.*43 running of 53.*Public URL.*Database.*Service running.*v1.3.0.*120 GB free.*last set 2026-09-13.*Tailscale up/s);
   });
+  it('warns about agents still on the shared network, with the fix', () => {
+    const line = doctorReport({ ...healthy, containers: { running: 43, total: 53, sharedNetwork: 7 } })
+      .find((l) => /shared network/.test(l.text));
+    expect(line).toMatchObject({ level: 'warn', text: expect.stringMatching(/^7 agent containers are still/) });
+    expect(line!.fix).toMatch(/rebuild --outdated/);
+    expect(doctorReport({ ...healthy, containers: { running: 1, total: 1, sharedNetwork: 0 } }).some((l) => /shared network/.test(l.text))).toBe(false);
+  });
   it('names the fix for each broken thing', () => {
     const lines = doctorReport({ ...healthy, nodeVersion: 'v18.1.0', dockerDaemon: { ok: false, error: 'permission denied' }, runtimeImage: undefined,
       envFile: { present: true, secretKey: false, password: false, authMode: 'password' }, service: { manager: 'systemd', active: false },

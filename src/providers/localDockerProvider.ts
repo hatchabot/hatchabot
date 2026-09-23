@@ -12,6 +12,7 @@ import type {
   RuntimeStatus,
 } from './provider.js';
 import { ProviderError, parseChannelsLabel } from './provider.js';
+import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
@@ -162,6 +163,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       // for hosts that want to run bigger agents.
       '--log-opt', 'max-size=10m',
       '--log-opt', 'max-file=3',
+      // Which way of making containers this one came from, so a release that
+      // changes it can tell which agents still need a rebuild (rebuildPolicy.ts).
+      '--label', `hatchabot.gen=${CONTAINER_GEN}`,
       // Agents live on their own network with inter-container traffic off. On
       // docker's default bridge every agent could open a connection to every
       // other agent's gateway, bypassing the owner-only proxy (audit
@@ -447,12 +451,27 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels] = res.stdout.trim().split('|');
-    return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels) };
+    const [imageId, openclawVersion, channels, gen, nets] = res.stdout.trim().split('|');
+    return {
+      imageId,
+      openclawVersion: openclawVersion || undefined,
+      channels: parseChannelsLabel(channels),
+      containerGen: Number(gen) || 0,
+      onAgentNetwork: this.#onAgentNetwork((nets ?? '').split(',').filter(Boolean)),
+    };
+  }
+
+  /** See RuntimeInfo.onAgentNetwork. */
+  #onAgentNetwork(nets: string[]): boolean | undefined {
+    const want = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+    if (!want || want === 'bridge' || want === 'default') return undefined;
+    if (nets.some((n) => n.startsWith(`${this.prefix}-ops-`))) return undefined;
+    if (!nets.length) return undefined; // docker told us nothing: don't guess
+    return nets.includes(want);
   }
 
   #daemonId?: string;

@@ -871,6 +871,30 @@ version bumps via the candidate → smoke → promote flow in
 `scripts/build-runtime-image.sh`, or a system package no static build can
 substitute for.
 
+**Rebuilds: when an agent needs one, and who does it.** A rebuild remakes an
+agent's container from the current image and the current way of making
+containers; its memory is kept. The app says why an agent needs one, at one
+of two levels:
+- **required**: it is still on docker's shared network, where other agents
+  can reach it (containers made before the isolated network), or a release
+  changed how containers are made and marked the change required;
+- **recommended**: it runs an older image than the default (never for a
+  pinned agent), or a release marked its change recommended.
+
+What the machine does on its own is its owner's choice (⚙ → Runtime →
+**Rebuilds**, or `hatchabot rebuild-policy`):
+- *Required ones on their own* (the default): a required rebuild happens once
+  the agent has been idle for 10 minutes, two at a time — never mid-reply,
+  never the Hatchabot agent, never a stopped agent (a rebuild would start it).
+  A stopped agent that needs one comes up rebuilt the next time it is started.
+- *Required, plus the rest overnight*: recommended ones too, in the quiet hours
+  (`HATCHABOT_REBUILD_QUIET_HOURS`, default `3-5`, local time).
+- *Only when I press Rebuild*: nothing happens on its own.
+
+`hatchabot rebuild --outdated [--required] [--dry-run]` rebuilds every running
+agent that needs it and prints why; `hatchabot doctor` warns about containers
+still on the shared network.
+
 **Per-agent image pin** (an agent's ⚙ Advanced → Runtime, host owner only): pin one agent
 to a specific image — a candidate build under test, or a derived image with
 extra system packages — instead of promoting fleet-wide. Applies on the next

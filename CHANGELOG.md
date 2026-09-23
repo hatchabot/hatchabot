@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.37.0] — 2026-09-23
+
+### Added
+- **The app says when an agent needs a rebuild, why, and how badly.** *Required*: it is still on docker's shared network, where other agents can reach it, or a release changed how containers are made and marked it required. *Recommended*: an older image than the default. Each card says why; the old "a newer image" badge was one case of this.
+- **Rebuild policy** (⚙ → Runtime → Rebuilds, `hatchabot rebuild-policy`): by default, required rebuilds happen on their own once an agent has been idle 10 minutes, two at a time, never the Hatchabot agent or a stopped one; a stopped agent comes up rebuilt when next started. *Auto* also does recommended ones in the quiet hours; *manual* does nothing on its own.
+- Releases can now declare "existing agents should be remade": containers carry the setup generation they were made at (`SETUP_CHANGES` in rebuildPolicy.ts; see releasing.md).
+- `hatchabot rebuild --outdated [--required] [--dry-run]`; `hatchabot doctor` warns about agent containers still on the shared network.
+
+### Security
+- Agents made before v1.16.0's isolated network were still on the shared one — 7 running on the development machine — because nothing ever rebuilt them. They now are rebuilt on their own (unless the owner chose manual).
+
 ## [2.36.1] — 2026-09-23
 
 ### Fixed

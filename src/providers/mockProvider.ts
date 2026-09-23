@@ -124,8 +124,10 @@ export class MockProvider implements RuntimeProvider {
     return this.execResponses.get('sh-volume') ?? { code: 0, stdout: '', stderr: '' };
   }
 
-  async info(): Promise<RuntimeInfo> {
-    return { imageId: 'mock-image', openclawVersion: 'mock' };
+  /** Per-runtime overrides of what info() reports (containerGen, onAgentNetwork…). */
+  infoOverride = new Map<string, Partial<RuntimeInfo>>();
+  async info(runtimeRef?: string): Promise<RuntimeInfo> {
+    return { imageId: 'mock-image', openclawVersion: 'mock', ...(runtimeRef ? this.infoOverride.get(runtimeRef) : {}) };
   }
 
   /** What the mock image claims to carry; tests narrow it to check the "image lacks it" path. */

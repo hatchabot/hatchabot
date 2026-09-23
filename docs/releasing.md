@@ -83,6 +83,16 @@ fetches it from the release `stable` names, not from `main`. A change to
    install's database.
 2. Bump `version` in `package.json` and finish the CHANGELOG section
    (`## [X.Y.Z] — YYYY-MM-DD`).
+   **Does it change how containers are made** (docker run flags, mounts,
+   network, what the seed writes) so that existing agents should be remade?
+   Append one entry to `SETUP_CHANGES` in `src/orchestrator/rebuildPolicy.ts`:
+   the next `gen`, this version, a level and a reason ("its mounts were
+   tightened"). `required` means every install rebuilds its agents on its
+   own, once each is idle (unless its owner chose manual); `recommended`
+   badges them, and rebuilds them overnight on installs set to `auto`;
+   `optional` only rides along with the next rebuild. Never edit or remove
+   an entry: containers carry the number. A new runtime image needs no entry;
+   agents behind the default image are already `recommended`.
 3. Commit, tag, push:
    ```sh
    git commit -am "Release vX.Y.Z"

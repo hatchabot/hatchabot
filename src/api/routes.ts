@@ -112,6 +112,7 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
+import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import {
@@ -3042,6 +3043,74 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { ok: true };
   });
 
+  // ---- rebuild policy: which agents need a rebuild, and which the machine
+  // does on its own (rebuildPolicy.ts) ---------------------------------------
+
+  /** Why this agent needs a rebuild, if it does. Pinned agents never chase the default image. */
+  const rebuildNeedOf = async (a: Agent) => {
+    if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return undefined;
+    const provider = providerFor(a.hostId);
+    const [running, current] = await Promise.all([provider.info(a.runtimeRef), provider.currentImageInfo()]);
+    const imageBehind = !a.image && !!(running.imageId && current.imageId && running.imageId !== current.imageId);
+    return { running, current, imageBehind, need: rebuildNeed(running, imageBehind) };
+  };
+
+  app.get('/v1/rebuild-policy', async () => ({
+    policy: rebuildPolicy(),
+    policies: REBUILD_POLICIES,
+    quietHours: process.env.HATCHABOT_REBUILD_QUIET_HOURS ?? '3-5',
+  }));
+  app.put<{ Body: { policy?: string } }>('/v1/rebuild-policy', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const policy = req.body?.policy;
+    if (!policy || !(REBUILD_POLICIES as string[]).includes(policy)) {
+      return reply.code(400).send({ error: `policy must be one of: ${REBUILD_POLICIES.join(', ')}` });
+    }
+    const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env'); // (tests point it elsewhere)
+    const wrote = await writeEnvVar(envFile, 'HATCHABOT_REBUILD_POLICY', policy, () => true,
+      'Written by Hatchabot: when agents are rebuilt on their own (Settings → Runtime).')
+      .catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
+    process.env.HATCHABOT_REBUILD_POLICY = policy; // live: the sweep reads it each time
+    trace()('rebuild.policy_set', { policy });
+    return { policy: policy as RebuildPolicy };
+  });
+
+  /**
+   * The machine's own rebuilds. Every few minutes: agents whose rebuild the
+   * policy allows now, idle ones only, two at a time through the same queue a
+   * Rebuild button uses. Exported for tests via the returned handle.
+   */
+  const rebuildSweep = async (now = new Date()): Promise<string[]> => {
+    const policy = rebuildPolicy();
+    if (policy === 'manual') return [];
+    const agents = store.listAllActiveAgents().filter((a) => a.state === 'RUNNING' && !a.ops && !a.migratedTo);
+    const candidates = await Promise.all(agents.map(async (a) => {
+      const need = await rebuildNeedOf(a).then((r) => r?.need, () => undefined);
+      return {
+        id: a.id,
+        state: a.state,
+        ops: a.ops,
+        busy: isBusy(a.id) || inflight.has(a.id),
+        need,
+        // Asking an agent when it last talked is a docker exec: only for the ones that matter.
+        lastActiveAt: need ? await lastActiveFor(a).catch(() => undefined) : undefined,
+      };
+    }));
+    const picked = pickAutoRebuilds(candidates, policy, now);
+    for (const id of picked) {
+      const c = candidates.find((x) => x.id === id)!;
+      trace(id)('rebuild.auto', { level: c.need!.level, reasons: c.need!.reasons, policy });
+      kickRebuild(id);
+    }
+    return picked;
+  };
+  (app as unknown as { rebuildSweep?: typeof rebuildSweep }).rebuildSweep = rebuildSweep;
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    setInterval(() => { void rebuildSweep().catch((err) => app.log.warn({ err }, 'rebuild sweep failed')); },
+      Number(process.env.HATCHABOT_REBUILD_SWEEP_MS) || 5 * 60_000).unref();
+  }
+
   app.get<{ Querystring: { all?: string } }>('/v1/agents', async (req, reply) => {
     // ?all=1: the HOST OWNER's admin view — every user's agents, with their
     // ownerId, so orphans from other logins (an old test account's leftovers)
@@ -3060,25 +3129,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         let openclawVersion: string | undefined;
         let latestOpenclawVersion: string | undefined;
         let updateAvailable = false;
+        let rebuild: Awaited<ReturnType<typeof rebuildNeedOf>> | undefined;
         if (a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           try {
-            const provider = providerFor(a.hostId);
-            const [running, current] = await Promise.all([
-              provider.info(a.runtimeRef),
-              provider.currentImageInfo(),
-            ]);
-            openclawVersion = running.openclawVersion;
-            latestOpenclawVersion = current.openclawVersion;
-            // Compare image ids, never tags — :latest gets reassigned in place.
-            // Note this fires for ANY image rebuild, including a same-version one
-            // (e.g. base tooling added), not only an OpenClaw version bump — the
-            // app words it from the two versions so it doesn't over-claim.
-            // A PINNED agent is exempt: it deliberately does not track :latest,
-            // and nagging it to "update" to an image it was pinned away from
-            // would fight the pin.
-            updateAvailable = !a.image && !!(
-              running.imageId && current.imageId && running.imageId !== current.imageId
-            );
+            rebuild = await rebuildNeedOf(a);
+            openclawVersion = rebuild!.running.openclawVersion;
+            latestOpenclawVersion = rebuild!.current.openclawVersion;
+            // Image ids, never tags (:latest is reassigned in place); a pinned
+            // agent is exempt — see rebuildNeedOf. Any image rebuild counts,
+            // same-version too, so the app words it from the two versions.
+            updateAvailable = rebuild!.imageBehind;
           } catch {
             /* provider hiccup — omit version info rather than fail the list */
           }
@@ -3133,6 +3193,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           openclawVersion,
           latestOpenclawVersion,
           updateAvailable,
+          /** { level: required | recommended, reasons } — absent when it's current. */
+          rebuild: rebuild?.need,
         });
       }),
     );
@@ -7748,6 +7810,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (busyNow(agent, reply)) return reply;
     if (agent.state !== 'STOPPED') {
       return reply.code(409).send({ error: `Cannot start while ${agent.state}` });
+    }
+    // A stopped agent is never rebuilt on the machine's own initiative (a
+    // rebuild starts it). Starting it is the moment: one that needs a
+    // REQUIRED rebuild comes up rebuilt instead of as it was.
+    if (rebuildPolicy() !== 'manual') {
+      const need = await rebuildNeedOf(agent).then((r) => r?.need, () => undefined);
+      if (need?.level === 'required' && kickRebuild(agent.id)) {
+        trace(agent.id)('rebuild.on_start', { reasons: need.reasons });
+        return reply.code(202).send({ ...publicAgent(store.getAgent(agent.id)!), rebuilding: true });
+      }
     }
     await providerFor(agent.hostId).start(agent.runtimeRef);
     return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
