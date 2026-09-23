@@ -3816,7 +3816,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    *  same port and forwards into the jail (src/ops/doorman.ts). */
   const gatewayAddr = async (agent: Agent): Promise<{ host: string; port: number } | undefined> => {
     if (!agent.gatewayToken || agent.state !== 'RUNNING') return undefined;
-    if (agent.gatewayPort) return { host: '127.0.0.1', port: agent.gatewayPort };
+    if (agent.gatewayPort) {
+      // A runner's agent publishes on the RUNNER's loopback: the provider
+      // tunnels to it. This machine's own agents: the port itself.
+      const p = providerFor(agent.hostId);
+      return p.gatewayEndpoint ? p.gatewayEndpoint(agent.gatewayPort) : { host: '127.0.0.1', port: agent.gatewayPort };
+    }
     // An older management agent, built before the doorman: reached by container address.
     const ip = agent.ops && agent.runtimeRef ? await providerFor(agent.hostId).containerIp?.(agent.runtimeRef) : undefined;
     return ip ? { host: ip, port: 18789 } : undefined;

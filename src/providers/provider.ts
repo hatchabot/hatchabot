@@ -258,6 +258,12 @@ export interface RuntimeProvider {
   /** A running container's address on its network, for host→container calls
    *  where no port is published (isolated runtimes). */
   containerIp?(runtimeRef: string): Promise<string | undefined>;
+  /**
+   * Where THIS machine can reach a port an agent published on its host's
+   * loopback. Local: that port. A runner over SSH: a tunnel to it. Undefined
+   * when there is no way through (a tcp:// runner).
+   */
+  gatewayEndpoint?(port: number): Promise<{ host: string; port: number } | undefined>;
 
   /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
   tagImage(from: string, to: string): Promise<void>;

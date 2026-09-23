@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.6] — 2026-09-23
+
+### Fixed
+- **The console of an agent on a runner never opened** — "The agent's gateway did not answer." The console proxy connected to the agent's port on *this* machine's loopback, but a runner's agent publishes it on the *runner's* loopback. Over the SSH connection the runner already uses, the control plane now opens a tunnel to that port (one per agent, reused, reopened if it drops); the console stays closed to the network on the runner. The destination must be a plain `user@host`, so nothing in a runner address can reach ssh as an option. Verified against a MacBook runner: both of its agents' consoles load.
+- **Notifications slid under the badges on agent icons.** The toast had no stacking level of its own; it now sits above everything on the page.
+- The clean-install job launches its VM with no input and a time limit (the lxc client once sat for 15 minutes after the VM was up), and reads the release from `doctor` whichever way it phrases it.
+
+### Added
+- **`scripts/clean-install-test.sh`** — the clean Linux install as a repeatable job: a fresh Ubuntu 24.04 VM (LXD), the public one-liner answered as a person would, `doctor`, the first account and its recovery code, `hbt upgrade latest`, and with `--ai-source` the full autonomous-agent regression on that source. Deletes the VM (unless `--keep`); logs in `~/hatchabot-clean-install/`. Run it before promoting a release to stable.
+
 ## [2.34.5] — 2026-09-23
 
 ### Fixed

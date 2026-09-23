@@ -352,6 +352,9 @@
     background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
     padding: 10px 18px; font-size: 14px; opacity: 0; transition: opacity 0.25s; pointer-events: none;
     max-width: min(560px, 90vw);
+    /* Above everything on the page: with no level of its own, the badges on
+       the agent icons (z-index 1) drew over it. Below tooltips (1002). */
+    z-index: 1001;
   }
   .toast.show { pointer-events: auto; cursor: pointer; }
   .toast.show { opacity: 1; }

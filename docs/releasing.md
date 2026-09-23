@@ -43,6 +43,13 @@ hbt promote          # stable ← what this machine runs     (hbt promote v2.32.
 hbt channels         # where everything points
 ```
 
+Before promoting to `stable`, install it from nothing on a fresh Linux VM —
+the only test that starts where a newcomer does (it needs LXD):
+
+```sh
+scripts/clean-install-test.sh --ai-source "<an AI source name>"
+```
+
 The machine you develop on can run every release first, automatically:
 
 ```sh

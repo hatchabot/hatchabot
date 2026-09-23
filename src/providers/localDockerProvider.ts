@@ -1,4 +1,5 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -757,6 +758,37 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
 
+  /**
+   * The agent's console is published on its host's loopback only — never the
+   * LAN. On this machine that is simply the port. On a runner it is the
+   * RUNNER's loopback, which the control plane's console proxy can't reach, so
+   * every runner agent's console answered "The agent's gateway did not answer"
+   * (2026-09-23). Over the SSH the docker connection already uses, forward a
+   * local port to it: one tunnel per port, reused while it lives, reopened when
+   * it dies. The console stays closed to the network on the runner.
+   */
+  readonly #tunnels = new Map<number, { local: number; child: ChildProcess }>();
+  async gatewayEndpoint(port: number): Promise<{ host: string; port: number } | undefined> {
+    if (!this.remote) return { host: '127.0.0.1', port };
+    const target = sshTarget(this.#conn[1] ?? '');
+    if (!target) return undefined; // tcp:// — no tunnel to be had
+    const open = this.#tunnels.get(port);
+    if (open && open.child.exitCode === null && !open.child.killed) return { host: '127.0.0.1', port: open.local };
+    const local = await freePort();
+    const child = spawn('ssh', sshTunnelArgs(target, local, port), { stdio: 'ignore' });
+    child.unref();
+    this.#tunnels.set(port, { local, child });
+    child.once('exit', () => { if (this.#tunnels.get(port)?.child === child) this.#tunnels.delete(port); });
+    // Wait for the forward to accept (ExitOnForwardFailure ends ssh otherwise).
+    for (let i = 0; i < 40; i++) {
+      if (child.exitCode !== null) break;
+      if (await canConnect(local)) return { host: '127.0.0.1', port: local };
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    child.kill();
+    return undefined;
+  }
+
   async containerIp(runtimeRef: string): Promise<string | undefined> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker(['inspect', container, '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}']);
@@ -860,4 +892,47 @@ export class LocalDockerProvider implements RuntimeProvider {
 /** Minimal single-quote shell escaping for the generated seed script. */
 function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+
+/** `ssh://user@host[:port]` → what ssh wants, or undefined for anything else. */
+export function sshTarget(dockerHost: string): { dest: string; port?: string } | undefined {
+  // A plain user@host only: nothing that ssh could read as an option
+  // (a leading "-", e.g. -oProxyCommand=…), no spaces.
+  const m = /^ssh:\/\/([A-Za-z0-9_][A-Za-z0-9._-]*(?:@[A-Za-z0-9][A-Za-z0-9.-]*)?)(?::(\d{1,5}))?\/?$/.exec(dockerHost.trim());
+  return m ? { dest: m[1]!, port: m[2] } : undefined;
+}
+
+/** A forward of one local port to the runner's loopback — nothing else. */
+export function sshTunnelArgs(t: { dest: string; port?: string }, local: number, remote: number): string[] {
+  return [
+    '-N', '-T',
+    '-o', 'BatchMode=yes', '-o', 'ExitOnForwardFailure=yes',
+    '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=3',
+    ...(t.port ? ['-p', t.port] : []),
+    '-L', `127.0.0.1:${local}:127.0.0.1:${remote}`,
+    t.dest,
+  ];
+}
+
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const p = typeof addr === 'object' && addr ? addr.port : 0;
+      srv.close(() => resolve(p));
+    });
+  });
+}
+
+function canConnect(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = connect({ host: '127.0.0.1', port });
+    const done = (ok: boolean) => { s.destroy(); resolve(ok); };
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+    s.setTimeout(500, () => done(false));
+  });
 }
