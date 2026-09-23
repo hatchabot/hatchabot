@@ -44,6 +44,15 @@ describe('sorting a section', () => {
     expect(order(s)).toEqual(['Charlie', 'Bravo', 'alpha', 'agent 10', 'agent 2']);
   });
 
+  it('by activity: quietest first, most recent first reversed, never-active last either way', () => {
+    const s = world();
+    const when = new Map([['a', '2026-09-20T00:00:00Z'], ['b', undefined], ['c', '2026-09-23T00:00:00Z']]);
+    s.sortSection(OWNER, null, 'activity', false, when);
+    expect(order(s)).toEqual(['Charlie', 'Bravo', 'alpha']);
+    s.sortSection(OWNER, null, 'activity', true, when);
+    expect(order(s)).toEqual(['Bravo', 'Charlie', 'alpha']);
+  });
+
   it('⏳ is earliest first, and latest first reversed', () => {
     const s = world();
     s.sortSection(OWNER, null, 'time');

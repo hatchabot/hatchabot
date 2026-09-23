@@ -456,17 +456,18 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels, gen, nets] = res.stdout.trim().split('|');
+    const [imageId, openclawVersion, channels, gen, nets, created] = res.stdout.trim().split('|');
     return {
       imageId,
       openclawVersion: openclawVersion || undefined,
       channels: parseChannelsLabel(channels),
       containerGen: Number(gen) || 0,
       onAgentNetwork: this.#onAgentNetwork((nets ?? '').split(',').filter(Boolean)),
+      containerCreatedAt: created && !Number.isNaN(Date.parse(created)) ? new Date(created).toISOString() : undefined,
     };
   }
 

@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.44.0] — 2026-09-23
+
+### Changed
+- **⏳ sorts by last activity**, not by when the agent was created: a group's ⏳ button puts the quietest first (again for the most recently active first); Fleet → Tools' "Most recently active first" does every group. Agents that have never spoken sort last either way.
+
+### Added
+- **View by Activity and View by Rebuilt** on the home screen: bins for the last hour, today, this week, this month, longer ago, and never — by when each agent last did something, and by when its container was last built.
+
 ## [2.43.0] — 2026-09-23 — 27th audit
 
 Three reviews of everything since the 26th audit (the memory search service

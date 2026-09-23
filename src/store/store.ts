@@ -21,7 +21,7 @@ import type {
 import { assertTransition } from '../domain/stateMachine.js';
 
 /** How a group section sorts itself: A→Z by name, or newest first. */
-export type SectionSort = 'name' | 'time';
+export type SectionSort = 'name' | 'time' | 'activity';
 
 interface LocalAccountRow {
   id: string;
@@ -2957,7 +2957,11 @@ export class Store {
    * "Agent 10"; **time** is earliest→latest. `desc` reverses either — the
    * second press of the same button, the way a table column behaves.
    */
-  sortSection(ownerId: string, group: string | null, mode: SectionSort = 'name', desc = false): number {
+  /**
+   * `activity` ranks by when each agent last did something — not a column,
+   * so the caller passes the times (ISO); agents with none sort last.
+   */
+  sortSection(ownerId: string, group: string | null, mode: SectionSort = 'name', desc = false, activity?: Map<string, string | undefined>): number {
     const rows = this.db
       .prepare(
         `SELECT id, name, created_at FROM agents WHERE owner_id = ? AND state != 'DELETED'
@@ -2968,10 +2972,15 @@ export class Store {
     // Ascending is A→Z by name and earliest→latest by age; `desc` is the
     // second press of the same button, which reverses it. The id is the
     // tie-break either way, so the result never depends on row order.
+    const act = (r: { id: string }) => activity?.get(r.id) ?? '';
     rows.sort((a, b) => {
-      const by = mode === 'time'
-        ? a.created_at.localeCompare(b.created_at)
-        : byName.compare(a.name, b.name);
+      let by: number;
+      if (mode === 'time') by = a.created_at.localeCompare(b.created_at);
+      else if (mode === 'activity') {
+        // Never-active agents stay last whichever way the button is pressed.
+        if (!act(a) !== !act(b)) return act(a) ? -1 : 1;
+        by = act(a).localeCompare(act(b));
+      } else by = byName.compare(a.name, b.name);
       return (desc ? -by : by) || a.id.localeCompare(b.id);
     });
     this.db.transaction(() => this.writeSectionOrder(rows.map((r) => r.id)))();

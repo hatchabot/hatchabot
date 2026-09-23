@@ -3356,6 +3356,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           updateAvailable,
           /** { level: required | recommended, reasons } — absent when it's current. */
           rebuild: rebuild?.need,
+          /** When its container was last built (docker's creation time). */
+          rebuiltAt: rebuild?.running.containerCreatedAt,
         });
       }),
     );
@@ -4566,20 +4568,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const ownerId = ownerIdOf(req);
       const b = (req.body ?? {}) as { group?: string | null; all?: boolean; mode?: unknown; desc?: unknown };
-      if (b.mode !== undefined && b.mode !== 'name' && b.mode !== 'time') {
-        return reply.code(400).send({ error: 'mode must be "name" or "time".' });
+      if (b.mode !== undefined && b.mode !== 'name' && b.mode !== 'time' && b.mode !== 'activity') {
+        return reply.code(400).send({ error: 'mode must be "name", "time" or "activity".' });
       }
       const mode = (b.mode ?? 'name') as SectionSort;
       const desc = b.desc === true;
+      // Last activity is read from each agent's sessions file (cached by the list).
+      let activity: Map<string, string | undefined> | undefined;
+      if (mode === 'activity') {
+        activity = new Map();
+        for (const a of store.listAgents(ownerId)) activity.set(a.id, await lastActiveFor(a).catch(() => undefined));
+      }
       if (b.all === true) {
         let n = 0;
-        for (const g of store.sectionsOf(ownerId)) n += store.sortSection(ownerId, g, mode, desc);
+        for (const g of store.sectionsOf(ownerId)) n += store.sortSection(ownerId, g, mode, desc, activity);
         return { ok: true, sorted: n, mode, desc };
       }
       if (b.group === undefined || (b.group !== null && typeof b.group !== 'string')) {
         return reply.code(400).send({ error: 'group (a name, or "" for ungrouped) or all: true is required.' });
       }
-      const sorted = store.sortSection(ownerId, (b.group ?? '').trim() || null, mode, desc);
+      const sorted = store.sortSection(ownerId, (b.group ?? '').trim() || null, mode, desc, activity);
       return { ok: true, sorted, mode, desc };
     },
   );

@@ -784,7 +784,7 @@
   <div class="toc-head">
     <b>Agents</b><span class="sub" id="tocCount"></span>
     <button class="movebtn" title="Sort the agents in every group A→Z, and keep them that way" onclick="sortAllGroups('name')" style="margin-left:auto">A→Z</button>
-    <button class="movebtn" title="Sort the agents in every group newest first, and keep them that way" onclick="sortAllGroups('time')">⏳</button>
+    <button class="movebtn" title="Sort the agents in every group by last activity, most recent first" onclick="sortAllGroups('activity', true)">⏳</button>
     <button class="toc-toggle" title="Close" onclick="closeToc()">✕</button>
   </div>
   <div id="tocList"></div>
@@ -9117,7 +9117,7 @@ async function moveAgent(id, dir, ev) {
  * rather than remembered: if the group already reads A→Z, A→Z gives you Z→A.
  * That survives a reload, and it cannot disagree with what you are looking at.
  */
-const SORT_LABEL = { name: 'A→Z', 'name-desc': 'Z→A', time: 'oldest first', 'time-desc': 'newest first' };
+const SORT_LABEL = { name: 'A→Z', 'name-desc': 'Z→A', time: 'oldest first', 'time-desc': 'newest first', activity: 'quietest first', 'activity-desc': 'most recently active first' };
 
 /** Is this section already in ascending order for `mode`? */
 function sortedAscending(g, mode) {
@@ -9126,7 +9126,9 @@ function sortedAscending(g, mode) {
   const coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   const cmp = (x, y) => mode === 'time'
     ? String(x.createdAt || '').localeCompare(String(y.createdAt || ''))
-    : coll.compare(x.name, y.name);
+    : mode === 'activity'
+      ? (!x.lastActiveAt !== !y.lastActiveAt ? (x.lastActiveAt ? -1 : 1) : String(x.lastActiveAt || '').localeCompare(String(y.lastActiveAt || '')))
+      : coll.compare(x.name, y.name);
   return mine.every((a, i) => i === 0 || cmp(mine[i - 1], a) <= 0);
 }
 
@@ -9135,7 +9137,7 @@ function sortBtns(g, cls = '') {
   const b = (mode, label, title) =>
     `<button class="${cls}" title="${esc(title)}" onclick="sortGroup('${jsq(g ?? '')}','${mode}')">${label}</button>`;
   return b('name', 'A→Z', 'Sort this group A→Z — again for Z→A')
-       + b('time', '⏳', 'Sort this group oldest first — again for newest first');
+       + b('activity', '⏳', 'Sort this group by last activity: quietest first — again for most recently active first');
 }
 
 async function sortGroup(g, mode = 'name') {
@@ -9889,7 +9891,17 @@ function v2IconHTML(a, st) {
 
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
-const V2_VIEWS = [['group', 'Groups'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['class', 'Class'], ['state', 'Status']];
+const V2_VIEWS = [['group', 'Groups'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
+/** Time-since bins, oldest last; the key's leading digit keeps them in order. */
+function v2AgeBin(iso, verb) {
+  if (!iso) return ['9', `Never ${verb}`];
+  const h = (Date.now() - Date.parse(iso)) / 36e5;
+  if (h < 1) return ['0', `${verb} in the last hour`];
+  if (h < 24) return ['1', `${verb} today`];
+  if (h < 24 * 7) return ['2', `${verb} this week`];
+  if (h < 24 * 30) return ['3', `${verb} this month`];
+  return ['4', `${verb} longer ago`];
+}
 let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return V2_VIEWS.some(([k]) => k === v) ? v : 'group'; } catch { return 'group'; } })();
 function v2SetView(v) {
   v2View = V2_VIEWS.some(([k]) => k === v) ? v : 'group';
@@ -9903,6 +9915,8 @@ function v2ViewKey(a) {
     case 'source': { const p = profiles.find(x => x.id === a.aiProfileId); return ['s:' + a.aiProfileId, p ? p.name : 'Unknown source']; }
     case 'model': { const m = (a.model || a.profileDefaultModel || '').replace(/^.*\//, ''); return ['m:' + m, m || 'No model']; }
     case 'class': return ['c:' + (a.classId || ''), a.className || 'No class'];
+    case 'activity': { const [k, l] = v2AgeBin(a.lastActiveAt, 'Active'); return ['act:' + k, l]; }
+    case 'rebuilt': { const [k, l] = v2AgeBin(a.rebuiltAt, 'Rebuilt'); return ['rb:' + k, l]; }
     case 'image': {
       // The fleet default, a pinned base image, or a derived image (its own bin, by name).
       if (!a.image) return ['i:', 'Fleet default image'];
@@ -9962,7 +9976,9 @@ function renderV2() {
   if (parked.length) for (const a of parked) section('archived', 'Archived', V2_ARCHIVE).items.push({ a, child: false });
   else if (live.some(v2Mine)) section('archived', 'Archived', V2_ARCHIVE); // somewhere to drop one
 
-  if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || x.label.localeCompare(y.label));
+  // Time bins keep their own order (recent → old); other views go alphabetical. Shared and Archived last.
+  const timeView = v2View === 'activity' || v2View === 'rebuilt';
+  if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
   const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${V2_VIEWS.map(([k, l]) =>
     `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}</div>` : '';
   const html = viewBar + sections.map(s => `
@@ -10778,7 +10794,7 @@ async function openFleet(tab = v2FleetTab, arg) {
       <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
         <span class="sub">New container for every agent, memory kept. Picks up a new runtime image or network.</span></div></div>
       <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups('name')">Sort every group A→Z</button>
-        <button onclick="sortAllGroups('time', true)">⏳ Newest first</button>
+        <button onclick="sortAllGroups('activity', true)">⏳ Most recently active first</button>
         <span class="sub">A one-off tidy. On a group's own header, pressing the same button again reverses it.</span></div></div>`;
     return;
   }

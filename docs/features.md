@@ -938,7 +938,10 @@ host-owner gated and never exposed to a co-tenant.
 **View by** (the home screen, above the agents): *Groups* is the arrangement
 you made — drag to reorder, drag between groups. The other views bin the same
 agents by **Machine**, **AI source**, **Model**, **Image** (the fleet default,
-a pinned base image, or each derived image by name), **Class** or **Status**,
+a pinned base image, or each derived image by name), **Class**, **Status**,
+**Activity** (when each agent last did something: the last hour, today, this
+week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
+its container was last built),
 read-only, remembered per device. The bar appears once there is more than
 one agent; the read-only views list their bins alphabetically, with *Shared
 with me* and *Archived* last.

@@ -362,6 +362,8 @@ export interface RuntimeInfo {
   extraPackages?: string[];
   /** A container's: the setup generation it was made at (label hatchabot.gen; absent = 0). */
   containerGen?: number;
+  /** A container's: when it was created (ISO) — i.e. the last rebuild. */
+  containerCreatedAt?: string;
   /** A container's: on the isolated agents network (false = still on a shared one;
    *  absent = not applicable — the Hatchabot agent's own network, or isolation turned off). */
   onAgentNetwork?: boolean;
