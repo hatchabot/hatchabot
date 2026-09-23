@@ -908,7 +908,9 @@ export class LocalDockerProvider implements RuntimeProvider {
         'run', '-d', '--name', embedder, '--network', net, '--network-alias', 'embedder',
         '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder',
         '--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
-        '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '1g', '--pids-limit', '64',
+        // 2 GiB: indexing several agents at once pushed the server past 1 GiB
+        // and it was killed mid-index (2026-09-23, five agents switched together).
+        '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '2g', '--pids-limit', '64',
         // As this user, so it can read the 0600 key file; the key is a FILE,
         // never an argument — argv is world-readable in /proc (27th audit).
         '--user', `${spec.uid}:${spec.gid}`,

@@ -895,8 +895,16 @@ export async function reindexMemoryIfSwitched(
   const sharedUnconfirmed = d.used === 'shared' && !agent.embedIndexedAt;
   if (!switched && !sharedUnconfirmed) return;
   log('memory.reindex', { agentId, engine: d.used, was: d.before });
-  const res = await provider.exec(runtimeRef, ['memory', 'index', '--force', '--agent', agent.slug], { timeoutMs: 10 * 60_000 })
+  const index = () => provider.exec(runtimeRef, ['memory', 'index', '--force', '--agent', agent.slug], { timeoutMs: 10 * 60_000 })
     .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+  let res = await index();
+  if (res.code !== 0) {
+    // A shared engine restarting under load answers 502 for a few seconds
+    // (2026-09-23): one more try after a pause, before it counts as failed.
+    log('memory.reindex_retry', { agentId });
+    await (deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))))(15_000);
+    res = await index();
+  }
   if (res.code !== 0) {
     const error = `memory index failed: ${(res.stderr || res.stdout).trim().slice(-300)}`;
     store.setAgentEmbedIndex(agentId, null, error);

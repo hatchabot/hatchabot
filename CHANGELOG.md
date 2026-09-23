@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.49.4] — 2026-09-23
+
+### Fixed
+- The memory search engine's memory limit is 2 GiB (was 1 GiB): indexing several agents at once pushed it past the limit and it was killed mid-index, so two of five switched agents came up without an index. The re-index step now also retries once after a pause when the engine answers with a transient error.
+
 ## [2.49.3] — 2026-09-23
 
 ### Changed
