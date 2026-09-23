@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.46.0] — 2026-09-23
+
+### Changed
+- The home screen's Sort is **Age · Name · Activity** in every view (Age = newest agent first; press again to flip), with no label. Positions inside a group follow the sort; dragging an icon moves it to another group or to Archived.
+- The top bar has its own colour — the accent tinted into the page — fading out at its bottom edge, in both themes.
+
 ## [2.45.1] — 2026-09-23
 
 ### Changed

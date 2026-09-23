@@ -394,7 +394,10 @@
      menu right. Inbox shows only when something is waiting in it. */
   body.v2 .v2top { display:flex }
   .v2top { position:sticky; top:env(safe-area-inset-top, 0px); z-index:30; flex-direction:row; align-items:center; gap:8px;
-           margin:0 -20px 14px; padding:12px 20px; background:color-mix(in srgb, var(--bg) 86%, transparent);
+           margin:0 -20px 14px; padding:12px 20px;
+           /* Its own colour — the accent, tinted into the page — fading out at the bottom edge. */
+           background:linear-gradient(180deg, color-mix(in srgb, var(--accent) 26%, var(--bg)) 0%, color-mix(in srgb, var(--accent) 14%, var(--bg)) 60%, color-mix(in srgb, var(--accent) 4%, var(--bg)) 100%);
+           box-shadow:0 10px 18px -12px color-mix(in srgb, var(--accent) 45%, transparent);
            -webkit-backdrop-filter:saturate(1.4) blur(12px); backdrop-filter:saturate(1.4) blur(12px);
            border-bottom:1px solid transparent; transition:border-color .2s }
   .v2top.scrolled { border-bottom-color:var(--line) }
@@ -9921,16 +9924,17 @@ let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return
 // only, where dragging works), Name, or Activity. Name and Activity order the
 // agents on screen and never touch the arrangement; Fleet → Tools has the
 // buttons that rewrite it. Remembered per device.
-let v2Sort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort') || 'null'); return v && ['manual', 'name', 'activity'].includes(v.key) ? v : { key: 'manual', dir: 1 }; } catch { return { key: 'manual', dir: 1 }; } })();
+let v2Sort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort') || 'null'); return v && ['age', 'name', 'activity'].includes(v.key) ? v : { key: 'age', dir: -1 }; } catch { return { key: 'age', dir: -1 }; } })();
 function v2SetSort(key) {
-  v2Sort = { key, dir: v2Sort.key === key && key !== 'manual' ? -v2Sort.dir : (key === 'activity' ? -1 : 1) };
+  // Age and Activity start newest / most recent first; Name starts A→Z. Again flips.
+  v2Sort = { key, dir: v2Sort.key === key ? -v2Sort.dir : (key === 'name' ? 1 : -1) };
   try { localStorage.setItem('hb-v2-sort', JSON.stringify(v2Sort)); } catch {}
   renderV2();
 }
-/** The sort in force: Manual means nothing outside Groups, where Name stands in. */
-const v2SortKey = () => (v2Sort.key === 'manual' && v2View !== 'group' ? 'name' : v2Sort.key);
+const v2SortKey = () => v2Sort.key;
 function v2BinCmp(x, y) {
   const key = v2SortKey(), dir = v2Sort.dir;
+  if (key === 'age') return dir * String(x.createdAt || '').localeCompare(String(y.createdAt || '')) || x.name.localeCompare(y.name);
   if (key === 'activity') {
     if (!x.lastActiveAt !== !y.lastActiveAt) return x.lastActiveAt ? -1 : 1; // never-active last either way
     return dir * String(x.lastActiveAt || '').localeCompare(String(y.lastActiveAt || '')) || x.name.localeCompare(y.name);
@@ -10013,13 +10017,11 @@ function renderV2() {
   // Time bins keep their own order (recent → old); other views go alphabetical. Shared and Archived last.
   const timeView = v2View === 'activity' || v2View === 'rebuilt';
   if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
-  const sorted = v2SortKey() !== 'manual';
-  if (sorted) for (const s of sections) s.items.sort((p, q) => v2BinCmp(p.a, q.a));
-  const sortChoices = v2View === 'group' ? [['manual', 'Manual'], ['name', 'Name'], ['activity', 'Activity']] : [['name', 'Name'], ['activity', 'Activity']];
-  const sortBar = `<span class="v2binsort"><span class="sub">Sort</span>${sortChoices.map(([k, l]) => {
+  for (const s of sections) s.items.sort((p, q) => v2BinCmp(p.a, q.a));
+  const sortBar = `<span class="v2binsort">${[['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
     const on = v2SortKey() === k;
-    const title = k === 'manual' ? 'The order you arranged — drag to change it' : k === 'name' ? 'A→Z; again for Z→A' : 'Most recently active first; again for quietest first';
-    return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on && k !== 'manual' ? (v2Sort.dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
+    const title = k === 'age' ? 'Newest agent first; again for oldest first' : k === 'name' ? 'A→Z; again for Z→A' : 'Most recently active first; again for quietest first';
+    return `<button class="${on ? 'on' : ''}" onclick="v2SetSort('${k}')" title="${title}">${l}${on ? (v2Sort.dir > 0 ? ' ▲' : ' ▼') : ''}</button>`;
   }).join('')}</span>`;
   const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${V2_VIEWS.map(([k, l]) =>
     `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}</div>` : '';
@@ -10033,7 +10035,7 @@ function renderV2() {
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
-          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || v2View !== 'group' || sorted ? ' data-v2fixed="1"' : ''}
+          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || v2View !== 'group' ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
@@ -10170,7 +10172,10 @@ window.addEventListener('pointerup', async (e) => {
       await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: name } });
       toast(`${a.name} moved to ${name}`);
     } else {
-      const r = await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: t.before ? { before: t.before } : { before: null, group: t.group } });
+      // Positions inside a group are sorted on screen, so a drop is a move
+      // BETWEEN groups; a drop back into the same one changes nothing.
+      if ((t.group ?? '') === (a.group ?? '')) return renderV2();
+      const r = await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: t.group } });
       if ((r.group ?? '') !== (a.group ?? '')) toast(`${a.name} moved to ${r.group || 'Default'}`);
     }
     await refresh(false);
