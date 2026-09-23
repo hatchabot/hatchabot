@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.38.0] — 2026-09-23
+
+### Added
+- `hatchabot accounts create <username> [--host-owner] [--cli-token [--token-days N]] [--json]`: make the owner, or another person, from the machine itself — for an install set up by a script. It prints a one-time link where the person chooses their password; an owner arriving that way gets their recovery code on the spot, and the link reads "This Hatchabot is yours".
+- `hatchabot doctor --json`: the verdict, the same lines, and the facts behind them, for a program watching many installs; exits 1 on any ✗.
+- `scripts/follow-channel.sh <stable|beta|latest>` (`--install` for a 10-minute timer): an install follows a channel on its own through `upgrade.sh`; a release that failed is not retried until the channel names a newer one.
+
+### Fixed
+- `hatchabot accounts` (list, reset-password — the locked-out owner's way back in) ignored the checkout's `.env`, so on an install that keeps its data elsewhere (as a production install does) it found no database.
+- Channel lookups read the version beside the channel's own name; a `channels.json` written on one line gave every channel the last version on it. (Every file so far had one channel per line.)
+
 ## [2.37.3] — 2026-09-23
 
 ### Fixed

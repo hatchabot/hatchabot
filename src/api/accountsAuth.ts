@@ -102,6 +102,7 @@ export function setupCode(): string {
   return SETUP_CODE;
 }
 
+
 function isLoopback(ip: string | undefined): boolean {
   if (!ip) return false;
   const bare = ip.replace(/^::ffff:/, '');
@@ -254,8 +255,12 @@ export function registerAccountRoutes(
     }
     const { hash, salt } = await hashPassword(password);
     store.claimLocalAccount(account.id, hash, salt);
+    // An owner made from the command line (`hatchabot accounts create`) meets the app here, for the first
+    // time: the one person nobody can send a reset link gets a recovery code
+    // now, as account #1 does at bootstrap.
+    const recoveryCode = account.hostOwner && !account.recoveryHash ? await issueRecoveryCode(account.id) : undefined;
     setSessionCookie(reply, req, mintSession(secret, account.id, hash, Date.now() + TTL_MS));
-    return { ok: true, id: account.id, username: account.username };
+    return { ok: true, id: account.id, username: account.username, ...(recoveryCode ? { recoveryCode } : {}) };
   });
 
   /** Is this claim link still good? Lets the page show the username it is for. */
@@ -264,7 +269,12 @@ export function registerAccountRoutes(
     if (!account) return reply.code(404).send({ error: 'That link has been used already, or it has expired.' });
     // An account that already has a password is being RESET, not invited: the
     // page should say so, or people wonder why they are "joining" again.
-    return { username: account.username, reset: account.pwHash !== '' };
+    return {
+      username: account.username,
+      reset: account.pwHash !== '',
+      // Made from the command line: this is its owner's first visit, not an invitation.
+      owner: account.hostOwner && account.pwHash === '',
+    };
   });
 
   /**

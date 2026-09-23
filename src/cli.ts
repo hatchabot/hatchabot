@@ -62,6 +62,11 @@ Commands:
                                Works with any sign-in method, including Google.
                                [--email <addr>] uses email/password instead.
   accounts [list]              Local sign-in accounts (HATCHABOT_AUTH=accounts).
+  accounts create <user> [--host-owner] [--cli-token [--token-days N]] [--json]
+                               Make an account from the machine itself; the
+                               person chooses a password on the one-time link it
+                               prints. --host-owner makes the first one, the
+                               owner; --cli-token also prints a CLI token.
   accounts reset-password <user> <new>
                                Reset a password from the machine itself — the
                                way back in when the host owner is locked out.
@@ -70,10 +75,11 @@ Commands:
                                to stable | beta | latest | an exact version —
                                which is also how you roll back. Restores the
                                previous release if the new one does not start.
-  doctor                       Check this installation: Node, Docker, runtime
+  doctor [--json]              Check this installation: Node, Docker, runtime
                                image, .env, database, service, control plane,
                                disk, backups, Tailscale — with the fix for
-                               anything wrong. Run it from the checkout.
+                               anything wrong. --json: for a program (the same
+                               lines plus the facts; exit 1 on any ✗).
   list [--all]                 Agents with state, model, and last activity.
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
@@ -391,8 +397,8 @@ function envQuote(v: string): string {
 // parser took any unlisted flag to have a value, so `--no-telegram` (missing
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'outdated', 'required', 'dry-run', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
-const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days']);
 
 export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -905,7 +911,11 @@ async function main() {
     const { Store } = await import('./store/store.js');
     const { default: Database } = await import('better-sqlite3');
     const { defaultDbPath } = await import('./envCompat.js');
-    const dbPath = process.env.HATCHABOT_DB ?? defaultDbPath();
+    // The checkout's .env says where the data lives (a production install keeps
+    // it outside the checkout); without reading it, this found no database there.
+    const { envMap } = await import('./doctor.js');
+    const dotenv = envMap('.env');
+    const dbPath = process.env.HATCHABOT_DB ?? dotenv.HATCHABOT_DB ?? defaultDbPath();
     if (!existsSync(dbPath)) {
       console.error(`No database at ${dbPath}. Is this the Hatchabot checkout?`);
       process.exitCode = 1;
@@ -949,7 +959,51 @@ async function main() {
       console.log(`Password reset for ${account.username}. Every session of that account is now signed out.`);
       return;
     }
-    console.error(`Unknown: accounts ${sub}. Try: list | reset-password <username> <new-password>`);
+    if (sub === 'create' || sub === 'add') {
+      // An account made from the machine itself — for a machine set up by a
+      // program (a hosting provisioner) or by someone with no browser at hand.
+      // Opening this database is the credential, as for reset-password. No
+      // password is set here: the person chooses their own on a one-time link.
+      const username = (rest[1] ?? '').trim();
+      const owner = flags.has('host-owner');
+      const { usernameProblem } = await import('./api/accountsAuth.js');
+      const problem = username ? usernameProblem(username) : 'Usage: hatchabot accounts create <username> [--host-owner] [--cli-token [--token-days N]] [--json]';
+      if (problem) { console.error(problem); process.exitCode = 1; return; }
+      if (store.localAccountByUsername(username)) { console.error(`There is already an account "${username}".`); process.exitCode = 1; return; }
+      if (owner && rows.some((r) => r.hostOwner)) {
+        console.error('This installation already has its owner. Add other people without --host-owner.');
+        process.exitCode = 1; return;
+      }
+      if (!owner && !rows.some((r) => r.hostOwner)) {
+        console.error('Create the owner first: hatchabot accounts create <username> --host-owner');
+        process.exitCode = 1; return;
+      }
+      const { randomBytes, randomUUID } = await import('node:crypto');
+      const id = `acct-${randomUUID()}`;
+      store.insertLocalAccount({ id, username, pwHash: '', pwSalt: '', hostOwner: owner, disabled: false, createdAt: new Date().toISOString() });
+      // The owner inherits what an earlier password-mode install made, as account #1 does in the app.
+      if (owner) store.adoptLocalOwnerData(id);
+      store.recordAccount(id, username.includes('@') ? username : undefined);
+      const code = randomBytes(16).toString('base64url');
+      const expiresAt = new Date(Date.now() + 48 * 3600_000).toISOString();
+      store.setLocalAccountClaim(id, code, expiresAt);
+      const days = Math.min(Math.max(Math.floor(Number(flags.get('token-days') ?? 1)) || 1, 1), 90);
+      const token = flags.has('cli-token') ? store.createCliToken(id, 'command line', days) : undefined;
+      const base = (process.env.HATCHABOT_PUBLIC_URL ?? dotenv.HATCHABOT_PUBLIC_URL ?? `http://localhost:${dotenv.PORT ?? 8080}`).replace(/\/$/, '');
+      const link = `${base}/?claim=${code}`;
+      const mode = process.env.HATCHABOT_AUTH ?? dotenv.HATCHABOT_AUTH ?? 'password';
+      if (flags.has('json')) {
+        console.log(JSON.stringify({ id, username, hostOwner: owner, claimUrl: link, claimExpiresAt: expiresAt,
+          ...(token ? { cliToken: token.token, cliTokenExpiresAt: token.expiresAt } : {}), authMode: mode }));
+      } else {
+        console.log(`Created ${username}${owner ? ' (host owner)' : ''}. They choose a password here — once, within 48 hours:`);
+        console.log(`  ${link}`);
+        if (token) console.log(`CLI token (expires ${token.expiresAt.slice(0, 10)}):\n  ${token.token}`);
+      }
+      if (mode !== 'accounts') console.error(`note: this install signs in with "${mode}", so accounts are not used yet — set HATCHABOT_AUTH=accounts in .env and restart.`);
+      return;
+    }
+    console.error(`Unknown: accounts ${sub}. Try: list | create <username> [--host-owner] | reset-password <username>`);
     process.exitCode = 1;
     return;
   }
@@ -966,7 +1020,23 @@ async function main() {
   if (cmd === 'doctor') {
     process.chdir(repoDir()); // .env, data/ and the scripts live in the checkout, wherever doctor was typed
     const { doctorReport, gatherFacts } = await import('./doctor.js');
-    const lines = doctorReport(await gatherFacts(url));
+    const facts = await gatherFacts(url);
+    const lines = doctorReport(facts);
+    if (flags.has('json')) {
+      // For a program watching many installs (a hosting monitor): the verdict,
+      // the same lines a person reads, and the raw facts behind them.
+      const fails = lines.filter((l) => l.level === 'fail').length;
+      console.log(JSON.stringify({
+        ok: fails === 0,
+        fails,
+        warns: lines.filter((l) => l.level === 'warn').length,
+        at: new Date().toISOString(),
+        lines,
+        facts,
+      }));
+      if (fails) process.exitCode = 1;
+      return;
+    }
     for (const l of lines) console.log(`${l.level === 'ok' ? '✓' : l.level === 'warn' ? '⚠' : '✗'} ${l.text}${l.fix ? `\n    → ${l.fix}` : ''}`);
     const fails = lines.filter((l) => l.level === 'fail').length, warns = lines.filter((l) => l.level === 'warn').length;
     console.log(fails ? `\n${fails} problem${fails === 1 ? '' : 's'}, ${warns} warning${warns === 1 ? '' : 's'}.` : `\nAll good${warns ? ` (${warns} warning${warns === 1 ? '' : 's'})` : ''}.`);

@@ -2686,7 +2686,9 @@ async function loadClaim(code) {
     // written each time, never patched.
     $('claimLede').innerHTML = r.reset
       ? `Choose a new password for <b>${esc(r.username)}</b>. Your old one stops working once you do.`
-      : `You've been invited as <b>${esc(r.username)}</b>. Choose a password and you're in.`;
+      : r.owner
+        ? `This Hatchabot is yours, <b>${esc(r.username)}</b>. Choose a password and you're in.`
+        : `You've been invited as <b>${esc(r.username)}</b>. Choose a password and you're in.`;
   } catch (e) {
     claimLoaded = null;
     $('loginErr').textContent = e.message;
@@ -2704,6 +2706,7 @@ async function acctClaim() {
     history.replaceState(null, '', location.pathname);   // the code is spent
     loginDlg.close(); $('claimPw').value = '';
     await loadConfig(); await refresh(true);
+    if (r.recoveryCode) showRecoveryCode(r.recoveryCode); // the owner, arriving from a command-line setup
   } catch (e) { $('loginErr').textContent = e.message; }
   finally { $('claimBtn').disabled = false; }
 }

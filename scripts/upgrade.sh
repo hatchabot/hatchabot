@@ -31,7 +31,7 @@ git fetch --tags --force --quiet origin
 newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
 case "$CHANNEL" in
   latest) TARGET="$(newest)" ;;
-  stable|beta) TARGET="$(git show origin/main:channels.json 2>/dev/null | grep "\"$CHANNEL\"" | sed -E 's/.*"(v[^"]+)".*/\1/' | head -1)"
+  stable|beta) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | head -1)"
     [ -n "$TARGET" ] || TARGET="$(newest)" ;;
   v[0-9]*) git rev-parse -q --verify "refs/tags/$CHANNEL" >/dev/null || { echo "There is no release $CHANNEL."; exit 1; }
     TARGET="$CHANNEL" ;;
@@ -55,9 +55,10 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
+INSTALL="${HATCHABOT_INSTALL_CMD:-npm ci --silent}"         # (likewise)
 echo "Upgrading $CUR → $TARGET ($CHANNEL)…"
-rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && npm ci --silent && $RESTART; }
+rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && $INSTALL && $RESTART; }
 git checkout --quiet "$TARGET"
-npm ci --silent || { rollback; exit 1; }
+$INSTALL || { rollback; exit 1; }
 $RESTART || { rollback; exit 1; }
 echo "Now on $TARGET."

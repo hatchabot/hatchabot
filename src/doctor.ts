@@ -124,7 +124,7 @@ export function checkoutFacts(dir = process.cwd()): DoctorFacts['checkout'] {
 function sh(cmd: string, args: string[], timeout = 8000): string | undefined {
   try { return execFileSync(cmd, args, { encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return undefined; }
 }
-function envMap(file: string): Record<string, string> {
+export function envMap(file: string): Record<string, string> {
   const m: Record<string, string> = {};
   try { for (const l of readFileSync(file, 'utf8').split('\n')) { const t = l.trim(); if (!t || t.startsWith('#') || !t.includes('=')) continue; m[t.slice(0, t.indexOf('=')).replace(/^AGENTCLAW_/, 'HATCHABOT_')] = t.slice(t.indexOf('=') + 1).replace(/^['"]|['"]$/g, ''); } } catch { /* absent */ }
   return m;

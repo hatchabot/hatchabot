@@ -532,7 +532,7 @@ describe('reset links', () => {
 
     // The page knows this is a reset, not a second invitation.
     const peek = await f.inject({ method: 'GET', url: `/v1/local-accounts/claim?code=${resetCode}` });
-    expect(peek.json()).toEqual({ username: 'sophie', reset: true });
+    expect(peek.json()).toEqual({ username: 'sophie', reset: true, owner: false });
 
     // Asking for a reset never locks anyone out on its own.
     expect((await signIn(f, 'sophie', 'first-password')).statusCode).toBe(200);

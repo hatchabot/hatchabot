@@ -117,7 +117,7 @@ case "$CHANNEL" in
   stable|beta)
     # Named releases live in channels.json on main, so promoting one is a
     # one-line commit and never a new tag.
-    LATEST="$(git -C "$DIR" show origin/main:channels.json 2>/dev/null | grep "\"$CHANNEL\"" | sed -E 's/.*"(v[^"]+)".*/\1/' | head -1)"
+    LATEST="$(git -C "$DIR" show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | head -1)"
     if [ -z "$LATEST" ]; then
       echo "   (no $CHANNEL release is named yet — using the newest)"
       LATEST="$(newest)"

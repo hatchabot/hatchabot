@@ -61,6 +61,20 @@ It deploys through `deploy-release.sh` (health check, automatic rollback). A tag
 that fails is not retried; the next tag is. It never moves `stable` — so the
 rhythm becomes: tag → it runs here → promote when it has held up.
 
+Any other install can follow a channel on its own — a hosted tenant on
+`stable`, a canary on `beta`:
+
+```sh
+./scripts/follow-channel.sh --install stable   # checks every 10 minutes (systemd --user)
+./scripts/follow-channel.sh stable             # once, now
+./scripts/follow-channel.sh --uninstall
+```
+
+It upgrades through `upgrade.sh` (forward only; the previous release restored if
+the new one does not start). A release that failed is not retried until the
+channel names a newer one. So promoting is the rollout: every follower of that
+channel moves within about ten minutes.
+
 So the rhythm is: tag and deploy to your own machines as often as you like;
 promote to `beta` when a release is worth testers' time; promote to `stable`
 once it has run for a while without surprises. Rolling `stable` back is the

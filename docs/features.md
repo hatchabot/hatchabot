@@ -502,6 +502,14 @@ recommends it; an install that started with a shared password can switch in
 - **No Telegram and no code** — the break-glass is still there, on the machine
   itself: `hatchabot accounts reset-password <username>` (it prompts for the
   new password).
+- **Accounts made from the machine** — `hatchabot accounts create <username>
+  --host-owner` makes the owner with no browser at hand (a machine set up by a
+  script or a hosting provider); without `--host-owner` it adds another person.
+  No password is set: it prints a one-time link (48 hours) where the person
+  chooses their own, and an owner gets their recovery code right then.
+  `--cli-token` also prints a CLI token (one day, or `--token-days N`), and
+  `--json` answers for a program. As with reset-password, being able to open
+  the machine's database is the credential.
 
 ## Members & invites
 
