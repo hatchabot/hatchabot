@@ -4379,8 +4379,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/crons', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply);
     if (!agent) return reply;
-    const crons = await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
-    return { crons };
+    try {
+      return { crons: await listCrons(providerFor(agent.hostId), agent.runtimeRef!, agent.slug) };
+    } catch (err) {
+      app.log.warn({ agent: agent.id, err: String((err as Error).message ?? err) }, 'cron list failed');
+      // Not "none": the tasks may be fine; they just couldn't be read.
+      return reply.code(503).send({ error: "Couldn't read its scheduled tasks just now — try again in a moment." });
+    }
   });
 
   // The missing verb (audit backlog: "no interface creates a cron"): a

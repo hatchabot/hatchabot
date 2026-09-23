@@ -65,13 +65,23 @@ describe('crons helpers', () => {
     expect(p.execLog).toContainEqual(['cron', 'list', '--agent', 'kitchen', '--all', '--json']);
   });
 
-  it('listCrons returns [] on a nonzero exit or bad json', async () => {
+  it('listCrons says it could not read the list — never "no tasks" (2026-09-23)', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     p.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway down' });
-    expect(await listCrons(p, ref, 'kitchen')).toEqual([]);
+    await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/cron list failed/);
     p.execResponses.set('cron list', { code: 0, stdout: 'not json', stderr: '' });
-    expect(await listCrons(p, ref, 'kitchen')).toEqual([]);
+    await expect(listCrons(p, ref, 'kitchen')).rejects.toThrow(/JSON/);
+    p.execResponses.set('cron list', { code: 0, stdout: '{"jobs":[]}', stderr: '' });
+    expect(await listCrons(p, ref, 'kitchen')).toEqual([]); // a real "none"
+  });
+
+  it('GET …/crons answers 503 with a try-again, not an empty list, when the gateway hiccups', async () => {
+    const { provider, f } = await world();
+    provider.execResponses.set('cron list', { code: 1, stdout: '', stderr: 'gateway down' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/crons', headers: as });
+    expect(res.statusCode).toBe(503);
+    expect(res.json().error).toMatch(/try again/);
   });
 
   it('mutators pass the right argv and report success by exit code', async () => {

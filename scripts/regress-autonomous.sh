@@ -100,8 +100,12 @@ $HB stop "$NAME" --wait >/dev/null 2>&1 && $HB start "$NAME" --wait --timeout 10
   && ok || bad "$($HB list | grep "$NAME")"
 
 step "after the restart: its task is still there, still paused"
-line=$($HB tasks "$NAME" 2>&1 | grep heartbeat)
-echo "$line" | grep -q " off " && ok || bad "listing: ${line:-no task}"
+line=""; out=""
+for _ in 1 2 3; do  # a gateway that has just restarted can miss one read; a lost task never appears
+  out=$($HB tasks "$NAME" 2>&1); line=$(echo "$out" | grep heartbeat) && break
+  sleep 5
+done
+echo "$line" | grep -q " off " && ok || bad "listing: ${line:-$(echo "$out" | head -1)}"
 
 step "after the restart: it still remembers the codeword"
 r=""

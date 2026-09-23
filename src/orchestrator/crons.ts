@@ -124,20 +124,27 @@ export async function listCronRuns(
   }
 }
 
-/** List the agent's scheduled tasks, including disabled ones. */
+/**
+ * List the agent's scheduled tasks, including disabled ones. Throws when the
+ * list could not be read: it used to return [] then, so a gateway that
+ * hiccuped for a moment made the app and CLI say "no scheduled tasks" to
+ * someone whose tasks were fine (seen in the clean-VM regression, 2026-09-23).
+ * Callers that want "nothing" on failure say so with .catch(() => []).
+ */
 export async function listCrons(
   provider: RuntimeProvider,
   runtimeRef: string,
   slug: string,
 ): Promise<Cron[]> {
   const res = await provider.exec(runtimeRef, ['cron', 'list', '--agent', slug, '--all', '--json']);
-  if (res.code !== 0) return [];
+  if (res.code !== 0) throw new Error(`cron list failed (${res.code}): ${(res.stderr || res.stdout).slice(0, 200)}`);
+  let jobs: unknown;
   try {
-    const jobs = JSON.parse(res.stdout).jobs;
-    return Array.isArray(jobs) ? jobs.map(normalizeCron) : [];
+    jobs = JSON.parse(res.stdout).jobs;
   } catch {
-    return [];
+    throw new Error('cron list returned something other than JSON');
   }
+  return Array.isArray(jobs) ? jobs.map(normalizeCron) : [];
 }
 
 export interface AddCronOptions {

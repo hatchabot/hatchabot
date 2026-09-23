@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.5] — 2026-09-23
+
+### Fixed
+- **A scheduled-task list that could not be read was shown as empty.** When the agent's gateway failed to answer for a moment, the app and `hbt tasks` said *no scheduled tasks* to someone whose tasks were fine. The list now answers "couldn't read its scheduled tasks just now — try again" (503), and a real empty list still reads as empty. Seen once in the regression on the clean Linux VM, right after a restart.
+- The autonomous-agent regression gives a just-restarted agent three tries to list its tasks (as it already did for its first answer), and reports the actual error when it fails.
+
 ## [2.34.4] — 2026-09-23
 
 ### Changed
