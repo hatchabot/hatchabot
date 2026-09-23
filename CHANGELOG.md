@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.37.3] — 2026-09-23
+
+### Fixed
+- The rebuild policy picker sat unlabelled inside "Base images", and the notes pointed to a Runtime tab the default view doesn't have. It is its own section now: **Settings → Images → Automatic rebuilds**.
+
 ## [2.37.2] — 2026-09-23
 
 ### Fixed

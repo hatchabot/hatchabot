@@ -1830,15 +1830,6 @@
     <h4 style="margin:18px 0 4px" id="rtImagesH">Images on this machine</h4>
     <div class="sub" style="margin-bottom:10px" id="rtFleetNote"> <b>Fleet default</b> is <code id="rtDefault"></code> — agents without a pin follow it on their next rebuild. Try a new image on <b>one agent</b> first; promote it when you're happy, or discard the trial.</div>
     <div id="rtBase" class="sub" style="margin-bottom:8px">Loading…</div>
-    <div class="pair" style="align-items:center;gap:8px;margin-bottom:10px">
-      <label for="rbPolicy"><b>Rebuilds</b></label>
-      <select id="rbPolicy" style="width:auto" onchange="setRebuildPolicy(this.value)">
-        <option value="required-only">Required ones on their own</option>
-        <option value="auto">Required, plus the rest overnight</option>
-        <option value="manual">Only when I press Rebuild</option>
-      </select>
-      <span id="rbPolicyNote" class="sub grow"></span>
-    </div>
     <details id="rtBuild" class="sec-drawer" style="margin-bottom:12px">
       <summary><b>🧪 Try a newer OpenClaw version, safely</b> <span class="sub">— build a candidate, test it on one agent, then promote</span></summary>
       <ol class="rt-steps">
@@ -1861,6 +1852,18 @@
     <div id="rtList">Loading…</div>
     <div class="sub" id="rtDerivedHint" style="margin-top:10px">Need extra packages (apt) in an image? Ask the management agent — <a href="#" onclick="event.preventDefault();askMgmtForImage()">ask for a derived image…</a> — then pin it to an agent or a class here.</div>
     <div class="sub" id="rtErr" style="color:var(--bad);margin-top:6px"></div>
+    </div>
+    <div id="rbSection" hidden>
+    <h4 style="margin:18px 0 4px">Automatic rebuilds</h4>
+    <div class="sub">A rebuild remakes an agent's container; its memory is kept. Each agent's card says when it needs one, and why.</div>
+    <div class="pair" style="align-items:center;gap:8px;margin:8px 0 0;flex-wrap:wrap">
+      <select id="rbPolicy" aria-label="Automatic rebuilds" style="width:auto" onchange="setRebuildPolicy(this.value)">
+        <option value="required-only">Required ones on their own</option>
+        <option value="auto">Required, plus the rest overnight</option>
+        <option value="manual">Only when I press Rebuild</option>
+      </select>
+      <span id="rbPolicyNote" class="sub grow"></span>
+    </div>
     </div>
     <div id="rtCapsHome">
     <h4 style="margin:18px 0 4px">What agents can do</h4>
@@ -3852,6 +3855,7 @@ async function loadRuntime() {
   loadRuntimeCaps();
   loadDerivedImages();
   $('rtPanel').hidden = !myAccount.hostOwner;
+  $('rbSection').hidden = !myAccount.hostOwner;
   // Web search provider is decided per agent by the fleet key, not by the image — say which one applies.
   if (myAccount.hostOwner) api('/v1/search-key').then(k => { $('runtimeSearch').innerHTML = k.set
     ? '🔎 Web search: <b>Brave</b> — the fleet search key is set and injected into every agent at provision/rebuild (agents built before the key was set stay on DuckDuckGo until rebuilt).'

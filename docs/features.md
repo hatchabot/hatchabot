@@ -881,8 +881,8 @@ of two levels:
 - **recommended**: it runs an older image than the default (never for a
   pinned agent), or a release marked its change recommended.
 
-What the machine does on its own is its owner's choice (⚙ → Runtime →
-**Rebuilds**, or `hatchabot rebuild-policy`):
+What the machine does on its own is its owner's choice (⚙ Settings → Images →
+**Automatic rebuilds**; ⚙ → Runtime in the classic view; or `hatchabot rebuild-policy`):
 - *Required ones on their own* (the default): a required rebuild happens once
   the agent has been idle for 10 minutes, two at a time — never mid-reply,
   never the Hatchabot agent, never a stopped agent (a rebuild would start it).

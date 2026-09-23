@@ -3068,7 +3068,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env'); // (tests point it elsewhere)
     const wrote = await writeEnvVar(envFile, 'HATCHABOT_REBUILD_POLICY', policy, () => true,
-      'Written by Hatchabot: when agents are rebuilt on their own (Settings → Runtime).')
+      'Written by Hatchabot: when agents are rebuilt on their own (Settings → Images → Automatic rebuilds).')
       .catch((err: unknown) => ({ ok: false, error: String(err) }));
     if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
     process.env.HATCHABOT_REBUILD_POLICY = policy; // live: the sweep reads it each time
