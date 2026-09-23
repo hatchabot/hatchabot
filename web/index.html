@@ -8330,12 +8330,21 @@ async function importAgentFile(file) {
       if (values === null) return; // cancelled — don't upload
       query = `?values=${encodeURIComponent(JSON.stringify(values))}`;
     }
-    const res = await fetch(`/v1/agents/import${query}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/octet-stream' },
-      body: file,
-    });
-    const data = await res.json().catch(() => ({}));
+    const send = async (q) => {
+      const res = await fetch(`/v1/agents/import${q}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: file,
+      });
+      return [res, await res.json().catch(() => ({}))];
+    };
+    let [res, data] = await send(query);
+    if (res.status === 409 && data.code === 'image_decision') {
+      const choice = imageDecision(data);
+      if (!choice) return;
+      if (choice === 'build') toast(`Building ${data.image}… this takes a few minutes`, 20000);
+      [res, data] = await send(`${query}${query ? '&' : '?'}image=${choice}`);
+    }
     if (!res.ok) throw new Error(data.error || data.message || 'Import failed');
     if (data.kind === 'template') {
       const needs = [];
@@ -8349,6 +8358,15 @@ async function importAgentFile(file) {
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
   finally { $('importFile').value = ''; }
+}
+
+// A file pinned to an image this machine lacks: show what building it would
+// run, BEFORE anyone agrees to it. 'build' | 'drop' | null (cancelled).
+function imageDecision(d) {
+  const r = d.recipe;
+  const what = r ? `\n\nFROM ${r.base}${r.packages?.length ? `\napt packages: ${r.packages.join(' ')}` : ''}${r.lines ? `\n${r.lines}` : ''}` : '';
+  if (d.mayBuild && confirm(`${d.error}${what}\n\nBuild this image here? These lines run as root while it builds (a few minutes).`)) return 'build';
+  return confirm(`Run it on this machine's default image instead? Whatever the pinned image adds will be missing.${d.mayBuild ? '' : what}`) ? 'drop' : null;
 }
 
 // Share = a trained copy for someone else. It downloads a file (you send it);

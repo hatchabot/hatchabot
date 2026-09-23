@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.36.0] — 2026-09-23
+
+### Added
+- **Downloaded copies carry their pinned image as a recipe** (base, extra packages, a derived image's lines). Importing one where the image is missing stops and shows what building it would run; the machine's owner can build it, anyone can use the default image instead. Web Import asks with the recipe on screen; `hatchabot restore` / `import` ask on a terminal or take `--build-image` / `--drop-pin`. A derived image arrives listed among that machine's images.
+- **Rehost no longer refuses a pinned agent**: the other server rebuilds the image if your token is its owner's, and otherwise refuses with your agent left as it was. `--drop-pin` still runs its default image.
+
+### Security
+- The recipe in a file is untrusted: its own `FROM`/`USER`, build mounts or networking, a base or name outside `hatchabot-runtime`, or a malformed package name is never built, whatever anyone chooses. A same-named derived image with other lines is never replaced. The build runs after the agent's row exists, so a mover whose connection drops mid-build waits for it instead of restarting its own copy next to a live one.
+
 ## [2.35.1] — 2026-09-23
 
 ### Fixed

@@ -15,6 +15,7 @@
  */
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { DerivedImage } from '../domain/types.js';
+import { baseProblem, dockerfileProblem, DERIVED_TAG_PREFIX } from './derivedImage.js';
 
 export interface ImageRecipe {
   /** The image to rebuild, by the same name. */
@@ -30,6 +31,14 @@ export interface ImageRecipe {
 }
 
 const PKG = /^[a-z0-9][a-z0-9+.-]*$/;
+
+/** A derived image's record, by the tag agents pin (`…:derived-<name>`). */
+export function derivedByTag(get: (name: string) => DerivedImage | undefined) {
+  return (tag: string): DerivedImage | undefined => {
+    const m = /:derived-([a-z][a-z0-9-]*)$/.exec(tag);
+    return m ? get(m[1]!) : undefined;
+  };
+}
 
 /** How to rebuild `tag` — read from the SOURCE machine, where the image exists. */
 export async function recipeFor(
@@ -76,6 +85,38 @@ export async function ensureImageOn(
   if (!target.ensureBaseImage || !target.buildImage) return { ok: false, problem: 'this machine cannot build images on that one' };
   const r = await recipeFor(source, tag, derived);
   if ('problem' in r) return { ok: false, problem: r.problem };
+  return buildRecipeOn(target, r);
+}
+
+/**
+ * A recipe that arrived from somewhere else (inside an export file) is
+ * untrusted: the same rules a derived image made here must pass, plus names
+ * that can only be what this app itself produces. Null when it is acceptable.
+ */
+export function recipeProblem(r: ImageRecipe): string | null {
+  const TAG = /^(hatchabot|agentclaw)-runtime:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
+  if (!TAG.test(r.tag)) return `"${r.tag}" is not a runtime image name`;
+  const bp = baseProblem(r.base);
+  if (bp) return bp;
+  if (r.packages.length > 32 || r.packages.some((p) => !PKG.test(p) || p.length > 64)) return 'its package list is not valid';
+  const derived = r.tag.split(':')[1]!.startsWith(DERIVED_TAG_PREFIX);
+  if (r.lines?.trim()) {
+    if (!derived) return 'only a derived image has Dockerfile lines';
+    if (r.lines.length > 8000) return 'its Dockerfile lines are too long';
+    const dp = dockerfileProblem(r.lines);
+    if (dp) return dp;
+  }
+  if (r.channels.length > 8 || r.channels.some((c) => !/^[a-z]{2,16}$/.test(c))) return 'its messaging plugins are not valid';
+  return null;
+}
+
+/** Base first (pulled if need be), then the recipe's layer. */
+export async function buildRecipeOn(
+  target: RuntimeProvider,
+  r: ImageRecipe,
+): Promise<{ ok: true; built: boolean } | { ok: false; problem: string }> {
+  if (!target.ensureBaseImage || !target.buildImage) return { ok: false, problem: 'this machine cannot build images on that one' };
+  const tag = r.tag;
   if (!(await target.ensureBaseImage(r.base))) {
     return { ok: false, problem: `the base ${r.base} is not on that machine and has no published copy to pull` };
   }

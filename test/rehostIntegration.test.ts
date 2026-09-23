@@ -118,20 +118,54 @@ describe('rehost over real HTTP', () => {
     expect(a.migratedTo).toBeUndefined();
   });
 
-  it('a pinned runtime image refuses the move until the drop is stated', async () => {
-    const dest = await destination();
-    const src = await source(dest);
+  // A pinned derived image travels as its recipe, and is rebuilt there only
+  // because the token belongs to that server's owner.
+  const pinDerived = (src: Awaited<ReturnType<typeof source>>) => {
+    src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.7.1-2', dockerfile: 'RUN apt-get install -y ffmpeg', createdBy: 'o' });
+    src.store.setDerivedImageStatus('media', 'READY');
     src.store.setAgentImage('a1', 'hatchabot-runtime:derived-media');
+  };
+
+  it('a pinned image is rebuilt on the destination from its recipe', async () => {
+    const dest = await destination();
+    dest.provider.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    const src = await source(dest);
+    pinDerived(src);
+
+    const res = await migrateAgent(src.deps as never, 'a1', src.peer as never);
+    expect(res.sourceState).toBe('STOPPED');
+    const arrived = dest.store.listAgents('owner-b').find((a) => a.slug === 'kitchen');
+    expect(arrived?.image).toBe('hatchabot-runtime:derived-media'); // the pin travelled
+    expect(dest.provider.built.map((b) => b.tag)).toEqual(['hatchabot-runtime:derived-media']);
+    expect(dest.provider.built[0]!.dockerfile).toContain('RUN apt-get install -y ffmpeg');
+    // It is one of that machine's images now, so it can travel on from there.
+    expect(dest.store.getDerivedImage('media')?.status).toBe('READY');
+  });
+
+  it("won't build for a token that isn't the destination owner's: refused, source back RUNNING", async () => {
+    const dest = await destination();
+    dest.provider.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    dest.store.insertAIProfile({ id: 'pC', ownerId: 'guest', name: 'C-AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/pB', createdAt: 'now', shared: true } as never);
+    const { token } = dest.store.createCliToken('guest', 'peer');
+    const src = await source({ url: dest.url, token });
+    pinDerived(src);
 
     await expect(migrateAgent(src.deps as never, 'a1', src.peer as never))
-      .rejects.toThrow(/pinned to image .* pins don't travel/s);
-    expect(src.store.getAgent('a1')!.state).toBe('RUNNING'); // untouched
+      .rejects.toThrow(/won't build it for this move .*--drop-pin/s);
+    expect(dest.provider.built).toEqual([]);
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING'); // undone
+    expect(src.store.getAgent('a1')!.migratedTo).toBeUndefined();
+  });
 
-    // Stating the choice moves it — onto the destination's default image.
+  it('--drop-pin moves it onto the default image, building nothing', async () => {
+    const dest = await destination();
+    const src = await source(dest);
+    pinDerived(src);
     const res = await migrateAgent(src.deps as never, 'a1', src.peer as never, { allowDroppedPin: true });
     expect(res.sourceState).toBe('STOPPED');
     const arrived = dest.store.listAgents('owner-b').find((a) => a.slug === 'kitchen');
-    expect(arrived?.image).toBeUndefined(); // the pin did not travel
+    expect(arrived?.image).toBeUndefined();
+    expect(dest.provider.built).toEqual([]);
   });
 
   it('a bad peer token is a clean auth error, not a hang or a half-move', async () => {

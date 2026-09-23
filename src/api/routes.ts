@@ -110,8 +110,8 @@ import {
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
 import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
-import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
-import { ensureImageOn } from '../orchestrator/imageRecipe.js';
+import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
+import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import {
@@ -6282,12 +6282,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // The pin travels as its recipe: rebuild the image there if it is
           // missing (base pulled if need be, then the extra packages or the
           // derived lines). Only if that can't be done does the owner choose.
-          const derivedByTag = (tag: string) => {
-            const m = /:derived-([a-z][a-z0-9-]*)$/.exec(tag);
-            return m ? store.getDerivedImage(m[1]!) : undefined;
-          };
           trace(agent.id)('image.ensure', { image: agent.image, on: host.id });
-          const got = await ensureImageOn(providerFor(host.id), providerFor(agent.hostId), agent.image, derivedByTag);
+          const got = await ensureImageOn(providerFor(host.id), providerFor(agent.hostId), agent.image,
+            derivedByTag((n) => store.getDerivedImage(n)));
           if (!got.ok) {
             return reply.code(409).send({
               error: `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have, and it couldn't be rebuilt there (${got.problem}). ` +
@@ -6359,6 +6356,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // ---- export & import (agent portability) ---------------------------------
 
+  /**
+   * A file's pinned image that this machine lacks is built only on the say-so
+   * of whoever owns the machine it lands on: building runs the recipe's lines
+   * here as root (the same privilege as making a derived image).
+   */
+  const imageChoice = (q: string | undefined, host: { ownerId: string }, ownerId: string) => ({
+    image: q === 'build' || q === 'drop' ? (q as 'build' | 'drop') : undefined,
+    mayBuild: host.ownerId === ownerId,
+  });
+  const imageDecisionBody = (e: ImageDecisionNeeded) => ({
+    error: e.userMessage,
+    code: 'image_decision',
+    image: e.image,
+    // What would run, shown before anyone agrees to it.
+    recipe: e.recipe ? { base: e.recipe.base, packages: e.recipe.packages, lines: e.recipe.lines ?? '' } : undefined,
+    problem: e.problem,
+    mayBuild: e.mayBuild && !e.problem,
+  });
+
   // The archive contains the bot token — it IS the agent's identity — so the
   // download is a credential. The export leaves the agent STOPPED here: once
   // it's imported elsewhere, two pollers on one bot would flip-flop.
@@ -6391,7 +6407,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
   });
 
-  app.post<{ Querystring: { aiProfileId?: string; hostId?: string } }>(
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; image?: string } }>(
     '/v1/agents/restore',
     async (req, reply) => {
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
@@ -6417,10 +6433,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // No id yet — trace() picks it up from the orchestrator's log detail.
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace() },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId) },
         );
         return reply.code(201).send(publicAgent(agent));
       } catch (err) {
+        if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
@@ -6993,7 +7010,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // format and does the right thing — a template becomes a fresh agent, a full
   // copy (a Download) is restored as the same agent. The /restore route above
   // stays for the CLI's explicit `restore` verb.
-  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string; values?: string } }>(
+  app.post<{ Querystring: { aiProfileId?: string; hostId?: string; name?: string; values?: string; image?: string } }>(
     '/v1/agents/import',
     async (req, reply) => {
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
@@ -7048,10 +7065,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const agent = await importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace() },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId) },
         );
         return reply.code(201).send({ ...publicAgent(agent), kind: 'agent' });
       } catch (err) {
+        if (err instanceof ImageDecisionNeeded) return reply.code(409).send(imageDecisionBody(err));
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }

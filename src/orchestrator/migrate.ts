@@ -244,17 +244,11 @@ async function migrateAgentInner(
   if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') {
     throw new MigrateError(`Can't move an agent while it is ${agent.state}.`);
   }
-  // An image pin does NOT travel (the export carries no image, and the
-  // destination may not have it) — the agent would land on that server's
-  // fleet default, silently missing whatever the pinned image adds (a derived
-  // image's apt packages, say). Losing capability must be a stated choice.
-  if (agent.image && !opts.allowDroppedPin) {
-    throw new MigrateError(
-      `This agent is pinned to image "${agent.image}", and pins don't travel — on ${peer.name} it ` +
-        `would run that server's default image, losing whatever the pinned image adds. Unpin it ` +
-        `first (Settings → Environment), or move anyway accepting the default (CLI: --drop-pin).`,
-    );
-  }
+  // A pinned image travels as its recipe (inside the export). The destination
+  // uses its own copy, or builds it — only if our token is its owner's; if
+  // not, it refuses (after our export, which undo reverses) and says why. --drop-pin: run that
+  // server's default image instead, a stated choice.
+  const imageChoice = agent.image ? (opts.allowDroppedPin ? 'drop' : 'build') : undefined;
   const channel = store.getChannelForAgent(agentId);
   if (!channel) throw new MigrateError(agent.webOnly
     ? 'This agent has no Telegram bot, and moving to another server needs one. Download a copy (Advanced → Download copy) and import it there instead, or add a bot first.'
@@ -317,7 +311,7 @@ async function migrateAgentInner(
   //    nothing behind if this fails, so we only have to undo our side.
   let remote: { id: string; state: string; name: string };
   try {
-    const res = await peerFetch(deps, peer, '/v1/agents/restore', {
+    const res = await peerFetch(deps, peer, `/v1/agents/restore${imageChoice ? `?image=${imageChoice}` : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
       body: new Uint8Array(data),
@@ -326,6 +320,13 @@ async function migrateAgentInner(
     if (!res.ok) {
       // A real answer from the destination: it refused and rolled back.
       await undo(`import rejected: ${body.error ?? res.status}`);
+      if (body.code === 'image_decision') {
+        throw new MigrateError(
+          `${peer.name} doesn't have the image ${agent.image} and won't build it for this move` +
+            `${body.problem ? ` (${body.problem})` : " (only that server's owner may build images there)"}. ` +
+            'Your agent is unchanged. Move it on that server\'s default image (CLI: --drop-pin), or Download a copy and import it there as its owner.',
+        );
+      }
       throw new MigrateError(
         `${peer.name} couldn't import it: ${body.error ?? res.status}. Your agent is unchanged.`,
       );

@@ -14,6 +14,8 @@ import {
 } from './provision.js';
 import { clearBusy, markBusy } from './busy.js';
 import { ENV_NAME_RE, reservedEnvProblem } from './envPolicy.js';
+import { buildRecipeOn, derivedByTag, recipeFor, recipeProblem, type ImageRecipe } from './imageRecipe.js';
+import { DERIVED_TAG_PREFIX } from './derivedImage.js';
 
 /**
  * Export/import: an agent as a single portable file, so "move it to another
@@ -84,14 +86,46 @@ export interface ExportManifest {
    * broken, which is worse. Templates (template.ts) still carry NAMES only.
    */
   envVars?: Array<{ name: string; value: string }>;
+  /**
+   * The image it is pinned to, as a RECIPE (base + extra packages + a derived
+   * image's Dockerfile lines), never the image itself. The destination uses
+   * its own copy if it has one, and otherwise builds it only when its owner
+   * says so, after seeing what would run. `problem`: why no recipe could be
+   * written (the export still works; the agent lands on the default image).
+   */
+  image?: { tag: string; recipe?: Omit<ImageRecipe, 'tag'>; problem?: string };
   /** base64 gzipped tarball of the OpenClaw state dir. */
   state: string;
 }
+
 
 export class TransferError extends Error {
   constructor(readonly userMessage: string) {
     super(userMessage);
     this.name = 'TransferError';
+  }
+}
+
+/**
+ * The file carries an image this machine lacks: someone has to decide whether
+ * to build it here (only the machine's owner may) or use the default image.
+ */
+export class ImageDecisionNeeded extends TransferError {
+  constructor(
+    readonly image: string,
+    readonly recipe: ImageRecipe | undefined,
+    readonly problem: string | undefined,
+    readonly mayBuild: boolean,
+  ) {
+    super(
+      `This agent is pinned to the image ${image}, which this machine does not have. ` +
+        (problem
+          ? `It can't be built here (${problem}), so it can only run on the default image.`
+          : mayBuild
+            ? 'Build it here from the recipe in the file, or run it on the default image.'
+            : "Only this machine's owner can build images, so it can run on the default image, or ask them to import it."),
+    );
+    this.name = 'ImageDecisionNeeded';
   }
 }
 
@@ -153,6 +187,21 @@ const ManifestSchema = z.object({
       }),
     )
     .max(64)
+    .optional(),
+  // Shape only; the CONTENT is judged by recipeProblem before anything builds.
+  image: z
+    .object({
+      tag: z.string().min(1).max(200),
+      recipe: z
+        .object({
+          base: z.string().min(1).max(200),
+          packages: z.array(z.string().max(64)).max(32),
+          lines: z.string().max(8000).optional(),
+          channels: z.array(z.string().max(16)).max(8),
+        })
+        .optional(),
+      problem: z.string().max(300).optional(),
+    })
     .optional(),
   state: z.string(),
 });
@@ -226,6 +275,17 @@ export async function exportAgent(
         `sessions, or keep the bulk data in a shared folder instead of the agent's own volume.`,
     );
   }
+  // Read BEFORE the manifest is assembled: a lookup failure only costs the
+  // recipe (noted in the file), never the export.
+  let image: ExportManifest['image'];
+  if (agent.image) {
+    const r = await recipeFor(provider, agent.image, derivedByTag((n) => store.getDerivedImage(n))).catch(
+      (e: unknown) => ({ problem: `its recipe could not be read (${String(e).slice(0, 120)})` }),
+    );
+    image = 'problem' in r
+      ? { tag: agent.image, problem: r.problem }
+      : { tag: agent.image, recipe: { base: r.base, packages: r.packages, lines: r.lines, channels: r.channels } };
+  }
   const manifest: ExportManifest = {
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
@@ -271,6 +331,7 @@ export async function exportAgent(
         }
       }),
     ),
+    image,
     state: state.toString('base64'),
   };
   log('agent.exported', { agentId, bytes: state.length });
@@ -285,6 +346,55 @@ export interface ImportOptions {
   /** Explicit AI profile; defaults to a vendor match, then the first one. */
   aiProfileId?: string;
   hostId?: string;
+  /** For a file whose pinned image this machine lacks: build it from the
+   *  file's recipe, or run the default image. Unset: ask (ImageDecisionNeeded). */
+  image?: 'build' | 'drop';
+  /** The caller owns this machine — the only one who may build an image here. */
+  mayBuild?: boolean;
+}
+
+/**
+ * Which image the imported agent runs on. The same-named image already here:
+ * that. Otherwise the caller's decision — and nothing is built without one.
+ * Decides only; the build itself runs once the agent's row exists (buildPinned),
+ * so a mover whose connection drops mid-build sees it PROVISIONING there and
+ * waits, instead of reading "not there" and restarting its own copy.
+ */
+async function settleImage(
+  deps: ProvisionDeps,
+  image: NonNullable<ExportManifest['image']>,
+  opts: ImportOptions,
+): Promise<{ pin?: string; build?: ImageRecipe }> {
+  const { store, provider } = deps;
+  const here = await provider.listImageTags().then((t) => t.some((x) => x.tag === image.tag), () => false);
+  if (here) return { pin: image.tag };
+  if (opts.image === 'drop') return {};
+  const recipe: ImageRecipe | undefined = image.recipe ? { tag: image.tag, ...image.recipe } : undefined;
+  let problem = recipe ? recipeProblem(recipe) : (image.problem ?? 'the file has no recipe for it');
+  // A derived image here under the same name but other lines is someone
+  // else's image: building would silently replace it for every agent on it.
+  const existing = !problem ? derivedByTag((n) => store.getDerivedImage(n))(image.tag) : undefined;
+  if (existing && (existing.base !== recipe!.base || existing.dockerfile.trim() !== (recipe!.lines ?? '').trim())) {
+    problem = `a different image here already has the name ${image.tag}`;
+  }
+  if (opts.image !== 'build' || problem || !opts.mayBuild) {
+    throw new ImageDecisionNeeded(image.tag, recipe, problem ?? undefined, !!opts.mayBuild);
+  }
+  return { pin: image.tag, build: recipe! };
+}
+
+async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: string): Promise<void> {
+  const { store, provider } = deps;
+  const name = recipe.tag.split(':')[1]!;
+  const derivedName = name.startsWith(DERIVED_TAG_PREFIX) ? name.slice(DERIVED_TAG_PREFIX.length) : undefined;
+  if (derivedName && !store.getDerivedImage(derivedName)) {
+    // So it shows among this machine's images, and travels again from here.
+    store.upsertDerivedImage({ name: derivedName, tag: recipe.tag, base: recipe.base, dockerfile: recipe.lines ?? '', createdBy: ownerId });
+  }
+  deps.log?.('import.image_build', { image: recipe.tag });
+  const got = await buildRecipeOn(provider, recipe);
+  if (derivedName) store.setDerivedImageStatus(derivedName, got.ok ? 'READY' : 'FAILED', got.ok ? null : got.problem);
+  if (!got.ok) throw new Error(`the image ${recipe.tag} could not be built here: ${got.problem}`);
 }
 
 export async function importAgent(
@@ -369,6 +479,8 @@ async function importAgentInner(
     : (store.listHosts(opts.ownerId).find((h) => h.kind === 'local') ??
       store.listHosts(opts.ownerId)[0]);
   if (!host) throw new TransferError('No host available to import onto.');
+  // Before anything is created: the decision may be the caller's to make.
+  const image = manifest.image ? await settleImage(deps, manifest.image, opts) : {};
 
   const now = new Date().toISOString();
   const agent: Agent = {
@@ -401,6 +513,7 @@ async function importAgentInner(
     updatedAt: now,
   };
   store.insertAgent(agent);
+  if (image.pin) store.setAgentImage(agent.id, image.pin);
   // From here the agent exists but is mid-build: reconcile must not judge it.
   markBusy(agent.id);
 
@@ -483,6 +596,7 @@ async function importAgentInner(
     // with the real state; a second provision re-applies THIS installation's
     // config (model, auth mode) over the imported openclaw.json — the seed
     // never touches existing workspace files, so memory survives.
+    if (image.build) await buildPinned(deps, image.build, opts.ownerId);
     const spec = await buildRuntimeSpec(deps, agent.id);
     ({ runtimeRef } = await provider.provision(spec));
     store.setAgentRuntimeRef(agent.id, runtimeRef);

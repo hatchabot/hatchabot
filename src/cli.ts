@@ -135,8 +135,10 @@ Commands:
   download <agent> [-o <file>] Download a complete private copy (.hatchabot) — for
                                your own keeping (contains its bot token, so treat
                                as a secret; the agent is left STOPPED)
-  restore <file> [--profile <aiProfileId>] [--host <id>]
-                               Restore an agent from a downloaded copy and boot it
+  restore <file> [--profile <aiProfileId>] [--host <id>] [--build-image|--drop-pin]
+                               Restore an agent from a downloaded copy and boot it.
+                               Pinned to an image this machine lacks: shows its
+                               recipe and asks (build it here, or default image)
   share <agent> [-o <file>] [--include-memory]
                                Share a TEMPLATE for someone else — the agent's
                                trained SOUL/AGENTS, no bot token/members. Memory
@@ -174,8 +176,9 @@ Commands:
   rehost <agent> <server> [--drop-pin]
                                Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
-                               --drop-pin moves a pinned agent anyway (it runs
-                               the destination's default image)
+                               A pinned image is rebuilt there from its recipe
+                               (if your token is that server's owner's);
+                               --drop-pin runs its default image instead
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
   approve <agent> <code>       Let a pending requester in (creates a member)
@@ -381,7 +384,7 @@ function envQuote(v: string): string {
 // parser took any unlisted flag to have a value, so `--no-telegram` (missing
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit']);
 
 export function parseArgs(argv: string[]) {
@@ -436,11 +439,47 @@ async function api(ctx: Ctx, path: string, init: RequestInit = {}): Promise<Resp
     const data = await res.json().catch(() => ({}) as any);
     // Throw (not exit) so callers can catch expected misses; uncaught ones
     // still land in main().catch → fail().
-    throw new Error(
-      (data as any).error ?? (data as any).message ?? `${init.method ?? 'GET'} ${path} → ${res.status}`,
+    throw Object.assign(
+      new Error((data as any).error ?? (data as any).message ?? `${init.method ?? 'GET'} ${path} → ${res.status}`),
+      { data }, // the whole answer, for the callers that act on a `code`
     );
   }
   return res;
+}
+
+/**
+ * Upload a .hatchabot file. One pinned to an image this machine lacks stops
+ * with the recipe: shown here, then built only on a yes (or --build-image),
+ * or run on the default image (--drop-pin).
+ */
+async function uploadAgentFile(ctx: Ctx, path: string, params: URLSearchParams, data: Buffer, flags: Map<string, string>,
+  askLine: (q: string) => Promise<string>): Promise<any> {
+  if (flags.has('build-image')) params.set('image', 'build');
+  if (flags.has('drop-pin')) params.set('image', 'drop');
+  const send = async () => (await api(ctx, `${path}${params.size ? `?${params}` : ''}`, {
+    method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: data,
+  })).json();
+  try {
+    return await send();
+  } catch (e: any) {
+    const d = e?.data;
+    if (d?.code !== 'image_decision' || params.has('image')) throw e;
+    console.log(d.error);
+    if (d.recipe) {
+      console.log(`\n  FROM ${d.recipe.base}`);
+      if (d.recipe.packages?.length) console.log(`  apt packages: ${d.recipe.packages.join(' ')}`);
+      if (d.recipe.lines) console.log(d.recipe.lines.split('\n').map((l: string) => `  | ${l}`).join('\n'));
+      console.log('');
+    }
+    if (!process.stdin.isTTY) {
+      throw new Error(`${d.mayBuild ? 'Re-run with --build-image to build it, or ' : 'Re-run with '}--drop-pin to use the default image.`);
+    }
+    const build = d.mayBuild && /^y/i.test(await askLine('Build this image here (it runs as root while building)? [y/N] '));
+    if (!build && !/^y/i.test(await askLine('Run the agent on the default image instead? [y/N] '))) throw new Error('nothing imported');
+    params.set('image', build ? 'build' : 'drop');
+    if (build) console.log('building… (a few minutes)');
+    return send();
+  }
 }
 
 async function agents(ctx: Ctx): Promise<any[]> {
@@ -1484,7 +1523,7 @@ async function main() {
       const peer = peers.find((p) => p.id === ref || p.name === ref);
       if (!peer) fail(`no server matches "${ref}"`);
       console.log(`rehosting "${a.name}" to ${peer.name}…`);
-      // --drop-pin: a pinned runtime image doesn't travel; state the choice.
+      // A pinned image is rebuilt there from its recipe; --drop-pin opts out.
       const res: any = await (await jsonPost(`/v1/agents/${a.id}/rehost`, {
         peerId: peer.id, ...(flags.has('drop-pin') ? { allowDroppedPin: true } : {}),
       })).json();
@@ -1710,13 +1749,7 @@ async function main() {
       const params = new URLSearchParams();
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
       if (flags.has('host')) params.set('hostId', flags.get('host')!);
-      const q = params.size ? `?${params}` : '';
-      const res = await api(ctx, `/v1/agents/restore${q}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/octet-stream' },
-        body: data,
-      });
-      const agent: any = await res.json();
+      const agent = await uploadAgentFile(ctx, '/v1/agents/restore', params, data, flags, askLine);
       console.log(`restored "${agent.name}" (${agent.state})`);
       return;
     }
@@ -1775,11 +1808,11 @@ async function main() {
         } catch { /* not gunzippable here (full backup?) — server sorts it out */ }
       }
       if (values && Object.keys(values).length) params.set('values', JSON.stringify(values));
-      const q = params.size ? `?${params}` : '';
-      const res = await api(ctx, `/v1/agents/import${q}`, {
-        method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: data,
-      });
-      const j: any = await res.json();
+      const j = await uploadAgentFile(ctx, '/v1/agents/import', params, data, flags, askLine);
+      if (j.kind === 'agent') {
+        console.log(`restored "${j.name}" (${j.state})`);
+        return;
+      }
       console.log(`imported "${j.name}" (${j.state}) — connect its Telegram bot to finish.`);
       const ds = (j.needs?.dataSources ?? []).map((d: any) => `${d.kind} ${d.mountName}`);
       const env = j.needs?.envVars ?? [];

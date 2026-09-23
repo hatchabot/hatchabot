@@ -899,6 +899,30 @@ then `hatchabot image pin <agent> media`. Building runs a Dockerfile on the box,
 a privilege the local-host owner already has — so it, and the pin, are
 host-owner gated and never exposed to a co-tenant.
 
+**A pin travels as its recipe.** An image is never copied between machines;
+its recipe is: the plain base (`hatchabot-runtime:<OpenClaw version>`, pulled
+from the published registry if missing), the extra apt packages recorded in the
+image's labels, and a derived image's Dockerfile lines. Built on the other
+machine, for its own CPU, in minutes.
+- **Move to a runner** (same cluster): rebuilt there automatically; only if it
+  can't be (no published base, a failed build) does the move offer the runner's
+  default image instead.
+- **Download a copy** (`.hatchabot`): the file carries the recipe. Importing it
+  where that image already exists just pins it. Where it doesn't, the import
+  stops and **shows what building would run**; only that machine's owner can
+  choose Build (the lines run as root while building), and anyone can choose the
+  default image. The file is untrusted: a recipe with its own `FROM`, `USER`, a
+  build mount or network, a base or name outside `hatchabot-runtime`, or a
+  package name that isn't one is never built. A derived image arrives listed
+  among that machine's images, so it can travel on from there; one of the same
+  name with different lines is never replaced. CLI: `hatchabot restore <file>`
+  asks the same question, or takes `--build-image` / `--drop-pin`.
+- **Rehost to another server**: rebuilt there if the server token you
+  registered belongs to that server's owner; otherwise refused with the source
+  left as it was. `--drop-pin` runs that server's default image instead.
+- Messaging-app plugins (Slack, Discord) come only from the base, so a runner
+  whose base lacks them can't rebuild an image that has them.
+
 ## Bots census
 
 Telegram caps an account at about 20 bots and offers no API to list them —
