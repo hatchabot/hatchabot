@@ -21,7 +21,7 @@ describe('hatchabot doctor report', () => {
   it('warns about agents still on the shared network, with the fix', () => {
     const line = doctorReport({ ...healthy, containers: { running: 43, total: 53, sharedNetwork: 7 } })
       .find((l) => /shared network/.test(l.text));
-    expect(line).toMatchObject({ level: 'warn', text: expect.stringMatching(/^7 agent containers are still/) });
+    expect(line).toMatchObject({ level: 'warn', text: expect.stringMatching(/^7 running agents are still/) });
     expect(line!.fix).toMatch(/rebuild --outdated/);
     expect(doctorReport({ ...healthy, containers: { running: 1, total: 1, sharedNetwork: 0 } }).some((l) => /shared network/.test(l.text))).toBe(false);
   });

@@ -24,7 +24,7 @@ export interface DoctorFacts {
   backups: { dir: string; lastSet?: string; ageDays?: number };
   tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean };
   containers?: { running: number; total: number;
-    /** Agent containers still on docker's shared bridge network (made before v1.16's isolation). */
+    /** RUNNING agent containers still on docker's shared bridge network (made before v1.16's isolation). */
     sharedNetwork?: number };
   /** Which release this checkout sits on, and whether a newer tag is present. */
   checkout?: { tag?: string; latestTag?: string; dirty?: string[] };
@@ -46,8 +46,8 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
     if (f.containers?.sharedNetwork) {
       out.push({
         level: 'warn',
-        text: `${f.containers.sharedNetwork} agent container${f.containers.sharedNetwork > 1 ? 's are' : ' is'} still on the shared network, where other agents can reach ${f.containers.sharedNetwork > 1 ? 'them' : 'it'} — made before the isolated network`,
-        fix: 'hatchabot rebuild --outdated   (running ones; a stopped one is rebuilt when started). Unless set to manual, this machine also does it on its own once each is idle.',
+        text: `${f.containers.sharedNetwork} running agent${f.containers.sharedNetwork > 1 ? 's are' : ' is'} still on the shared network, where other agents can reach ${f.containers.sharedNetwork > 1 ? 'them' : 'it'} — made before the isolated network`,
+        fix: 'hatchabot rebuild --outdated — or wait: unless the rebuild policy is manual, this machine does it on its own once each is idle.',
       });
     }
   }
@@ -149,7 +149,9 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   const rows = (ps ?? '').split('\n').filter((l) => l.startsWith(`${prefix}-`) || l.startsWith('agentclaw-'));
   const agentNet = (process.env.HATCHABOT_AGENT_NETWORK ?? env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
   const sharedNetwork = agentNet && agentNet !== 'bridge' && agentNet !== 'default'
-    ? rows.filter((l) => l.split('|')[1] === 'bridge').length
+    // Running ones only: a stopped container is either rebuilt when started, or
+    // an archived agent's, which is made anew when restored.
+    ? rows.filter((l) => l.split('|')[1] === 'bridge' && l.endsWith('|running')).length
     : 0;
   const dbPath = process.env.HATCHABOT_DB ?? env.HATCHABOT_DB ?? defaultDbPath();
   const service: DoctorFacts['service'] = process.platform === 'darwin'

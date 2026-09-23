@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.37.2] — 2026-09-23
+
+### Fixed
+- `doctor` counted archived agents' parked containers as "still on the shared network" (13 on the development machine); it counts running agents only — a stopped agent is rebuilt when started, an archived one is made anew when restored.
+
 ## [2.37.1] — 2026-09-23
 
 ### Fixed
