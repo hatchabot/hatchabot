@@ -447,6 +447,8 @@
     .v2btn { padding:0 11px }
     .v2brand { font-size:18px }
   }
+  .res-sort { background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer }
+  .res-sort.on { color:var(--accent) }
   .hb-loading { display:flex; align-items:center; gap:10px; padding:28px 8px; color:var(--dim); font-size:15px }
   .hb-spin { width:16px; height:16px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:hb-spin .8s linear infinite; flex:none }
   @keyframes hb-spin { to { transform:rotate(360deg) } }
@@ -7377,29 +7379,45 @@ function openFleetHealth() {
  *  each runs now. Mirrors `hatchabot sources`. */
 // Resources: docker stats per host, one call each; polled while the view is open.
 let fleetResTimer = null;
+// Sort by name, CPU or memory; click a heading again to flip. Remembered per device.
+let fleetResSort = (() => { try { return JSON.parse(localStorage.getItem('hb-res-sort') || '') || { key: 'mem', dir: -1 }; } catch { return { key: 'mem', dir: -1 }; } })();
+function fleetResSortBy(key) {
+  fleetResSort = { key, dir: fleetResSort.key === key ? -fleetResSort.dir : (key === 'name' ? 1 : -1) };
+  try { localStorage.setItem('hb-res-sort', JSON.stringify(fleetResSort)); } catch {}
+  if (fleetResLast) fleetResDraw(fleetResLast);
+}
+let fleetResLast = null;
+function fleetResDraw(r) {
+  const el = $('fleetResBody');
+  const mb = (b) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
+  const who = (c) => c.agentName ? esc(c.agentName) : ({ embedder: 'Memory search service', 'embed-door': 'Memory search door', doorman: 'Hatchabot agent’s doorman' })[c.role] || esc(c.name);
+  const plain = (c) => c.agentName || ({ embedder: 'Memory search service', 'embed-door': 'Memory search door', doorman: 'Doorman' })[c.role] || c.name;
+  const { key, dir } = fleetResSort;
+  const cmp = (a, b) => key === 'name' ? dir * plain(a).localeCompare(plain(b), undefined, { sensitivity: 'base' })
+    : key === 'cpu' ? dir * (a.cpuPct - b.cpuPct) || plain(a).localeCompare(plain(b))
+    : dir * (a.memBytes - b.memBytes) || plain(a).localeCompare(plain(b));
+  const th = (k, label, right) => `<th${right ? ' style="text-align:right"' : ''}><button class="res-sort${key === k ? ' on' : ''}" onclick="fleetResSortBy('${k}')" aria-sort="${key === k ? (dir > 0 ? 'ascending' : 'descending') : 'none'}">${label}${key === k ? (dir > 0 ? ' ▲' : ' ▼') : ''}</button></th>`;
+  $('fleetResAt').textContent = `measured ${clock(r.at)}`;
+  el.innerHTML = r.hosts.map(h => {
+    const rows = [...h.containers].sort(cmp);
+    return `<div style="padding:10px 0;border-top:1px solid var(--line)">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
+        <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
+      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}<th style="text-align:right">of limit</th></tr></thead><tbody>
+        ${rows.map(c => `<tr><td>${who(c)}${c.mine === false ? ' <span class="sub">(shared with you)</span>' : ''}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '%' : '—'}</td></tr>`).join('')}
+      </tbody></table>` : ''}</div>`;
+  }).join('') || '<div class="sub">Nothing running.</div>';
+}
 async function openFleetResources() {
   fleetResDlg.showModal();
   const el = $('fleetResBody');
   if (!el.innerHTML) el.innerHTML = '<div class="sub">Measuring… (a second per machine)</div>';
-  const mb = (b) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
-  const who = (c) => c.agentName ? esc(c.agentName) : ({ embedder: 'Memory search service', 'embed-door': 'Memory search door', doorman: 'Hatchabot agent’s doorman' })[c.role] || esc(c.name);
   const draw = async () => {
-    try {
-      const r = await api('/v1/resources');
-      $('fleetResAt').textContent = `measured ${clock(r.at)}`;
-      el.innerHTML = r.hosts.map(h => {
-        const rows = [...h.containers].sort((a, b) => b.memBytes - a.memBytes);
-        return `<div style="padding:10px 0;border-top:1px solid var(--line)">
-          <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
-            <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
-          ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr><th>Agent</th><th style="text-align:right">CPU</th><th style="text-align:right">Memory</th><th style="text-align:right">of limit</th></tr></thead><tbody>
-            ${rows.map(c => `<tr><td>${who(c)}${c.mine === false ? ' <span class="sub">(shared with you)</span>' : ''}</td>
-              <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
-              <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
-              <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '%' : '—'}</td></tr>`).join('')}
-          </tbody></table>` : ''}</div>`;
-      }).join('') || '<div class="sub">Nothing running.</div>';
-    } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+    try { fleetResLast = await api('/v1/resources'); fleetResDraw(fleetResLast); }
+    catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
   };
   await draw();
   clearInterval(fleetResTimer);

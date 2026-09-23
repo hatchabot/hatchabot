@@ -81,7 +81,7 @@ Commands:
                                anything wrong. --json: for a program (the same
                                lines plus the facts; exit 1 on any ✗).
   list [--all]                 Agents with state, model, and last activity.
-  top                          Live CPU and memory per agent, per machine
+  top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
                                (docker's own measurement; a second per machine).
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
@@ -408,7 +408,7 @@ function envQuote(v: string): string {
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
-const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days']);
+const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1994,7 +1994,10 @@ async function main() {
       const mb = (b: number) => `${Math.round(b / 1048576)}M`;
       for (const h of r.hosts) {
         console.log(`\n${h.name}${h.error ? `  (${h.error})` : `  ·  ${h.totals.cpuPct}% CPU  ·  ${mb(h.totals.memBytes)} in ${h.containers.length} container(s)`}`);
-        const rows = [...h.containers].sort((a: any, b: any) => b.memBytes - a.memBytes);
+        const by = flags.get('sort') ?? 'mem';
+        const who0 = (c: any) => c.agentName ?? c.role ?? c.name;
+        const rows = [...h.containers].sort((a: any, b: any) =>
+          by === 'name' ? who0(a).localeCompare(who0(b)) : by === 'cpu' ? b.cpuPct - a.cpuPct : b.memBytes - a.memBytes);
         for (const c of rows) {
           const who = c.agentName ?? ({ embedder: 'memory search service', 'embed-door': 'memory search door', doorman: 'doorman' } as any)[c.role] ?? c.name;
           console.log(`  ${String(c.cpuPct.toFixed(1)).padStart(6)}%  ${mb(c.memBytes).padStart(7)} / ${mb(c.memLimitBytes).padEnd(6)}  ${who}`);

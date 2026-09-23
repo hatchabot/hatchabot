@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.42.2] — 2026-09-23
+
+### Added
+- Resources sorts by agent name, CPU or memory (click a heading; again to flip; remembered per device); `hatchabot top --sort cpu|mem|name`.
+
 ## [2.42.1] — 2026-09-23
 
 ### Fixed
