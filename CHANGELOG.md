@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.49.3] — 2026-09-23
+
+### Changed
+- The Hatchabot panel no longer says "Ask it anything" under a healthy manager; the caption appears only when something needs you (paused, failed, stopped, setting up).
+
 ## [2.49.2] — 2026-09-23
 
 ### Changed

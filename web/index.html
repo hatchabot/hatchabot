@@ -11077,9 +11077,9 @@ function v2RenderHub() {
       : ops.state === 'FAILED' ? `It didn't start${ops.stateReason ? ': ' + esc(ops.stateReason) : '.'} Click it to retry.`
       : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.'
       : ops.state === 'STOPPED' ? 'Stopped. Click it to start it again.'
-      : 'Ask it anything — click it to open the conversation.';
+      : ''; // healthy: the icon says it all — no caption
     const thin = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED').length < 3;
-    html = `<div class="sub">${say}</div>`
+    html = (say ? `<div class="sub">${say}</div>` : '')
       + (thin && ops.state === 'RUNNING' && !ops.opsDrift
         ? `<div class="sub" style="margin-top:4px">Not sure what to add?
              <a href="#" onclick="event.preventDefault();askOpsSuggest(this)">Ask it what you're missing</a>.</div>`
