@@ -607,7 +607,8 @@
   .v2ghead { display:flex; align-items:baseline; gap:10px; margin-bottom:6px }
   .v2viewbar { display:flex; gap:4px; flex-wrap:wrap; margin:2px 0 10px }
   .v2viewbar button { font-size:12px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:transparent; color:var(--dim); cursor:pointer }
-  .v2viewbar button.on { background:var(--accent); border-color:transparent; color:var(--accent-ink, #fff) }
+  /* Selected: the same soft wash as the Hatchabot agent's icon tile (its gold at 17%), not a full gold chip. */
+  .v2viewbar button.on { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border-color:color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--text) }
   .v2binsort { display:inline-flex; gap:4px; align-items:center; margin-left:auto; padding-left:8px }
   .v2ghead h3 { margin:0; font-size:12px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim); font-weight:650 }
   .v2ghead .n { font-size:12px; color:var(--dim); font-variant-numeric:tabular-nums }
@@ -3110,6 +3111,16 @@ function setupSteps() {
       <p class="sub" style="margin:4px 0 6px">Agents keep everything on a volume — memory, files, members. A nightly backup set is what stands between that and a bad day,
         and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old.`}</p>
       <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('backups')">Open Backups</button></div>` },
+    { key: 'gemini', optional: true, done: fleetKeys.media === true,
+      title: fleetKeys.media ? 'Voice notes are transcribed (Gemini key set)' : 'Add a Gemini key so agents understand voice notes',
+      body: `<p class="sub" style="margin:4px 0 6px">One Gemini API key lets every agent transcribe the voice notes people send it. Free tier is plenty for a household.
+        Without it, voice notes are ignored.</p>
+      <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('conn')">Open Connections</button></div>` },
+    { key: 'brave', optional: true, done: fleetKeys.search === true,
+      title: fleetKeys.search ? 'Web search uses Brave (key set)' : 'Add a Brave Search key for better web search',
+      body: `<p class="sub" style="margin:4px 0 6px">Agents search the web with keyless DuckDuckGo out of the box. One Brave Search API key upgrades every agent's results;
+        an agent can also carry its own key.</p>
+      <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('conn')">Open Connections</button></div>` },
   );
   return steps;
 }
@@ -3248,15 +3259,15 @@ function renderSetup() {
   $('fabBtn').hidden = !aiDone;
   // Until the first agent exists the guide shows itself; after that it is
   // opened on purpose, and says so in its heading.
-  const left = steps.filter(s => !s.done).length;
+  const left = steps.filter(s => !s.done && !s.optional).length; // optional steps never nag
   const badge0 = $('v2SetupCount');
   if (badge0) { badge0.textContent = String(left); badge0.hidden = !left; }
   if (firstAgent && !setupOpen) { el.innerHTML = ''; return; }
   const done = steps.length - left;
   const step = (n, s) => `
     <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)${s.done ? ';opacity:.6' : ''}">
-      <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${s.done ? 'var(--ok)' : 'var(--accent)'};color:var(--accent-ink);font-weight:800;display:flex;align-items:center;justify-content:center">${s.done ? '✓' : n}</span>
-      <div class="grow"><div class="name" style="font-size:15px">${s.title}</div>${s.done ? '' : s.body}</div>
+      <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${s.done ? 'var(--ok)' : s.optional ? 'transparent' : 'var(--accent)'};${s.optional && !s.done ? 'border:2px solid var(--line);color:var(--dim);' : 'color:var(--accent-ink);'}font-weight:800;display:flex;align-items:center;justify-content:center">${s.done ? '✓' : n}</span>
+      <div class="grow"><div class="name" style="font-size:15px">${s.title}${s.optional ? ' <span class="sub" style="font-weight:400">(optional)</span>' : ''}</div>${s.done ? '' : s.body}</div>
     </div>`;
   el.innerHTML = `
     <div class="card" id="setupCard">
@@ -3477,7 +3488,7 @@ async function loadMediaKey() {
     const el = $('mediaKeyStatus');
     if (r.set) {
       el.style.color = 'var(--ok)';
-      el.innerHTML = '✓ <b>Gemini media key set</b> — voice notes are transcribed. <span class="sub">(Write-only: the key is never shown again. Paste a new one to replace it.)</span>';
+      el.innerHTML = '✓ <b>Gemini media key set</b> — voice notes are transcribed. <button class="hbtn" onclick="revealFleetKey(\'media\', this)">Show</button> <code id="fleetkey-media" style="display:none;user-select:all;word-break:break-all"></code> <span class="sub">Paste a new one to replace it.</span>';
       $('mediaKey').placeholder = 'Replace key…';
     } else {
       el.style.color = 'var(--warn)';
@@ -3487,6 +3498,21 @@ async function loadMediaKey() {
     $('mediaKeyDelBtn').style.display = r.set ? '' : 'none';
     if (r.set) $('mediaKeyDrawer')?.setAttribute('open', ''); // don't hide a live key
   } catch { /* not the host owner — leave the section inert */ }
+}
+/** Show a fleet key, then copy it — the same two presses as a bot token. Machine owner only; each reveal is logged. */
+async function revealFleetKey(kind, btn) {
+  const out = $('fleetkey-' + kind);
+  if (out.style.display !== 'none' && out.textContent) {
+    toast(await copyText(out.textContent) ? 'Copied.' : 'Select it and copy by hand.');
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const r = await api(kind === 'media' ? '/v1/media-key/reveal' : '/v1/search-key/reveal');
+    out.textContent = r.key; out.style.display = '';
+    btn.textContent = 'Copy';
+  } catch (e) { toast(e.message, 10000); }
+  finally { btn.disabled = false; }
 }
 async function saveMediaKey() {
   const key = $('mediaKey').value.trim();
@@ -3510,7 +3536,7 @@ async function loadSearchKey() {
     const el = $('searchKeyStatus');
     if (r.set) {
       el.style.color = 'var(--ok)';
-      el.innerHTML = '✓ <b>Fleet search key set</b> — agents use Brave on their next Rebuild. <span class="sub">(Write-only; paste a new one to replace.)</span>';
+      el.innerHTML = '✓ <b>Fleet search key set</b> — agents use Brave on their next Rebuild. <button class="hbtn" onclick="revealFleetKey(\'search\', this)">Show</button> <code id="fleetkey-search" style="display:none;user-select:all;word-break:break-all"></code> <span class="sub">Paste a new one to replace.</span>';
       $('searchKey').placeholder = 'Replace key…';
     } else {
       el.style.color = 'var(--dim)';
@@ -9789,7 +9815,7 @@ async function refresh(withMeta) {
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); }
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); }
     if (withMeta && tailnet === null) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
@@ -11017,6 +11043,12 @@ let tailnet = null;
 async function loadTailnet() {
   try { tailnet = await api('/v1/tailscale'); }
   catch { tailnet = null; } // not the machine owner, or the probe is unavailable
+}
+/** Whether the fleet's Gemini and Brave keys are set — the two optional setup steps. */
+let fleetKeys = { media: null, search: null }; // null = unknown or not the machine owner
+async function loadFleetKeys() {
+  try { fleetKeys = { media: !!(await api('/v1/media-key')).set, search: !!(await api('/v1/search-key')).set }; }
+  catch { fleetKeys = { media: null, search: null }; }
 }
 async function loadBackupAge() {
   try {

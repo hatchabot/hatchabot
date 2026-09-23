@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.48.1] — 2026-09-23
+
+### Added
+- Settings → Connections can **show the Gemini and Brave keys** again (Show, then Copy — the same two presses as a bot token), to the machine owner only; each reveal is logged. (The routes shipped in v2.48.0; the buttons here.)
+- The setup guide has two **optional** steps — a Gemini key for voice notes, a Brave key for web search — that never count as unfinished.
+
+### Changed
+- The View by and Sort selectors use the soft gold wash of the Hatchabot agent's icon when selected, rather than a full gold chip.
+
+## [2.48.0] — 2026-09-23
+
+### Added
+- Routes to reveal the fleet's Gemini and Brave keys to the machine owner (the Show buttons follow in v2.48.1).
+
 ## [2.47.12] — 2026-09-23
 
 ### Changed

@@ -412,7 +412,7 @@ learning back to the master") is the designed next step.
 
 **Web search is on for every agent** (keyless DuckDuckGo baseline; the
 config is written explicitly on every rebuild). Upgrade the whole fleet to
-Brave with one **Fleet search key** (⚙ Settings → Connections — write-only, same
+Brave with one **Fleet search key** (⚙ Settings → Connections — Show reveals it to the machine owner; same
 sharing caveats as the media key); a per-agent `BRAVE_API_KEY` env var (or
 an env-target template field) overrides it with that agent's own quota.
 Provider auto-detection comes from the key names.
