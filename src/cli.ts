@@ -81,6 +81,8 @@ Commands:
                                anything wrong. --json: for a program (the same
                                lines plus the facts; exit 1 on any ✗).
   list [--all]                 Agents with state, model, and last activity.
+  top                          Live CPU and memory per agent, per machine
+                               (docker's own measurement; a second per machine).
                                --all (host owner): every user's agents, with
                                the owner id — find another login's leftovers.
   users [--all]                Every Telegram user across your agents: which
@@ -1986,6 +1988,19 @@ async function main() {
         if (Date.now() > deadline) fail(`"${a.name}" is still ${now.state} after ${limit} min`);
         await new Promise((r) => setTimeout(r, 3000));
       }
+    }
+    case 'top': {
+      const r: any = await (await api(ctx, '/v1/resources')).json();
+      const mb = (b: number) => `${Math.round(b / 1048576)}M`;
+      for (const h of r.hosts) {
+        console.log(`\n${h.name}${h.error ? `  (${h.error})` : `  ·  ${h.totals.cpuPct}% CPU  ·  ${mb(h.totals.memBytes)} in ${h.containers.length} container(s)`}`);
+        const rows = [...h.containers].sort((a: any, b: any) => b.memBytes - a.memBytes);
+        for (const c of rows) {
+          const who = c.agentName ?? ({ embedder: 'memory search service', 'embed-door': 'memory search door', doorman: 'doorman' } as any)[c.role] ?? c.name;
+          console.log(`  ${String(c.cpuPct.toFixed(1)).padStart(6)}%  ${mb(c.memBytes).padStart(7)} / ${mb(c.memLimitBytes).padEnd(6)}  ${who}`);
+        }
+      }
+      return;
     }
     case 'embedder': {
       const sub = rest[0] ?? 'status';

@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.42.0] — 2026-09-23
+
+### Added
+- **Resources** (Fleet → Resources; `hatchabot top`): live CPU and memory per agent, per machine, from `docker stats` — one call per machine, refreshed while open. The machine owner also sees the memory search service, its door and doormen; other accounts see their own and shared agents.
+- **View by Image** on the home screen: the fleet default, a pinned base image, or each derived image as its own bin.
+
 ## [2.41.0] — 2026-09-23
 
 ### Added

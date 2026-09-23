@@ -305,6 +305,8 @@ export interface RuntimeProvider {
 
   /** Recent runtime output for the observability card. */
   logs(runtimeRef: string, lines: number): Promise<string>;
+  /** Live CPU and memory of every Hatchabot container on this daemon (docker stats). */
+  stats?(): Promise<ContainerStats[]>;
 
   /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp. */
   modelCallLog(runtimeRef: string, sinceIso: string): Promise<string>;
@@ -329,6 +331,26 @@ export interface RuntimeProvider {
    * files (SOUL/MEMORY/AGENTS and everything else it has accumulated).
    */
   importWorkspace(runtimeRef: string, slug: string, data: Buffer): Promise<void>;
+}
+
+export interface ContainerStats {
+  /** The container name (an agent's runtimeRef is `docker://<name>`). */
+  name: string;
+  /** Percent of one core, e.g. 12.5. */
+  cpuPct: number;
+  memBytes: number;
+  memLimitBytes: number;
+  pids: number;
+}
+
+/** "629.1MiB", "1GiB", "2.5GB", "512kB" → bytes. */
+export function parseByteSize(s: string): number {
+  const m = /^\s*([\d.]+)\s*([kKMGT]?i?B?)\s*$/.exec(s);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  const u = m[2]!.toLowerCase();
+  const scale: Record<string, number> = { b: 1, kb: 1e3, kib: 1024, mb: 1e6, mib: 1024 ** 2, gb: 1e9, gib: 1024 ** 3, tb: 1e12, tib: 1024 ** 4 };
+  return Math.round(n * (scale[u] ?? (u === '' ? 1 : 0)));
 }
 
 export interface RuntimeInfo {

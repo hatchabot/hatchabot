@@ -11,7 +11,7 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { ProviderError, parseChannelsLabel } from './provider.js';
+import { ProviderError, parseByteSize, parseChannelsLabel, type ContainerStats } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
@@ -597,6 +597,30 @@ export class LocalDockerProvider implements RuntimeProvider {
         resolve(keep.join('\n'));
       });
     });
+  }
+
+  async stats(): Promise<ContainerStats[]> {
+    // One call for the whole daemon: docker samples every container for a
+    // second, so per-agent calls would take a second each.
+    const res = await this.#docker(['stats', '--no-stream', '--format', '{{json .}}'], 30_000);
+    if (res.code !== 0) throw new ProviderError(`docker stats failed: ${res.stderr.slice(-300)}`, "Couldn't read container usage.");
+    const out: ContainerStats[] = [];
+    for (const line of res.stdout.split('\n')) {
+      if (!line.trim()) continue;
+      let j: { Name?: string; CPUPerc?: string; MemUsage?: string; PIDs?: string };
+      try { j = JSON.parse(line); } catch { continue; }
+      const name = j.Name ?? '';
+      if (!/^(hatchabot|agentclaw)-/.test(name)) continue;
+      const [used, limit] = (j.MemUsage ?? '').split('/');
+      out.push({
+        name,
+        cpuPct: Number((j.CPUPerc ?? '0').replace('%', '')) || 0,
+        memBytes: parseByteSize(used ?? ''),
+        memLimitBytes: parseByteSize(limit ?? ''),
+        pids: Number(j.PIDs) || 0,
+      });
+    }
+    return out;
   }
 
   async logs(runtimeRef: string, lines: number): Promise<string> {

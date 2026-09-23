@@ -157,6 +157,9 @@ export class MockProvider implements RuntimeProvider {
   }
   tagged: [string, string][] = [];
   async listImageTags() { return this.tags; }
+  /** What docker stats would say; tests set it. */
+  statsRows: import('./provider.js').ContainerStats[] = [];
+  async stats() { return this.statsRows; }
 
   /** The embedding service, as tests see it: a status the test can set, and what start/stop did. */
   embedder: { embedder: 'running' | 'stopped' | 'absent'; door: 'running' | 'stopped' | 'absent'; doorAddress?: string } = { embedder: 'absent', door: 'absent' };

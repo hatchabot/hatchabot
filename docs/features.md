@@ -937,8 +937,15 @@ host-owner gated and never exposed to a co-tenant.
 
 **View by** (the home screen, above the agents): *Groups* is the arrangement
 you made — drag to reorder, drag between groups. The other views bin the same
-agents by **Machine**, **AI source**, **Model**, **Class** or **Status**, read-only,
-remembered per device.
+agents by **Machine**, **AI source**, **Model**, **Image** (the fleet default,
+a pinned base image, or each derived image by name), **Class** or **Status**,
+read-only, remembered per device.
+
+**Resources** (Fleet → Resources; `hatchabot top`): live CPU and memory per
+agent, per machine, as Docker measures it — one call per machine, refreshed
+every few seconds while the view is open. The machine owner also sees the
+machine-level containers (the memory search service and its door, the
+Hatchabot agent's doorman); everyone else sees their own and shared agents.
 
 **Memory search engine** (an agent's ⚙ Settings → Advanced): where its
 semantic memory search runs — the engine built into its image (today's

@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
-import type { RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
+import type { ContainerStats, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
@@ -1579,6 +1579,44 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   };
   app.get('/v1/embedder', async () => embedder.status());
+
+  /**
+   * Live CPU and memory, per agent and per machine (docker stats, one call per
+   * host). Your own and shared agents; the machine owner also sees the
+   * machine-level containers (the memory search service, doormen).
+   */
+  app.get('/v1/resources', async (req) => {
+    const ownerId = ownerIdOf(req);
+    const owner = ownsLocalHost(req);
+    const visible = new Map(store.listVisibleAgents(ownerId).map((a) => [a.runtimeRef?.replace(/^docker:\/\//, '') ?? '', a]));
+    const everyone = owner ? new Map(store.listAllActiveAgents().map((a) => [a.runtimeRef?.replace(/^docker:\/\//, '') ?? '', a])) : visible;
+    const hosts = await Promise.all(store.listHosts(ownerId).map(async (h) => {
+      const provider = providerFor(h.id);
+      if (!provider.stats) return { id: h.id, name: h.name, kind: h.kind, containers: [], error: 'not measurable' };
+      try {
+        const rows = await provider.stats();
+        type Row = ContainerStats & { agentId?: string; agentName?: string; role: 'agent' | 'hatchabot' | 'embedder' | 'embed-door' | 'doorman'; mine?: boolean };
+        const containers = rows.flatMap((r): Row[] => {
+          const a = everyone.get(r.name);
+          if (a) {
+            if (!visible.has(r.name) && !owner) return [];
+            return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId }];
+          }
+          if (!owner) return [];
+          const role = /-embedder$/.test(r.name) ? 'embedder' : /-embed-door$/.test(r.name) ? 'embed-door' : /-doorman-/.test(r.name) ? 'doorman' : 'other';
+          if (role === 'other') return [];
+          return [{ ...r, role: role as 'embedder' | 'embed-door' | 'doorman' }];
+        });
+        return { id: h.id, name: h.name, kind: h.kind, containers, totals: {
+          cpuPct: Math.round(containers.reduce((s, c) => s + c.cpuPct, 0) * 10) / 10,
+          memBytes: containers.reduce((s, c) => s + c.memBytes, 0),
+        } };
+      } catch (err) {
+        return { id: h.id, name: h.name, kind: h.kind, containers: [], error: err instanceof ProviderError ? err.userMessage : 'unreachable' };
+      }
+    }));
+    return { at: new Date().toISOString(), hosts };
+  });
   const embedderAction = (action: 'start' | 'stop' | 'restart') => async (req: FastifyRequest, reply: FastifyReply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     try {

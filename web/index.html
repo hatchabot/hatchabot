@@ -2210,6 +2210,20 @@
   </div>
 </dialog>
 
+<dialog id="fleetResDlg" style="width:min(720px,96vw)">
+  <div style="display:flex;justify-content:space-between;align-items:baseline">
+    <h3 style="margin:0">Resources</h3>
+    <span class="sub" id="fleetResAt"></span>
+  </div>
+  <div class="sub" style="margin:4px 0 0">
+    Live CPU and memory per agent, as Docker measures it — refreshed every few seconds while this is open.
+  </div>
+  <div id="fleetResBody" style="margin-top:14px"></div>
+  <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+    <button class="primary" onclick="fleetResDlg.close()">Close</button>
+  </div>
+</dialog>
+
 <dialog id="fleetSourcesDlg" style="width:min(640px,96vw)">
   <div style="display:flex;justify-content:space-between;align-items:baseline">
     <h3 style="margin:0">AI sources</h3>
@@ -7357,6 +7371,37 @@ function openFleetHealth() {
 
 /** 📊 Sources: which of your agents are on which AI source, and which model
  *  each runs now. Mirrors `hatchabot sources`. */
+// Resources: docker stats per host, one call each; polled while the view is open.
+let fleetResTimer = null;
+async function openFleetResources() {
+  fleetResDlg.showModal();
+  const el = $('fleetResBody');
+  if (!el.innerHTML) el.innerHTML = '<div class="sub">Measuring… (a second per machine)</div>';
+  const mb = (b) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
+  const who = (c) => c.agentName ? esc(c.agentName) : ({ embedder: 'Memory search service', 'embed-door': 'Memory search door', doorman: 'Hatchabot agent’s doorman' })[c.role] || esc(c.name);
+  const draw = async () => {
+    try {
+      const r = await api('/v1/resources');
+      $('fleetResAt').textContent = `measured ${clock(r.at)}`;
+      el.innerHTML = r.hosts.map(h => {
+        const rows = [...h.containers].sort((a, b) => b.memBytes - a.memBytes);
+        return `<div style="padding:10px 0;border-top:1px solid var(--line)">
+          <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
+            <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
+          ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr><th>Agent</th><th style="text-align:right">CPU</th><th style="text-align:right">Memory</th><th style="text-align:right">of limit</th></tr></thead><tbody>
+            ${rows.map(c => `<tr><td>${who(c)}${c.mine === false ? ' <span class="sub">(shared with you)</span>' : ''}</td>
+              <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
+              <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
+              <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '%' : '—'}</td></tr>`).join('')}
+          </tbody></table>` : ''}</div>`;
+      }).join('') || '<div class="sub">Nothing running.</div>';
+    } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  };
+  await draw();
+  clearInterval(fleetResTimer);
+  fleetResTimer = setInterval(() => { if (fleetResDlg.open || v2FleetDlg?.open) draw(); else clearInterval(fleetResTimer); }, 5000);
+}
+
 async function openFleetSources() {
   fleetSourcesDlg.showModal();
   const el = $('fleetSourcesBody');
@@ -9812,7 +9857,7 @@ function v2IconHTML(a, st) {
 
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
-const V2_VIEWS = [['group', 'Groups'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['class', 'Class'], ['state', 'Status']];
+const V2_VIEWS = [['group', 'Groups'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['class', 'Class'], ['state', 'Status']];
 let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return V2_VIEWS.some(([k]) => k === v) ? v : 'group'; } catch { return 'group'; } })();
 function v2SetView(v) {
   v2View = V2_VIEWS.some(([k]) => k === v) ? v : 'group';
@@ -9826,6 +9871,12 @@ function v2ViewKey(a) {
     case 'source': { const p = profiles.find(x => x.id === a.aiProfileId); return ['s:' + a.aiProfileId, p ? p.name : 'Unknown source']; }
     case 'model': { const m = (a.model || a.profileDefaultModel || '').replace(/^.*\//, ''); return ['m:' + m, m || 'No model']; }
     case 'class': return ['c:' + (a.classId || ''), a.className || 'No class'];
+    case 'image': {
+      // The fleet default, a pinned base image, or a derived image (its own bin, by name).
+      if (!a.image) return ['i:', 'Fleet default image'];
+      const m = /:derived-([a-z0-9-]+)$/.exec(a.image);
+      return ['i:' + a.image, m ? `Derived image: ${m[1]}` : `Image: ${a.image.replace(/^hatchabot-runtime:/, '')}`];
+    }
     case 'state': { const st = v2Status(a); return ['st:' + st.cls, st.label]; }
     default: return null;
   }
@@ -10659,6 +10710,7 @@ const V2_FLEET = [
   ['health', 'Health', 'fleetDlg'],
   ['usage', 'Usage', 'fleetUsageDlg'],
   ['sources', 'AI in use', 'fleetSourcesDlg'],
+  ['resources', 'Resources', 'fleetResDlg'],
   ['activity', 'Activity', 'auditDlg'],
   ['tools', 'Tools', null],
 ];
@@ -10992,7 +11044,7 @@ function initV2() {
   };
   for (const [, , dlgId] of V2_FLEET) if (dlgId) wrapBody($(dlgId), `${dlgId}Body`, true);
   wrapBody(healthDlg, 'healthDlgBody', false);
-  Object.assign(V2_FLEET_OPEN, { health: openFleetHealth, usage: openFleetUsage, sources: openFleetSources, activity: openAudit });
+  Object.assign(V2_FLEET_OPEN, { health: openFleetHealth, usage: openFleetUsage, sources: openFleetSources, resources: openFleetResources, activity: openAudit });
   openFleetHealth = () => openFleet('health');
   openFleetUsage = () => openFleet('usage');
   openFleetSources = () => openFleet('sources');
