@@ -532,9 +532,10 @@
                                   background:color-mix(in srgb, var(--tone) 16%, var(--panel-2)); border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
                                   transition:transform .12s ease, box-shadow .12s ease }
   .v2hubactions .v2btn:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
-  /* New: one big plus, nothing around it (Chris, 2026-09-23: simpler). */
-  .v2hubactions .v2btn.v2new .v2glyph { background:none; border:0; color:var(--accent); font:500 48px/1 system-ui, sans-serif; box-shadow:none }
-  .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:none; color:var(--text) }
+  /* New: a big plus in an outlined tile — no fill, ink-coloured (black on the
+     light theme; the text colour, so it stays visible on the dark one). */
+  .v2hubactions .v2btn.v2new .v2glyph { background:none; border:2px solid var(--text); color:var(--text); font:400 54px/1 system-ui, sans-serif; box-shadow:none; padding-bottom:4px }
+  .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:none; background:color-mix(in srgb, var(--text) 6%, transparent) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
   .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
   .hub-unknown .v2hubactions { display:none }
