@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.11] — 2026-09-23
+
+### Changed
+- The New tile's gold is the header egg's gold in both themes (the light theme's accent is a darker gold, which made the tile read darker than the egg).
+
 ## [2.47.10] — 2026-09-23
 
 ### Changed

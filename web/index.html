@@ -534,8 +534,10 @@
   .v2hubactions .v2btn:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   /* New: a big plus in an outlined tile — no fill, ink-coloured (black on the
      light theme; the text colour, so it stays visible on the dark one). */
-  /* Filled with the one gold used everywhere (--accent: the top bar, View by), the plus in its ink. */
-  .v2hubactions .v2btn.v2new .v2glyph { background:var(--accent); border:1px solid var(--accent); color:var(--accent-ink, #14161a); box-shadow:none }
+  /* Filled with the brand's gold — the egg in the header, #e8a33d in both
+     themes (the light theme's --accent is a darker gold, for contrast on
+     white, which is why the tile read darker than the egg). */
+  .v2hubactions .v2btn.v2new .v2glyph { background:#e8a33d; border:1px solid #e8a33d; color:#14161a; box-shadow:none }
   .v2hubactions .v2btn.v2new .v2glyph svg { display:block } /* a drawn plus, dead centre — a typed one sits high */
   .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
