@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.10] — 2026-09-23
+
+### Changed
+- The New tile is filled with the app's one gold (the same as the top bar and View by), its plus in the ink colour.
+
 ## [2.47.9] — 2026-09-23
 
 ### Changed

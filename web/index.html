@@ -534,9 +534,10 @@
   .v2hubactions .v2btn:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   /* New: a big plus in an outlined tile — no fill, ink-coloured (black on the
      light theme; the text colour, so it stays visible on the dark one). */
-  .v2hubactions .v2btn.v2new .v2glyph { background:none; border:1px solid color-mix(in srgb, var(--dim) 38%, var(--line)); color:var(--text); box-shadow:none }
+  /* Filled with the one gold used everywhere (--accent: the top bar, View by), the plus in its ink. */
+  .v2hubactions .v2btn.v2new .v2glyph { background:var(--accent); border:1px solid var(--accent); color:var(--accent-ink, #14161a); box-shadow:none }
   .v2hubactions .v2btn.v2new .v2glyph svg { display:block } /* a drawn plus, dead centre — a typed one sits high */
-  .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:none; background:color-mix(in srgb, var(--text) 6%, transparent) }
+  .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
   .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
   .hub-unknown .v2hubactions { display:none }
