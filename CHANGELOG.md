@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.45.0] — 2026-09-23
+
+### Added
+- **Sort inside the read-only views**: under Machine, AI source, Model, Image, Class, Status, Activity or Rebuilt, a Sort control (Name / Activity, again to flip) orders every bin on screen without touching the order you arranged in Groups. Remembered per device.
+- **The create dialog warns when the bot pool is empty** and pre-selects *No Telegram*, so a new agent starts right away as a web-only agent instead of parking on a token nobody has; untick it to paste a token instead.
+
 ## [2.44.1] — 2026-09-23
 
 ### Fixed
