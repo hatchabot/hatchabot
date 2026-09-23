@@ -517,8 +517,20 @@
   .v2hubhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
   .v2hubhead h2 { margin:0; font-size:17px }
   .v2hubhead .spacer { flex:1 }
-  /* The fleet's actions live with the manager, not in the header (Chris, 2026-09-23). */
-  .v2hubactions { display:flex; align-items:center; gap:8px; flex-wrap:wrap }
+  /* The fleet's actions live with the manager, not in the header (Chris,
+     2026-09-23), as icon tiles in the same row as its numbers. */
+  .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:12px 14px; margin:4px 0 2px }
+  .v2hubrow .v2stats { margin:0 }
+  .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 14px; margin-left:auto }
+  .v2hubactions .v2btn, .v2hubactions .v2btn:hover { display:grid; gap:5px; justify-items:center; width:72px; height:auto; padding:0; border:0; background:none; border-radius:0; position:relative; --tone:var(--dim) }
+  .v2hubactions .v2btn .v2glyph { width:56px; height:56px; padding:17px; box-sizing:border-box; border-radius:17px;
+                                  background:color-mix(in srgb, var(--tone) 16%, var(--panel-2)); border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
+                                  transition:transform .12s ease, box-shadow .12s ease }
+  .v2hubactions .v2btn:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
+  .v2hubactions .v2btn.v2new { --tone:var(--accent) }
+  .v2hubactions .v2btn.v2new .v2glyph { background:color-mix(in srgb, var(--accent) 32%, var(--panel-2)); border-color:color-mix(in srgb, var(--accent) 70%, var(--line)) }
+  .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
+  .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
   .hub-unknown .v2hubactions { display:none }
   #v2HubTools { display:flex; align-items:center; gap:8px }
   #v2HubTools label { margin:0; width:auto }
@@ -889,6 +901,8 @@
       <div class="v2hubmain">
         <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
         <div id="v2OpsBox" hidden></div>
+        <div class="v2hubrow">
+          <div class="v2stats" id="v2Stats" hidden></div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg><span class="lbl">New agent</span></button>
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg><span class="v2count" id="v2InboxCount"></span></button>
@@ -896,7 +910,7 @@
           <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22V4"/><path d="M4 4h12l-2 4 2 4H4z"/></svg><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
           <button class="v2btn" onclick="openAiDlg()" title="AI sources, people, Telegram bots, machines, backups, security"><svg class="v2glyph" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span class="lbl">Settings</span></button>
         </div>
-        <div class="v2stats" id="v2Stats" hidden></div>
+        </div>
       </div>
     </section>
     <section id="v2Proposals" hidden aria-labelledby="v2PropTitle">
