@@ -513,6 +513,15 @@
   /* Every section of a settings tab in its own card: a tab should read as a
      few things you can act on, not one column of text (Chris, 2026-09-20). */
   .v2card { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; background:var(--panel) }
+  /* Settings → Security: the posture report's groups and the per-agent rows. */
+  .posture-group { margin-top:12px }
+  .posture-label { font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--dim); margin-bottom:4px }
+  .posture-row { padding:8px 0; border-top:1px solid var(--line) }
+  .posture-row:first-child { border-top:0; padding-top:2px }
+  .posture-head { display:flex; align-items:baseline; gap:6px }
+  .posture-row > .sub { margin-left:22px; margin-top:2px }
+  .posture-level { font-size:12px; color:var(--dim) }
+  .posture-hot b, .posture-hot .posture-level { color:var(--warn) }
   .v2card > h4:first-child, .v2card > label:first-child { margin-top:0 }
   .v2card > .sec-drawer:first-child { margin-top:0 }
   /* A card whose whole contents are hidden (an admin-only block, say) draws
@@ -1873,12 +1882,16 @@
     <div id="cliTokenList" class="sub" style="margin-top:8px">Loading…</div>
 
 
-    <div class="pair" style="align-items:center">
-      <span class="grow"><b>Security posture</b>
-        <span class="sub">A config-risk report: what is exposed, what each agent can do, and what changed since the last one. It runs when you open this tab, and once a day in the background.</span></span>
+    <h4 style="margin:0 0 4px">Security posture</h4>
+    <div style="display:flex;align-items:flex-start;gap:12px">
+      <span class="grow sub">What this machine exposes, and what changed since the last check. It runs when you open this tab, and once a day in the background.</span>
       <button class="primary" id="postureRunBtn" onclick="loadPosture()">Check again</button>
     </div>
-    <div id="postureOut" class="sub" style="margin-top:10px">Checking…</div>
+    <div id="postureOut" style="margin-top:10px">Checking…</div>
+
+    <h4 style="margin:0 0 4px">Agent exposure</h4>
+    <div class="sub">For each agent: who can message it, and what it can do. The higher both are, the more a stranger or a mistake could do through it.</div>
+    <div id="exposureOut" style="margin-top:8px"></div>
   </section>
 
   <section id="paneOperator" role="tabpanel" hidden>
@@ -3323,10 +3336,18 @@ async function loadPosture() {
           : m.channels.length > 1 ? ` <span class="sub">(${m.channels.map(esc).join(', ')})</span>` : ''}`).join(', ');
     };
 
-    const agents = report.agents.length
-      ? report.agents.map(a => `<div class="pair" style="align-items:baseline;gap:6px${a.exposure === 'high' ? ';color:var(--warn)' : ''}">
-          <span>${EXPOSURE_DOT[a.exposure]}</span>
-          <span class="grow"><b>${esc(a.name)}</b> <span class="sub">— ${a.exposure} exposure${a.reasons.length ? ': ' + a.reasons.map(esc).join(' + ') : ''}${a.capabilities.length ? `<br>can: ${a.capabilities.map(esc).join(', ')}` : ''}${audienceLine(a)}</span></span></div>`).join('')
+    // One row per agent: name and level on the first line, who can reach it
+    // and what it can do below, each on its own line — the old single run-on
+    // line was the hardest part of the tab to read.
+    const agentRow = (a) => `<div class="posture-row${a.exposure === 'high' ? ' posture-hot' : ''}">
+        <div class="posture-head"><span>${EXPOSURE_DOT[a.exposure]}</span>
+          <b class="grow">${esc(a.name)}</b><span class="posture-level">${esc(a.exposure)} exposure</span></div>
+        ${a.reasons.length ? `<div class="sub">${a.reasons.map(esc).join(' · ')}</div>` : ''}
+        <div class="sub">${audienceLine(a).replace(/^<br>/, '')}</div>
+        ${a.capabilities.length ? `<div class="sub">can: ${a.capabilities.map(esc).join(', ')}</div>` : ''}
+      </div>`;
+    $('exposureOut').innerHTML = report.agents.length
+      ? report.agents.map(agentRow).join('')
       : '<div class="sub">No live agents.</div>';
 
     const lim = report.limits;
@@ -3334,10 +3355,9 @@ async function loadPosture() {
     // looked like it did nothing.
     const when = `<div class="sub" style="margin-bottom:8px">Checked ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.</div>`;
     el.innerHTML = `${when}${chg}
-      <div style="margin:6px 0"><b>Install</b></div>${install}
-      <div style="margin:14px 0 6px"><b>Agent exposure</b> <span class="sub">(who can reach it × what it can do)</span></div>${agents}
-      <div style="margin:14px 0 6px"><b>Limits</b></div>
-      <div class="sub">Agents: ${lim.liveAgents}${lim.agentCap ? ` / ${lim.agentCap}` : ' (no cap set)'} · Disk warn threshold: ${lim.diskWarnGB} GB/agent</div>`;
+      <div class="posture-group"><div class="posture-label">This machine</div>${install}</div>
+      <div class="posture-group"><div class="posture-label">Limits</div>
+        <div class="sub">Agents: ${lim.liveAgents}${lim.agentCap ? ` / ${lim.agentCap}` : ' (no cap set)'} · Disk warning at ${lim.diskWarnGB} GB per agent</div></div>`;
   } catch (e) {
     el.textContent = e.message;
   } finally {

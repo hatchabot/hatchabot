@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.4] — 2026-09-23
+
+### Changed
+- **⚙ Settings → Security reads as three sections**: *Access tokens*, *Security posture* and *Agent exposure* each have their own outlined card (the posture report used to share the tokens' card, with its parts as bold lines). Inside the posture card the machine checks and the limits are labelled groups; in *Agent exposure* each agent is its own row — name and level first, then why, who can message it, and what it can do, each on its own line.
+
+### Fixed
+- **A fresh Linux install ended without the `hatchabot` command.** With a system-wide Node (NodeSource, distro packages) npm's global folder is root-owned, `npm link` failed with EACCES, and setup only printed instructions. It now links through `scripts/link-cli.sh`, which falls back to `~/.npm-global` and adds it to your shell's PATH. Third first-run problem from the clean-VM install.
+
 ## [2.34.3] — 2026-09-23
 
 ### Fixed

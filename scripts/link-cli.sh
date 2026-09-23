@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Put the `hatchabot` and `hbt` commands on your PATH, and check the install.
 #
-#   ./scripts/link-cli.sh
+#   ./scripts/link-cli.sh              # …and run `hatchabot doctor` at the end
+#   ./scripts/link-cli.sh --no-doctor  # (setup-host.sh, which checks on its own)
 #
 # For a machine where the checkout exists but the command does not — after
 # moving to a new laptop with Migration Assistant, a fresh shell profile, or an
@@ -19,7 +20,15 @@ if ! npm link >/dev/null 2>&1; then
   BIN="$HOME/.npm-global/bin"
   npm link >/dev/null
 fi
-[ -e "$BIN/hbt" ] || ln -s "$BIN/hatchabot" "$BIN/hbt" 2>/dev/null || true
+# `hbt` is the short name — only where nothing else already answers to it.
+# (Not a package.json bin: npm link fails outright on a name another package
+# owns, and would take `hatchabot` down with it.)
+OTHER="$(PATH="${PATH//$BIN:/}" command -v hbt 2>/dev/null || true)"
+if [ -n "$OTHER" ] && [ "$(readlink -f "$OTHER")" != "$(readlink -f "$BIN/hatchabot")" ]; then
+  echo "note: another program here is already called hbt ($OTHER), so use the full name: hatchabot."
+else
+  [ -e "$BIN/hbt" ] || ln -s "$BIN/hatchabot" "$BIN/hbt" 2>/dev/null || true
+fi
 echo "linked: $BIN/hatchabot$([ -L "$BIN/hbt" ] && echo ", $BIN/hbt")"
 
 # The shell profile, once. zsh on a Mac, bash elsewhere; both if unsure.
@@ -36,5 +45,6 @@ case ":$PATH:" in
     ;;
 esac
 
+[ "${1:-}" = --no-doctor ] && exit 0
 echo
 "$BIN/hatchabot" doctor || true
