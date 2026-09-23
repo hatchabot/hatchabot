@@ -79,7 +79,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 echo "   docker $(docker version --format '{{.Server.Version}}' 2>/dev/null) ($(docker version --format '{{.Server.Arch}}' 2>/dev/null))"
 
-say "3/4 Node.js 22+"
+say "3/4 Node.js 22+ and build tools"
 node_ok() { have node && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 22 ]; }
 if ! node_ok; then
   if [ "$OS" = Darwin ] && have brew; then ask "Node 22+ is missing. Install it with Homebrew?" && brew install node@22 && brew link --overwrite node@22 || die "Install Node 22+ (https://nodejs.org), then re-run."
@@ -89,6 +89,18 @@ if ! node_ok; then
   node_ok || die "Node is still not 22+ on PATH. Open a new shell and re-run."
 fi
 echo "   node $(node --version)"
+# The database driver (better-sqlite3 13) compiles on install — it no longer
+# downloads a prebuilt binary — so it needs make, a C++ compiler and Python.
+# Every developer machine has them; a fresh Ubuntu does not, and npm failed
+# with "not found: make" (found by a clean-VM install, 2026-09-23). A Mac has
+# them with the Xcode command-line tools, which git already required.
+if [ "$OS" = Linux ] && ! { have make && { have g++ || have c++; } && have python3; }; then
+  if have apt-get && ask "Build tools are missing (make, a C++ compiler, Python) — Hatchabot's database driver is compiled when it installs. Install them with apt (build-essential)?"; then
+    sudo apt-get install -y build-essential python3
+  else
+    die "Install make, g++ and python3, then re-run. (Debian/Ubuntu: sudo apt-get install -y build-essential python3 · Fedora: sudo dnf install -y make gcc-c++ python3)"
+  fi
+fi
 
 say "4/4 Hatchabot → $DIR"
 if [ -d "$DIR/.git" ]; then

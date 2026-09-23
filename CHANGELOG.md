@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.3] — 2026-09-23
+
+### Fixed
+- **A fresh Linux install failed at `npm install` with "not found: make".** The database driver, better-sqlite3 13, compiles on install instead of downloading a prebuilt binary, so it needs make, a C++ compiler and Python — present on every development machine and on a Mac with the Xcode tools, absent on a fresh Ubuntu. The installer now checks for them on Linux and offers `build-essential` through apt, the way it offers Docker and Node. Found by the same clean-VM install as 2.34.2.
+
 ## [2.34.2] — 2026-09-23
 
 ### Fixed
