@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.9] — 2026-09-23
+
+### Changed
+- The New tile's outline matches the other tiles' (soft, one pixel), and its plus is drawn, so it sits dead centre.
+
 ## [2.47.8] — 2026-09-23
 
 ### Changed

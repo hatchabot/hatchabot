@@ -534,7 +534,8 @@
   .v2hubactions .v2btn:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   /* New: a big plus in an outlined tile — no fill, ink-coloured (black on the
      light theme; the text colour, so it stays visible on the dark one). */
-  .v2hubactions .v2btn.v2new .v2glyph { background:none; border:2px solid var(--text); color:var(--text); font:400 54px/1 system-ui, sans-serif; box-shadow:none; padding-bottom:4px }
+  .v2hubactions .v2btn.v2new .v2glyph { background:none; border:1px solid color-mix(in srgb, var(--dim) 38%, var(--line)); color:var(--text); box-shadow:none }
+  .v2hubactions .v2btn.v2new .v2glyph svg { display:block } /* a drawn plus, dead centre — a typed one sits high */
   .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:none; background:color-mix(in srgb, var(--text) 6%, transparent) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
   .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
@@ -915,7 +916,7 @@
           <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true">🎛️</span><span class="lbl">Status</span></button>
           <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><span class="v2glyph em" aria-hidden="true">🧭</span><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
           <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
-          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true">+</span><span class="lbl">New</span></button>
+          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
         </div>
         </div>
       </div>
