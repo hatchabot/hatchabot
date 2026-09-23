@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.49.1] — 2026-09-23
+
+### Changed
+- The New tile uses the same soft gold wash as the selected View by / Sort buttons instead of solid gold.
+
 ## [2.49.0] — 2026-09-23
 
 ### Added
