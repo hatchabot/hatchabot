@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.2] — 2026-09-23
+
+### Changed
+- The Hatchabot panel's tiles have pictures now (＋, 📥, 💓, 🧭, ⚙️) with short captions; the New tile is solid accent with a bold plus; and the **Fleet** panel is called **Status** — it is what the fleet is doing right now: health, usage, resources, activity, tools.
+
 ## [2.47.1] — 2026-09-23
 
 ### Changed
