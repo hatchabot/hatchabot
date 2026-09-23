@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.42.1] — 2026-09-23
+
+### Fixed
+- The home screen showed an empty grid under a half-filled hub until the first agent list arrived (a few seconds on a big fleet, since every agent is checked); it now says "Loading your agents…" until then, in both layouts.
+
 ## [2.42.0] — 2026-09-23
 
 ### Added

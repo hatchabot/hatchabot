@@ -447,6 +447,10 @@
     .v2btn { padding:0 11px }
     .v2brand { font-size:18px }
   }
+  .hb-loading { display:flex; align-items:center; gap:10px; padding:28px 8px; color:var(--dim); font-size:15px }
+  .hb-spin { width:16px; height:16px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:hb-spin .8s linear infinite; flex:none }
+  @keyframes hb-spin { to { transform:rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .hb-spin { animation:none } }
   .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
            grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
   .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
@@ -866,7 +870,7 @@
     <div id="activity" style="margin-top:8px;max-height:260px;overflow:auto"></div>
     <div class="resize-bar" id="activityResize" role="separator" aria-orientation="horizontal" aria-label="Resize recent activity" tabindex="0" title="Drag to resize · double-click to reset"></div>
   </div>
-  <div id="agents"></div>
+  <div id="agents"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents…</div></div>
   <div id="v2home" class="v2only">
     <section class="v2hub" aria-labelledby="v2HubTitle">
       <div class="v2face" aria-hidden="true">🐣</div>
@@ -881,7 +885,7 @@
       <div id="v2JoinList" style="display:grid;gap:8px;margin-bottom:8px"></div>
       <div id="v2PropList"></div>
     </section>
-    <div id="v2groups"></div>
+    <div id="v2groups"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents… <span class="sub">(a few seconds on a big fleet: every agent is checked)</span></div></div>
     <div class="v2dropstrips">
       <div class="v2newgroup" id="v2NewGroup">Drop here to start a new group</div>
       <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first</div>
@@ -9271,6 +9275,7 @@ let archiveOpen = false;
 
 function renderAgents() {
   if (UI_V2) return renderV2();
+  if (!agentsLoaded) return; // keep the "Loading…" line until the first list arrives
   const el = $('agents');
   // Show "Rebuild all" only when there's more than one agent to rebuild.
   $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
@@ -9891,6 +9896,9 @@ const v2IsCollapsed = (key) => (key in v2Collapsed ? v2Collapsed[key] : key === 
 
 function renderV2() {
   if (v2drag.active) return; // never re-render out from under a drag
+  // Until the first list arrives the page keeps its "Loading…" line: an
+  // empty grid under a half-filled hub read as broken (Chris, 2026-09-23).
+  if (!agentsLoaded) return;
   v2MaybeAutoIcons();
   v2RenderHub();
   renderV2Joins(); // people knocking: refreshed with the pairing poll, not only with proposals
