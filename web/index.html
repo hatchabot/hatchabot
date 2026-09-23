@@ -419,6 +419,13 @@
   .v2top .v2btn.v2new { background:color-mix(in srgb, var(--accent) 30%, var(--bg)); border-color:color-mix(in srgb, var(--accent) 70%, var(--line)) }
   .v2top .v2btn.v2new:hover { background:color-mix(in srgb, var(--accent) 42%, var(--bg)) }
   .v2btn .v2glyph { flex:none; display:block }
+  .v2ask { display:flex; align-items:center; gap:6px; flex:1; max-width:520px; min-width:0 }
+  .v2ask input { flex:1; min-width:0; height:38px; border-radius:10px; border:1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+                 background:color-mix(in srgb, var(--bg) 62%, transparent); color:var(--text); font:inherit; font-size:14px; padding:0 12px; margin:0 }
+  .v2ask input::placeholder { color:var(--dim) }
+  .v2ask .v2btn { padding:0 12px }
+  .v2askpop { position:fixed; top:calc(env(safe-area-inset-top, 0px) + 62px); left:50%; transform:translateX(-50%); width:min(680px, calc(100vw - 32px)); z-index:40 }
+  @media (max-width: 720px) { .v2ask { max-width:none } .v2ask input { font-size:16px } }
   .v2new { font-weight:600 }
   .v2count { position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--bad); color:#fff;
              font-size:11px; font-weight:700; display:grid; place-items:center; border:2px solid var(--bg) }
@@ -838,6 +845,18 @@
         <span class="appver" id="v2AppVer" title="The build this browser is running. If it lags the server after a reload, something is serving you a cached page."></span></span>
     </a>
     <span class="v2spacer"></span>
+    <form class="v2ask" id="v2Ask" hidden onsubmit="return v2AskSubmit(event)" role="search">
+      <input id="v2AskInput" type="text" placeholder="Ask Hatchabot anything…" autocomplete="off" maxlength="2000" aria-label="Ask your Hatchabot agent">
+      <button type="submit" class="v2btn" title="Ask" aria-label="Ask">➤</button>
+    </form>
+    <div class="v2pop v2askpop" id="v2AskPop" hidden>
+      <div class="sub" id="v2AskQ" style="margin-bottom:6px"></div>
+      <div id="v2AskA" style="white-space:pre-wrap;max-height:50vh;overflow:auto"></div>
+      <div class="actions" style="justify-content:flex-end;margin-top:10px;gap:6px">
+        <button class="hbtn" id="v2AskOpen" onclick="v2AskOpenThread()">Open the conversation</button>
+        <button class="hbtn" onclick="$('v2AskPop').hidden = true">Close</button>
+      </div>
+    </div>
     <div class="v2acct">
       <button class="v2avatar" id="v2AvatarBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="v2AcctPop" onclick="v2ToggleAccount()" title="Your account">?</button>
       <div class="v2pop" id="v2AcctPop" role="menu" hidden>
@@ -10117,6 +10136,31 @@ function renderV2() {
   if (focused) root.querySelector(`.v2agent[data-v2id="${CSS.escape(focused)}"]`)?.focus();
 }
 
+// Ask Hatchabot from the top bar: the question goes into the manager's own
+// conversation (the same one its console shows) and the answer comes back here.
+let v2AskBusy = false;
+async function v2AskSubmit(ev) {
+  ev.preventDefault();
+  const input = $('v2AskInput'), text = input.value.trim(), id = $('v2Ask').dataset.ops;
+  if (!text || !id || v2AskBusy) return false;
+  v2AskBusy = true;
+  const pop = $('v2AskPop'); pop.hidden = false;
+  $('v2AskQ').textContent = `You: ${text}`;
+  $('v2AskA').textContent = 'Thinking… (it reads the fleet before it answers; a long question can take a minute)';
+  input.value = '';
+  try {
+    const r = await api(`/v1/agents/${id}/ask`, { method: 'POST', body: { text } });
+    $('v2AskA').textContent = r.reply || '(no reply)';
+  } catch (e) { $('v2AskA').textContent = `Couldn't ask: ${e.message}`; }
+  finally { v2AskBusy = false; refresh(false); }
+  return false;
+}
+function v2AskOpenThread() {
+  const id = $('v2Ask').dataset.ops;
+  $('v2AskPop').hidden = true;
+  if (id) v2Open(id);
+}
+
 // Icons for agents that have none yet: one batch, picked by the management AI.
 let v2IconTry = 0;
 function v2MaybeAutoIcons() {
@@ -11076,7 +11120,7 @@ function v2RenderHub() {
       : ops.state === 'FAILED' ? `It didn't start${ops.stateReason ? ': ' + esc(ops.stateReason) : '.'} Click it to retry.`
       : ops.state === 'PROVISIONING' ? 'Setting up — about a minute.'
       : ops.state === 'STOPPED' ? 'Stopped. Click it to start it again.'
-      : 'Ask it anything.';
+      : 'Ask it anything — in the bar above, or click it to open the conversation.';
     const thin = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED').length < 3;
     html = `<div class="sub">${say}</div>`
       + (thin && ops.state === 'RUNNING' && !ops.opsDrift
@@ -11089,6 +11133,9 @@ function v2RenderHub() {
   }
   if (box.__html !== html) { box.innerHTML = html; box.__html = html; }
   box.hidden = false;
+  // The Ask box in the top bar answers through the manager: only while it can.
+  const askForm = $('v2Ask');
+  if (askForm) { askForm.hidden = !(ops && ops.state === 'RUNNING' && !ops.opsDrift); askForm.dataset.ops = ops?.id ?? ''; }
   renderV2Stats();
   // Its icon IS an agent icon: same markup and classes as the grid's, so the
   // ring, badge, tooltip and click all behave identically. Only the size differs.

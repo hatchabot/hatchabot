@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.49.0] — 2026-09-23
+
+### Added
+- **Ask Hatchabot from the top bar**: a box that sends your question to the manager and shows its answer right there, with a button to open the full conversation. The question and answer land in the manager's own thread, the same one its console shows. Shown while the manager is running.
+
 ## [2.48.1] — 2026-09-23
 
 ### Added
