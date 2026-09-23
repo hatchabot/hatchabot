@@ -5295,7 +5295,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
-      const body = (req.body ?? {}) as { token?: string; fromWorkspace?: string };
+      const body = (req.body ?? {}) as { token?: string; fromWorkspace?: string; webOnly?: boolean };
+      // No bot to give it (the pool is empty and there is no spare token):
+      // go on without Telegram — the agent becomes web-only, as if created so,
+      // and provisioning resumes. Only while it is parked on this very step.
+      if (body.webOnly === true) {
+        if (agent.pendingAction?.type !== 'bot_token') return reply.code(409).send({ error: 'This agent is not waiting for a bot token.' });
+        store.setAgentWebOnly(agent.id, true);
+        store.setAgentPendingAction(agent.id, null);
+        trace(agent.id)('telegram.skipped', { why: 'no bot available' });
+        kickProvision(agent.id);
+        return reply.code(202).send({ webOnly: true });
+      }
       let token = body.token?.trim();
 
       // Reuse: the bot a hand-built workspace already owns. Resolved here

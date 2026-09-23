@@ -6188,6 +6188,12 @@ function cardMenu(a) {
   return `<details class="menu"><summary>⋯</summary><div class="menu-items" onclick="this.parentElement.open=false">${items.join('')}</div></details>`;
 }
 
+/** The pool is empty and there is no spare token: finish the agent without a bot. */
+async function skipTelegram(id, name) {
+  if (!confirm(`Finish "${name}" without Telegram?\n\nYou talk to it here in Hatchabot; a bot can be attached later from its Messaging tab.`)) return;
+  try { await api(`/v1/agents/${id}/channel-token`, { method: 'POST', body: { webOnly: true } }); toast(`${name} is finishing without Telegram`); await refresh(false); }
+  catch (e) { toast(e.message, 12000); }
+}
 function tokenForm(a) {
   return `
   <div class="token-form">
@@ -6197,6 +6203,7 @@ function tokenForm(a) {
       <button class="primary" onclick="submitToken('${a.id}')">Connect</button>
     </div>
     <div class="err" id="tokerr-${a.id}"></div>
+    <div class="sub" style="margin-top:6px">No bot to give it? <button onclick="skipTelegram('${a.id}','${jsq(a.name)}')">Continue without Telegram</button> — it becomes a web-only agent you talk to here (a bot can be attached later).</div>
   </div>`;
 }
 
@@ -10295,6 +10302,7 @@ function v2Pane(a, tab) {
   switch (tab) {
     case 'overview': return `
       <div class="v2notices">${agentNotices(a, { skipFailure: true }).trim()}</div>
+      ${a.pendingAction?.type === 'bot_token' ? row('Telegram bot', `<div class="grow"><span class="sub">The bot pool is empty, so this agent is waiting for a bot of its own — or it can go on without one.</span>${tokenForm(a)}</div>`) : ''}
       ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
       ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
         ? `<ul class="v2why" style="margin:0 0 10px">${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}

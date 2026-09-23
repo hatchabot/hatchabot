@@ -167,6 +167,8 @@ Commands:
                                required ones once idle (default), those plus
                                the rest in the quiet hours, or never
   retry <agent>                Retry a FAILED agent's provisioning
+  skip-telegram <agent>        An agent parked on "paste a bot token" (the pool
+                               is empty): finish it as a web-only agent instead
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
                                (applies on the agent's next rebuild)
@@ -2003,6 +2005,12 @@ async function main() {
           console.log(`  ${String(c.cpuPct.toFixed(1)).padStart(6)}%  ${mb(c.memBytes).padStart(7)} / ${mb(c.memLimitBytes).padEnd(6)}  ${who}`);
         }
       }
+      return;
+    }
+    case 'skip-telegram': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot skip-telegram <agent>'));
+      await jsonPost(`/v1/agents/${a.id}/channel-token`, { webOnly: true });
+      console.log(`"${a.name}" is finishing without Telegram — talk to it in the web app; a bot can be attached later.`);
       return;
     }
     case 'embedder': {

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.44.1] — 2026-09-23
+
+### Fixed
+- **An agent waiting for a Telegram bot token looked hung in the default layout**: the classic card showed the paste step, the new agent sheet did not — only "Waiting on you". The sheet's Overview now carries the step, and both layouts offer **Continue without Telegram** (`hatchabot skip-telegram <agent>`) for when the pool is empty and there is no spare token: the agent finishes as a web-only agent, and a bot can be attached later.
+
 ## [2.44.0] — 2026-09-23
 
 ### Changed
