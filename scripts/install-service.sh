@@ -64,4 +64,32 @@ else
   fi
 fi
 
+# The service runs under the user's systemd manager, whose groups were fixed
+# when it started. If that was before the user joined the docker group — the
+# installer adds it, and "log out and back in" within seconds, or `newgrp`,
+# leaves the old manager running, which lingering then keeps for good — the
+# service is denied Docker while a login shell has it: every agent fails with
+# "Could not create the agent volume" and nothing says why (clean-VM install,
+# 2026-09-23). Restarting the manager fixes it; a login session is not touched.
+DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3)"
+MANAGER="$(pgrep -u "$USER" -x systemd 2>/dev/null | head -1)"
+if [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | grep -qx docker \
+   && ! grep '^Groups:' "/proc/$MANAGER/status" 2>/dev/null | tr ' \t' '\n\n' | grep -qx "$DOCKER_GID"; then
+  echo
+  echo "⚠ Your background services started before you joined the docker group, so"
+  echo "  Hatchabot cannot use Docker yet (your terminal can — that is why it looks fine)."
+  a=n
+  if { : >/dev/tty; } 2>/dev/null; then
+    printf '  Restart your user services now? (sudo systemctl restart user@%s — your login stays) [y/N] ' "$(id -u)" >/dev/tty
+    read -r a </dev/tty || a=n
+  fi
+  if [ "$(printf %s "$a" | tr '[:upper:]' '[:lower:]')" = y ] && sudo systemctl restart "user@$(id -u).service"; then
+    sleep 2
+    systemctl --user start hatchabot hatchabot-backup.timer 2>/dev/null || true
+    echo "  Restarted — Hatchabot can use Docker now."
+  else
+    echo "  Fix it later with:  sudo systemctl restart user@$(id -u)   (or reboot)"
+  fi
+fi
+
 systemctl --user status hatchabot --no-pager | head -5

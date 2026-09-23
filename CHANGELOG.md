@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.7] — 2026-09-23
+
+### Fixed
+- **On Linux, every agent could fail with "Could not create the agent volume" while `doctor` said all was well.** The service runs under the user's systemd manager, whose groups are fixed when it starts. The installer adds the user to the docker group and asks them to log out and back in; logging back in within seconds, or using `newgrp docker`, leaves the old manager running — and lingering then keeps it for good — so the service was denied Docker while every terminal had it. Setup now notices and offers to restart the user's services (`sudo systemctl restart user@<uid>`; the login session is untouched), and `doctor` checks the running service's own groups and names the fix. Found by the new clean-install job, which re-logs in within seconds.
+
 ## [2.34.6] — 2026-09-23
 
 ### Fixed

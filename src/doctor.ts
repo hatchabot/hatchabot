@@ -16,7 +16,9 @@ export interface DoctorFacts {
   runtimeImage?: { openclawVersion?: string; sizeGb?: number };
   envFile: { present: boolean; secretKey: boolean; password: boolean; authMode: string; publicUrl?: string };
   db: { path: string; present: boolean; sizeMb?: number };
-  service: { manager: 'systemd' | 'launchd' | 'none'; active?: boolean; enabled?: boolean };
+  service: { manager: 'systemd' | 'launchd' | 'none'; active?: boolean; enabled?: boolean;
+    /** Linux: the RUNNING service process is not in the docker group, though the user is. */
+    dockerDenied?: boolean };
   controlPlane: { url: string; ok: boolean; version?: string; error?: string };
   diskFreeGb?: number;
   backups: { dir: string; lastSet?: string; ageDays?: number };
@@ -75,6 +77,7 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   out.push(f.db.present ? { level: 'ok', text: `Database ${f.db.path}${f.db.sizeMb !== undefined ? ` (${f.db.sizeMb.toFixed(1)} MB)` : ''}` } : { level: 'warn', text: `Database not created yet at ${f.db.path}`, fix: 'It appears on first start' });
   if (f.service.manager === 'none') out.push({ level: 'warn', text: 'No background service installed — Hatchabot will not start with the machine', fix: './scripts/install-service.sh' });
   else if (!f.service.active) out.push({ level: 'fail', text: `Service is installed (${f.service.manager}) but not running`, fix: f.service.manager === 'systemd' ? 'systemctl --user start hatchabot; journalctl --user -u hatchabot -n 50' : './scripts/restart.sh' });
+  else if (f.service.dockerDenied) out.push({ level: 'fail', text: 'Service running, but it cannot use Docker — it started before your user joined the docker group, so agents fail to start (your terminal has the group, which is why the rest looks fine)', fix: 'sudo systemctl restart user@$(id -u)   (or reboot)' });
   else out.push({ level: f.service.enabled === false ? 'warn' : 'ok', text: `Service running (${f.service.manager})${f.service.enabled === false ? ' — but not enabled at boot' : ''}`, ...(f.service.enabled === false ? { fix: 'systemctl --user enable hatchabot' } : {}) });
   out.push(f.controlPlane.ok ? { level: 'ok', text: `Control plane answering at ${f.controlPlane.url}${f.controlPlane.version ? ` (v${f.controlPlane.version})` : ''}` } : { level: 'fail', text: `Control plane not answering at ${f.controlPlane.url}${f.controlPlane.error ? ` (${f.controlPlane.error})` : ''}`, fix: 'journalctl --user -u hatchabot -n 50 (Linux) · ./scripts/restart.sh' });
   if (f.diskFreeGb !== undefined) out.push(f.diskFreeGb < 10 ? { level: f.diskFreeGb < 3 ? 'fail' : 'warn', text: `Only ${f.diskFreeGb.toFixed(1)} GB free — each agent volume grows; the image is ~2 GB`, fix: 'docker system prune; remove old backup sets; move backups to a NAS (HATCHABOT_BACKUP_DIR)' } : { level: 'ok', text: `${f.diskFreeGb.toFixed(0)} GB free` });
@@ -138,7 +141,7 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   const dbPath = process.env.HATCHABOT_DB ?? env.HATCHABOT_DB ?? defaultDbPath();
   const service: DoctorFacts['service'] = process.platform === 'darwin'
     ? { manager: existsSync(join(homedir(), 'Library/LaunchAgents/com.hatchabot.control-plane.plist')) || existsSync(join(homedir(), 'Library/LaunchAgents/com.agentclaw.control-plane.plist')) ? 'launchd' : 'none', active: !!sh('launchctl', ['list', 'com.hatchabot.control-plane']) || !!sh('launchctl', ['list', 'com.agentclaw.control-plane']) }
-    : sh('systemctl', ['--user', 'cat', 'hatchabot.service']) ? { manager: 'systemd', active: sh('systemctl', ['--user', 'is-active', 'hatchabot']) === 'active', enabled: sh('systemctl', ['--user', 'is-enabled', 'hatchabot']) === 'enabled' } : { manager: 'none' };
+    : sh('systemctl', ['--user', 'cat', 'hatchabot.service']) ? { manager: 'systemd', active: sh('systemctl', ['--user', 'is-active', 'hatchabot']) === 'active', enabled: sh('systemctl', ['--user', 'is-enabled', 'hatchabot']) === 'enabled', dockerDenied: serviceDockerDenied() } : { manager: 'none' };
   let controlPlane: DoctorFacts['controlPlane'] = { url, ok: false };
   try {
     // Self-signed TLS is normal on a LAN install: verify the version marker, not the chain.
@@ -170,4 +173,25 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
     containers: { running: rows.filter((l) => l.endsWith('|running')).length, total: rows.length },
     checkout: checkoutFacts(),
   };
+}
+
+
+/**
+ * Linux: is the running service's process missing the docker group that the
+ * user has? The groups a process holds are fixed when its systemd manager
+ * started; a login shell checking `docker info` can't see this (2026-09-23).
+ */
+function serviceDockerDenied(): boolean | undefined {
+  try {
+    const pid = sh('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', 'hatchabot']);
+    const gid = (sh('getent', ['group', 'docker']) ?? '').split(':')[2];
+    if (!pid || pid === '0' || !gid) return undefined;
+    const user = (sh('id', ['-nG']) ?? '').split(/\s+/);
+    if (!user.includes('docker')) return undefined; // not in the group at all: the docker check reports that
+    const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+    const groups = (/^Groups:\s*(.*)$/m.exec(status)?.[1] ?? '').trim().split(/\s+/);
+    return !groups.includes(gid);
+  } catch {
+    return undefined;
+  }
 }
