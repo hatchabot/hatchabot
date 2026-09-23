@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.6] — 2026-09-23
+
+### Changed
+- The New tile uses Hatchabot's own egg (the banner's icon) with a plain black plus at its foot.
+
 ## [2.47.5] — 2026-09-23
 
 ### Changed
