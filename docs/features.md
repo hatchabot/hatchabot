@@ -943,8 +943,12 @@ a pinned base image, or each derived image by name), **Class**, **Status**,
 week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
 its container was last built),
 read-only, remembered per device. The bar appears once there is more than
-one agent; the read-only views list their bins alphabetically, with *Shared
-with me* and *Archived* last.
+one agent; the read-only views list their bins alphabetically (the two time
+views newest first), with *Shared with me* and *Archived* last. **Sort**, on
+the same bar in every view: *Manual* (Groups only — the order you arranged,
+where dragging works), *Name* or *Activity*, again to flip; Name and Activity
+order the agents on screen without touching your arrangement. Fleet → Tools
+keeps the two actions that rewrite the arrangement itself.
 
 **Resources** (Fleet → Resources; `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per

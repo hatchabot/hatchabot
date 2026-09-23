@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.45.1] — 2026-09-23
+
+### Changed
+- **One Sort control for every view** (Manual · Name · Activity on the view bar; Manual only in Groups, where dragging works). Name and Activity order the agents on screen in any view without touching your arrangement; the per-group A→Z / ⏳ header buttons are gone, and Fleet → Tools keeps the two actions that rewrite the arrangement.
+
 ## [2.45.0] — 2026-09-23
 
 ### Added
