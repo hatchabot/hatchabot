@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.5] — 2026-09-23
+
+### Changed
+- The New tile is an egg with a small plus badge at its foot.
+
 ## [2.47.4] — 2026-09-23
 
 ### Changed
