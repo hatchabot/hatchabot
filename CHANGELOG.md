@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.37.1] — 2026-09-23
+
+### Fixed
+- v2.37.0 was tagged with one test failing (the management chat's coverage ledger lacked the new rebuild-policy route); the release gate piped `npm test` into `grep`, which hid the failure. The route is now listed as app-only, and gate chains run with `pipefail`.
+
 ## [2.37.0] — 2026-09-23
 
 ### Added

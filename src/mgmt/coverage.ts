@@ -122,6 +122,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/ai-profiles/:id/apply-default-model': 'set_model (one agent at a time)',
   'POST /v1/ai-profiles/usage/sample': 'app: internal — the usage view refreshes itself',
   'PUT /v1/media-key': 'app: secret — the Gemini key',
+  'PUT /v1/rebuild-policy': 'app: later — the machine\'s rebuild policy (Runtime → Rebuilds, or hatchabot rebuild-policy)',
   'DELETE /v1/media-key': 'app: later — remove the Gemini key',
   'PUT /v1/search-key': 'app: secret — the Brave key',
   'DELETE /v1/search-key': 'app: later — remove the Brave key',
