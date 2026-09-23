@@ -29,7 +29,18 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # The setup script asks for a password: give it a terminal even when this
 # script arrived through a pipe.
 [ -t 0 ] || { [ -r /dev/tty ] && exec </dev/tty; } || true
-ask() { local a; read -r -p "$1 [y/N] " a </dev/tty 2>/dev/null || a=n; [ "$(printf %s "$a" | tr "[:upper:]" "[:lower:]")" = y ]; }
+# The question goes to the terminal explicitly. It used to be `read -p … 2>/dev/null`:
+# read -p writes its prompt to stderr, so the question was thrown away and a
+# fresh Linux machine sat silently at "2/4 Docker" waiting for an answer nobody
+# could see (found by a clean-VM install, 2026-09-23). No terminal: "no".
+ask() {
+  local a=n
+  if { : >/dev/tty; } 2>/dev/null; then
+    printf '%s [y/N] ' "$1" >/dev/tty
+    read -r a </dev/tty || a=n
+  fi
+  [ "$(printf %s "$a" | tr "[:upper:]" "[:lower:]")" = y ]
+}
 
 say "Hatchabot installer — $OS $(uname -m)"
 [ "$OS" = Linux ] || [ "$OS" = Darwin ] || die "Linux or macOS only (found $OS). On Windows, use WSL2 with Docker Desktop."

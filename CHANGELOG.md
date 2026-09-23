@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.2] — 2026-09-23
+
+### Fixed
+- **On a fresh Linux machine the installer seemed to hang at "2/4 Docker".** It was waiting for an answer to *Docker is missing. Install it? [y/N]* — a question nobody could see: `read -p` writes its prompt to stderr, and the line sent stderr to `/dev/null`. The same hid the Node and docker-group questions. Macs never showed it (Docker Desktop and Node were already there), so it surfaced only when a clean Ubuntu VM was installed from scratch. Questions now go to the terminal explicitly.
+
 ## [2.34.1] — 2026-09-23
 
 ### Fixed
