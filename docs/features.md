@@ -949,7 +949,9 @@ bar in every view, **Age** (newest agent first), **Name** (A→Z) or
 **Activity** (most recently active first) orders the agents within each bin;
 press the active one again to flip it. Dragging an agent's icon still moves
 it to another group (or to Archived); positions inside a group follow the
-sort. The top bar carries the accent colour, fading into the page.
+sort. The top bar carries the accent colour, fading into the page, and holds
+only the brand and your account; New agent, Inbox, Fleet, Setup guide and
+Settings sit in the Hatchabot panel beside the manager.
 
 **Resources** (Fleet → Resources; `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per

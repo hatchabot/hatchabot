@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.0] — 2026-09-23
+
+### Changed
+- **The fleet's actions moved into the Hatchabot panel**: New agent, Inbox, Fleet, Setup guide and Settings sit beside the manager, where the fleet's numbers are; the top bar keeps the brand and your account.
+
 ## [2.46.1] — 2026-09-23
 
 ### Fixed
