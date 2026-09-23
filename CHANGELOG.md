@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.47.12] — 2026-09-23
+
+### Changed
+- One gold: the light theme's accent is now the brand egg's gold, so the top bar's tint, the active View by button and the New tile all match it (gold text on white keeps its darker shade to stay readable; ink on gold is dark in both themes).
+
 ## [2.47.11] — 2026-09-23
 
 ### Changed

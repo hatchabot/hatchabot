@@ -40,7 +40,9 @@
   }
   :root[data-theme="light"] {
     --bg: #ffffff; --panel: #ffffff; --panel-2: #f1f3f5; --line: #e2e5ea;
-    --text: #1a1c20; --dim: #6b7079; --accent: #b5791a; --accent-ink: #ffffff;
+    /* The brand's gold everywhere it fills or tints (the egg, the top bar, View
+       by, the New tile); gold TEXT on white uses --accent-text, darker, to read. */
+    --text: #1a1c20; --dim: #6b7079; --accent: #e8a33d; --accent-ink: #14161a;
     --ok: #2f9e6a; --warn: #b5791a; --bad: #cc4b3e; --off: #9aa0a8; --info: #2f72c4; --accent-text: #8a5a0f;
     color-scheme: light;
   }
@@ -459,7 +461,7 @@
     .v2brand { font-size:18px }
   }
   .res-sort { background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer }
-  .res-sort.on { color:var(--accent) }
+  .res-sort.on { color:var(--accent-text, var(--accent)) }
   .hb-loading { display:flex; align-items:center; gap:10px; padding:28px 8px; color:var(--dim); font-size:15px }
   .hb-spin { width:16px; height:16px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:hb-spin .8s linear infinite; flex:none }
   @keyframes hb-spin { to { transform:rotate(360deg) } }
@@ -537,7 +539,7 @@
   /* Filled with the brand's gold — the egg in the header, #e8a33d in both
      themes (the light theme's --accent is a darker gold, for contrast on
      white, which is why the tile read darker than the egg). */
-  .v2hubactions .v2btn.v2new .v2glyph { background:#e8a33d; border:1px solid #e8a33d; color:#14161a; box-shadow:none }
+  .v2hubactions .v2btn.v2new .v2glyph { background:var(--accent); border:1px solid var(--accent); color:var(--accent-ink); box-shadow:none }
   .v2hubactions .v2btn.v2new .v2glyph svg { display:block } /* a drawn plus, dead centre — a typed one sits high */
   .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
