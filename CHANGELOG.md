@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.49.2] — 2026-09-23
+
+### Changed
+- The Ask box came back out of the top bar; the manager is asked by clicking its icon, as before.
+
 ## [2.49.1] — 2026-09-23
 
 ### Changed
