@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.35.0] — 2026-09-23
+
+### Added
+- **A pinned image travels with a moved agent — as its recipe.** Moving an agent pinned to an image the runner doesn't have used to stop (and since 2.33.3, to ask whether to drop the pin). The move now rebuilds the image on the runner first: the plain base, pulled from the published registry if the runner lacks it, then the extra packages recorded in the image's labels, or a derived image's own Dockerfile lines — one thin layer, built on the runner for its own CPU, under the same name, so the agent keeps its pin and its packages. What can't be rebuilt this way (an image with the Slack/Discord plugins baked in, a base with no published copy, a failed build) says why, and the owner can still move it on the runner's default image. Provider gains `ensureBaseImage` and `buildImage`, both on whichever daemon it drives.
+
 ## [2.34.7] — 2026-09-23
 
 ### Fixed

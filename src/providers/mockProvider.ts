@@ -134,7 +134,25 @@ export class MockProvider implements RuntimeProvider {
     return { imageId: 'mock-image', openclawVersion: 'mock', channels: this.imageChannels };
   }
 
-  tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
+  tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[] }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
+  /** Plain base tags a pull would find in the published registry. */
+  publishedBases = new Set<string>();
+  pulled: string[] = [];
+  built: Array<{ tag: string; dockerfile: string; labels: Record<string, string> }> = [];
+  buildFails = false;
+  async ensureBaseImage(tag: string): Promise<boolean> {
+    if (this.tags.some((t) => t.tag === tag)) return true;
+    if (!this.publishedBases.has(tag)) return false;
+    this.pulled.push(tag);
+    this.tags.push({ tag, imageId: `pulled-${tag}` });
+    return true;
+  }
+  async buildImage(tag: string, dockerfile: string, labels: Record<string, string>) {
+    if (this.buildFails) return { ok: false, error: 'E: Unable to locate package' };
+    this.built.push({ tag, dockerfile, labels });
+    this.tags.push({ tag, imageId: `built-${tag}` });
+    return { ok: true };
+  }
   tagged: [string, string][] = [];
   async listImageTags() { return this.tags; }
   async tagImage(from: string, to: string) { this.tagged.push([from, to]); }

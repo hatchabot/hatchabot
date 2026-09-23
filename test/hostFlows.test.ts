@@ -236,3 +236,67 @@ describe('Move — a pinned image the runner does not have (2026-09-22)', () => 
     expect(w.store.getAgent(created.id)!.hostId).toBe('h2');
   });
 });
+
+
+describe('Move — the pinned image travels as its recipe (item 5, 2026-09-23)', () => {
+  const setup = async (sourceTag: Record<string, unknown>) => {
+    const w = await makeWorld();
+    const mock2 = new MockProvider();
+    w.providers.set('mock2', mock2);
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Laptop', settings: {}, createdAt: 'now' });
+    const id = await seedRunningAgent(w);
+    const tag = String(sourceTag.tag);
+    w.store.setAgentImage(id, tag);
+    (w.providers.get('mock') as MockProvider).tags.push(sourceTag as any);
+    mock2.tags = [{ tag: 'hatchabot-runtime:latest', imageId: 'x' }] as any;
+    const move = (body: Record<string, unknown> = {}) =>
+      w.f.inject({ method: 'POST', url: `/v1/agents/${id}/move-host`, headers: as(), payload: { hostId: 'h2', ...body } });
+    return { w, mock2, id, tag, move };
+  };
+
+  it('a base with extra packages is rebuilt there: base pulled, packages layered, same name, pin kept', async () => {
+    const { w, mock2, id, tag, move } = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-plus-traceroute', imageId: 'src', openclawVersion: '2026.7.1-2', extraPackages: ['traceroute'] });
+    mock2.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    const res = await move();
+    expect(res.statusCode).toBe(200);
+    expect(mock2.pulled).toEqual(['hatchabot-runtime:2026.7.1-2']);
+    expect(mock2.built).toHaveLength(1);
+    expect(mock2.built[0]!.tag).toBe(tag);
+    expect(mock2.built[0]!.dockerfile).toMatch(/^FROM hatchabot-runtime:2026\.7\.1-2\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends traceroute/);
+    expect(mock2.built[0]!.dockerfile.trim().endsWith('USER node')).toBe(true);
+    expect(w.store.getAgent(id)!.image).toBe(tag); // it keeps its pin — and its packages
+    expect(w.store.getAgent(id)!.hostId).toBe('h2');
+  });
+
+  it('an image that is already there is used as is', async () => {
+    const { mock2, move } = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-plus-jq', imageId: 'src', openclawVersion: '2026.7.1-2', extraPackages: ['jq'] });
+    mock2.tags.push({ tag: 'hatchabot-runtime:2026.7.1-2-plus-jq', imageId: 'there' } as any);
+    expect((await move()).statusCode).toBe(200);
+    expect(mock2.built).toHaveLength(0);
+  });
+
+  it('what cannot be rebuilt says why, and still offers the default image', async () => {
+    const { w, mock2, id, move } = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-ch1', imageId: 'src', openclawVersion: '2026.7.1-2', channels: ['slack', 'discord'] });
+    mock2.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    const refused = await move();
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toMatchObject({ code: 'pinned_image_missing' });
+    expect(refused.json().error).toMatch(/slack and discord built in/);
+    expect(w.store.getAgent(id)!.hostId).toBe('h1'); // nothing moved
+    expect((await move({ dropPin: true })).statusCode).toBe(200);
+    expect(w.store.getAgent(id)!.image ?? null).toBeNull();
+  });
+
+  it('no published base to pull, or a failed build, is a clear refusal', async () => {
+    const a = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-plus-jq', imageId: 'src', openclawVersion: '2026.7.1-2', extraPackages: ['jq'] });
+    const r1 = await a.move();
+    expect(r1.statusCode).toBe(409);
+    expect(r1.json().error).toMatch(/no published copy to pull/);
+    const b = await setup({ tag: 'hatchabot-runtime:2026.7.1-2-plus-jq', imageId: 'src', openclawVersion: '2026.7.1-2', extraPackages: ['jq'] });
+    b.mock2.publishedBases.add('hatchabot-runtime:2026.7.1-2');
+    b.mock2.buildFails = true;
+    const r2 = await b.move();
+    expect(r2.statusCode).toBe(409);
+    expect(r2.json().error).toMatch(/the rebuild failed: E: Unable to locate package/);
+  });
+});

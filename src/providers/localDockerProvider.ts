@@ -789,6 +789,33 @@ export class LocalDockerProvider implements RuntimeProvider {
     return undefined;
   }
 
+  async ensureBaseImage(tag: string): Promise<boolean> {
+    if (!IMAGE_REF_RE.test(tag)) return false;
+    if ((await this.#docker(['image', 'inspect', '--format', '{{.Id}}', tag])).code === 0) return true;
+    // Only a plain version tag has a published twin (release builds push
+    // <registry>:<openclaw version>, multi-arch). Anything else is local-only.
+    const m = /^[^:]+:(\d{4}\.\d+\.\d+(?:-\d+)?)$/.exec(tag);
+    if (!m) return false;
+    const published = `${process.env.HATCHABOT_IMAGE_REGISTRY ?? 'ghcr.io/hatchabot/runtime'}:${m[1]}`;
+    const pull = await this.#docker(['pull', '--quiet', published], IO_TIMEOUT_MS);
+    if (pull.code !== 0) return false;
+    return (await this.#docker(['tag', published, tag])).code === 0;
+  }
+
+  async buildImage(tag: string, dockerfile: string, labels: Record<string, string>): Promise<{ ok: boolean; error?: string }> {
+    if (!IMAGE_REF_RE.test(tag)) return { ok: false, error: 'That image name is not valid.' };
+    const dir = await mkdtemp(join(tmpdir(), 'hatchabot-recipe-'));
+    try {
+      await writeFile(join(dir, 'Dockerfile'), dockerfile, 'utf8');
+      const labelArgs = Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
+      // The context is one Dockerfile, so it streams to a remote daemon as easily as a local one.
+      const res = await this.#docker(['build', '-t', tag, ...labelArgs, dir], 30 * 60_000);
+      return res.code === 0 ? { ok: true } : { ok: false, error: (res.stderr || res.stdout).trim().slice(-800) || `docker build exited ${res.code}` };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
   async containerIp(runtimeRef: string): Promise<string | undefined> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker(['inspect', container, '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}']);

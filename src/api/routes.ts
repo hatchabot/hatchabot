@@ -111,6 +111,7 @@ import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTrans
 import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
+import { ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
 import {
@@ -6273,19 +6274,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // the agent had already been stopped (2026-09-22). Say so up front, and
       // let the caller choose the runner's default image instead.
       if (agent.image) {
-        const there = await providerFor(host.id).listImageTags().then((t) => t.some((x) => x.tag === agent.image), () => false);
-        if (!there) {
-          const dropPin = (req.body as { dropPin?: boolean } | null)?.dropPin === true;
-          if (!dropPin) {
+        const dropPin = (req.body as { dropPin?: boolean } | null)?.dropPin === true;
+        if (dropPin) {
+          store.setAgentImage(agent.id, null);
+          trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
+        } else {
+          // The pin travels as its recipe: rebuild the image there if it is
+          // missing (base pulled if need be, then the extra packages or the
+          // derived lines). Only if that can't be done does the owner choose.
+          const derivedByTag = (tag: string) => {
+            const m = /:derived-([a-z][a-z0-9-]*)$/.exec(tag);
+            return m ? store.getDerivedImage(m[1]!) : undefined;
+          };
+          trace(agent.id)('image.ensure', { image: agent.image, on: host.id });
+          const got = await ensureImageOn(providerFor(host.id), providerFor(agent.hostId), agent.image, derivedByTag);
+          if (!got.ok) {
             return reply.code(409).send({
-              error: `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have. ` +
-                'Move it on that runner\'s default image instead (its extra packages will be missing there), or build the image on the runner first.',
+              error: `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have, and it couldn't be rebuilt there (${got.problem}). ` +
+                'Move it on that runner\'s default image instead — its extra packages will be missing there.',
               code: 'pinned_image_missing',
               image: agent.image,
             });
           }
-          store.setAgentImage(agent.id, null);
-          trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
+          if (got.built) trace(agent.id)('image.rebuilt_from_recipe', { image: agent.image, on: host.id });
         }
       }
       // Same split as create: a machine-login Max profile mounts THIS box's

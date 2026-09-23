@@ -264,6 +264,14 @@ export interface RuntimeProvider {
    * when there is no way through (a tcp:// runner).
    */
   gatewayEndpoint?(port: number): Promise<{ host: string; port: number } | undefined>;
+  /**
+   * Make sure a plain base runtime image (`<repo>:<openclaw version>`) is on
+   * this host's daemon, pulling the published multi-arch one if it is not.
+   * True when it is there afterwards.
+   */
+  ensureBaseImage?(tag: string): Promise<boolean>;
+  /** Build `tag` from a Dockerfile on THIS host's daemon (a runner's, over its connection). */
+  buildImage?(tag: string, dockerfile: string, labels: Record<string, string>): Promise<{ ok: boolean; error?: string }>;
 
   /** Point `to` at the image `from` names (e.g. promote a candidate to :latest). */
   tagImage(from: string, to: string): Promise<void>;
