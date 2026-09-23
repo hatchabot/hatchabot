@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.46.1] — 2026-09-23
+
+### Fixed
+- The top bar's buttons sat as opaque panels on the tinted bar; they are glass on it now, with an accent-tinted edge (the New button a shade stronger).
+
 ## [2.46.0] — 2026-09-23
 
 ### Changed

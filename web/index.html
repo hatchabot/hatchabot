@@ -408,6 +408,14 @@
   .v2btn { display:inline-flex; align-items:center; gap:7px; height:38px; padding:0 14px; border-radius:10px; border:1px solid var(--line);
            background:var(--panel-2); color:var(--text); font:inherit; font-size:14px; cursor:pointer; position:relative }
   .v2btn:hover { border-color:var(--dim) }
+  /* In the tinted top bar the buttons are glass on that tint, not panels
+     dropped on it: translucent, an accent-tinted edge, brighter on hover;
+     the New button a shade stronger. */
+  .v2top .v2btn { background:color-mix(in srgb, var(--bg) 42%, transparent); border-color:color-mix(in srgb, var(--accent) 38%, var(--line)); color:var(--text);
+                  -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px) }
+  .v2top .v2btn:hover { background:color-mix(in srgb, var(--bg) 62%, transparent); border-color:color-mix(in srgb, var(--accent) 60%, var(--line)) }
+  .v2top .v2btn.v2new { background:color-mix(in srgb, var(--accent) 30%, var(--bg)); border-color:color-mix(in srgb, var(--accent) 70%, var(--line)) }
+  .v2top .v2btn.v2new:hover { background:color-mix(in srgb, var(--accent) 42%, var(--bg)) }
   .v2btn .v2glyph { flex:none; display:block }
   .v2new { font-weight:600 }
   .v2count { position:absolute; top:-6px; right:-6px; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--bad); color:#fff;
