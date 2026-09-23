@@ -935,6 +935,22 @@ then `hatchabot image pin <agent> media`. Building runs a Dockerfile on the box,
 a privilege the local-host owner already has — so it, and the pin, are
 host-owner gated and never exposed to a co-tenant.
 
+**Memory search service** (⚙ Settings → Hosts → *Memory search service*,
+machine owner; `hatchabot embedder [status|start|stop|restart]`). One engine
+on this machine for every agent's semantic memory search, instead of one
+inside each agent (about 290 MB each). Two hardened containers: the engine
+(llama.cpp serving the same EmbeddingGemma model the runtime image bakes,
+copied out of it on first start so nothing downloads) on an internal network,
+and a small *door* that checks each agent's own key, rate-limits per agent
+(`HATCHABOT_EMBED_PER_MIN`, 600), caps bodies and inputs, and logs only the
+agent id, count, bytes and time — never a body. The door is published on the
+address agents reach this machine at (`HATCHABOT_EMBED_BIND`, port
+`HATCHABOT_EMBED_PORT`, 8093). Once on, a health loop restarts it if it falls
+over; a deploy of Hatchabot itself does not touch it. **Nothing uses it until
+an agent is switched to it** (the next step); it is safe to leave off.
+`HATCHABOT_EMBED_URL` points at a server you already run (Ollama speaks the
+same API) instead of a container.
+
 **A pin travels as its recipe.** An image is never copied between machines;
 its recipe is: the plain base (`hatchabot-runtime:<OpenClaw version>`, pulled
 from the published registry if missing), the extra apt packages recorded in the

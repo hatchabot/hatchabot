@@ -157,6 +157,24 @@ export class MockProvider implements RuntimeProvider {
   }
   tagged: [string, string][] = [];
   async listImageTags() { return this.tags; }
+
+  /** The embedding service, as tests see it: a status the test can set, and what start/stop did. */
+  embedder: { embedder: 'running' | 'stopped' | 'absent'; door: 'running' | 'stopped' | 'absent'; doorAddress?: string } = { embedder: 'absent', door: 'absent' };
+  embedderSpecs: Array<import('../embedder/embedder.js').EmbedderSpec> = [];
+  copyFromImageWorks = false;
+  async copyFromImage(_image: string, _src: string, dest: string) {
+    if (!this.copyFromImageWorks) return false;
+    const { writeFileSync } = await import('node:fs');
+    writeFileSync(dest, 'copied-model');
+    return true;
+  }
+  async ensureEmbedder(spec: import('../embedder/embedder.js').EmbedderSpec) {
+    this.embedderSpecs.push(spec);
+    this.embedder = { embedder: 'running', door: 'running', doorAddress: `${spec.doorBind}:${spec.doorPort}` };
+    return this.embedder;
+  }
+  async embedderStatus() { return this.embedder; }
+  async stopEmbedder() { this.embedder = { embedder: 'absent', door: 'absent' }; }
   async tagImage(from: string, to: string) { this.tagged.push([from, to]); }
   removed: string[] = [];
   async imageHistory() { return [{ step: 'RUN npm i -g openclaw@mock', size: '100MB' }]; }

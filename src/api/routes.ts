@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname as osHostname } from 'node:os';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
@@ -112,6 +112,8 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
+import { EmbedderService } from '../embedder/embedder.js';
+import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -1536,6 +1538,48 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const RUNTIME_REPO = DEFAULT_BASE.replace(/:[^:]*$/, '');
   // Build logs live beside the database, not in the checkout (prod checkouts have no data/).
   const buildDataDir = dirname(resolve(process.env.HATCHABOT_DB ?? defaultDbPath()));
+
+  // ---- the embedding service (src/embedder): one engine per machine for
+  // every agent's semantic memory search. Nothing uses it until an agent is
+  // switched to it; the owner turns it on under Settings → Hosts. ------------
+  const localProvider = (): RuntimeProvider => {
+    const id = store.localHostId();
+    if (!id) throw new Error('This installation has no local host.');
+    return providerFor(id);
+  };
+  const embedder = new EmbedderService({
+    provider: localProvider,
+    secrets,
+    store,
+    dataDir: buildDataDir,
+    runtimeImage: process.env.HATCHABOT_IMAGE ?? DEFAULT_BASE,
+    doorScript: embedDoorScript(),
+    // Where agents reach this machine: the docker bridge's gateway on Linux;
+    // Docker Desktop has no such address to bind, so loopback (agents use host.docker.internal).
+    doorBind: async () => (await localProvider().hostGatewayAddress?.()) ?? '127.0.0.1',
+    log: (e, d) => trace()(e, d),
+  });
+  (app as unknown as { embedder?: EmbedderService }).embedder = embedder;
+  app.get('/v1/embedder', async () => embedder.status());
+  const embedderAction = (action: 'start' | 'stop' | 'restart') => async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    try {
+      return await embedder[action]();
+    } catch (err) {
+      if (err instanceof ProviderError) return reply.code(502).send({ error: err.userMessage });
+      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  app.post('/v1/embedder/start', embedderAction('start'));
+  app.post('/v1/embedder/stop', embedderAction('stop'));
+  app.post('/v1/embedder/restart', embedderAction('restart'));
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    // An enabled service that fell over comes back; a fleet event says so.
+    setInterval(() => {
+      void embedder.healthTick().then((r) => { if (r === 'restarted') app.log.warn('embedder restarted by the health loop'); })
+        .catch((err) => app.log.warn({ err }, 'embedder health tick failed'));
+    }, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
+  }
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).
   const buildingImages = new Set<string>();

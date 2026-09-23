@@ -270,6 +270,12 @@ export interface RuntimeProvider {
    * True when it is there afterwards.
    */
   ensureBaseImage?(tag: string): Promise<boolean>;
+  /** Copy one file out of an image (docker create + cp). False when the image or path is missing. */
+  copyFromImage?(image: string, srcPath: string, destPath: string): Promise<boolean>;
+  /** The machine's embedding service (src/embedder): bring both containers up, idempotently. */
+  ensureEmbedder?(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus>;
+  embedderStatus?(): Promise<import('../embedder/embedder.js').EmbedderStatus>;
+  stopEmbedder?(): Promise<void>;
   /** Build `tag` from a Dockerfile on THIS host's daemon (a runner's, over its connection). */
   buildImage?(tag: string, dockerfile: string, labels: Record<string, string>): Promise<{ ok: boolean; error?: string }>;
 

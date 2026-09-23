@@ -420,6 +420,11 @@ export class Store {
       );
       -- The management agent's key: read + propose, nothing else. One per
       -- agent, replaced on every rebuild; only its hash is kept.
+      CREATE TABLE IF NOT EXISTS embed_tokens (
+        agent_id TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS ops_tokens (
         agent_id TEXT PRIMARY KEY,
         owner_id TEXT NOT NULL,
@@ -1144,6 +1149,8 @@ export class Store {
       .run(next, reason ?? null, new Date().toISOString(), id);
     // A management agent that is put away or removed has no key any more.
     if (agent.ops && (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED')) this.deleteOpsToken(id);
+    // Its embed key dies with its state too (the door's file carries only live agents).
+    if (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED') this.deleteEmbedToken(id);
     // A deleted agent leaves nothing behind: its unread marks and channel
     // identities go with it (the rows are keyed by agent id, which is never reused).
     if (next === 'DELETED') {
@@ -1679,6 +1686,25 @@ export class Store {
   }
 
   /** The owner this token belongs to, or undefined. Records the use. */
+  // ---- embed keys: one per agent, for the embedding service's door ----------
+  /** Replace the agent's embed key hash (minted on every build, like the ops key). */
+  setEmbedToken(agentId: string, tokenHash: string): void {
+    this.db
+      .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at) VALUES (?, ?, ?)
+                ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at`)
+      .run(agentId, tokenHash, new Date().toISOString());
+  }
+  deleteEmbedToken(agentId: string): void {
+    this.db.prepare(`DELETE FROM embed_tokens WHERE agent_id = ?`).run(agentId);
+  }
+  /** Every key with its agent's state, so the door's file can carry only live agents. */
+  listEmbedTokens(): Array<{ agentId: string; tokenHash: string; state: string }> {
+    return this.db
+      .prepare(`SELECT e.agent_id AS agentId, e.token_hash AS tokenHash, a.state AS state
+                FROM embed_tokens e JOIN agents a ON a.id = e.agent_id`)
+      .all() as Array<{ agentId: string; tokenHash: string; state: string }>;
+  }
+
   /** A token's scope (see createCliToken), or undefined for a full token. */
   cliTokenScope(token: string): string | undefined {
     const row = this.db.prepare(`SELECT scope FROM cli_tokens WHERE token_hash = ?`).get(hashToken(token)) as { scope: string | null } | undefined;
@@ -2308,6 +2334,11 @@ export class Store {
 
   /** The owner of the shared local host — the operator, who sees install-level
    *  posture checks. undefined if no local host is registered. */
+  /** The row for this machine, whoever set it up. */
+  localHostId(): string | undefined {
+    const r = this.db.prepare(`SELECT id FROM hosts WHERE kind = 'local' LIMIT 1`).get() as { id: string } | undefined;
+    return r?.id;
+  }
   localHostOwnerId(): string | undefined {
     const r = this.db.prepare(`SELECT owner_id FROM hosts WHERE kind = 'local' LIMIT 1`).get() as { owner_id: string } | undefined;
     return r?.owner_id;

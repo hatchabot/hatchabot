@@ -57,6 +57,8 @@ export interface LocalDockerOptions {
 export const DEFAULT_PREFIX = 'hatchabot';
 export const LEGACY_PREFIXES = ['agentclaw'] as const;
 /** Docker image reference: repo[:tag] — no leading dash, so it can't parse as a flag. */
+/** basename() for a model path — the container sees the file under /models. */
+const EMBED_MODEL_BASENAME = (p: string): string => p.split('/').pop() ?? p;
 const IMAGE_REF_RE = /^[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
 /** Bound for volume import/export and seeding (large tarballs, slow runners). */
 const IO_TIMEOUT_MS = Number(process.env.HATCHABOT_DOCKER_IO_TIMEOUT_MS ?? 15 * 60_000);
@@ -830,6 +832,104 @@ export class LocalDockerProvider implements RuntimeProvider {
     }
     child.kill();
     return undefined;
+  }
+
+  async copyFromImage(image: string, srcPath: string, destPath: string): Promise<boolean> {
+    if (!IMAGE_REF_RE.test(image)) return false;
+    const made = await this.#docker(['create', image]);
+    if (made.code !== 0) return false;
+    const id = made.stdout.trim();
+    try {
+      const cp = await this.#docker(['cp', `${id}:${srcPath}`, destPath], IO_TIMEOUT_MS);
+      return cp.code === 0;
+    } finally {
+      await this.#docker(['rm', '-f', id]);
+    }
+  }
+
+  // ---- the embedding service (src/embedder/embedder.ts) --------------------
+  #embedNetwork(): string { return `${this.prefix}-embed`; }
+  #embedderName(): string { return `${this.prefix}-embedder`; }
+  #embedDoorName(): string { return `${this.prefix}-embed-door`; }
+  async #containerState(name: string): Promise<'running' | 'stopped' | 'absent'> {
+    const r = await this.#docker(['inspect', '--format', '{{.State.Running}}', name]);
+    if (r.code !== 0) return 'absent';
+    return r.stdout.trim() === 'true' ? 'running' : 'stopped';
+  }
+  async embedderStatus(): Promise<import('../embedder/embedder.js').EmbedderStatus> {
+    const [embedder, door] = await Promise.all([this.#containerState(this.#embedderName()), this.#containerState(this.#embedDoorName())]);
+    let doorAddress: string | undefined;
+    if (door === 'running') {
+      const p = await this.#docker(['port', this.#embedDoorName()]);
+      const m = /-> ([\d.]+:\d+)/.exec(p.stdout);
+      if (m) doorAddress = m[1];
+    }
+    return { embedder, door, doorAddress };
+  }
+  async ensureEmbedder(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus> {
+    const net = this.#embedNetwork();
+    if ((await this.#docker(['network', 'inspect', net])).code !== 0) {
+      // Internal: neither container has a way out; the door is published by port below.
+      const made = await this.#docker(['network', 'create', '--driver', 'bridge', '--internal', '--label', 'hatchabot.role=embed', net]);
+      if (made.code !== 0 && (await this.#docker(['network', 'inspect', net])).code !== 0) {
+        throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, "Could not create the embedding service's network.");
+      }
+    }
+    // The server: the model read-only, no ports, nothing writable but /tmp.
+    const embedder = this.#embedderName();
+    if ((await this.#containerState(embedder)) === 'absent') {
+      if (!IMAGE_REF_RE.test(spec.image.replace(/@sha256:[0-9a-f]{64}$/, ''))) throw new ProviderError(`bad embedder image ${spec.image}`, 'The embedding service image name is not valid.');
+      const run = await this.#docker([
+        'run', '-d', '--name', embedder, '--network', net, '--network-alias', 'embedder',
+        '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder',
+        '--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+        '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '1g', '--pids-limit', '64',
+        '-v', `${spec.modelPath}:/models/${EMBED_MODEL_BASENAME(spec.modelPath)}:ro`,
+        spec.image,
+        '--embeddings', '-m', `/models/${EMBED_MODEL_BASENAME(spec.modelPath)}`, '--alias', spec.modelAlias,
+        '-c', '2048', '-ub', '2048', '--host', '0.0.0.0', '--port', '8080', '--api-key', spec.key, '--no-webui',
+      ], IO_TIMEOUT_MS);
+      if (run.code !== 0) throw new ProviderError(`embedder failed: ${run.stderr.slice(-500)}`, 'Could not start the embedding service.');
+    } else if ((await this.#containerState(embedder)) === 'stopped') {
+      await this.#must(['start', embedder], 'Could not start the embedding service.');
+    }
+    // The door: replaced on every start so a changed port, bind or key takes effect.
+    const door = this.#embedDoorName();
+    await this.#docker(['rm', '-f', door]);
+    // Docker publishes no port for a container whose only network is
+    // internal: the door starts on the bridge (where its port is published,
+    // on the one address asked for) and is then connected to the internal
+    // network, where the server is — as the doorman does with its jail.
+    const run = await this.#docker([
+      'run', '-d', '--name', door, '--network', 'bridge',
+      '--restart', 'unless-stopped', '--label', 'hatchabot.role=embed-door',
+      '-p', `${spec.doorBind}:${spec.doorPort}:8093`,
+      '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+      '--memory', '128m', '--pids-limit', '64',
+      '--user', `${spec.uid}:${spec.gid}`,
+      // The DIRECTORY, not the file: Hatchabot replaces the file by rename,
+      // and a bind-mounted file would keep the old inode — a re-minted key
+      // would never be seen until the door restarted.
+      '-v', `${dirname(spec.keysFile)}:/keys:ro`, '-e', `EMBED_KEYS_FILE=/keys/${EMBED_MODEL_BASENAME(spec.keysFile)}`,
+      '-e', 'EMBED_UPSTREAM=http://embedder:8080', '-e', `EMBED_UPSTREAM_KEY=${spec.key}`,
+      '-e', `EMBED_PER_MIN=${spec.perMin}`, '-e', 'EMBED_DOOR_PORT=8093',
+      '--entrypoint', 'node', spec.doorImage, '-e', spec.doorScript,
+    ]);
+    if (run.code !== 0) throw new ProviderError(`embed door failed: ${run.stderr.slice(-500)}`, "Could not start the embedding service's door.");
+    const joined = await this.#docker(['network', 'connect', net, door]);
+    if (joined.code !== 0) throw new ProviderError(`embed door network connect failed: ${joined.stderr.slice(-500)}`, "Could not connect the embedding service's door to its server.");
+    // Loading the model takes a few seconds; the door's /health answers for the server.
+    const deadline = Date.now() + 90_000;
+    while (Date.now() < deadline) {
+      const ok = await fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
+      if (ok) return this.embedderStatus();
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    throw new ProviderError('embedder did not become healthy', 'The embedding service started but did not answer its health check.');
+  }
+  async stopEmbedder(): Promise<void> {
+    await this.#docker(['rm', '-f', this.#embedDoorName()]);
+    await this.#docker(['rm', '-f', this.#embedderName()]);
   }
 
   async ensureBaseImage(tag: string): Promise<boolean> {

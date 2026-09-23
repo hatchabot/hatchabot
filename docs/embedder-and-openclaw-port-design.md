@@ -53,17 +53,34 @@ OpenClaw has a documented embedding provider for exactly this,
 ## Architecture
 
 ```
- agent container ── POST /v1/embed/v1/embeddings ──► Hatchabot (front door)
-   (Bearer: this agent's embed key)                     │ checks the key, rate-limits, forwards
- ops agent ──── same path on its own door ─────────────►│
-                                                         ▼
-                                   hatchabot-embedder container (127.0.0.1 only)
-                                   llama-server + EmbeddingGemma, no internet needed
+ agent container ── POST /v1/embeddings ──► hatchabot-embed-door container
+   (Bearer: this agent's embed key)          │ checks the key, rate-limits, forwards
+                                             │ (published on the address agents reach this machine at)
+                                             ▼
+                              hatchabot-embedder container (internal network only)
+                              llama-server + EmbeddingGemma, no internet needed
 ```
 
-**Hatchabot is the front door; the embedder is never exposed.** This mirrors
-the management agent's web search: the service sits behind Hatchabot, agents
-hold a narrow key, and nothing new listens where containers can reach it.
+**Revised 2026-09-23 (built as step 1, v2.40.0): the front door is its own
+container, not the control plane.** The first draft had Hatchabot forward the
+calls; that put every deploy's restart in the data path — a switched agent
+would have had keyword-only recall for the seconds Hatchabot was down, several
+times a day on a machine that follows every tag. The door is a small Node
+script (`src/embedder/door.ts`, run like the doorman) that keeps the same
+properties: every call authenticated by a per-agent key, rate-limited per
+agent, bodies capped, nothing logged but agent id, count, bytes and
+milliseconds. Hatchabot's part is out of the data path: it fetches the model,
+mints the server's key and each agent's key, writes the door's key file
+(sha256 → agent id, re-read by the door when it changes, so a rebuild re-mints
+without a restart), and runs the health loop. Both containers sit on an
+internal docker network; the door is also on the bridge, where its one port is
+published on the bridge gateway (loopback on Docker Desktop). At scale the
+same shape holds: the embedder is stateless and can be shared by many tenants
+on a host or run several times behind one door.
+
+The sections below describe the first draft's Hatchabot-side route; step 1
+replaced it with the door container, and step 2 (the per-agent switch) writes
+the door's address into each agent's config instead of a Hatchabot route.
 
 ### The embedder
 

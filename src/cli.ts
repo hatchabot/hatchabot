@@ -212,6 +212,10 @@ Commands:
   logs <agent> [-n <lines>]    Recent runtime output
   health <agent>               Live gateway health — is it actually answering
   usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
+  embedder [status|start|stop|restart]
+                               The machine's embedding service: one engine for
+                               every agent's semantic memory search (Settings →
+                               Hosts). Nothing uses it until an agent is switched to it.
   runtime                      Runtime image's OpenClaw version vs the npm latest
   upgrade-image [--version <X>] [--candidate]
                                Rebuild the shared runtime image to a new OpenClaw
@@ -1978,6 +1982,16 @@ async function main() {
         if (Date.now() > deadline) fail(`"${a.name}" is still ${now.state} after ${limit} min`);
         await new Promise((r) => setTimeout(r, 3000));
       }
+    }
+    case 'embedder': {
+      const sub = rest[0] ?? 'status';
+      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart]');
+      const r: any = sub === 'status'
+        ? await (await api(ctx, '/v1/embedder')).json()
+        : await (await api(ctx, `/v1/embedder/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();
+      if (r.external) console.log(`embedding: an external server is used — ${r.external}`);
+      console.log(`embedding service: ${r.enabled ? 'on' : 'off'} · engine ${r.embedder} · door ${r.door}${r.doorAddress ? ` at ${r.doorAddress}` : ''} · model ${r.modelPresent ? 'present' : 'not fetched yet'}`);
+      return;
     }
     case 'rebuild-policy': {
       if (rest[0]) {

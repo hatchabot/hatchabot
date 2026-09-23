@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.40.0] — 2026-09-23
+
+### Added
+- **The memory search service** (Settings → Hosts → *Memory search service*; `hatchabot embedder`): one embedding engine on the machine for every agent's semantic memory search, instead of one baked into each agent (~290 MB each). Two hardened containers — llama.cpp with the same EmbeddingGemma model the runtime image bakes (copied out of it, so nothing downloads), on an internal network, and a small *door* that checks each agent's own key, rate-limits per agent, caps bodies and inputs, and never logs a body. The door is its own process, so a Hatchabot restart never pauses memory search. A health loop restarts it if it falls over. **Nothing uses it yet**: agents are switched to it one at a time in the next release, and the fleet stays on the baked engine until then. Step 1 of docs/embedder-and-openclaw-port-design.md.
+
 ## [2.39.0] — 2026-09-23 — 26th audit
 
 Seven antagonistic reviews (auth, everything since v2.30.1, mutating routes,

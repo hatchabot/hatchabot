@@ -1616,6 +1616,11 @@
       or a Max setup-token (<code>claude setup-token</code>).</div></details>
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
+    <div id="embedBox" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">
+      <div><b>🧠 Memory search service</b> <span class="sub" id="embedStatus">…</span></div>
+      <div class="sub" style="margin-top:2px">One engine on this machine for every agent's semantic memory search, instead of one inside each agent (about 290 MB each). Nothing uses it until an agent is switched to it.</div>
+      <div class="actions" id="embedActions" style="justify-content:flex-start;margin-top:6px"></div>
+    </div>
     <h4 style="margin:16px 0 4px">Add a runner</h4>
     <div class="sub" style="margin-bottom:6px">
       <b>1.</b> On the runner: install <b>Docker</b> and enable <b>SSH</b>
@@ -3290,7 +3295,7 @@ function showTabPane(name) {
   if (name === 'access') void loadAccounts();
   if (name === 'classes') loadClasses();
   if (name === 'conn') loadConnections();
-  if (name === 'hosts') loadHosts();
+  if (name === 'hosts') { loadHosts(); loadEmbedder(); }
   if (name === 'pool') loadPool();
   if (name === 'backups') loadBackups();
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
@@ -3639,6 +3644,30 @@ async function loadHosts() {
       </div>`;
     }).join('');
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+// The embedding service (Settings → Hosts): on/off is the machine owner's.
+async function loadEmbedder() {
+  const st = $('embedStatus'), acts = $('embedActions');
+  if (!st) return;
+  try {
+    const r = await api('/v1/embedder');
+    const up = r.embedder === 'running' && r.door === 'running';
+    st.textContent = r.external ? `· external server ${r.external}`
+      : !r.enabled && r.embedder === 'absent' ? '· off'
+      : up ? `· running${r.doorAddress ? ` at ${r.doorAddress}` : ''}` : `· ${r.enabled ? 'restarting' : 'stopped'} (engine ${r.embedder}, door ${r.door})`;
+    st.style.color = up ? 'var(--ok)' : '';
+    acts.innerHTML = !myAccount.hostOwner || r.external ? '' : up
+      ? `<button class="hbtn" onclick="embedderAction('restart')">Restart</button><button class="hbtn" onclick="embedderAction('stop')">Stop</button>`
+      : `<button class="primary" onclick="embedderAction('start')">Start</button>`;
+  } catch (e) { st.textContent = `· ${e.message}`; }
+}
+async function embedderAction(action) {
+  const st = $('embedStatus'); if (st) st.textContent = action === 'stop' ? '· stopping…' : '· starting (the first start fetches the model)…';
+  $('embedActions').innerHTML = '';
+  try { await api(`/v1/embedder/${action}`, { method: 'POST', body: {} }); toast(action === 'stop' ? 'Embedding service stopped' : 'Embedding service running'); }
+  catch (e) { toast(e.message, 15000); }
+  loadEmbedder();
 }
 
 async function pingHost(id) {
