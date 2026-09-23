@@ -2141,6 +2141,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { set: true };
   });
 
+  /**
+   * Show the fleet keys again, to the machine owner only — the same two
+   * presses as a bot token (Show, then Copy). Each reveal is logged.
+   */
+  app.get('/v1/media-key/reveal', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const key = await secrets.get(MEDIA_KEY_REF).catch(() => undefined);
+    if (!key) return reply.code(404).send({ error: 'No Gemini key is set.' });
+    app.log.warn({ ownerId: ownerIdOf(req) }, 'media.key_revealed');
+    return { key };
+  });
+  app.get('/v1/search-key/reveal', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const key = await secrets.get(SEARCH_KEY_REF).catch(() => undefined);
+    if (!key) return reply.code(404).send({ error: 'No Brave key is set.' });
+    app.log.warn({ ownerId: ownerIdOf(req) }, 'search.key_revealed');
+    return { key };
+  });
+
   app.delete('/v1/media-key', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     await secrets.delete(MEDIA_KEY_REF).catch(() => {});
