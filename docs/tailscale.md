@@ -7,9 +7,10 @@
 > its first message. Tailscale is only needed for someone to open Hatchabot's
 > web pages, including the classic invite-link join flow below.
 
-With a password set, Hatchabot's control plane binds `0.0.0.0:8080` on the
-host (without `HATCHABOT_PASSWORD` it deliberately binds `127.0.0.1` only,
-since every request would be treated as the owner). Tailscale turns
+With any sign-in on (accounts, identity, or a password), Hatchabot's control
+plane binds `0.0.0.0:8080` on the host; in password mode with no password it
+deliberately binds `127.0.0.1` only, since every request would be treated as
+the owner. Tailscale turns
 that into "reachable from anywhere, by exactly the people you choose" without
 opening a single port to the internet. This is the family-scale access story:
 the invite flow works from a phone on cellular, not just your wifi.
@@ -73,14 +74,14 @@ that path.
 
 `tailscale funnel` would publish the app to the open internet (no Tailscale
 app needed for invitees). In **password mode** that's a bad trade: one shared
-password guards everything. With `HATCHABOT_AUTH=identity` (per-user accounts,
+password guards everything. With `HATCHABOT_AUTH=accounts` or `identity` (per-user accounts,
 see docs/identity.md) the calculus changes — but note the join pages are still
 reachable by invite code alone, by design.
 
 
 ## The OpenClaw console needs HTTPS
 
-Each agent's OpenClaw console (⋯ → **OpenClaw (debug)**) creates a device
+Each agent's OpenClaw console (click the agent's icon; ⋯ → OpenClaw (debug) in the classic look) creates a device
 identity with WebCrypto, which browsers only allow in a *secure context*: an
 `https://` page, or `http://localhost`. Tailscale encrypting the wire doesn't
 count — the browser judges by the URL scheme alone.

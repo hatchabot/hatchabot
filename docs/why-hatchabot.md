@@ -24,7 +24,7 @@ goes; you can ask it to save a conversation to memory, download its entire
 chat history, or recover the context of a conversation that was reset. Nothing
 important is trapped in a transcript.
 
-**Not locked to one lab.** Anthropic (subscription or API key), Google Gemini,
+**Not locked to one lab.** Anthropic (subscription or API key), OpenAI, Google Gemini,
 or a local model server with no account at all — per agent, switchable live
 without a rebuild. Put simple agents on a cheap model and the demanding ones on
 the best; group them into classes and retune a whole tier in one place. Your
@@ -114,7 +114,7 @@ when there are several, they matter, and other people talk to them.
 | **Create agents fast** | Name + one paragraph + a bot token → a running, remembering agent in a minute. Clone one you like; import a shared template. |
 | **Talk through Telegram** | You and your family message agents like contacts. Invite by link or QR; group rooms; per-agent allowlists. |
 | **Many humans, one agent** | Private one-to-one threads with the same agent, or a shared room. Shared or private memory, declared. |
-| **Choose the brain per agent** | Claude, Gemini, or a local model; switch the model live; classes for tiers; live source migration. |
+| **Choose the brain per agent** | Claude, OpenAI, Gemini, or a local model; switch the model live; classes for tiers; live source migration. |
 | **Give agents accounts and data** | Gmail / Calendar / Drive / Sheets connections, folders, git repos it commits to, per-agent secrets. |
 | **Schedule and react** | Cron tasks, event-triggered tasks (a zero-cost check decides whether to wake the model), run-now tests. |
 | **Agents that consult each other** | Grant an investing agent access to your tax and legal agents; it asks them mid-task. |

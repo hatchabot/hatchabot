@@ -15,7 +15,7 @@
  */
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { DerivedImage } from '../domain/types.js';
-import { baseProblem, dockerfileProblem, DERIVED_TAG_PREFIX } from './derivedImage.js';
+import { baseProblem, derivedNameProblem, dockerfileProblem, DERIVED_TAG_PREFIX } from './derivedImage.js';
 
 export interface ImageRecipe {
   /** The image to rebuild, by the same name. */
@@ -30,7 +30,8 @@ export interface ImageRecipe {
   channels: string[];
 }
 
-const PKG = /^[a-z0-9][a-z0-9+.-]*$/;
+// A trailing "-" or "+" is apt's REMOVE / install syntax ("curl-" removes curl).
+const PKG = /^[a-z0-9][a-z0-9+.-]*[a-z0-9]$|^[a-z0-9]$/;
 
 /** A derived image's record, by the tag agents pin (`…:derived-<name>`). */
 export function derivedByTag(get: (name: string) => DerivedImage | undefined) {
@@ -100,6 +101,11 @@ export function recipeProblem(r: ImageRecipe): string | null {
   if (bp) return bp;
   if (r.packages.length > 32 || r.packages.some((p) => !PKG.test(p) || p.length > 64)) return 'its package list is not valid';
   const derived = r.tag.split(':')[1]!.startsWith(DERIVED_TAG_PREFIX);
+  if (derived) {
+    // The name becomes a record here, so it must be one this machine's own derive would accept.
+    const np = derivedNameProblem(r.tag.split(':')[1]!.slice(DERIVED_TAG_PREFIX.length));
+    if (np) return `its name is not a derived-image name (${np})`;
+  }
   if (r.lines?.trim()) {
     if (!derived) return 'only a derived image has Dockerfile lines';
     if (r.lines.length > 8000) return 'its Dockerfile lines are too long';

@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
-import type { RuntimeProvider } from '../providers/provider.js';
+import type { RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
@@ -44,7 +44,7 @@ import {
 import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
 import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
-import { AgentBusyError, isBusy, whileBusy } from '../orchestrator/busy.js';
+import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orchestrator/busy.js';
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
@@ -314,9 +314,9 @@ export function isPrivateModelUrl(raw: string): boolean {
     /^10\./.test(h) ||
     /^192\.168\./.test(h) ||
     /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
-    /^169\.254\./.test(h) ||
-    h.endsWith('.local') ||
-    h.endsWith('.internal')
+    // Not 169.254.* or *.internal: no model server lives there, and on a
+    // cloud machine that is the metadata service (26th audit).
+    h.endsWith('.local')
   );
 }
 
@@ -416,11 +416,12 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       }
     };
 
-  // Agent archives arrive as raw bytes (import). 512 MB ceiling — a family
-  // agent's volume snapshot is MBs, but sessions grow.
+  // Agent archives arrive as raw bytes (import). The ceiling is what an
+  // import can accept at all (transfer.ts's MAX_STATE_BYTES, base64-inflated)
+  // — a bigger body only ever sat in memory to be refused (26th audit).
   app.addContentTypeParser(
     'application/octet-stream',
-    { parseAs: 'buffer', bodyLimit: 512 * 1024 * 1024 },
+    { parseAs: 'buffer', bodyLimit: 272 * 1024 * 1024 },
     (_req, body, done) => done(null, body),
   );
 
@@ -504,6 +505,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       /** The management agent's tool lockdown was loosened: key suspended. */
       opsDrift: agent.ops ? opsDriftOf(agent.id) : undefined,
       ...extra,
+      // A member of someone else's agent gets what it can DO, never where the
+      // owner's files live, their env var names, or its gateway port (26th audit).
+      ...(extra.role !== undefined && extra.role !== 'owner'
+        ? { dataSources: dataSourcesFor(agent).map((d) => ({ ...d, hostPath: undefined })), envVars: [], gatewayPort: undefined, sharedPaths: undefined }
+        : {}),
     };
   };
 
@@ -2172,6 +2178,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // only the account that owns the host row may lean on it; anyone else
       // would silently bill their agents to someone else's subscription.
       // They can still paste a setup-token of their own (the branch above).
+      // No new machine-login sources (26th audit): the mount is the owner's
+      // real ~/.claude, read-write — an agent that is talked into writing a
+      // hook into settings.json there runs it as the owner the next time they
+      // use Claude Code on the machine. Existing sources keep working, and
+      // the Security posture says to move them; a setup token mounts nothing.
+      if (!process.env.HATCHABOT_ALLOW_MACHINE_LOGIN) {
+        return reply.code(400).send({
+          error:
+            "A source that mounts this machine's Claude login is no longer offered: an agent could " +
+            'change files that run as you. Run `claude setup-token` and paste the token here instead ' +
+            '(same subscription, nothing mounted) — or use an API key or a local model.',
+        });
+      }
       const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
       if (localHost && localHost.ownerId !== ownerIdOf(req)) {
         return reply.code(400).send({
@@ -2709,9 +2728,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.get('/v1/cli-tokens', async (req) => store.listCliTokens(ownerIdOf(req)));
 
-  app.post<{ Body: { label?: string } }>('/v1/cli-tokens', async (req, reply) => {
+  app.post<{ Body: { label?: string; scope?: string } }>('/v1/cli-tokens', async (req, reply) => {
     const label = (req.body as { label?: string } | null)?.label ?? 'CLI';
-    const { id, token } = store.createCliToken(ownerIdOf(req), label);
+    // scope 'rehost': for another Hatchabot server that will move agents
+    // here — it can do that, and nothing else with the token.
+    const scope = (req.body as { scope?: string } | null)?.scope;
+    if (scope !== undefined && scope !== 'rehost') return reply.code(400).send({ error: "scope must be 'rehost' or absent" });
+    const { id, token } = store.createCliToken(ownerIdOf(req), label, 90, scope as 'rehost' | undefined);
     // Shown once — only the hash is kept.
     return reply.code(201).send({ id, token });
   });
@@ -3047,10 +3070,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // does on its own (rebuildPolicy.ts) ---------------------------------------
 
   /** Why this agent needs a rebuild, if it does. Pinned agents never chase the default image. */
+  // The default image is per host, not per agent: one lookup per host per
+  // 10 s, not 45 in a burst every list and every sweep (26th audit).
+  const imageInfoCache = new Map<string, { at: number; value: Promise<RuntimeInfo> }>();
+  const currentImageInfoFor = (hostId: string): Promise<RuntimeInfo> => {
+    const hit = imageInfoCache.get(hostId);
+    if (hit && Date.now() - hit.at < 10_000) return hit.value;
+    const value = providerFor(hostId).currentImageInfo();
+    imageInfoCache.set(hostId, { at: Date.now(), value });
+    value.catch(() => imageInfoCache.delete(hostId));
+    return value;
+  };
   const rebuildNeedOf = async (a: Agent) => {
     if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return undefined;
     const provider = providerFor(a.hostId);
-    const [running, current] = await Promise.all([provider.info(a.runtimeRef), provider.currentImageInfo()]);
+    const [running, current] = await Promise.all([provider.info(a.runtimeRef), currentImageInfoFor(a.hostId)]);
     const imageBehind = !a.image && !!(running.imageId && current.imageId && running.imageId !== current.imageId);
     return { running, current, imageBehind, need: rebuildNeed(running, imageBehind) };
   };
@@ -6241,6 +6275,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const { name, url, token } = parsed.data;
+      // Another Hatchabot server is another machine: not this one's loopback,
+      // nor a link-local/metadata address — that turned the probe into a
+      // port scan from the server's own vantage point (26th audit).
+      const peerHost = new URL(url).hostname;
+      if (/^(localhost|127\.|::1$|0\.0\.0\.0$|169\.254\.)/.test(peerHost) || peerHost.endsWith('.internal')) {
+        return reply.code(400).send({ error: 'Give the other server\'s own address (its Tailscale or LAN name), not a local one.' });
+      }
 
       // Prove the token works before storing it, so a typo fails here rather
       // than halfway through a migration.
@@ -6253,7 +6294,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return reply.code(400).send({ error: 'That server rejected the token.' });
         }
         if (!probe.ok) {
-          return reply.code(400).send({ error: `That server answered ${probe.status}.` });
+          return reply.code(400).send({ error: 'That address did not answer like a Hatchabot server.' });
         }
       } catch {
         return reply.code(400).send({ error: `Couldn't reach a Hatchabot server at ${url}.` });
@@ -6335,18 +6376,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // failed deep inside the seed with docker's "pull access denied", after
       // the agent had already been stopped (2026-09-22). Say so up front, and
       // let the caller choose the runner's default image instead.
-      if (agent.image) {
-        const dropPin = (req.body as { dropPin?: boolean } | null)?.dropPin === true;
-        if (dropPin) {
-          store.setAgentImage(agent.id, null);
-          trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
-        } else {
+      // dropPin used to take effect here, before the checks below — a move
+      // refused a line later left the agent unpinned where it stood, and its
+      // next rebuild silently lost its packages (26th audit). It applies at
+      // the end, once nothing else can refuse.
+      const dropPin = !!agent.image && (req.body as { dropPin?: boolean } | null)?.dropPin === true;
+      if (agent.image && !dropPin) {
+        {
           // The pin travels as its recipe: rebuild the image there if it is
           // missing (base pulled if need be, then the extra packages or the
           // derived lines). Only if that can't be done does the owner choose.
+          // The agent is busy for the build: a Rebuild or Delete landing in
+          // those minutes used to proceed underneath it.
           trace(agent.id)('image.ensure', { image: agent.image, on: host.id });
-          const got = await ensureImageOn(providerFor(host.id), providerFor(agent.hostId), agent.image,
-            derivedByTag((n) => store.getDerivedImage(n)));
+          markBusy(agent.id);
+          let got: Awaited<ReturnType<typeof ensureImageOn>>;
+          try {
+            got = await ensureImageOn(providerFor(host.id), providerFor(agent.hostId), agent.image,
+              derivedByTag((n) => store.getDerivedImage(n)));
+          } finally {
+            clearBusy(agent.id);
+          }
           if (!got.ok) {
             return reply.code(409).send({
               error: `"${agent.name}" is pinned to the image ${agent.image}, which ${host.name} does not have, and it couldn't be rebuilt there (${got.problem}). ` +
@@ -6367,6 +6417,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             "This agent's Claude Max source uses this machine's login, which can't reach a runner. " +
             'Switch it to a setup-token Max source or an API key first, then move it.',
         });
+      }
+      if (dropPin) {
+        // Every check has passed; a busy agent is the one refusal left, and it is checked here.
+        if (isBusy(agent.id)) return reply.code(409).send({ error: 'The agent is busy — try again in a moment.' });
+        store.setAgentImage(agent.id, null);
+        trace(agent.id)('image.unpinned', { reason: 'move-host', was: agent.image, to: host.id });
       }
       try {
         const moved = await moveAgentToHost(
@@ -6668,6 +6724,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .safeParse(body.values);
       if (!vals.success) return reply.code(400).send({ error: 'Malformed setup values.' });
       if ((body.name?.trim().length ?? 0) > 64) return reply.code(400).send({ error: 'Names cap at 64 characters.' });
+      // The host must be one of the caller's before a provider is built for it (26th audit).
+      if (body.hostId && !store.listHosts(me.ownerId).some((h) => h.id === body.hostId)) {
+        return reply.code(400).send({ error: 'Unknown host.' });
+      }
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
       try {
         const { agent, needs, envValues, dataSourceValues } = importTemplate(

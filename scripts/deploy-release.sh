@@ -29,14 +29,20 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "       something of yours, move it out:  mv $PROD/<file> ~/"
   echo "  Any other marker = a tracked file was edited in place. Restore it with"
   echo "       git -C $PROD checkout -- <file>   (your .env and data/ are untouched)"
-  exit 1
+  exit 2
 fi
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
-rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && npm ci --silent && systemctl --user restart "$SVC"; }
+# `npm ci` wipes node_modules first: keep the working one aside until the new
+# one is in, or an npm outage leaves prod with no dependencies (exit 3 = that;
+# the old release is back untouched).
+rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
+restore_deps() { rm -rf node_modules; [ -d node_modules.prev ] && mv node_modules.prev node_modules; return 0; }
+rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && restore_deps && systemctl --user restart "$SVC"; }
 git checkout --quiet "$TAG"
 # A failed install must not leave prod checked out at a tag it can't run.
-npm ci --silent || { rollback; exit 1; }
+npm ci --silent || { rollback; exit 3; }
+rm -rf node_modules.prev
 systemctl --user restart "$SVC" || { rollback; exit 1; }
 WANT="$(node -e 'console.log(require("./package.json").version)')"
 # Health URL from the production .env, not the caller's shell: PORT and native TLS.

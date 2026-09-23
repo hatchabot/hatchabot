@@ -6,9 +6,10 @@
 #   cd hatchabot && ./scripts/setup-host.sh
 #
 # What it does: checks prerequisites, installs dependencies, writes a .env
-# (random secret key + the password you choose), builds the runtime image,
+# (random secret key + how people sign in), pulls the runtime image (builds only if that fails),
 # installs the systemd user service, and links the `hatchabot` CLI.
 set -euo pipefail
+umask 077   # .env and ~/.config/hatchabot/env hold secrets: never created wider than 0600
 cd "$(dirname "$0")/.."
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
@@ -37,6 +38,9 @@ if [ ! -f .env ]; then
   if [ "$SIGNIN" = "2" ]; then
     read -r -s -p "Choose an app password (what you'll type to open the web app): " PW; echo
     [ -n "$PW" ] || { echo "Password cannot be empty."; exit 1; }
+    # systemd's EnvironmentFile and the shell read a quoted apostrophe
+    # differently, so a password holding one never matched on Linux.
+    case "$PW" in *"'"*) echo "Please choose a password without an apostrophe (')."; exit 1 ;; esac
   fi
   {
     echo "HATCHABOT_SECRET_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"

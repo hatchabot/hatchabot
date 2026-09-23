@@ -33,7 +33,9 @@ Description=Hatchabot: follow the $2 release channel
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/env bash $DIR/scripts/follow-channel.sh $2
+# The user manager's PATH does not include a node installed by nvm or Homebrew.
+Environment=PATH=$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash "$DIR/scripts/follow-channel.sh" $2
 UNIT
   cat > "$UNITS/$NAME.timer" <<UNIT
 [Unit]
@@ -86,7 +88,14 @@ if [ "$(cat "$FAILED" 2>/dev/null)" = "$TARGET" ]; then exit 0; fi
 if bash "$DIR/scripts/upgrade.sh" "$CHANNEL"; then
   rm -f "$FAILED"
 else
-  echo "$TARGET" > "$FAILED"
-  echo "Upgrading to $TARGET did not complete (see above; a release that did not start was rolled back). It will not be retried; the channel's next release will be."
+  rc=$?
+  # Exit 2 = refused (local changes), 3 = the install step failed: transient,
+  # tried again next time. Exit 1 = the release did not start.
+  if [ "$rc" = 1 ]; then
+    echo "$TARGET" > "$FAILED"
+    echo "Upgrading to $TARGET failed and was rolled back. It will not be retried; the channel's next release will be."
+  else
+    echo "Upgrading to $TARGET did not complete (see above); it will be tried again."
+  fi
   exit 1
 fi

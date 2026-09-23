@@ -46,8 +46,9 @@ between releases, prefer the candidate path for a real version bump. After
 promoting, each agent shows "update available"; **Rebuild** it to adopt the new
 version, memory kept.
 
-There is deliberately **no web button** for this: it's a slow, host-side,
-fleet-wide docker build, so it lives in the CLI, not one click away in a browser.
+There is no form for this in the app: it's a slow, host-side, fleet-wide docker
+build. The Hatchabot agent can propose a candidate build (you confirm it), and
+⚙ Settings → Images promotes or discards the result; the CLI does the rest.
 
 ## Python libraries — per agent, on the volume
 
@@ -71,7 +72,7 @@ one-off check, set it explicitly: `PYTHONPATH=/home/node/.openclaw/pylibs`.
 ## Secrets & environment variables — per agent
 
 An agent's own tools often need a credential of their own — a market-data API
-key, a webhook secret. Set these per agent in **⚙ Settings → Environment variables**
+key, a webhook secret. Set these per agent in its **⚙ Settings → Advanced** tab
 (or `POST /v1/agents/:id/env` with `{name, value}`):
 
 - **Values are secrets.** They're stored encrypted in the SecretStore, **never**
@@ -89,9 +90,9 @@ key, a webhook secret. Set these per agent in **⚙ Settings → Environment var
 - **Deleting the agent scrubs them** from the SecretStore along with its other
   credentials.
 
-Caveat: env vars are **not yet carried by export/migrate** — the secret values
-live in the SecretStore, not the portable workspace. After moving or importing an
-agent, re-add its variables on the new host. (Carrying them is a follow-up.)
+A Download (and a Rehost) carries env vars with their values, since v0.94.0 —
+the file is a private backup, handled like a password. A Share template carries
+names only.
 
 ## Data — three patterns, chosen per folder
 
@@ -124,7 +125,7 @@ managed declaratively per agent — see [docs/data-sources.md](data-sources.md).
 
 **Scheduled tasks are visible and manageable.** An agent's OpenClaw crons live in
 its own gateway store on the durable volume (they survive rebuilds like MEMORY.md).
-The app's **⏰ Tasks** button (per running agent) lists them and lets you
+The agent's **Schedule** tab lists them and lets you
 **add** (name + cron expression + timezone + the message fired at the agent,
 v0.97.0), enable, disable, **run one now to test**, or delete — driven through
 the in-container `openclaw cron` CLI, never the store directly.

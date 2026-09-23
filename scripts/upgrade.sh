@@ -28,6 +28,9 @@ CHANNEL="$ARG"
 CHANNEL="${CHANNEL:-stable}"
 
 git fetch --tags --force --quiet origin
+# The newer of two versions. `sort -V` alone ranks v2.35.0-beta.1 ABOVE v2.35.0,
+# which stranded a beta tester on the prerelease; "~" sorts below everything.
+vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
 newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
 case "$CHANNEL" in
   latest) TARGET="$(newest)" ;;
@@ -46,19 +49,27 @@ CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HE
 if [ "$CUR" = "$TARGET" ]; then echo "Already on $TARGET ($CHANNEL)."; exit 0; fi
 case "$CHANNEL" in v[0-9]*) ;; *)
   # A channel never takes a machine backwards (this one may run ahead of it).
-  if [[ "$CUR" == v* ]] && [ "$(printf '%s\n%s\n' "$CUR" "$TARGET" | sort -V | tail -1)" = "$CUR" ]; then
+  if [[ "$CUR" == v* ]] && [ "$(vernewer "$CUR" "$TARGET")" = "$CUR" ]; then
     echo "On $CUR, which is newer than $CHANNEL ($TARGET). Nothing to do — name a version to go back."; exit 0
   fi ;;
 esac
 if [ -n "$(git status --porcelain)" ]; then
-  echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 1
+  echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 2
 fi
 
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 INSTALL="${HATCHABOT_INSTALL_CMD:-npm ci --silent}"         # (likewise)
 echo "Upgrading $CUR → $TARGET ($CHANNEL)…"
-rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && $INSTALL && $RESTART; }
+# `npm ci` deletes node_modules before installing, so a registry outage or a
+# full disk used to leave the machine with NO dependencies (and the rollback's
+# own npm ci failing under the same fault). Keep the working tree aside until
+# the new one is in.
+rm -rf node_modules.prev; [ -d node_modules ] && mv node_modules node_modules.prev
+restore_deps() { rm -rf node_modules; [ -d node_modules.prev ] && mv node_modules.prev node_modules; return 0; }
+rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && restore_deps && $RESTART; }
 git checkout --quiet "$TARGET"
-$INSTALL || { rollback; exit 1; }
+# Exit 3: the install step failed (usually transient) and the old release is back untouched.
+$INSTALL || { rollback; exit 3; }
 $RESTART || { rollback; exit 1; }
+rm -rf node_modules.prev
 echo "Now on $TARGET."

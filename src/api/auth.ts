@@ -34,19 +34,46 @@ function allowedEmailProblem(email: string | undefined): string | undefined {
 const failLimit = () => Number(process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW ?? 10); // read per call (tests tune it)
 const FAIL_WINDOW_MS = Number(process.env.HATCHABOT_LOGIN_WINDOW_MS ?? 15 * 60_000);
 const failures = new Map<string, { n: number; until: number }>();
-function throttleKey(req: FastifyRequest): string { return req.ip || 'unknown'; }
-function throttled(req: FastifyRequest): boolean {
-  const f = failures.get(throttleKey(req));
-  if (!f) return false;
-  if (Date.now() > f.until) { failures.delete(throttleKey(req)); return false; }
-  return f.n >= failLimit();
+/**
+ * Whom to count a failure against. Behind `tailscale serve` or a local reverse
+ * proxy every client arrives from loopback, so counting the socket address
+ * locked EVERYONE out after one person's ten misses (26th audit). A loopback
+ * peer's X-Forwarded-For names the real client (trusted only from loopback:
+ * a remote client cannot forge its way to a different bucket). The account
+ * being tried is a second bucket, so hopping addresses does not help either.
+ */
+function throttleKeys(req: FastifyRequest, who?: string): string[] {
+  let ip = req.ip || 'unknown';
+  const bare = ip.replace(/^::ffff:/, '');
+  if (bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.')) {
+    const fwd = req.headers['x-forwarded-for'];
+    const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
+    if (first) ip = `fwd:${first}`;
+  }
+  const keys = [`ip:${ip}`];
+  if (who) keys.push(`user:${who.trim().toLowerCase()}`);
+  return keys;
 }
-function noteFailure(req: FastifyRequest): void {
-  const k = throttleKey(req);
-  const f = failures.get(k);
-  if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
-  else f.n += 1;
-  if (failures.size > 10_000) failures.clear(); // bounded; a flood just resets everyone's count
+function throttled(req: FastifyRequest, who?: string): boolean {
+  for (const k of throttleKeys(req, who)) {
+    const f = failures.get(k);
+    if (!f) continue;
+    if (Date.now() > f.until) { failures.delete(k); continue; }
+    if (f.n >= failLimit()) return true;
+  }
+  return false;
+}
+function noteFailure(req: FastifyRequest, who?: string): void {
+  for (const k of throttleKeys(req, who)) {
+    const f = failures.get(k);
+    if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
+    else f.n += 1;
+  }
+  // Bounded: drop the OLDEST entries, never everyone's count at once — a
+  // flood from many addresses used to reset the flooder's own bucket too.
+  if (failures.size > 10_000) {
+    for (const k of [...failures.keys()].slice(0, 2_000)) failures.delete(k);
+  }
 }
 /** Test hook. */
 export function _resetLoginThrottle(): void { failures.clear(); }
@@ -94,6 +121,9 @@ export interface AuthOptions {
    * password flow to offer it).
    */
   cliTokenOwner?: (token: string) => string | undefined;
+  /** A token's scope: undefined = full owner access, 'rehost' = only what a
+   *  peer server needs to move an agent here. */
+  cliTokenScope?: (token: string) => string | undefined;
 }
 
 export type AuthMode = 'password' | 'accounts' | 'identity';
@@ -474,6 +504,12 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 
     const cliOwner = cliBearer(req, opts);
     if (cliOwner) {
+      // Same rule as accounts mode: a local account that was disabled or
+      // removed takes its tokens with it (26th audit).
+      if (localAccounts) {
+        const owner = opts.store?.localAccount(cliOwner);
+        if (owner?.disabled) return reply.code(401).send({ error: 'That access token belongs to an account that no longer exists.' });
+      }
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
       return;
     }
@@ -522,9 +558,23 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
  * A `hatchabot_…` bearer is a long-lived token this installation minted, not
  * an identity-provider token — resolve it locally.
  */
+/** What a rehost-scoped token may call: the other server's move, and nothing else. */
+const REHOST_PATHS = new Set(['/v1/agents/preflight', '/v1/agents/restore', '/v1/agents']);
 function cliBearer(req: FastifyRequest, opts: AuthOptions): string | undefined {
   const authz = req.headers.authorization;
   if (typeof authz !== 'string') return undefined;
   if (!authz.startsWith('Bearer hatchabot_') && !authz.startsWith('Bearer agentclaw_')) return undefined;
-  return opts.cliTokenOwner?.(authz.slice(7));
+  const token = authz.slice(7);
+  const owner = opts.cliTokenOwner?.(token);
+  if (!owner) return undefined;
+  // The token a peer server holds for moving agents here used to be a full
+  // owner token: a hostile peer could read bot tokens and credentials, delete
+  // agents, mint more tokens (26th audit). A scoped one opens three routes.
+  const scope = opts.cliTokenScope?.(token);
+  if (scope === 'rehost') {
+    const path = req.url.split('?')[0] ?? '';
+    const ok = REHOST_PATHS.has(path) && (path === '/v1/agents' ? req.method === 'GET' : req.method === 'POST');
+    if (!ok) return undefined;
+  }
+  return owner;
 }

@@ -13,7 +13,7 @@ covers everything else.
 |---|---|
 | **A computer that stays on** — Linux or macOS, with **Docker** and **Node.js 22+** | Agents run here, one container each. A Mac mini, a home server, a spare laptop that never sleeps. Docker: [Engine on Linux](https://docs.docker.com/engine/install/) (then `sudo usermod -aG docker $USER`, log out and in) or [Docker Desktop on macOS](https://docs.docker.com/desktop/setup/install/mac-install/). Node: [nodejs.org](https://nodejs.org) LTS, or `brew install node`. |
 | **A Telegram account** (the app on your phone) | Telegram is the front door. Agents are Telegram bots you create. |
-| **An AI to think with** — recommended: a **Claude subscription** (Pro or Max) | One subscription powers every agent, within the plan's usage limits (the agents share them). Alternatives: an Anthropic or Google API key, or a local model server (Ollama) that needs no account at all. |
+| **An AI to think with** — recommended: a **Claude subscription** (Pro or Max) | One subscription powers every agent, within the plan's usage limits (the agents share them). Alternatives: an Anthropic, OpenAI or Google API key, or a local model server (Ollama) that needs no account at all. |
 
 > Claude **Max** is the comfortable choice for a household of agents; **Pro**
 > works for one or two light ones. You can also mix: a cheap or local model for
@@ -45,7 +45,7 @@ You can make more later (one per agent, ~60 seconds each), or pre-stock a pool s
 ## 3. Install Hatchabot (3 min)
 
 One line — it checks git, Docker and Node (offering to install what's missing),
-fetches the latest release into `~/hatchabot`, and runs the setup:
+fetches the release on the `stable` channel into `~/hatchabot`, and runs the setup:
 
 ```sh
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"
@@ -56,11 +56,11 @@ Prefer to see every step? The same thing by hand:
 ```sh
 git clone https://github.com/hatchabot/hatchabot.git hatchabot
 cd hatchabot
-git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")"   # the latest release
+git checkout "$(git describe --tags "$(git rev-list --tags --max-count=1)")"   # the newest tag (`latest`); the installer takes `stable`
 ./scripts/setup-host.sh
 ```
 
-Setup asks you to choose an **app password**, pulls the agent runtime image
+Setup asks how people will sign in (**accounts**, recommended, or one shared password), pulls the agent runtime image
 (pre-built for arm64 and amd64 — about a minute; it only builds locally if the
 pull fails), installs a background service so Hatchabot starts with the
 machine, and links the `hatchabot` command. It is safe to re-run.
@@ -103,8 +103,8 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 - **Let family in** — **Invite…** on the card: a link or QR for chat-only access, or a full invite so they can also log into Hatchabot. Or make an agent a **group room**.
 - **Give it your Google account** — ⚙ Settings → Connections (Gmail, Calendar, Drive, Sheets). Per agent, with a "no send" option.
 - **Give it data** — the agent's **Data** tab: a read-only folder, a writable one, or a git repo it commits to.
-- **Schedule it** — the **Tasks** dialog: a morning briefing, an inbox poll, a weekly digest.
-- **Let agents consult each other** — the agent's **Peers** tab. A consult is
+- **Schedule it** — the agent's **Schedule** tab: a morning briefing, an inbox poll, a weekly digest.
+- **Let agents consult each other** — the agent's **Sharing** tab. A consult is
   relayed as *untrusted* input by default: the peer answers from knowledge but
   is told not to act on it, because anything that can steer one agent (an
   injected email, a message from someone in its chat) would otherwise reach

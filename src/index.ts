@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { hostname } from 'node:os';
 import Database from 'better-sqlite3';
+import { installErrorHandler } from './api/errorHandler.js';
 import Fastify, { type FastifyServerOptions } from 'fastify';
 import { Store } from './store/store.js';
 import { LocalSecretStore } from './secrets/localSecretStore.js';
@@ -112,6 +113,7 @@ const tls =
 const serverOptions: FastifyServerOptions = { logger: true };
 if (tls) (serverOptions as FastifyServerOptions & { https: unknown }).https = tls;
 const app = Fastify(serverOptions);
+installErrorHandler(app);
 
 // Mend any state drift from reboots/crashes before serving a single request —
 // containers auto-restart with the box, the DB doesn't know that.
@@ -133,6 +135,7 @@ await registerAuth(app, {
   secret: LocalSecretStore.keyFromEnv(),
   mode: authModeFromEnv(),
   cliTokenOwner: (token) => store.ownerForCliToken(token),
+  cliTokenScope: (token) => store.cliTokenScope(token),
   onAuthenticated: (principal) => {
     // Register the account (email <-> owner) so agents can be shared to it by
     // email, and bind any shares that were addressed to this email before its

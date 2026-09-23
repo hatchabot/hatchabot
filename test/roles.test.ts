@@ -256,12 +256,17 @@ describe('cross-owner isolation (audit regressions)', () => {
     // machine owner's Max login. A second account creating one would silently
     // bill its agents to somebody else's subscription.
     const f = await app(twoOwners());
+    // Machine-login sources are retired outright since v2.39.0; this guards the
+    // cross-owner rule that still stands behind the override.
+    process.env.HATCHABOT_ALLOW_MACHINE_LOGIN = '1';
+    try {
     const res = await f.inject({
       method: 'POST', url: '/v1/ai-profiles', headers: as(MEMBER),
       payload: { kind: 'subscription', name: 'Freeload', vendor: 'anthropic', model: 'claude-opus-4-8' },
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatch(/your own Claude account/);
+    } finally { delete process.env.HATCHABOT_ALLOW_MACHINE_LOGIN; }
   });
 
   it('accepts a second account bringing its own setup-token', async () => {

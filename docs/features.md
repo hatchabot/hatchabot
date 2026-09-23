@@ -1,7 +1,7 @@
 # Hatchabot features — a tour
 
 What exists today, in one place. Each section says how to do the thing; where a
-deeper doc exists, it's linked instead of duplicated. Updated 2026-09-20.
+deeper doc exists, it's linked instead of duplicated. Updated 2026-09-23.
 
 **Start here: you don't have to do any of it yourself.** Hatchabot ships with a
 manager — *your Hatchabot agent* — that you talk to in plain words: "which
@@ -232,7 +232,7 @@ token isn't lost: delete parks it in the Bot pool by default (API callers can
 opt out with `?recycleBot=0`), ready for a future agent.
 
 Bots outlive agents by default: **deleting an agent parks its bot in the
-Bot pool** (⚙ Settings → Bot pool) — pool-leased and hand-pasted alike — and
+Bot pool** (⚙ Settings → Telegram) — pool-leased and hand-pasted alike — and
 when the pool leases it to the next agent, the bot's display name updates to
 that agent's name automatically. **Bots are personal**: a token belongs to
 whoever minted it at BotFather (they can rename or revoke it any time), so
@@ -307,8 +307,10 @@ knows).
 
 ## Training & memory
 
-To edit an agent's mind, open **⚙ Settings** on its card. The dialog has six
-tabs: **📖 Definition · Snapshots · AI · Data · Telegram · Environment**.
+To edit an agent's mind, open **⚙ Settings** on its card. The sheet's tabs are
+**Overview · Personality · AI · Data · Telegram · Slack & Discord · Sharing ·
+Schedule · Advanced** (the classic look has Definition · Snapshots · AI · Data ·
+Telegram · Environment).
 
 - **Definition** — rename the agent, edit SOUL.md / AGENTS.md / MEMORY.md,
   and toggle **shared memory**: On means MEMORY.md is a common log for every
@@ -367,7 +369,9 @@ Five distinct verbs, for five intents:
   members; any failure rolls it back where it was. While it moves the card
   shows a pulsing **WORKING…** chip.
 - **Move to another cluster** (card ⋯ menu) — send the agent to a different
-  Hatchabot server entirely (registered under ⚙ Settings → Cluster servers).
+  Hatchabot server entirely (registered under ⚙ Settings → Hosts → Other Hatchabot servers,
+  with a token made on that server under Security → **Token for moving agents
+  here** — it lets the other server move agents there, and nothing else).
   It transfers with memory, members, and Telegram identity, and is managed
   from that server's dashboard afterwards. The local copy stays STOPPED —
   never start both, they'd fight over the same bot. CLI: `hatchabot rehost`.
@@ -408,7 +412,7 @@ learning back to the master") is the designed next step.
 
 **Web search is on for every agent** (keyless DuckDuckGo baseline; the
 config is written explicitly on every rebuild). Upgrade the whole fleet to
-Brave with one **Fleet search key** (⚙ Settings → Media — write-only, same
+Brave with one **Fleet search key** (⚙ Settings → Connections — write-only, same
 sharing caveats as the media key); a per-agent `BRAVE_API_KEY` env var (or
 an env-target template field) overrides it with that agent's own quota.
 Provider auto-detection comes from the key names.
@@ -461,7 +465,7 @@ new bot slot.
 Details: [data-sources.md](data-sources.md). Changes apply on the next
 **Rebuild**.
 
-**⚙ Settings → Environment** — per-agent environment variables for the
+**The agent's Advanced tab** (Environment in the classic look) — per-agent environment variables for the
 agent's **own tools, not its AI**: when its scripts or scheduled tasks call
 an outside service (a market-data API, a home-automation hub), the key they
 read lands here. Most agents need none. Values are write-only — stored
@@ -713,7 +717,7 @@ not counted (live-only)" rather than as zero. On the CLI, `hatchabot usage` (no
 agent name) prints the same ranked table with cost; `hatchabot usage <agent>`
 still shows one agent's breakdown by model.
 
-**📊 Sources** (header) answers "who runs on what": each AI source with its
+**Fleet → AI in use** (📊 Sources in the classic look) answers "who runs on what": each AI source with its
 credential kind, the agents on it and each agent's current model (pins and
 pending switches flagged), plus a models-in-use tally. The card's status line
 also names each agent's AI source (when more than one exists) alongside its
@@ -723,7 +727,7 @@ Per-agent, the card's ⋯ menu has **📊 Usage** (tokens by model,
 honest billing context), **❤️ Health** (is it actually answering?), and
 **Logs**.
 
-**⚙ Settings → Runners** manages the machines this cluster runs agents on
+**⚙ Settings → Hosts** manages the machines this cluster runs agents on
 ("this machine" is the built-in runner). Adding one is a guided three-step
 flow: enable SSH + Docker on the runner, paste one command there (it
 authorizes this server's dedicated key and fixes PATH quirks), then enter
@@ -768,7 +772,7 @@ can act as the connected account. Design and phases:
 Three layers, smallest to largest:
 
 - **Snapshots** — the three definition files, per agent, before every edit
-  (⚙ Settings → Snapshots).
+  (the agent's ⚙ Settings → Personality tab).
 - **Backups** — nightly, server-side, machine-wide: every agent volume plus
   the control-plane database and secret key, written to dated sets on disk
   (`backup-volumes.sh`, installed as a timer by setup). **⚙ Settings →
@@ -787,7 +791,7 @@ Operations section.
 
 **⚙ Settings → AI sources** holds the credentials agents run on. Kinds:
 
-- **API key** — Anthropic or Google Gemini; stored encrypted, injected at
+- **API key** — Anthropic, OpenAI or Google Gemini; stored encrypted, injected at
   boot, runs on any host including cloud.
 - **Claude Pro/Max subscription**, two flavours: **machine login** (reuses
   this box's `~/.claude` in place — local/desktop hosts only) and

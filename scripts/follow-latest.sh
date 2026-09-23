@@ -26,7 +26,8 @@ Description=Hatchabot: deploy the newest release tag to this machine
 [Service]
 Type=oneshot
 Environment=HATCHABOT_PROD_DIR=$PROD
-ExecStart=/usr/bin/env bash $PROD/scripts/follow-latest.sh
+Environment=PATH=$(dirname "$(command -v node)"):$(dirname "$(command -v docker || echo /usr/bin/docker)"):/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash "$PROD/scripts/follow-latest.sh"
 EOF
   cat > "$UNITS/$NAME.timer" <<EOF
 [Unit]
@@ -70,7 +71,8 @@ NEWEST="$(git -C "$PROD" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|
 CUR="$(git -C "$PROD" describe --tags --exact-match 2>/dev/null || true)"
 [ "$CUR" = "$NEWEST" ] && exit 0
 # Only ever forward: a checkout that is ahead (a hand deploy of a newer tag) stays.
-if [ -n "$CUR" ] && [ "$(printf '%s\n%s\n' "$CUR" "$NEWEST" | sort -V | tail -1)" = "$CUR" ]; then exit 0; fi
+vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
+if [ -n "$CUR" ] && [ "$(vernewer "$CUR" "$NEWEST")" = "$CUR" ]; then exit 0; fi
 if [ "$(cat "$STATE/follow-latest-failed" 2>/dev/null)" = "$NEWEST" ]; then exit 0; fi
 
 # The deploy script as the NEW release ships it, from a copy for the same reason.
@@ -80,8 +82,15 @@ echo "Following latest: ${CUR:-untagged} → $NEWEST"
 if HATCHABOT_PROD_DIR="$PROD" bash "$deploy" "$NEWEST"; then
   rm -f "$STATE/follow-latest-failed" "$deploy"
 else
-  echo "$NEWEST" > "$STATE/follow-latest-failed"
+  rc=$?
   rm -f "$deploy"
-  echo "Deploying $NEWEST failed and was rolled back. It will not be retried; the next tag will be."
+  # Exit 2 = refused (a stray file in prod), 3 = the install step failed: both
+  # transient, tried again next time. Exit 1 = the release did not start.
+  if [ "$rc" = 1 ]; then
+    echo "$NEWEST" > "$STATE/follow-latest-failed"
+    echo "Deploying $NEWEST failed and was rolled back. It will not be retried; the next tag will be."
+  else
+    echo "Deploying $NEWEST did not complete (see above); it will be tried again."
+  fi
   exit 1
 fi

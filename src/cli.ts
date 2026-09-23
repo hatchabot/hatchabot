@@ -67,7 +67,7 @@ Commands:
                                person chooses a password on the one-time link it
                                prints. --host-owner makes the first one, the
                                owner; --cli-token also prints a CLI token.
-  accounts reset-password <user> <new>
+  accounts reset-password <user> [<new>]
                                Reset a password from the machine itself — the
                                way back in when the host owner is locked out.
   upgrade [channel|vX.Y.Z]     Move this machine to the newest release on its
@@ -184,8 +184,8 @@ Commands:
   folders <agent> rm <name>    Stop sharing a folder or repo (by its /data/<name>)
   servers                      Other Hatchabot servers you can move agents to
   servers add <name> <url> <token>
-                               Register one (token from that server's
-                               ⚙ Settings → Security)
+                               Register one (on that server: ⚙ Settings →
+                               Security → "Token for moving agents here")
   rehost <agent> <server> [--drop-pin]
                                Move an agent there: preflight, transfer, verify.
                                The source is left STOPPED, never deleted.
@@ -240,7 +240,7 @@ Commands:
 Global options:
   --url <url>        Control plane (env HATCHABOT_URL, default http://localhost:8080)
   --password <pw>    Shared password (env HATCHABOT_PASSWORD)
-  --json             Machine-readable output (list, ask, tasks)
+  --json             Machine-readable output (list, ask, tasks, doctor, accounts create)
 
 <agent> is an agent's name or slug (any case), or 4+ characters of its id.
 Options must be ones listed here: a mistyped one is an error, not a guess.`;

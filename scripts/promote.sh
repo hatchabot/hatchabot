@@ -25,7 +25,8 @@ CURRENT="$(sed -nE "s/.*\"$CH\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" ch
 if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG."; exit 0; fi
 # Going backwards is allowed (a bad release gets rolled back this way) but it
 # should never happen by accident.
-NEWER="$(printf '%s\n%s\n' "$CURRENT" "$TAG" | sort -V | tail -1)"
+# "~" sorts below everything in sort -V, so a prerelease ranks below its final release.
+NEWER="$(printf '%s\n%s\n' "$CURRENT" "$TAG" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/')"
 if [ -n "$CURRENT" ] && [ "$NEWER" = "$CURRENT" ]; then
   read -r -p "$CH is at $CURRENT; move it BACK to $TAG? [y/N] " ok
   [ "$ok" = "y" ] || die "Nothing changed."

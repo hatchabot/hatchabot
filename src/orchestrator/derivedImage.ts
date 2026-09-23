@@ -67,11 +67,21 @@ export function baseProblem(base: string, repo = 'hatchabot-runtime'): string | 
  * other local images, host networking during the build, or a USER of its own.
  */
 export function dockerfileProblem(snippet: string): string | null {
-  for (const raw of snippet.split('\n')) {
+  // Judge what docker will PARSE, not the physical lines: BuildKit drops
+  // comment lines and joins `\`-continued lines first, so `RUN --network\` +
+  // `=host …` is one instruction with `--network=host` (found by the 26th
+  // audit; the split hid it from the preview too).
+  const logical = snippet
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n')
+    .replace(/\\[ \t]*\n/g, ' ');
+  for (const raw of logical.split('\n')) {
     const line = raw.trim();
     if (/^FROM\b/i.test(line)) return 'A derived image cannot contain its own FROM — the base field sets it.';
-    if (/--mount=/i.test(line)) return 'RUN --mount is not allowed in a derived image.';
-    if (/--network=/i.test(line)) return 'RUN --network is not allowed in a derived image.';
+    if (/--mount\b/i.test(line)) return 'RUN --mount is not allowed in a derived image.';
+    if (/--network\b/i.test(line)) return 'RUN --network is not allowed in a derived image.';
     if (/^USER\b/i.test(line)) return 'USER is managed for you (root during your lines, node at the end).';
   }
   return null;

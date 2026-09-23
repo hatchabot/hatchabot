@@ -223,7 +223,7 @@ describe('the CLI keeps up with the app', () => {
   // against a server it was never minted for.
   it('documents all three auth modes and all three API vendors', () => {
     const readme = read('README.md');
-    expect(readme).toMatch(/`password` \(default\), `accounts` or `identity`/);
+    expect(readme).toMatch(/`accounts` \(what the installer writes\), `password` \(the fallback when unset\) or `identity`/);
     for (const vendor of ['Anthropic', 'OpenAI', 'Gemini']) {
       expect(readme, `README should name ${vendor} as an API-key vendor`).toContain(vendor);
     }

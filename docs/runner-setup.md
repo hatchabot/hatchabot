@@ -5,7 +5,7 @@ plane itself — a laptop, a spare box, a cloud VM. The control plane drives its
 Docker daemon remotely (usually over SSH); the runner needs **no Hatchabot
 install** of its own.
 
-The web app walks you through this (⚙ Settings → Runners → Add a runner).
+The web app walks you through this (⚙ Settings → Hosts → Add a runner).
 This page is the same flow with the reasoning and the troubleshooting.
 
 ## What a runner needs
@@ -25,7 +25,7 @@ Install Docker, enable SSH. That's the only inherently manual part.
 
 ### 2. Authorize this control plane
 
-In ⚙ Settings → Runners, tap **"show the command"** and paste the snippet
+In ⚙ Settings → Hosts, tap **"show the command"** and paste the snippet
 into a terminal *on the runner*. It does three idempotent things:
 
 - appends the control plane's **dedicated public key** to
@@ -63,8 +63,8 @@ multi-GB copy; expect minutes on a tailnet.
 - **Host-folder data sources don't follow**: a folder path names the control
   plane's disk, so remote agents skip those mounts. Git-repo data sources
   work anywhere (they live on the agent's own volume).
-- The agent's debug Control UI publishes on the *runner's* loopback, so the
-  gateway button in the app won't reach it. Everything else — Telegram,
+- The agent's console publishes on the *runner's* loopback; since v2.34.6 the
+  app reaches it through the runner's SSH connection. Everything else — Telegram,
   health checks, logs, Move — works normally (health and logs go over the
   Docker connection, and the Telegram gateway polls outbound).
 

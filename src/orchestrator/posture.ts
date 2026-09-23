@@ -111,6 +111,20 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
           },
     );
 
+    // A machine-login Claude source mounts the owner's real ~/.claude
+    // read-write into their agents: an agent talked into writing a hook there
+    // runs it as the owner next time they use Claude Code on the machine.
+    // New ones are no longer offered (26th audit); an old one is a finding.
+    const machineLogin = store.listAllAIProfiles().filter((p) => p.kind === 'subscription' && !p.secretRef);
+    if (machineLogin.length) {
+      install.push({
+        key: 'machine-login-source',
+        level: 'warn',
+        title: `Claude source${machineLogin.length > 1 ? 's' : ''} using this machine's login: ${machineLogin.map((p) => p.name).join(', ')}`,
+        detail: 'Its agents mount your ~/.claude read-write, so one could change files that run as you. Make a setup-token source (`claude setup-token`), move the agents to it, then delete this one.',
+      });
+    }
+
     // Fleet media/search keys are readable by every agent's owner from inside
     // their own container — informational, a deliberate shared-house credential.
     const refs = new Set(store.listSecretRefs('media/%')); // presence only, never the value

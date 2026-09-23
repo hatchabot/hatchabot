@@ -4,7 +4,7 @@
 #   bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh)"
 #
 # What it does: checks git, Docker and Node 22+ (offers to install the missing
-# ones where that is safe), clones the LATEST RELEASE into ~/hatchabot (or
+# ones where that is safe), clones the release on your channel (stable unless you say otherwise) into ~/hatchabot (or
 # updates an existing clone), then runs scripts/setup-host.sh — which writes
 # .env, pulls the runtime image, installs the background service and links the
 # `hatchabot` command. Re-running is safe. Set HATCHABOT_DIR to install elsewhere.
@@ -43,6 +43,7 @@ ask() {
 }
 
 say "Hatchabot installer — $OS $(uname -m)"
+[ "$(id -u)" != 0 ] || die "Run this as your own user, not root (no sudo): Hatchabot installs as a user service."
 [ "$OS" = Linux ] || [ "$OS" = Darwin ] || die "Linux or macOS only (found $OS). On Windows, use WSL2 with Docker Desktop."
 
 say "1/4 git"
@@ -129,6 +130,26 @@ if [ "${HATCHABOT_DRY_RUN:-0}" = "1" ]; then
   echo "   channel $CHANNEL → release $LATEST  (dry run: nothing checked out or installed)"
   exit 0
 fi
+# Is Hatchabot already installed, from somewhere else? Running setup-host.sh
+# here would point the service at THIS directory — replacing a working install
+# with one that runs from a different checkout. That is how a production box
+# ends up serving a development tree. Checked BEFORE the checkout below moves
+# anything: it used to leave a development clone detached at the stable tag.
+UNIT="$HOME/.config/systemd/user/hatchabot.service"
+if [ -f "$UNIT" ]; then
+  INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -1)"
+  INSTALLED="${INSTALLED/#\%h/$HOME}"
+  if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$DIR" ]; then
+    die "Hatchabot is already installed here, running from:
+    $INSTALLED
+Installing into $DIR would repoint the service at it and leave the other one dark.
+
+  Upgrade the existing install:   hatchabot upgrade   (or: cd $INSTALLED && git fetch --tags --force && git checkout $LATEST && ./scripts/restart.sh)
+  Try a release on a clean machine: scripts/clean-install-test.sh (a throwaway VM)
+  Remove the existing one first:  cd $INSTALLED && ./scripts/uninstall.sh"
+  fi
+fi
+
 CUR="$(git -C "$DIR" describe --tags --exact-match 2>/dev/null || echo none)"
 if [ "$CUR" != "$LATEST" ]; then
   if [ -n "$(git -C "$DIR" status --porcelain)" ]; then
@@ -144,25 +165,6 @@ Then re-run this installer. (Your .env, data/ and backups are untouched either w
   git -C "$DIR" checkout --quiet "$LATEST"
 fi
 echo "   channel $CHANNEL → release $LATEST"
-
-# Is Hatchabot already installed, from somewhere else? Running setup-host.sh
-# here would point the service at THIS directory — replacing a working install
-# with one that runs from a different checkout. That is how a production box
-# ends up serving a development tree.
-UNIT="$HOME/.config/systemd/user/hatchabot.service"
-if [ -f "$UNIT" ]; then
-  INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -1)"
-  INSTALLED="${INSTALLED/#\%h/$HOME}"
-  if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$DIR" ]; then
-    die "Hatchabot is already installed here, running from:
-    $INSTALLED
-Installing into $DIR would repoint the service at it and leave the other one dark.
-
-  Upgrade the existing install:   cd $INSTALLED && git fetch --tags --force && git checkout $LATEST && ./scripts/restart.sh
-  Install a SECOND one to test:   HATCHABOT_DIR=$INSTALLED-test bash install.sh   (and give it its own PORT)
-  Remove the existing one first:  cd $INSTALLED && ./scripts/uninstall.sh"
-  fi
-fi
 
 mkdir -p "$(dirname "$CHANNEL_FILE")"
 # Remember it OUTSIDE the clone: a file inside would be an untracked change,

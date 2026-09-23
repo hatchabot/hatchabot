@@ -131,6 +131,10 @@ describe('a pinned image in a downloaded copy', () => {
 
   it.each([
     ['its own FROM', (i: any) => { i.recipe.lines = 'FROM evil/image\nRUN true'; }, /own FROM/],
+    ['a network flag split over a continued line', (i: any) => { i.recipe.lines = 'RUN --network\\\n=host curl http://127.0.0.1:11434/'; }, /--network/],
+    ['a mount flag split over a continued line', (i: any) => { i.recipe.lines = 'RUN --mount \\\n=type=bind,source=/,target=/h cat /h/x'; }, /--mount/],
+    ['a package name that removes', (i: any) => { i.tag = `${BASE}-plus-x`; i.recipe.lines = undefined; i.recipe.packages = ['curl-']; }, /package list/],
+    ['a derived name the machine would not accept', (i: any) => { i.tag = 'hatchabot-runtime:derived-Foo.Bar'; }, /derived-image name/],
     ['a build-time mount', (i: any) => { i.recipe.lines = 'RUN --mount=type=bind,source=/,target=/h cat /h/etc/shadow'; }, /--mount/],
     ['a USER of its own', (i: any) => { i.recipe.lines = 'USER root'; }, /USER is managed/],
     ['a foreign image name', (i: any) => { i.tag = 'evil/hatchabot:derived-media'; }, /not a runtime image name/],
@@ -165,7 +169,7 @@ describe('a pinned image in a downloaded copy', () => {
     await expect(importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true, image: 'build' }))
       .rejects.toThrow(TransferError);
     expect(dst.store.listAgents('me').filter((a) => a.state !== 'DELETED')).toEqual([]);
-    expect(dst.store.getDerivedImage('media')?.status).toBe('FAILED');
+    expect(dst.store.getDerivedImage('media')).toBeUndefined(); // no record for an image that never existed
     // Nothing left holding the slug: importing again (on the default) works.
     const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', image: 'drop' });
     expect(agent.slug).toBe('kitchen');

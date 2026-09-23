@@ -79,9 +79,17 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
       try { msg = JSON.parse(body.toString('utf8')); } catch { return send(400, { error: 'Bad JSON' }); }
       try {
         const token = bearer(req.headers.authorization);
-        const out = Array.isArray(msg)
-          ? (await Promise.all(msg.map((m) => handlers.mcp(token, m)))).filter((x) => x !== undefined)
-          : await handlers.mcp(token, msg);
+        // A batch is a courtesy, not a fan-out: bounded and one at a time,
+        // or one 1 MB array became thousands of concurrent requests (26th audit).
+        if (Array.isArray(msg) && msg.length > 20) return send(400, { error: 'At most 20 requests in one batch' });
+        let out: unknown;
+        if (Array.isArray(msg)) {
+          const results: unknown[] = [];
+          for (const m of msg) { const r = await handlers.mcp(token, m); if (r !== undefined) results.push(r); }
+          out = results;
+        } else {
+          out = await handlers.mcp(token, msg);
+        }
         if (out === undefined || (Array.isArray(out) && !out.length)) return send(202);
         return send(200, out);
       } catch (e) {

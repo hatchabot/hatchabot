@@ -47,7 +47,11 @@ supported shapes:
 
 - **`kind: 'subscription'` machine login + `host.kind: 'local'`** — the agent runs
   on the machine where the login already exists and reuses `~/.claude` in place;
-  Hatchabot never holds or copies it. This is the local-only shape.
+  Hatchabot never holds or copies it. **No longer offered for new sources
+  (v2.39.0):** the mount is read-write, so an agent talked into writing a hook
+  into `~/.claude/settings.json` would run it as you the next time you used
+  Claude Code. An existing source keeps working and the Security posture says
+  to move off it; `HATCHABOT_ALLOW_MACHINE_LOGIN=1` re-enables creating one.
 - **`kind: 'subscription'` + a stored `claude setup-token`** — this rides to **any
   host, a runner included**, because the token is injected as
   `CLAUDE_CODE_OAUTH_TOKEN` rather than mounted. This is how Claude Max runs on a
@@ -170,7 +174,7 @@ Set `HATCHABOT_USAGE_SAMPLE_MS` to change how often it samples (default
 
 One AI source can drive many agents on different models. A source has a
 **default model** plus a switchable `/model` list; each agent may pin any model
-from that list, or follow the default. Set it in **⚙ Settings → Model** (the row
+from that list, or follow the default. Set it in the agent's **⚙ Settings → AI** tab (the row
 appears only for cloud sources) — it applies on the agent's next Rebuild.
 
 Why this shape:

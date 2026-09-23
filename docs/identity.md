@@ -76,7 +76,7 @@ phone app follows the identical flow — that's the point.
 ## Phases
 
 1. **Seam** — ✅ shipped 2026-08-01. `HATCHABOT_AUTH=password|identity`
-   (`authModeFromEnv`, password default; identity mode refuses to boot until
+   (`authModeFromEnv`; password is the fallback when unset, the installer writes accounts; identity mode refuses to boot until
    phase 2 rather than silently serving an unauthenticated install).
    `src/api/principal.ts` owns the caller: auth sets `req.principal`, routes
    read `ownerIdOf(req)` instead of sniffing the legacy header, and every

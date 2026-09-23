@@ -462,6 +462,7 @@ export class Store {
       `ALTER TABLE ai_profiles ADD COLUMN models TEXT`,
       `ALTER TABLE ai_profiles ADD COLUMN base_url TEXT`,
       `ALTER TABLE cli_tokens ADD COLUMN expires_at TEXT`,
+      `ALTER TABLE cli_tokens ADD COLUMN scope TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_profile_id TEXT`,
       `ALTER TABLE agents ADD COLUMN applied_model TEXT`,
       `ALTER TABLE agents ADD COLUMN migrated_to TEXT`,
@@ -848,6 +849,11 @@ export class Store {
   getAIProfile(id: string): AIProfile | undefined {
     const r = this.db.prepare(`SELECT * FROM ai_profiles WHERE id = ?`).get(id) as any;
     return r ? rowToAIProfile(r) : undefined;
+  }
+
+  /** Every profile on the installation — for the host owner's posture view only. */
+  listAllAIProfiles(): AIProfile[] {
+    return (this.db.prepare(`SELECT * FROM ai_profiles ORDER BY sort_order, created_at`).all() as any[]).map(rowToAIProfile);
   }
 
   listAIProfiles(ownerId: string): AIProfile[] {
@@ -1646,6 +1652,8 @@ export class Store {
     ownerId: string,
     label: string,
     ttlDays = 90,
+    /** 'rehost': only what a peer server needs to move an agent here. */
+    scope?: 'rehost',
   ): { id: string; token: string; expiresAt: string } {
     const raw = randomBytes(32).toString('base64url');
     const token = `hatchabot_${raw}`;
@@ -1655,8 +1663,8 @@ export class Store {
     const expiresAt = new Date(Date.now() + ttlDays * 86_400_000).toISOString();
     this.db
       .prepare(
-        `INSERT INTO cli_tokens (id, owner_id, token_hash, label, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO cli_tokens (id, owner_id, token_hash, label, created_at, expires_at, scope)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1665,11 +1673,18 @@ export class Store {
         label.trim().slice(0, 64) || 'CLI',
         new Date().toISOString(),
         expiresAt,
+        scope ?? null,
       );
     return { id, token, expiresAt };
   }
 
   /** The owner this token belongs to, or undefined. Records the use. */
+  /** A token's scope (see createCliToken), or undefined for a full token. */
+  cliTokenScope(token: string): string | undefined {
+    const row = this.db.prepare(`SELECT scope FROM cli_tokens WHERE token_hash = ?`).get(hashToken(token)) as { scope: string | null } | undefined;
+    return row?.scope ?? undefined;
+  }
+
   ownerForCliToken(token: string): string | undefined {
     const row = this.db
       .prepare(
@@ -1690,12 +1705,12 @@ export class Store {
 
   listCliTokens(
     ownerId: string,
-  ): Array<{ id: string; label: string; createdAt: string; lastUsedAt?: string; expiresAt?: string }> {
+  ): Array<{ id: string; label: string; createdAt: string; lastUsedAt?: string; expiresAt?: string; scope?: string }> {
     return (
       this.db
         // agent_id IS NULL: the agent-scoped A2A call tokens are infrastructure,
         // not user CLI tokens — listing/revoking them here bricked consults.
-        .prepare(`SELECT id, label, created_at, last_used_at, expires_at FROM cli_tokens WHERE owner_id = ? AND agent_id IS NULL ORDER BY created_at DESC`)
+        .prepare(`SELECT id, label, created_at, last_used_at, expires_at, scope FROM cli_tokens WHERE owner_id = ? AND agent_id IS NULL ORDER BY created_at DESC`)
         .all(ownerId) as any[]
     ).map((r) => ({
       id: r.id,
@@ -1703,6 +1718,7 @@ export class Store {
       createdAt: r.created_at,
       lastUsedAt: r.last_used_at ?? undefined,
       expiresAt: r.expires_at ?? undefined,
+      scope: r.scope ?? undefined,
     }));
   }
 

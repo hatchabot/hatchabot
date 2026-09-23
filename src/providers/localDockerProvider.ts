@@ -13,6 +13,9 @@ import type {
 } from './provider.js';
 import { ProviderError, parseChannelsLabel } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
+
+/** How much an imported archive may expand to on the volume (default 8 GiB). */
+const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
 import { batchConfigCommands, buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
@@ -643,6 +646,11 @@ export class LocalDockerProvider implements RuntimeProvider {
         // .openclaw/ inside it). Detect which, and extract to the matching
         // place, so old backups and .hatchabot files still restore.
         'cat > /tmp/s.tgz && gzip -t /tmp/s.tgz && ' +
+          // What it EXPANDS to is bounded too: a ~190 MB gzip of zeros is
+          // ~190 GB on disk, filling the host for every agent (26th audit).
+          // Counted by decompressing once more (CPU), never by trusting the
+          // gzip trailer (mod 2^32).
+          `if [ "$(gzip -dc /tmp/s.tgz | head -c ${IMPORT_MAX_BYTES + 1} | wc -c)" -gt ${IMPORT_MAX_BYTES} ]; then echo "archive expands past the size limit" >&2; exit 3; fi && ` +
           'if tar tzf /tmp/s.tgz | grep -qE "^\\./\\.openclaw/"; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
           'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
           'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
@@ -657,7 +665,9 @@ export class LocalDockerProvider implements RuntimeProvider {
           reject(
             new ProviderError(
               `volume import failed (${code}): ${stderr.slice(-500)}`,
-              "Couldn't restore the agent's state.",
+              code === 3
+                ? `This archive would expand to more than ${Math.round(IMPORT_MAX_BYTES / 2 ** 30)} GB, which this machine does not allow (HATCHABOT_IMPORT_MAX_GB).`
+                : "Couldn't restore the agent's state.",
             ),
           );
       });
@@ -787,17 +797,31 @@ export class LocalDockerProvider implements RuntimeProvider {
    * it dies. The console stays closed to the network on the runner.
    */
   readonly #tunnels = new Map<number, { local: number; child: ChildProcess }>();
+  /** Opening, so a second caller waits for the same tunnel instead of spawning another (26th audit). */
+  readonly #tunnelOpening = new Map<number, Promise<{ host: string; port: number } | undefined>>();
   async gatewayEndpoint(port: number): Promise<{ host: string; port: number } | undefined> {
     if (!this.remote) return { host: '127.0.0.1', port };
     const target = sshTarget(this.#conn[1] ?? '');
     if (!target) return undefined; // tcp:// — no tunnel to be had
     const open = this.#tunnels.get(port);
     if (open && open.child.exitCode === null && !open.child.killed) return { host: '127.0.0.1', port: open.local };
+    const opening = this.#tunnelOpening.get(port);
+    if (opening) return opening;
+    const p = this.#openTunnel(target, port).finally(() => this.#tunnelOpening.delete(port));
+    this.#tunnelOpening.set(port, p);
+    return p;
+  }
+  async #openTunnel(target: { dest: string; port?: string }, port: number): Promise<{ host: string; port: number } | undefined> {
     const local = await freePort();
     const child = spawn('ssh', sshTunnelArgs(target, local, port), { stdio: 'ignore' });
-    child.unref();
+    child.unref(); // never keeps the process alive…
+    const stop = () => { try { child.kill(); } catch { /* gone */ } };
+    process.once('exit', stop); // …and never outlives it, holding a loopback port forever
     this.#tunnels.set(port, { local, child });
-    child.once('exit', () => { if (this.#tunnels.get(port)?.child === child) this.#tunnels.delete(port); });
+    child.once('exit', () => {
+      process.removeListener('exit', stop);
+      if (this.#tunnels.get(port)?.child === child) this.#tunnels.delete(port);
+    });
     // Wait for the forward to accept (ExitOnForwardFailure ends ssh otherwise).
     for (let i = 0; i < 40; i++) {
       if (child.exitCode !== null) break;

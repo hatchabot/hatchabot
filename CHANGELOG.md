@@ -2,6 +2,35 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.39.0] — 2026-09-23 — 26th audit
+
+Seven antagonistic reviews (auth, everything since v2.30.1, mutating routes,
+the runtime/ops layer, the web UI, documentation drift, the scripts), each
+finding verified against the code before it was fixed. Record:
+docs/audit-2026-09-23.md.
+
+### Security
+- **New Claude sources no longer mount this machine's `~/.claude`** (the "machine login" kind): the mount was read-write, so an agent could have written a hook that runs as the owner. `claude setup-token` gives the same subscription with nothing mounted; an existing machine-login source keeps working and is a Security-posture finding. `HATCHABOT_ALLOW_MACHINE_LOGIN=1` re-enables creating one.
+- **A token for another server** (Security → *Token for moving agents here*) can only move agents here; the full token the old advice had you paste there could read bot tokens and credentials or delete agents from the peer.
+- **The Dockerfile validator judges what docker parses**: `RUN --network\` + `=host …` across a continued line got past it in an imported recipe. Package names ending in `-` (apt's *remove*) are refused; a derived image arriving by import must have a name this machine's own derive would accept; a failed import build leaves no image record behind.
+- **Internal error text stays in the log**: Fastify's default handler sent a rethrown docker/ssh error (container names, runner addresses) to the client.
+- **Login throttle**: behind `tailscale serve` or a local proxy every client looked like 127.0.0.1, so one person's misses locked everyone out; it now counts the forwarded client and the account under attack, and evicts old entries instead of resetting everyone.
+- An imported `.hatchabot` file may expand to at most `HATCHABOT_IMPORT_MAX_GB` (8) on the volume — a 190 MB gzip of zeros could fill the disk — and the upload ceiling matches what an import can accept.
+- A member of someone else's agent no longer sees the owner's host paths, env-var names or the gateway port. Registering a peer refuses this machine's loopback and link-local addresses and no longer echoes the upstream status. A local model server may not live at 169.254.* or *.internal. The ops door takes at most 20 requests per batch, one at a time. A disabled account's token is refused in identity mode too.
+
+### Fixed
+- **Moving an agent with `dropPin` unpinned it before the move could still be refused**, so a refused move silently lost the image's packages at the next rebuild. The pin now goes only once nothing else can refuse, and the agent is busy while its image is rebuilt on the runner.
+- **`uninstall.sh` acted on every Hatchabot container on the machine**, not this install's, and `--purge` removed the whole directory holding the database wherever it was. It scopes to the agents its database knows and removes only Hatchabot's own data folder; it also stops the follow timers.
+- **`upgrade.sh` / `deploy-release.sh` could leave an install with no dependencies**: `npm ci` wipes `node_modules` first, so a registry outage failed the install and the rollback alike. The working tree is kept aside until the new one is in; a refused or install-failed upgrade exits 2/3 and is retried by the follow timers, only a release that did not start is remembered.
+- **A prerelease outranked its final release** (`sort -V`): a beta install on `v2.35.0-beta.1` would never move to `v2.35.0`.
+- **A shared password with an apostrophe never matched on Linux** (systemd reads the quoting differently from the shell); the installer refuses one.
+- `install.sh` refuses a second install *before* moving the checkout (it left a development clone detached at the stable tag), refuses to run as root, and no longer suggests installing a second copy (which would repoint the one service). `install-service.sh` no longer offers to restart the user manager from a desktop session (it killed the session). Follow timers carry a PATH that finds an nvm/Homebrew node. `link-cli.sh` rewrites `~/.npmrc` only for the permission failure it exists for. Secret files are created 0600 from the start.
+- SSH console tunnels: two openers no longer spawn two forwards, and none outlives the process. The default image is looked up once per host, not once per agent, on every list and sweep.
+- Web: *Merge + Push to children* and removing a data source ask first; the recovery code leaves the page when its dialog closes.
+
+### Documentation
+- Forty-odd corrections from the drift review: settings locations in the default layout (Hosts, Images, Telegram, Connections, the agent's Advanced/Schedule/Sharing tabs), defaults (accounts is what the installer writes; rebuild concurrency 6), Slack/Discord status, env vars carried by Download/Rehost, runner consoles, OpenAI keys, `folders … add`, and the removed management bot and MCP route. New: the rebuild-policy and import-size env vars in `.env.example` and the README.
+
 ## [2.38.0] — 2026-09-23
 
 ### Added

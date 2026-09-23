@@ -1887,12 +1887,14 @@
   <section id="paneSecurity" role="tabpanel" hidden>
     <h4 style="margin:0 0 4px">Access tokens</h4>
     <div class="sub">
-      For the <code>hatchabot</code> command line, and for pairing this server
-      with another one (paste it there, under Cluster servers).
+      For the <code>hatchabot</code> command line. For pairing this server with
+      another one, make a <b>token for moving agents here</b> instead — it can
+      do that and nothing else — and paste it there under Hosts → Other Hatchabot servers.
     </div>
     <div id="cliTokenOut" class="invite-link" style="display:none"></div>
-    <div class="actions" style="justify-content:flex-start">
+    <div class="actions" style="justify-content:flex-start;flex-wrap:wrap">
       <button class="primary" onclick="newCliToken()">New token</button>
+      <button onclick="newCliToken('rehost')" title="For another Hatchabot server: it can move agents here, and nothing else">Token for moving agents here</button>
     </div>
     <div id="cliTokenList" class="sub" style="margin-top:8px">Loading…</div>
 
@@ -2855,6 +2857,8 @@ document.addEventListener('DOMContentLoaded', () => {
   $('recoveryDlg')?.addEventListener('cancel', (e) => { if (!$('recoverySaved').checked) e.preventDefault(); });
 });
 function showRecoveryCode(code, lede) {
+  // Gone from the page when the dialog closes: a one-time code must not sit in the DOM for the next person at the keyboard.
+  recoveryDlg.addEventListener('close', () => { $('recoveryCode').textContent = ''; }, { once: true });
   $('recoveryCode').textContent = code;
   if (lede) $('recoveryLede').innerHTML = lede;
   $('recoverySaved').checked = false;
@@ -3644,7 +3648,7 @@ async function pingHost(id) {
     const r = await api(`/v1/hosts/${id}/ping`);
     if (el) {
       el.style.color = r.reachable ? 'var(--ok)' : 'var(--warn)';
-      if (!r.reachable) { el.textContent = `⚠ unreachable — ${esc(r.error || 'no response')}`; return; }
+      if (!r.reachable) { el.textContent = `⚠ unreachable — ${r.error || 'no response'}`; return; }
       // Reachable but missing the runtime image = provision will fail — offer
       // the fix right here instead of letting the first create explain it.
       el.innerHTML = `✓ reachable · Docker ${esc(r.serverVersion || '')}` +
@@ -5412,14 +5416,16 @@ function aiModelSelectChanged() {
   if (other) { $('aiModel').value = ''; $('aiModel').focus(); }
 }
 
-async function newCliToken() {
+async function newCliToken(scope) {
   try {
-    const t = await api('/v1/cli-tokens', { method: 'POST', body: { label: 'CLI' } });
+    // scope 'rehost': for another server that will move agents here — that,
+    // and nothing else. The old advice pasted a full token there.
+    const t = await api('/v1/cli-tokens', { method: 'POST', body: scope ? { label: 'Rehost from another server', scope } : { label: 'CLI' } });
     const out = $('cliTokenOut');
     out.style.display = '';
     out.textContent = t.token;
     toast('Copy it now — it is not shown again', 20000);
-    if (await copyText(t.token)) toast('Token copied — run: hatchabot login', 20000);
+    if (await copyText(t.token)) toast(scope ? 'Token copied — paste it on the other server, under Hosts → Other Hatchabot servers' : 'Token copied — run: hatchabot login', 20000);
     void loadCliTokens();
   } catch (e) { $('aiErr').textContent = e.message; }
 }
@@ -5433,7 +5439,7 @@ async function loadCliTokens() {
     const rows = await api('/v1/cli-tokens');
     el.innerHTML = rows.length
       ? rows.map(t => `<div class="pair" style="align-items:baseline;padding:4px 0;border-top:1px solid var(--line)">
-          <span class="grow"><b>${esc(t.label || 'CLI')}</b> <span class="sub">· made ${ago(t.createdAt)}${t.lastUsedAt ? ` · last used ${ago(t.lastUsedAt)}` : ' · never used'}</span></span>
+          <span class="grow"><b>${esc(t.label || 'CLI')}</b>${t.scope === 'rehost' ? ' <span class="sub">(moving agents here only)</span>' : ''} <span class="sub">· made ${ago(t.createdAt)}${t.lastUsedAt ? ` · last used ${ago(t.lastUsedAt)}` : ' · never used'}</span></span>
           <button class="danger" onclick="revokeCliToken('${jsq(t.id)}','${jsq(t.label || 'CLI')}')">Revoke</button>
         </div>`).join('')
       : 'No tokens.';
@@ -5884,7 +5890,7 @@ function memberCard(a) {
       You're a member of this agent${a.sharedMemory ? ' — its memory is shared with everyone who uses it' : ''}.
     </div>
     <div class="actions">
-      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank">Telegram Web</a>` : ''}
+      ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : ''}
     </div>
   </div>`;
 }
@@ -6753,6 +6759,7 @@ async function setDataAccess(id, access) {
 async function removeDataSource(id) {
   const src = editData.find(d => d.id === id);
   if (!src) return;
+  if (!confirm(`Remove ${src.kind === 'folder' ? 'the folder' : 'the source'} “${src.mountName}” from this agent?${src.kind === 'git' ? ' Its deploy key is deleted with it.' : ''}`)) return;
   try {
     let updated;
     if (src.legacy) {
@@ -8798,6 +8805,11 @@ async function loadProposals() {
   } catch (e) { $('proposalsList').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 async function resolveProposal(pid, action, push) {
+  if (push) {
+    // The same confirmation as Push: this rewrites every child's definition in one go.
+    const kids = agents.filter(k => k.parentAgentId === proposalsMasterId).map(k => k.name);
+    if (!confirm(`Merge this into the master's AGENTS.md and push it to ${kids.length} child agent${kids.length === 1 ? '' : 's'}?\n\n${kids.join(', ')}\n\nEach child's definition is replaced; there is no undo.`)) return;
+  }
   try {
     const r = await api(`/v1/agents/${proposalsMasterId}/proposals/${encodeURIComponent(pid)}/resolve`, { method: 'POST', body: { action, push } });
     toast(action === 'dismiss' ? 'Dismissed.' : `Merged into the master's AGENTS.md${push ? ` — pushed to ${r.pushed} child(ren)` : ''}.`, 8000);

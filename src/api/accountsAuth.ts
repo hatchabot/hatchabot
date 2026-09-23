@@ -170,7 +170,7 @@ function setSessionCookie(reply: FastifyReply, req: FastifyRequest, value: strin
 export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
-  guard: { throttled: (req: FastifyRequest) => boolean; noteFailure: (req: FastifyRequest) => void },
+  guard: { throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void },
   opts: { bootstrap?: boolean } = {},
 ): void {
   const { store, secret } = deps;
@@ -298,15 +298,16 @@ export function registerAccountRoutes(
   });
 
   app.post<{ Body: { username?: string; password?: string } }>('/v1/login', async (req, reply) => {
-    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const username = (req.body?.username ?? '').trim();
+    // Counted per client AND per account: hopping addresses does not reset it.
+    if (guard.throttled(req, username || undefined)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const password = req.body?.password ?? '';
     const account = username ? store.localAccountByUsername(username) : undefined;
     // One message for every failure: a different answer for "no such user"
     // would turn this endpoint into a username oracle.
     const ok = account && !account.disabled && account.pwHash !== '' && (await verifyPassword(password, account.pwHash, account.pwSalt));
     if (!account || !ok) {
-      guard.noteFailure(req);
+      guard.noteFailure(req, username || undefined);
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong username or password' });
     }
@@ -350,9 +351,9 @@ export function registerAccountRoutes(
    * a new one is issued in the same answer — nobody is left without one.
    */
   app.post<{ Body: { username?: string; code?: string; password?: string } }>('/v1/local-accounts/recover-with-code', async (req, reply) => {
-    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-    const started = Date.now();
     const username = String(req.body?.username ?? '').trim();
+    if (guard.throttled(req, username || undefined)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    const started = Date.now();
     const code = normalizeRecoveryCode(String(req.body?.code ?? ''));
     const password = String(req.body?.password ?? '');
     const problem = passwordProblem(password);
@@ -364,7 +365,7 @@ export function registerAccountRoutes(
     const salt = account?.recoverySalt ?? 'no-account';
     const match = (await verifyPassword(code, hash, salt)) && !!account?.recoveryHash && !account.disabled && code.length === 20;
     if (!account || !match) {
-      guard.noteFailure(req);
+      guard.noteFailure(req, username || undefined);
       const left = 900 - (Date.now() - started);
       if (left > 0) await new Promise((r) => setTimeout(r, left));
       return reply.code(401).send({ error: 'That username and recovery code do not match.' });

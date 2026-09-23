@@ -41,7 +41,7 @@ and points you at folder sharing — bulk data
 belongs in a folder the agent *reads*, not in a copy the agent *owns*:
 
 ```sh
-hatchabot folders "Tech Advisor" ~/condo-documents
+hatchabot folders "Tech Advisor" add ~/condo-documents
 ```
 
 ### Reuse the bot it already has
@@ -101,7 +101,7 @@ with a single action — no files to shuttle.
 
 On the **destination**: ⚙ Settings → Security → **New token**, and copy it.
 
-On the **source**: ⚙ Settings → Cluster servers → add its name, URL and that token.
+On the **source**: ⚙ Settings → Hosts → Other Hatchabot servers → add its name, URL and that token.
 Hatchabot checks the token works before saving it.
 
 Then use **Rehost** on the agent card, or:

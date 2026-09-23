@@ -14,12 +14,15 @@ command -v npm >/dev/null 2>&1 || { echo "npm is not installed — install Node 
 [ -d node_modules ] || { echo "Installing dependencies…"; npm ci --silent; }
 
 BIN="$(npm prefix -g)/bin"
-if ! npm link >/dev/null 2>&1; then
+LINK_OUT="$(npm link 2>&1)" || {
   # A system-wide Node makes the global folder root-owned: give npm one of ours.
+  # Only for that failure — any other (a broken package, no network) must not
+  # quietly rewrite ~/.npmrc for every node on the machine.
+  case "$LINK_OUT" in *EACCES*|*"permission denied"*|*"Permission denied"*) ;; *) printf '%s\n' "$LINK_OUT"; exit 1 ;; esac
   npm config set prefix "$HOME/.npm-global"
   BIN="$HOME/.npm-global/bin"
   npm link >/dev/null
-fi
+}
 # `hbt` is the short name — only where nothing else already answers to it.
 # (Not a package.json bin: npm link fails outright on a name another package
 # owns, and would take `hatchabot` down with it.)

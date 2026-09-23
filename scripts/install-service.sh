@@ -79,7 +79,9 @@ if [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | g
   echo "⚠ Your background services started before you joined the docker group, so"
   echo "  Hatchabot cannot use Docker yet (your terminal can — that is why it looks fine)."
   a=n
-  if { : >/dev/tty; } 2>/dev/null; then
+  # From a desktop session the terminal itself is a user service: restarting
+  # the manager would kill it mid-install. Only offer it over ssh / a console.
+  if { : >/dev/tty; } 2>/dev/null && ! case "${XDG_SESSION_TYPE:-}" in x11|wayland) true ;; *) false ;; esac; then
     printf '  Restart your user services now? (sudo systemctl restart user@%s — your login stays) [y/N] ' "$(id -u)" >/dev/tty
     read -r a </dev/tty || a=n
   fi
@@ -88,7 +90,8 @@ if [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | g
     systemctl --user start hatchabot hatchabot-backup.timer 2>/dev/null || true
     echo "  Restarted — Hatchabot can use Docker now."
   else
-    echo "  Fix it later with:  sudo systemctl restart user@$(id -u)   (or reboot)"
+    case "${XDG_SESSION_TYPE:-}" in x11|wayland) echo "  You are in a desktop session, so: log out and back in (or reboot). That restarts them with the docker group." ;;
+      *) echo "  Fix it later with:  sudo systemctl restart user@$(id -u)   (or reboot)" ;; esac
   fi
 fi
 

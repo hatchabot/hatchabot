@@ -389,14 +389,21 @@ async function buildPinned(deps: ProvisionDeps, recipe: ImageRecipe, ownerId: st
   const { store, provider } = deps;
   const name = recipe.tag.split(':')[1]!;
   const derivedName = name.startsWith(DERIVED_TAG_PREFIX) ? name.slice(DERIVED_TAG_PREFIX.length) : undefined;
-  if (derivedName && !store.getDerivedImage(derivedName)) {
+  const newRecord = !!derivedName && !store.getDerivedImage(derivedName);
+  if (newRecord) {
     // So it shows among this machine's images, and travels again from here.
-    store.upsertDerivedImage({ name: derivedName, tag: recipe.tag, base: recipe.base, dockerfile: recipe.lines ?? '', createdBy: ownerId });
+    store.upsertDerivedImage({ name: derivedName!, tag: recipe.tag, base: recipe.base, dockerfile: recipe.lines ?? '', createdBy: ownerId });
   }
   deps.log?.('import.image_build', { image: recipe.tag });
   const got = await buildRecipeOn(provider, recipe);
-  if (derivedName) store.setDerivedImageStatus(derivedName, got.ok ? 'READY' : 'FAILED', got.ok ? null : got.problem);
-  if (!got.ok) throw new Error(`the image ${recipe.tag} could not be built here: ${got.problem}`);
+  if (!got.ok) {
+    // The import rolls back completely; a record for an image that never
+    // existed would not (found by the 26th audit).
+    if (newRecord) store.deleteDerivedImage(derivedName!);
+    else if (derivedName) store.setDerivedImageStatus(derivedName, 'FAILED', got.problem);
+    throw new Error(`the image ${recipe.tag} could not be built here: ${got.problem}`);
+  }
+  if (derivedName) store.setDerivedImageStatus(derivedName, 'READY', null);
 }
 
 export async function importAgent(

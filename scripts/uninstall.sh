@@ -57,12 +57,31 @@ fi
 [ -f "$ENV_DIR/.env" ] && set -a && . "$ENV_DIR/.env" 2>/dev/null; set +a
 BACKUP_DIR="${HATCHABOT_BACKUP_DIR:-$HOME/hatchabot-backups}"
 DB_PATH="${HATCHABOT_DB:-$ENV_DIR/data/hatchabot.sqlite}"
+case "$DB_PATH" in /*) ;; *) DB_PATH="$ENV_DIR/$DB_PATH" ;; esac   # relative to the install, as the server reads it
 DATA_DIR="$(dirname "$DB_PATH")"
 
 # Containers and volumes belong to Hatchabot by name: agentclaw- is the old
 # prefix, still worn by agents made before the rename.
-containers() { docker ps -aq --filter "name=^/hatchabot-" --filter "name=^/agentclaw-" 2>/dev/null; }
-volumes() { docker volume ls -q 2>/dev/null | grep -E '^(hatchabot|agentclaw)-.*-vol$'; }
+# THIS install's agents — the names its database holds — never every
+# hatchabot-* container on the machine: a test install beside production used
+# to stop (or, with --purge, destroy) production's agents (26th audit). With
+# no readable database there is nothing to scope by, and docker is left alone.
+agent_names() {
+  [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
+  (cd "$REPO" && node -e '
+    const db = require("better-sqlite3")(process.argv[1], { readonly: true });
+    for (const r of db.prepare("SELECT runtime_ref FROM agents WHERE runtime_ref IS NOT NULL").all())
+      console.log(String(r.runtime_ref).replace(/^docker:\/\//, ""));' "$DB_PATH" 2>/dev/null)
+}
+NAMES="$(agent_names)"
+containers() {
+  [ -n "$NAMES" ] || return 0
+  for n in $NAMES; do docker ps -aq --filter "name=^/$n$" 2>/dev/null; done
+}
+volumes() {
+  [ -n "$NAMES" ] || return 0
+  for n in $NAMES; do docker volume ls -q --filter "name=^$n-vol$" 2>/dev/null; done
+}
 images() { docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^hatchabot-runtime:'; }
 
 say "This install"
@@ -111,6 +130,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
   [ "$found" = 1 ] || echo "  no launchd jobs found (nothing was installed, or it runs under a different user)"
 else
   for unit in hatchabot.service hatchabot-backup.timer hatchabot-backup.service hatchabot-mgmt-bot.service \
+              hatchabot-follow-channel.timer hatchabot-follow-channel.service hatchabot-follow-latest.timer hatchabot-follow-latest.service \
               agentclaw.service agentclaw-backup.timer agentclaw-backup.service; do
     if systemctl --user list-unit-files "$unit" >/dev/null 2>&1 && [ -f "$HOME/.config/systemd/user/$unit" ]; then
       systemctl --user disable --now "$unit" >/dev/null 2>&1
@@ -173,7 +193,13 @@ if [ "$PURGE" = 1 ]; then
     docker network rm hatchabot-agents >/dev/null 2>&1 && echo "  removed the hatchabot-agents network"
   fi
   say "Deleting local state…"
-  rm -rf "$DATA_DIR" && echo "  removed $DATA_DIR"
+  # The whole directory only when it is Hatchabot's own (the install's data/
+  # or a *hatchabot-data* folder); a database placed elsewhere (a home
+  # directory, a NAS folder) loses only its own files (26th audit).
+  case "$DATA_DIR" in
+    "$ENV_DIR/data"|*hatchabot-data*|*agentclaw-data*) rm -rf "$DATA_DIR" && echo "  removed $DATA_DIR" ;;
+    *) rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm" && echo "  removed the database in $DATA_DIR (the folder is not Hatchabot's own, so it stays)" ;;
+  esac
   [ -f "$ENV_DIR/.env" ] && rm -f "$ENV_DIR/.env" && echo "  removed $ENV_DIR/.env"
   if [ "$BACKUPS" = 1 ] && [ -d "$BACKUP_DIR" ]; then
     rm -rf "$BACKUP_DIR" && echo "  removed $BACKUP_DIR"
