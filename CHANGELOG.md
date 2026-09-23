@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.34.1] — 2026-09-23
+
+### Fixed
+- **Every Telegram password-reset link failed with "Cannot set properties of null (setting 'textContent')"** and dropped to the sign-in form. The page loads its configuration twice when a link is opened signed out; for a *reset* (not an invitation) the first pass rewrote the heading and deleted the element the second pass wrote the username into. The claim form now writes its whole message each time and fetches a code once. Found by the first real use of the feature; invitation links were not affected.
+
 ## [2.34.0] — 2026-09-23
 
 ### Added

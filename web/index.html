@@ -2642,14 +2642,25 @@ async function forgotPassword() {
 }
 
 /** An invitation link: show who it is for, then let them choose a password. */
+// loadConfig runs more than once on a page (at start, and again when the
+// first request finds no session), so this must be safe to repeat. It used to
+// replace the lede for a reset — deleting #claimFor — and the second pass then
+// crashed on the missing element: "Cannot set properties of null" on every
+// Telegram reset link (found 2026-09-23).
+let claimLoaded = null;
 async function loadClaim(code) {
+  if (claimLoaded === code) return;
+  claimLoaded = code;
   try {
     const r = await api('/v1/local-accounts/claim?code=' + encodeURIComponent(code));
-    $('claimFor').textContent = r.username;
     $('claimUser').value = r.username;
-    // A reset reads as one, not as a second invitation.
-    if (r.reset) $('claimLede').innerHTML = `Choose a new password for <b>${esc(r.username)}</b>. Your old one stops working once you do.`;
+    // A reset reads as one, not as a second invitation. The whole lede is
+    // written each time, never patched.
+    $('claimLede').innerHTML = r.reset
+      ? `Choose a new password for <b>${esc(r.username)}</b>. Your old one stops working once you do.`
+      : `You've been invited as <b>${esc(r.username)}</b>. Choose a password and you're in.`;
   } catch (e) {
+    claimLoaded = null;
     $('loginErr').textContent = e.message;
     $('acctClaim').style.display = 'none';
     $('acctLogin').style.display = '';
