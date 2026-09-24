@@ -132,11 +132,13 @@ export class MockProvider implements RuntimeProvider {
 
   /** What the mock image claims to carry; tests narrow it to check the "image lacks it" path. */
   imageChannels: string[] = ['slack', 'discord'];
+  /** What the mock image says about its memory search engine (label embed-engine). */
+  imageEmbedEngine: 'baked' | 'none' = 'baked';
   async currentImageInfo(_image?: string): Promise<RuntimeInfo> {
-    return { imageId: 'mock-image', openclawVersion: 'mock', channels: this.imageChannels };
+    return { imageId: 'mock-image', openclawVersion: 'mock', channels: this.imageChannels, embedEngine: this.imageEmbedEngine };
   }
 
-  tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[] }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
+  tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: 'baked' | 'none' }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];
   /** Plain base tags a pull would find in the published registry. */
   publishedBases = new Set<string>();
   pulled: string[] = [];

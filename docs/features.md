@@ -685,6 +685,19 @@ For one agent's own libraries — a Python stack, a CLI only it needs — a
 **derived image** is still the lighter answer: it layers on the base and only
 the agents you pin to it carry the weight.
 
+**Without its own memory search engine.** The build drawer's tick box (or
+`hatchabot upgrade-image --no-engine`, or `EMBED_ENGINE=none` for the script)
+builds the image without the baked memory search engine — about 390 MB
+lighter, tagged `-lite` — and every agent on it uses the machine's **shared
+memory search service** (below) whatever its own switch says; the switch
+follows. It needs that service running, so the build is refused while it is
+off, and an agent built onto such an image while the service is unavailable
+fails with the reason rather than running without memory search. Images for
+OpenClaw **2026.8 and later** are always built this way: their plugin no
+longer carries an engine to bake. The Images list says "shared memory search
+only" for such an image, and the OpenClaw line under Settings → Images says
+when the newest version needs the service.
+
 **Settings → Images** lists every image on the machine as one table — tag,
 what it is (fleet default, candidate, older build, derived), what it carries
 ("with Slack and Discord · plus traceroute"), what uses it, and its actions.

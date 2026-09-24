@@ -18,7 +18,7 @@ class MemSecrets implements SecretStore {
 const OWNER = 'user-owner';
 const as = { 'x-hatchabot-owner': OWNER };
 
-async function world(buildBase?: (o: { version?: string; candidate: boolean; logPath: string }) => Promise<{ ok: boolean; error?: string }>) {
+async function world(buildBase?: (o: { version?: string; candidate: boolean; logPath: string; engine?: 'none' }) => Promise<{ ok: boolean; error?: string }>) {
   const store = new Store(new Database(':memory:'));
   const provider = new MockProvider();
   provider.tags = [
@@ -123,14 +123,29 @@ describe('POST /v1/runtime/build', () => {
   it('runs the base build through the hook, reports progress and refuses a second concurrent build', async () => {
     let release!: (r: { ok: boolean }) => void;
     const { f } = await world(() => new Promise((r) => { release = r; }));
-    const start = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.9.4', candidate: true } });
+    const start = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.9', candidate: true } });
     expect(start.statusCode).toBe(202);
     expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: {} })).statusCode).toBe(409);
     expect((await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json().running).toBe(true);
     release({ ok: true }); await new Promise((r) => setTimeout(r, 10));
     const done = (await f.inject({ method: 'GET', url: '/v1/runtime/build', headers: as })).json();
-    expect(done.running).toBe(false); expect(done.ok).toBe(true); expect(done.version).toBe('2026.9.4');
+    expect(done.running).toBe(false); expect(done.ok).toBe(true); expect(done.version).toBe('2026.7.9');
     expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: 'x;rm -rf /' } })).statusCode).toBe(400);
+  });
+
+  it('an engine-free image (asked for, or any 2026.8+) needs the shared memory search service, which is off here', async () => {
+    const seen: Array<{ version?: string; candidate: boolean; logPath: string; engine?: string }> = [];
+    const { f } = await world(async (o) => { seen.push(o); return { ok: true }; });
+    expect((await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { engine: 'sideways' } })).statusCode).toBe(400);
+    const lite = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2', engine: 'none' } });
+    expect(lite.statusCode).toBe(400); expect(lite.json().error).toMatch(/shared memory search service/);
+    const nine = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.9.4' } });
+    expect(nine.statusCode).toBe(400); expect(nine.json().error).toMatch(/2026\.9\.4 has no memory search engine/);
+    // The proven line still builds, with its own engine.
+    const ok = await f.inject({ method: 'POST', url: '/v1/runtime/build', headers: as, payload: { version: '2026.7.1-2' } });
+    expect(ok.statusCode).toBe(202); expect(ok.json().engine).toBe('baked');
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen[0]?.engine).toBeUndefined();
   });
 });
 

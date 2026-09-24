@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error plain .mjs helper shared with the build script
-import { pickPlugin, satisfies } from '../scripts/runtime-pins.mjs';
+import { embedEngine, pickPlugin, satisfies } from '../scripts/runtime-pins.mjs';
+import { readFileSync } from 'node:fs';
+import { parseEmbedEngineLabel } from '../src/providers/provider.js';
+import { EMBED_MODEL_SHA256, EMBED_MODEL_URL } from '../src/embedder/embedder.js';
 
 describe('runtime image pins', () => {
   const R9 = '>=24.16.0 <25 || >=26.1.0';
@@ -23,6 +26,42 @@ describe('runtime image pins', () => {
     expect(pickPlugin('2026.7.1-2', list)).toBe('2026.7.1');
     expect(pickPlugin('2026.1.0', list)).toBeUndefined();
   });
+});
+
+describe('the memory search engine in an image', () => {
+  it('2026.8 and later have nothing to bake; earlier versions bake their own', () => {
+    expect(embedEngine('2026.7.1-2')).toBe('baked');
+    expect(embedEngine('2026.7.33')).toBe('baked');
+    expect(embedEngine('2026.8.0')).toBe('none');
+    expect(embedEngine('2026.9.4')).toBe('none');
+    expect(embedEngine('garbage')).toBe('baked');
+  });
+  it('only an explicit none label means none: every image built before the label has an engine', () => {
+    expect(parseEmbedEngineLabel('none')).toBe('none');
+    expect(parseEmbedEngineLabel('baked')).toBe('baked');
+    expect(parseEmbedEngineLabel('')).toBe('baked');
+    expect(parseEmbedEngineLabel(undefined)).toBe('baked');
+  });
+  it('the Dockerfile takes the engine as an argument, labels it, and pins the same model the shared service serves', () => {
+    const df = readFileSync('docker/Dockerfile.runtime', 'utf8');
+    expect(df).toMatch(/^ARG EMBED_ENGINE=baked$/m);
+    expect(df).toContain('LABEL org.hatchabot.embed-engine="${EMBED_ENGINE}"');
+    expect(df).toContain(`ARG EMBED_MODEL_URL=${EMBED_MODEL_URL}`);
+    expect(df).toContain(`ARG EMBED_MODEL_SHA256=${EMBED_MODEL_SHA256}`);
+  });
+  it('the build script drops the engine for 2026.8+, tags a deliberate -lite build apart, and refuses a baked 2026.8+', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const run = (env: Record<string, string>) => {
+      try {
+        return execFileSync('bash', ['scripts/build-runtime-image.sh'], { encoding: 'utf8', cwd: process.cwd(), env: { ...process.env, DRYRUN: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) { const x = e as { stdout?: string; stderr?: string }; return String(x.stdout ?? '') + String(x.stderr ?? ''); }
+    };
+    expect(run({})).toMatch(/hatchabot-runtime:2026\.7\.1-2 \(OpenClaw 2026\.7\.1-2, engine baked\)/);
+    expect(run({ EMBED_ENGINE: 'none' })).toMatch(/hatchabot-runtime:2026\.7\.1-2-lite \(.*engine none\)/);
+    expect(run({ OPENCLAW_VERSION: '2026.9.4' })).toMatch(/hatchabot-runtime:2026\.9\.4 \(OpenClaw 2026\.9\.4, engine none\)/);
+    expect(run({ OPENCLAW_VERSION: '2026.9.4', EMBED_ENGINE: 'baked' })).toMatch(/no embedding engine to bake/);
+    expect(run({ EMBED_ENGINE: 'sideways' })).toMatch(/must be baked or none/);
+  }, 30_000);
 });
 
 describe('extra packages in a base candidate', () => {

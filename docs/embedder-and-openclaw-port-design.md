@@ -1,7 +1,8 @@
 # Design: a shared embedding service, and the road to OpenClaw 2026.9
 
-Status, 2026-09-23: steps 1–2 of the build order are built (v2.40.0, v2.41.0),
-with the door as its own container (see "Revised" below); steps 3–6 are open. Written to be coded
+Status, 2026-09-24: steps 1–4 of the build order are built (v2.40.0, v2.41.0,
+v2.50.0, v2.51.0), with the door as its own container (see "Revised" below);
+steps 5–6 are open. Images for OpenClaw 2026.8+ now build (engine-free). Written to be coded
 from directly.
 
 ## The problem
@@ -16,7 +17,7 @@ library out of it.
 |---|---|
 | 2026.9 needs Node.js 24.16+ | Fixed in v1.30.0 (the build picks the Node line) |
 | The plugin installer's options were renamed | Fixed in v1.30.0 |
-| From 2026.8 the plugin no longer carries its engine. It downloads a `llama-server` later, per install, after a consent prompt, and needs glibc 2.38 on arm64 (our Debian base has 2.36) | **Open. This document.** |
+| From 2026.8 the plugin no longer carries its engine. It downloads a `llama-server` later, per install, after a consent prompt, and needs glibc 2.38 on arm64 (our Debian base has 2.36) | Fixed in v2.51.0: such images are built without the plugin (`EMBED_ENGINE=none`), their agents use the shared service (this document) |
 
 The extended-stable release (2026.7.33) is not a way round it: as published
 it does not start.
@@ -194,13 +195,19 @@ search until the index is rebuilt; it does not rebuild by itself.
 - `none`: skip the plugin and model steps entirely, and set
   `LABEL org.hatchabot.embed-engine=none`.
 
-`scripts/build-runtime-image.sh` passes `EMBED_ENGINE=none` when
-`openclawBuildable(version)` is false (2026.8 and later), so those builds stop
-refusing. Once that ships, `FIRST_UNPORTED_OPENCLAW` and the "can't build
-images for it yet" sentence are deleted.
+`scripts/build-runtime-image.sh` passes `EMBED_ENGINE=none` for 2026.8 and
+later (`scripts/runtime-pins.mjs embed-engine`), so those builds stop
+refusing; asked for on a version that could bake (`EMBED_ENGINE=none`,
+`hatchabot upgrade-image --no-engine`, the Images tick box), the image gets
+its own `-lite` tag. `needsSharedEmbedder(version)` (src/orchestrator/
+buildFailure.ts) is what is left of the old "can't build" gate: such a build
+is refused up front unless the shared service is on.
 
-`listImageTags` already reads labels; add `embedEngine` to what it returns so
-the Base images list can say "memory search: shared service".
+`listImageTags` and `currentImageInfo` read the label (`RuntimeInfo.embedEngine`);
+the Images list says "shared memory search only". Provisioning an agent onto
+such an image uses the shared service whatever its switch says (and sets the
+switch to match); with the service unavailable the build fails with the reason
+rather than leaving the agent without memory search. *Built in v2.51.0.*
 
 ### Machines other than this one
 
@@ -268,6 +275,8 @@ Each step ships alone and leaves the fleet as it was.
    still `baked` until Chris flips it.*
 4. **Engine-free images**: `EMBED_ENGINE=none`, the label, the build-script
    rule. 2026.9 candidates now build. Delete the "can't build" sentence.
+   *Built in v2.51.0; `hatchabot-runtime:2026.7.1-2-lite` is the first such
+   image, tried on a throwaway agent.*
 5. **The port checklist and the candidate gate script.** Only then "Try on
    one agent" with a 2026.9 candidate.
 6. Later, when every agent is on `shared`: drop the baked steps from the

@@ -1919,6 +1919,9 @@
       <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-top:8px" class="sub">
         <input type="checkbox" id="rtBuildCandidate" checked style="width:auto">
         Keep it as a candidate (recommended). Untick to replace the fleet default directly, skipping the trial.</label>
+      <label style="display:flex;gap:6px;align-items:center;font-weight:400;margin-top:4px" class="sub">
+        <input type="checkbox" id="rtBuildLite" style="width:auto">
+        Without its own memory search engine (about 390 MB lighter; its agents use this machine's shared memory search service). OpenClaw 2026.8 and later are always built this way.</label>
       <pre id="rtBuildLog" hidden style="margin-top:8px;max-height:240px;overflow:auto;font-size:11px;background:#0b0b0b;color:#ddd;padding:8px;border-radius:8px;white-space:pre-wrap"></pre>
     </details>
     <div id="rtList">Loading…</div>
@@ -4854,7 +4857,8 @@ async function loadRuntimeImages() {
     const [rt, imgs] = await Promise.all([api('/v1/runtime'), api('/v1/runtime/images')]);
     rtData = imgs;
     $('rtDefault').textContent = imgs.default;
-    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
+    const sharedNote = rt.upgradeNeedsSharedEmbedder ? ` <span class="sub">An image for it carries no memory search engine of its own: its agents use the shared memory search service${rt.upgradeBuildable ? '' : ', which is off — start it first (Settings → Hosts)'}.</span>` : '';
+    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}${sharedNote}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
     if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
     if (UI_V2) {
       // Only what asks something of you: agents that still need a Rebuild.
@@ -4884,7 +4888,7 @@ function renderRuntimeList() {
     const apps = (t.channels ?? []).map(k => ({ slack: 'Slack', discord: 'Discord' })[k]).filter(Boolean);
     const extras = (t.extraPackages ?? []).filter(Boolean);
     const own = t.derived?.summary ? `<div class="sub" title="${esc(t.derived.summary)}">${esc(t.derived.summary.slice(0, 60))}${t.derived.summary.length > 60 ? '…' : ''}</div>` : '';
-    const contents = !t.exists ? '' : ([apps.length ? `with ${apps.join(' and ')}` : '', extras.length ? `plus ${extras.map(esc).join(', ')}` : ''].filter(Boolean).join(' · ') || 'stock') + own;
+    const contents = !t.exists ? '' : ([apps.length ? `with ${apps.join(' and ')}` : '', extras.length ? `plus ${extras.map(esc).join(', ')}` : '', t.embedEngine === 'none' ? 'shared memory search only' : ''].filter(Boolean).join(' · ') || 'stock') + own;
     const version = !t.exists ? '' : t.openclawVersion
       ? `<b>${esc(t.openclawVersion)}</b>${defV && t.openclawVersion !== defV && !t.isDefault ? `<div class="sub">default: ${esc(defV)}</div>` : ''}`
       : '<span class="sub">unknown</span>';
@@ -5047,9 +5051,10 @@ async function promoteImage(tag) {
 async function startBaseBuild() {
   const version = $('rtBuildVersion').value.trim();
   const candidate = $('rtBuildCandidate').checked;
+  const engine = $('rtBuildLite')?.checked ? 'none' : undefined;
   if (!candidate && !confirm('Build straight to :latest? Every agent will show "newer image available" as soon as it finishes. Safer: build a candidate and try it on one agent first.')) return;
   $('rtBuildBtn').disabled = true; $('rtErr').textContent = '';
-  try { await api('/v1/runtime/build', { method: 'POST', body: { version: version || undefined, candidate } }); $('rtBuildLog').hidden = false; pollBaseBuild(); }
+  try { await api('/v1/runtime/build', { method: 'POST', body: { version: version || undefined, candidate, engine } }); $('rtBuildLog').hidden = false; pollBaseBuild(); }
   catch (e) { $('rtErr').textContent = e.message; $('rtBuildBtn').disabled = false; }
 }
 async function pollBaseBuild() {

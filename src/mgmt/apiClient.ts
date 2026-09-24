@@ -177,11 +177,13 @@ export class HttpApiClient implements ApiClient {
 
   // ---- images -------------------------------------------------------------
 
-  async getRuntime(): Promise<{ imageVersion?: string; npmLatest?: string; upgradeAvailable: boolean }> {
+  async getRuntime(): Promise<{ imageVersion?: string; npmLatest?: string; upgradeAvailable: boolean; upgradeBuildable?: boolean; upgradeNeedsSharedEmbedder?: boolean }> {
     return (await this.#req('GET', '/v1/runtime')) as {
       imageVersion?: string;
       npmLatest?: string;
       upgradeAvailable: boolean;
+      upgradeBuildable?: boolean;
+      upgradeNeedsSharedEmbedder?: boolean;
     };
   }
   async listImages(): Promise<{ base: string; images: ImageSummary[] }> {

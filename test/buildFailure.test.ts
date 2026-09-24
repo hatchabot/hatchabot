@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFailureReason, openclawBuildable } from '../src/orchestrator/buildFailure.js';
+import { buildFailureReason, needsSharedEmbedder } from '../src/orchestrator/buildFailure.js';
 
 describe('why a base-image build failed', () => {
   it('quotes the script\'s own marked reason, through docker\'s line prefixes', () => {
@@ -23,12 +23,12 @@ describe('why a base-image build failed', () => {
   });
 });
 
-describe('which OpenClaw versions can be built here', () => {
-  it('the proven line and its revisions can; 2026.8 onward cannot yet', () => {
-    expect(openclawBuildable('2026.7.1-2')).toBe(true);
-    expect(openclawBuildable('2026.7.33')).toBe(true);
-    expect(openclawBuildable('2026.8.0')).toBe(false);
-    expect(openclawBuildable('2026.9.4')).toBe(false);
-    expect(openclawBuildable(undefined)).toBe(true);
+describe('which OpenClaw versions need the shared memory search service', () => {
+  it('the proven line and its revisions bake their own engine; 2026.8 onward cannot', () => {
+    expect(needsSharedEmbedder('2026.7.1-2')).toBe(false);
+    expect(needsSharedEmbedder('2026.7.33')).toBe(false);
+    expect(needsSharedEmbedder('2026.8.0')).toBe(true);
+    expect(needsSharedEmbedder('2026.9.4')).toBe(true);
+    expect(needsSharedEmbedder(undefined)).toBe(false);
   });
 });

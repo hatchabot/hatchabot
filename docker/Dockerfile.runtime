@@ -49,6 +49,14 @@ ARG LLAMA_CPP_PROVIDER_VERSION=2026.7.1
 # the image every agent's memory search depends on.
 ARG EMBED_MODEL_URL=https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf
 ARG EMBED_MODEL_SHA256=6fa0c02a9c302be6f977521d399b4de3a46310a4f2621ee0063747881b673f67
+# Whether this image carries that engine at all. `baked` (the default) bakes
+# the plugin and the model below; `none` leaves both out (~390 MB lighter),
+# and every agent on the image uses the machine's shared memory search
+# service instead (src/embedder, docs/embedder-and-openclaw-port-design.md).
+# From OpenClaw 2026.8 the plugin has no engine of its own, so those images
+# can only be built `none`. The control plane reads the label and never
+# links the plugin on an image that has none.
+ARG EMBED_ENGINE=baked
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client curl procps \
@@ -124,7 +132,12 @@ RUN ARCH="$(dpkg --print-architecture)" \
 #
 # The installer's "yes, I mean it" options were renamed in OpenClaw 2026.9, so they
 # are read from the installed CLI's own help rather than assumed.
-RUN export HOME=/tmp/ocbuild \
+#
+# EMBED_ENGINE=none skips this block and the model below (the paths stay
+# unset on purpose: nothing may link what is not there).
+RUN case "${EMBED_ENGINE}" in baked|none) ;; *) echo "EMBED_ENGINE must be baked or none, not '${EMBED_ENGINE}'" >&2; exit 1;; esac
+RUN if [ "${EMBED_ENGINE}" = none ]; then echo "No embedding engine in this image (EMBED_ENGINE=none): agents use the shared memory search service."; exit 0; fi \
+ && export HOME=/tmp/ocbuild \
  && mkdir -p "$HOME" && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
  && HELP="$(openclaw plugins install --help 2>&1)" \
  && if echo "$HELP" | grep -q -- '--acknowledge-clawhub-risk'; then ACK="--acknowledge-clawhub-risk"; \
@@ -136,13 +149,14 @@ RUN export HOME=/tmp/ocbuild \
  && test -f /opt/agentclaw/llama-cpp/llama-cpp-provider/dist/index.js \
  && if ! find /opt/agentclaw/llama-cpp/llama-cpp-provider/node_modules -name llama-addon.node -print -quit | grep -q .; then \
       echo "✗ OpenClaw ${OPENCLAW_VERSION}: its embedding plugin (${LLAMA_CPP_PROVIDER_VERSION}) no longer carries its own engine." >&2; \
-      echo "  From OpenClaw 2026.8 the plugin runs a separate llama-server that it downloads later. Hatchabot's memory" >&2; \
-      echo "  search is not ported to that yet, so an image for this version would have no memory search. Not building it." >&2; \
+      echo "  From OpenClaw 2026.8 the plugin runs a separate llama-server that it downloads later. Build this version" >&2; \
+      echo "  with EMBED_ENGINE=none (scripts/build-runtime-image.sh does so by itself): its agents use the shared service." >&2; \
       exit 1; fi \
  && rm -rf /tmp/ocbuild
 
 # The GGUF model — verified against its pinned digest before it can ship.
-RUN mkdir -p /opt/agentclaw/models \
+RUN if [ "${EMBED_ENGINE}" = none ]; then exit 0; fi \
+ && mkdir -p /opt/agentclaw/models \
  && curl -fsSL -o /opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf "${EMBED_MODEL_URL}" \
  && echo "${EMBED_MODEL_SHA256}  /opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf" | sha256sum -c - \
  && chmod -R a+rX /opt/agentclaw
@@ -150,8 +164,13 @@ RUN mkdir -p /opt/agentclaw/models \
 # Well-known paths the control plane links/points at when it enables local
 # embeddings (src/openclaw/configWriter.ts). Exposed as ENV so a running agent —
 # and anything inspecting the image — can discover them without hardcoding.
+# (Set even on an engine-free image: an ENV cannot be conditional. The label
+# below is the truth about what is there.)
 ENV HATCHABOT_EMBED_PLUGIN=/opt/agentclaw/llama-cpp/llama-cpp-provider \
     HATCHABOT_EMBED_MODEL=/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf
+# Read back by the control plane: baked = the engine above is in the image;
+# none = agents on this image use the shared memory search service.
+LABEL org.hatchabot.embed-engine="${EMBED_ENGINE}"
 
 # --- Messaging plugins: Slack and Discord, baked outside /home/node -----------
 # Same idea as the embedding plugin: installed once here with OpenClaw's own

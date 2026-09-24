@@ -6,6 +6,7 @@
 //
 //   node scripts/runtime-pins.mjs node-ok  <range> <version>      exit 0 if the Node version fits
 //   node scripts/runtime-pins.mjs plugin   <openclawVersion> <json list of plugin versions>
+//   node scripts/runtime-pins.mjs embed-engine <openclawVersion>   prints baked or none
 //
 // No dependencies: it runs on a host that has only what Hatchabot itself needs.
 
@@ -49,9 +50,22 @@ export function pickPlugin(openclawVersion, pluginVersions) {
     .pop()?.s;
 }
 
+/**
+ * Whether a runtime image for this OpenClaw can bake its own embedding engine.
+ * From 2026.8 the plugin downloads a separate llama-server later instead of
+ * carrying one, so nothing can be baked: such images are built `none`, and
+ * their agents use the shared memory search service (src/embedder).
+ */
+export function embedEngine(openclawVersion) {
+  const v = parse(openclawVersion);
+  if (!v) return 'baked';
+  return cmp(v, parse('2026.8.0')) >= 0 ? 'none' : 'baked';
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [, , verb, a, b] = process.argv;
   if (verb === 'node-ok') process.exit(satisfies(b, a) ? 0 : 1);
+  if (verb === 'embed-engine') { console.log(embedEngine(a)); process.exit(0); }
   if (verb === 'plugin') {
     const got = pickPlugin(a, JSON.parse(b || '[]'));
     if (!got) process.exit(1);

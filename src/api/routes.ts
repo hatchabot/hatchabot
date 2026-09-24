@@ -55,7 +55,7 @@ import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { consoleActivity, type SessionEntry } from '../orchestrator/unread.js';
-import { buildFailureReason, openclawBuildable } from '../orchestrator/buildFailure.js';
+import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { estimateCost } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
@@ -185,7 +185,7 @@ export interface ApiDeps {
   /** Test seam: what actually takes the image off the daemon. */
   removeImage?: typeof removeDerivedImage;
   /** Override the base-image build (tests). Default spawns scripts/build-runtime-image.sh. */
-  buildBase?: (opts: { version?: string; candidate: boolean; logPath: string; packages?: string }) => Promise<{ ok: boolean; error?: string }>;
+  buildBase?: (opts: { version?: string; candidate: boolean; logPath: string; packages?: string; engine?: 'none' }) => Promise<{ ok: boolean; error?: string }>;
   /** Override the mgmt-LLM proxy's Anthropic call (tests). */
   mgmtLlmComplete?: typeof completeWithProfile;
   /** Override the mgmt-LLM CLI path (tests — the real one spawns `claude`). */
@@ -1731,7 +1731,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const IMAGE_TAG_RE = /^[a-z0-9][a-z0-9._\/-]*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
   let baseBuild: { running: boolean; version?: string; candidate: boolean; startedAt?: string; ok?: boolean; error?: string } = { running: false, candidate: true };
   /** Default base build: the same script an operator runs by hand, output to a log file. */
-  const buildBaseImage = (opts: { version?: string; candidate: boolean; logPath: string; packages?: string }): Promise<{ ok: boolean; error?: string }> =>
+  const buildBaseImage = (opts: { version?: string; candidate: boolean; logPath: string; packages?: string; engine?: 'none' }): Promise<{ ok: boolean; error?: string }> =>
     new Promise((resolve) => {
       const out = createWriteStream(opts.logPath);
       const child = spawn('bash', ['scripts/build-runtime-image.sh'], {
@@ -1739,6 +1739,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ...process.env,
           ...(opts.version ? { OPENCLAW_VERSION: opts.version } : {}),
           ...(opts.packages ? { EXTRA_PACKAGES: opts.packages } : {}),
+          ...(opts.engine === 'none' ? { EMBED_ENGINE: 'none' } : {}),
           NO_LATEST: opts.candidate ? '1' : '',
         },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -1888,13 +1889,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { ok: true, value: list.join(' ') };
   };
 
-  app.post<{ Body: { version?: string; candidate?: boolean; packages?: unknown } }>('/v1/runtime/build', async (req, reply) => {
+  app.post<{ Body: { version?: string; candidate?: boolean; packages?: unknown; engine?: unknown } }>('/v1/runtime/build', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
     if (baseBuild.running) return reply.code(409).send({ error: 'A base image build is already running.' });
-    const b = (req.body ?? {}) as { version?: string; candidate?: boolean };
+    const b = (req.body ?? {}) as { version?: string; candidate?: boolean; engine?: unknown };
     const version = b.version?.trim() || undefined;
     if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: 'That version is not valid.' });
     if (version && (version === 'latest' || version.startsWith('derived-'))) return reply.code(400).send({ error: 'Build a specific OpenClaw version; :latest is set by Promote.' });
+    // Engine-free: the image carries no memory search engine, its agents use
+    // the shared service (docs/embedder-and-openclaw-port-design.md, step 4).
+    // Only with that service on: an image nobody can run is no candidate.
+    if (b.engine !== undefined && b.engine !== 'baked' && b.engine !== 'none') return reply.code(400).send({ error: "engine must be 'baked' or 'none'" });
+    const engine = b.engine === 'none' || needsSharedEmbedder(version) ? 'none' as const : undefined;
+    if (engine && !embedder.enabled && !embedder.external) {
+      return reply.code(400).send({ error: (needsSharedEmbedder(version) ? `OpenClaw ${version} has no memory search engine of its own to bake, so its agents need` : 'An image without its own memory search engine needs') + ' the shared memory search service: start it first (Settings → Hosts).' });
+    }
     const candidate = b.candidate !== false;
     const packages = cleanPackages((req.body as { packages?: unknown } | null)?.packages);
     if (!packages.ok) return reply.code(400).send({ error: packages.error });
@@ -1907,8 +1916,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const run = deps.buildBase ?? buildBaseImage;
     const forOwner = ownerIdOf(req);
     const what = `base image ${candidate ? 'candidate' : 'default'} for OpenClaw ${version ?? 'the newest version'}` +
-      (packages.value ? ` with ${packages.value.split(' ').join(', ')}` : '');
-    void run({ version, candidate, logPath, packages: packages.value })
+      (packages.value ? ` with ${packages.value.split(' ').join(', ')}` : '') + (engine ? ' without its own memory search engine' : '');
+    void run({ version, candidate, logPath, packages: packages.value, engine })
       .then((r) => {
         baseBuild = { ...baseBuild, running: false, ok: r.ok, error: r.error };
         opsNotifier.notify(forOwner, r.ok
@@ -1919,7 +1928,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         baseBuild = { ...baseBuild, running: false, ok: false, error: String(err?.message ?? err) };
         opsNotifier.notify(forOwner, `The ${what} FAILED to build. Its last output: "${quoteOutput(err)}"`);
       });
-    return reply.code(202).send({ building: true, version, candidate, packages: packages.value });
+    return reply.code(202).send({ building: true, version, candidate, packages: packages.value, engine: engine ?? 'baked' });
   });
 
   app.get('/v1/runtime/build', async (req, reply) => {
@@ -6296,8 +6305,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       npmLatest: latest,
       npmExtendedStable: extendedStable,
       upgradeAvailable: !!(imageVersion && latest && imageVersion !== latest),
-      /** False while the newest OpenClaw needs parts Hatchabot is not ported to: say so rather than invite a build that must fail. */
-      upgradeBuildable: openclawBuildable(latest),
+      /** 2026.8+ images carry no memory search engine: buildable only with the shared service on. Say so rather than invite a build that must fail. */
+      upgradeNeedsSharedEmbedder: needsSharedEmbedder(latest),
+      upgradeBuildable: !needsSharedEmbedder(latest) || embedder.enabled || embedder.external,
     };
   });
 

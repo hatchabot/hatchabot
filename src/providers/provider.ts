@@ -234,7 +234,7 @@ export interface RuntimeProvider {
   currentImageInfo(image?: string): Promise<RuntimeInfo>;
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[] }[]>;
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine }[]>;
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
@@ -360,6 +360,9 @@ export interface RuntimeInfo {
   channels?: string[];
   /** System packages this image carries beyond the standard list. */
   extraPackages?: string[];
+  /** The image's memory search engine (label org.hatchabot.embed-engine): `none` =
+   *  no engine of its own, its agents use the shared service; absent = baked. */
+  embedEngine?: EmbedEngine;
   /** A container's: the setup generation it was made at (label hatchabot.gen; absent = 0). */
   containerGen?: number;
   /** A container's: when it was created (ISO) — i.e. the last rebuild. */
@@ -367,6 +370,12 @@ export interface RuntimeInfo {
   /** A container's: on the isolated agents network (false = still on a shared one;
    *  absent = not applicable — the Hatchabot agent's own network, or isolation turned off). */
   onAgentNetwork?: boolean;
+}
+
+export type EmbedEngine = 'baked' | 'none';
+/** Parse the org.hatchabot.embed-engine label: only an explicit `none` means none (older images have no label). */
+export function parseEmbedEngineLabel(v: string | undefined): EmbedEngine {
+  return (v ?? '').trim() === 'none' ? 'none' : 'baked';
 }
 
 /** Parse the org.hatchabot.channels label: a comma list, empty when absent. */

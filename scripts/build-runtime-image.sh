@@ -41,6 +41,30 @@ if [ -n "${EXTRA_PACKAGES:-}" ]; then
   BUILD_LOCAL=1   # a published image never carries someone's extra packages
 fi
 case "$IMAGE_TAG" in latest|derived-*) echo "IMAGE_TAG=$IMAGE_TAG is reserved (:latest moves only via promote; derived-* via image derive)." >&2; exit 1;; esac
+PINS="$(dirname "$0")/runtime-pins.mjs"
+
+# The memory search engine (docs/embedder-and-openclaw-port-design.md, step 4):
+# baked into the image, or none — every agent on the image uses the machine's
+# shared memory search service. From OpenClaw 2026.8 the plugin has no engine
+# to bake, so those versions build `none` on their own. Leaving the engine out
+# of a version that could bake it gives the image its own tag (-lite), so it
+# is tried on one agent like any other candidate and never mistaken for the
+# standard one.
+ENGINE_RULE="$(node "$PINS" embed-engine "${OPENCLAW_VERSION}" 2>/dev/null || echo baked)"
+EMBED_ENGINE="${EMBED_ENGINE:-$ENGINE_RULE}"
+case "$EMBED_ENGINE" in baked|none) ;; *) echo "EMBED_ENGINE must be baked or none." >&2; exit 1;; esac
+if [ "$EMBED_ENGINE" = baked ] && [ "$ENGINE_RULE" = none ]; then
+  echo "OpenClaw ${OPENCLAW_VERSION} has no embedding engine to bake (its plugin downloads one later)." >&2
+  echo "Build it with EMBED_ENGINE=none: its agents use the shared memory search service." >&2
+  exit 1
+fi
+if [ "$EMBED_ENGINE" = none ] && [ "$ENGINE_RULE" = baked ] && [ "$IMAGE_TAG" = "$OPENCLAW_VERSION" ]; then
+  IMAGE_TAG="${OPENCLAW_VERSION}-lite"
+fi
+if [ "${DRYRUN:-0}" = 1 ]; then
+  echo "dry run: would build ${REPO}:${IMAGE_TAG} (OpenClaw ${OPENCLAW_VERSION}, engine ${EMBED_ENGINE})"
+  exit 0
+fi
 
 # The embedding plugin declares openclaw as a peerDependency, so its pin must
 # move with OPENCLAW_VERSION (Dockerfile ARG LLAMA_CPP_PROVIDER_VERSION). The
@@ -52,7 +76,7 @@ case "$IMAGE_TAG" in latest|derived-*) echo "IMAGE_TAG=$IMAGE_TAG is reserved (:
 # published yet (a fresh candidate) — or BUILD_LOCAL=1 — falls through to the
 # local build below.
 PUBLISHED="${HATCHABOT_IMAGE_REGISTRY:-ghcr.io/hatchabot/runtime}"
-if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
+if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] && [ -z "${LLAMA_CPP_PROVIDER_VERSION:-}" ] && [ "${EMBED_ENGINE}" = "${ENGINE_RULE}" ]; then
   # The per-release tag (vX.Y.Z) is never rewritten; the version tag moves with every release.
   RELEASE_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
   # The per-release image bakes the Dockerfile's DEFAULT OpenClaw. It is only
@@ -87,14 +111,15 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
   echo "Not published (or offline) — building locally instead."
 fi
 DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | head -1)"
-PINS="$(dirname "$0")/runtime-pins.mjs"
 
 # The embedding plugin is published in step with OpenClaw and declares it as a
 # peer, so a newer OpenClaw needs a newer plugin. Given explicitly, use that;
 # for the proven default, keep the Dockerfile's pin; otherwise take the newest
 # plugin release that is not newer than this OpenClaw.
 PLUGIN_ARG=()
-if [ -n "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
+if [ "${EMBED_ENGINE}" = none ]; then
+  : # nothing to pin: the plugin is not baked
+elif [ -n "${LLAMA_CPP_PROVIDER_VERSION:-}" ]; then
   PLUGIN_ARG=(--build-arg "LLAMA_CPP_PROVIDER_VERSION=${LLAMA_CPP_PROVIDER_VERSION}")
 elif [ "${OPENCLAW_VERSION}" != "${DEFAULT_OPENCLAW}" ]; then
   LIST="$(npm view @openclaw/llama-cpp-provider versions --json 2>/dev/null || true)"
@@ -152,6 +177,7 @@ fi
 
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
+  --build-arg "EMBED_ENGINE=${EMBED_ENGINE}" \
   "${PLUGIN_ARG[@]}" \
   "${NODE_ARG[@]}" \
   "${CHANNEL_ARG[@]}" \

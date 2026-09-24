@@ -467,16 +467,22 @@ export async function buildRuntimeSpec(
   const discordRow = store.getChannelForAgent(agentId, 'discord');
   let channelPlugins: string[] = [];
   let openclawVersion: string | undefined;
+  let engineless = false;
   try {
     const info = await deps.provider.currentImageInfo(agent.image ?? undefined);
     channelPlugins = info.channels ?? [];
     openclawVersion = info.openclawVersion;
+    engineless = info.embedEngine === 'none';
   } catch { /* no image info: no new channels this build */ }
 
   // Memory search engine. `shared` needs the service on THIS machine; when
   // it cannot be had (a runner, the service down), the agent is built on the
   // baked engine — never left without one — and the reason is on its record.
-  const wantShared = agent.embedMode === 'shared';
+  // An image with no engine of its own (label embed-engine=none: OpenClaw
+  // 2026.8+, or a -lite build) has only the shared service: the agent is
+  // built on it whatever its switch says, and the build refuses rather than
+  // leave it without memory search.
+  const wantShared = agent.embedMode === 'shared' || engineless;
   let embed: OpenClawConfigPatch['embed'];
   let bakedWhy: string | undefined;
   if (wantShared && host.kind !== 'local') bakedWhy = 'it runs on a runner, and the service is on the main machine';
@@ -487,6 +493,16 @@ export async function buildRuntimeSpec(
     } catch (err) {
       bakedWhy = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     }
+  }
+  if (engineless && !embed) {
+    deps.log?.('embed.engineless_refused', { agentId, why: bakedWhy });
+    throw new ProviderError(`image ${agent.image ?? 'default'} has no embedding engine and the shared service is unavailable: ${bakedWhy}`,
+      `Its image has no memory search engine of its own, and the shared memory search service cannot be had (${bakedWhy}). Start the service (Settings → Hosts), or pin the agent to an image that carries an engine.`);
+  }
+  if (engineless && agent.embedMode !== 'shared') {
+    // The record says what the agent runs on, not what the switch once said.
+    deps.log?.('embed.forced_shared', { agentId, image: agent.image ?? 'default' });
+    store.setAgentEmbedMode(agentId, 'shared');
   }
   if (bakedWhy) {
     deps.log?.('embed.baked_instead', { agentId, why: bakedWhy });

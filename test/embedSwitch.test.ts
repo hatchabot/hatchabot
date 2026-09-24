@@ -194,3 +194,36 @@ describe('over the API', () => {
     expect(store.getAgent('todo')!.embedMode).toBe('shared');
   });
 });
+
+describe('an image with no engine of its own (label embed-engine=none)', () => {
+  it('is built on the shared service whatever the switch says, and the record follows', async () => {
+    const w = world();
+    w.store.setAgentEmbedMode('todo', 'baked');
+    w.provider.imageEmbedEngine = 'none';
+    const spec = await buildRuntimeSpec(w.deps(true), 'todo');
+    expect(spec.workspace.configPatch.embed?.token).toBe('key-for-todo');
+    expect(w.store.getAgent('todo')!.embedMode).toBe('shared');
+    expect(w.events).toContain('embed.forced_shared');
+    // Nothing baked is linked: there is nothing there to link.
+    const flat = buildConfigCommands(spec.workspace.configPatch).map((c) => c.argv.join(' '));
+    expect(flat.some((l) => l.includes('llama-cpp'))).toBe(false);
+  });
+
+  it('refuses the build when the shared service cannot be had, rather than leave it without memory search', async () => {
+    const w = world();
+    w.provider.imageEmbedEngine = 'none';
+    await expect(buildRuntimeSpec(w.deps(false), 'todo')).rejects.toThrow(/no embedding engine/);
+    expect(w.events).toContain('embed.engineless_refused');
+    const c = world('cloud');
+    c.provider.imageEmbedEngine = 'none';
+    await expect(buildRuntimeSpec(c.deps(true), 'todo')).rejects.toThrow(/runner/);
+  });
+
+  it('an image that bakes its engine leaves a baked agent alone', async () => {
+    const w = world();
+    w.store.setAgentEmbedMode('todo', 'baked');
+    const spec = await buildRuntimeSpec(w.deps(true), 'todo');
+    expect(spec.workspace.configPatch.embed).toBeUndefined();
+    expect(w.store.getAgent('todo')!.embedMode ?? 'baked').toBe('baked');
+  });
+});

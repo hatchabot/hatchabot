@@ -81,7 +81,7 @@ export const STUB = `(() => {
     '/v1/proposals': { pending: [] },
     '/v1/ops-agent': { agent: AGENTS[AGENTS.length - 1] },
     '/v1/mgmt/chat': { available: true, llm: { model: 'claude-sonnet-5', profileName: PROFILE.name }, mode: 'read-only', transcript: [] },
-    '/v1/runtime': { imageVersion: '2026.7.1-2', npmLatest: '2026.9.4', upgradeAvailable: true, upgradeBuildable: false },
+    '/v1/runtime': { imageVersion: '2026.7.1-2', npmLatest: '2026.9.4', upgradeAvailable: true, upgradeBuildable: false, upgradeNeedsSharedEmbedder: true },
     '/v1/runtime/build': { running: false },
     '/v1/media-key': { set: false },
     '/v1/search-key': { set: true },

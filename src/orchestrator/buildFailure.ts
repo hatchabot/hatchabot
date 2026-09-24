@@ -18,19 +18,20 @@ export function buildFailureReason(log: string, code: number | null): string {
 
 /**
  * From OpenClaw 2026.8 the embedding plugin runs a separate llama-server it
- * downloads later, instead of carrying its engine. Hatchabot bakes the engine
- * into the image and is not ported to the new arrangement, so images for those
- * versions cannot be built yet (the Dockerfile refuses, with this reason).
- * Raise this when the port lands.
+ * downloads later, instead of carrying its engine, so an image for those
+ * versions cannot bake one: it is built engine-free (EMBED_ENGINE=none), and
+ * every agent on it uses the machine's shared memory search service
+ * (docs/embedder-and-openclaw-port-design.md). Building one is only worth
+ * offering when that service is on.
  */
-export const FIRST_UNPORTED_OPENCLAW = [2026, 8, 0] as const;
-export function openclawBuildable(version: string | undefined): boolean {
+export const FIRST_ENGINELESS_OPENCLAW = [2026, 8, 0] as const;
+export function needsSharedEmbedder(version: string | undefined): boolean {
   const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version ?? '');
-  if (!m) return true; // unknown: let the build itself be the judge
+  if (!m) return false; // unknown: let the build itself be the judge
   const v = [Number(m[1]), Number(m[2]), Number(m[3])];
   for (let i = 0; i < 3; i++) {
-    const have = v[i] ?? 0, first = FIRST_UNPORTED_OPENCLAW[i] ?? 0;
-    if (have !== first) return have < first;
+    const have = v[i] ?? 0, first = FIRST_ENGINELESS_OPENCLAW[i] ?? 0;
+    if (have !== first) return have > first;
   }
-  return false;
+  return true;
 }

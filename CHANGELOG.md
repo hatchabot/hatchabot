@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.51.0] — 2026-09-24
+
+### Added
+- **Engine-free runtime images** (step 4 of docs/embedder-and-openclaw-port-design.md): `docker/Dockerfile.runtime` takes `EMBED_ENGINE=baked|none` and labels the image `org.hatchabot.embed-engine`; `none` leaves the memory search plugin and model out (about 390 MB lighter) and every agent on the image uses the shared memory search service, whatever its switch says (the switch follows; with the service unavailable the build fails with the reason rather than running without memory search). Build one from Settings → Images (a tick box), `hatchabot upgrade-image --no-engine`, or `EMBED_ENGINE=none ./scripts/build-runtime-image.sh` — it gets its own `-lite` tag. **OpenClaw 2026.8 and later now build**: their plugin has no engine to bake, so the build script (and the GHCR workflow) choose `none` on their own; the app says so, and refuses the build while the shared service is off. The Images list says "shared memory search only" for such an image.
+
+### Changed
+- `openclawBuildable`/`FIRST_UNPORTED_OPENCLAW` became `needsSharedEmbedder`: `GET /v1/runtime` reports `upgradeNeedsSharedEmbedder`, and `upgradeBuildable` is true when the shared service is on.
+
 ## [2.50.0] — 2026-09-24
 
 ### Added

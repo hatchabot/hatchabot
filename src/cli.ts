@@ -231,11 +231,13 @@ Commands:
                                rebuilds the idle running ones at once, otherwise
                                the quiet hours do it (never mid-conversation).
   runtime                      Runtime image's OpenClaw version vs the npm latest
-  upgrade-image [--version <X>] [--candidate]
+  upgrade-image [--version <X>] [--candidate] [--no-engine]
                                Rebuild the shared runtime image to a new OpenClaw
                                version (default: latest stable), for the whole
                                fleet. --candidate builds without promoting to
-                               :latest so you can smoke-test first. Run on the host.
+                               :latest so you can smoke-test first. --no-engine
+                               leaves out the memory search engine (agents use
+                               the shared service; 2026.8+ always). Run on the host.
   image [list]                 Derived runtime images (host owner). A derived
                                image is FROM the base + your Dockerfile lines,
                                for system packages (apt) a volume install can't
@@ -415,7 +417,7 @@ function envQuote(v: string): string {
 // parser took any unlisted flag to have a value, so `--no-telegram` (missing
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -1443,7 +1445,10 @@ async function main() {
       const r: any = await (await api(ctx, '/v1/runtime')).json();
       console.log(`Runtime image: OpenClaw ${r.imageVersion ?? 'unknown'}`);
       if (!r.npmLatest) console.log('  (could not reach npm to check the latest stable)');
-      else if (r.upgradeAvailable) console.log(`  ⬆ latest stable on npm is ${r.npmLatest} — upgrade with: hatchabot upgrade-image`);
+      else if (r.upgradeAvailable) {
+        console.log(`  ⬆ latest stable on npm is ${r.npmLatest} — upgrade with: hatchabot upgrade-image`);
+        if (r.upgradeNeedsSharedEmbedder) console.log(`    an image for it carries no memory search engine: its agents use the shared service${r.upgradeBuildable ? '' : ' — start it first: hatchabot embedder start'}`);
+      }
       else console.log(`  ✓ up to date with the latest stable (${r.npmLatest})`);
       if (r.npmExtendedStable) console.log(`  extended-stable track: ${r.npmExtendedStable}`);
       return;
@@ -1463,7 +1468,7 @@ async function main() {
       try {
         execFileSync('bash', [script], {
           stdio: 'inherit',
-          env: { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '' },
+          env: { ...process.env, OPENCLAW_VERSION: version, NO_LATEST: candidate ? '1' : '', ...(flags.has('no-engine') ? { EMBED_ENGINE: 'none' } : {}) },
         });
       } catch {
         fail('Image build failed — see the output above.');

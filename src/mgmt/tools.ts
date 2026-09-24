@@ -238,7 +238,7 @@ export const MANIFEST: ToolDef[] = [
     name: 'get_runtime',
     tier: 'read',
     description:
-      "The fleet's base runtime: which OpenClaw version the base image bakes in, the newest on npm, and whether an upgrade is available. To try a new version, propose build_base_candidate.",
+      "The fleet's base runtime: which OpenClaw version the base image bakes in, the newest on npm, and whether an upgrade is available. upgradeNeedsSharedEmbedder = an image for the newest version carries no memory search engine of its own (OpenClaw 2026.8+), so its agents use the shared memory search service, which must be running (upgradeBuildable). To try a new version, propose build_base_candidate.",
     input_schema: { type: 'object', additionalProperties: false, properties: {} },
   },
   {

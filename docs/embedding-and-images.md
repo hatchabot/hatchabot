@@ -3,8 +3,11 @@
 > Since v2.40/2.41 an agent may instead use the machine's **shared memory
 > search service** (its Settings → Advanced → *Memory search engine*; see
 > docs/embedder-and-openclaw-port-design.md). That engine is keyed and reached
-> over the docker network. This page covers the **baked** default, which every
-> agent still uses unless switched.
+> over the docker network. Since v2.51.0 an image can leave the baked engine
+> out altogether (`EMBED_ENGINE=none`, label `org.hatchabot.embed-engine`):
+> every agent on it uses the shared service, and images for OpenClaw 2026.8+
+> — whose plugin has no engine to bake — are always built that way. This page
+> covers the **baked** default, which agents use unless switched.
 
 ## The problem this closes
 
@@ -87,6 +90,13 @@ with no keyword overlap matched the right memory line.
   # pin one agent to hatchabot-runtime:2026.7.1-2-emb1, verify memory search
   docker tag hatchabot-runtime:2026.7.1-2-emb1 hatchabot-runtime:latest    # promote
   ```
+- Build the same OpenClaw **without** the engine (about 390 MB lighter; needs
+  the shared memory search service running):
+  ```
+  EMBED_ENGINE=none NO_LATEST=1 ./scripts/build-runtime-image.sh   # → hatchabot-runtime:2026.7.1-2-lite
+  ```
+  For OpenClaw 2026.8 and later the build script chooses `none` on its own;
+  asking for `baked` there is refused, since the plugin has nothing to bake.
 
 ### Multi-arch note
 
