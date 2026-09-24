@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.53.4] — 2026-09-24
+
+### Fixed
+- An agent on the shared memory search engine also has the baked plugin's install record removed (`plugins uninstall llama-cpp --force`, optional): the record outlived the unlink and the registry refresh, and on 2026.9 `plugins list` errored on it. Found on To Do Agent, the first real agent on OpenClaw 2026.9.6.
+- An agent moved onto a 2026.8+ image whose memory index comes up partial (the store migrated; 2026.9 indexes sessions too) is re-indexed once — one `memory status` call decides, so a routine rebuild costs no re-index.
+
 ## [2.53.3] — 2026-09-24
 
 ### Fixed

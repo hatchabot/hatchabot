@@ -220,7 +220,14 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // retrying") and the second pass then migrated everything (agent database
   // v1 → v23, shared auth, audit log, workspace state). Idempotent.
   if (port) for (let i = 0; i < 2; i++) cmds.push({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
-  if (patch.embed) cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
+  if (patch.embed) {
+    cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
+    // The install record outlives the link and the registry refresh: on
+    // 2026.9 `plugins list` then errors "install incomplete" for a plugin
+    // that is not there (To Do Agent, 2026-09-24). Uninstall removes just
+    // that record; nothing of the plugin is on the volume.
+    cmds.push({ argv: ['plugins', 'uninstall', 'llama-cpp', '--force'], optional: true });
+  }
   // `plugins install --link` on 2026.8+ refuses a local path until its three
   // "I mean it" options are given (2026.7 asked nothing for a link); the
   // Dockerfile reads them from `--help`, the writer knows them by version.

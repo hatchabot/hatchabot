@@ -211,9 +211,9 @@ describe('an image with no engine of its own (label embed-engine=none)', () => {
     expect(spec.workspace.configPatch.embed?.token).toBe('key-for-todo');
     expect(w.store.getAgent('todo')!.embedMode).toBe('shared');
     expect(w.events).toContain('embed.forced_shared');
-    // Nothing baked is linked: there is nothing there to link.
+    // Nothing baked is linked or enabled: there is nothing there to link (the uninstall of its record is fine).
     const flat = buildConfigCommands(spec.workspace.configPatch).map((c) => c.argv.join(' '));
-    expect(flat.some((l) => l.includes('llama-cpp'))).toBe(false);
+    expect(flat.some((l) => l.includes('llama-cpp') && !l.startsWith('plugins uninstall'))).toBe(false);
   });
 
   it('refuses the build when the shared service cannot be had, rather than leave it without memory search', async () => {
@@ -232,5 +232,33 @@ describe('an image with no engine of its own (label embed-engine=none)', () => {
     const spec = await buildRuntimeSpec(w.deps(true), 'todo');
     expect(spec.workspace.configPatch.embed).toBeUndefined();
     expect(w.store.getAgent('todo')!.embedMode ?? 'baked').toBe('baked');
+  });
+});
+
+describe('a 2026.8+ image with a partial index', () => {
+  it('re-indexes once when memory status says files are missing, and leaves a complete index alone', async () => {
+    const w = world();
+    w.store.setAgentEmbedApplied('todo', 'shared');
+    w.store.setAgentEmbedIndex('todo', '2026-09-23T13:40:51.475Z', null);
+    w.provider.imageOpenclawVersion = '2026.9.6';
+    w.provider.imageEmbedEngine = 'none';
+    const calls: string[][] = [];
+    let indexed = '7/10';
+    w.provider.exec = async (_ref: string, argv: string[]) => {
+      calls.push(argv);
+      if (argv[0] === 'memory' && argv[1] === 'status') return { code: 0, stdout: `Indexed: ${indexed} files\nEmbeddings: ready\nSemantic vectors: ready`, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    await buildRuntimeSpec(w.deps(true), 'todo');
+    recordApplied(w.store, 'todo');
+    await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', (e) => w.events.push(e));
+    expect(calls.some((c) => c[0] === 'memory' && c[1] === 'index')).toBe(true);
+    expect(w.events).toContain('memory.reindex');
+    // Complete: one status call, no index.
+    calls.length = 0; indexed = '10/10';
+    await buildRuntimeSpec(w.deps(true), 'todo');
+    recordApplied(w.store, 'todo');
+    await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', (e) => w.events.push(e));
+    expect(calls.filter((c) => c[0] === 'memory').map((c) => c[1])).toEqual(['status']);
   });
 });

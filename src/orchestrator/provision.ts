@@ -7,6 +7,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
 import { embedDefault } from '../embedder/embedder.js';
+import { needsPortHeal } from '../openclaw/configWriter.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
@@ -512,7 +513,7 @@ export async function buildRuntimeSpec(
     // left the row promising a switch that would not happen (27th audit).
     store.setAgentEmbedIndex(agentId, null, `built on its own engine — ${bakedWhy}`);
   }
-  embedDecision.set(agentId, { used: embed ? 'shared' : 'baked', before: agent.appliedEmbedMode ?? 'baked' });
+  embedDecision.set(agentId, { used: embed ? 'shared' : 'baked', before: agent.appliedEmbedMode ?? 'baked', openclawVersion });
   const roomsOf = (c: Channel): ChannelRooms => {
     const r = (c.settings?.rooms ?? {}) as { mode?: string; roomId?: unknown };
     return r.mode === 'room' && typeof r.roomId === 'string' && r.roomId ? { mode: 'room', roomId: r.roomId } : { mode: 'off' };
@@ -889,9 +890,9 @@ export function forgetEmbedDecision(agentId: string): void {
 }
 
 /** What buildRuntimeSpec decided about memory search, until the provider accepts the build… */
-const embedDecision = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared' }>();
+const embedDecision = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared'; openclawVersion?: string }>();
 /** …and then, for the re-index step that follows. */
-const embedToIndex = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared' }>();
+const embedToIndex = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared'; openclawVersion?: string }>();
 
 /**
  * Changing the memory-search engine changes OpenClaw's index identity: vector
@@ -916,8 +917,19 @@ export async function reindexMemoryIfSwitched(
   // re-index on the next Rebuild all (27th audit).
   const switched = d.used !== d.before;
   const sharedUnconfirmed = d.used === 'shared' && !agent.embedIndexedAt;
-  if (!switched && !sharedUnconfirmed) return;
-  log('memory.reindex', { agentId, engine: d.used, was: d.before });
+  // On 2026.8+ the memory store itself moved (sessions are indexed too): an
+  // agent carried over from 2026.7 comes up with a partial index ("7/10
+  // files") until one forced pass (To Do Agent, 2026-09-24). Ask first, so
+  // a routine rebuild on 2026.9 costs one status call, not a re-index.
+  let incomplete = false;
+  if (!switched && !sharedUnconfirmed && needsPortHeal(d.openclawVersion)) {
+    const st = await provider.exec(runtimeRef, ['memory', 'status', '--agent', agent.slug], { timeoutMs: 120_000 })
+      .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
+    const m = /Indexed:\s*(\d+)\s*\/\s*(\d+)/i.exec(`${st.stdout}\n${st.stderr}`);
+    incomplete = !!m && Number(m[1]) < Number(m[2]);
+  }
+  if (!switched && !sharedUnconfirmed && !incomplete) return;
+  log('memory.reindex', { agentId, engine: d.used, was: d.before, ...(incomplete ? { why: 'index incomplete' } : {}) });
   const index = () => provider.exec(runtimeRef, ['memory', 'index', '--force', '--agent', agent.slug], { timeoutMs: 10 * 60_000 })
     .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
   let res = await index();
