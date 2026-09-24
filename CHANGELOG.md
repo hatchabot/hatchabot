@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.4] — 2026-09-24
+
+### Fixed
+- View by → Image: an agent pinned to a tag that is the same image as the fleet default (the candidate you just promoted, say) now sits under **Fleet default image** with the unpinned ones, instead of in a bin of its own. The list carries `imageIsDefault`.
+
 ## [2.59.3] — 2026-09-24
 
 ### Changed

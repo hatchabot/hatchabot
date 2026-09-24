@@ -200,3 +200,14 @@ describe('deleting a derived image tag', () => {
   });
 });
 
+
+describe('the agent list knows who runs the fleet default', () => {
+  it('unpinned, or pinned to a tag that is the same image as :latest', async () => {
+    const { f, store } = await world();
+    store.setAgentImage('a1', 'hatchabot-runtime:2026.7.1-2'); // same image id as :latest in this world
+    store.setAgentImage('a2', 'hatchabot-runtime:2026.9.4');   // another image
+    const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as })).json();
+    const by = Object.fromEntries(list.map((a: any) => [a.id, a.imageIsDefault]));
+    expect(by).toEqual({ a1: true, a2: false });
+  });
+});

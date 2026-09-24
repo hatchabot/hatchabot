@@ -10187,7 +10187,8 @@ function v2ViewKey(a, view = v2View) {
     case 'rebuilt': { const [k, l] = v2AgeBin(a.rebuiltAt, 'Rebuilt'); return ['rb:' + k, l]; }
     case 'image': {
       // The fleet default, a pinned base image, or a derived image (its own bin, by name).
-      if (!a.image) return ['i:', 'Fleet default image'];
+      // A pin to a tag that IS the default's image (2026.9.6 just promoted, say) is the default too.
+      if (!a.image || a.imageIsDefault) return ['i:', 'Fleet default image'];
       const m = /:derived-([a-z0-9-]+)$/.exec(a.image);
       return ['i:' + a.image, m ? `Derived image: ${m[1]}` : `Image: ${a.image.replace(/^hatchabot-runtime:/, '')}`];
     }

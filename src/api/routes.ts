@@ -3310,6 +3310,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     value.catch(() => imageInfoCache.delete(hostId));
     return value;
   };
+  /** Every tag on a host that IS the fleet default's image (`:latest` under another name), cached like the image info. */
+  const aliasCache = new Map<string, { at: number; value: Promise<Set<string>> }>();
+  const defaultAliasesFor = (hostId: string): Promise<Set<string>> => {
+    const hit = aliasCache.get(hostId);
+    if (hit && Date.now() - hit.at < 10_000) return hit.value;
+    const value = providerFor(hostId).listImageTags().then((tags) => {
+      const latest = tags.find((t) => t.tag === DEFAULT_BASE)?.imageId;
+      return new Set(latest ? tags.filter((t) => t.imageId === latest).map((t) => t.tag) : []);
+    }).catch(() => new Set<string>());
+    aliasCache.set(hostId, { at: Date.now(), value });
+    return value;
+  };
   /** The owner switched its memory search engine and the rebuild is still owed. */
   const switchPendingFor = (a: Agent): boolean =>
     a.hostId === store.localHostId() && !a.ops && (a.embedMode ?? 'baked') !== (a.appliedEmbedMode ?? 'baked');
@@ -3489,6 +3501,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           rebuild: rebuild?.need,
           /** When its container was last built (docker's creation time). */
           rebuiltAt: rebuild?.running.containerCreatedAt,
+          /** True when it runs the fleet default — unpinned, or pinned to a tag that IS the default's image. */
+          imageIsDefault: !a.image || (await defaultAliasesFor(a.hostId)).has(a.image),
           /** While it is being set up or rebuilt: the step it is on, and since when. */
           progress: progressOf(a),
         });
