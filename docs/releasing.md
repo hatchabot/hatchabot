@@ -100,8 +100,11 @@ scripts/candidate-gate.sh hatchabot-runtime:X      # or: npm run gate:candidate 
 It makes a throwaway web-only agent, pins it to the candidate, and checks
 everything Hatchabot reads or writes of OpenClaw's own formats (config accepted
 by `openclaw doctor`, memory index + semantic search, the CLI JSON shapes, the
-files it reads, the console address, one real model turn), then deletes the
-agent. Only a candidate that passes is tried on one real agent
+files it reads, the console address — and the console loaded through
+Hatchabot's proxy the way a browser loads it, since 2026.9.6 answered the
+address and still showed "Control UI did not start" — one real model turn),
+then deletes the agent. `hatchabot console <agent> --check` runs that last
+check on any agent. Only a candidate that passes is tried on one real agent
 (`hatchabot image try "<agent>" hatchabot-runtime:X`), then promoted. The
 management agent stays pinned and moves last.
 

@@ -140,6 +140,12 @@ step "the console answers at ?session=agent:$SLUG:main"
 code="$(inagent "curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18789/?session=agent:$SLUG:main'")"
 [ "$code" = 200 ] && ok || bad "HTTP $code"
 
+# 2026.9.6 passed the step above and still showed "Control UI did not start"
+# in the browser: the page loaded, its app bundle (root-absolute links) did
+# not. This one goes through Hatchabot's proxy, the way a browser does.
+step "the console starts through the proxy (page, app script and config load)"
+out=$($HB console "$NAME" --check 2>&1) && ok || bad "$(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')"
+
 step "the plugins the image says it carries are there, and web search is enabled"
 chans="$(docker image inspect "$TAG" --format '{{ index .Config.Labels "org.hatchabot.channels" }}')"
 baked="$(docker image inspect "$TAG" --format '{{ index .Config.Labels "org.hatchabot.plugins" }}')"

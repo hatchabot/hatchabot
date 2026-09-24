@@ -214,6 +214,9 @@ Commands:
   logs <agent> [-n <lines>]    Recent runtime output
   events <agent> [-n <count>]  The setup log: what Hatchabot did to it and when
                                (each step of a setup, rebuild or move)
+  console <agent> [--check]    The agent's OpenClaw console address; --check
+                               loads it the way a browser would and says
+                               whether the app bundle is reachable
   files <agent> [path]         List a folder inside the agent (its home by
                                default; the workspace is agents/<slug>/agent
                                under .openclaw). Works stopped or archived.
@@ -2149,6 +2152,38 @@ async function main() {
       console.log(`${r.agent} (${r.state}) — setup log, newest first`);
       for (const e of r.events) console.log(`  ${e.at.slice(0, 19).replace('T', ' ')}  ${e.label}${e.note ? ` — ${String(e.note).slice(0, 160)}` : ''}`);
       if (!r.events.length) console.log('  (nothing recorded yet)');
+      return;
+    }
+    case 'console': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot console <agent> [--check]'));
+      const prefix = `/v1/agents/${a.id}/ui`;
+      console.log(`${ctx.url}${prefix}/`);
+      if (!flags.has('check')) return;
+      // What a browser does: load the document, then the module script it
+      // names — through the proxy, on the same path the browser would use.
+      // 2026.9 writes root-absolute links that only work once the proxy has
+      // moved them under its prefix; a 401/404 here is the "Control UI did
+      // not start" page.
+      const doc = await api(ctx, `${prefix}/`);
+      const html = await doc.text();
+      if (!/text\/html/i.test(doc.headers.get('content-type') ?? '')) fail(`the console answered with ${doc.headers.get('content-type') ?? 'no content type'}, not a page`);
+      const script = /<script[^>]*\ssrc="([^"]+)"/i.exec(html)?.[1];
+      if (!script) fail('the console page names no app script');
+      const scriptPath = script.startsWith('/') ? script : `${prefix}/${script.replace(/^\.\//, '')}`;
+      const problems: string[] = [];
+      if (!scriptPath.startsWith(`${prefix}/`)) problems.push(`app script points outside the console: ${script}`);
+      const base = /data-openclaw-control-ui-base-path="([^"]*)"/.exec(html)?.[1];
+      if (base !== undefined && base !== prefix) problems.push(`base path is "${base}", expected ${prefix}`);
+      const js = await fetch(`${ctx.url}${scriptPath}`, { headers: ctx.bearer ? { authorization: `Bearer ${ctx.bearer}` } : { cookie: ctx.cookie } });
+      if (!js.ok) problems.push(`app script ${scriptPath} → HTTP ${js.status}`);
+      else if (!/javascript/i.test(js.headers.get('content-type') ?? '')) problems.push(`app script served as ${js.headers.get('content-type')}`);
+      // The gateway answers its config with 401 until the browser presents
+      // the agent's token (carried in the URL fragment, which we do not have
+      // here): 401 means the request reached the gateway; 404 means it did not.
+      const cfg = await fetch(`${ctx.url}${prefix}/control-ui-config.json`, { headers: ctx.bearer ? { authorization: `Bearer ${ctx.bearer}` } : { cookie: ctx.cookie } });
+      if (!cfg.ok && cfg.status !== 401) problems.push(`control-ui-config.json → HTTP ${cfg.status}`);
+      if (problems.length) fail(`the console would not start in a browser:\n  ${problems.join('\n  ')}`);
+      console.log(`ok: page, app script (${scriptPath.slice(prefix.length)}) and config all load through the proxy`);
       return;
     }
     case 'files':

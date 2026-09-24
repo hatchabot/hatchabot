@@ -35,6 +35,20 @@ afterEach(() => {
   toClose = [];
 });
 
+const CONTROL_UI_2026_9 = `<!doctype html>
+<html data-openclaw-control-ui-base-path="" data-openclaw-terminal-enabled="true" data-openclaw-control-ui-build-id="2026.9.6-release" lang="en">
+  <head>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2026.9.6-release" />
+    <link rel="manifest" href="/manifest.webmanifest?v=2026.9.6-release" crossorigin="use-credentials" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter" />
+    <link rel="preconnect" href="//fonts.gstatic.com" />
+    <script data-cfasync="false" type="module" crossorigin src="/assets/index-DsEuFQRE.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/gateway-runtime-hTh6B_FS.js">
+    <script>var inline = "untouched";</script>
+  </head>
+  <body><openclaw-app></openclaw-app></body>
+</html>`;
+
 /** A stand-in for the agent's OpenClaw gateway: upgrades, then echoes. */
 /** What the fake gateway last received, for the header tests. */
 let lastGatewayHeaders: Record<string, string | string[] | undefined> = {};
@@ -44,7 +58,10 @@ async function fakeGateway(): Promise<{ port: number; server: Server }> {
     // What OpenClaw actually sends: framing forbidden outright.
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'; script-src 'self'");
-    res.end('page');
+    if (/\.js$/.test(req.url ?? '')) { res.setHeader('Content-Type', 'text/javascript'); res.end('const href="/assets/x";'); return; }
+    // 2026.9's document: an empty base path and root-absolute asset links.
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.end(CONTROL_UI_2026_9);
   });
   server.on('upgrade', (_req, socket) => {
     socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
@@ -134,6 +151,44 @@ describe('the console can be embedded by Hatchabot, and only by Hatchabot', () =
     expect(csp).toContain("frame-ancestors 'self'");
     expect(csp).not.toContain("frame-ancestors 'none'");
     expect(csp).toContain("script-src 'self'"); // everything else untouched
+  });
+});
+
+describe('the 2026.9 Control UI page works from under the proxy prefix', () => {
+  // OpenClaw 2026.9 writes root-absolute asset links and an empty base path
+  // into its page. Reached through /v1/agents/<id>/ui/ those pointed at
+  // Hatchabot's own root, the bundle never loaded, and the page reported
+  // "Control UI did not start" (Cooking Teacher, 2026-09-24).
+  const owner = { 'x-hatchabot-owner': OWNER };
+  const withOwnerHeader = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try { return await fn(); } finally { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; }
+  };
+  it('moves the document onto the prefix: base path, asset links, nothing else', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const res = await withOwnerHeader(() => fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/chat?session=agent:a:main`, { headers: { ...owner, 'accept-encoding': 'gzip, br' } }));
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('data-openclaw-control-ui-base-path="/v1/agents/a1/ui"');
+    expect(html).toContain('src="/v1/agents/a1/ui/assets/index-DsEuFQRE.js"');
+    expect(html).toContain('href="/v1/agents/a1/ui/assets/gateway-runtime-hTh6B_FS.js"');
+    expect(html).toContain('href="/v1/agents/a1/ui/favicon.svg?v=2026.9.6-release"');
+    expect(html).toContain('href="/v1/agents/a1/ui/manifest.webmanifest?v=2026.9.6-release"');
+    // Off-origin and protocol-relative links are not ours to move.
+    expect(html).toContain('href="https://fonts.googleapis.com/css2?family=Inter"');
+    expect(html).toContain('href="//fonts.gstatic.com"');
+    // Inline scripts untouched, so the gateway's CSP hashes still match.
+    expect(html).toContain('<script>var inline = "untouched";</script>');
+    // A rewritten document is asked for uncompressed.
+    expect(lastGatewayHeaders['accept-encoding']).toBeUndefined();
+  });
+  it('passes assets through untouched, compression negotiation included', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const res = await withOwnerHeader(() => fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/assets/index-DsEuFQRE.js`, { headers: { ...owner, 'accept-encoding': 'gzip, br' } }));
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('const href="/assets/x";');
+    expect(lastGatewayHeaders['accept-encoding']).toBe('gzip, br');
   });
 });
 

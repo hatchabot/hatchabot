@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.60.3] — 2026-09-24
+
+### Fixed
+- **The OpenClaw console starts again on 2026.9 images.** OpenClaw 2026.9 serves its Control UI page with root-absolute asset links and an empty base path; reached through Hatchabot's console proxy those pointed at Hatchabot's own root, the app bundle never loaded, and the page reported "Control UI did not start" (Cooking Teacher, and every agent on 2026.9.6). The proxy now moves the page onto its prefix — base path, script and link addresses — before handing it to the browser, for any image and without a rebuild. Assets pass through untouched, compression included.
+
+### Added
+- **`hatchabot console <agent> [--check]`** prints the agent's console address; `--check` loads the page, its app script and its config through the proxy the way a browser does and says what would stop it. The candidate gate runs the same check, since 2026.9.6 passed the old "console answers" step and still failed in the browser.
+
 ## [2.60.2] — 2026-09-24
 
 ### Fixed

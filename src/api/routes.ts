@@ -20,6 +20,7 @@ import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
 import { randomBytes } from 'node:crypto';
 import { hashPassword, passwordProblem, usernameProblem } from './accountsAuth.js';
+import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -4452,6 +4453,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!target) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     const path = `/${req.params['*'] ?? ''}`;
     const qs = req.raw.url?.includes('?') ? req.raw.url.slice(req.raw.url.indexOf('?')) : '';
+    // The app's document (a route, not a file) is rewritten onto this prefix
+    // below — so it is asked for uncompressed. Assets pass through as they
+    // come, gzip/brotli included.
+    const isDocument = isControlUiDocument(path);
+    const forwarded: Record<string, string | string[] | undefined> = { ...stripSessionCookie(req.headers), host: `127.0.0.1:${target.port}`, connection: 'close' };
+    if (isDocument) delete forwarded['accept-encoding'];
     const upstream = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }>(
       (resolve, reject) => {
         const r = httpRequest(
@@ -4462,7 +4469,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             method: req.method,
             // Drop hop-by-hop and our own host header; keep auth/content ones.
             // The owner's session cookie is stripped — the gateway must not see it.
-            headers: { ...stripSessionCookie(req.headers), host: `127.0.0.1:${target.port}`, connection: 'close' },
+            headers: forwarded,
           },
           (res) => {
             const chunks: Buffer[] = [];
@@ -4494,7 +4501,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       reply.header(k, v);
     }
-    return reply.code(upstream.status).send(upstream.body);
+    // OpenClaw 2026.9 writes root-absolute asset links and an empty base
+    // path into its page; served from under our prefix, those point at
+    // Hatchabot's root and the app never starts. Move the page onto the
+    // prefix (see controlUiRebase.ts). Only an uncompressed HTML document.
+    let body = upstream.body;
+    const ctype = String(upstream.headers['content-type'] ?? '');
+    if (isDocument && /text\/html/i.test(ctype) && !upstream.headers['content-encoding']) {
+      body = Buffer.from(rebaseControlUi(body.toString('utf8'), `/v1/agents/${req.params.id}/ui`), 'utf8');
+    }
+    return reply.code(upstream.status).send(body);
   });
 
   // The Control UI opens a WebSocket for live updates; without it the page

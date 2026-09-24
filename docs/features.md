@@ -741,7 +741,9 @@ Before a candidate goes near a real agent, the host can run the **candidate
 gate** — `scripts/candidate-gate.sh <tag>` — which builds a throwaway agent
 on it and checks everything Hatchabot relies on in OpenClaw (config accepted,
 memory search indexes and answers, the CLI's JSON, the files it reads, the
-console, one model turn), then deletes the agent. See docs/releasing.md.
+console loaded through the proxy as a browser would, one model turn), then
+deletes the agent. See docs/releasing.md. `hatchabot console <agent> --check`
+runs the console check alone on any agent.
 
 **Without its own memory search engine.** The build drawer's tick box (or
 `hatchabot upgrade-image --no-engine`, or `EMBED_ENGINE=none` for the script)
