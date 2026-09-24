@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { catArgv, cleanRelPath, downloadName, listShell, parseListing, tarArgv } from '../src/orchestrator/agentFiles.js';
+import { catArgv, cleanFileName, cleanRelPath, downloadName, inlineType, listShell, parseListing, putArgv, tarArgv, uploadAllowed } from '../src/orchestrator/agentFiles.js';
 
 /**
  * Browsing and downloading an agent's files: read-only, owner-only, paths
@@ -101,5 +101,63 @@ describe('downloads', () => {
     expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/archive?path=hi.txt', headers: as })).statusCode).toBe(400);
     provider.execResponses.set('sh-volume', { code: 0, stdout: `regular file\t${600 * 1024 * 1024}\n`, stderr: '' });
     expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=big.bin', headers: as })).statusCode).toBe(413);
+  });
+});
+
+describe('uploads and opening in the browser', () => {
+  it('a file name is one plain segment; uploads stay out of OpenClaw\'s state except the workspace', () => {
+    expect(cleanFileName('report.pdf')).toBe('report.pdf');
+    expect(cleanFileName(' notes.md ')).toBe('notes.md');
+    for (const bad of ['', '.', '..', 'a/b', 'a\0b', 'x'.repeat(300), 7]) expect(cleanFileName(bad)).toBeUndefined();
+    expect(uploadAllowed('', 'kitchen')).toBe(true);
+    expect(uploadAllowed('projects/x', 'kitchen')).toBe(true);
+    expect(uploadAllowed('.openclaw', 'kitchen')).toBe(false);
+    expect(uploadAllowed('.openclaw/state', 'kitchen')).toBe(false);
+    expect(uploadAllowed('.openclaw/agents/kitchen/agent', 'kitchen')).toBe(true);
+    expect(uploadAllowed('.openclaw/agents/kitchen/agent/inbox', 'kitchen')).toBe(true);
+    expect(uploadAllowed('.openclaw/agents/other/agent', 'kitchen')).toBe(false);
+    const sh = putArgv('inbox', "it's.txt", false)[2]!;
+    expect(sh).toContain('realpath -e');
+    expect(sh).toContain(`'it'\\''s.txt'`);
+    expect(sh).toContain('exit 5');
+    expect(sh).toContain('mv -f');
+  });
+  it('knows what a browser shows: text as text, pages and images as themselves, unknown binaries download', () => {
+    expect(inlineType('notes.md')).toBe('text/plain');
+    expect(inlineType('Makefile')).toBe('text/plain');
+    expect(inlineType('report.pdf')).toBe('application/pdf');
+    expect(inlineType('page.html')).toBe('text/html');
+    expect(inlineType('photo.JPG')).toBe('image/jpeg');
+    expect(inlineType('model.gguf')).toBeUndefined();
+    expect(inlineType('data.bin')).toBeUndefined();
+  });
+  it('opened in the browser: inline, the right type, sandboxed and unsniffable; a binary still downloads', async () => {
+    const { f, provider } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: 'regular file\t5\n', stderr: '' });
+    provider.streamBytes = Buffer.from('hello');
+    const r = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=page.html&inline=1', headers: as });
+    expect(r.headers['content-type']).toMatch(/^text\/html/);
+    expect(r.headers['content-disposition']).toBe('inline; filename="page.html"');
+    expect(r.headers['content-security-policy']).toBe('sandbox');
+    expect(r.headers['x-content-type-options']).toBe('nosniff');
+    const b = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs/file?path=x.gguf&inline=1', headers: as });
+    expect(b.headers['content-disposition']).toBe('attachment; filename="x.gguf"');
+  });
+  it('an upload lands through a writable one-shot; an existing name is refused until overwrite is asked; never into OpenClaw\'s state', async () => {
+    const { f, provider } = await world();
+    const hdr = { ...as, 'content-type': 'application/octet-stream' };
+    const r = await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=inbox&name=report.pdf', headers: hdr, payload: Buffer.from('%PDF') });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ ok: true, path: 'inbox', name: 'report.pdf', size: 4 });
+    expect(provider.written[0]!.bytes.toString()).toBe('%PDF');
+    expect(provider.written[0]!.argv[2]).toContain("realpath -e '/home/node/inbox'");
+    provider.writeFails = 5;
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=inbox&name=report.pdf', headers: hdr, payload: Buffer.from('x') })).statusCode).toBe(409);
+    provider.writeFails = 0;
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=inbox&name=report.pdf&overwrite=1', headers: hdr, payload: Buffer.from('x') })).statusCode).toBe(200);
+    expect(provider.written.at(-1)!.argv[2]).toContain('[ "1" != 1 ]');
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=.openclaw&name=openclaw.json', headers: hdr, payload: Buffer.from('{}') })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=inbox&name=a/b', headers: hdr, payload: Buffer.from('x') })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'PUT', url: '/v1/agents/a1/fs/file?path=inbox&name=x', headers: { 'x-hatchabot-owner': 'someone-else', 'content-type': 'application/octet-stream' }, payload: Buffer.from('x') })).statusCode).toBe(404);
   });
 });

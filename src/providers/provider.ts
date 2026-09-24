@@ -231,6 +231,8 @@ export interface RuntimeProvider {
    * without buffering. Optional: a provider without it cannot serve files.
    */
   streamFromVolume?(runtimeRef: string, argv: string[]): import('node:stream').Readable;
+  /** The write-side twin: a one-shot on the VOLUME (writable) fed `input` on stdin — an upload. */
+  writeToVolume?(runtimeRef: string, argv: string[], input: Buffer): Promise<ExecResult>;
 
   /** What this runtime is actually running (image identity, OpenClaw version). */
   info(runtimeRef: string): Promise<RuntimeInfo>;

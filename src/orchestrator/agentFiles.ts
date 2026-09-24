@@ -99,3 +99,56 @@ export function downloadName(rel: string, slug: string): string {
   const last = rel.split('/').filter(Boolean).pop();
   return (last ?? slug).replace(/[^\w.+-]+/g, '_').slice(0, 120) || slug;
 }
+
+/** A file name the owner uploads: one segment, no slash, no NUL, not a dot name, ≤255 bytes. */
+export function cleanFileName(input: unknown): string | undefined {
+  if (typeof input !== 'string') return undefined;
+  const n = input.trim();
+  if (!n || n === '.' || n === '..' || n.includes('/') || n.includes('\0') || Buffer.byteLength(n) > 255) return undefined;
+  return n;
+}
+
+/**
+ * Where an upload may land: anywhere in the home EXCEPT OpenClaw's own state
+ * (`.openclaw/…`), other than the agent's workspace inside it — that is
+ * where a file for the agent belongs, and overwriting its config or
+ * databases by hand would break it.
+ */
+export function uploadAllowed(relDir: string, slug: string): boolean {
+  const ws = `.openclaw/agents/${slug}/agent`;
+  if (relDir === '.openclaw' || relDir.startsWith('.openclaw/')) return relDir === ws || relDir.startsWith(`${ws}/`);
+  return true;
+}
+
+/**
+ * The argv a writable one-shot runs to write stdin to <dir>/<name>: the
+ * directory is guarded like a read, the file is written beside its target
+ * and moved into place, so a broken upload never leaves a half file. Exit 5
+ * when the name exists and overwriting was not asked for.
+ */
+export function putArgv(relDir: string, name: string, overwrite: boolean): string[] {
+  const n = q(name);
+  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; T="$P"/${n}; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; cat > "$T.part-$$" && mv -f "$T.part-$$" "$T"`];
+}
+
+/**
+ * How a file opens in the browser (the Files tab's links): a type the
+ * browser shows as itself, or text for anything text-like. HTML and SVG can
+ * carry scripts, so they are shown too — but the response also carries a
+ * `Content-Security-Policy: sandbox`, which makes the document originless:
+ * no cookies, no scripts, no reach into the app. Unknown binaries download.
+ */
+export function inlineType(name: string): string | undefined {
+  const ext = (name.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] ?? '');
+  const map: Record<string, string> = {
+    txt: 'text/plain', md: 'text/plain', markdown: 'text/plain', log: 'text/plain', csv: 'text/plain', tsv: 'text/plain',
+    json: 'text/plain', jsonl: 'text/plain', yaml: 'text/plain', yml: 'text/plain', toml: 'text/plain', ini: 'text/plain', cfg: 'text/plain', conf: 'text/plain',
+    py: 'text/plain', js: 'text/plain', mjs: 'text/plain', ts: 'text/plain', sh: 'text/plain', c: 'text/plain', cc: 'text/plain', cpp: 'text/plain', h: 'text/plain',
+    sql: 'text/plain', xml: 'text/plain', v: 'text/plain', sv: 'text/plain', diff: 'text/plain', patch: 'text/plain', env: 'text/plain',
+    html: 'text/html', htm: 'text/html', svg: 'image/svg+xml',
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', ico: 'image/x-icon',
+    pdf: 'application/pdf', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', mp4: 'video/mp4', webm: 'video/webm',
+  };
+  if (!ext) return 'text/plain'; // README, Makefile, LICENSE…
+  return map[ext];
+}

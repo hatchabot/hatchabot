@@ -113,7 +113,7 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
-import { catArgv, cleanRelPath, downloadName, duShell, listShell, parseListing, statShell, tarArgv } from '../orchestrator/agentFiles.js';
+import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, statShell, tarArgv, uploadAllowed } from '../orchestrator/agentFiles.js';
 import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
@@ -3886,7 +3886,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { path: t.rel, entries: parseListing(res.stdout) };
   });
 
-  const fsStream = async (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown, kind: 'file' | 'archive') => {
+  const fsStream = async (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown, kind: 'file' | 'archive', inline = false) => {
     const t = fsAgent(req, reply, id, path); if (!t) return reply;
     const provider = providerFor(t.agent.hostId);
     if (!provider.streamFromVolume) return reply.code(501).send({ error: 'Downloads are not available from this machine.' });
@@ -3901,13 +3901,41 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (size > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big to download here (${Math.round(size / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
     const name = downloadName(t.rel, t.agent.slug) + (kind === 'archive' ? '.tar.gz' : '');
     const stream = provider.streamFromVolume(t.agent.runtimeRef!, kind === 'file' ? catArgv(t.rel) : tarArgv(t.rel));
-    reply.type(kind === 'file' ? 'application/octet-stream' : 'application/gzip')
-      .header('content-disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
-      .header('cache-control', 'no-store');
+    // Opened in the browser (the Files tab's links) when the type is one it
+    // shows; always sandboxed (originless: no cookies, no scripts, no reach
+    // into the app) and never sniffed, so an agent-written page cannot act
+    // as this app. Anything else is a download.
+    const shown = kind === 'file' && inline ? inlineType(name) : undefined;
+    reply.type(shown ?? (kind === 'file' ? 'application/octet-stream' : 'application/gzip'))
+      .header('content-disposition', `${shown ? 'inline' : 'attachment'}; filename="${name.replace(/"/g, '')}"`)
+      .header('cache-control', 'no-store')
+      .header('x-content-type-options', 'nosniff')
+      .header('content-security-policy', 'sandbox');
     if (kind === 'file') reply.header('content-length', String(size));
     return reply.send(stream);
   };
-  app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/file', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file'));
+  app.get<{ Params: { id: string }; Querystring: { path?: string; inline?: string } }>('/v1/agents/:id/fs/file', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file', req.query.inline === '1'));
+
+  /** Upload one file into a folder of the agent's home (raw body). */
+  app.put<{ Params: { id: string }; Querystring: { path?: string; name?: string; overwrite?: string } }>('/v1/agents/:id/fs/file', async (req, reply) => {
+    const t = fsAgent(req, reply, req.params.id, req.query.path); if (!t) return reply;
+    const name = cleanFileName(req.query.name);
+    if (!name) return reply.code(400).send({ error: 'Give the file a plain name (no folders in it).' });
+    if (!uploadAllowed(t.rel, t.agent.slug)) return reply.code(400).send({ error: "Files go in the agent's workspace or anywhere outside .openclaw — not into OpenClaw's own state." });
+    const body = req.body;
+    if (!Buffer.isBuffer(body)) return reply.code(400).send({ error: 'Send the file as the request body (application/octet-stream).' });
+    if (body.length > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big (${Math.round(body.length / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
+    const provider = providerFor(t.agent.hostId);
+    if (!provider.writeToVolume) return reply.code(501).send({ error: 'Uploads are not available to this machine.' });
+    // The busy guard: an export or restore must not interleave with a write.
+    if (busyNow(t.agent, reply)) return reply;
+    let res: ExecResult;
+    try { res = await whileBusy(t.agent.id, () => provider.writeToVolume!(t.agent.runtimeRef!, putArgv(t.rel, name, req.query.overwrite === '1'), body)); }
+    catch { return reply.code(502).send({ error: "Couldn't write into the agent." }); }
+    if (res.code === 5) return reply.code(409).send({ error: `${name} is already there — replace it?` });
+    if (res.code !== 0) return fsFailure(reply, res.code);
+    return { ok: true, path: t.rel, name, size: body.length };
+  });
   app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/archive', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'archive'));
 
   app.put<{ Params: { id: string; name: string }; Body: { content?: string } }>(

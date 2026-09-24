@@ -470,6 +470,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     return out;
   }
 
+  async writeToVolume(runtimeRef: string, argv: string[], input: Buffer): Promise<ExecResult> {
+    const { volume } = this.#names(runtimeRef);
+    // Writable mount, no network, as the agent's own uid (the image's user),
+    // so what lands is the agent's to read and change.
+    return this.#runStdin(['run', '--rm', '-i', '--network', 'none', '-v', `${volume}:/home/node`, this.image, ...argv], input);
+  }
+
   async info(runtimeRef: string): Promise<RuntimeInfo> {
     const { container } = this.#names(runtimeRef);
     const res = await this.#docker([

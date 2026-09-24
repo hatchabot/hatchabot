@@ -133,6 +133,15 @@ export class MockProvider implements RuntimeProvider {
     return Readable.from(this.streamBytes ? [this.streamBytes] : []);
   }
 
+  /** Uploads as the mock saw them: the argv and the bytes; `writeFails` = the exit code to answer. */
+  written: Array<{ argv: string[]; bytes: Buffer }> = [];
+  writeFails = 0;
+  async writeToVolume(runtimeRef: string, argv: string[], input: Buffer) {
+    this.#require(runtimeRef);
+    this.written.push({ argv, bytes: input });
+    return { code: this.writeFails, stdout: '', stderr: this.writeFails ? 'refused' : '' };
+  }
+
   /** Per-runtime overrides of what info() reports (containerGen, onAgentNetwork…). */
   infoOverride = new Map<string, Partial<RuntimeInfo>>();
   async info(runtimeRef?: string): Promise<RuntimeInfo> {

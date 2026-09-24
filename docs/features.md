@@ -672,7 +672,14 @@ Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
 An agent's ⚙ sheet has a **Files** tab (owner only): its home folder as a
 table — name, size, when it changed — folders to open, a ⬇ on every file, and
-**⬇ .tar.gz** for any folder (or the whole folder you are in). **Workspace**
+**⬇ .tar.gz** for any folder (or the whole folder you are in). A file the
+browser can show (text, images, PDF, pages) is a link that opens in a new tab
+— served sandboxed, so a page an agent wrote cannot act as the app. **⬆
+Upload…** (or drop files on the list) puts files from your computer into the
+folder you are in; it asks before replacing one. Uploads may go anywhere in
+the home except OpenClaw's own state under `.openclaw` — the agent's
+workspace inside it is the natural place for something you want it to read.
+CLI: `hatchabot put <agent> <file> [dir] [--overwrite]`. **Workspace**
 jumps to where the agent writes (`.openclaw/agents/<slug>/agent`); its memory
 lives under `.openclaw` too, and anything it made elsewhere is under its home.
 Read-only, and it works while the agent is stopped or archived: the files are
@@ -730,7 +737,7 @@ what it is (fleet default, candidate, older build, derived), what it carries
 like, and **Pin & rebuild _n_** pins each and queues the rebuilds (memory kept,
 six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image as a
 dropdown of every image with a line saying what each one is, and **Fleet
-default** at the top to put it back.
+default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
 
 ## Fleet operations
 

@@ -217,6 +217,9 @@ Commands:
                                under .openclaw). Works stopped or archived.
   get <agent> <path> [-o <file>]
                                Download a file, or a folder as .tar.gz
+  put <agent> <file> [dir] [--overwrite]
+                               Upload a file into a folder of the agent (its
+                               workspace when no dir is given)
   health <agent>               Live gateway health — is it actually answering
   usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
   top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
@@ -431,7 +434,7 @@ function envQuote(v: string): string {
  */
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -2153,6 +2156,20 @@ async function main() {
       const { Readable } = await import('node:stream');
       await pipeline(Readable.fromWeb(res.body as never), createWriteStream(out, { mode: 0o600 }));
       console.log(`saved ${out}${isDir ? ' (folder as .tar.gz)' : ''}`);
+      return;
+    }
+    case 'put': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot put <agent> <file> [dir] [--overwrite]'));
+      const file = rest[1] ?? fail('give the file to upload');
+      const dir = rest[2] ?? `.openclaw/agents/${a.slug}/agent`;
+      const data = await readFile(userPath(file));
+      const { basename: base } = await import('node:path');
+      const name = base(file);
+      const res = await api(ctx, `/v1/agents/${a.id}/fs/file?path=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}${flags.has('overwrite') ? '&overwrite=1' : ''}`,
+        { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: data });
+      const r: any = await res.json();
+      if (!res.ok) fail(r.error ?? `upload failed (${res.status})`);
+      console.log(`put ${name} (${r.size} bytes) into ~/${r.path || ''} of "${a.name}"`);
       return;
     }
     case 'ask': {

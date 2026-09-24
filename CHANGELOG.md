@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.55.0] — 2026-09-24
+
+### Added
+- **Files: open and upload.** A file the browser can show (text, images, PDF, pages) is now a link that opens in a new tab — served with `Content-Security-Policy: sandbox` and `nosniff`, so a page an agent wrote is originless and cannot act as the app. **⬆ Upload…** (or drop files on the list) puts files from your computer into the folder you are in, through a writable one-shot on the volume; it asks before replacing a file, and never writes into OpenClaw's own state under `.openclaw` (the agent's workspace inside it is allowed). CLI: `hatchabot put <agent> <file> [dir] [--overwrite]`. Route: `PUT /v1/agents/:id/fs/file`.
+- **⚡ Bulk actions** is a tile in the manager's panel (shown once there are two agents to choose from), next to Status.
+
+### Changed
+- **The manager's panel lays its two tile rows out properly.** When the numbers and the action tiles do not fit on one line, the actions take a line of their own under the numbers, starting where they start, with a hairline between — instead of a stray right-aligned row that read as one jumble with the numbers.
+- **Pin & rebuild.** Pinning a runtime image on an agent's ⚙ Advanced tab now rebuilds it onto that image right away (memory kept), the way `hatchabot image try` does. A pin that waited for "the next rebuild" looked as if it had taken effect while the agent still ran the old image. A stopped agent moves when it starts.
+
 ## [2.54.1] — 2026-09-24
 
 ### Fixed

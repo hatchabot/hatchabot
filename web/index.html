@@ -521,9 +521,15 @@
   .v2hubhead .spacer { flex:1 }
   /* The fleet's actions live with the manager, not in the header (Chris,
      2026-09-23), as icon tiles in the same row as its numbers. */
-  .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:12px 14px; margin:4px 0 2px }
+  .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:16px 14px; margin:4px 0 2px }
   .v2hubrow .v2stats { margin:0 }
   .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 14px; margin-left:auto }
+  /* No room for the numbers and the actions on one line: the actions take a
+     line of their own, under the numbers and starting where they start, with
+     a hairline between — two rows of the same tiles otherwise read as one
+     jumble (Chris, 2026-09-24). v2HubWrapCheck() sets the class. */
+  .v2hubrow.wrapped .v2hubactions { flex-basis:100%; margin-left:0; justify-content:flex-start; padding-top:14px; border-top:1px solid var(--line) }
+  .v2hubrow.wrapped .v2hubactions .v2btn.v2new { margin-left:auto }
   /* Written with body.v2 in front: the v2-wide "every main action shares a
      surface" rule (body.v2 .v2new) otherwise paints the tile's button grey. */
   body.v2 .v2hubactions .v2btn, body.v2 .v2hubactions .v2btn:hover, body.v2 .v2hubactions .v2btn.v2new, body.v2 .v2hubactions .v2btn.v2new:hover {
@@ -921,6 +927,7 @@
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
           <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true">🎛️</span><span class="lbl">Status</span></button>
+          <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
           <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><span class="v2glyph em" aria-hidden="true">🧭</span><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
           <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
           <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
@@ -1531,11 +1538,11 @@
       <label style="margin-top:0">Image <span style="color:var(--dim)">— which one this agent runs (host owner only)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
         <select id="editImage" style="flex:1;min-width:0;font-size:13px"><option value="">Loading images…</option></select>
-        <button id="imageBtn" onclick="saveImagePin()">Pin</button>
+        <button id="imageBtn" onclick="saveImagePin()">Pin &amp; rebuild</button>
       </div>
       <div class="sub" style="margin:-4px 0 4px">For trying a candidate or a derived image on this one agent
-        (build them in ⚙ Settings → Images). Applies on its next rebuild; a pinned agent stops following fleet
-        promotes until you pick <b>Fleet default</b> again.</div>
+        (build them in ⚙ Settings → Images). Rebuilds it onto the image right away, memory kept (a stopped agent
+        moves when it starts); a pinned agent stops following fleet promotes until you pick <b>Fleet default</b> again.</div>
     </div>
   </section>
 
@@ -9100,11 +9107,20 @@ function embedModeText(a) {
 }
 
 /** Pin (or clear) the runtime image. Empty input = back to the fleet default. */
+/** Pin (or clear) the runtime image AND rebuild onto it now, the way `hatchabot image try` does — a pin that
+ *  waited for "the next rebuild" looked as if it had taken effect while the agent still ran the old image
+ *  (Chris, 2026-09-24). A stopped agent picks it up when it starts. */
 async function saveImagePin() {
   const v = $('editImage').value.trim();
+  const a = agents.find(x => x.id === editAgentId);
   try {
     await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
-    toast(v ? `Pinned to ${v} — applies on the next rebuild.` : 'Back on the fleet default image.');
+    if (a?.state === 'RUNNING' && a.runtimeRef) {
+      await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
+      toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
+    } else {
+      toast(v ? `Pinned to ${v} — it moves onto it when it next starts or rebuilds.` : 'Back on the fleet default image — applies when it next starts or rebuilds.');
+    }
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
@@ -9426,6 +9442,7 @@ function renderAgents() {
   // Show "Rebuild all" only when there's more than one agent to rebuild.
   $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
   $('fleetActionsBtn').hidden = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED').length < 2;
+  if ($('v2BulkBtn')) { $('v2BulkBtn').hidden = $('fleetActionsBtn').hidden; v2HubWrapCheck(); }
   renderToc(); // keep the jump-to legend in sync with the list
   if (profiles.length && agents.length === 0) {
     el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
@@ -10433,18 +10450,56 @@ async function v2LoadFiles(id, path) {
   const crumb = [`<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','')">home</a>`]
     .concat(segs.map((s, i) => `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(segs.slice(0, i + 1).join('/'))}')">${esc(s)}</a>`)).join(' / ');
   const dl = (kind, p) => `/v1/agents/${id}/fs/${kind}?path=${encodeURIComponent(p)}`;
+  // What the browser can show by itself opens in a new tab (served sandboxed);
+  // the rest downloads. Mirrors inlineType() on the server.
+  const viewable = (n) => !/\.[a-z0-9]+$/i.test(n) || /\.(txt|md|markdown|log|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|py|m?js|ts|sh|c|cc|cpp|h|sql|xml|s?v|diff|patch|env|html?|svg|png|jpe?g|gif|webp|bmp|ico|pdf|mp3|wav|ogg|m4a|mp4|webm)$/i.test(n);
   const rows = r.entries.map(e => {
     const p = (r.path ? r.path + '/' : '') + e.name;
-    const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>` : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
+    const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>`
+      : e.type === 'file' && viewable(e.name) ? `📄 <a href="${dl('file', p)}&inline=1" target="_blank" rel="noopener" title="Open in a new tab">${esc(e.name)}</a>`
+      : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
     const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
-      : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download>⬇</a>` : '';
+      : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download title="Download">⬇</a>` : '';
     return `<tr><td>${open}</td><td class="num">${e.type === 'dir' ? '' : fmtBytes(e.size)}</td><td class="sub">${e.mtime ? ago(e.mtime) : ''}</td><td>${get}</td></tr>`;
   }).join('');
+  const canUpload = !(r.path || '').startsWith('.openclaw') || (r.path || '') === ws || (r.path || '').startsWith(ws + '/');
   box.innerHTML = `<div class="v2row"><div class="v2k">Folder</div><div class="v2v"><span style="font-family:ui-monospace,monospace">~/ ${crumb}</span>
       ${ws && (r.path || '') !== ws ? `<button onclick="v2LoadFiles('${jsq(id)}','${jsq(ws)}')">Workspace</button>` : ''}
       <a class="btn" href="${dl('archive', r.path || '')}" title="This folder as a .tar.gz">⬇ Whole folder</a>
-      <span class="sub">Read-only. Its workspace holds what it wrote; memory is under .openclaw. Files it makes elsewhere are under its home too.</span></div></div>
-    ${r.entries.length ? `<table class="tbl"><thead><tr><th>Name</th><th class="num">Size</th><th>Changed</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}`;
+      ${canUpload ? `<button onclick="$('v2UploadInput').click()" title="Put a file from this computer into this folder">⬆ Upload…</button><input type="file" id="v2UploadInput" multiple hidden onchange="v2UploadFiles('${jsq(id)}','${jsq(r.path || '')}', this.files)">` : ''}
+      <span class="sub">Click a name to open it in a new tab, ⬇ to download. ${canUpload ? 'Drop files on the list to upload them here.' : "OpenClaw's own state — uploads go in the workspace or outside .openclaw."} Its workspace holds what it wrote; memory is under .openclaw.</span></div></div>
+    <div id="v2FilesDrop">${r.entries.length ? `<table class="tbl"><thead><tr><th>Name</th><th class="num">Size</th><th>Changed</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}</div>
+    <div id="v2UploadNote" class="sub" hidden></div>`;
+  if (canUpload) {
+    const drop = $('v2FilesDrop');
+    drop.ondragover = (ev) => { ev.preventDefault(); drop.style.outline = '2px dashed var(--accent)'; };
+    drop.ondragleave = () => { drop.style.outline = ''; };
+    drop.ondrop = (ev) => { ev.preventDefault(); drop.style.outline = ''; void v2UploadFiles(id, r.path || '', ev.dataTransfer.files); };
+  }
+}
+
+/** Upload files (from a picker or a drop) into a folder of the agent's home; asks before replacing. */
+async function v2UploadFiles(id, path, files) {
+  const list = [...(files || [])]; if (!list.length) return;
+  const note = $('v2UploadNote'); if (note) { note.hidden = false; }
+  const say = (t) => { if (note) note.textContent = t; };
+  let done = 0;
+  for (const f of list) {
+    say(`Uploading ${f.name} (${fmtBytes(f.size)})…`);
+    const put = async (overwrite) => fetch(`/v1/agents/${id}/fs/file?path=${encodeURIComponent(path)}&name=${encodeURIComponent(f.name)}${overwrite ? '&overwrite=1' : ''}`,
+      { method: 'PUT', headers: { 'content-type': 'application/octet-stream', ...authHeaders() }, body: f });
+    try {
+      let res = await put(false);
+      if (res.status === 409) {
+        if (!confirm(`${f.name} is already in this folder. Replace it?`)) continue;
+        res = await put(true);
+      }
+      if (!res.ok) { const e = await res.json().catch(() => ({})); say(`${f.name}: ${e.error || res.statusText}`); continue; }
+      done++;
+    } catch (e) { say(`${f.name}: ${e.message}`); }
+  }
+  say(`${done} of ${list.length} uploaded.`);
+  void v2LoadFiles(id, path);
 }
 
 function v2MemberPane(a) {
@@ -11106,6 +11161,9 @@ function renderV2Stats() {
     for (const t of tiles) box.querySelector(`[data-stat="${t.key}"]`)?.addEventListener('click', t.go);
   }
   box.hidden = false;
+  // The Bulk actions tile: only once there is a selection to make.
+  if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
+  v2HubWrapCheck();
 }
 let v2PendingCount = 0;
 let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
@@ -11127,6 +11185,20 @@ async function loadBackupAge() {
     const newest = (r.backups ?? [])[0];
     backupAgeH = newest ? (Date.now() - Date.parse(newest.date + 'T03:30:00')) / 3600_000 : null;
   } catch { backupAgeH = null; } // not the host owner, or no backups configured
+}
+
+/** Do the numbers and the action tiles share a line? If not, lay the actions out as their own row. */
+function v2HubWrapCheck() {
+  const row = document.querySelector('.v2hubrow'); if (!row) return;
+  const stats = $('v2Stats'), actions = $('v2HubActions');
+  if (!stats || !actions || stats.hidden) { row.classList.remove('wrapped'); return; }
+  row.classList.remove('wrapped'); // measure the natural layout, not the forced one
+  const wrapped = actions.offsetTop > stats.offsetTop + 8;
+  row.classList.toggle('wrapped', wrapped);
+}
+if (typeof ResizeObserver !== 'undefined') {
+  const hubRow = document.querySelector('.v2hubrow');
+  if (hubRow) new ResizeObserver(() => v2HubWrapCheck()).observe(hubRow.parentElement);
 }
 
 function v2RenderHub() {

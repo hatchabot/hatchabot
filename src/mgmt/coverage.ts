@@ -49,6 +49,7 @@ export const COVERAGE: Record<string, string> = {
 
   // ---- agents: definition & memory ----
   'PUT /v1/agents/:id/files/:name': 'update_definition (SOUL.md / AGENTS.md; never MEMORY.md)',
+  'PUT /v1/agents/:id/fs/file': 'app: browser — a file from the owner\'s own computer (the Files tab)',
   'PUT /v1/agents/:id/params': 'app: later — setup values of a template copy',
   'POST /v1/agents/:id/snapshots': 'snapshot_agent',
   'POST /v1/agents/:id/snapshots/:snapId/restore': 'restore_snapshot',
