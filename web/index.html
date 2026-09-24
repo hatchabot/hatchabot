@@ -7462,6 +7462,37 @@ function openFleetHealth() {
 
 /** 📊 Sources: which of your agents are on which AI source, and which model
  *  each runs now. Mirrors `hatchabot sources`. */
+// Memory search across the fleet (Status → Tools): what new agents get, and moving the rest.
+async function loadEmbedFleet() {
+  const row = $('embedFleetRow'), el = $('embedFleetBody');
+  if (!row || !myAccount.hostOwner) return;
+  try {
+    const r = await api('/v1/embed-default');
+    row.hidden = false;
+    const rest = r.total - r.shared;
+    el.innerHTML = `<span>${r.shared} of ${r.total} agent${r.total === 1 ? '' : 's'} on the shared service${r.pending ? ` <span class="sub">· ${r.pending} waiting for a rebuild</span>` : ''}</span>
+      <label style="margin:0;display:inline-flex;align-items:center;gap:6px">New agents use
+        <select style="width:auto" onchange="setEmbedDefault(this.value)"><option value="baked"${r.default === 'baked' ? ' selected' : ''}>their own engine</option><option value="shared"${r.default === 'shared' ? ' selected' : ''}>the shared service</option></select></label>
+      ${rest ? `<button onclick="embedMoveAll('shared','now')">Move the rest now (idle ones)</button><button onclick="embedMoveAll('shared','quiet')">Move the rest overnight</button>` : ''}
+      ${r.shared ? `<button onclick="embedMoveAll('baked','quiet')">Move all back to their own engine</button>` : ''}
+      <span class="sub">A move applies as a rebuild — memory kept, the index rebuilt — never while an agent is mid-conversation. Overnight means the quiet hours of the rebuild policy.</span>`;
+  } catch (e) { row.hidden = true; }
+}
+async function setEmbedDefault(mode) {
+  try { await api('/v1/embed-default', { method: 'PUT', body: { default: mode } }); toast(mode === 'shared' ? 'New agents will use the shared service' : 'New agents will use their own engine'); }
+  catch (e) { toast(e.message, 12000); }
+  loadEmbedFleet();
+}
+async function embedMoveAll(mode, when) {
+  const what = mode === 'shared' ? 'the shared memory search service' : 'their own engine';
+  if (!confirm(`Move every agent on this machine to ${what}?\n\n${when === 'now' ? 'Idle ones rebuild now, two at a time; any mid-conversation wait for the quiet hours.' : 'They rebuild in the quiet hours, never mid-conversation.'} Memory is kept; each re-indexes its memory search afterwards.`)) return;
+  try {
+    const r = await api('/v1/embed/move-all', { method: 'POST', body: { mode, when } });
+    toast(`${r.switched} switched — ${r.queued} rebuilding now, ${r.deferred} in the quiet hours.`, 12000);
+  } catch (e) { toast(e.message, 12000); }
+  loadEmbedFleet();
+}
+
 // Resources: docker stats per host, one call each; polled while the view is open.
 let fleetResTimer = null;
 // Sort by name, CPU or memory; click a heading again to flip. Remembered per device.
@@ -10907,9 +10938,11 @@ async function openFleet(tab = v2FleetTab, arg) {
         <span class="sub">Switch model, rebuild, stop or start a selection — by AI source, group, machine or state.</span></div></div>
       <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
         <span class="sub">New container for every agent, memory kept. Picks up a new runtime image or network.</span></div></div>
+      <div class="v2row" id="embedFleetRow" hidden><div class="v2k">Memory search</div><div class="v2v" id="embedFleetBody"></div></div>
       <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups('name')">Sort every group A→Z</button>
         <button onclick="sortAllGroups('activity', true)">⏳ Most recently active first</button>
         <span class="sub">A one-off tidy. On a group's own header, pressing the same button again reverses it.</span></div></div>`;
+    void loadEmbedFleet();
     return;
   }
   const body = $(`${dlgId}Body`);

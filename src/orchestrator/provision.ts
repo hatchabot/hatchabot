@@ -6,6 +6,7 @@ import { homedir, hostname as osHostname } from 'node:os';
 import { lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import type { Store } from '../store/store.js';
+import { embedDefault } from '../embedder/embedder.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
@@ -150,6 +151,9 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
     updatedAt: now,
   };
   store.insertAgent(agent);
+  // The fleet default for memory search: shared once the owner flipped it
+  // (Status → Tools); only where the service is — this machine.
+  if (embedDefault() === 'shared' && host.kind === 'local') store.setAgentEmbedMode(agent.id, 'shared');
 
   // Owner is a member from the start — the allowlist has to contain somebody.
   // And if any earlier agent already bound their Telegram identity, carry it

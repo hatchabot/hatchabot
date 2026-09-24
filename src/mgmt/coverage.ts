@@ -122,6 +122,8 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/ai-profiles/:id/apply-default-model': 'set_model (one agent at a time)',
   'POST /v1/ai-profiles/usage/sample': 'app: internal — the usage view refreshes itself',
   'PUT /v1/media-key': 'app: secret — the Gemini key',
+  'PUT /v1/embed-default': 'app: later — which memory search engine new agents get (Status → Tools, or hatchabot embedder default)',
+  'POST /v1/embed/move-all': 'app: later — move every agent to a memory search engine (Status → Tools, or hatchabot embedder move-all)',
   'POST /v1/embedder/start': 'app: later — the machine\'s embedding service (Settings → Hosts, or hatchabot embedder start)',
   'POST /v1/embedder/stop': 'app: later — the machine\'s embedding service (Settings → Hosts, or hatchabot embedder stop)',
   'POST /v1/embedder/restart': 'app: later — the machine\'s embedding service (Settings → Hosts, or hatchabot embedder restart)',

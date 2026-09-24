@@ -94,6 +94,9 @@ export interface RebuildCandidate {
   busy: boolean;
   /** Its newest conversation activity (ISO), if known. */
   lastActiveAt?: string;
+  /** Its memory search engine was switched and the rebuild is still owed: done
+   *  in the quiet hours under any policy but manual (the owner asked for it). */
+  switchPending?: boolean;
 }
 
 /**
@@ -112,13 +115,14 @@ export function pickAutoRebuilds(
   const quiet = opts.quiet ?? inQuietHours(now);
   const idleMs = (opts.idleMinutes ?? 10) * 60_000;
   const due = candidates.filter((c) => {
-    if (!c.need || c.ops || c.busy || c.state !== 'RUNNING') return false;
+    if ((!c.need && !c.switchPending) || c.ops || c.busy || c.state !== 'RUNNING') return false;
     if (c.lastActiveAt && now.getTime() - Date.parse(c.lastActiveAt) < idleMs) return false;
-    return c.need.level === 'required' || (policy === 'auto' && quiet);
+    if (c.switchPending && quiet) return true;
+    return !!c.need && (c.need.level === 'required' || (policy === 'auto' && quiet));
   });
   // Required first; then the longest idle.
   due.sort((a, b) =>
-    (a.need!.level === 'required' ? 0 : 1) - (b.need!.level === 'required' ? 0 : 1) ||
+    (a.need?.level === 'required' ? 0 : 1) - (b.need?.level === 'required' ? 0 : 1) ||
     Date.parse(a.lastActiveAt ?? '1970-01-01') - Date.parse(b.lastActiveAt ?? '1970-01-01'));
   return due.slice(0, opts.max ?? 2).map((c) => c.id);
 }

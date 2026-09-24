@@ -263,6 +263,9 @@ Each step ships alone and leaves the fleet as it was.
    first real agent: To Do Agent, 2026-09-23.*
 3. **Flip the fleet default** to `shared` for new agents; a Fleet action
    "Move all to the shared memory engine" rebuilds the rest in batches.
+   *Built in v2.50.0 (Status → Tools; `HATCHABOT_EMBED_DEFAULT`; move-all now /
+   overnight through the rebuild queue and the quiet hours). The default is
+   still `baked` until Chris flips it.*
 4. **Engine-free images**: `EMBED_ENGINE=none`, the label, the build-script
    rule. 2026.9 candidates now build. Delete the "can't build" sentence.
 5. **The port checklist and the candidate gate script.** Only then "Try on

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.50.0] — 2026-09-24
+
+### Added
+- **Memory search for the whole fleet** (Status → Tools): how many agents are on the shared service; what new agents get (`HATCHABOT_EMBED_DEFAULT`); and *Move the rest* — now (idle running agents rebuild two at a time; anyone mid-conversation waits) or overnight (the rebuild policy's quiet hours). A pending switch is picked up in the quiet hours under any policy but manual. CLI: `hatchabot embedder default`, `hatchabot embedder move-all`. Step 3 of docs/embedder-and-openclaw-port-design.md.
+
 ## [2.49.4] — 2026-09-23
 
 ### Fixed

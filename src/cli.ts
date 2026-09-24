@@ -224,6 +224,12 @@ Commands:
                                Which engine an agent's memory search uses —
                                the shared service, or the one in its image.
                                Applies on its next rebuild (it re-indexes then).
+  embedder default [shared|baked]
+                               Which engine NEW agents get (shows it when bare).
+  embedder move-all shared|baked [--now]
+                               Switch every agent on this machine; --now
+                               rebuilds the idle running ones at once, otherwise
+                               the quiet hours do it (never mid-conversation).
   runtime                      Runtime image's OpenClaw version vs the npm latest
   upgrade-image [--version <X>] [--candidate]
                                Rebuild the shared runtime image to a new OpenClaw
@@ -409,7 +415,7 @@ function envQuote(v: string): string {
 // parser took any unlisted flag to have a value, so `--no-telegram` (missing
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
-const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
+const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
@@ -2023,7 +2029,21 @@ async function main() {
         console.log(`"${a.name}" will use the ${mode === 'shared' ? 'shared memory search service' : "image's own engine"} from its next rebuild: hatchabot rebuild ${JSON.stringify(a.name)}`);
         return;
       }
-      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart|use <agent> shared|baked]');
+      if (sub === 'default') {
+        const r: any = rest[1]
+          ? await (await api(ctx, '/v1/embed-default', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ default: rest[1] }) })).json()
+          : await (await api(ctx, '/v1/embed-default')).json();
+        console.log(`new agents use: ${r.default === 'shared' ? 'the shared service' : "the image's own engine"} · ${r.shared} of ${r.total} agents on the shared service${r.pending ? ` · ${r.pending} waiting for a rebuild` : ''}`);
+        return;
+      }
+      if (sub === 'move-all') {
+        const mode = rest[1];
+        if (mode !== 'shared' && mode !== 'baked') fail('usage: hatchabot embedder move-all shared|baked [--now]');
+        const r: any = await (await jsonPost('/v1/embed/move-all', { mode, when: flags.has('now') ? 'now' : 'quiet' })).json();
+        console.log(`${r.switched} agent(s) switched; ${r.queued} rebuilding now, ${r.deferred} in the quiet hours. ${r.shared} of ${r.total} on the shared service.`);
+        return;
+      }
+      if (!['status', 'start', 'stop', 'restart'].includes(sub)) fail('usage: hatchabot embedder [status|start|stop|restart|use <agent> shared|baked|default [shared|baked]|move-all shared|baked [--now]]');
       const r: any = sub === 'status'
         ? await (await api(ctx, '/v1/embedder')).json()
         : await (await api(ctx, `/v1/embedder/${sub}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).json();

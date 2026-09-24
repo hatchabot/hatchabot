@@ -113,7 +113,7 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
-import { EMBED_MODEL_ALIAS, EmbedderService, embedKeyHash } from '../embedder/embedder.js';
+import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
@@ -1589,6 +1589,69 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     },
   };
   (app as unknown as { embedderForProvision?: typeof embedderForProvision }).embedderForProvision = embedderForProvision;
+  /**
+   * The fleet's engine choice: what new agents get, and moving the rest.
+   * A move marks the agents; `now` rebuilds the idle running ones through the
+   * queue at once, `quiet` leaves them to the sweep's quiet hours. Machine
+   * owner only, since it drives the machine's service.
+   */
+  const embedFleetView = () => {
+    const local = store.localHostId();
+    const all = store.listAllActiveAgents().filter((a) => a.hostId === local && !a.ops && a.state !== 'ARCHIVED');
+    return {
+      default: embedDefault(),
+      total: all.length,
+      shared: all.filter((a) => a.embedMode === 'shared').length,
+      pending: all.filter(switchPendingFor).length,
+    };
+  };
+  app.get('/v1/embed-default', async () => embedFleetView());
+  app.put<{ Body: { default?: string } }>('/v1/embed-default', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const mode = req.body?.default;
+    if (mode !== 'shared' && mode !== 'baked') return reply.code(400).send({ error: "default must be 'shared' or 'baked'" });
+    if (mode === 'shared' && !embedder.enabled && !embedder.external) {
+      return reply.code(400).send({ error: 'Turn the memory search service on first (Settings → Hosts).' });
+    }
+    const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env');
+    const wrote = await writeEnvVar(envFile, 'HATCHABOT_EMBED_DEFAULT', mode, () => true,
+      'Written by Hatchabot: which memory search engine new agents get (Status → Tools).')
+      .catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
+    process.env.HATCHABOT_EMBED_DEFAULT = mode;
+    trace()('embed.default_set', { mode });
+    return embedFleetView();
+  });
+  app.post<{ Body: { mode?: string; when?: string } }>('/v1/embed/move-all', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const mode = req.body?.mode, when = req.body?.when ?? 'quiet';
+    if (mode !== 'shared' && mode !== 'baked') return reply.code(400).send({ error: "mode must be 'shared' or 'baked'" });
+    if (when !== 'now' && when !== 'quiet') return reply.code(400).send({ error: "when must be 'now' or 'quiet'" });
+    if (mode === 'shared' && !embedder.enabled && !embedder.external) {
+      return reply.code(400).send({ error: 'Turn the memory search service on first (Settings → Hosts).' });
+    }
+    const local = store.localHostId();
+    const agents = store.listAllActiveAgents().filter((a) =>
+      a.hostId === local && !a.ops && !a.migratedTo && (a.state === 'RUNNING' || a.state === 'STOPPED') && (a.embedMode ?? 'baked') !== mode);
+    let queued = 0;
+    for (const a of agents) {
+      store.setAgentEmbedMode(a.id, mode);
+      trace(a.id)('embed.mode', { mode, by: 'move-all' });
+    }
+    if (when === 'now') {
+      // The idle running ones through the queue (two at a time); the rest wait
+      // for the quiet hours — never mid-conversation.
+      for (const a of agents) {
+        if (a.state !== 'RUNNING' || isBusy(a.id) || inflight.has(a.id)) continue;
+        const last = await lastActiveFor(a).catch(() => undefined);
+        if (last && Date.now() - Date.parse(last) < 10 * 60_000) continue;
+        if (kickRebuild(a.id)) queued++;
+      }
+    }
+    trace()('embed.move_all', { mode, when, switched: agents.length, queued });
+    return { ...embedFleetView(), switched: agents.length, queued, deferred: agents.length - queued };
+  });
+
   app.get('/v1/embedder', async (req) => {
     const v = await embedder.status();
     // The external server's address may carry credentials: the owner's to see.
@@ -3227,6 +3290,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     value.catch(() => imageInfoCache.delete(hostId));
     return value;
   };
+  /** The owner switched its memory search engine and the rebuild is still owed. */
+  const switchPendingFor = (a: Agent): boolean =>
+    a.hostId === store.localHostId() && !a.ops && (a.embedMode ?? 'baked') !== (a.appliedEmbedMode ?? 'baked');
   const rebuildNeedOf = async (a: Agent) => {
     if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return undefined;
     const provider = providerFor(a.hostId);
@@ -3267,20 +3333,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agents = store.listAllActiveAgents().filter((a) => a.state === 'RUNNING' && !a.ops && !a.migratedTo);
     const candidates = await Promise.all(agents.map(async (a) => {
       const need = await rebuildNeedOf(a).then((r) => r?.need, () => undefined);
+      const switchPending = switchPendingFor(a);
       return {
         id: a.id,
         state: a.state,
         ops: a.ops,
         busy: isBusy(a.id) || inflight.has(a.id),
         need,
+        switchPending,
         // Asking an agent when it last talked is a docker exec: only for the ones that matter.
-        lastActiveAt: need ? await lastActiveFor(a).catch(() => undefined) : undefined,
+        lastActiveAt: need || switchPending ? await lastActiveFor(a).catch(() => undefined) : undefined,
       };
     }));
     const picked = pickAutoRebuilds(candidates, policy, now);
     for (const id of picked) {
       const c = candidates.find((x) => x.id === id)!;
-      trace(id)('rebuild.auto', { level: c.need!.level, reasons: c.need!.reasons, policy });
+      trace(id)('rebuild.auto', { level: c.need?.level ?? 'switch', reasons: c.need?.reasons ?? ['memory search engine switch'], policy });
       kickRebuild(id);
     }
     return picked;

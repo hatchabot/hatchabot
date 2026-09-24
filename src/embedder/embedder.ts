@@ -250,6 +250,11 @@ export class EmbedderService {
   }
 }
 
+/** Which engine a NEW agent gets: the fleet default (HATCHABOT_EMBED_DEFAULT), baked unless the owner flipped it. */
+export function embedDefault(env: NodeJS.ProcessEnv = process.env): 'baked' | 'shared' {
+  return env.HATCHABOT_EMBED_DEFAULT?.trim() === 'shared' ? 'shared' : 'baked';
+}
+
 /** Tests and the store use the same hashing as the door. */
 export function embedKeyHash(token: string): string {
   return createHash('sha256').update(token).digest('hex');

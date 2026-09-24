@@ -161,8 +161,10 @@ describe('the embedding service', () => {
 });
 
 describe('what provisioning is handed', () => {
-  afterEach(() => { delete process.env.HATCHABOT_EMBED_URL; delete process.env.HATCHABOT_EMBED_KEY; delete process.env.HATCHABOT_EMBED_MODEL; });
+  afterEach(() => { delete process.env.HATCHABOT_EMBED_URL; delete process.env.HATCHABOT_EMBED_KEY; delete process.env.HATCHABOT_EMBED_MODEL; delete process.env.HATCHABOT_DB; });
   async function app() {
+    // The service keeps its files beside the database: a scratch one, never the checkout's data/.
+    process.env.HATCHABOT_DB = join(mkdtempSync(join(tmpdir(), 'hb-embed-app-')), 'hatchabot.sqlite');
     const store = new Store(new Database(':memory:'));
     store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' } as never);
     store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'a1', slug: 'a1', state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);

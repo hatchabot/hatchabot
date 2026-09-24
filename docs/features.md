@@ -972,6 +972,16 @@ replies continue meanwhile) and checks the engine answers; the row says
 never left without one. Switching back re-indexes the same way. CLI:
 `hatchabot embedder use <agent> shared|baked`.
 
+**The whole fleet** (Status → Tools → *Memory search*, machine owner): how
+many agents are on the shared service, what **new agents** get (their own
+engine, or the shared service — `HATCHABOT_EMBED_DEFAULT`), and **Move the
+rest**: *now* rebuilds the idle running ones through the queue, two at a
+time, and leaves any agent that spoke in the last ten minutes for the quiet
+hours; *overnight* leaves them all to the quiet hours of the rebuild policy.
+Nothing moves mid-conversation. *Move all back* returns every agent to its own
+engine the same way. CLI: `hatchabot embedder default [shared|baked]`,
+`hatchabot embedder move-all shared|baked [--now]`.
+
 **Memory search service** (⚙ Settings → Hosts → *Memory search service*,
 machine owner; `hatchabot embedder [status|start|stop|restart]`). One engine
 on this machine for every agent's semantic memory search, instead of one
