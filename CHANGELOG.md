@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.1] — 2026-09-24
+
+### Changed
+- The section ⚡ shows on any section with an agent of yours in it, not only sections of two or more.
+
 ## [2.59.0] — 2026-09-24
 
 ### Added

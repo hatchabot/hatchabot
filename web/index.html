@@ -10261,7 +10261,7 @@ function renderV2() {
       <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
-          ${s.items.filter(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED').length > 1 ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
+          ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
           <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
         </span></div>
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
