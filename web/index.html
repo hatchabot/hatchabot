@@ -4889,8 +4889,10 @@ function refreshMoveCount() {
 
 // ---- ⚡ Bulk actions: a selection of agents + one action -------------------
 function faAgents() {
-  // Owner's own, non-archived — the set bulk actions operate on.
-  return agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED');
+  // Owner's own, non-archived — the set bulk actions operate on. A→Z, so a
+  // name is where you expect it (the home screen's order is the owner's own).
+  return agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED')
+    .sort((x, y) => x.name.localeCompare(y.name, undefined, { sensitivity: 'base', numeric: true }));
 }
 // ---- Runtime images dialog ---------------------------------------------------
 let rtData = null, rtBuildTimer = null;
