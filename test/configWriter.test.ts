@@ -435,7 +435,8 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     const raw = cmds.map((c) => c.rawShell ?? '').join('\n');
     expect(raw).toContain('cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache');
     expect(raw).toContain('npm_config_offline=true');
-    expect(raw).toContain('openclaw plugins install "@openclaw/slack@$V" --accept-capabilities --acknowledge-install-policy-warning --pin');
+    expect(raw).toContain('openclaw plugins install "@openclaw/slack@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin');
+    expect(raw).toContain('if [ "$H" != "$V" ]'); // only when the baked version moved
     expect(raw).toContain('openclaw plugins install "@openclaw/discord@$V"');
     expect(cmds.some((c) => c.argv.includes('--link') && /slack|discord/.test(c.argv.join(' ')))).toBe(false);
     expect(cmds[0]!.rawShell).toContain('/opt/hatchabot/plugins/slack/');

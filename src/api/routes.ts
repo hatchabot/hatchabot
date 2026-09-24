@@ -114,7 +114,10 @@ import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { eventLabel, IN_PROGRESS } from '../orchestrator/eventLabels.js';
+import { needsPortHeal } from '../openclaw/configWriter.js';
 
+/** The largest file (or folder as .tar.gz) that moves through an agent's Files tab, either way. */
+const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
 /** Rebuilds at once: 1–12; the default 6 fits an ordinary machine. */
 const MAX_REBUILD_CONCURRENCY = 12;
 function clampConcurrency(raw: string | undefined): number {
@@ -433,7 +436,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // — a bigger body only ever sat in memory to be refused (26th audit).
   app.addContentTypeParser(
     'application/octet-stream',
-    { parseAs: 'buffer', bodyLimit: 272 * 1024 * 1024 },
+    { parseAs: 'buffer', bodyLimit: Math.max(272 * 1024 * 1024, FILE_MAX_BYTES) }, // imports, and Files uploads up to their own cap
     (_req, body, done) => done(null, body),
   );
 
@@ -3710,6 +3713,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // Deliberately NOT validated against `docker images`: the point of a
         // pin is often an image that is about to exist (candidate being built).
         // A wrong name fails the next rebuild with a clear error and Retry.
+        // One thing IS checked: no way back across the 2026.8 line. Moving
+        // onto 2026.8+ migrates the volume (state database, roster, auth
+        // store) and 2026.7 cannot read it; the way back is the export taken
+        // before the move (28th audit).
+        if (agent.runtimeRef) {
+          try {
+            const prov = providerFor(agent.hostId);
+            const [running, target] = await Promise.all([prov.info(agent.runtimeRef), prov.currentImageInfo(parsed.data.image ?? undefined)]);
+            if (needsPortHeal(running.openclawVersion) && target.openclawVersion && !needsPortHeal(target.openclawVersion)) {
+              return reply.code(400).send({ error: `This agent's data was migrated for OpenClaw ${running.openclawVersion}; ${parsed.data.image ?? 'the fleet default'} runs ${target.openclawVersion}, which cannot read it. To go back, restore the copy downloaded before the move.` });
+            }
+          } catch { /* no image info: the rebuild will say */ }
+        }
         store.setAgentImage(agent.id, parsed.data.image);
         detachClassIfDrifted(agent.id);
         // Does the pin change what it runs? A tag that IS the image already
@@ -3943,7 +3959,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // again inside (src/orchestrator/agentFiles.ts). Members never see this:
   // the home holds the agent's config, tokens included — the owner's, like
   // the export.
-  const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
   const fsAgent = (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown) => {
     const agent = ownedAgent(req, id);
     if (!agent?.runtimeRef) { reply.code(404).send({ error: 'Not found' }); return undefined; }
@@ -4010,9 +4025,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // The busy guard: an export or restore must not interleave with a write.
     if (busyNow(t.agent, reply)) return reply;
     let res: ExecResult;
-    try { res = await whileBusy(t.agent.id, () => provider.writeToVolume!(t.agent.runtimeRef!, putArgv(t.rel, name, req.query.overwrite === '1'), body)); }
+    try { res = await whileBusy(t.agent.id, () => provider.writeToVolume!(t.agent.runtimeRef!, putArgv(t.rel, name, req.query.overwrite === '1', t.agent.slug), body)); }
     catch { return reply.code(502).send({ error: "Couldn't write into the agent." }); }
     if (res.code === 5) return reply.code(409).send({ error: `${name} is already there — replace it?` });
+    if (res.code === 6) return reply.code(400).send({ error: "That folder leads into OpenClaw's own state — uploads go in the workspace or outside .openclaw." });
     if (res.code !== 0) return fsFailure(reply, res.code);
     return { ok: true, path: t.rel, name, size: body.length };
   });
@@ -4338,6 +4354,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     // Our long-lived bearer tokens are for /v1/*, never for the gateway.
     if (typeof h.authorization === 'string' && /^Bearer (hatchabot|agentclaw)_/.test(h.authorization)) delete h.authorization;
+    // The browser → Hatchabot hop's proxy headers (an HTTPS front such as
+    // Tailscale Serve adds X-Forwarded-For/-Proto) describe THAT hop, not
+    // this one. OpenClaw 2026.9 refuses gateway-authenticated routes that
+    // carry forwarded claims from an address it does not trust
+    // ("proxy_attribution_required" — History Teacher, 2026-09-24), and
+    // 2026.7 already warned about them. They never belonged to the gateway.
+    for (const k of Object.keys(h)) {
+      const l = k.toLowerCase();
+      if (l.startsWith('x-forwarded-') || l === 'forwarded' || l === 'x-real-ip' || l === 'via' || l === 'x-client-ip' || l === 'true-client-ip' || l === 'cf-connecting-ip') delete h[k];
+    }
     return h;
   };
 

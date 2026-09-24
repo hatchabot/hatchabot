@@ -226,3 +226,17 @@ describe('a pin says whether it changes anything', () => {
     expect(unpin.json().sameImage).toBe(true);
   });
 });
+
+describe('no way back across the 2026.8 line', () => {
+  it('refuses a pin (or unpin) onto an image that cannot read a migrated volume', async () => {
+    const { f, provider } = await world();
+    provider.tags.push({ tag: 'hatchabot-runtime:2026.9.6', imageId: 'img-N', openclawVersion: '2026.9.6' });
+    provider.tags.find((t) => t.tag === 'hatchabot-runtime:latest')!.openclawVersion = '2026.7.1-2';
+    provider.infoOverride.set('mock://a1', { imageId: 'img-N', openclawVersion: '2026.9.6' }); // runs 2026.9 already
+    const back = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { image: null } });
+    expect(back.statusCode).toBe(400);
+    expect(back.json().error).toMatch(/cannot read it/);
+    const same = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { image: 'hatchabot-runtime:2026.9.6' } });
+    expect(same.statusCode).toBe(200);
+  });
+});

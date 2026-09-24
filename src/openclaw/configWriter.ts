@@ -259,7 +259,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   const channelPlugin = (kind: 'slack' | 'discord'): ConfigCommand => npmMode
     ? {
       argv: [],
-      rawShell: `V=$(node -p 'require("/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}/package.json").version') && openclaw plugins install "@openclaw/${kind}@$V" --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1 || true`,
+      // Installed once; reinstalled (--force) only when the image's baked
+      // version moved, so a rebuild onto a newer image does not keep an old
+      // copy (28th audit).
+      rawShell: `V=$(node -p 'require("/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}/package.json").version') && H=$(cat /home/node/.openclaw/npm/projects/openclaw-${kind}-*/node_modules/@openclaw/${kind}/package.json 2>/dev/null | node -p 'try{JSON.parse(require("fs").readFileSync(0,"utf8")).version}catch(e){""}'); if [ "$H" != "$V" ]; then openclaw plugins install "@openclaw/${kind}@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1; fi || true`,
     }
     : link(channelPluginDir(kind));
   // 2026.8+ images bake the DuckDuckGo plugin (no longer bundled with

@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import type { Readable } from 'node:stream';
+import { randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -466,16 +467,23 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Read-only mount, no network, the runtime image (GNU tar/find/realpath),
     // as the agent's own uid. stderr is swallowed: a download either streams
     // or the stream errors with the exit code.
+    // Named, so a reader that goes away can have the CONTAINER removed:
+    // killing the docker client alone leaves the one-shot streaming into the
+    // daemon's log until cat/tar finishes (28th audit).
+    const name = `${this.prefix}-fs-${randomBytes(6).toString('hex')}`;
     const child = spawn(this.docker, this.#argv([
-      'run', '--rm', '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
+      'run', '--rm', '--name', name, '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
     ]), { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
     child.stderr.on('data', (c: Buffer) => { if (err.length < 2000) err += c.toString('utf8'); });
     const out = child.stdout;
     child.on('error', (e) => out.destroy(e));
     child.on('close', (code) => { if (code !== 0 && !out.destroyed) out.destroy(new Error(`exit ${code}: ${err.trim().slice(-300)}`)); });
-    // A reader that goes away must not leave the one-shot running.
-    out.on('close', () => { if (child.exitCode === null) child.kill('SIGKILL'); });
+    out.on('close', () => {
+      if (child.exitCode !== null) return;
+      child.kill('SIGKILL');
+      void this.#docker(['rm', '-f', name]).catch(() => {});
+    });
     return out;
   }
 
@@ -960,7 +968,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         '-v', `${dirname(spec.serverKeyFile)}:/keys:ro`,
         spec.image,
         '--embeddings', '-m', `/models/${EMBED_MODEL_BASENAME(spec.modelPath)}`, '--alias', spec.modelAlias,
-        '-c', '2048', '-ub', '2048', '--host', '0.0.0.0', '--port', '8080',
+        '-c', '2048', '-ub', '512', '--host', '0.0.0.0', '--port', '8080',
         '--api-key-file', `/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`, '--no-webui',
       ], IO_TIMEOUT_MS);
       if (run.code !== 0) throw new ProviderError(`embedder failed: ${run.stderr.slice(-500)}`, 'Could not start the embedding service.');

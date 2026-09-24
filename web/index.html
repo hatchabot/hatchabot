@@ -765,6 +765,13 @@
   /* Base images: one row per image, so versions and contents line up. */
   .rt-wrap { overflow-x:auto; margin-top:4px }
   table.rt-tbl { border-collapse:collapse; width:100%; font-size:13px; min-width:600px }
+  /* The Files tab's listing: the name takes the room, sizes line up on the right, buttons stay compact. */
+  table.tbl { border-collapse:collapse; width:100%; font-size:13.5px }
+  table.tbl th { text-align:left; font-weight:600; color:var(--dim); font-size:12px; padding:6px 8px; border-bottom:1px solid var(--line) }
+  table.tbl td { padding:7px 8px; border-bottom:1px solid var(--line); vertical-align:middle }
+  table.tbl td:first-child { width:55%; word-break:break-word }
+  table.tbl .num, table.tbl td:nth-child(2) { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap }
+  table.tbl td:last-child { text-align:right; white-space:nowrap }
   .rt-tbl th { text-align:left; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim);
                font-weight:650; padding:0 8px 6px 0; border-bottom:1px solid var(--line); white-space:nowrap }
   .rt-tbl td { padding:10px 8px 10px 0; border-top:1px solid var(--line); vertical-align:top }
@@ -2387,7 +2394,7 @@
 
 <dialog id="fleetActionsDlg" style="width:min(640px,96vw)">
   <h3 style="margin:0 0 4px">⚡ Bulk actions</h3>
-  <div class="sub" style="margin-bottom:10px">Pick a set of agents, then an action. Selection filters just tick the list for you — adjust by hand after.</div>
+  <div class="sub" style="margin-bottom:10px">Pick a set of agents, then an action. Selection filters just tick the list for you — adjust by hand after. The Hatchabot manager is never in the list; it is handled on its own.</div>
 
   <label style="margin:0">Filter</label>
   <div id="faFilters" style="display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 8px"></div>
@@ -3806,7 +3813,7 @@ async function loadEmbedder() {
     const up = r.embedder === 'running' && r.door === 'running';
     st.textContent = r.external ? `· external server ${r.external}`
       : !r.enabled && r.embedder === 'absent' ? '· off'
-      : up ? `· running${r.doorAddress ? ` at ${r.doorAddress}` : ''}` : `· ${r.enabled ? 'restarting' : 'stopped'} (engine ${r.embedder}, door ${r.door})`;
+      : up ? `· running${r.doorAddress ? ` at ${r.doorAddress}` : ''}` : `· ${r.enabled ? 'restarting' : 'stopped'} (engine ${r.embedder ?? 'absent'}, door ${r.door ?? 'absent'})`;
     st.style.color = up ? 'var(--ok)' : '';
     acts.innerHTML = !myAccount.hostOwner || r.external ? '' : up
       ? `<button class="hbtn" onclick="embedderAction('restart')">Restart</button><button class="hbtn" onclick="embedderAction('stop')">Stop</button>`
@@ -4093,7 +4100,7 @@ async function imageOptionsHtml(pin) {
   let html = '';
   try {
     const d = await api('/v1/runtime/images');
-    html += opt('', `Fleet default — ${d.default}${d.defaultInfo?.openclawVersion ? ` (OpenClaw ${d.defaultInfo.openclawVersion})` : ''}`);
+    html += opt('', `Fleet default${d.default ? ` — ${d.default}` : ''}${d.defaultInfo?.openclawVersion ? ` (OpenClaw ${d.defaultInfo.openclawVersion})` : ''}`);
     const base = (d.tags ?? []).filter(t => t.exists && !t.isDefault && !t.derived);
     const derived = (d.tags ?? []).filter(t => t.exists && t.derived);
     const say = (t) => {
@@ -4895,7 +4902,9 @@ function refreshMoveCount() {
 function faAgents() {
   // Owner's own, non-archived — the set bulk actions operate on. A→Z, so a
   // name is where you expect it (the home screen's order is the owner's own).
-  return agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED')
+  // Never the manager: it is pinned on purpose, moves last, and a bulk stop or
+  // model switch would take the fleet's own operator down with the rest.
+  return agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED' && !a.ops)
     .sort((x, y) => x.name.localeCompare(y.name, undefined, { sensitivity: 'base', numeric: true }));
 }
 // ---- Runtime images dialog ---------------------------------------------------
@@ -7776,7 +7785,7 @@ async function renderFleetOps() {
     const rows = hs.map(h => {
       const local = h.kind === 'local';
       const id = `fleethost-${h.id}`;
-      return `<div class="sub">${local ? '🖥️' : '☁️'} ${esc(h.name)} · ${h.agentCount} agent${h.agentCount === 1 ? '' : 's'}${local ? '' : ` <span id="${id}" style="color:var(--dim)">· checking…</span>`}</div>`;
+      return `<div class="sub">${local ? '🖥️' : '☁️'} ${esc(h.name)} · ${h.agentCount ?? 0} agent${h.agentCount === 1 ? '' : 's'}${local ? '' : ` <span id="${id}" style="color:var(--dim)">· checking…</span>`}</div>`;
     }).join('');
     ops.innerHTML += `<div><b class="sub">Runners</b>${rows}</div>`;
     // Ping each runner in the background and paint its dot.
@@ -10628,7 +10637,7 @@ async function v2UploadFiles(id, path, files) {
   for (const f of list) {
     say(`Uploading ${f.name} (${fmtBytes(f.size)})…`);
     const put = async (overwrite) => fetch(`/v1/agents/${id}/fs/file?path=${encodeURIComponent(path)}&name=${encodeURIComponent(f.name)}${overwrite ? '&overwrite=1' : ''}`,
-      { method: 'PUT', headers: { 'content-type': 'application/octet-stream', ...authHeaders() }, body: f });
+      { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: f }); // the session cookie is the auth
     try {
       let res = await put(false);
       if (res.status === 409) {

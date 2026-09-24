@@ -31,9 +31,9 @@ describe('paths the owner may ask for', () => {
     expect(catArgv("it's")[2]).toContain(`'/home/node/it'\\''s'`);
   });
   it('parses a listing and names a download', () => {
-    const rows = parseListing("d\t4096\t1790000000.5\tout\nf\t120\t1790000100\tnotes.md\nl\t9\t1790000200\tlink\n\n");
-    expect(rows.map((r) => [r.name, r.type, r.size])).toEqual([['out', 'dir', 4096], ['notes.md', 'file', 120], ['link', 'link', 9]]);
-    expect(rows[0]!.mtime).toBe(new Date(1790000000500).toISOString());
+    const rows = parseListing("d\t4096\t1790000000.5\tout\0f\t120\t1790000100\tnotes.md\0l\t9\t1790000200\tlink\0\0");
+    expect(rows.map((r) => [r.name, r.type, r.size])).toEqual([['link', 'link', 9], ['notes.md', 'file', 120], ['out', 'dir', 4096]]);
+    expect(rows[2]!.mtime).toBe(new Date(1790000000500).toISOString());
     expect(downloadName('out/report v2.pdf', 'slug')).toBe('report_v2.pdf');
     expect(downloadName('', 'to-do-agent')).toBe('to-do-agent');
   });
@@ -58,10 +58,10 @@ async function world() {
 describe('GET /v1/agents/:id/fs', () => {
   it('lists a folder from a read-only one-shot, even while the agent is stopped', async () => {
     const { f, provider } = await world();
-    provider.execResponses.set('sh-volume', { code: 0, stdout: "d\t4096\t1790000000\tout\nf\t7\t1790000001\thi.txt\n", stderr: '' });
+    provider.execResponses.set('sh-volume', { code: 0, stdout: "d\t4096\t1790000000\tout\0f\t7\t1790000001\thi.txt\0", stderr: '' });
     const r = await f.inject({ method: 'GET', url: '/v1/agents/a1/fs?path=/out/', headers: as });
     expect(r.statusCode).toBe(200);
-    expect(r.json()).toMatchObject({ path: 'out', entries: [{ name: 'out', type: 'dir' }, { name: 'hi.txt', type: 'file', size: 7 }] });
+    expect(r.json()).toMatchObject({ path: 'out', entries: [{ name: 'hi.txt', type: 'file', size: 7 }, { name: 'out', type: 'dir' }] });
     expect(provider.execLog.at(-1)![1]).toContain("realpath -e '/home/node/out'");
   });
   it('refuses an escaping path, says so when the one-shot finds nothing, and hides other people\'s agents', async () => {
@@ -116,11 +116,13 @@ describe('uploads and opening in the browser', () => {
     expect(uploadAllowed('.openclaw/agents/kitchen/agent', 'kitchen')).toBe(true);
     expect(uploadAllowed('.openclaw/agents/kitchen/agent/inbox', 'kitchen')).toBe(true);
     expect(uploadAllowed('.openclaw/agents/other/agent', 'kitchen')).toBe(false);
-    const sh = putArgv('inbox', "it's.txt", false)[2]!;
+    const sh = putArgv('inbox', "it's.txt", false, 'kitchen')[2]!;
     expect(sh).toContain('realpath -e');
     expect(sh).toContain(`'it'\\''s.txt'`);
     expect(sh).toContain('exit 5');
     expect(sh).toContain('mv -f');
+    expect(sh).toContain('/home/node/.openclaw/agents/kitchen/agent|'); // the state rule, on the resolved directory
+    expect(sh).toContain('if [ -d "$T" ]; then exit 4; fi'); // never into a directory under that name
   });
   it('knows what a browser shows: text as text, pages and images as themselves, unknown binaries download', () => {
     expect(inlineType('notes.md')).toBe('text/plain');

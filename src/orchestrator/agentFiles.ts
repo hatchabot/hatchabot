@@ -57,7 +57,8 @@ function guard(rel: string): string {
 export function listShell(rel: string): string {
   // find -printf: %y type letter, %s bytes, %T@ mtime epoch, %f name. GNU
   // find, which the runtime image has. Only the direct children.
-  return `${guard(rel)} [ -d "$P" ] || exit 4; find "$P" -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%f\\n' 2>/dev/null | LC_ALL=C sort -t $'\\t' -k4,4`;
+  // NUL between entries: a newline in a file name must not split a record.
+  return `${guard(rel)} [ -d "$P" ] || exit 4; find "$P" -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T@\\t%f\\0' 2>/dev/null`;
 }
 
 /** Type letter, size and kind of one path: "y\tsize" (d = dir, f = file). */
@@ -72,7 +73,7 @@ export function duShell(rel: string): string {
 
 export function parseListing(stdout: string): AgentFileEntry[] {
   const out: AgentFileEntry[] = [];
-  for (const line of stdout.split('\n')) {
+  for (const line of stdout.split('\0')) {
     if (!line) continue;
     const [t, size, mtime, ...rest] = line.split('\t');
     const name = rest.join('\t');
@@ -81,7 +82,7 @@ export function parseListing(stdout: string): AgentFileEntry[] {
     const at = Number(mtime);
     out.push({ name, type, size: Number(size) || 0, mtime: Number.isFinite(at) ? new Date(at * 1000).toISOString() : '' });
   }
-  return out;
+  return out.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
 }
 
 /** The argv a read-only one-shot runs to stream one file's bytes to stdout. */
@@ -126,9 +127,15 @@ export function uploadAllowed(relDir: string, slug: string): boolean {
  * and moved into place, so a broken upload never leaves a half file. Exit 5
  * when the name exists and overwriting was not asked for.
  */
-export function putArgv(relDir: string, name: string, overwrite: boolean): string[] {
+export function putArgv(relDir: string, name: string, overwrite: boolean, slug: string): string[] {
   const n = q(name);
-  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; T="$P"/${n}; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; cat > "$T.part-$$" && mv -f "$T.part-$$" "$T"`];
+  // The .openclaw rule again, on the RESOLVED directory: a symlink an agent
+  // made (`~/inbox -> ~/.openclaw`) must not route an upload into its state.
+  const ws = `${AGENT_HOME}/.openclaw/agents/${slug}/agent`;
+  const stateGuard = `case "$P" in ${ws}|${ws}/*) ;; ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`;
+  // A directory (or a link to one) under the target name is refused, not
+  // written into.
+  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; cat > "$T.part-$$" && mv -f "$T.part-$$" "$T"`];
 }
 
 /**

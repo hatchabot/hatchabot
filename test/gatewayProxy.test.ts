@@ -36,8 +36,11 @@ afterEach(() => {
 });
 
 /** A stand-in for the agent's OpenClaw gateway: upgrades, then echoes. */
+/** What the fake gateway last received, for the header tests. */
+let lastGatewayHeaders: Record<string, string | string[] | undefined> = {};
 async function fakeGateway(): Promise<{ port: number; server: Server }> {
-  const server = createServer((_req, res) => {
+  const server = createServer((req, res) => {
+    lastGatewayHeaders = req.headers;
     // What OpenClaw actually sends: framing forbidden outright.
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'; script-src 'self'");
@@ -131,6 +134,20 @@ describe('the console can be embedded by Hatchabot, and only by Hatchabot', () =
     expect(csp).toContain("frame-ancestors 'self'");
     expect(csp).not.toContain("frame-ancestors 'none'");
     expect(csp).toContain("script-src 'self'"); // everything else untouched
+  });
+});
+
+describe('what the gateway is told about the caller', () => {
+  it('proxy-shaped headers from the browser\'s own hop are not forwarded (2026.9 refuses them)', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    const res = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/index.html`, { headers: {
+      'x-hatchabot-owner': OWNER, 'x-forwarded-for': '203.0.113.9', 'x-forwarded-proto': 'https', 'forwarded': 'for=203.0.113.9', 'x-real-ip': '203.0.113.9', 'via': '1.1 tailscale', 'x-custom': 'kept',
+    } }).finally(() => { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; });
+    expect(res.status).toBe(200);
+    for (const k of ['x-forwarded-for', 'x-forwarded-proto', 'forwarded', 'x-real-ip', 'via']) expect(lastGatewayHeaders[k]).toBeUndefined();
+    expect(lastGatewayHeaders['x-custom']).toBe('kept');
   });
 });
 

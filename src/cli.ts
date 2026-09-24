@@ -437,7 +437,7 @@ function envQuote(v: string): string {
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
-const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
+const VALUE_FLAGS = new Set(['at-once', 'agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();

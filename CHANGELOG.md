@@ -2,6 +2,22 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.60.0] — 2026-09-24
+
+### Fixed
+- **Console on OpenClaw 2026.9 behind an HTTPS front.** The console proxy passed the browser's own hop headers (`X-Forwarded-For`, `X-Forwarded-Proto`, `Forwarded`, `X-Real-IP`, `Via`…) on to the agent's gateway; 2026.9 refuses gateway-authenticated routes that carry forwarded claims from an address it does not trust ("Proxy client attribution is required"). Those headers describe the hop to Hatchabot, never the hop to the gateway, and are dropped now on every version.
+- **Uploading from the Files tab in the browser did not work** (it called a helper that does not exist; only `hatchabot put` worked). Found by the 28th audit's review.
+- **No way back across the 2026.8 line:** pinning (or unpinning) an agent onto an image that runs OpenClaw 2026.7 after it moved to 2026.8+ is refused with the reason — the move migrates its state database, roster and auth store, and 2026.7 cannot read them; the way back is the copy downloaded before the move.
+- Files: an abandoned download now removes its one-shot container instead of letting it stream to completion; an upload never lands inside a directory that happens to carry the target name, and the "not into .openclaw" rule is applied to the resolved folder too (a link an agent made cannot route around it); the upload body limit follows `HATCHABOT_FILE_MAX_MB`; a newline in a file name no longer breaks the listing (entries are NUL-separated, A→Z).
+- 2026.8+ images: a Slack/Discord plugin already on the volume is reinstalled (`--force`) when the image's baked version moved, so a rebuild onto a newer image does not keep an old copy.
+- The memory search engine runs with a physical batch of 512 (was 2048): its compute buffers were the part of its memory that grew under a re-index storm. Machines moving many agents at once should also give it a larger cap (`HATCHABOT_EMBEDDER_MEMORY=4g`) and fewer rebuilds at once.
+- Status → Health and Settings → Hosts no longer print "undefined" when a count or state is missing; the image picker's default entry reads "Fleet default" even before the image list has loaded.
+
+### Changed
+- The Files tab's listing is a proper table: the name takes the room, sizes line up, buttons stay compact.
+- The Hatchabot manager is never listed in Bulk actions — it is pinned on purpose and moves last; a bulk stop or model switch would take the fleet's own operator down with the rest.
+- README documents `HATCHABOT_FILE_MAX_MB` and the widened `HATCHABOT_REBUILD_CONCURRENCY`; the deck and the website carry fresh screenshots.
+
 ## [2.59.9] — 2026-09-24
 
 ### Fixed

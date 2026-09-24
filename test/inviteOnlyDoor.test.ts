@@ -98,7 +98,10 @@ describe('a window held open for a named person', () => {
     const bound = await claimFirstContact(
       { store: s, provider, sleep: async () => {} },
       { agentId: 'a1', runtimeRef: 'ref', accountId: 'bot', forUserId: 'user-guest',
-        expect: '@Maria_K', timeoutMs: 40, pollIntervalMs: 5 },
+        // A generous window: the poll is answered on its first call, but a
+        // loaded test run used to eat a 40 ms budget before that call returned
+        // (flaky about one full run in ten, 2026-09-24).
+        expect: '@Maria_K', timeoutMs: 5000, pollIntervalMs: 5 },
     );
     // The stranger knocked FIRST and is not bound; Maria is.
     expect(bound).toBe('555');
