@@ -27,6 +27,8 @@ export interface RuntimeSpec {
    * which is what fleet-wide promote moves.
    */
   image?: string;
+  /** Memory cap for the container ("4g"); absent = the provider's default. */
+  memory?: string;
   /**
    * Set when this spec re-provisions an existing runtime (rebuild, retry).
    * The provider MUST keep using the same underlying storage so the agent's
@@ -323,6 +325,8 @@ export interface RuntimeProvider {
   logs(runtimeRef: string, lines: number): Promise<string>;
   /** Live CPU and memory of every Hatchabot container on this daemon (docker stats). */
   stats?(): Promise<ContainerStats[]>;
+  /** Change a container's memory cap in place — running or stopped, no restart (docker update). */
+  updateMemory?(runtimeRef: string, cap: string): Promise<void>;
 
   /** Only the model-call lines ("[model-fetch] response …") logged since `sinceIso`, each prefixed with its timestamp. */
   modelCallLog(runtimeRef: string, sinceIso: string): Promise<string>;
@@ -419,6 +423,12 @@ export interface RuntimeInfo {
   startedAt?: string;
   /** A container's: the exit code of its last quit (0 = clean; 137 = killed for memory). */
   lastExitCode?: number;
+  /** A container's: its memory cap in bytes (docker's HostConfig.Memory; 0 = none). */
+  memoryLimitBytes?: number;
+  /** A container's: cgroup memory.peak, memory.events max / oom_kill, when readable (see stats()). */
+  memPeakBytes?: number;
+  memCapHits?: number;
+  memOomKills?: number;
 }
 
 export type EmbedEngine = 'baked' | 'none';

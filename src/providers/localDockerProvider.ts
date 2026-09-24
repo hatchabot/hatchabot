@@ -180,7 +180,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       // 2026-09-18). Host services (Hatchabot at 172.17.0.1:8080, Ollama) stay
       // reachable. HATCHABOT_AGENT_NETWORK=bridge restores the old behaviour.
       ...(spec.isolated ? ['--network', this.#opsNetworkName(spec.agentId)] : await this.#agentNetworkArgs()),
-      '--memory', process.env.HATCHABOT_AGENT_MEMORY ?? '3g',
+      // A ceiling, not a reservation. Swap is capped at the same figure, so
+      // the cap means what it says on a host that has swap. Per agent or
+      // class from the store (memoryCap.ts); else the fleet default.
+      '--memory', spec.memory ?? process.env.HATCHABOT_AGENT_MEMORY ?? '3g',
+      '--memory-swap', spec.memory ?? process.env.HATCHABOT_AGENT_MEMORY ?? '3g',
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
       // agent's compass (see provision.ts, which derives it per host).
@@ -500,12 +504,14 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.ExitCode}}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.ExitCode}}|{{.HostConfig.Memory}}|{{.Id}}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install, restarts, started, exitCode] = res.stdout.trim().split('|');
+    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install, restarts, started, exitCode, memLimit, fullId] = res.stdout.trim().split('|');
     return {
+      memoryLimitBytes: /^\d+$/.test(memLimit ?? '') ? Number(memLimit) : undefined,
+      ...this.#cgroupMemory((fullId ?? '').slice(0, 12)),
       restartCount: /^\d+$/.test(restarts ?? '') ? Number(restarts) : undefined,
       startedAt: started && !Number.isNaN(Date.parse(started)) ? new Date(started).toISOString() : undefined,
       lastExitCode: /^-?\d+$/.test(exitCode ?? '') ? Number(exitCode) : undefined,
@@ -699,6 +705,13 @@ export class LocalDockerProvider implements RuntimeProvider {
     } catch {
       return {};
     }
+  }
+
+  async updateMemory(runtimeRef: string, cap: string): Promise<void> {
+    const { container } = this.#names(runtimeRef);
+    if (!/^\d+(\.\d+)?[mg]$/.test(cap)) throw new ProviderError(`bad memory cap ${cap}`, 'That memory cap is not valid.');
+    const res = await this.#docker(['update', '--memory', cap, '--memory-swap', cap, container]);
+    if (res.code !== 0) throw new ProviderError(`docker update failed: ${res.stderr.slice(-300)}`, "Couldn't change the container's memory cap.");
   }
 
   async logs(runtimeRef: string, lines: number): Promise<string> {

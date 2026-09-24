@@ -52,7 +52,11 @@ describe('GET /v1/resources', () => {
     // Peak and cap hits travel with the row: five 2026.9 agents had hit a 2 GiB cap hundreds of times unseen (2026-09-24).
     expect(h.containers.find((c: any) => c.agentName === 'mine')).toMatchObject({ cpuPct: 1.5, memBytes: 300e6, memLimitBytes: 2e9, role: 'agent', mine: true, memPeakBytes: 2e9, memCapHits: 1203, memOomKills: 0 });
     expect(h.containers.find((c: any) => c.agentName === 'theirs').mine).toBe(false);
-    expect(h.totals).toEqual({ cpuPct: 2.1, memBytes: 300e6 + 900e6 + 100e6 + 629e6 + 18e6 + 12e6 });
+    expect(h.totals).toMatchObject({ cpuPct: 2.1, memBytes: 300e6 + 900e6 + 100e6 + 629e6 + 18e6 + 12e6 });
+    // Peaks (a row without one counts its current use) and caps add up, against the machine's RAM.
+    expect(h.totals.memPeakBytes).toBe(2e9 + 900e6 + 100e6 + 629e6 + 18e6 + 12e6);
+    expect(h.totals.memCapBytes).toBe(2e9 * 3 + 1e9 + 128e6 * 2);
+    expect(h.totals.machineMemBytes).toBeGreaterThan(0);
   });
 
   it('another account sees its own and shared agents only — no machine containers, nobody else\'s', async () => {

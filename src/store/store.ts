@@ -521,6 +521,10 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN pending_schedules TEXT`,
       // Which agent a share was cut from — lets an accepted copy record lineage.
       `ALTER TABLE agent_shares ADD COLUMN source_agent_id TEXT`,
+      // Per-agent and per-class memory cap (memoryCap.ts); the baseline hides cap hits from before the last change.
+      `ALTER TABLE agents ADD COLUMN memory_cap TEXT`,
+      `ALTER TABLE agents ADD COLUMN memory_cap_baseline INTEGER`,
+      `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // Installation-wide default AI source for NEW agents (single-select):
       // preselected in the create form and preferred by importTemplate's
       // silent fallback — the "household default" once per-member profiles
@@ -883,7 +887,7 @@ export class Store {
   #rowToClass = (r: any): AgentClass => ({
     id: r.id, ownerId: r.owner_id, name: r.name,
     model: r.model ?? undefined, aiProfileId: r.ai_profile_id ?? undefined,
-    image: r.image ?? undefined, createdAt: r.created_at,
+    image: r.image ?? undefined, memoryCap: r.memory_cap ?? undefined, createdAt: r.created_at,
   });
   listAgentClasses(ownerId: string): AgentClass[] {
     return (this.db.prepare(`SELECT * FROM agent_classes WHERE owner_id = ? ORDER BY name`).all(ownerId) as any[]).map(this.#rowToClass);
@@ -892,14 +896,14 @@ export class Store {
     const r = this.db.prepare(`SELECT * FROM agent_classes WHERE id = ?`).get(id) as any;
     return r ? this.#rowToClass(r) : undefined;
   }
-  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string; image?: string }): void {
+  upsertAgentClass(c: { id: string; ownerId: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string }): void {
     this.db
       .prepare(
-        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, image, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id, image = excluded.image`,
+        `INSERT INTO agent_classes (id, owner_id, name, model, ai_profile_id, image, memory_cap, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, model = excluded.model, ai_profile_id = excluded.ai_profile_id, image = excluded.image, memory_cap = excluded.memory_cap`,
       )
-      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, c.image ?? null, new Date().toISOString());
+      .run(c.id, c.ownerId, c.name, c.model ?? null, c.aiProfileId ?? null, c.image ?? null, c.memoryCap ?? null, new Date().toISOString());
   }
   deleteAgentClass(id: string): void {
     this.transact(() => {
@@ -2704,6 +2708,12 @@ export class Store {
   }
 
   /** Pin (or clear, with null) the agent's runtime image. Takes effect on rebuild. */
+  /** The agent's own memory cap (null = back to its class's / the fleet default); the baseline is the cap hits at that moment. */
+  setAgentMemoryCap(id: string, cap: string | null, baseline?: number): void {
+    this.db
+      .prepare(`UPDATE agents SET memory_cap = ?, memory_cap_baseline = ?, updated_at = ? WHERE id = ?`)
+      .run(cap, baseline ?? null, new Date().toISOString(), id);
+  }
   setAgentImage(id: string, image: string | null): void {
     this.db
       .prepare(`UPDATE agents SET image = ?, updated_at = ? WHERE id = ?`)
@@ -3464,6 +3474,8 @@ function rowToAgent(r: any): Agent {
     groupAccess: r.group_access ? safeJson(r.group_access, undefined) : undefined,
     richMessages: r.rich_messages === null || r.rich_messages === undefined ? undefined : !!r.rich_messages,
     cronTriggers: !!r.cron_triggers,
+    memoryCap: r.memory_cap ?? undefined,
+    memoryCapBaseline: r.memory_cap_baseline ?? undefined,
     embedMode: r.embed_mode === 'shared' ? 'shared' : undefined,
     appliedEmbedMode: r.applied_embed_mode === 'shared' ? 'shared' : r.applied_embed_mode === 'baked' ? 'baked' : undefined,
     embedIndexedAt: r.embed_indexed_at ?? undefined,

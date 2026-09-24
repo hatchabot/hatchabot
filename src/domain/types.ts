@@ -51,6 +51,8 @@ export interface AgentClass {
   aiProfileId?: string;
   /** Runtime image tag members run on (applied on rebuild); unset = fleet default. */
   image?: string;
+  /** Memory cap members' containers get ("4g") unless they carry their own; unset = fleet default. */
+  memoryCap?: string;
   createdAt: string;
 }
 
@@ -167,6 +169,10 @@ export interface Agent {
    * next rebuild, like a model change.
    */
   image?: string;
+  /** Memory cap on its container ("4g"); unset = its class's, else the fleet default. Applied live and kept across rebuilds. */
+  memoryCap?: string;
+  /** Cap hits the container had recorded when the cap was last set — hits before that are old news. */
+  memoryCapBaseline?: number;
   /** The AI profile the runtime was last configured with (vs the desired one). */
   appliedProfileId?: string;
   /** The model that configuration actually used. */

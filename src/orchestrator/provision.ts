@@ -19,6 +19,7 @@ import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { syncConnections } from './googleConnections.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
+import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 
 /**
  * The `call-agent` tool installed on agents granted peers: consults a peer by
@@ -74,6 +75,11 @@ export interface CreateAgentInput {
   sharedMemory?: boolean;
   /** Optional per-agent model override (cloud only); absent = profile default. */
   model?: string;
+}
+
+/** The cap this agent's container gets (memoryCap.ts): its own, its class's, or the fleet default. */
+export function memoryCapFor(store: Store, agent: Agent): string {
+  return effectiveMemoryCap(agent, agent.classId ? store.getAgentClass(agent.classId) : undefined);
 }
 
 export interface ProvisionDeps {
@@ -596,6 +602,8 @@ export async function buildRuntimeSpec(
     // Pinned image, when the agent has one — a candidate under test, or a
     // derived image with extra system packages. Absent = provider default.
     image: agent.image,
+    // Its own cap, else its class's, else the fleet default (memoryCap.ts).
+    memory: memoryCapFor(store, agent),
     previousRef: agent.runtimeRef,
     ports: [{ host: gateway.port, container: 18789 }],
     workspace: {
@@ -669,6 +677,8 @@ export async function buildRuntimeSpec(
       // Orientation, not configuration: the human name of the machine this
       // agent runs on, refreshed by every rebuild/move.
       HATCHABOT_HOST_NAME: hostLabel,
+      // Its memory budget, so a script can size itself (AGENTS.md says the same).
+      HATCHABOT_MEMORY_CAP: memoryCapFor(store, agent),
       // Google-connection credentials (gog) live ON THE VOLUME: they refresh
       // in place and ride Move/backup/export with the agent, while Share
       // templates never include them. See docs/connections-design.md.
@@ -1090,6 +1100,8 @@ export async function syncDataSourceDocs(
     if (read.code !== 0 || !read.stdout.trim()) return; // no file yet — seed owns it
     let next = replaceSection(read.stdout, DATA_SOURCES_HEADING, dataSourcesSection(sources));
     next = replaceSection(next, '## Memory policy', memoryPolicySection(agent.sharedMemory));
+    // Its memory budget: what its container has, so it sizes jobs to fit.
+    next = replaceSection(next, '## Memory budget', memoryBudgetSection(memoryCapFor(store, agent)));
     // The operator identity: injected so every agent already knows who it serves.
     next = replaceSection(next, OPERATOR_HEADING, operatorSection(store.getOperatorProfile(agent.ownerId)));
     // The management agent's own notes are Hatchabot's: keep the sections that

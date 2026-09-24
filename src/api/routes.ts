@@ -4,7 +4,7 @@ import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { hostname as osHostname } from 'node:os';
+import { hostname as osHostname, totalmem } from 'node:os';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
@@ -21,6 +21,7 @@ import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/ta
 import { randomBytes } from 'node:crypto';
 import { hashPassword, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
+import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
 import { APP_VERSION } from '../domain/appVersion.js';
 import { slackConnector, slackManifest } from '../channels/slack.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
@@ -42,6 +43,7 @@ import {
   slugify,
   MEDIA_KEY_REF,
   SEARCH_KEY_REF,
+  memoryCapFor,
 } from '../orchestrator/provision.js';
 import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
@@ -1262,6 +1264,43 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Assigning a class writes the agent's source and/or model (via the normal
   // fields) and applies it — model live, a source change needs a rebuild. Shared
   // by the assign route and the class-edit propagation.
+  /**
+   * Set (or clear) an agent's own memory cap and apply it to its container
+   * right away. A member may go up to the machine's per-agent maximum
+   * (HATCHABOT_AGENT_MEMORY_MAX, default 8g); the machine owner beyond it.
+   * The cap hits the container has so far become the baseline, so the
+   * "hit its cap" note stops showing hits from before the raise.
+   */
+  const setMemoryCap = async (req: FastifyRequest, agent: Agent, cap: string | null): Promise<{ error?: string; status?: number; applied?: string }> => {
+    let own: string | null = null;
+    if (cap !== null) {
+      const bytes = parseMemoryCap(cap);
+      if (!bytes) return { error: `A memory cap looks like "4g" or "1536m", at least 512m.` };
+      own = formatMemoryCap(bytes);
+      const max = parseMemoryCap(memberMemoryMax())!;
+      if (bytes > max && !ownsLocalHost(req)) {
+        return { status: 403, error: `Up to ${memberMemoryMax()} per agent here; the machine's owner can go higher (HATCHABOT_AGENT_MEMORY_MAX).` };
+      }
+    }
+    const effective = effectiveMemoryCap({ memoryCap: own ?? undefined }, agent.classId ? store.getAgentClass(agent.classId) : undefined);
+    let baseline: number | undefined;
+    const provider = providerFor(agent.hostId);
+    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
+      try { baseline = (await provider.info(agent.runtimeRef)).memCapHits; } catch { /* no reading: no baseline */ }
+      if (provider.updateMemory) {
+        try { await provider.updateMemory(agent.runtimeRef, effective); }
+        catch (err) { return { status: 502, error: err instanceof ProviderError ? err.userMessage : "Couldn't change the container's memory cap." }; }
+      }
+    }
+    store.setAgentMemoryCap(agent.id, own, baseline);
+    trace(agent.id)('memory.cap_set', { cap: own ?? 'default', effective, live: !!agent.runtimeRef });
+    // Tell the agent its new budget (AGENTS.md); best-effort, off the request.
+    if (agent.runtimeRef && agent.state === 'RUNNING') {
+      void syncDataSourceDocs({ store, secrets, provider, channel: deps.channel, log: trace(agent.id) }, agent.id, agent.runtimeRef, trace(agent.id)).catch(() => {});
+    }
+    return { applied: effective };
+  };
+
   const applyClassToAgent = async (
     agent: Agent,
     cls: { model?: string; aiProfileId?: string; image?: string },
@@ -1346,6 +1385,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.code(202).send({ content, pushing: targets.length });
   });
 
+  /** A class cap obeys the same per-agent maximum as an agent's own (memoryCap.ts). */
+  const classCapProblem = (req: FastifyRequest, cap: string): { status: number; error: string } | undefined => {
+    const bytes = parseMemoryCap(cap);
+    if (!bytes) return { status: 400, error: `A memory cap looks like "4g" or "1536m", at least 512m.` };
+    if (bytes > parseMemoryCap(memberMemoryMax())! && !ownsLocalHost(req)) return { status: 403, error: `Up to ${memberMemoryMax()} per agent here; the machine's owner can go higher (HATCHABOT_AGENT_MEMORY_MAX).` };
+    return undefined;
+  };
   app.get('/v1/agent-classes', async (req) => ({ classes: store.listAgentClasses(ownerIdOf(req)) }));
 
   app.post<{ Body: { name?: string; model?: string; aiProfileId?: string; image?: string } }>('/v1/agent-classes', async (req, reply) => {
@@ -1361,8 +1407,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const image = (b as { image?: string }).image?.trim() || undefined;
     if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
     if (image && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    const capIn = (b as { memoryCap?: string }).memoryCap?.trim() || undefined;
+    const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
+    if (capCheck) return reply.code(capCheck.status).send({ error: capCheck.error });
     const id = randomUUID();
-    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined, image });
+    store.upsertAgentClass({ id, ownerId: ownerIdOf(req), name, model: b.model?.trim() || undefined, aiProfileId: b.aiProfileId || undefined, image, memoryCap: capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined });
     return { class: store.getAgentClass(id) };
   });
 
@@ -1371,8 +1420,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const cls = store.getAgentClass(req.params.id);
       if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
-      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null };
+      const b = (req.body ?? {}) as { name?: string; model?: string; aiProfileId?: string; image?: string | null; memoryCap?: string | null };
       const name = b.name !== undefined ? (b.name.trim().slice(0, 48) || cls.name) : cls.name;
+      let memoryCap = cls.memoryCap;
+      if (b.memoryCap !== undefined) {
+        const capIn = b.memoryCap?.trim() || undefined;
+        const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
+        if (capCheck) return reply.code(capCheck.status).send({ error: capCheck.error });
+        memoryCap = capIn ? formatMemoryCap(parseMemoryCap(capIn)!) : undefined;
+      }
       const image = b.image !== undefined ? (b.image?.trim() || undefined) : cls.image;
       if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
       if (image && image !== cls.image && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
@@ -1384,11 +1440,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const src = store.getAIProfile(aiProfileId);
         if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
       }
-      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image });
+      store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap });
       // Propagate the (possibly changed) model/source/image to every agent in the class.
       let applied = 0, needRebuild = 0; const skipped: string[] = [];
       for (const a of store.listAgentsInClass(cls.id)) {
         if (a.state === 'ARCHIVED') continue; // nothing to apply to; it keeps its tag
+        // A class cap reaches members without a cap of their own, live.
+        if (memoryCap !== cls.memoryCap && !a.memoryCap && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
+          const prov = providerFor(a.hostId);
+          const eff = effectiveMemoryCap(a, { memoryCap });
+          try { await prov.updateMemory?.(a.runtimeRef, eff); trace(a.id)('memory.cap_set', { cap: 'class', effective: eff, live: true }); }
+          catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
+        }
         // Image cleared: members the class had pinned go back to the fleet default (needs a rebuild).
         if (!image && cls.image && a.image === cls.image) { store.setAgentImage(a.id, null); applied++; needRebuild++; continue; }
         const r = await applyClassToAgent(a, { model, aiProfileId, image });
@@ -1718,6 +1781,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return { id: h.id, name: h.name, kind: h.kind, containers, totals: {
           cpuPct: Math.round(containers.reduce((s, c) => s + c.cpuPct, 0) * 10) / 10,
           memBytes: containers.reduce((s, c) => s + c.memBytes, 0),
+          // Caps are ceilings, not reservations: what matters is whether the
+          // peaks, all reached at once, would fit the machine.
+          memPeakBytes: containers.reduce((s, c) => s + (c.memPeakBytes ?? c.memBytes), 0),
+          memCapBytes: containers.reduce((s, c) => s + c.memLimitBytes, 0),
+          ...(h.kind === 'local' ? { machineMemBytes: totalmem() } : {}),
         } };
       } catch (err) {
         return { id: h.id, name: h.name, kind: h.kind, containers: [], error: err instanceof ProviderError ? err.userMessage : 'unreachable' };
@@ -3476,6 +3544,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const role = store.accessRole(a.id, ownerIdOf(req));
         return publicAgent(a, {
           selfRestarts: rebuild?.running.restartCount || undefined,
+          // Its memory: the cap it has (its own / class / default), what the
+          // container actually runs with, and how it has fared against it.
+          memoryCap: a.memoryCap,
+          memoryCapEffective: rebuild?.running.memoryLimitBytes ? formatMemoryCap(rebuild.running.memoryLimitBytes) : memoryCapFor(store, a),
+          memoryPeakBytes: rebuild?.running.memPeakBytes,
+          memoryCapHits: rebuild?.running.memCapHits === undefined ? undefined : Math.max(0, rebuild.running.memCapHits - (a.memoryCapBaseline ?? 0)),
+          memoryKills: rebuild?.running.memOomKills,
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
@@ -3645,6 +3720,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           cronTriggers: z.boolean().optional(),
           /** Memory search engine: the image's own, or the machine's shared service. Applies on rebuild. */
           embedMode: z.enum(['baked', 'shared']).optional(),
+          /** Memory cap on its container ("4g"); `null` = back to its class's / the fleet default. Applied live. */
+          memoryCap: z.string().max(16).nullable().optional(),
           /** Home-screen icon: one emoji, and a #rrggbb tint. Cosmetic and
            *  immediate. `null` clears (the app then shows a picked default). */
           icon: z.string().refine(validIcon, { message: 'icon must be a single emoji' }).nullable().optional(),
@@ -3668,6 +3745,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.richMessages === undefined &&
         parsed.data.cronTriggers === undefined &&
         parsed.data.embedMode === undefined &&
+        parsed.data.memoryCap === undefined &&
         parsed.data.icon === undefined &&
         parsed.data.iconColor === undefined
       ) {
@@ -3697,6 +3775,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
         store.setAgentEmbedMode(agent.id, parsed.data.embedMode);
         trace(agent.id)('embed.mode', { mode: parsed.data.embedMode });
+      }
+      if (parsed.data.memoryCap !== undefined) {
+        const r = await setMemoryCap(req, agent, parsed.data.memoryCap);
+        if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
       }
       if (parsed.data.cronTriggers !== undefined) {
         store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
@@ -7081,6 +7163,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       telegramUserId: store.accountTelegram(me.ownerId),
       /** True for the account that owns this machine (admin actions in the UI). */
       hostOwner: ownsLocalHost(req),
+      /** Memory caps: the fleet default and the most a member may give one agent (the owner is unbound). */
+      memoryCapDefault: defaultMemoryCap(),
+      memoryCapMax: ownsLocalHost(req) ? formatMemoryCap(MEMORY_CAP_CEILING_BYTES) : memberMemoryMax(),
       /**
        * The machine's OS, for the machine's owner only: what the setup guide
        * can offer depends on it. "Use this machine's Claude login" only works

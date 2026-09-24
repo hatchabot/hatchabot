@@ -685,10 +685,27 @@ noticed; the count on the card still is.
 
 **Status → Resources** shows, beside each container's memory, its **peak**
 since it started and how many times it **hit its cap** (the kernel had to
-reclaim; a process killed for memory is counted separately). An OpenClaw
-2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top: a
-container that hits the cap needs a bigger one (`HATCHABOT_AGENT_MEMORY`,
-default 3g since v2.62.0; Rebuild to apply) or its heavy work moved out.
+reclaim; a process killed for memory is counted separately), and warns when
+every container's peak at once would want more than 80% of the machine.
+
+## Memory cap: per agent, per class, or the fleet default
+
+A container's memory cap is a ceiling, not a reservation, so one agent can
+have 8 GB while the rest sit at 3 GB and nothing is wasted. The fleet default
+(`HATCHABOT_AGENT_MEMORY`, 3g) covers OpenClaw's own baseline with headroom;
+a **class** can carry a cap for its agents (Settings → Classes), and an
+**agent** its own (its sheet → Runtime → **Memory cap**, or `hatchabot memory
+<agent> 6g`). A change applies to the running container right away, no
+rebuild, and sticks across rebuilds. A member may go up to the machine's
+per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, 8g); the machine's owner
+beyond it. An agent that hits its cap or has processes killed for memory
+shows under Needs attention with a **Give it 1 GB more** button on its sheet.
+
+The agent is told its budget: `HATCHABOT_MEMORY_CAP` in its environment and a
+"Memory budget" section in its AGENTS.md, refreshed when the cap changes, so
+it sizes its jobs to fit (fewer workers, chunked data) instead of running
+them into the kernel. OpenClaw already tells the model when a command was
+killed by SIGKILL and suggests narrowing it.
 
 ## Bulk actions on what you can see
 

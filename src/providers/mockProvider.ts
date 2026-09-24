@@ -143,6 +143,13 @@ export class MockProvider implements RuntimeProvider {
   }
 
   /** Per-runtime overrides of what info() reports (containerGen, onAgentNetwork…). */
+  /** Live cap changes, as docker update would see them. */
+  memoryUpdates: Array<{ runtimeRef: string; cap: string }> = [];
+  async updateMemory(runtimeRef: string, cap: string): Promise<void> {
+    this.#require(runtimeRef);
+    this.memoryUpdates.push({ runtimeRef, cap });
+  }
+
   infoOverride = new Map<string, Partial<RuntimeInfo>>();
   async info(runtimeRef?: string): Promise<RuntimeInfo> {
     return { imageId: 'mock-image', openclawVersion: 'mock', ...(runtimeRef ? this.infoOverride.get(runtimeRef) : {}) };

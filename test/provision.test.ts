@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { memoryBudgetSection } from '../src/orchestrator/memoryCap.js';
 import Database from 'better-sqlite3';
 import {
   buildRuntimeSpec,
@@ -350,6 +351,7 @@ describe('buildRuntimeSpec', () => {
     // the volume-resident gog home (a PATH, not a credential).
     expect(spec.env).toEqual({
       HATCHABOT_HOST_NAME: expect.any(String),
+      HATCHABOT_MEMORY_CAP: '3g',
       GOG_HOME: '/home/node/.openclaw/connections/gog',
       // $HOME is the persistent volume, so the user-install locations are on
       // PATH for every process — that's what makes a tool the agent installs
@@ -673,6 +675,7 @@ describe('AGENTS.md "## Data sources" stays in step with reality', () => {
     const applyBoth = (doc: string) => {
       let n = replaceSection(doc, DATA_SOURCES_HEADING, dataSourcesSection([]));
       n = replaceSection(n, '## Memory policy', memoryPolicySection(shared));
+      n = replaceSection(n, '## Memory budget', memoryBudgetSection('3g'));
       return replaceSection(n, OPERATOR_HEADING, operatorSection(w.store.getOperatorProfile(agent.ownerId)));
     };
     const current = applyBoth(applyBoth('# K\n'));
@@ -770,6 +773,31 @@ describe('a pinned runtime image reaches docker', () => {
     const w = await world();
     await provisionAgent(w.deps, INPUT);
     expect((w.provider as MockProvider).lastSpec!.image).toBeUndefined();
+  });
+});
+
+describe('the memory cap reaches docker, the environment and AGENTS.md', () => {
+  it('its own cap, else its class\'s, else the fleet default — and the agent is told', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const p = w.provider as MockProvider;
+    expect(p.lastSpec!.memory).toBe('3g');
+    expect(p.lastSpec!.env.HATCHABOT_MEMORY_CAP).toBe('3g');
+
+    w.store.upsertAgentClass({ id: 'c1', ownerId: 'o', name: 'Quants', memoryCap: '6g' });
+    w.store.setAgentClass(agent.id, 'c1');
+    p.execResponses.set('sh', { code: 0, stdout: '# K\n\n## Memory policy\n- old\n', stderr: '' });
+    await rebuildAgent(w.deps, agent.id);
+    expect(p.lastSpec!.memory).toBe('6g');
+    expect(p.lastSpec!.env.HATCHABOT_MEMORY_CAP).toBe('6g');
+    const agentsMd = p.execLog.filter((a) => a[0] === 'sh').map((a) => a[1]!).filter((x) => x.includes('base64 -d') && x.includes('AGENTS.md')).at(-1);
+    const doc = agentsMd && Buffer.from(/echo "([A-Za-z0-9+/=]+)"/.exec(agentsMd)![1]!, 'base64').toString('utf8');
+    expect(doc).toContain('## Memory budget');
+    expect(doc).toContain('**6 GB**');
+
+    w.store.setAgentMemoryCap(agent.id, '8g');
+    await rebuildAgent(w.deps, agent.id);
+    expect(p.lastSpec!.memory).toBe('8g');
   });
 });
 

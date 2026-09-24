@@ -214,6 +214,9 @@ Commands:
   logs <agent> [-n <lines>]    Recent runtime output
   events <agent> [-n <count>]  The setup log: what Hatchabot did to it and when
                                (each step of a setup, rebuild or move)
+  memory <agent> [<cap>|default]
+                               Its container's memory cap ("4g"): show, set (applied
+                               live, kept across rebuilds), or back to the default
   console <agent> [--check]    The agent's OpenClaw console address; --check
                                loads it the way a browser would and says
                                whether the app bundle is reachable
@@ -2155,6 +2158,24 @@ async function main() {
       console.log(`${r.agent} (${r.state}) — setup log, newest first`);
       for (const e of r.events) console.log(`  ${e.at.slice(0, 19).replace('T', ' ')}  ${e.label}${e.note ? ` — ${String(e.note).slice(0, 160)}` : ''}`);
       if (!r.events.length) console.log('  (nothing recorded yet)');
+      return;
+    }
+    case 'memory': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot memory <agent> [<cap>|default]'));
+      if (rest[1]) {
+        const cap = rest[1] === 'default' ? null : rest[1];
+        const res = await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ memoryCap: cap }) });
+        const r: any = await res.json();
+        console.log(`${a.name}: memory cap ${cap ? `set to ${cap}` : 'back to the default'} → its container runs with ${r.memoryCapEffective ?? cap ?? 'the default'}${r.state === 'RUNNING' ? ' (applied live)' : ''}`);
+        return;
+      }
+      const list = await agents(ctx);
+      const cur: any = list.find((x: any) => x.id === a.id) ?? a;
+      const mb = (b: number) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
+      console.log(`${cur.name}: ${cur.memoryCap ? `own cap ${cur.memoryCap}` : 'no cap of its own (class or fleet default)'} · container runs with ${cur.memoryCapEffective ?? '?'}`
+        + (cur.memoryPeakBytes ? ` · peak ${mb(cur.memoryPeakBytes)}` : '')
+        + (cur.memoryCapHits ? ` · hit its cap ${cur.memoryCapHits}×` : '')
+        + (cur.memoryKills ? ` · ${cur.memoryKills} process${cur.memoryKills === 1 ? '' : 'es'} killed for memory` : ''));
       return;
     }
     case 'console': {

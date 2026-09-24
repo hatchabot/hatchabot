@@ -1550,6 +1550,15 @@
       </div>
       <div class="sub" id="embedModeStatus" style="margin:-4px 0 4px"></div>
     </div>
+    <div id="memoryCapRow">
+      <label style="margin-top:0">Memory cap <span style="color:var(--dim)">— the most its container may use; applied right away, kept across rebuilds</span></label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="editMemoryCap" style="flex:1;min-width:0;font-size:13px"></select>
+        <button onclick="saveMemoryCap()">Save</button>
+        <button id="memoryBumpBtn" onclick="bumpMemoryCap()" title="One step up, right away">Give it 1 GB more</button>
+      </div>
+      <div class="sub" id="memoryCapStatus" style="margin:-4px 0 4px"></div>
+    </div>
     <div id="imagePinRow">
       <label style="margin-top:0">Image <span style="color:var(--dim)">— which one this agent runs (host owner only)</span></label>
       <div style="display:flex;gap:8px;align-items:center">
@@ -4336,6 +4345,12 @@ function sourceUsage(p) {
 
 // ---- agent classes (model/source tiers) -----------------------------------
 let agentClasses = [];
+function classMemoryOptions(selected) {
+  const max = capBytes(myAccount.memoryCapMax || '8g') || Infinity;
+  const choices = [...new Set([...MEMORY_CAP_CHOICES.filter(c => capBytes(c) <= max), ...(selected ? [selected] : [])])].sort((x, y) => capBytes(x) - capBytes(y));
+  return `<option value=""${selected ? '' : ' selected'}>— memory: fleet default (${capLabel(myAccount.memoryCapDefault || '3g')}) —</option>` +
+    choices.map(c => `<option value="${c}"${c === selected ? ' selected' : ''}>memory ${capLabel(c)}</option>`).join('');
+}
 function classModelOptions(selected) {
   // Union of models across the owner's sources; the server validates a chosen
   // model against the agent's actual source when a class is applied.
@@ -4375,6 +4390,7 @@ function renderClassList() {
       <select onchange="updateClass('${c.id}','model',this.value)">${classModelOptions(c.model || '')}</select>
       <select onchange="updateClass('${c.id}','aiProfileId',this.value)">${classSourceOptions(c.aiProfileId || '')}</select>
       ${myAccount.hostOwner ? `<select onchange="updateClass('${c.id}','image',this.value)" title="Runtime image (applied on rebuild)">${classImageOptions(c.image || '')}</select>` : ''}
+      <select onchange="updateClass('${c.id}','memoryCap',this.value)" title="Memory cap for its agents' containers (applied right away to members without a cap of their own)">${classMemoryOptions(c.memoryCap || '')}</select>
       <button class="danger" onclick="deleteClass('${c.id}','${jsq(c.name)}')">Delete</button>
     </div>`;
   }).join('');
@@ -7644,7 +7660,7 @@ function fleetResDraw(r) {
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '% of ' + mb(c.memLimitBytes) : '—'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memPeakBytes ? mb(c.memPeakBytes) : '—'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums"${c.memCapHits || c.memOomKills ? ' style="text-align:right;font-variant-numeric:tabular-nums;color:var(--warn);font-weight:600"' : ' class="sub"'}>${c.memCapHits === undefined ? '—' : `${c.memCapHits}${c.memOomKills ? ` · killed ${c.memOomKills}×` : ''}`}</td></tr>`).join('')}
-      </tbody></table>${rows.some(c => c.memCapHits) ? `<div class="sub" style="margin-top:6px">⚠ ${rows.filter(c => c.memCapHits).length === 1 ? 'One container has' : `${rows.filter(c => c.memCapHits).length} containers have`} run into the memory cap. An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top of that: raise the cap (<code>HATCHABOT_AGENT_MEMORY</code>, then Rebuild) or move heavy work out of the container.</div>` : ''}` : ''}</div>`;
+      </tbody></table>${h.totals?.machineMemBytes && h.totals.memPeakBytes > 0.8 * h.totals.machineMemBytes ? `<div class="sub" style="margin-top:6px;color:var(--warn)">⚠ If every container hit its peak at once they would want ${mb(h.totals.memPeakBytes)} of this machine's ${mb(h.totals.machineMemBytes)}. Caps are ceilings, not reservations — but this is close: lower some caps or move agents.</div>` : ''}${rows.some(c => c.memCapHits) ? `<div class="sub" style="margin-top:6px">⚠ ${rows.filter(c => c.memCapHits).length === 1 ? 'One container has' : `${rows.filter(c => c.memCapHits).length} containers have`} run into the memory cap. An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top of that: give that agent more (its sheet → Runtime → Memory cap, applied right away) or ask it to run smaller jobs.</div>` : ''}` : ''}</div>`;
   }).join('') || '<div class="sub">Nothing running.</div>';
 }
 async function openFleetResources() {
@@ -9237,6 +9253,46 @@ async function saveEmbedMode() {
     await refresh(false);
   } catch (e) { toast(e.message); }
 }
+// ---- memory cap: a ceiling on the agent's container, its own or its class's or the fleet default ----
+const MEMORY_CAP_CHOICES = ['1g', '2g', '3g', '4g', '6g', '8g', '12g', '16g', '24g', '32g', '48g', '64g'];
+const capBytes = (c) => { const m = /^(\d+(?:\.\d+)?)([mg])$/i.exec(c || ''); return m ? Math.round(Number(m[1]) * (m[2].toLowerCase() === 'g' ? 1073741824 : 1048576)) : 0; };
+const capLabel = (c) => { const b = capBytes(c); return b >= 1073741824 ? `${Number.isInteger(b / 1073741824) ? b / 1073741824 : (b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`; };
+function fillMemoryCapRow(a) {
+  const dflt = myAccount.memoryCapDefault || '3g';
+  const max = capBytes(myAccount.memoryCapMax || '8g') || Infinity;
+  const cls = a.classId ? (agentClasses || []).find(c => c.id === a.classId) : null;
+  const inherited = cls?.memoryCap ? `its class's ${capLabel(cls.memoryCap)}` : `the fleet default, ${capLabel(dflt)}`;
+  const choices = [...new Set([...MEMORY_CAP_CHOICES.filter(c => capBytes(c) <= max), ...(a.memoryCap ? [a.memoryCap] : [])])].sort((x, y) => capBytes(x) - capBytes(y));
+  $('editMemoryCap').innerHTML = `<option value="">No cap of its own — ${esc(inherited)}</option>` + choices.map(c => `<option value="${c}">${capLabel(c)}${c === dflt ? ' (the fleet default)' : ''}</option>`).join('');
+  $('editMemoryCap').value = a.memoryCap || '';
+  $('memoryBumpBtn').hidden = !(a.state === 'RUNNING' || a.state === 'STOPPED') || (capBytes(a.memoryCapEffective) + 1073741824 > max);
+  $('memoryCapStatus').textContent = memoryCapText(a);
+}
+function memoryCapText(a) {
+  const mb = (b) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
+  const bits = [`Its container runs with ${a.memoryCapEffective ? capLabel(a.memoryCapEffective) : 'the default'}`];
+  if (a.memoryPeakBytes) bits.push(`peak ${mb(a.memoryPeakBytes)} since it started`);
+  if (a.memoryCapHits) bits.push(`hit its cap ${a.memoryCapHits}×`);
+  if (a.memoryKills) bits.push(`${a.memoryKills} of its processes killed for memory`);
+  const s = bits.join(' · ') + '.';
+  return (a.memoryCapHits || a.memoryKills) ? s + ' A cap it keeps hitting starves its own jobs: give it more, or ask it to run smaller ones. The agent knows its budget (AGENTS.md → Memory budget).' : s;
+}
+async function saveMemoryCap() {
+  const v = $('editMemoryCap').value;
+  try {
+    const r = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { memoryCap: v || null } });
+    toast(v ? `Memory cap ${capLabel(v)}${r.state === 'RUNNING' ? ' — applied to the running container' : ''}.` : 'Memory cap back to the default.');
+    await refresh(false);
+    const a = agents.find(x => x.id === editAgentId); if (a) fillMemoryCapRow(a);
+  } catch (e) { toast(e.message); }
+}
+async function bumpMemoryCap() {
+  const a = agents.find(x => x.id === editAgentId); if (!a) return;
+  const next = `${Math.floor(capBytes(a.memoryCapEffective || myAccount.memoryCapDefault || '3g') / 1073741824) + 1}g`;
+  $('editMemoryCap').value = next;
+  if ($('editMemoryCap').value !== next) { const o = document.createElement('option'); o.value = next; o.textContent = capLabel(next); $('editMemoryCap').append(o); $('editMemoryCap').value = next; }
+  await saveMemoryCap();
+}
 function embedModeText(a) {
   const want = a.embedMode || 'baked', have = a.appliedEmbedMode;
   const engine = (m) => m === 'shared' ? 'the shared service' : 'its own engine';
@@ -9716,6 +9772,7 @@ function agentAttention(a) {
   if (a.peersPending) rebuild.push('peer changes need a rebuild');
   if (rebuild.length && !rechecking) out.push({ icon: a.rebuild?.level === 'required' ? '⚠' : '🔄', why: rebuild.join('; ') });
   if (a.botNamePending) out.push({ icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
+  if (a.memoryCapHits || a.memoryKills) out.push({ icon: '🧠', why: `${a.memoryKills ? `${a.memoryKills} of its processes ${a.memoryKills === 1 ? 'was' : 'were'} killed for memory` : `it hit its memory cap ${a.memoryCapHits}×`} (${a.memoryCapEffective ? capLabel(a.memoryCapEffective) : 'default cap'}) — raise it under Runtime → Memory cap, or ask it to run smaller jobs` });
   if (a.selfRestarts) out.push({ icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
   return out;
 }
@@ -10506,7 +10563,7 @@ let v2EditFor = null;
 /** Put borrowed edit sections back in their dialog before the pane is redrawn,
  *  or setting innerHTML would destroy them (and every id the edit code uses). */
 /** [block id, the pane it lives in when parked] */
-const V2_MOVED = [['tgMembersBlock', 'paneEditTg'], ['imagePinRow', 'paneEditEnv'], ['embedModeRow', 'paneEditEnv']];
+const V2_MOVED = [['tgMembersBlock', 'paneEditTg'], ['imagePinRow', 'paneEditEnv'], ['embedModeRow', 'paneEditEnv'], ['memoryCapRow', 'paneEditEnv']];
 function v2ParkPanes() {
   // Blocks that live in one classic pane but belong in a different place here:
   // members under Sharing (people, not plumbing), the image picker inside the
@@ -10554,6 +10611,7 @@ function v2EmbedPanes(a, tab) {
     if (blockId === 'tgMembersBlock') void renderEditMembers();
     if (blockId === 'imagePinRow') void populateImagePicker(a.image ?? '');
     if (blockId === 'embedModeRow') { $('editEmbedMode').value = a.embedMode || 'baked'; $('embedModeStatus').textContent = embedModeText(a); }
+    if (blockId === 'memoryCapRow') fillMemoryCapRow(a);
   }
   $('v2Pane').append($('editErr'));
   if (list.some(([p]) => p === 'paneEditConn')) void renderConnections();
@@ -10772,7 +10830,8 @@ function v2Pane(a, tab) {
       ${built ? row('Runtime', `${run || a.state === 'STOPPED' ? B('Rebuild', `rebuild('${id}')`, 'title="New container, memory kept"') : ''}
         ${run && a.hasGateway ? B('OpenClaw console', `v2Close();openGateway('${id}','${jsq(a.slug)}')`) : ''}
         <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
-        <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>`) : ''}
+        <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>
+        <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">

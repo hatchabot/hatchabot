@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.63.0] — 2026-09-24
+
+### Added
+- **A memory cap per agent and per class.** A container's cap is a ceiling, not a reservation, so the heavy agent can have 8 GB while the rest keep the fleet default. An agent's sheet (Runtime → Memory cap) and `hatchabot memory <agent> 6g` set an agent's own cap; Settings → Classes sets one for a class's agents. A change applies to the running container right away — no rebuild — and sticks across rebuilds. Members may go up to the machine's per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, default 8g); the machine's owner beyond it.
+- **The agent knows its budget.** `HATCHABOT_MEMORY_CAP` in its environment and a "Memory budget" section in AGENTS.md (refreshed when the cap changes) tell it to size jobs to fit and that a SIGKILL with no other reason was the memory cap. Genetic Algorithm Trading would have run four backtest workers instead of twelve.
+- **Needs attention when it hits the cap.** An agent that ran into its cap or had processes killed for memory is listed, with what its container runs with, and a **Give it 1 GB more** button on its sheet. Hits from before a raise are not counted again. Status → Resources warns when every container's peak at once would want more than 80% of the machine.
+
 ## [2.62.0] — 2026-09-24
 
 ### Added
