@@ -672,6 +672,19 @@ sheet walks through it in three steps; it takes about five minutes.
 
 Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
+## The Setup log: what is it doing?
+
+An agent that says *Rebuilding* or *Setting up* for a while now says which
+step it is on — on its ⚙ sheet ("Working on: rebuilding the memory index — it
+came up partial · 3 min ago") — and **Setup log** (also in the Checks row)
+opens its whole trail: every step of a setup, rebuild or move with its time,
+in plain words, newest first; failures with their reason. Moving onto a new
+OpenClaw line is the slow case: its migrations run and the memory index is
+rebuilt, minutes on an agent with a long history. The **Activity** view is the
+other half — the agent's own output. CLI: `hatchabot events <agent> [-n 40]`.
+The management agent reads the same trail (`list_events`), so "what is Cyber
+Advisor doing?" works in its chat too.
+
 ## Files: browse and download from an agent
 
 An agent's ⚙ sheet has a **Files** tab (owner only): its home folder as a

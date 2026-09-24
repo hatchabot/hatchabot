@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.57.0] — 2026-09-24
+
+### Added
+- **The Setup log.** An agent being set up or rebuilt now shows the step it is on ("Working on: rebuilding the memory index — it came up partial · 3 min ago") on its ⚙ sheet, and **Setup log** opens its whole trail — every step of a setup, rebuild or move with its time, in plain words, newest first, failures with their reason. Six agents moved to 2026.9 at once looked hung while each rebuilt its memory index. Route `GET /v1/agents/:id/events`; `progress` on the agent list; CLI `hatchabot events <agent>`. Provisioning and rebuilds record their steps (seeding, container started, gateway answered, syncing, settling, re-indexing).
+
 ## [2.56.4] — 2026-09-24
 
 ### Changed

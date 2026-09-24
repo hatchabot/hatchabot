@@ -212,6 +212,8 @@ Commands:
   revert <agent> <snapshotId>  Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
+  events <agent> [-n <count>]  The setup log: what Hatchabot did to it and when
+                               (each step of a setup, rebuild or move)
   files <agent> [path]         List a folder inside the agent (its home by
                                default; the workspace is agents/<slug>/agent
                                under .openclaw). Works stopped or archived.
@@ -2123,6 +2125,18 @@ async function main() {
       if (!/^\d{1,5}$/.test(lines)) fail('-n takes a number of lines');
       const { text } = (await (await api(ctx, `/v1/agents/${a.id}/logs?lines=${lines}`)).json()) as any;
       console.log(text || '(no recent output)');
+      return;
+    }
+    case 'events':
+    case 'setup-log': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot events <agent> [-n count]'));
+      const n = flags.get('lines') ?? '40';
+      if (!/^\d{1,3}$/.test(n)) fail('-n takes a number');
+      const r: any = await (await api(ctx, `/v1/agents/${a.id}/events?limit=${n}`)).json();
+      if (flags.has('json')) { console.log(JSON.stringify(r)); return; }
+      console.log(`${r.agent} (${r.state}) — setup log, newest first`);
+      for (const e of r.events) console.log(`  ${e.at.slice(0, 19).replace('T', ' ')}  ${e.label}${e.note ? ` — ${String(e.note).slice(0, 160)}` : ''}`);
+      if (!r.events.length) console.log('  (nothing recorded yet)');
       return;
     }
     case 'files':

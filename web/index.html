@@ -2074,6 +2074,16 @@
   </div>
 </dialog>
 
+<dialog id="setupLogDlg" style="width:min(720px,94vw)">
+  <h3 style="margin:0 0 4px">Setup log — <span id="setupLogAgent"></span></h3>
+  <div class="sub" style="margin-bottom:8px">What Hatchabot did to this agent and when — each step of a setup, rebuild or move. Newest first. The <b>Activity</b> view shows the agent's own output.</div>
+  <div id="setupLogBody" style="max-height:55vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px">Loading…</div>
+  <div class="actions" style="justify-content:flex-end">
+    <button onclick="loadSetupLog()">Refresh</button>
+    <button class="primary" onclick="setupLogDlg.close()">Close</button>
+  </div>
+</dialog>
+
 <dialog id="cronDlg" style="width:min(720px,94vw)">
   <h3 style="margin:0 0 4px">Scheduled tasks — <span id="cronAgent"></span></h3>
   <div class="sub">
@@ -8058,6 +8068,24 @@ async function openLogs(id, name) {
   await loadLogs();
 }
 
+let setupLogAgentId = null;
+async function openSetupLog(id, name) {
+  setupLogAgentId = id;
+  $('setupLogAgent').textContent = name;
+  setupLogDlg.showModal();
+  await loadSetupLog();
+}
+async function loadSetupLog() {
+  if (!setupLogAgentId) return;
+  try {
+    const r = await api(`/v1/agents/${setupLogAgentId}/events?limit=80`);
+    const when = (iso) => { const d = new Date(iso); return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} ${d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`; };
+    $('setupLogBody').innerHTML = r.events.length
+      ? r.events.map(e => `<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px solid var(--line)"><span class="sub" style="flex:none;font-variant-numeric:tabular-nums">${esc(when(e.at))}</span><span>${esc(e.label)}${e.note ? ` <span class="sub">— ${esc(String(e.note)).slice(0, 200)}</span>` : ''}</span></div>`).join('')
+      : '<div class="sub">Nothing recorded yet.</div>';
+  } catch (e) { $('setupLogBody').textContent = e.message; }
+}
+
 async function loadLogs() {
   if (!logsAgentId) return;
   $('logsText').textContent = 'Loading…';
@@ -10552,6 +10580,8 @@ function v2Pane(a, tab) {
       <div class="v2notices">${agentNotices(a, { skipFailure: true }).trim()}</div>
       ${a.pendingAction?.type === 'bot_token' ? row('Telegram bot', `<div class="grow"><span class="sub">The bot pool is empty, so this agent is waiting for a bot of its own — or it can go on without one.</span>${tokenForm(a)}</div>`) : ''}
       ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
+      ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}
+        <span class="sub">Moving onto a new OpenClaw line runs its migrations and rebuilds the memory index — minutes on an agent with a long history.</span>`) : ''}
       ${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).length
         ? `<ul class="v2why" style="margin:0 0 10px">${(a.state === 'FAILED' ? st.why.filter(w => !/^it failed/.test(w)) : st.why).map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${row('Name &amp; icon', `<span>${esc(a.name)}</span>${B('Change icon', `openV2Icon('${id}')`)}${a.state !== 'ARCHIVED' ? B('Rename…', goto('personality')) : ''}
@@ -10565,9 +10595,9 @@ function v2Pane(a, tab) {
       ${a.state !== 'ARCHIVED' ? row(v2ChannelKinds(a).length > 1 ? 'Messaging' : 'Telegram', v2ChannelKinds(a).length
         ? `<span>${v2ChannelKinds(a).map(k => k === 'telegram' ? `Telegram · @${esc(a.botUsername)}` : V2_CHAN_LABEL[k]).join(' · ')}</span>${run ? agentChannelLinks(a).map(l => `<a class="btn" href="${esc(l.url)}" target="_blank" rel="noopener">Open ${V2_CHAN_LABEL[l.kind]}</a>`).join('') : ''}${B('Manage…', goto('messaging'))}`
         : `<span>None — you talk to it here.</span>${B('Add an app…', goto('messaging'))}`) : ''}
-      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}
+      ${run ? row('Checks', `${B('❤️ Check health', `v2InlineHealth('${id}','${n}')`)}${B('📊 Usage', `openUsage('${id}','${n}')`)}${B('Logs', `openLogs('${id}','${n}')`)}${B('Setup log', `openSetupLog('${id}','${n}')`)}
         ${B('Stop', `act('${id}','stop')`, 'title="Pause it. It keeps its Telegram bot — Archive hands that back."')}
-        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', B('Logs', `openLogs('${id}','${n}')`)) : ''}
+        <div id="v2HealthSlot" hidden style="flex-basis:100%"></div>`) : built ? row('Checks', `${B('Logs', `openLogs('${id}','${n}')`)}${B('Setup log', `openSetupLog('${id}','${n}')`)}`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Rebuild', `${B('↻ Rebuild', `rebuild('${id}')`, 'class="primary" title="A fresh container on the current image. Its memory, files and members are kept."')}
         <span class="sub">Takes about a minute. Do this after changing its image, its data folders, or the agents it can ask — and whenever Hatchabot says an update is waiting.</span>`) : ''}`;
     case 'personality': return `

@@ -279,6 +279,7 @@ async function runProvisionStepsInner(
     const spec = await buildRuntimeSpec(deps, agentId);
 
     // Step 4: runtime + persistent volume.
+    log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
     const { runtimeRef } = await provider.provision(spec);
     recordApplied(store, agentId);
     store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
@@ -830,14 +831,21 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       log('rebuild.abandoned', { agentId, reason: 'agent is being deleted' });
       return current ?? agent;
     }
+    // Each step says what it is, so a card that reads REBUILDING for minutes
+    // can be asked what it is doing (the Setup log; Chris, 2026-09-24).
+    log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
     const { runtimeRef } = await provider.provision(spec);
+    log('runtime.provisioned', { agentId, runtimeRef });
     recordApplied(store, agentId);
     store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     await provider.start(runtimeRef);
+    log('runtime.started', { agentId, runtimeRef });
     // As generous as a retry's health wait: a rebuild boots an agent with its
     // whole history to load, and 30s used to fail exactly the agents that had
     // been used the most.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
+    log('runtime.healthy', { agentId, runtimeRef });
+    log('runtime.syncing', { agentId });
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     // Step 7.6: attached platform connections (Google via gog) land on the
     // volume — best-effort per connection; a Google hiccup never fails a
@@ -847,6 +855,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await syncDataSourceDocs(deps, agentId, runtimeRef, log);
     await syncInstallDocs(deps, agentId, runtimeRef, log);
     await runRebuildHook(deps, agentId, runtimeRef, log);
+    log('runtime.settling', { agentId });
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
     log('runtime.rebuilt', { agentId, runtimeRef });

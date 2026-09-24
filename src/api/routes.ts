@@ -113,6 +113,7 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
+import { eventLabel, IN_PROGRESS } from '../orchestrator/eventLabels.js';
 import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, statShell, tarArgv, uploadAllowed } from '../orchestrator/agentFiles.js';
 import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
@@ -3366,6 +3367,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       Number(process.env.HATCHABOT_REBUILD_SWEEP_MS) || 5 * 60_000).unref();
   }
 
+  /** For a busy agent: its newest event, as a plain step ("re-indexing memory") with its time. */
+  const progressOf = (a: Agent): { at: string; step: string } | undefined => {
+    if (a.state !== 'PROVISIONING' && a.state !== 'REBUILDING') return undefined;
+    const last = store.listEvents([a.id], 1)[0];
+    if (!last || !IN_PROGRESS.has(last.event)) return undefined;
+    return { at: last.at, step: eventLabel(last.event, last.detail) };
+  };
   app.get<{ Querystring: { all?: string } }>('/v1/agents', async (req, reply) => {
     // ?all=1: the HOST OWNER's admin view — every user's agents, with their
     // ownerId, so orphans from other logins (an old test account's leftovers)
@@ -3452,9 +3460,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           rebuild: rebuild?.need,
           /** When its container was last built (docker's creation time). */
           rebuiltAt: rebuild?.running.containerCreatedAt,
+          /** While it is being set up or rebuilt: the step it is on, and since when. */
+          progress: progressOf(a),
         });
       }),
     );
+  });
+
+  /** The agent's own event trail — what Hatchabot did to it and when, in plain words (the Setup log). */
+  app.get<{ Params: { id: string }; Querystring: { limit?: string } }>('/v1/agents/:id/events', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
+    const events = store.listEvents([agent.id], limit).map((e) => ({
+      at: e.at, event: e.event, label: eventLabel(e.event, e.detail),
+      // A little of the detail for the curious; never the whole blob.
+      note: e.detail?.reason ?? e.detail?.error ?? e.detail?.why ?? e.detail?.mountName ?? undefined,
+    }));
+    return { agent: agent.name, state: agent.state, events };
   });
 
   // Recent runtime output — the "is it alive and what is it doing" view.
