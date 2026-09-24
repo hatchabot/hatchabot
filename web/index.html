@@ -2419,6 +2419,10 @@
     <select id="faSource" style="width:auto;min-width:160px;display:none"></select>
     <select id="faImage" style="width:auto;min-width:220px;display:none"></select>
   </div>
+  <div id="faAtOnceRow" class="sub" style="display:none;align-items:center;gap:6px;margin-top:6px">
+    Rebuild at once <select id="faAtOnce" style="width:auto" onchange="setRebuildAtOnce(this.value)"></select>
+    <span>— rebuilds beyond this wait their turn (the machine's setting, also under Settings → Images).</span>
+  </div>
   <div id="faPeersOpts" style="display:none;margin-top:6px">
     <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
       <input type="checkbox" id="faPeersRebuild" checked style="width:auto;margin-top:3px;flex:none">
@@ -5187,6 +5191,13 @@ async function openFleetActions(preset) {
   faRenderAction();
   faCount();
   if (preset?.ids?.length) faSelect('preset');
+  // The machine's "rebuild at once", right where a rebuild is about to be asked for (owner only; others see nothing).
+  void api('/v1/rebuild-concurrency').then(r => {
+    const sel = $('faAtOnce'); if (!sel) return;
+    sel.innerHTML = Array.from({ length: r.max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('');
+    sel.value = String(r.atOnce);
+    $('faAtOnceRow').style.display = myAccount?.hostOwner ? 'flex' : 'none';
+  }).catch(() => {});
 }
 let faPreset = null;
 function faSelect(key) {

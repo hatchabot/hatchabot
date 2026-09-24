@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.6] — 2026-09-24
+
+### Changed
+- **Rebuild at once** is also shown inside the Bulk actions dialog (machine owner), under the action row — the same setting as Settings → Images → Automatic rebuilds.
+
 ## [2.59.5] — 2026-09-24
 
 ### Added
