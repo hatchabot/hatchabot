@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.60.2] — 2026-09-24
+
+### Fixed
+- **The memory search engine no longer creeps toward its cap.** Measured under a re-index-style load: with a 512 batch its working set is ~900 MiB, and with glibc capped at two malloc arenas (`MALLOC_ARENA_MAX=2`) plus bounded threads (8 compute, 4 HTTP) it stays flat where the previous settings crept by ~7 MB a minute — which over hours of moving agents reached 2 GiB. The default cap stays 2 GiB; the idle-over-80% restart remains as a backstop.
+
 ## [2.60.1] — 2026-09-24
 
 ### Fixed

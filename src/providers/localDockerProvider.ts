@@ -3,7 +3,7 @@ import type { Readable } from 'node:stream';
 import { randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir, cpus } from 'node:os';
 import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -958,6 +958,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         'run', '-d', '--name', embedder, '--network', net, '--network-alias', 'embedder',
         '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder',
         '--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+        '-e', 'MALLOC_ARENA_MAX=2',
         // 2 GiB: indexing several agents at once pushed the server past 1 GiB
         // and it was killed mid-index (2026-09-23, five agents switched together).
         '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '2g', '--pids-limit', '64',
@@ -968,7 +969,12 @@ export class LocalDockerProvider implements RuntimeProvider {
         '-v', `${dirname(spec.serverKeyFile)}:/keys:ro`,
         spec.image,
         '--embeddings', '-m', `/models/${EMBED_MODEL_BASENAME(spec.modelPath)}`, '--alias', spec.modelAlias,
-        '-c', '2048', '-ub', '512', '--host', '0.0.0.0', '--port', '8080',
+        // Measured 2026-09-24 under a re-index-style load (8 workers, 150 s):
+        // the working set is ~900 MiB with a 512 batch and stays FLAT with
+        // glibc capped at two malloc arenas and the threads bounded; without
+        // the cap it crept (~7 MB/min — hours of storms reached 2 GiB). So
+        // 2 GiB is enough; raising the cap was never the fix.
+        '-c', '2048', '-ub', '512', '-t', String(Math.min(8, cpus().length || 8)), '--threads-http', '4', '--host', '0.0.0.0', '--port', '8080',
         '--api-key-file', `/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`, '--no-webui',
       ], IO_TIMEOUT_MS);
       if (run.code !== 0) throw new ProviderError(`embedder failed: ${run.stderr.slice(-500)}`, 'Could not start the embedding service.');
