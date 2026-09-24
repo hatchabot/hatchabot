@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.56.3] — 2026-09-24
+
+### Changed
+- The **asks / 5h** tile is gone from the manager's panel (Status → Usage has the full picture); a rate-limited AI source still shows as its own tile.
+
 ## [2.56.2] — 2026-09-24
 
 ### Fixed

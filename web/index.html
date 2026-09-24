@@ -11159,9 +11159,10 @@ function renderV2Stats() {
       go: () => { openFleetActions(); setTimeout(() => faSelect('needs-rebuild'), 50); }, title: 'Agents on an older image' } : null,
     { key: 'tokens', emoji: '🔢', tone: 'var(--info)', num: fmtN(tokens24h), lab: 'tokens / 24h', hot: false,
       go: () => openFleetUsage(), title: 'Tokens your agents have spent across every AI source in the last 24 hours' },
-    { key: 'usage', emoji: limited ? '⛔' : '⚡', tone: limited ? 'var(--bad)' : 'var(--accent)', num: fmtN(usage), lab: 'asks / 5h', hot: limited,
-      art: v2Spark((sourceUsageData?.sources ?? []).find(x => x.hourly?.length)?.hourly),
-      go: () => openFleetUsage(), title: limited ? 'A source is rate-limited' : 'Requests to your AI sources in the last 5 hours — the line is the last 24 hours' },
+    // asks/5h was here; dropped (Chris, 2026-09-24) — Status → Usage has the
+    // full picture. A rate-limited source still shows, as its own tile.
+    limited ? { key: 'usage', emoji: '⛔', tone: 'var(--bad)', num: fmtN(usage), lab: 'rate-limited', hot: true,
+      go: () => openFleetUsage(), title: 'An AI source is rate-limited — open Usage' } : null,
     backupAgeH !== null ? { key: 'backup', emoji: '🗄', tone: backupAgeH > 36 ? 'var(--warn)' : 'var(--ok)',
       num: backupAgeH < 1 ? '<small>just now</small>' : backupAgeH < 48 ? `${Math.round(backupAgeH)}<small>h</small>` : `${Math.round(backupAgeH / 24)}<small>d</small>`,
       lab: 'last backup', hot: backupAgeH > 36, go: () => openAiDlg('backups'),
@@ -11175,7 +11176,7 @@ function renderV2Stats() {
   // One line, always (Chris, 2026-09-24): when the numbers and the action
   // tiles do not fit, the least actionable numbers go first — asks/5h, then
   // tokens/24h, spare bots, last backup — never the ones that ask for a click.
-  const dropOrder = { usage: 1, tokens: 2, bots: 3, backup: 4 };
+  const dropOrder = { tokens: 1, bots: 2, backup: 3 };
   const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}"${dropOrder[t.key] ? ` data-drop="${dropOrder[t.key]}"` : ''}>
       <span class="tile">${t.art ?? ''}<span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
       <span class="lab">${esc(t.lab)}</span>
