@@ -368,9 +368,28 @@ describe('the 2026.9 port (OpenClaw 2026.8 and later)', () => {
     expect(heal.rawShell).toContain('lastTouchedAt');
     expect(heal.rawShell).toContain('memorySearch');
     expect(heal.rawShell).toContain('ownership="explicit"');
-    expect(cmds[1]).toMatchObject({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
+    const doctor = cmds.findIndex((c) => c.argv[0] === 'doctor');
+    expect(cmds[doctor]).toMatchObject({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
+    expect(cmds.filter((c) => c.argv[0] === 'doctor')).toHaveLength(2); // the second pass finishes what the first refused
+    // Every JSON edit precedes doctor; doctor precedes every other CLI command.
+    expect(cmds.slice(0, doctor).every((c) => c.argv.length === 0)).toBe(true);
+    expect(cmds.slice(0, doctor).some((c) => c.rawShell?.includes('llama-cpp'))).toBe(false);
     const firstCli = cmds.findIndex((c) => c.argv.length && c.argv[0] !== 'doctor');
-    expect(firstCli).toBeGreaterThan(1);
+    expect(firstCli).toBeGreaterThan(doctor);
+  });
+  it('a shared-engine agent moving to 2026.9 has its llama-cpp link removed before doctor looks', () => {
+    const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6', embed: { baseUrl: 'http://d/v1', token: 't', model: 'e' } });
+    const doctor = cmds.findIndex((c) => c.argv[0] === 'doctor');
+    expect(cmds.slice(0, doctor).some((c) => c.rawShell?.includes('llama-cpp'))).toBe(true);
+    expect(cmds.findIndex((c) => c.argv.join(' ') === 'plugins registry --refresh')).toBeGreaterThan(doctor);
+  });
+  it('links on 2026.8+ carry the install options a local path needs; 2026.7 links carry none', () => {
+    const nine = buildConfigCommands({ ...base, openclawVersion: '2026.9.6', bakedPlugins: ['duckduckgo'], channelPlugins: ['slack'], slack: { botToken: 'x', appToken: 'y', allowFrom: [], rooms: { mode: 'off' } }, embed: { baseUrl: 'http://d/v1', token: 't', model: 'e' } });
+    const links = nine.filter((c) => c.argv[0] === 'plugins' && c.argv[1] === 'install');
+    expect(links.length).toBe(2); // duckduckgo + slack; no baked engine on the shared service
+    for (const l of links) expect(l.argv).toEqual(expect.arrayContaining(['--link', '--force', '--accept-capabilities', '--acknowledge-install-policy-warning']));
+    const seven = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2', channelPlugins: ['slack'], slack: { botToken: 'x', appToken: 'y', allowFrom: [], rooms: { mode: 'off' } } });
+    for (const l of seven.filter((c) => c.argv[0] === 'plugins' && c.argv[1] === 'install')) expect(l.argv).not.toContain('--force');
   });
   it('does none of that on the proven line', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' });
@@ -382,7 +401,7 @@ describe('the 2026.9 port (OpenClaw 2026.8 and later)', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6', bakedPlugins: ['duckduckgo'] });
     expect(cmds[0]!.rawShell).toContain('/opt/hatchabot/plugins/duckduckgo/node_modules/@openclaw/duckduckgo-plugin');
     const flat = cmds.map((c) => c.argv.join(' '));
-    const link = flat.indexOf('plugins install --link /opt/hatchabot/plugins/duckduckgo/node_modules/@openclaw/duckduckgo-plugin');
+    const link = flat.findIndex((l) => l.startsWith('plugins install --link /opt/hatchabot/plugins/duckduckgo/node_modules/@openclaw/duckduckgo-plugin'));
     expect(link).toBeGreaterThan(0);
     expect(link).toBeLessThan(flat.indexOf('plugins enable duckduckgo'));
     // Not baked (an older image): no link, as always.

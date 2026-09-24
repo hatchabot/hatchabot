@@ -191,32 +191,43 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // the CLI itself will not start on such a config. Harmless when the path
   // exists: a shared agent never loads that plugin.
   const baked = new Set(patch.bakedPlugins ?? []);
-  if (needsPortHeal(patch.openclawVersion)) {
-    // Static JSON surgery first — the CLI refuses to start on the old keys —
-    // then doctor's own safe migrations (state database, agents.entries,
-    // device identity) before the first real command. The baked web-search
-    // plugin is put on the load path here too, so doctor finds it and does
-    // not go to npm for it (the seed one-shot may have no network).
+  const port = needsPortHeal(patch.openclawVersion);
+  // Order matters, and every JSON edit comes before the first `openclaw`
+  // command, because the CLI refuses to start on a config it cannot validate:
+  //  1. the 2026.8+ heal (below) — keys 2026.9 no longer accepts;
+  //  2. the shared-engine unlink — a linked path that is not on this image;
+  //  3. doctor's own safe migrations (2026.8+): state database, agents.entries,
+  //     device identity — the CLI refuses every command until they have run;
+  //  4. a registry refresh after the unlink, so `doctor --post-upgrade` stops
+  //     looking for the plugin that is gone.
+  if (port) {
+    // The baked web-search plugin is put on the load path here too, so doctor
+    // finds it and does not go to npm for it (the seed one-shot may have no
+    // network).
     cmds.push({
       argv: [],
       rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;if(c.meta&&"lastTouchedAt" in c.meta){delete c.meta.lastTouchedAt;n++}if(c.agents&&c.agents.defaults&&"memorySearch" in c.agents.defaults){delete c.agents.defaults.memorySearch;n++}c.agents=c.agents||{};if(c.agents.ownership!=="explicit"){c.agents.ownership="explicit";n++}${baked.has('duckduckgo') ? `c.plugins=c.plugins||{};c.plugins.load=c.plugins.load||{};c.plugins.load.paths=Array.isArray(c.plugins.load.paths)?c.plugins.load.paths:[];if(!c.plugins.load.paths.includes("${DUCKDUCKGO_PLUGIN_DIR}")){c.plugins.load.paths.push("${DUCKDUCKGO_PLUGIN_DIR}");n++}` : ''}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
     });
-    cmds.push({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
   }
   if (patch.embed) {
     cmds.push({
       argv: [],
       rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));const p=c.plugins||{};let n=0;if(p.load&&Array.isArray(p.load.paths)){const k=p.load.paths.filter(x=>x!=="${EMBED_PLUGIN_DIR}");if(k.length!==p.load.paths.length){p.load.paths=k;n++}}if(p.entries&&p.entries["llama-cpp"]){delete p.entries["llama-cpp"];n++}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
     });
-    // The persisted plugin registry still records the install; `doctor
-    // --post-upgrade` reads it and complains about the missing path. Rebuilt
-    // from what is actually there. Optional: an older or newer CLI without
-    // the flag must not fail the build over a stale index.
-    cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
   }
+  // Twice: on the first 2026.9.6 candidate the first pass refused its
+  // shared-auth-store step ("resolve the reported migration failure before
+  // retrying") and the second pass then migrated everything (agent database
+  // v1 → v23, shared auth, audit log, workspace state). Idempotent.
+  if (port) for (let i = 0; i < 2; i++) cmds.push({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
+  if (patch.embed) cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
+  // `plugins install --link` on 2026.8+ refuses a local path until its three
+  // "I mean it" options are given (2026.7 asked nothing for a link); the
+  // Dockerfile reads them from `--help`, the writer knows them by version.
+  const link = (dir: string): ConfigCommand => ({ argv: ['plugins', 'install', '--link', dir, ...(port ? ['--force', '--accept-capabilities', '--acknowledge-install-policy-warning'] : [])] });
   // 2026.8+ images bake the DuckDuckGo plugin (no longer bundled with
   // OpenClaw); link it like a channel plugin, then enable as always.
-  if (baked.has('duckduckgo')) cmds.push({ argv: ['plugins', 'install', '--link', DUCKDUCKGO_PLUGIN_DIR] });
+  if (baked.has('duckduckgo')) cmds.push(link(DUCKDUCKGO_PLUGIN_DIR));
   cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
 
   // Local memory embeddings from the image-baked GGUF provider. `--link` points
@@ -227,7 +238,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // silently dead (the fleet-wide gap this closes). `--link` + `enable` are not
   // `config set`, so they break the batch run — harmless, they just run alone.
   if (!patch.embed) {
-    cmds.push({ argv: ['plugins', 'install', '--link', EMBED_PLUGIN_DIR] });
+    cmds.push(link(EMBED_PLUGIN_DIR));
     cmds.push({ argv: ['plugins', 'enable', 'llama-cpp'] });
   }
 
@@ -502,7 +513,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (plugins.has('slack')) {
     if (patch.slack) {
       const sl = patch.slack;
-      cmds.push({ argv: ['plugins', 'install', '--link', channelPluginDir('slack')] });
+      cmds.push(link(channelPluginDir('slack')));
       cmds.push({ argv: ['plugins', 'enable', 'slack'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.mode', 'socket'] });
@@ -526,7 +537,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (plugins.has('discord')) {
     if (patch.discord) {
       const dc = patch.discord;
-      cmds.push({ argv: ['plugins', 'install', '--link', channelPluginDir('discord')] });
+      cmds.push(link(channelPluginDir('discord')));
       cmds.push({ argv: ['plugins', 'enable', 'discord'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', groups(dc.rooms)] });

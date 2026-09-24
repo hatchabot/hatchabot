@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.53.1] — 2026-09-24
+
+### Fixed
+- 2026.9 port, from the second candidate run: on 2026.8+ a `plugins install --link` of a baked plugin carries `--force --accept-capabilities --acknowledge-install-policy-warning` (2026.9 refuses a local path without them; 2026.7 asked nothing); the shared-engine unlink is done before `doctor --fix` looks at the config; and doctor runs twice, because its first pass on a 2026.7 volume refuses the shared-auth-store step and the second pass then migrates everything (agent database v1 → v23, shared auth, audit log, workspace state).
+
 ## [2.53.0] — 2026-09-24
 
 ### Added
