@@ -211,6 +211,9 @@ Commands:
   snapshots <agent>            List restore points
   revert <agent> <snapshotId>  Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
+  telegram remove <agent> [--yes]
+                               Take its bot away: the bot goes back to your pool,
+                               the agent keeps everything and becomes web-only
   logs <agent> [-n <lines>]    Recent runtime output
   events <agent> [-n <count>]  The setup log: what Hatchabot did to it and when
                                (each step of a setup, rebuild or move)
@@ -2045,6 +2048,19 @@ async function main() {
         }
         if (h.containers.some((c: any) => c.memCapHits)) console.log('  ⚠ containers that hit their memory cap need a bigger one (HATCHABOT_AGENT_MEMORY, then Rebuild) or their heavy work moved out.');
       }
+      return;
+    }
+    case 'telegram': {
+      const sub = rest[0];
+      if (sub !== 'remove') fail('usage: hatchabot telegram remove <agent> [--yes]');
+      const a = await resolveAgent(ctx, rest[1] ?? fail('usage: hatchabot telegram remove <agent> [--yes]'));
+      if (!a.botUsername) fail(`"${a.name}" has no Telegram bot.`);
+      if (!flags.has('yes')) {
+        const typed = await askLine(`Take @${a.botUsername} off "${a.name}"?\nIt keeps everything it knows and becomes web-only; people who reach it on Telegram lose access and get a goodbye. The bot goes back to your pool.\nType y to confirm: `);
+        if (!/^y(es)?$/i.test(typed.trim())) fail('not confirmed — nothing changed');
+      }
+      const r: any = await (await api(ctx, `/v1/agents/${a.id}/telegram`, { method: 'DELETE' })).json();
+      console.log(`@${r.released ?? a.botUsername} is back in your pool. "${a.name}" is rebuilding as a web-only agent — talk to it in the app; a bot can be attached again later.`);
       return;
     }
     case 'skip-telegram': {

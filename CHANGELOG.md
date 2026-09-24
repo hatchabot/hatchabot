@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.65.0] — 2026-09-24
+
+### Added
+- **`hatchabot telegram remove <agent>`** — the CLI twin of the Telegram tab's Remove… button: the bot goes back to your pool, the agent keeps everything it knows and becomes web-only, people who reached it on Telegram get a goodbye. Asks to confirm unless `--yes`.
+
 ## [2.64.0] — 2026-09-24
 
 ### Changed

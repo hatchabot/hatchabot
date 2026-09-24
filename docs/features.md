@@ -613,7 +613,10 @@ renames the bot. For a different handle the agent has to move to a different
 bot: **⚙ Settings → Telegram → 🔁 Change bot** takes a spare from the pool,
 tells every member on the old bot where it went (a bot cannot message someone
 who has never opened a chat with it, so that farewell is the only chance),
-parks the old bot back in the pool, and rebuilds. Memory, files, settings and
+parks the old bot back in the pool, and rebuilds. **Remove…** on the same tab
+(or `hatchabot telegram remove <agent>`) takes the bot away without a
+replacement: the agent keeps everything and becomes web-only, the bot goes
+back to the pool, and a bot can be attached again later. Memory, files, settings and
 members all come with it — nobody pairs again — but the Telegram conversation
 does not: scrollback belongs to the bot, so everyone opens the new one on an
 empty screen.
