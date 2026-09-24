@@ -137,13 +137,19 @@ step "the console answers at ?session=agent:$SLUG:main"
 code="$(inagent "curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18789/?session=agent:$SLUG:main'")"
 [ "$code" = 200 ] && ok || bad "HTTP $code"
 
-step "the channel plugins the image says it carries are known to the runtime"
+step "the plugins the image says it carries are there, and web search is enabled"
 chans="$(docker image inspect "$TAG" --format '{{ index .Config.Labels "org.hatchabot.channels" }}')"
+baked="$(docker image inspect "$TAG" --format '{{ index .Config.Labels "org.hatchabot.plugins" }}')"
 miss=""
 for p in $(printf '%s' "$chans" | tr ',' ' '); do
   inagent "test -f /opt/hatchabot/plugins/$p/node_modules/@openclaw/$p/dist/index.js" >/dev/null || miss="$miss $p"
 done
-[ -z "$miss" ] && ok || bad "missing in the image:$miss"
+for pair in $(printf '%s' "$baked" | tr ',' ' '); do
+  id="${pair%%=*}"; pkg="${pair#*=}"
+  inagent "test -f /opt/hatchabot/plugins/$id/node_modules/$pkg/dist/index.js" >/dev/null || miss="$miss $id"
+done
+ddg="$(inagent 'openclaw plugins list --json 2>/dev/null' | json 'v=>{const a=Array.isArray(v)?v:(v.plugins||[]);const p=a.find(x=>x.id==="duckduckgo");return p?String(p.enabled):"absent"}')"
+[ -z "$miss" ] && [ "$ddg" = true ] && ok || bad "missing in the image:${miss:- none} · duckduckgo plugin: $ddg"
 
 DONE=1
 echo

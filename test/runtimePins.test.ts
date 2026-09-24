@@ -36,6 +36,13 @@ describe('the memory search engine in an image', () => {
     expect(embedEngine('2026.9.4')).toBe('none');
     expect(embedEngine('garbage')).toBe('baked');
   });
+  it('the plugins label lists ids from id=package pairs', async () => {
+    const { parsePluginsLabel } = await import('../src/providers/provider.js');
+    expect(parsePluginsLabel('duckduckgo=@openclaw/duckduckgo-plugin')).toEqual(['duckduckgo']);
+    expect(parsePluginsLabel('')).toEqual([]);
+    expect(parsePluginsLabel(undefined)).toEqual([]);
+    expect(parsePluginsLabel('a=b,Bad Id=x,c')).toEqual(['a', 'c']);
+  });
   it('only an explicit none label means none: every image built before the label has an engine', () => {
     expect(parseEmbedEngineLabel('none')).toBe('none');
     expect(parseEmbedEngineLabel('baked')).toBe('baked');
@@ -46,6 +53,8 @@ describe('the memory search engine in an image', () => {
     const df = readFileSync('docker/Dockerfile.runtime', 'utf8');
     expect(df).toMatch(/^ARG EMBED_ENGINE=baked$/m);
     expect(df).toContain('LABEL org.hatchabot.embed-engine="${EMBED_ENGINE}"');
+    expect(df).toMatch(/^ARG BAKED_PLUGINS=$/m);
+    expect(df).toContain('LABEL org.hatchabot.plugins="${BAKED_PLUGINS}"');
     expect(df).toContain(`ARG EMBED_MODEL_URL=${EMBED_MODEL_URL}`);
     expect(df).toContain(`ARG EMBED_MODEL_SHA256=${EMBED_MODEL_SHA256}`);
   });

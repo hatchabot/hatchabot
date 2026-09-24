@@ -142,6 +142,9 @@ export interface OpenClawConfigPatch {
    * them get exactly the commands they always did.
    */
   channelPlugins?: string[];
+  /** Other plugins the image bakes (label org.hatchabot.plugins), linked at seed
+   *  time: `duckduckgo` on OpenClaw 2026.8+, where web search is no longer bundled. */
+  bakedPlugins?: string[];
   slack?: {
     botToken: string;
     appToken: string;
@@ -234,7 +237,7 @@ export interface RuntimeProvider {
   currentImageInfo(image?: string): Promise<RuntimeInfo>;
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine }[]>;
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[] }[]>;
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
@@ -363,6 +366,9 @@ export interface RuntimeInfo {
   /** The image's memory search engine (label org.hatchabot.embed-engine): `none` =
    *  no engine of its own, its agents use the shared service; absent = baked. */
   embedEngine?: EmbedEngine;
+  /** Other plugins baked into the image by id (label org.hatchabot.plugins),
+   *  e.g. ['duckduckgo'] on OpenClaw 2026.8+; linked into each agent at seed time. */
+  plugins?: string[];
   /** A container's: the setup generation it was made at (label hatchabot.gen; absent = 0). */
   containerGen?: number;
   /** A container's: when it was created (ISO) — i.e. the last rebuild. */
@@ -376,6 +382,11 @@ export type EmbedEngine = 'baked' | 'none';
 /** Parse the org.hatchabot.embed-engine label: only an explicit `none` means none (older images have no label). */
 export function parseEmbedEngineLabel(v: string | undefined): EmbedEngine {
   return (v ?? '').trim() === 'none' ? 'none' : 'baked';
+}
+
+/** Parse the org.hatchabot.plugins label (`id=package` pairs, comma-separated) into plugin ids. */
+export function parsePluginsLabel(v: string | undefined): string[] {
+  return (v ?? '').split(',').map((x) => x.trim().split('=')[0]!.trim()).filter((x) => /^[a-z][a-z0-9-]*$/.test(x));
 }
 
 /** Parse the org.hatchabot.channels label: a comma list, empty when absent. */

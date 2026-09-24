@@ -466,11 +466,13 @@ export async function buildRuntimeSpec(
   const slackRow = store.getChannelForAgent(agentId, 'slack');
   const discordRow = store.getChannelForAgent(agentId, 'discord');
   let channelPlugins: string[] = [];
+  let bakedPlugins: string[] = [];
   let openclawVersion: string | undefined;
   let engineless = false;
   try {
     const info = await deps.provider.currentImageInfo(agent.image ?? undefined);
     channelPlugins = info.channels ?? [];
+    bakedPlugins = info.plugins ?? [];
     openclawVersion = info.openclawVersion;
     engineless = info.embedEngine === 'none';
   } catch { /* no image info: no new channels this build */ }
@@ -611,6 +613,7 @@ export async function buildRuntimeSpec(
         cronTriggers: agent.cronTriggers === true,
         embed,
         openclawVersion,
+        bakedPlugins,
         // Model refs are provider-prefixed; a Google profile configured as
         // `anthropic/gemini-…` provisions healthy and fails on first use.
         provider: local

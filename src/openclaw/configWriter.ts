@@ -72,6 +72,22 @@ export function memoryKeyPrefix(openclawVersion: string | undefined): string {
 }
 export const EMBED_MODEL_PATH = '/opt/agentclaw/models/embeddinggemma-300m-qat-Q8_0.gguf';
 
+/**
+ * OpenClaw 2026.8+ (the 2026.9 port, docs/embedder-and-openclaw-port-design.md):
+ * a volume written by 2026.7 needs healing before its CLI will run at all.
+ * Found on the first 2026.9.6 candidate (2026-09-24): `meta.lastTouchedAt`
+ * and `agents.defaults.memorySearch` are unrecognized keys that fail config
+ * validation; a roster of more than one agent needs `agents.ownership =
+ * "explicit"`; `agents.list` moved to keyed `agents.entries`; and the state
+ * database wants a schema migration that only `openclaw doctor --fix` runs.
+ */
+export function needsPortHeal(version: string | undefined): boolean {
+  return memoryKeyPrefix(version) === 'memory.search';
+}
+/** Where the image keeps a baked non-channel plugin (label org.hatchabot.plugins). */
+export const bakedPluginDir = (id: string, pkg: string) => `/opt/hatchabot/plugins/${id}/node_modules/${pkg}`;
+export const DUCKDUCKGO_PLUGIN_DIR = bakedPluginDir('duckduckgo', '@openclaw/duckduckgo-plugin');
+
 /** Where the image keeps a baked messaging plugin (docker/Dockerfile.runtime). */
 export const channelPluginDir = (kind: 'slack' | 'discord') => `/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}`;
 /** The one account key Hatchabot uses for Slack and Discord in OpenClaw's config. */
@@ -174,6 +190,19 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // it is edited out of the JSON before any `openclaw` command runs, because
   // the CLI itself will not start on such a config. Harmless when the path
   // exists: a shared agent never loads that plugin.
+  const baked = new Set(patch.bakedPlugins ?? []);
+  if (needsPortHeal(patch.openclawVersion)) {
+    // Static JSON surgery first — the CLI refuses to start on the old keys —
+    // then doctor's own safe migrations (state database, agents.entries,
+    // device identity) before the first real command. The baked web-search
+    // plugin is put on the load path here too, so doctor finds it and does
+    // not go to npm for it (the seed one-shot may have no network).
+    cmds.push({
+      argv: [],
+      rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;if(c.meta&&"lastTouchedAt" in c.meta){delete c.meta.lastTouchedAt;n++}if(c.agents&&c.agents.defaults&&"memorySearch" in c.agents.defaults){delete c.agents.defaults.memorySearch;n++}c.agents=c.agents||{};if(c.agents.ownership!=="explicit"){c.agents.ownership="explicit";n++}${baked.has('duckduckgo') ? `c.plugins=c.plugins||{};c.plugins.load=c.plugins.load||{};c.plugins.load.paths=Array.isArray(c.plugins.load.paths)?c.plugins.load.paths:[];if(!c.plugins.load.paths.includes("${DUCKDUCKGO_PLUGIN_DIR}")){c.plugins.load.paths.push("${DUCKDUCKGO_PLUGIN_DIR}");n++}` : ''}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
+    });
+    cmds.push({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
+  }
   if (patch.embed) {
     cmds.push({
       argv: [],
@@ -185,6 +214,9 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // the flag must not fail the build over a stale index.
     cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
   }
+  // 2026.8+ images bake the DuckDuckGo plugin (no longer bundled with
+  // OpenClaw); link it like a channel plugin, then enable as always.
+  if (baked.has('duckduckgo')) cmds.push({ argv: ['plugins', 'install', '--link', DUCKDUCKGO_PLUGIN_DIR] });
   cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
 
   // Local memory embeddings from the image-baked GGUF provider. `--link` points
@@ -554,7 +586,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // frozen per-agent model so the default actually governs.
   cmds.push({
     argv: [],
-    rawShell: `node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;for(const a of (c.agents&&c.agents.list)||[]){if(a.model){delete a.model;n++}}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));'`,
+    rawShell: `node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;const r=c.agents||{};const list=Array.isArray(r.list)?r.list:(r.entries&&typeof r.entries==="object"?Object.values(r.entries):[]);for(const a of list){if(a&&a.model){delete a.model;n++}}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));'`,
   });
 
   if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && patch.setupToken) {

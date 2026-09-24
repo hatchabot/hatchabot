@@ -359,3 +359,39 @@ describe('the OpenClaw console shows the agent by its Hatchabot name', () => {
     expect(cmds.some((c) => c.argv[1] === 'set-identity')).toBe(false);
   });
 });
+
+describe('the 2026.9 port (OpenClaw 2026.8 and later)', () => {
+  const base = { agentId: 'todo', authMode: 'api-key' as const, model: 'm' };
+  it('heals a 2026.7 volume before the first CLI command, then runs doctor\'s safe migrations', () => {
+    const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6' });
+    const heal = cmds[0]!;
+    expect(heal.rawShell).toContain('lastTouchedAt');
+    expect(heal.rawShell).toContain('memorySearch');
+    expect(heal.rawShell).toContain('ownership="explicit"');
+    expect(cmds[1]).toMatchObject({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
+    const firstCli = cmds.findIndex((c) => c.argv.length && c.argv[0] !== 'doctor');
+    expect(firstCli).toBeGreaterThan(1);
+  });
+  it('does none of that on the proven line', () => {
+    const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' });
+    expect(cmds.some((c) => c.rawShell?.includes('lastTouchedAt'))).toBe(false);
+    expect(cmds.some((c) => c.argv[0] === 'doctor')).toBe(false);
+    expect(cmds.some((c) => c.argv.join(' ').includes('duckduckgo-plugin'))).toBe(false);
+  });
+  it('links the baked DuckDuckGo plugin before enabling it, and puts it on the load path for doctor', () => {
+    const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6', bakedPlugins: ['duckduckgo'] });
+    expect(cmds[0]!.rawShell).toContain('/opt/hatchabot/plugins/duckduckgo/node_modules/@openclaw/duckduckgo-plugin');
+    const flat = cmds.map((c) => c.argv.join(' '));
+    const link = flat.indexOf('plugins install --link /opt/hatchabot/plugins/duckduckgo/node_modules/@openclaw/duckduckgo-plugin');
+    expect(link).toBeGreaterThan(0);
+    expect(link).toBeLessThan(flat.indexOf('plugins enable duckduckgo'));
+    // Not baked (an older image): no link, as always.
+    expect(buildConfigCommands({ ...base, openclawVersion: '2026.9.6' }).some((c) => c.argv.includes('--link') && c.argv.join(' ').includes('duckduckgo'))).toBe(false);
+  });
+  it('the frozen-model heal reads agents.entries as well as agents.list', () => {
+    const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6' });
+    const heal = cmds.find((c) => c.rawShell?.includes('a.model'))!;
+    expect(heal.rawShell).toContain('r.entries');
+    expect(heal.rawShell).toContain('r.list');
+  });
+});

@@ -240,8 +240,22 @@ OpenClaw's own formats:
 1. Config keys `configWriter.ts` writes. 2026.9 moved `memorySearch` and
    renamed `agents.list` to `agents.entries`. Run `openclaw doctor` on a
    freshly written candidate and treat every migration it offers as a key to
-   version in the writer.
+   version in the writer. *Found on the first 2026.9.6 candidate (2026-09-24,
+   v2.53.0): a 2026.7 volume fails validation on `meta.lastTouchedAt` and
+   `agents.defaults.memorySearch` (unrecognized), needs
+   `agents.ownership="explicit"` for a two-agent roster, and its state
+   database needs a schema migration (`audit-events-v2`) that only `openclaw
+   doctor --fix` performs — and the CLI refuses every command until it has.
+   The writer now heals the JSON by hand and runs `doctor --fix
+   --non-interactive` before its first command on 2026.8+ (`needsPortHeal`).
+   `agents.list` → `agents.entries` is migrated by doctor with a warning.*
 2. `plugins install --link` options (only matters for channel plugins now).
+   *Unchanged in 2026.9.6 (`--link`, `--accept-capabilities`,
+   `--acknowledge-install-policy-warning`, `--force`). New: the DuckDuckGo
+   web-search plugin is no longer bundled — doctor tries to install
+   `@openclaw/duckduckgo-plugin` from npm on first sight of the config. The
+   image now bakes it (`BAKED_PLUGINS`, label `org.hatchabot.plugins`) and the
+   writer links it like a channel plugin (v2.53.0).*
 3. The management agent's lockdown: tool and group names in `OPS_TOOLS_ALLOW`
    and `OPS_TOOLS_DENY`, and `mcp set`. The drift check will flag a miss; the
    management agent stays pinned and moves last.

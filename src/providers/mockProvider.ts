@@ -134,8 +134,12 @@ export class MockProvider implements RuntimeProvider {
   imageChannels: string[] = ['slack', 'discord'];
   /** What the mock image says about its memory search engine (label embed-engine). */
   imageEmbedEngine: 'baked' | 'none' = 'baked';
+  /** Other plugins the mock image bakes (label org.hatchabot.plugins). */
+  imagePlugins: string[] = [];
+  /** What the mock image claims to run; tests set a 2026.8+ version to see the port paths. */
+  imageOpenclawVersion = 'mock';
   async currentImageInfo(_image?: string): Promise<RuntimeInfo> {
-    return { imageId: 'mock-image', openclawVersion: 'mock', channels: this.imageChannels, embedEngine: this.imageEmbedEngine };
+    return { imageId: 'mock-image', openclawVersion: this.imageOpenclawVersion, channels: this.imageChannels, embedEngine: this.imageEmbedEngine, plugins: this.imagePlugins };
   }
 
   tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: 'baked' | 'none' }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];

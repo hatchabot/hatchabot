@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.53.0] — 2026-09-24
+
+### Added
+- **The OpenClaw 2026.9 port, first pass** (from the first 2026.9.6 candidate through the gate): on a 2026.8+ image the agent's config is healed before the first `openclaw` command — `meta.lastTouchedAt` and `agents.defaults.memorySearch` (keys 2026.9 no longer accepts) are removed, `agents.ownership` is set to `explicit`, and `openclaw doctor --fix --non-interactive` runs the state-database and roster migrations 2026.9 requires; the frozen-model heal reads `agents.entries` as well as `agents.list`. The DuckDuckGo web-search plugin, no longer bundled with OpenClaw from 2026.8, is baked into those images (`BAKED_PLUGINS`, label `org.hatchabot.plugins`) and linked into each agent, so no agent fetches it from npm on first start. Nothing changes for agents on the proven 2026.7 line. The candidate gate also checks the baked plugins and that web search is enabled.
+
 ## [2.52.0] — 2026-09-24
 
 ### Added

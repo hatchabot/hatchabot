@@ -183,6 +183,13 @@ LABEL org.hatchabot.embed-engine="${EMBED_ENGINE}"
 # See docs/channels-slack-discord-design.md.
 ARG CHANNEL_PLUGINS=slack,discord
 ARG CHANNEL_PLUGIN_VERSION=2026.7.1
+# Other plugins baked the same way, as `<id>=<npm package>` pairs. From
+# OpenClaw 2026.8 the web-search plugin is no longer bundled with OpenClaw
+# (2026.7 had `duckduckgo` built in): every agent needs it, and an agent must
+# not fetch it from npm on first start. scripts/build-runtime-image.sh sets
+# `duckduckgo=@openclaw/duckduckgo-plugin` for those versions; empty for the
+# proven default.
+ARG BAKED_PLUGINS=
 RUN export HOME=/tmp/chbuild \
  && mkdir -p "$HOME" /opt/hatchabot/plugins && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
  && HELP="$(openclaw plugins install --help 2>&1)" \
@@ -194,10 +201,19 @@ RUN export HOME=/tmp/chbuild \
       && test -f "/opt/hatchabot/plugins/$p/node_modules/@openclaw/$p/dist/index.js" \
       || exit 1; \
     done \
+ && for pair in $(echo "$BAKED_PLUGINS" | tr ',' ' '); do \
+      id="${pair%%=*}"; pkg="${pair#*=}"; dir="$(echo "$pkg" | sed 's#^@##; s#/#-#')"; \
+      openclaw plugins install "$pkg@${CHANNEL_PLUGIN_VERSION}" $ACK \
+      && cp -a "$HOME"/.openclaw/npm/projects/$dir-*/ "/opt/hatchabot/plugins/$id" \
+      && test -f "/opt/hatchabot/plugins/$id/node_modules/$pkg/dist/index.js" \
+      || exit 1; \
+    done \
  && rm -rf /tmp/chbuild \
  && chmod -R a+rX /opt/hatchabot
-# Read back by the control plane: which channels this image can run.
+# Read back by the control plane: which channels this image can run, and
+# which other plugins it carries (linked into each agent at seed time).
 LABEL org.hatchabot.channels="${CHANNEL_PLUGINS}"
+LABEL org.hatchabot.plugins="${BAKED_PLUGINS}"
 # What this image has beyond the standard list, so the app can say so.
 LABEL org.hatchabot.extra-packages="${EXTRA_PACKAGES}"
 
