@@ -610,9 +610,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       sensitive: true,
     });
     // Also into the default agent "main"'s store — the Control UI lands
-    // there, and auth stores are per-agent.
+    // there, and auth stores are per-agent. 2026.9 refuses to guess the
+    // owner once more than one agent is configured ("Pass --agent <id>").
     cmds.push({
-      argv: ['models', 'auth', 'paste-token', '--provider', 'anthropic', '--expires-in', '365d'],
+      argv: ['models', 'auth', ...(port ? ['--agent', 'main'] : []), 'paste-token', '--provider', 'anthropic', '--expires-in', '365d'],
       stdin: patch.setupToken,
       sensitive: true,
     });

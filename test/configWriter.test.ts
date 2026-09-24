@@ -407,6 +407,11 @@ describe('the 2026.9 port (OpenClaw 2026.8 and later)', () => {
     // Not baked (an older image): no link, as always.
     expect(buildConfigCommands({ ...base, openclawVersion: '2026.9.6' }).some((c) => c.argv.includes('--link') && c.argv.join(' ').includes('duckduckgo'))).toBe(false);
   });
+  it('the second setup-token paste names the default agent on 2026.8+ (2026.9 refuses to guess the owner)', () => {
+    const tok = (v: string) => buildConfigCommands({ ...base, openclawVersion: v, authMode: 'oauth-claude-cli', setupToken: 'sk-ant-oat01-test' }).filter((c) => c.argv.includes('paste-token'));
+    expect(tok('2026.9.6').map((c) => c.argv.slice(0, 4))).toEqual([['models', 'auth', '--agent', 'todo'], ['models', 'auth', '--agent', 'main']]);
+    expect(tok('2026.7.1-2').map((c) => c.argv.slice(0, 4))).toEqual([['models', 'auth', '--agent', 'todo'], ['models', 'auth', 'paste-token', '--provider']]);
+  });
   it('the frozen-model heal reads agents.entries as well as agents.list', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6' });
     const heal = cmds.find((c) => c.rawShell?.includes('a.model'))!;

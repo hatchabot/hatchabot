@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.53.2] — 2026-09-24
+
+### Fixed
+- 2026.9 port, from the third candidate run: the setup token is pasted into the default agent's store with `--agent main` on 2026.8+ — 2026.9 refuses to guess the owner once two agents are configured. (Doctor's two passes were already migrating the volume: the first refuses at the shared auth store, the second upgrades the agent databases and relocates it.)
+
 ## [2.53.1] — 2026-09-24
 
 ### Fixed
