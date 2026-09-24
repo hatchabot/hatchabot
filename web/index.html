@@ -523,7 +523,10 @@
      2026-09-23), as icon tiles in the same row as its numbers. */
   .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:16px 14px; margin:4px 0 2px }
   .v2hubrow .v2stats { margin:0 }
-  .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 14px; margin-left:auto }
+  /* The action tiles follow the numbers, left-justified; only New stands at
+     the far right (Chris, 2026-09-24). */
+  .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 14px; flex:1; margin-left:0 }
+  .v2hubactions .v2btn.v2new { margin-left:auto }
   /* No room for the numbers and the actions on one line: the actions take a
      line of their own, under the numbers and starting where they start, with
      a hairline between — two rows of the same tiles otherwise read as one
@@ -534,7 +537,6 @@
      surface" rule (body.v2 .v2new) otherwise paints the tile's button grey. */
   body.v2 .v2hubactions .v2btn, body.v2 .v2hubactions .v2btn:hover, body.v2 .v2hubactions .v2btn.v2new, body.v2 .v2hubactions .v2btn.v2new:hover {
     display:grid; gap:5px; justify-items:center; width:72px; height:auto; padding:0; border:0; background:none; box-shadow:none; filter:none; border-radius:0; position:relative; --tone:var(--dim) }
-  .v2hubactions .v2btn.v2new { margin-left:10px } /* the New tile stands at the far right, a little apart */
   .v2hubactions .v2btn .v2glyph { width:56px; height:56px; box-sizing:border-box; border-radius:17px; display:grid; place-items:center;
                                   font-size:26px; line-height:1;
                                   background:color-mix(in srgb, var(--tone) 16%, var(--panel-2)); border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
@@ -2384,6 +2386,7 @@
       <option value="source">Switch AI source (rebuild)</option>
       <option value="checkpoint">Chat → Memory (save conversation)</option>
       <option value="rebuild">Rebuild</option>
+      <option value="image">Set runtime image (rebuild)</option>
       <option value="stop">Stop</option>
       <option value="start">Start</option>
       <option value="peers-connect">Connect to each other (agent-to-agent)</option>
@@ -2392,6 +2395,7 @@
     <select id="faModel" style="width:auto;min-width:180px"></select>
     <select id="faClass" style="width:auto;min-width:160px;display:none"></select>
     <select id="faSource" style="width:auto;min-width:160px;display:none"></select>
+    <select id="faImage" style="width:auto;min-width:220px;display:none"></select>
   </div>
   <div id="faPeersOpts" style="display:none;margin-top:6px">
     <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:6px 0 0">
@@ -4049,6 +4053,11 @@ async function populateImagePicker(current) {
   const sel = $('editImage');
   if (!sel) return;
   const pin = current ?? sel.value ?? '';
+  sel.innerHTML = await imageOptionsHtml(pin);
+  sel.value = pin;
+}
+/** The <option>s of every runtime image on this machine, the fleet default first; `pin` is pre-selected. */
+async function imageOptionsHtml(pin) {
   const opt = (value, label) => `<option value="${esc(value)}"${value === pin ? ' selected' : ''}>${esc(label)}</option>`;
   let html = '';
   try {
@@ -4073,8 +4082,7 @@ async function populateImagePicker(current) {
   // A pin to something no longer listed stays selectable, so opening this
   // panel can never silently move the agent off it.
   if (pin && !html.includes(`value="${esc(pin)}"`)) html += opt(pin, `${pin} — not on this machine`);
-  sel.innerHTML = html;
-  sel.value = pin;
+  return html;
 }
 
 async function loadDerivedImages() {
@@ -5147,6 +5155,10 @@ function faSelect(key) {
   // A filter REPLACES the selection (so chips are predictable); Select-all is additive via its own control.
   document.querySelectorAll('.faCb').forEach(cb => { cb.checked = test(cb); });
   faCount();
+  // Show the first agent the filter picked, so the effect is visible without
+  // scrolling (Chris, 2026-09-24).
+  const first = document.querySelector('.faCb:checked');
+  if (first) first.closest('label, div')?.scrollIntoView({ block: 'nearest' });
 }
 function faManual() { document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.remove('fa-on')); faCount(); }
 function faToggleAll(on) { document.querySelectorAll('.faCb').forEach(cb => { cb.checked = on; }); faCount(); }
@@ -5168,6 +5180,8 @@ function faRenderAction() {
   $('faModel').style.display = isModel ? '' : 'none';
   $('faClass').style.display = action === 'class' ? '' : 'none';
   $('faSource').style.display = action === 'source' ? '' : 'none';
+  $('faImage').style.display = action === 'image' ? '' : 'none';
+  if (action === 'image' && !$('faImage').childElementCount) void imageOptionsHtml('').then(h => { $('faImage').innerHTML = h; });
   $('faSourceOpts').style.display = action === 'source' ? '' : 'none';
   $('faPeersOpts').style.display = action.startsWith('peers-') ? '' : 'none';
   const sel = faSelected().map(cb => agents.find(a => a.id === cb.dataset.id)).filter(Boolean);
@@ -5210,6 +5224,7 @@ function faRenderAction() {
   } else {
     $('faApplyBtn').disabled = !sel.length;
     note = action === 'rebuild' ? 'Rebuilds each selected agent (memory kept, brief downtime). Stopped agents are skipped.'
+      : action === 'image' ? 'Pins each selected agent to the chosen image (Fleet default = unpin) and rebuilds the running ones onto it now, memory kept; stopped ones move when they start. A pinned agent stops following fleet promotes.'
       : action === 'stop' ? 'Stops each selected running agent. It keeps its bot.'
       : action === 'start' ? 'Starts each selected stopped agent.'
       : action === 'checkpoint' ? 'Each running agent writes its current conversation into memory (~20s and some tokens per agent — runs one at a time). Stopped agents are skipped; an agent whose AI source is out of credits will report "not saved".'
@@ -5271,6 +5286,8 @@ async function faApply() {
     return;
   }
   if (action === 'rebuild' && !confirm(`Rebuild ${ids.length} agent${ids.length > 1 ? 's' : ''}? Each briefly goes offline (memory kept).`)) return;
+  const image = $('faImage').value || null;
+  if (action === 'image' && !confirm(`${image ? `Pin ${ids.length} agent${ids.length > 1 ? 's' : ''} to ${image.replace(/^[^:]*:/, '')}` : `Put ${ids.length} agent${ids.length > 1 ? 's' : ''} back on the fleet default`} and rebuild the running ones now? Each briefly goes offline (memory kept).`)) return;
   if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
   $('faApplyBtn').disabled = true;
   $('faResults').innerHTML = `Working on ${ids.length}…`;
@@ -5293,6 +5310,10 @@ async function faApply() {
       } else if (action === 'rebuild') {
         if (a?.state !== 'RUNNING' && a?.state !== 'STOPPED') { skipped++; continue; }
         await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+      } else if (action === 'image') {
+        if ((a?.image ?? null) === image) { skipped++; continue; } // already there
+        await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image } });
+        if (a?.state === 'RUNNING' && a.runtimeRef) await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
       } else if (action === 'stop') {
         if (a?.state !== 'RUNNING') { skipped++; continue; }
         await api(`/v1/agents/${id}/stop`, { method: 'POST', body: {} });

@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.56.1] — 2026-09-24
+
+### Added
+- **Bulk actions → Set runtime image (rebuild):** pin a selection of agents to any image on the machine (or back to the fleet default) and rebuild the running ones onto it at once, memory kept; stopped ones move when they start.
+
+### Changed
+- Bulk actions: choosing a filter scrolls the list to the first agent it picked, so the effect is visible without scrolling.
+- The manager's panel: the action tiles (Status, Bulk actions, Setup, Settings) sit left, right after the numbers; only New stands at the far right.
+
 ## [2.56.0] — 2026-09-24
 
 ### Fixed
