@@ -86,6 +86,25 @@ The installer script is on that schedule too: hatchabot.com's `install.sh`
 fetches it from the release `stable` names, not from `main`. A change to
 `install.sh` reaches new users when you promote the release that carries it.
 
+## Trying a newer OpenClaw
+
+Build the candidate (Settings → Images, `hatchabot upgrade-image --candidate
+--version X`, or `OPENCLAW_VERSION=X NO_LATEST=1 ./scripts/build-runtime-image.sh`
+— 2026.8 and later come out engine-free and need the shared memory search
+service running), then run the gate on the host:
+
+```sh
+scripts/candidate-gate.sh hatchabot-runtime:X      # or: npm run gate:candidate -- hatchabot-runtime:X
+```
+
+It makes a throwaway web-only agent, pins it to the candidate, and checks
+everything Hatchabot reads or writes of OpenClaw's own formats (config accepted
+by `openclaw doctor`, memory index + semantic search, the CLI JSON shapes, the
+files it reads, the console address, one real model turn), then deletes the
+agent. Only a candidate that passes is tried on one real agent
+(`hatchabot image try "<agent>" hatchabot-runtime:X`), then promoted. The
+management agent stays pinned and moves last.
+
 ## Cutting a release
 
 1. `npm test && npm run typecheck` green on `main`, and

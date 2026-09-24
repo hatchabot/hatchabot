@@ -39,6 +39,7 @@ describe('what OpenClaw is told', () => {
     const unlink = shared.findIndex((c) => c.rawShell?.includes('/opt/agentclaw/llama-cpp/llama-cpp-provider') && c.rawShell.includes('plugins'));
     expect(unlink).toBeGreaterThanOrEqual(0);
     expect(unlink).toBeLessThan(shared.findIndex((c) => c.argv[0] === 'plugins'));
+    expect(shared.find((c) => c.argv.join(' ') === 'plugins registry --refresh')?.optional).toBe(true);
     expect(buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' }).some((c) => c.rawShell?.includes('llama-cpp'))).toBe(false);
 
     const baked = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' }).map((c) => c.argv.join(' '));

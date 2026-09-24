@@ -179,6 +179,11 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       argv: [],
       rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));const p=c.plugins||{};let n=0;if(p.load&&Array.isArray(p.load.paths)){const k=p.load.paths.filter(x=>x!=="${EMBED_PLUGIN_DIR}");if(k.length!==p.load.paths.length){p.load.paths=k;n++}}if(p.entries&&p.entries["llama-cpp"]){delete p.entries["llama-cpp"];n++}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
     });
+    // The persisted plugin registry still records the install; `doctor
+    // --post-upgrade` reads it and complains about the missing path. Rebuilt
+    // from what is actually there. Optional: an older or newer CLI without
+    // the flag must not fail the build over a stale index.
+    cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
   }
   cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
 

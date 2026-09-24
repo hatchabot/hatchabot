@@ -1,8 +1,10 @@
 # Design: a shared embedding service, and the road to OpenClaw 2026.9
 
-Status, 2026-09-24: steps 1–4 of the build order are built (v2.40.0, v2.41.0,
-v2.50.0, v2.51.0), with the door as its own container (see "Revised" below);
-steps 5–6 are open. Images for OpenClaw 2026.8+ now build (engine-free). Written to be coded
+Status, 2026-09-24: steps 1–5 of the build order are built (v2.40.0, v2.41.0,
+v2.50.0, v2.51.0, v2.52.0), with the door as its own container (see "Revised"
+below); step 6 waits for the fleet to be on `shared`. Images for OpenClaw
+2026.8+ now build (engine-free), and `scripts/candidate-gate.sh` is the gate
+before one is tried on a real agent. Written to be coded
 from directly.
 
 ## The problem
@@ -250,10 +252,19 @@ OpenClaw's own formats:
 6. The console address and its `?session=agent:<slug>:main` parameter.
 7. Claude Code CLI pin and the subscription-token path.
 
-Make this repeatable: extend `npm run e2e:docker` to take
-`HATCHABOT_IMAGE=<candidate>` and assert items 1, 4, 5 and 6 plus one memory
-index and search through the shared service. That script is the gate for
-"Try on one agent".
+Make this repeatable: `scripts/candidate-gate.sh <image tag>` (`npm run
+gate:candidate -- <tag>`) makes a web-only agent on the live control plane,
+pins it to the candidate with `hatchabot image try`, and asserts items 1
+(`openclaw doctor --lint` has no errors, `--post-upgrade` no findings, the
+memory keys are under the right prefix), 4 (`sessions list`, `cron list`,
+`models list`, `devices list` JSON shapes, `--version`), 5 (`sessions.json`,
+`devices/pending.json`) and 6 (the console answers at
+`?session=agent:<slug>:main`), plus one memory index and a semantic search
+(through the shared service when the image has no engine), one real model
+turn, and the channel plugins the image claims. Item 3 (the management
+agent's lockdown) is not covered: that agent stays pinned and moves last.
+The script is the gate for "Try on one agent". *Built in v2.52.0; first run
+against `2026.7.1-2-lite`.*
 
 ## Build order
 
@@ -281,7 +292,9 @@ Each step ships alone and leaves the fleet as it was.
    325 MiB. The first try failed on the baked plugin's stale `--link`
    pointer, fixed in v2.51.1.*
 5. **The port checklist and the candidate gate script.** Only then "Try on
-   one agent" with a 2026.9 candidate.
+   one agent" with a 2026.9 candidate. *Gate built in v2.52.0
+   (`scripts/candidate-gate.sh`); the 2026.9 candidate itself is item 9 of
+   the roadmap.*
 6. Later, when every agent is on `shared`: drop the baked steps from the
    Dockerfile default too.
 

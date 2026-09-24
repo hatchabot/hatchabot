@@ -685,6 +685,12 @@ For one agent's own libraries — a Python stack, a CLI only it needs — a
 **derived image** is still the lighter answer: it layers on the base and only
 the agents you pin to it carry the weight.
 
+Before a candidate goes near a real agent, the host can run the **candidate
+gate** — `scripts/candidate-gate.sh <tag>` — which builds a throwaway agent
+on it and checks everything Hatchabot relies on in OpenClaw (config accepted,
+memory search indexes and answers, the CLI's JSON, the files it reads, the
+console, one model turn), then deletes the agent. See docs/releasing.md.
+
 **Without its own memory search engine.** The build drawer's tick box (or
 `hatchabot upgrade-image --no-engine`, or `EMBED_ENGINE=none` for the script)
 builds the image without the baked memory search engine — about 390 MB

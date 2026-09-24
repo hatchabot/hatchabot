@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.52.0] — 2026-09-24
+
+### Added
+- **Candidate gate** (`scripts/candidate-gate.sh <image tag>`, `npm run gate:candidate`): before a new runtime image is tried on a real agent, a throwaway web-only agent is made on the live control plane, pinned to the candidate, and checked for everything Hatchabot reads or writes of OpenClaw's own formats — `openclaw doctor` accepts the config (no errors, no post-upgrade findings), the memory search keys sit under the right prefix for that version, a memory index and a semantic search work (through the shared service when the image has no engine), one real model turn, the `sessions`/`cron`/`models`/`devices` JSON shapes, `sessions.json` and `devices/pending.json`, the console address, and the channel plugins the image claims. Step 5 of docs/embedder-and-openclaw-port-design.md; documented in docs/releasing.md.
+
+### Fixed
+- After an agent moves to the shared memory search engine, its plugin registry is refreshed (`openclaw plugins registry --refresh`, optional) so `openclaw doctor --post-upgrade` stops warning about the unlinked baked plugin.
+
 ## [2.51.1] — 2026-09-24
 
 ### Fixed
