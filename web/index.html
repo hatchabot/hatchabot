@@ -11151,7 +11151,11 @@ function renderV2Stats() {
       art: `<span class="v2tg v2mk-telegram" aria-hidden="true">${V2_MARK_SVG.telegram}</span>`,
       go: () => openAiDlg('pool'), title: 'Telegram bots parked and ready for a new agent' },
   ].filter(Boolean).slice(0, 8);
-  const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}">
+  // One line, always (Chris, 2026-09-24): when the numbers and the action
+  // tiles do not fit, the least actionable numbers go first — asks/5h, then
+  // tokens/24h, spare bots, last backup — never the ones that ask for a click.
+  const dropOrder = { usage: 1, tokens: 2, bots: 3, backup: 4 };
+  const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}"${dropOrder[t.key] ? ` data-drop="${dropOrder[t.key]}"` : ''}>
       <span class="tile">${t.art ?? ''}<span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
       <span class="lab">${esc(t.lab)}</span>
     </button>`).join('');
@@ -11193,8 +11197,13 @@ function v2HubWrapCheck() {
   const stats = $('v2Stats'), actions = $('v2HubActions');
   if (!stats || !actions || stats.hidden) { row.classList.remove('wrapped'); return; }
   row.classList.remove('wrapped'); // measure the natural layout, not the forced one
-  const wrapped = actions.offsetTop > stats.offsetTop + 8;
-  row.classList.toggle('wrapped', wrapped);
+  const droppable = [...stats.querySelectorAll('[data-drop]')].sort((a, b) => Number(a.dataset.drop) - Number(b.dataset.drop));
+  for (const t of droppable) t.hidden = false;
+  const fits = () => actions.offsetTop <= stats.offsetTop + 8;
+  // Drop the least useful numbers one by one until one line holds everything;
+  // only when none are left does the panel fall back to two rows.
+  for (const t of droppable) { if (fits()) break; t.hidden = true; }
+  row.classList.toggle('wrapped', !fits());
 }
 if (typeof ResizeObserver !== 'undefined') {
   const hubRow = document.querySelector('.v2hubrow');

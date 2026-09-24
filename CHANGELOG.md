@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.55.3] — 2026-09-24
+
+### Changed
+- The manager's panel stays on **one line**: when the numbers and the action tiles do not fit, the least actionable numbers drop first — asks/5h, then tokens/24h, spare bots, last backup — never the ones that ask for a click (awake, set up, to read, to confirm, knocking, to rebuild). Two rows only when nothing is left to drop.
+
 ## [2.55.2] — 2026-09-24
 
 ### Fixed
