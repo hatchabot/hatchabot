@@ -225,6 +225,13 @@ export interface RuntimeProvider {
    */
   execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean }): Promise<ExecResult>;
 
+  /**
+   * Stream a command's stdout from a read-only one-shot on the agent's
+   * VOLUME (a file's bytes, a folder as tar) — for downloads of any size
+   * without buffering. Optional: a provider without it cannot serve files.
+   */
+  streamFromVolume?(runtimeRef: string, argv: string[]): import('node:stream').Readable;
+
   /** What this runtime is actually running (image identity, OpenClaw version). */
   info(runtimeRef: string): Promise<RuntimeInfo>;
 

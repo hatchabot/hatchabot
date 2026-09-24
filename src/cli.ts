@@ -212,6 +212,11 @@ Commands:
   revert <agent> <snapshotId>  Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   logs <agent> [-n <lines>]    Recent runtime output
+  files <agent> [path]         List a folder inside the agent (its home by
+                               default; the workspace is agents/<slug>/agent
+                               under .openclaw). Works stopped or archived.
+  get <agent> <path> [-o <file>]
+                               Download a file, or a folder as .tar.gz
   health <agent>               Live gateway health — is it actually answering
   usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
   top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
@@ -2106,6 +2111,39 @@ async function main() {
       if (!/^\d{1,5}$/.test(lines)) fail('-n takes a number of lines');
       const { text } = (await (await api(ctx, `/v1/agents/${a.id}/logs?lines=${lines}`)).json()) as any;
       console.log(text || '(no recent output)');
+      return;
+    }
+    case 'files':
+    case 'ls': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot files <agent> [path]'));
+      const path = rest.slice(1).join(' ');
+      const r: any = await (await api(ctx, `/v1/agents/${a.id}/fs?path=${encodeURIComponent(path)}`)).json();
+      const entries: any[] = r.entries ?? [];
+      if (flags.has('json')) { console.log(JSON.stringify(r)); return; }
+      console.log(`${a.name}: ~/${r.path || ''}  (${entries.length} entr${entries.length === 1 ? 'y' : 'ies'})`);
+      const size = (n: number) => { const u = ['B', 'KB', 'MB', 'GB']; let i = 0; let v = n; while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; } return `${i ? v.toFixed(1) : v} ${u[i]}`; };
+      for (const e of entries) {
+        const when = e.mtime ? e.mtime.slice(0, 16).replace('T', ' ') : '';
+        console.log(`  ${e.type === 'dir' ? 'd' : e.type === 'link' ? 'l' : '-'}  ${(e.type === 'dir' ? '' : size(e.size)).padStart(9)}  ${when}  ${e.name}${e.type === 'dir' ? '/' : ''}`);
+      }
+      return;
+    }
+    case 'get': {
+      const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot get <agent> <path> [-o file]'));
+      const path = rest.slice(1).join(' ').trim() || fail('give the path inside the agent (see: hatchabot files <agent>)');
+      // A folder comes as .tar.gz; a file as itself. Ask which it is first.
+      const parent = path.split('/').filter(Boolean).slice(0, -1).join('/');
+      const leaf = path.split('/').filter(Boolean).pop() ?? '';
+      const listing: any = await (await api(ctx, `/v1/agents/${a.id}/fs?path=${encodeURIComponent(parent)}`)).json();
+      const entry = (listing.entries ?? []).find((e: any) => e.name === leaf);
+      const isDir = entry?.type === 'dir';
+      const res = await api(ctx, `/v1/agents/${a.id}/fs/${isDir ? 'archive' : 'file'}?path=${encodeURIComponent(path)}`);
+      const out = flags.get('out') ?? (leaf + (isDir ? '.tar.gz' : ''));
+      const { createWriteStream } = await import('node:fs');
+      const { pipeline } = await import('node:stream/promises');
+      const { Readable } = await import('node:stream');
+      await pipeline(Readable.fromWeb(res.body as never), createWriteStream(out, { mode: 0o600 }));
+      console.log(`saved ${out}${isDir ? ' (folder as .tar.gz)' : ''}`);
       return;
     }
     case 'ask': {

@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.54.0] — 2026-09-24
+
+### Added
+- **A C/C++ toolchain in the base image** (`build-essential`: gcc, g++, make): agents cannot install packages themselves, and without a compiler every `pip install` with a C extension, every native npm module and every "build this" (an agent wanted Verilator's compiled flow) failed with "no compiler". About 220 MB once in the shared image; agents get it on their next rebuild.
+- **Files tab** on an agent's ⚙ sheet (owner only): browse its home — the workspace where it writes, its memory under `.openclaw`, anything it made — and download any file, or any folder as `.tar.gz`. Read-only, from the volume through a throwaway read-only container (so it works stopped or archived; the agent is never involved); paths are confined to the agent's home, and a download over `HATCHABOT_FILE_MAX_MB` (512) is refused up front. CLI: `hatchabot files <agent> [path]`, `hatchabot get <agent> <path> [-o file]`. Routes: `GET /v1/agents/:id/fs`, `/fs/file`, `/fs/archive`.
+
 ## [2.53.4] — 2026-09-24
 
 ### Fixed

@@ -10307,7 +10307,7 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['messaging', 'Telegram'], ['channels', 'Slack & Discord'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', 'Slack & Discord'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
 /** Where each classic edit tab now lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
 const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
@@ -10342,6 +10342,7 @@ function v2ParkPanes() {
   const hb = $('v2Pane').querySelector('#healthDlgBody'); if (hb) healthDlg.append(hb);
 }
 function v2EmbedPanes(a, tab) {
+  if (tab === 'files') { void v2LoadFiles(a.id, v2FilesPath.get(a.id) ?? ''); return; }
   const list = V2_EMBED[tab]; if (!list) return;
   if (tab === 'schedule') {
     const slot = $('v2Pane').querySelector('[data-v2slot="cronBody"]');
@@ -10405,7 +10406,7 @@ function v2RenderSheetBar() {
 function v2RenderSheet() {
   const a = v2Find(v2AgentId); if (!a) return v2Close();
   v2RenderSheetBar();
-  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'advanced') : V2_TABS;
+  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'files' || k === 'advanced') : V2_TABS;
   if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
   $('v2Tabs').hidden = !tabs.length;
   $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
@@ -10415,6 +10416,35 @@ function v2RenderSheet() {
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
   if ($('editClass')) void renderClassPicker(a);
   if ($('v2Chans') && previewing()) void v2LoadChans(a.id);
+}
+
+/** The Files tab: browse the agent's home (read-only), download a file or a folder. */
+const v2FilesPath = new Map();
+async function v2LoadFiles(id, path) {
+  const box = $('v2Files'); if (!box || box.dataset.agent !== id) return;
+  v2FilesPath.set(id, path);
+  const a = v2Find(id);
+  const ws = a ? `.openclaw/agents/${a.slug}/agent` : '';
+  let r;
+  try { r = await api(`/v1/agents/${id}/fs?path=${encodeURIComponent(path)}`); }
+  catch (e) { box.innerHTML = `<div class="sub" style="color:var(--bad)">${esc(e.message)}</div>`; return; }
+  if (box.dataset.agent !== id) return;
+  const segs = (r.path || '').split('/').filter(Boolean);
+  const crumb = [`<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','')">home</a>`]
+    .concat(segs.map((s, i) => `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(segs.slice(0, i + 1).join('/'))}')">${esc(s)}</a>`)).join(' / ');
+  const dl = (kind, p) => `/v1/agents/${id}/fs/${kind}?path=${encodeURIComponent(p)}`;
+  const rows = r.entries.map(e => {
+    const p = (r.path ? r.path + '/' : '') + e.name;
+    const open = e.type === 'dir' ? `<a href="#" onclick="event.preventDefault();v2LoadFiles('${jsq(id)}','${jsq(p)}')">📁 ${esc(e.name)}/</a>` : `${e.type === 'link' ? '🔗' : '📄'} ${esc(e.name)}`;
+    const get = e.type === 'dir' ? `<a class="btn" href="${dl('archive', p)}" title="This folder as a .tar.gz">⬇ .tar.gz</a>`
+      : e.type === 'file' ? `<a class="btn" href="${dl('file', p)}" download>⬇</a>` : '';
+    return `<tr><td>${open}</td><td class="num">${e.type === 'dir' ? '' : fmtBytes(e.size)}</td><td class="sub">${e.mtime ? ago(e.mtime) : ''}</td><td>${get}</td></tr>`;
+  }).join('');
+  box.innerHTML = `<div class="v2row"><div class="v2k">Folder</div><div class="v2v"><span style="font-family:ui-monospace,monospace">~/ ${crumb}</span>
+      ${ws && (r.path || '') !== ws ? `<button onclick="v2LoadFiles('${jsq(id)}','${jsq(ws)}')">Workspace</button>` : ''}
+      <a class="btn" href="${dl('archive', r.path || '')}" title="This folder as a .tar.gz">⬇ Whole folder</a>
+      <span class="sub">Read-only. Its workspace holds what it wrote; memory is under .openclaw. Files it makes elsewhere are under its home too.</span></div></div>
+    ${r.entries.length ? `<table class="tbl"><thead><tr><th>Name</th><th class="num">Size</th><th>Changed</th><th></th></tr></thead><tbody>${rows}</tbody></table>` : '<div class="sub" style="padding:8px 0">Empty folder.</div>'}`;
 }
 
 function v2MemberPane(a) {
@@ -10512,6 +10542,8 @@ function v2Pane(a, tab) {
       ${slot('paneEditPeers')}`;
     }
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', '<span>Start it to see its tasks.</span>');
+    case 'files': return built ? `<div id="v2Files" data-agent="${id}"><div class="sub">Loading…</div></div>`
+      : row('Files', '<span>Nothing is built yet.</span>');
     case 'advanced': return `
       ${row('Machine', `<span>${esc(host ? (host.kind === 'local' ? (host.hostname || host.name) : host.name) : '—')}</span>
         ${(run || a.state === 'STOPPED') && built && hosts.length > 1 ? B('Move…', `moveHostAgent('${id}','${n}')`) : ''}

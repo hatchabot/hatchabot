@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import type { Readable } from 'node:stream';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -449,6 +450,24 @@ export class LocalDockerProvider implements RuntimeProvider {
       'run', '--rm', '-v', mount, this.image,
       'bash', '-c', script,
     ]);
+  }
+
+  streamFromVolume(runtimeRef: string, argv: string[]): Readable {
+    const { volume } = this.#names(runtimeRef);
+    // Read-only mount, no network, the runtime image (GNU tar/find/realpath),
+    // as the agent's own uid. stderr is swallowed: a download either streams
+    // or the stream errors with the exit code.
+    const child = spawn(this.docker, this.#argv([
+      'run', '--rm', '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
+    ]), { stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (c: Buffer) => { if (err.length < 2000) err += c.toString('utf8'); });
+    const out = child.stdout;
+    child.on('error', (e) => out.destroy(e));
+    child.on('close', (code) => { if (code !== 0 && !out.destroyed) out.destroy(new Error(`exit ${code}: ${err.trim().slice(-300)}`)); });
+    // A reader that goes away must not leave the one-shot running.
+    out.on('close', () => { if (child.exitCode === null) child.kill('SIGKILL'); });
+    return out;
   }
 
   async info(runtimeRef: string): Promise<RuntimeInfo> {

@@ -9,7 +9,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
-import type { ContainerStats, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
+import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
 import { pingRunner, resolveProvider } from '../providers/resolveProvider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
@@ -113,6 +113,7 @@ import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js'
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
+import { catArgv, cleanRelPath, downloadName, duShell, listShell, parseListing, statShell, tarArgv } from '../orchestrator/agentFiles.js';
 import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
@@ -3855,6 +3856,59 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return { name: req.params.name, content: res.stdout };
     },
   );
+
+  // ---- the agent's files: browse and download (owner only, read-only) ----
+  // Read-only one-shots on the volume: works stopped or archived, cannot
+  // write. Paths are relative to the agent's home; cleaned here and resolved
+  // again inside (src/orchestrator/agentFiles.ts). Members never see this:
+  // the home holds the agent's config, tokens included — the owner's, like
+  // the export.
+  const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
+  const fsAgent = (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown) => {
+    const agent = ownedAgent(req, id);
+    if (!agent?.runtimeRef) { reply.code(404).send({ error: 'Not found' }); return undefined; }
+    const rel = cleanRelPath(path);
+    if (rel === undefined) { reply.code(400).send({ error: 'That is not a path inside the agent.' }); return undefined; }
+    return { agent, rel };
+  };
+  const fsFailure = (reply: FastifyReply, code: number) =>
+    code === 2 ? reply.code(404).send({ error: 'No such file or folder.' })
+      : code === 3 ? reply.code(400).send({ error: 'That path leads outside the agent.' })
+      : code === 4 ? reply.code(400).send({ error: 'Not that kind of path.' })
+      : reply.code(502).send({ error: "Couldn't read the agent's files." });
+
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs', async (req, reply) => {
+    const t = fsAgent(req, reply, req.params.id, req.query.path); if (!t) return reply;
+    let res: ExecResult;
+    try { res = await providerFor(t.agent.hostId).execShellOnVolume(t.agent.runtimeRef!, listShell(t.rel), { readOnly: true }); }
+    catch { return reply.code(502).send({ error: "Couldn't read the agent's files." }); }
+    if (res.code !== 0) return fsFailure(reply, res.code);
+    return { path: t.rel, entries: parseListing(res.stdout) };
+  });
+
+  const fsStream = async (req: FastifyRequest, reply: FastifyReply, id: string, path: unknown, kind: 'file' | 'archive') => {
+    const t = fsAgent(req, reply, id, path); if (!t) return reply;
+    const provider = providerFor(t.agent.hostId);
+    if (!provider.streamFromVolume) return reply.code(501).send({ error: 'Downloads are not available from this machine.' });
+    // Size first, so a runaway folder is refused before a byte streams.
+    let st: ExecResult;
+    try { st = await provider.execShellOnVolume(t.agent.runtimeRef!, kind === 'file' ? statShell(t.rel) : duShell(t.rel), { readOnly: true }); }
+    catch { return reply.code(502).send({ error: "Couldn't read the agent's files." }); }
+    if (st.code !== 0) return fsFailure(reply, st.code);
+    const [ftype, fsize] = kind === 'file' ? st.stdout.trim().split('\t') : ['directory', st.stdout.trim()];
+    if (kind === 'file' && ftype !== 'regular file' && ftype !== 'regular empty file') return reply.code(400).send({ error: 'That is a folder — download it as an archive.' });
+    const size = Number(fsize) || 0;
+    if (size > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big to download here (${Math.round(size / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
+    const name = downloadName(t.rel, t.agent.slug) + (kind === 'archive' ? '.tar.gz' : '');
+    const stream = provider.streamFromVolume(t.agent.runtimeRef!, kind === 'file' ? catArgv(t.rel) : tarArgv(t.rel));
+    reply.type(kind === 'file' ? 'application/octet-stream' : 'application/gzip')
+      .header('content-disposition', `attachment; filename="${name.replace(/"/g, '')}"`)
+      .header('cache-control', 'no-store');
+    if (kind === 'file') reply.header('content-length', String(size));
+    return reply.send(stream);
+  };
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/file', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file'));
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/archive', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'archive'));
 
   app.put<{ Params: { id: string; name: string }; Body: { content?: string } }>(
     '/v1/agents/:id/files/:name',

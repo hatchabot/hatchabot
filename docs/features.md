@@ -668,11 +668,30 @@ sheet walks through it in three steps; it takes about five minutes.
 
 Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
+## Files: browse and download from an agent
+
+An agent's ⚙ sheet has a **Files** tab (owner only): its home folder as a
+table — name, size, when it changed — folders to open, a ⬇ on every file, and
+**⬇ .tar.gz** for any folder (or the whole folder you are in). **Workspace**
+jumps to where the agent writes (`.openclaw/agents/<slug>/agent`); its memory
+lives under `.openclaw` too, and anything it made elsewhere is under its home.
+Read-only, and it works while the agent is stopped or archived: the files are
+read from the agent's volume by a throwaway read-only container, never
+through the agent itself. A path can only point inside the agent's home (it is
+cleaned before any shell sees it and resolved again inside, so a link out
+of the home is refused), and a download above `HATCHABOT_FILE_MAX_MB` (512)
+is refused before a byte moves. Members never see the tab — the home holds
+the agent's config, tokens included, the same as an export. CLI:
+`hatchabot files <agent> [path]`, `hatchabot get <agent> <path> [-o file]` (a
+folder arrives as `.tar.gz`).
+
 ## The base image
 
-Every agent runs the same base image: OpenClaw, the Claude CLI, Python, the PDF
-and OCR tools, the messaging plugins, and the usual shell tools — including
-`ping` and `dig`, so "can it reach that?" needs nothing extra.
+Every agent runs the same base image: OpenClaw, the Claude CLI, Python, a
+C/C++ toolchain (`gcc`, `g++`, `make` — so `pip install` with a C extension,
+native npm modules and "build this" work without asking), the PDF and OCR
+tools, the messaging plugins, and the usual shell tools — including `ping`
+and `dig`, so "can it reach that?" needs nothing extra.
 
 Need something else in it? Ask your Hatchabot agent: *"build a base candidate
 with tcpdump"*. It comes back as a card naming the packages; confirming builds

@@ -6,6 +6,7 @@ import type {
   RuntimeStatus,
 } from './provider.js';
 import { ProviderError } from './provider.js';
+import { Readable } from 'node:stream';
 
 interface MockRuntime {
   spec: RuntimeSpec;
@@ -122,6 +123,14 @@ export class MockProvider implements RuntimeProvider {
     this.#require(runtimeRef);
     this.execLog.push(['sh-volume', script]);
     return this.execResponses.get('sh-volume') ?? { code: 0, stdout: '', stderr: '' };
+  }
+
+  /** What a volume stream would carry (tests set it); the argv is logged like a shell. */
+  streamBytes: Buffer | undefined = undefined;
+  streamFromVolume(runtimeRef: string, argv: string[]) {
+    this.#require(runtimeRef);
+    this.execLog.push(['stream', argv.join(' ')]);
+    return Readable.from(this.streamBytes ? [this.streamBytes] : []);
   }
 
   /** Per-runtime overrides of what info() reports (containerGen, onAgentNetwork…). */

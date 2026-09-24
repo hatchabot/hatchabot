@@ -66,6 +66,12 @@ RUN apt-get update \
       # image. ping and dig are a few hundred KB and tell nobody anything
       # curl could not already say.
       iputils-ping dnsutils \
+      # A C/C++ toolchain (gcc, g++, make, libc headers), in the BASE on
+      # purpose: agents cannot apt-get (they are unprivileged), and without
+      # it every `pip install` with a C extension, every native npm module
+      # and every "build this" (an agent wanted Verilator's --binary flow,
+      # 2026-09-24) dies with "no compiler". ~220 MB once, shared by all.
+      build-essential \
       # PDF ingestion with OCR (base, not derived, ON PURPOSE): image-only
       # pages in scanned PDFs have no text layer, and without local OCR an
       # agent silently drops them and reports "nothing new" — a silent-fail
