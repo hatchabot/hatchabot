@@ -284,7 +284,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       // (and SHOULD re-run — they re-apply current tokens/allowlists), but
       // `agents add` and the workspace file copies must not touch an existing
       // agent — overwriting MEMORY.md on rebuild would lobotomize it.
-      const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail'];
+      const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail',
+        // Anything in here that reaches for npm (doctor repairing a plugin it
+        // finds on the volume) must give up at once, not retry for minutes.
+        'export npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm_config_fetch_retry_maxtimeout=5000'];
       // $HOME is the volume, so anything the agent installs or configures for
       // itself persists. Make the conventional targets exist and be usable:
       //  - ~/.local/bin on PATH, so a tool it installs is runnable by name
@@ -336,15 +339,21 @@ export class LocalDockerProvider implements RuntimeProvider {
           maxBuffer: 256 * 1024 * 1024,
         });
         res = await this.#runStdin(
-          ['run', '--rm', '-i', '-v', `${volume}:/home/node`, spec.image ?? this.image,
+          ['run', '--rm', '-i', '--network', 'none', '-v', `${volume}:/home/node`, spec.image ?? this.image,
             'bash', '-c', `mkdir -p ${seedBase} && tar xz -C ${seedBase} && bash ${seedBase}/seed.sh`],
           tar.stdout as Buffer,
         );
       } else {
+        // The long timeout, not the probe default (60 s): on OpenClaw 2026.8+
+        // the seed runs doctor's state migrations, which on a big volume take
+        // minutes (Taco Agent, 2026-09-24: "docker run timed out"). No
+        // network: nothing in the seed needs one — links, config writes,
+        // doctor, the token paste are all local — and with it, doctor's npm
+        // calls for a stale per-volume plugin stall on DNS retries.
         res = await this.#docker([
-          'run', '--rm', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
+          'run', '--rm', '--network', 'none', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
           spec.image ?? this.image, 'bash', '/seed/seed.sh',
-        ]);
+        ], IO_TIMEOUT_MS);
       }
       if (res.code !== 0) {
         throw new ProviderError(

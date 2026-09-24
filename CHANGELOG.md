@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.55.1] — 2026-09-24
+
+### Fixed
+- Moving a big, older agent onto an OpenClaw 2026.8+ image failed with "seed failed: docker run timed out" (Taco Agent): the seed one-shot ran under the 60-second probe timeout while doctor migrated the volume and retried npm for a stale per-volume plugin against unreachable DNS. The seed now gets the long timeout (15 min, `HATCHABOT_DOCKER_IO_TIMEOUT_MS`), runs without a network (nothing in it needs one), and tells npm to give up at once.
+
 ## [2.55.0] — 2026-09-24
 
 ### Added
