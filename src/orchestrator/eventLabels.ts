@@ -25,6 +25,11 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'memory.reindex_failed': (d) => `memory index failed: ${String(d.error ?? '')}`.trim(),
   'memory.reindex_not_ready': 'memory search not answering after the index',
   'runtime.rebuilt': 'rebuild finished — running',
+  'runtime.self_restarted': (d) => {
+    const code = typeof d.exitCode === 'number' ? d.exitCode : undefined;
+    const why = code === 137 ? 'killed for memory (exit 137)' : code === 0 ? 'quit cleanly (exit 0) without saying why' : code !== undefined ? `exit ${code}` : 'exit unknown';
+    return `its OpenClaw process quit on its own — ${why} — and Docker started it again (time ${d.count ?? '?'} since the last rebuild)`;
+  },
   'rebuild.failed': (d) => `rebuild failed: ${String(d.reason ?? d.error ?? '')}`.trim(),
   'rebuild.abandoned': 'rebuild abandoned (the agent is being deleted)',
   'rebuild.auto': 'rebuilt by the machine on its own',

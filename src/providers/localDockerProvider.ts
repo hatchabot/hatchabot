@@ -3,6 +3,7 @@ import type { Readable } from 'node:stream';
 import { randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { readdirSync, readFileSync } from 'node:fs';
 import { tmpdir, cpus } from 'node:os';
 import { join, dirname } from 'node:path';
 import { promisify } from 'node:util';
@@ -13,7 +14,7 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { ProviderError, parseByteSize, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
+import { ProviderError, parseByteSize, parseCgroupMemory, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
@@ -179,7 +180,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // 2026-09-18). Host services (Hatchabot at 172.17.0.1:8080, Ollama) stay
       // reachable. HATCHABOT_AGENT_NETWORK=bridge restores the old behaviour.
       ...(spec.isolated ? ['--network', this.#opsNetworkName(spec.agentId)] : await this.#agentNetworkArgs()),
-      '--memory', process.env.HATCHABOT_AGENT_MEMORY ?? '2g',
+      '--memory', process.env.HATCHABOT_AGENT_MEMORY ?? '3g',
       '--pids-limit', process.env.HATCHABOT_AGENT_PIDS ?? '512',
       // `hostname` inside the container answers "<agent>.<host>" — the moving
       // agent's compass (see provision.ts, which derives it per host).
@@ -499,12 +500,15 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}|{{.RestartCount}}|{{.State.StartedAt}}|{{.State.ExitCode}}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install] = res.stdout.trim().split('|');
+    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install, restarts, started, exitCode] = res.stdout.trim().split('|');
     return {
+      restartCount: /^\d+$/.test(restarts ?? '') ? Number(restarts) : undefined,
+      startedAt: started && !Number.isNaN(Date.parse(started)) ? new Date(started).toISOString() : undefined,
+      lastExitCode: /^-?\d+$/.test(exitCode ?? '') ? Number(exitCode) : undefined,
       imageId,
       openclawVersion: openclawVersion || undefined,
       channels: parseChannelsLabel(channels),
@@ -658,7 +662,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const out: ContainerStats[] = [];
     for (const line of res.stdout.split('\n')) {
       if (!line.trim()) continue;
-      let j: { Name?: string; CPUPerc?: string; MemUsage?: string; PIDs?: string };
+      let j: { Name?: string; ID?: string; CPUPerc?: string; MemUsage?: string; PIDs?: string };
       try { j = JSON.parse(line); } catch { continue; }
       const name = j.Name ?? '';
       if (!/^(hatchabot|agentclaw)-/.test(name)) continue;
@@ -669,9 +673,32 @@ export class LocalDockerProvider implements RuntimeProvider {
         memBytes: parseByteSize(used ?? ''),
         memLimitBytes: parseByteSize(limit ?? ''),
         pids: Number(j.PIDs) || 0,
+        ...this.#cgroupMemory(j.ID ?? ''),
       });
     }
     return out;
+  }
+
+  /**
+   * What `docker stats` does not say: the container's memory peak and how
+   * often it hit its cap (cgroup v2, same machine, where the daemon puts
+   * each container under system.slice). Five 2026.9 agents had hit a 2 GiB
+   * cap hundreds of times before anyone could see it (2026-09-24). Absent
+   * when the files are not there (cgroup v1, a remote daemon, macOS).
+   */
+  #cgroupDirs?: { at: number; names: string[] };
+  #cgroupMemory(shortId: string): Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills'> {
+    if (!shortId || process.platform !== 'linux') return {};
+    try {
+      const base = '/sys/fs/cgroup/system.slice';
+      if (!this.#cgroupDirs || Date.now() - this.#cgroupDirs.at > 30_000) this.#cgroupDirs = { at: Date.now(), names: readdirSync(base) };
+      const dir = this.#cgroupDirs.names.find((n) => n.startsWith(`docker-${shortId}`) && n.endsWith('.scope'));
+      if (!dir) return {};
+      const read = (f: string) => { try { return readFileSync(`${base}/${dir}/${f}`, 'utf8'); } catch { return undefined; } };
+      return parseCgroupMemory(read('memory.events'), read('memory.peak'));
+    } catch {
+      return {};
+    }
   }
 
   async logs(runtimeRef: string, lines: number): Promise<string> {

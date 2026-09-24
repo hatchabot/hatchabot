@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.62.0] — 2026-09-24
+
+### Added
+- **A container that restarts on its own is written up.** When an agent's OpenClaw process quits and Docker starts it again, nothing used to say so: the container log stops and the agent comes back. Hatchabot now notices the restart count going up and writes a Setup-log line with the exit code ("quit cleanly (exit 0) without saying why", "killed for memory (exit 137)") and the time, and the agent is listed under Needs attention with "its process quit and was started again" (Genetic Algorithm Trading, 2026-09-24). Restarts while Hatchabot itself was down are not noticed.
+- **Status → Resources shows memory peak and cap hits.** Beside each container's memory: the most it has used since it started, and how many times it ran into its memory cap (a process killed for memory is counted separately), read from the kernel where the daemon is local. Five agents on OpenClaw 2026.9 had hit a 2 GiB cap hundreds of times unseen.
+
+### Changed
+- **Per-agent memory cap default 2g → 3g** (`HATCHABOT_AGENT_MEMORY`). An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top; at 2 GiB the kernel was reclaiming constantly. Applies to containers made after the change: Rebuild to apply.
+
+### Fixed
+- **OpenClaw 2026.9's Control UI no longer has thousands of requests refused.** Its workspace icon, avatar and config fetches carry the agent's gateway token as a bearer; in identity mode Hatchabot verified that as an ID token and refused before looking at the owner's cookie, so the UI retried the icon thousands of times an hour. On the console proxy the cookie decides; the token passes through to the gateway it belongs to.
+
 ## [2.61.0] — 2026-09-24
 
 ### Added

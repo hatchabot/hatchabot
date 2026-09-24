@@ -357,6 +357,24 @@ export interface ContainerStats {
   memBytes: number;
   memLimitBytes: number;
   pids: number;
+  /** Highest memory the container has used since it started (cgroup memory.peak), when readable. */
+  memPeakBytes?: number;
+  /** Times the container hit its memory cap and the kernel had to reclaim (cgroup memory.events `max`), when readable. */
+  memCapHits?: number;
+  /** Times the kernel killed a process in it for memory (memory.events `oom_kill`), when readable. */
+  memOomKills?: number;
+}
+
+/** cgroup v2 memory.events + memory.peak text → the three ContainerStats memory fields. */
+export function parseCgroupMemory(events: string | undefined, peak: string | undefined): Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills'> {
+  const out: Pick<ContainerStats, 'memPeakBytes' | 'memCapHits' | 'memOomKills'> = {};
+  const n = (k: string) => { const m = new RegExp(`^${k} (\\d+)$`, 'm').exec(events ?? ''); return m ? Number(m[1]) : undefined; };
+  const max = n('max'), oom = n('oom_kill');
+  if (max !== undefined) out.memCapHits = max;
+  if (oom !== undefined) out.memOomKills = oom;
+  const pk = Number((peak ?? '').trim());
+  if (peak !== undefined && Number.isFinite(pk) && pk >= 0) out.memPeakBytes = pk;
+  return out;
 }
 
 /** "629.1MiB", "1GiB", "2.5GB", "512kB" → bytes. */
@@ -393,6 +411,14 @@ export interface RuntimeInfo {
   /** A container's: on the isolated agents network (false = still on a shared one;
    *  absent = not applicable — the Hatchabot agent's own network, or isolation turned off). */
   onAgentNetwork?: boolean;
+  /** A container's: how many times Docker's restart policy started it again after its
+   *  process quit on its own (never Hatchabot's doing: a rebuild makes a new container,
+   *  a Restart does not count). */
+  restartCount?: number;
+  /** A container's: when its process last started (ISO). */
+  startedAt?: string;
+  /** A container's: the exit code of its last quit (0 = clean; 137 = killed for memory). */
+  lastExitCode?: number;
 }
 
 export type EmbedEngine = 'baked' | 'none';

@@ -3330,6 +3330,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** The owner switched its memory search engine and the rebuild is still owed. */
   const switchPendingFor = (a: Agent): boolean =>
     a.hostId === store.localHostId() && !a.ops && (a.embedMode ?? 'baked') !== (a.appliedEmbedMode ?? 'baked');
+  /**
+   * A container whose process quit on its own and was started again by
+   * Docker's restart policy (RestartCount went up; a rebuild makes a new
+   * container, so it starts from 0) gets a line in its Setup log, with the
+   * exit code — the only trace of an event nothing else records. Genetic
+   * Algorithm Trading, 2026-09-24: the gateway quit with code 0 a second
+   * after a message, at a 2 GiB cap it had hit hundreds of times; the
+   * container log had nothing, and neither did Hatchabot. Counts seen since
+   * this process started; a restart while Hatchabot was down is not noticed.
+   */
+  const restartsSeen = new Map<string, number>();
+  const noteSelfRestart = (a: Agent, running: RuntimeInfo) => {
+    const n = running.restartCount;
+    if (n === undefined) return;
+    const prev = restartsSeen.get(a.id);
+    restartsSeen.set(a.id, n);
+    if (prev === undefined || n <= prev) return;
+    trace(a.id)('runtime.self_restarted', { count: n, exitCode: running.lastExitCode, startedAt: running.startedAt });
+  };
   const rebuildNeedOf = async (a: Agent) => {
     if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return undefined;
     const provider = providerFor(a.hostId);
@@ -3442,6 +3461,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED')) {
           try {
             rebuild = await rebuildNeedOf(a);
+            noteSelfRestart(a, rebuild!.running);
             openclawVersion = rebuild!.running.openclawVersion;
             latestOpenclawVersion = rebuild!.current.openclawVersion;
             // Image ids, never tags (:latest is reassigned in place); a pinned
@@ -3455,6 +3475,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const chan = store.getChannelForAgent(a.id);
         const role = store.accessRole(a.id, ownerIdOf(req));
         return publicAgent(a, {
+          selfRestarts: rebuild?.running.restartCount || undefined,
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).

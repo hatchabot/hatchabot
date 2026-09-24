@@ -194,6 +194,9 @@ function cookieValue(header: string | undefined, name: string): string | undefin
   return undefined;
 }
 
+/** The console proxy: a browser reaches an agent's Control UI through here, with its cookie. */
+const CONSOLE_PATH = /^\/v1\/agents\/[^/]+\/ui(\/|$)/;
+
 export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
   await app.register(fastifyCookie);
 
@@ -514,9 +517,15 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       return;
     }
 
-    // Bearer token (CLI, phone app) — verified on every call.
+    // Bearer token (CLI, phone app) — verified on every call. Not on the
+    // console proxy: OpenClaw 2026.9's Control UI sends the AGENT's gateway
+    // token as `Authorization: Bearer …` on its own fetches (workspace icon,
+    // avatar, config). That token is for the gateway, not for us; judging it
+    // here refused the request before the owner's cookie was even looked at,
+    // and the UI retried the icon thousands of times an hour (2026-09-24).
+    // The cookie decides those requests; the proxy still strips our tokens.
     const authz = req.headers.authorization;
-    if (typeof authz === 'string' && authz.startsWith('Bearer ')) {
+    if (typeof authz === 'string' && authz.startsWith('Bearer ') && !CONSOLE_PATH.test(path)) {
       try {
         const token = await verifier.verify(authz.slice(7));
         const denied = allowedEmailProblem(token.email);

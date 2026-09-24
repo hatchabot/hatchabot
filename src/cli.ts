@@ -2036,8 +2036,11 @@ async function main() {
           by === 'name' ? who0(a).localeCompare(who0(b)) : by === 'cpu' ? b.cpuPct - a.cpuPct : b.memBytes - a.memBytes);
         for (const c of rows) {
           const who = c.agentName ?? ({ embedder: 'memory search service', 'embed-door': 'memory search door', doorman: 'doorman' } as any)[c.role] ?? c.name;
-          console.log(`  ${String(c.cpuPct.toFixed(1)).padStart(6)}%  ${mb(c.memBytes).padStart(7)} / ${mb(c.memLimitBytes).padEnd(6)}  ${who}`);
+          const peak = c.memPeakBytes ? `  peak ${mb(c.memPeakBytes)}` : '';
+          const cap = c.memCapHits ? `  hit cap ${c.memCapHits}×${c.memOomKills ? ` (killed ${c.memOomKills}×)` : ''}` : '';
+          console.log(`  ${String(c.cpuPct.toFixed(1)).padStart(6)}%  ${mb(c.memBytes).padStart(7)} / ${mb(c.memLimitBytes).padEnd(6)}  ${who}${peak}${cap}`);
         }
+        if (h.containers.some((c: any) => c.memCapHits)) console.log('  ⚠ containers that hit their memory cap need a bigger one (HATCHABOT_AGENT_MEMORY, then Rebuild) or their heavy work moved out.');
       }
       return;
     }

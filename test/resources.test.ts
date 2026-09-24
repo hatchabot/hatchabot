@@ -32,7 +32,7 @@ describe('GET /v1/resources', () => {
     agent('mine', 'o'); agent('theirs', 'other'); agent('shared-with-me', 'other');
     store.insertMembership({ id: 'm1', agentId: 'shared-with-me', userId: 'o', role: 'user', status: 'active' } as never);
     provider.statsRows = [
-      { name: 'hatchabot-mine-1234', cpuPct: 1.5, memBytes: 300e6, memLimitBytes: 2e9, pids: 20 },
+      { name: 'hatchabot-mine-1234', cpuPct: 1.5, memBytes: 300e6, memLimitBytes: 2e9, pids: 20, memPeakBytes: 2e9, memCapHits: 1203, memOomKills: 0 },
       { name: 'hatchabot-theirs-1234', cpuPct: 0.5, memBytes: 900e6, memLimitBytes: 2e9, pids: 30 },
       { name: 'hatchabot-shared-with-me-1234', cpuPct: 0.1, memBytes: 100e6, memLimitBytes: 2e9, pids: 10 },
       { name: 'hatchabot-embedder', cpuPct: 0, memBytes: 629e6, memLimitBytes: 1e9, pids: 43 },
@@ -49,7 +49,8 @@ describe('GET /v1/resources', () => {
     const r = (await f.inject({ method: 'GET', url: '/v1/resources', headers: { 'x-hatchabot-owner': 'o' } })).json();
     const h = r.hosts[0];
     expect(h.containers.map((c: any) => c.agentName ?? c.role).sort()).toEqual(['doorman', 'embed-door', 'embedder', 'mine', 'shared-with-me', 'theirs']);
-    expect(h.containers.find((c: any) => c.agentName === 'mine')).toMatchObject({ cpuPct: 1.5, memBytes: 300e6, memLimitBytes: 2e9, role: 'agent', mine: true });
+    // Peak and cap hits travel with the row: five 2026.9 agents had hit a 2 GiB cap hundreds of times unseen (2026-09-24).
+    expect(h.containers.find((c: any) => c.agentName === 'mine')).toMatchObject({ cpuPct: 1.5, memBytes: 300e6, memLimitBytes: 2e9, role: 'agent', mine: true, memPeakBytes: 2e9, memCapHits: 1203, memOomKills: 0 });
     expect(h.containers.find((c: any) => c.agentName === 'theirs').mine).toBe(false);
     expect(h.totals).toEqual({ cpuPct: 2.1, memBytes: 300e6 + 900e6 + 100e6 + 629e6 + 18e6 + 12e6 });
   });

@@ -672,6 +672,24 @@ sheet walks through it in three steps; it takes about five minutes.
 
 Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
+## When a container restarts on its own
+
+A container whose OpenClaw process quits and is started again by Docker
+leaves no trace where anyone looks: the container log stops, and the agent
+simply comes back. Hatchabot notices the restart count going up, writes a
+line in the agent's **Setup log** with the exit code ("quit cleanly (exit 0)
+without saying why", "killed for memory (exit 137)") and when, and lists the
+agent under Needs attention with "its process quit and was started again".
+Restarts that happened while Hatchabot itself was not running are not
+noticed; the count on the card still is.
+
+**Status → Resources** shows, beside each container's memory, its **peak**
+since it started and how many times it **hit its cap** (the kernel had to
+reclaim; a process killed for memory is counted separately). An OpenClaw
+2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top: a
+container that hits the cap needs a bigger one (`HATCHABOT_AGENT_MEMORY`,
+default 3g since v2.62.0; Rebuild to apply) or its heavy work moved out.
+
 ## Bulk actions on what you can see
 
 Every section on the home screen — a group, or a bin of whatever **View by**
@@ -1038,7 +1056,9 @@ Settings sit in the Hatchabot panel beside the manager.
 **Resources** (Status → Resources; `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per
 machine, refreshed every few seconds while the view is open; click Agent, CPU
-or Memory to sort (again to flip). A runner shows "not measurable" until its
+or Memory to sort (again to flip). Beside the memory: the container's **peak**
+since it started and how often it **hit its cap** (see "When a container
+restarts on its own"). A runner shows "not measurable" until its
 provider reports stats. The machine owner also sees the
 machine-level containers (the memory search service and its door, the
 Hatchabot agent's doorman); everyone else sees their own and shared agents.

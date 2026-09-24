@@ -7637,12 +7637,14 @@ function fleetResDraw(r) {
     return `<div style="padding:10px 0;border-top:1px solid var(--line)">
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
         <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
-      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}<th style="text-align:right">of limit</th></tr></thead><tbody>
+      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}<th style="text-align:right">of cap</th><th style="text-align:right" title="The most it has used since it started">peak</th><th style="text-align:right" title="Times it ran into its memory cap and the kernel had to reclaim; a process killed for memory counts separately">hit cap</th></tr></thead><tbody>
         ${rows.map(c => `<tr><td>${who(c)}${c.shared ? ' <span class="sub">(shared with you)</span>' : c.mine === false ? ' <span class="sub">(another account’s)</span>' : ''}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
-          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '%' : '—'}</td></tr>`).join('')}
-      </tbody></table>` : ''}</div>`;
+          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '% of ' + mb(c.memLimitBytes) : '—'}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memPeakBytes ? mb(c.memPeakBytes) : '—'}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums"${c.memCapHits || c.memOomKills ? ' style="text-align:right;font-variant-numeric:tabular-nums;color:var(--warn);font-weight:600"' : ' class="sub"'}>${c.memCapHits === undefined ? '—' : `${c.memCapHits}${c.memOomKills ? ` · killed ${c.memOomKills}×` : ''}`}</td></tr>`).join('')}
+      </tbody></table>${rows.some(c => c.memCapHits) ? `<div class="sub" style="margin-top:6px">⚠ ${rows.filter(c => c.memCapHits).length === 1 ? 'One container has' : `${rows.filter(c => c.memCapHits).length} containers have`} run into the memory cap. An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top of that: raise the cap (<code>HATCHABOT_AGENT_MEMORY</code>, then Rebuild) or move heavy work out of the container.</div>` : ''}` : ''}</div>`;
   }).join('') || '<div class="sub">Nothing running.</div>';
 }
 async function openFleetResources() {
@@ -9714,6 +9716,7 @@ function agentAttention(a) {
   if (a.peersPending) rebuild.push('peer changes need a rebuild');
   if (rebuild.length && !rechecking) out.push({ icon: a.rebuild?.level === 'required' ? '⚠' : '🔄', why: rebuild.join('; ') });
   if (a.botNamePending) out.push({ icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
+  if (a.selfRestarts) out.push({ icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
   return out;
 }
 

@@ -147,6 +147,26 @@ describe('identity auth mode', () => {
     expect(me.json()).toMatchObject({ ownerId: 'user-uid-abc' });
   });
 
+  it('on the console proxy, a bearer that is not ours does not get in the way of the cookie', async () => {
+    // OpenClaw 2026.9's Control UI fetches its workspace icon, avatar and
+    // config with the AGENT's gateway token as `Authorization: Bearer …`.
+    // Verifying that as an ID token failed every such request before the
+    // owner's cookie was looked at — 6,000 refused icon fetches in an hour
+    // (2026-09-24). The cookie decides console requests; other paths still
+    // judge a bearer as before.
+    const f = await app();
+    f.get('/v1/agents/:id/ui/*', async (req) => principalOf(req));
+    const login = await f.inject({ method: 'POST', url: '/v1/session', payload: { idToken: makeToken() } });
+    const cookie = `hatchabot_session=${login.cookies[0]!.value}`;
+    const icon = await f.inject({ method: 'GET', url: '/v1/agents/a1/ui/__openclaw__/workspace-icon/x', headers: { cookie, authorization: 'Bearer gateway-token-of-the-agent' } });
+    expect(icon.statusCode).toBe(200);
+    expect(icon.json()).toMatchObject({ ownerId: 'user-uid-abc' });
+    // No cookie: still refused (the bearer is the gateway's business, not a session).
+    expect((await f.inject({ method: 'GET', url: '/v1/agents/a1/ui/__openclaw__/workspace-icon/x', headers: { authorization: 'Bearer gateway-token-of-the-agent' } })).statusCode).toBe(401);
+    // Off the console, a bad bearer is refused even with a cookie, as before.
+    expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie, authorization: 'Bearer not-an-id-token' } })).statusCode).toBe(401);
+  });
+
   it('does not mark the session cookie secure over plain HTTP', async () => {
     // A secure cookie on an http:// origin is silently DISCARDED by the
     // browser, which turns sign-in into an infinite login loop with no error
