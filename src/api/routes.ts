@@ -54,7 +54,7 @@ import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
-import { consoleActivity, type SessionEntry } from '../orchestrator/unread.js';
+import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { estimateCost } from '../orchestrator/pricing.js';
@@ -3205,10 +3205,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const sessionsCache = new Map<string, { fetchedAt: number; value?: Record<string, SessionEntry>; refreshing?: boolean }>();
   const readSessions = async (a: Agent): Promise<Record<string, SessionEntry> | undefined> => {
     try {
-      const res = await providerFor(a.hostId).execShell(
-        a.runtimeRef!,
-        `cat ${JSON.stringify(`/home/node/.openclaw/agents/${a.slug}/sessions/sessions.json`)} 2>/dev/null || true`,
-      );
+      const res = await providerFor(a.hostId).execShell(a.runtimeRef!, sessionsReadShell(a.slug));
       if (res.code === 0 && res.stdout.trim()) return JSON.parse(res.stdout) as Record<string, SessionEntry>;
     } catch {
       /* a container hiccup: no mark this minute */
@@ -4790,10 +4787,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (hit && Date.now() - hit.fetchedAt < 60_000) return hit.value;
     let value: Array<{ tg: string; at: number; thread: string }> = [];
     try {
-      const res = await providerFor(a.hostId).execShell(
-        a.runtimeRef!,
-        `cat ${JSON.stringify(`/home/node/.openclaw/agents/${a.slug}/sessions/sessions.json`)} 2>/dev/null || true`,
-      );
+      const res = await providerFor(a.hostId).execShell(a.runtimeRef!, sessionsReadShell(a.slug));
       if (res.code === 0 && res.stdout.trim()) {
         const sessions = JSON.parse(res.stdout) as Record<string, {
           lastInteractionAt?: number;

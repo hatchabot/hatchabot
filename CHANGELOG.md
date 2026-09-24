@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.53.3] — 2026-09-24
+
+### Fixed
+- 2026.9 port, from the fourth candidate run (15 of 16 checks passed): from OpenClaw 2026.8 an agent's session records live in its SQLite store, not `sessions.json`. Last-active, the unread mark and the last-exchanges view now read the file when it exists and the store (`session_nodes`, read-only, via Node's own sqlite) when it does not; the unread mark also understands the newer `delivery` field. The candidate gate checks the records the same way.
+
 ## [2.53.2] — 2026-09-24
 
 ### Fixed

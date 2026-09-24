@@ -117,8 +117,11 @@ step "sessions list --json has the shape the app reads (sessions[].updatedAt, ke
 s="$(inagent "openclaw sessions list --agent $SLUG --json 2>/dev/null" | json "v=>(v.sessions||[]).filter(s=>typeof s.updatedAt==='number'&&s.key==='agent:$SLUG:main').length")"
 [ "${s:-0}" -ge 1 ] 2>/dev/null && ok || bad "no session with a numeric updatedAt and the main key"
 
-step "sessions.json is where the app reads it"
-inagent "test -s /home/node/.openclaw/agents/$SLUG/sessions/sessions.json && node -e 'JSON.parse(require(\"fs\").readFileSync(\"/home/node/.openclaw/agents/$SLUG/sessions/sessions.json\",\"utf8\"))'" >/dev/null && ok || bad "missing or not JSON"
+step "the session records are readable the way the app reads them (sessions.json, or the agent's SQLite from 2026.8)"
+# The same shell src/orchestrator/unread.ts sessionsReadShell() builds.
+B="/home/node/.openclaw/agents/$SLUG"
+recs="$(inagent "if [ -f $B/sessions/sessions.json ]; then cat $B/sessions/sessions.json; elif [ -f $B/agent/openclaw-agent.sqlite ]; then node -e 'const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(\"$B/agent/openclaw-agent.sqlite\",{readOnly:true});const out={};for(const r of db.prepare(\"select session_key,entry_json from session_nodes\").all()){try{out[r.session_key]=JSON.parse(r.entry_json)}catch(e){}}process.stdout.write(JSON.stringify(out));' 2>/dev/null; fi" | json "v=>{const e=v['agent:$SLUG:main'];return e&&typeof e.updatedAt==='number'?'ok':'no'}")"
+[ "$recs" = ok ] && ok || bad "no main record with a numeric updatedAt ($recs)"
 
 step "cron list --all --json has the shape the app reads (jobs[])"
 c="$(inagent "openclaw cron list --agent $SLUG --all --json 2>/dev/null" | json 'v=>Array.isArray(v.jobs)?"array":"no"')"
