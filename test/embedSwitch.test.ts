@@ -34,6 +34,12 @@ describe('what OpenClaw is told', () => {
     expect(shared.find((c) => c.argv.includes('agents.defaults.memorySearch.remote.apiKey'))?.sensitive).toBe(true);
     expect(flat.some((l) => l.includes('plugins enable llama-cpp'))).toBe(false);
     expect(flat.some((l) => l.includes('local.modelPath'))).toBe(false);
+    // The baked plugin's link is edited out of the JSON before the first openclaw command:
+    // on an engine-free image the CLI refuses a config whose linked path is missing.
+    const unlink = shared.findIndex((c) => c.rawShell?.includes('/opt/agentclaw/llama-cpp/llama-cpp-provider') && c.rawShell.includes('plugins'));
+    expect(unlink).toBeGreaterThanOrEqual(0);
+    expect(unlink).toBeLessThan(shared.findIndex((c) => c.argv[0] === 'plugins'));
+    expect(buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' }).some((c) => c.rawShell?.includes('llama-cpp'))).toBe(false);
 
     const baked = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' }).map((c) => c.argv.join(' '));
     expect(baked.some((l) => l.includes('plugins enable llama-cpp'))).toBe(true);

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.51.1] — 2026-09-24
+
+### Fixed
+- An agent built on the shared memory search engine now has the baked plugin's `--link` pointer edited out of its `openclaw.json` before the first `openclaw` command runs. The pointer stayed on the volume from the agent's baked days, and OpenClaw refuses the whole config when a linked path is missing — so the first agent tried on an engine-free (`-lite`) image failed its rebuild ("plugin path not found"). Found live on To Do Agent; it was returned to the fleet default.
+
 ## [2.51.0] — 2026-09-24
 
 ### Added

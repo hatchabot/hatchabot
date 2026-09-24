@@ -166,6 +166,20 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // the DDG fallback in OpenClaw's auto-detection.) Naturally re-runnable.
   // FIRST in the list: the `config set` runs below batch into one invocation
   // only while they stay consecutive.
+  // On the shared engine the image-baked plugin must not be LINKED any more:
+  // the link (plugins.load.paths + the llama-cpp entry) survives on the
+  // volume from when the agent was baked, and OpenClaw refuses the whole
+  // config when a linked path is missing — which it is on an engine-free
+  // image (found live, To Do Agent on the first -lite image, 2026-09-24). So
+  // it is edited out of the JSON before any `openclaw` command runs, because
+  // the CLI itself will not start on such a config. Harmless when the path
+  // exists: a shared agent never loads that plugin.
+  if (patch.embed) {
+    cmds.push({
+      argv: [],
+      rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));const p=c.plugins||{};let n=0;if(p.load&&Array.isArray(p.load.paths)){const k=p.load.paths.filter(x=>x!=="${EMBED_PLUGIN_DIR}");if(k.length!==p.load.paths.length){p.load.paths=k;n++}}if(p.entries&&p.entries["llama-cpp"]){delete p.entries["llama-cpp"];n++}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
+    });
+  }
   cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
 
   // Local memory embeddings from the image-baked GGUF provider. `--link` points
@@ -199,7 +213,8 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (patch.embed) {
     // The machine's shared embedding service (src/embedder): OpenClaw's
     // openai-compatible provider, pointed at the door with this agent's own
-    // key. Nothing baked is touched; the image can drop the engine later.
+    // key. The baked plugin's link was removed above; the image can drop
+    // the engine (label embed-engine=none).
     const k = memoryKeyPrefix(patch.openclawVersion);
     cmds.push({ argv: ['config', 'set', `${k}.provider`, 'openai-compatible'] });
     cmds.push({ argv: ['config', 'set', `${k}.model`, patch.embed.model] });
