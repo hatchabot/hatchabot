@@ -275,8 +275,11 @@ Each step ships alone and leaves the fleet as it was.
    still `baked` until Chris flips it.*
 4. **Engine-free images**: `EMBED_ENGINE=none`, the label, the build-script
    rule. 2026.9 candidates now build. Delete the "can't build" sentence.
-   *Built in v2.51.0; `hatchabot-runtime:2026.7.1-2-lite` is the first such
-   image, tried on a throwaway agent.*
+   *Built in v2.51.0/.1; `hatchabot-runtime:2026.7.1-2-lite` (384 MB
+   lighter) is the first such image, proven on To Do Agent on 2026-09-24:
+   6/6 files indexed through the shared service, semantic search answers,
+   325 MiB. The first try failed on the baked plugin's stale `--link`
+   pointer, fixed in v2.51.1.*
 5. **The port checklist and the candidate gate script.** Only then "Try on
    one agent" with a 2026.9 candidate.
 6. Later, when every agent is on `shared`: drop the baked steps from the
