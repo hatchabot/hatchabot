@@ -41,6 +41,8 @@ export interface ChannelConnector {
   verify(creds: Record<string, string>): Promise<VerifiedChannel>;
   /** The secret stored for the agent, from the verified fields. */
   secretValue(creds: Record<string, string>): string;
+  /** The fields back out of a stored secret, so a re-check can run verify() without asking the owner to paste again. */
+  credsFromSecret(secret: string): Record<string, string>;
 }
 
 /** A refusal the owner can act on. The message never contains a credential. */

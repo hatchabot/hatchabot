@@ -5960,9 +5960,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       addToServerUrl: typeof st.addToServerUrl === 'string' ? st.addToServerUrl : undefined,
       warnings: Array.isArray(st.warnings) ? st.warnings : [],
       rooms: (st.rooms as unknown) ?? { mode: 'off' },
+      /** Discord: the servers the bot is in (id + name), from the last check; Slack: the workspace. */
+      servers: Array.isArray(st.servers) ? (st.servers as Array<{ id: string; name: string }>).filter((g) => g && typeof g.id === 'string').map((g) => ({ id: g.id, name: String(g.name ?? '') })) : [],
+      botName: typeof st.botName === 'string' ? st.botName : undefined,
+      team: typeof st.team === 'string' ? st.team : undefined,
+      checkedAt: typeof st.checkedAt === 'string' ? st.checkedAt : undefined,
       createdAt: c.createdAt,
     };
   };
+  /** The people linked to an agent on one channel kind: who the agent answers there. */
+  const peopleOn = (agent: Agent, kind: Channel['kind']) =>
+    store.listMemberships(agent.id).filter((m) => m.status === 'active').flatMap((m) => {
+      const id = kind === 'telegram' ? m.channelUserId : store.memberIdentities(agent.id, m.userId)[kind];
+      return id ? [{ userId: m.userId, role: m.role, displayName: m.displayName, you: m.userId === agent.ownerId }] : [];
+    });
 
   /** What each connector asks for, so the set-up sheet is drawn from one source. */
   app.get('/v1/channels/connectors', async () =>
@@ -5984,6 +5995,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ...(c.kind === 'telegram' ? { kind: 'telegram', accountId: c.accountId, deepLink: c.deepLink } : publicChannel(c)),
         /** Has the owner's first message on this channel linked them yet? */
         youAreLinked: !!mine[c.kind],
+        /** Who it answers on this channel (members linked there). */
+        people: peopleOn(agent, c.kind),
       })),
       imageSupports: ['telegram', ...supported],
     };
@@ -6045,6 +6058,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim failed'));
     }
     return reply.code(202).send(publicChannel(store.getChannelForAgent(agent.id, kind)!));
+  });
+
+  /**
+   * Ask the platform again about a connected channel, from the stored token:
+   * Discord's server list and its "not in any server yet" / "intent is off"
+   * warnings were frozen at connect time, so the card kept nagging after the
+   * owner had fixed exactly that. No token is pasted, none is returned.
+   */
+  app.post<{ Params: { id: string; kind: string } }>('/v1/agents/:id/channels/:kind/recheck', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const conn = connectorFor(req.params.kind);
+    if (!conn) return reply.code(404).send({ error: 'Unknown channel.' });
+    const row = store.getChannelForAgent(agent.id, conn.kind);
+    if (!row) return reply.code(404).send({ error: `It has no ${conn.label}.` });
+    let secret: string;
+    try { secret = await secrets.get(row.secretRef); } catch { return reply.code(409).send({ error: `Its ${conn.label} token is missing — remove ${conn.label} and connect it again.` }); }
+    let verified;
+    try { verified = await conn.verify(conn.credsFromSecret(secret)); }
+    catch (err) {
+      if (err instanceof ConnectorError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+    const st = (row.settings ?? {}) as Record<string, unknown>;
+    store.setChannelSettings(agent.id, conn.kind, {
+      ...st, ...verified.settings, displayName: verified.displayName,
+      ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
+      warnings: verified.warnings, checkedAt: new Date().toISOString(),
+      rooms: st.rooms ?? { mode: 'off' },
+    });
+    trace(agent.id)('channel.rechecked', { kind: conn.kind, warnings: verified.warnings.length });
+    return publicChannel(store.getChannelForAgent(agent.id, conn.kind)!);
   });
 
   app.patch<{ Params: { id: string; kind: string }; Body: { rooms?: { mode?: string; roomId?: string } } }>('/v1/agents/:id/channels/:kind', async (req, reply) => {

@@ -72,6 +72,10 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
     secretValue(creds) {
       return JSON.stringify({ botToken: cleanField(creds, FIELDS[0]!), appToken: cleanField(creds, FIELDS[1]!) });
     },
+    credsFromSecret(secret) {
+      try { const t = JSON.parse(secret) as { botToken?: string; appToken?: string }; return { botToken: String(t.botToken ?? ''), appToken: String(t.appToken ?? '') }; }
+      catch { return {} as Record<string, string>; }
+    },
 
     async verify(creds): Promise<VerifiedChannel> {
       const botToken = cleanField(creds, FIELDS[0]!);

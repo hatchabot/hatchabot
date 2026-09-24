@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.66.0] — 2026-09-24
+
+### Added
+- **Discord, out of preview.** An agent's **Discord** tab is offered to everyone: Set up… (three steps: make the bot, turn on Message Content Intent, paste the token — checked with Discord before saving), then the connected card shows the servers the bot is in, Add to a server, Open in Discord, **People on Discord** (who is linked there, and anyone knocking, with Let them in / That's me / Not now on the card), Group chats with the bot's servers as a picker, and **↻ Re-check**, which asks Discord again from the stored token so "not in any server yet" and "intent is off" clear once fixed. Slack stays behind `?dev` until it has been tried against a real app.
+- `POST /v1/agents/:id/channels/:kind/recheck`; the channels list carries `servers`, `people` and `checkedAt`; Setup-log lines for connects, removals, re-checks and group-chat changes.
+
 ## [2.65.0] — 2026-09-24
 
 ### Added

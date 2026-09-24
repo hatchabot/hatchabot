@@ -632,20 +632,28 @@ wears one mark per app.
 
 ## Slack and Discord
 
-> **Coming — hidden by default (v2.3.0).** Everything below is built and
-> covered by tests, but it has never been run against real Slack or Discord
-> apps, so the app does not offer it yet: an agent's **Messaging** tab says
-> Slack and Discord are coming. Turn them on in your own browser with
-> `?dev` (not remembered, so removing it from the URL turns it straight back
-> off) — the server keeps its routes either way, so this is a place to work,
-> not a demo. An agent that already has a channel attached keeps showing
-> and managing it whether or not preview is on.
+> **Discord is offered to everyone (v2.66.0); Slack still waits.** Slack is
+> built and tested against a fake, but has not been tried against a real
+> Slack app, so the app keeps it behind `?dev` in the address (not
+> remembered). An agent that already has Slack attached keeps showing and
+> managing it either way.
 
-An agent can also be reached on Slack and on Discord, beside or instead of
+An agent can also be reached on Discord (and Slack), beside or instead of
 Telegram. Both connect outward from this machine, so nothing here has to be
-reachable from the internet. Each agent gets its own Slack app or Discord bot,
-which you make on that platform and paste into **Messaging → Set up…**. The
-sheet walks through it in three steps; it takes about five minutes.
+reachable from the internet. Each agent gets its own Discord bot or Slack app,
+which you make on that platform and paste into the agent's **Discord** tab →
+**Set up…**. The sheet walks through it in three steps; it takes about five
+minutes.
+
+The **Discord** tab, once connected, is the whole picture: which servers the
+bot is in, **Add to a server**, **Open in Discord**, **People on Discord**
+(who is linked there, and anyone knocking, with *Let them in* / *That's me*
+/ *Not now* right on the card), **Group chats** with the bot's own servers
+as a picker (or another server by ID), and **↻ Re-check**, which asks Discord
+again from the stored token — so "not in any server yet" and "Message
+Content Intent is off" clear once you have fixed them, without pasting the
+token again. The Setup log records connects, removals, re-checks and
+group-chat changes.
 
 - **Slack** needs two tokens from one app: the bot token (`xoxb-`) and an
   app-level token (`xapp-`) with `connections:write`. **Copy app manifest**

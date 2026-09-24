@@ -24,16 +24,22 @@ function fakeConnector(kind: 'slack' | 'discord', accountId = kind === 'slack' ?
     fields: [{ key: 'token', label: 'Token', pattern: /^ok-/, help: 'starts with ok-' }],
     hosts: [],
     secretValue: (c) => String(c.token),
+    credsFromSecret: (secret) => ({ token: secret }),
     async verify(c) {
       if (c.token !== 'ok-good') throw new ConnectorError('The platform refused it.');
+      verifyCalls.push(kind);
+      // The second look finds the bot in a server and the intent turned on.
+      const later = verifyCalls.filter((k) => k === kind).length > 1;
       return {
-        accountId, displayName: '@Bot in Home', deepLink: `https://x/${kind}`,
+        accountId, displayName: later ? '@Bot in Home, Work' : '@Bot in Home', deepLink: `https://x/${kind}`,
         ...(kind === 'discord' ? { addToServerUrl: 'https://discord.com/oauth2/authorize?client_id=1' } : {}),
-        settings: { team: 'Home' }, warnings: kind === 'discord' ? ['Message Content Intent is off'] : [],
+        settings: { team: 'Home', botName: 'Bot', servers: later ? [{ id: '100', name: 'Home' }, { id: '200', name: 'Work' }] : [{ id: '100', name: 'Home' }] },
+        warnings: kind === 'discord' && !later ? ['Message Content Intent is off'] : [],
       };
     },
   };
 }
+const verifyCalls: string[] = [];
 
 async function setup(opts: { imageChannels?: string[] } = {}) {
   const store = new Store(new Database(':memory:'));
@@ -117,6 +123,45 @@ describe('adding Slack or Discord', () => {
     expect((await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' }, { 'x-hatchabot-owner': 'stranger' })).statusCode).toBe(404);
     expect((await inject('POST', `/v1/agents/${add({ ops: true })}/channels/discord`, { token: 'ok-good' })).statusCode).toBe(409);
     expect((await inject('POST', `/v1/agents/${id}/channels/whatsapp`, { token: 'ok-good' })).statusCode).toBe(404);
+  });
+});
+
+describe('checking again, and who it answers', () => {
+  it('re-check asks the platform again from the stored token: servers and warnings refresh, nothing is pasted or returned', async () => {
+    const { inject, add, secrets } = await setup();
+    const id = add();
+    verifyCalls.length = 0;
+    const first = (await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' })).json();
+    expect(first.warnings).toEqual(['Message Content Intent is off']);
+    expect(first.servers).toEqual([{ id: '100', name: 'Home' }]);
+    const again = await inject('POST', `/v1/agents/${id}/channels/discord/recheck`);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().warnings).toEqual([]);
+    expect(again.json().servers).toEqual([{ id: '100', name: 'Home' }, { id: '200', name: 'Work' }]);
+    expect(again.json().displayName).toBe('@Bot in Home, Work');
+    expect(again.json().checkedAt).toBeTruthy();
+    expect(JSON.stringify(again.json())).not.toContain('ok-good');
+    expect(secrets.map.get(`channel/${id}/discord`)).toBe('ok-good'); // untouched
+    // Rooms survive a re-check.
+    await inject('PATCH', `/v1/agents/${id}/channels/discord`, { rooms: { mode: 'room', roomId: '123456789012345678' } });
+    const third = (await inject('POST', `/v1/agents/${id}/channels/discord/recheck`)).json();
+    expect(third.rooms).toEqual({ mode: 'room', roomId: '123456789012345678' });
+    expect((await inject('POST', `/v1/agents/${id}/channels/slack/recheck`)).statusCode).toBe(404); // it has no Slack
+  });
+
+  it('the list says who is linked on each channel', async () => {
+    const { inject, add, store } = await setup();
+    const id = add();
+    await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
+    store.insertMembership({ id: 'm1', agentId: id, userId: OWNER, role: 'owner', status: 'active' } as never);
+    store.insertMembership({ id: 'm2', agentId: id, userId: 'user-ann', role: 'user', status: 'active', displayName: 'Ann' } as never);
+    store.insertMembership({ id: 'm3', agentId: id, userId: 'user-bob', role: 'user', status: 'active', displayName: 'Bob' } as never);
+    store.bindMemberIdentity(id, OWNER, 'discord', '1');
+    store.bindMemberIdentity(id, 'user-ann', 'discord', '2');
+    const r = (await inject('GET', `/v1/agents/${id}/channels`)).json();
+    const d = r.channels.find((c: any) => c.kind === 'discord');
+    expect(d.youAreLinked).toBe(true);
+    expect(d.people.map((p: any) => [p.displayName ?? 'you', p.you])).toEqual([['you', true], ['Ann', false]]); // Bob has no Discord identity
   });
 });
 

@@ -700,6 +700,8 @@
   .v2chan-h b { font-size:15px }
   .v2chan-mark { width:26px; height:26px; border-radius:8px; display:grid; place-items:center; flex:none }
   .v2chan-warn { color:var(--warn); font-size:13px; margin:0; padding-left:18px }
+  .v2chan-people { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:6px 0 }
+  .v2chan-people .pair { flex-basis:100% }
   .v2chan-rooms { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
   .v2chan-rooms input { width:auto; flex:1; min-width:180px }
   .v2steps { margin:6px 0 12px; padding-left:20px; line-height:1.55 }
@@ -10547,7 +10549,7 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', 'Slack & Discord'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', previewing() ? 'Slack & Discord' : 'Discord'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
 /** Where each classic edit tab now lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
 const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
@@ -10656,7 +10658,7 @@ function v2RenderSheet() {
   if (v2Mine(a)) v2EmbedPanes(a, v2Tab);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
   if ($('editClass')) void renderClassPicker(a);
-  if ($('v2Chans') && previewing()) void v2LoadChans(a.id);
+  if ($('v2Chans')) void v2LoadChans(a.id);
 }
 
 /** The Files tab: browse the agent's home (read-only), download a file or a folder. */
@@ -10799,11 +10801,8 @@ function v2Pane(a, tab) {
           : '<span class="sub">No Telegram bot.</span>') : ''}
       ${a.botUsername ? slot('paneEditTg') : ''}`;
     case 'channels': return `
-      ${previewing() ? '' : `<div class="v2wip">
-        <b>🚧 Under construction.</b> Slack and Discord are built — an agent can already answer in a
-        workspace or a server — but they have not been tested against real Slack apps and Discord bots
-        yet, so they are switched off. They land in a release of their own.</div>`}
-      <div id="v2Chans" data-agent="${esc(a.id)}">${previewing() ? '<div class="sub">Loading…</div>' : ''}</div>`;
+      <div id="v2Chans" data-agent="${esc(a.id)}"><div class="sub">Loading…</div></div>
+      ${previewing() ? '' : `<div class="sub" style="margin-top:8px">Slack is built too, but has not been tried against a real Slack app yet; add <code>?dev</code> to the address to work on it.</div>`}`;
     case 'knowledge': return `
       ${slot('paneEditData')}
       ${slot('paneEditConn')}
@@ -10812,8 +10811,8 @@ function v2Pane(a, tab) {
       return `
       ${v2ChannelKinds(a).length
         ? `<div data-v2slot="tgMembersBlock"></div>`
-        : row('People', `<span>Only you — it is not in a chat app yet.</span>${B('Add Telegram…', goto('messaging'))}
-            <span class="sub">Other people reach an agent through a chat app: Telegram today, Slack and Discord soon.</span>`)}
+        : row('People', `<span>Only you — it is not in a chat app yet.</span>${B('Add Telegram…', goto('messaging'))}${B('Add Discord…', goto('channels'))}
+            <span class="sub">Other people reach an agent through a chat app: Telegram or Discord.</span>`)}
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
@@ -10901,31 +10900,53 @@ async function v2LoadChans(id) {
     const roomHelp = kind === 'slack'
       ? 'The channel ID starts with C: open the channel, click its name, and it is at the bottom. Invite the app to that channel too.'
       : 'The server ID is a long number: turn on Developer Mode (User Settings → Advanced), then right-click the server → Copy Server ID.';
-    return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b><span>${esc(c.displayName || '')}</span></div>
-      <div class="sub">${c.youAreLinked ? '✓ Linked to you.' : `Not linked to you yet: send it a direct message on ${label} and your first message links you.`}</div>
+    const servers = Array.isArray(c.servers) ? c.servers : [];
+    const people = Array.isArray(c.people) ? c.people : [];
+    const knocks = (pairings[id] ?? []).filter(p => (p.kind || 'telegram') === kind);
+    const who = (p) => p.meta?.firstName || p.meta?.username || p.id;
+    // The bot's own servers as a picker; "another" keeps the typed-ID route.
+    const known = servers.some(g => g.id === rooms.roomId);
+    const roomPicker = kind === 'discord' && servers.length ? `
+        <select id="chanRoomPick-${kind}" style="width:auto"${rooms.mode === 'room' ? '' : ' hidden'} onchange="$('chanRoom-${kind}').hidden = this.value !== ''; if (this.value) $('chanRoom-${kind}').value = this.value">
+          ${servers.map(g => `<option value="${esc(g.id)}"${rooms.roomId === g.id ? ' selected' : ''}>${esc(g.name || g.id)}</option>`).join('')}
+          <option value=""${rooms.mode === 'room' && !known ? ' selected' : ''}>Another server (type its ID)</option>
+        </select>` : '';
+    const roomInputHidden = rooms.mode !== 'room' || (roomPicker && known);
+    return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b><span>${esc(c.displayName || '')}</span>
+        ${canChange ? `<button onclick="chanRecheck('${jsq(id)}','${kind}', this)" title="Ask ${label} again: servers it is in, and whether anything still needs fixing">↻ Re-check</button>` : ''}</div>
+      <div class="sub">${c.youAreLinked ? '✓ Linked to you.' : `Not linked to you yet: send it a direct message on ${label} and your first message links you.`}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}</div>
       ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+      ${kind === 'discord' ? `<div class="sub">${servers.length ? `In ${servers.length === 1 ? 'one server' : `${servers.length} servers`}: ${servers.map(g => `<b>${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any server yet.'} People can only message it once they share a server with it.</div>` : ''}
       <div class="v2chan-h">
         ${c.deepLink ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
         ${c.addToServerUrl ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
         ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Remove…</button>` : ''}
       </div>
+      <div class="v2chan-people">
+        <b>People on ${label}</b>
+        ${people.length ? `<span>${people.map(p => `<span class="member linked">${p.you ? 'You' : `<span class="pii">${esc(p.displayName || p.userId.slice(0, 8))}</span>`}${p.role === 'owner' ? ' ★' : ''}</span>`).join(' ')}</span>` : `<span class="sub">Nobody yet${c.youAreLinked ? '' : ' — your own first message links you'}.</span>`}
+        ${knocks.map(p => `<div class="pair"><span class="grow">🔑 <b class="pii">${esc(who(p))}</b> wants to talk to it on ${label}</span>
+          <button onclick="denyPair('${jsq(id)}','${jsq(p.code)}','${jsq(who(p))}','${kind}')" title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
+          <button onclick="approve('${jsq(id)}','${jsq(p.code)}', true,'${kind}','${jsq(who(p))}')" title="This is you on ${label}: link it to your login">That's me</button>
+          <button class="primary" onclick="approve('${jsq(id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button></div>`).join('')}
+        <span class="sub" style="flex-basis:100%">Anyone else who messages it gets a code and a knock here; or send them an invite from Sharing. Remove a member from Sharing and they are off every app.</span>
+      </div>
       <div class="v2chan-rooms">
         <label for="chanRoom-${kind}" style="margin:0">Group chats</label>
-        <select id="chanRoomMode-${kind}" style="width:auto" onchange="$('chanRoom-${kind}').hidden = this.value !== 'room'">
+        <select id="chanRoomMode-${kind}" style="width:auto" onchange="const on = this.value === 'room'; const pick = $('chanRoomPick-${kind}'); if (pick) { pick.hidden = !on; $('chanRoom-${kind}').hidden = !on || pick.value !== ''; if (on && pick.value) $('chanRoom-${kind}').value = pick.value; } else $('chanRoom-${kind}').hidden = !on">
           <option value="off"${rooms.mode !== 'room' ? ' selected' : ''}>Off: direct messages only</option>
           <option value="room"${rooms.mode === 'room' ? ' selected' : ''}>One ${kind === 'slack' ? 'channel' : 'server'}</option>
-        </select>
-        <input type="text" id="chanRoom-${kind}" placeholder="${kind === 'slack' ? 'C0123ABCD' : '123456789012345678'}" value="${esc(rooms.roomId || '')}"${rooms.mode === 'room' ? '' : ' hidden'} autocomplete="off">
+        </select>${roomPicker}
+        <input type="text" id="chanRoom-${kind}" placeholder="${kind === 'slack' ? 'C0123ABCD' : '123456789012345678'}" value="${esc(rooms.roomId || '')}"${roomInputHidden ? ' hidden' : ''} autocomplete="off">
         ${canChange ? `<button onclick="chanSaveRooms('${jsq(id)}','${kind}', this)">Save</button>` : ''}
         <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
       </div></div>`;
   };
   // Only what this browser is set up to see: an attached channel always
   // renders (never strand an agent that has one), the rest wait for preview.
-  const kinds = ['slack', 'discord'].filter(k => previewing() || r.channels.some(x => x.kind === k));
-  box.innerHTML = kinds.length
-    ? kinds.map(card).join('')
-    : '<div class="sub">Slack and Discord are coming: the code is here, and they stay hidden until they have been tested against real apps.</div>';
+  // Discord is offered to everyone; Slack waits for preview (untried against a real app) — an attached one always shows.
+  const kinds = ['discord', 'slack'].filter(k => k === 'discord' || previewing() || r.channels.some(x => x.kind === k));
+  box.innerHTML = kinds.map(card).join('');
 }
 
 async function openChanSetup(id, kind) {
@@ -11025,6 +11046,14 @@ function chanShowConnected(c) {
 }
 chanDlg.addEventListener('close', () => { clearInterval(chanWatch); chanDlg.querySelectorAll('input').forEach(i => { i.value = ''; }); });
 
+async function chanRecheck(id, kind, btn) {
+  btn.disabled = true; const was = btn.textContent; btn.textContent = 'Checking…';
+  try {
+    const c = await api(`/v1/agents/${id}/channels/${kind}/recheck`, { method: 'POST', body: {} });
+    toast(c.warnings?.length ? `${V2_CHAN_LABEL[kind]}: ${c.warnings.length} thing${c.warnings.length === 1 ? '' : 's'} still to fix.` : `${V2_CHAN_LABEL[kind]}: all good.`);
+    if ($('v2Chans')) void v2LoadChans(id);
+  } catch (e) { toast(e.message, 8000); btn.disabled = false; btn.textContent = was; }
+}
 async function chanSaveRooms(id, kind, btn) {
   const mode = $(`chanRoomMode-${kind}`).value;
   const roomId = $(`chanRoom-${kind}`).value.trim();

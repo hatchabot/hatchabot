@@ -38,6 +38,9 @@ export function discordConnector(f: FetchLike = fetch): ChannelConnector {
     secretValue(creds) {
       return cleanField(creds, FIELDS[0]!);
     },
+    credsFromSecret(secret) {
+      return { token: secret };
+    },
 
     async verify(creds): Promise<VerifiedChannel> {
       const token = cleanField(creds, FIELDS[0]!);
@@ -64,7 +67,7 @@ export function discordConnector(f: FetchLike = fetch): ChannelConnector {
         displayName: servers.length ? `@${botName} in ${servers.map((g: { name: string }) => g.name).join(', ')}` : `@${botName}`,
         deepLink: `https://discord.com/users/${encodeURIComponent(String(me.body.id))}`,
         addToServerUrl: discordAddToServerUrl(applicationId),
-        settings: { botUserId: String(me.body.id), botName, servers, applicationName: String(app.body.name ?? '') },
+        settings: { botUserId: String(me.body.id), botName, servers, applicationName: String(app.body.name ?? ''), checkedAt: new Date().toISOString() },
         warnings,
       };
     },

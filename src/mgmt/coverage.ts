@@ -71,6 +71,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/channel-token': 'app: secret — a BotFather token',
   'POST /v1/agents/:id/channels/:kind': 'app: secret — Slack and Discord tokens',
   'PATCH /v1/agents/:id/channels/:kind': 'app: later — which Slack channel or Discord server the agent answers in',
+  'POST /v1/agents/:id/channels/:kind/recheck': 'app: browser — a re-check with the platform from the Discord tab; nothing for the manager to decide',
   'DELETE /v1/agents/:id/channels/:kind': 'remove_channel',
   'POST /v1/agents/:id/invites': 'create_invite',
   'POST /v1/agents/:id/pairing/approve': 'approve_member',
