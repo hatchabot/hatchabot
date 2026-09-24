@@ -35,6 +35,13 @@ describe('rebuildNeed', () => {
     });
     expect(rebuildNeed({ onAgentNetwork: true }, true, [])?.level).toBe('recommended');
   });
+  it('the image reason says what the rebuild changes, in the two OpenClaw versions', () => {
+    expect(rebuildNeed({}, true, [], { running: '2026.7.1-2', current: '2026.9.6' })?.reasons)
+      .toEqual(['the fleet default moved to OpenClaw 2026.9.6 — this one still runs 2026.7.1-2']);
+    expect(rebuildNeed({}, true, [], { running: '2026.9.6', current: '2026.9.6' })?.reasons)
+      .toEqual(['the fleet default image was rebuilt (same OpenClaw 2026.9.6) — this one runs the previous build']);
+    expect(rebuildNeed({}, true, [], {})?.reasons).toEqual(['a newer runtime image is available']);
+  });
   it('each release the container predates adds its reason; optional ones never badge', () => {
     expect(rebuildNeed({ containerGen: 0 }, false, CHANGES)).toEqual({
       level: 'required', reasons: ['its mounts were tightened', 'its tools folder moved'],

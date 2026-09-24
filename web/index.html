@@ -5141,6 +5141,15 @@ function v2BulkSection(key, label) {
   const ids = faAgents().filter(a => v2ViewKey(a)[0] === key).map(a => a.id);
   void openFleetActions({ ids, label });
 }
+// The section's agent names, one per line, in the order shown — for a
+// message, a note, or a list to paste somewhere.
+let v2SectionsNow = [];
+async function v2CopySection(key) {
+  const names = (v2SectionsNow.find(s => s.key === key)?.items ?? []).map(({ a }) => a.name).filter(Boolean);
+  if (!names.length) return toast('Nothing to copy.');
+  try { await navigator.clipboard.writeText(names.join('\n')); toast(`Copied ${names.length} name${names.length === 1 ? '' : 's'}.`); }
+  catch { toast('Could not reach the clipboard — copy them from the list.', 6000); }
+}
 async function openFleetActions(preset) {
   $('faErr').textContent = ''; $('faResults').innerHTML = '';
   // Classes power the "Set class" action + the class filter chips. Always
@@ -8962,7 +8971,7 @@ function updateBlurb(a) {
 
 /** Rebuild reasons other than the newer image (which has its own ⬆ Update row). */
 function rebuildOtherReasons(a) {
-  return (a.rebuild?.reasons ?? []).filter(r => !/newer runtime image/.test(r));
+  return (a.rebuild?.reasons ?? []).filter(r => !/newer runtime image|^the fleet default (moved to|image was rebuilt)/.test(r));
 }
 
 // The machine's rebuild policy (Runtime tab; machine owner sets it).
@@ -10294,12 +10303,14 @@ function renderV2() {
   }).join('')}</span>`;
   const viewBar = live.length > 1 ? `<div class="v2viewbar" role="tablist" aria-label="Group agents by">${V2_VIEWS.map(([k, l]) =>
     `<button role="tab" aria-selected="${k === v2View}" class="${k === v2View ? 'on' : ''}" onclick="v2SetView('${k}')">${esc(l)}</button>`).join('')}${sortBar}</div>` : '';
+  v2SectionsNow = sections;
   const html = viewBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
       <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
+          ${s.items.length ? `<button onclick="v2CopySection('${jsq(s.key)}')" title="Copy the names of the agents in this section" aria-label="Copy agent names">⧉</button>` : ''}
           <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
         </span></div>
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>

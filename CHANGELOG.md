@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.61.0] — 2026-09-24
+
+### Added
+- **Copy the names in a section.** Every section on the home screen has a ⧉ beside its ⚡ that copies the names of the agents in it, one per line, in the order shown.
+
+### Changed
+- **The rebuild reason says what changes.** An agent that follows the fleet default but was built before the default moved used to say "a newer runtime image is available", which read as if it were already on the new image. It now says "the fleet default moved to OpenClaw 2026.9.6 — this one still runs 2026.7.1-2" (or "the fleet default image was rebuilt (same OpenClaw …)"). Following the default is a setting; the rebuild is what moves the container.
+
 ## [2.60.4] — 2026-09-24
 
 ### Fixed

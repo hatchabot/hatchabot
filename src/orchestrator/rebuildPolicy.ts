@@ -50,10 +50,26 @@ export interface RebuildNeed {
   reasons: string[];
 }
 
+/**
+ * The image reason in the owner's terms. "A newer runtime image is available"
+ * read as news about the world; on an agent that already follows the fleet
+ * default it needs to say what the rebuild changes: the default moved to
+ * another OpenClaw and this container still runs the old one (Stock Broker
+ * and four more after the 2026.9.6 promotion, 2026-09-24), or the default was
+ * rebuilt on the same version.
+ */
+export function imageBehindReason(versions?: { running?: string; current?: string }): string {
+  const from = versions?.running, to = versions?.current;
+  if (from && to && from !== to) return `the fleet default moved to OpenClaw ${to} — this one still runs ${from}`;
+  if (to) return `the fleet default image was rebuilt (same OpenClaw ${to}) — this one runs the previous build`;
+  return 'a newer runtime image is available';
+}
+
 export function rebuildNeed(
   info: { containerGen?: number; onAgentNetwork?: boolean },
   imageBehind: boolean,
   changes: SetupChange[] = SETUP_CHANGES,
+  versions?: { running?: string; current?: string },
 ): RebuildNeed | undefined {
   const required: string[] = [];
   const recommended: string[] = [];
@@ -63,7 +79,7 @@ export function rebuildNeed(
     if (c.gen <= gen || c.level === 'optional') continue;
     (c.level === 'required' ? required : recommended).push(c.why);
   }
-  if (imageBehind) recommended.push('a newer runtime image is available');
+  if (imageBehind) recommended.push(imageBehindReason(versions));
   const reasons = [...required, ...recommended];
   if (!reasons.length) return undefined;
   return { level: required.length ? 'required' : 'recommended', reasons };

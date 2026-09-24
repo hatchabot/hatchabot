@@ -3335,7 +3335,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const provider = providerFor(a.hostId);
     const [running, current] = await Promise.all([provider.info(a.runtimeRef), currentImageInfoFor(a.hostId)]);
     const imageBehind = !a.image && !!(running.imageId && current.imageId && running.imageId !== current.imageId);
-    return { running, current, imageBehind, need: rebuildNeed(running, imageBehind) };
+    return { running, current, imageBehind, need: rebuildNeed(running, imageBehind, undefined, { running: running.openclawVersion, current: current.openclawVersion }) };
   };
 
   app.get('/v1/rebuild-policy', async () => ({

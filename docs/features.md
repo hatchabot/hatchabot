@@ -677,7 +677,8 @@ Design and the verification notes: `docs/channels-slack-discord-design.md`.
 Every section on the home screen — a group, or a bin of whatever **View by**
 is showing (an image, a status, a Needs-you bin, an activity age…) — has a
 **⚡** in its header that opens Bulk actions with exactly those agents
-ticked. Inside Bulk actions, the current View by's sections are also filter
+ticked, and a **⧉** that copies their names (one per line, in the order
+shown). Inside Bulk actions, the current View by's sections are also filter
 chips ("Image: 2026.9.6 (4)"), next to the usual ones (all, running, stopped,
 needs rebuild, needs attention, each source, group, class and machine).
 
