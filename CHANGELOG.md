@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.9] — 2026-09-24
+
+### Fixed
+- The v2.59.8 tag shipped with its version number still reading 2.59.7 (the bump was skipped when a test fixture failed mid-release); this release carries the same code with the right number.
+
 ## [2.59.8] — 2026-09-24
 
 ### Fixed
