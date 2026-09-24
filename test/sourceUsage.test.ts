@@ -100,11 +100,13 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     at(1000); await sampleSourceUsage(deps, NOW - 40 * 3_600_000); // older than a day
     at(3000); await sampleSourceUsage(deps, NOW - 30 * 3_600_000); // +2000, still older
     at(9000); await sampleSourceUsage(deps, NOW - 10 * 3_600_000); // +6000, inside the day
-    at(9500); await sampleSourceUsage(deps, NOW);                  // +500, inside five hours
+    at(9500); await sampleSourceUsage(deps, NOW - 4_000_000);      // +500, 66 min ago: inside five hours, outside the hour
+    at(9800); await sampleSourceUsage(deps, NOW);                  // +300, inside the hour
     const [src] = summarizeSourceUsage(store, OWNER, NOW);
-    expect(src!.window5h.tokens).toBe(2 * 500);
-    expect(src!.window24h.tokens).toBe(2 * (6000 + 500)); // the day, not the week
-    expect(src!.window7d.tokens).toBe(2 * (2000 + 6000 + 500));
+    expect(src!.window1h.tokens).toBe(2 * 300); // the tokens / hr tile
+    expect(src!.window5h.tokens).toBe(2 * (500 + 300));
+    expect(src!.window24h.tokens).toBe(2 * (6000 + 500 + 300)); // the day, not the week
+    expect(src!.window7d.tokens).toBe(2 * (2000 + 6000 + 500 + 300));
   });
 });
 

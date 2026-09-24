@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.64.0] — 2026-09-24
+
+### Changed
+- **Dashboard: tokens / hr, and a memory tile.** The tokens tile now counts the last hour (samples are ten minutes apart) instead of the last day; Status → Usage keeps the day and the week. A new tile shows the memory every container is using and opens Status → Resources; when any container has been running into its memory cap it turns amber and counts them instead.
+- **Status → Resources sorts by every column**: agent, CPU, memory, of cap, peak and cap hits.
+
 ## [2.63.0] — 2026-09-24
 
 ### Added

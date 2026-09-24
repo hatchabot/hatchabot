@@ -44,8 +44,11 @@ The header holds:
   install as an app, help, the classic look, the version, and sign out.
 
 - **The manager's dashboard.** Beside the Hatchabot agent, the fleet in tiles
-  drawn like the agent icons: **awake** (11/13), **asks / 5h** (with a
-  sparkline of the last hours), **tokens / 24h**, **last backup** (amber past
+  drawn like the agent icons: **awake** (11/13), **tokens / hr** (spent across
+  every AI source in the last hour; Status → Usage has the day and the week),
+  **memory in use** (every container's live memory, opening Status →
+  Resources; it turns amber and counts the containers when any has been
+  running into its memory cap), **last backup** (amber past
   36h), **spare bots** (wearing the same Telegram badge the agent icons do, so it
   reads as spare *Telegram* bots), and — only when they are not zero — **to read**, **to
   confirm**, **knocking** and **to rebuild**, which take priority when the row
@@ -1073,7 +1076,7 @@ Settings sit in the Hatchabot panel beside the manager.
 **Resources** (Status → Resources; `hatchabot top [--sort cpu|mem|name]`): live
 CPU and memory per agent, per machine, as Docker measures it — one call per
 machine, refreshed every few seconds while the view is open; click Agent, CPU
-or Memory to sort (again to flip). Beside the memory: the container's **peak**
+or any other column to sort (again to flip). Beside the memory: the container's **peak**
 since it started and how often it **hit its cap** (see "When a container
 restarts on its own"). A runner shows "not measurable" until its
 provider reports stats. The machine owner also sees the

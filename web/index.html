@@ -7643,9 +7643,11 @@ function fleetResDraw(r) {
   const who = (c) => c.agentName ? esc(c.agentName) : ({ embedder: 'Memory search service', 'embed-door': 'Memory search door', doorman: 'Hatchabot agent’s doorman' })[c.role] || esc(c.name);
   const plain = (c) => c.agentName || ({ embedder: 'Memory search service', 'embed-door': 'Memory search door', doorman: 'Doorman' })[c.role] || c.name;
   const { key, dir } = fleetResSort;
+  // Every column sorts (Chris, 2026-09-24); a row without a reading sorts as zero.
+  const val = (c) => key === 'cpu' ? c.cpuPct : key === 'cap' ? (c.memLimitBytes ? c.memBytes / c.memLimitBytes : 0)
+    : key === 'peak' ? (c.memPeakBytes ?? 0) : key === 'hits' ? ((c.memCapHits ?? 0) + 1e6 * (c.memOomKills ?? 0)) : c.memBytes;
   const cmp = (a, b) => key === 'name' ? dir * plain(a).localeCompare(plain(b), undefined, { sensitivity: 'base' })
-    : key === 'cpu' ? dir * (a.cpuPct - b.cpuPct) || plain(a).localeCompare(plain(b))
-    : dir * (a.memBytes - b.memBytes) || plain(a).localeCompare(plain(b));
+    : dir * (val(a) - val(b)) || plain(a).localeCompare(plain(b));
   const th = (k, label, right) => `<th${right ? ' style="text-align:right"' : ''}><button class="res-sort${key === k ? ' on' : ''}" onclick="fleetResSortBy('${k}')" aria-sort="${key === k ? (dir > 0 ? 'ascending' : 'descending') : 'none'}">${label}${key === k ? (dir > 0 ? ' ▲' : ' ▼') : ''}</button></th>`;
   $('fleetResAt').textContent = `measured ${clock(r.at)}`;
   el.innerHTML = r.hosts.map(h => {
@@ -7653,7 +7655,7 @@ function fleetResDraw(r) {
     return `<div style="padding:10px 0;border-top:1px solid var(--line)">
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><b>${esc(h.kind === 'local' ? 'This machine' : h.name)}</b>
         <span class="sub">${h.error ? esc(h.error) : `${h.totals.cpuPct}% CPU · ${mb(h.totals.memBytes)} in ${h.containers.length} container${h.containers.length === 1 ? '' : 's'}`}</span></div>
-      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}<th style="text-align:right">of cap</th><th style="text-align:right" title="The most it has used since it started">peak</th><th style="text-align:right" title="Times it ran into its memory cap and the kernel had to reclaim; a process killed for memory counts separately">hit cap</th></tr></thead><tbody>
+      ${rows.length ? `<table class="rt-tbl" style="width:100%;margin-top:6px"><thead><tr>${th('name', 'Agent')}${th('cpu', 'CPU', true)}${th('mem', 'Memory', true)}${th('cap', 'of cap', true)}${th('peak', 'peak', true)}${th('hits', 'hit cap', true)}</tr></thead><tbody>
         ${rows.map(c => `<tr><td>${who(c)}${c.shared ? ' <span class="sub">(shared with you)</span>' : c.mine === false ? ' <span class="sub">(another account’s)</span>' : ''}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
@@ -10069,7 +10071,7 @@ async function refresh(withMeta) {
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); }
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadResourcesTile(); }
     if (withMeta && tailnet === null) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
@@ -11340,7 +11342,7 @@ function renderV2Stats() {
   const knocking = mine.reduce((n, a) => n + (pairings[a.id]?.length ?? 0), 0);
   const stale = mine.filter(a => a.rebuild).length;
   const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
-  const tokens24h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window24h?.tokens ?? 0), 0);
+  const tokens1h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window1h?.tokens ?? 0), 0);
   const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');
   // The setup guide no longer vanishes after the first agent; while anything
   // on it is undone, the dashboard says so and opens it.
@@ -11361,8 +11363,12 @@ function renderV2Stats() {
       go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'People waiting to be let in' } : null,
     stale ? { key: 'stale', emoji: '🔄', tone: 'var(--warn)', num: stale, lab: 'to rebuild', hot: true,
       go: () => { openFleetActions(); setTimeout(() => faSelect('needs-rebuild'), 50); }, title: 'Agents on an older image' } : null,
-    { key: 'tokens', emoji: '🔢', tone: 'var(--info)', num: fmtN(tokens24h), lab: 'tokens / 24h', hot: false,
-      go: () => openFleetUsage(), title: 'Tokens your agents have spent across every AI source in the last 24 hours' },
+    { key: 'tokens', emoji: '🔢', tone: 'var(--info)', num: fmtN(tokens1h), lab: 'tokens / hr', hot: false,
+      go: () => openFleetUsage(), title: 'Tokens your agents have spent across every AI source in the last hour (Status → Usage has the day and the week)' },
+    // Live CPU and memory (Status → Resources): the machine's in-use memory,
+    // amber when a container has been running into its cap (Chris, 2026-09-24).
+    resourcesTile ? { key: 'resources', emoji: '🧠', tone: resourcesTile.capHits ? 'var(--warn)' : 'var(--info)', num: resourcesTile.num, lab: resourcesTile.capHits ? 'at cap' : 'memory in use', hot: !!resourcesTile.capHits,
+      go: () => openFleet('resources'), title: resourcesTile.capHits ? `${resourcesTile.capHits} container${resourcesTile.capHits === 1 ? ' has' : 's have'} run into ${resourcesTile.capHits === 1 ? 'its' : 'their'} memory cap — open Status → Resources` : `Memory in use across every container (${resourcesTile.cpu}% CPU) — open Status → Resources` } : null,
     // asks/5h was here; dropped (Chris, 2026-09-24) — Status → Usage has the
     // full picture. A rate-limited source still shows, as its own tile.
     limited ? { key: 'usage', emoji: '⛔', tone: 'var(--bad)', num: fmtN(usage), lab: 'rate-limited', hot: true,
@@ -11380,7 +11386,7 @@ function renderV2Stats() {
   // One line, always (Chris, 2026-09-24): when the numbers and the action
   // tiles do not fit, the least actionable numbers go first — asks/5h, then
   // tokens/24h, spare bots, last backup — never the ones that ask for a click.
-  const dropOrder = { tokens: 1, bots: 2, backup: 3 };
+  const dropOrder = { tokens: 1, bots: 2, backup: 3, resources: 4 };
   const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}"${dropOrder[t.key] ? ` data-drop="${dropOrder[t.key]}"` : ''}>
       <span class="tile">${t.art ?? ''}<span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
       <span class="lab">${esc(t.lab)}</span>
@@ -11394,6 +11400,22 @@ function renderV2Stats() {
   // The Bulk actions tile: only once there is a selection to make.
   if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
   v2HubWrapCheck();
+}
+// Figures for the resources tile, refreshed at most once a minute: one
+// docker stats call per machine, not one per home-screen poll.
+let resourcesTile = null, resourcesTileAt = 0;
+async function loadResourcesTile() {
+  if (Date.now() - resourcesTileAt < 60_000) return;
+  resourcesTileAt = Date.now();
+  try {
+    const r = await api('/v1/resources');
+    const rows = r.hosts.flatMap(h => h.containers);
+    const mem = rows.reduce((n, c) => n + c.memBytes, 0);
+    const cpu = Math.round(rows.reduce((n, c) => n + c.cpuPct, 0));
+    const capHits = rows.filter(c => c.memCapHits || c.memOomKills).length;
+    resourcesTile = { num: capHits ? String(capHits) : (mem >= 1073741824 ? `${Math.round(mem / 1073741824)}<small>GB</small>` : `${Math.round(mem / 1048576)}<small>MB</small>`), cpu, capHits };
+    renderV2Stats();
+  } catch { /* the tile simply stays away */ }
 }
 let v2PendingCount = 0;
 let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
