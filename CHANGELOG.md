@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.56.2] — 2026-09-24
+
+### Fixed
+- On a 2026.8+ image, an agent whose volume carries the Brave search plugin from 2026.7 (OpenClaw installs it itself when a Brave key is set) has it reinstalled at the runtime's version, offline from the image's cache — `doctor --post-upgrade` no longer reports the version drift. Images for 2026.8+ bake `@openclaw/brave-plugin` into that cache.
+
 ## [2.56.1] — 2026-09-24
 
 ### Added

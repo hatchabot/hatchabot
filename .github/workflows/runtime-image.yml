@@ -43,7 +43,7 @@ jobs:
           echo "engine=$(node scripts/runtime-pins.mjs embed-engine "$V")" >> "$GITHUB_OUTPUT"
           # …and those bake the DuckDuckGo plugin and install channel plugins from an npm cache (trust model).
           if [ "$(node scripts/runtime-pins.mjs embed-engine "$V")" = none ]; then
-            echo "baked=duckduckgo=@openclaw/duckduckgo-plugin" >> "$GITHUB_OUTPUT"; echo "install=npm" >> "$GITHUB_OUTPUT"
+            echo "baked=duckduckgo=@openclaw/duckduckgo-plugin,brave=@openclaw/brave-plugin" >> "$GITHUB_OUTPUT"; echo "install=npm" >> "$GITHUB_OUTPUT"
           else
             echo "baked=" >> "$GITHUB_OUTPUT"; echo "install=link" >> "$GITHUB_OUTPUT"
           fi

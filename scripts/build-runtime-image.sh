@@ -154,7 +154,9 @@ BAKED_ARG=()
 if [ -n "${BAKED_PLUGINS:-}" ]; then
   BAKED_ARG=(--build-arg "BAKED_PLUGINS=${BAKED_PLUGINS}")
 elif [ "$(node "$PINS" embed-engine "${OPENCLAW_VERSION}" 2>/dev/null || echo baked)" = none ]; then
-  BAKED_ARG=(--build-arg "BAKED_PLUGINS=duckduckgo=@openclaw/duckduckgo-plugin")
+  # brave too: OpenClaw installs it into the volume when a Brave key is set, and
+  # a 2026.7 copy drifts on 2026.9 — the seed reinstalls it from the cache.
+  BAKED_ARG=(--build-arg "BAKED_PLUGINS=duckduckgo=@openclaw/duckduckgo-plugin,brave=@openclaw/brave-plugin")
 fi
 
 # 2026.8+ refuses linked channel plugins anything keyed (its plugin trust

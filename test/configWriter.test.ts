@@ -445,6 +445,15 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     const en = cmds.findIndex((c) => c.argv.join(' ') === 'plugins enable slack');
     expect(cache).toBeLessThan(inst); expect(inst).toBeLessThan(en);
   });
+  it('reinstalls a drifted brave plugin from the cache when the image carries it, only then', () => {
+    const withBrave = buildConfigCommands({ ...base, pluginInstall: 'npm', bakedPlugins: ['duckduckgo', 'brave'] });
+    const line = withBrave.find((c) => c.rawShell?.includes('@openclaw/brave-plugin@$V'))!;
+    expect(line.rawShell).toContain('openclaw-brave-plugin-*');
+    expect(line.rawShell).toContain('--force');
+    expect(withBrave.findIndex((c) => c === line)).toBeGreaterThan(withBrave.findIndex((c) => c.rawShell?.includes('hb-npm-cache')));
+    expect(buildConfigCommands({ ...base, pluginInstall: 'npm', bakedPlugins: ['duckduckgo'] }).some((c) => c.rawShell?.includes('brave-plugin'))).toBe(false);
+    expect(buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2', bakedPlugins: ['brave'] }).some((c) => c.rawShell?.includes('brave-plugin'))).toBe(false);
+  });
   it('a link image (2026.7, or absent label) links as before', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2', channelPlugins: ['slack'], slack });
     expect(cmds.some((c) => c.argv.includes('--link') && c.argv.join(' ').includes('slack'))).toBe(true);

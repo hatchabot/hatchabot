@@ -246,6 +246,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       rawShell: `rm -rf /tmp/hb-npm-cache && cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache 2>/dev/null; export npm_config_cache=/tmp/hb-npm-cache npm_config_offline=true npm_config_fetch_retries=0 npm_config_logs_dir=/tmp/hb-npm-logs`,
     });
   }
+  // OpenClaw installs the Brave search plugin into the volume by itself when a
+  // Brave key is set; a copy from 2026.7 drifts on 2026.9 ("plugin
+  // version_drift", the gate on 2026-09-24). When the image carries brave in
+  // its cache, an agent that has it is moved to the baked version. Static.
+  if (npmMode && baked.has('brave')) {
+    cmds.push({
+      argv: [],
+      rawShell: `if ls /home/node/.openclaw/npm/projects/openclaw-brave-plugin-* >/dev/null 2>&1; then V=$(node -p 'require("/opt/hatchabot/plugins/brave/node_modules/@openclaw/brave-plugin/package.json").version') && openclaw plugins install "@openclaw/brave-plugin@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1; fi || true`,
+    });
+  }
   const channelPlugin = (kind: 'slack' | 'discord'): ConfigCommand => npmMode
     ? {
       argv: [],
