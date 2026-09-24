@@ -138,6 +138,25 @@ describe('the embedding service', () => {
     expect(w.provider.embedder.embedder).toBe('stopped');
   });
 
+  it('an idle engine sitting near its memory cap is restarted; a busy or lean one is left alone', async () => {
+    const w = world();
+    const sha = await withModel(w, 'data');
+    const svc = new EmbedderService({
+      provider: () => w.provider, secrets: w.secrets, store: w.store, dataDir: w.dataDir, runtimeImage: 'x:1',
+      doorScript: 'noop', doorBind: async () => '127.0.0.1', modelSha256: sha, log: (e, d) => w.events.push([e, d]),
+    });
+    await svc.start();
+    const G = 1024 ** 3;
+    w.provider.embedderStatsRow = { name: 'mock-embedder', cpuPct: 0, memBytes: 0.5 * G, memLimitBytes: 2 * G, pids: 3 };
+    expect(await svc.healthTick()).toBe('ok');
+    w.provider.embedderStatsRow = { name: 'mock-embedder', cpuPct: 60, memBytes: 1.9 * G, memLimitBytes: 2 * G, pids: 3 };
+    expect(await svc.healthTick()).toBe('ok'); // busy: not now
+    w.provider.embedderStatsRow = { name: 'mock-embedder', cpuPct: 0, memBytes: 1.9 * G, memLimitBytes: 2 * G, pids: 3 };
+    expect(await svc.healthTick()).toBe('restarted');
+    expect(w.events.some((e) => e[0] === 'embedder.memory_restart')).toBe(true);
+    expect(w.provider.embedder.embedder).toBe('running');
+  });
+
   it('a model file that fails its checksum is replaced, never used', async () => {
     const w = world();
     mkdirSync(join(w.dataDir, 'models'), { recursive: true });

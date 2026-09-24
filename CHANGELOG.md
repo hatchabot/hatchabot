@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.55.2] — 2026-09-24
+
+### Fixed
+- The memory search engine is restarted by its health loop when it sits idle above 80 % of its memory limit. It grows under load (the overnight fleet re-index left it at its 2 GiB cap, one big request from being killed) and holds nothing between calls; a restart returns it to about 360 MiB. Agents on it see a few seconds of "unavailable", which the re-index step already retries through.
+
 ## [2.55.1] — 2026-09-24
 
 ### Fixed

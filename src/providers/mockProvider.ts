@@ -202,6 +202,9 @@ export class MockProvider implements RuntimeProvider {
   }
   async embedderStatus() { return this.embedder; }
   async stopEmbedder() { this.embedder = { embedder: 'absent', door: 'absent' }; }
+  /** What docker stats would say about the engine (tests set it). */
+  embedderStatsRow: import('./provider.js').ContainerStats | undefined = undefined;
+  async embedderStats() { return this.embedderStatsRow; }
   async tagImage(from: string, to: string) { this.tagged.push([from, to]); }
   removed: string[] = [];
   async imageHistory() { return [{ step: 'RUN npm i -g openclaw@mock', size: '100MB' }]; }

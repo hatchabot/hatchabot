@@ -242,6 +242,18 @@ export class EmbedderService {
     const s = await this.status();
     if (s.embedder === 'running' && s.door === 'running') {
       this.syncKeys(); // retired keys (archive, delete) leave the file within a tick
+      // The engine grows under load and never gives the memory back: after
+      // the fleet's overnight re-index it sat at its 2 GiB cap, idle, one big
+      // request from being killed (2026-09-24; a restart returned it to
+      // ~360 MiB). It holds nothing between calls, so when it is over 80 % of
+      // its limit AND idle, restart it — a few seconds of 502s that the
+      // re-index step already retries through.
+      const st = await this.#o.provider().embedderStats?.().catch(() => undefined);
+      if (st && st.memLimitBytes > 0 && st.memBytes > 0.8 * st.memLimitBytes && st.cpuPct < 5) {
+        this.#o.log?.('embedder.memory_restart', { memBytes: st.memBytes, memLimitBytes: st.memLimitBytes });
+        await this.restart();
+        return 'restarted';
+      }
       return 'ok';
     }
     this.#o.log?.('embedder.unhealthy', { embedder: s.embedder, door: s.door });

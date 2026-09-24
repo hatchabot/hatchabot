@@ -1000,6 +1000,11 @@ export class LocalDockerProvider implements RuntimeProvider {
     }
     throw new ProviderError('embedder did not become healthy', 'The embedding service started but did not answer its health check.');
   }
+  async embedderStats(): Promise<ContainerStats | undefined> {
+    const name = this.#embedderName();
+    return (await this.stats()).find((r) => r.name === name);
+  }
+
   async stopEmbedder(): Promise<void> {
     await this.#docker(['rm', '-f', this.#embedDoorName()]);
     await this.#docker(['rm', '-f', this.#embedderName()]);

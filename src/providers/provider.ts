@@ -295,6 +295,8 @@ export interface RuntimeProvider {
   ensureEmbedder?(spec: import('../embedder/embedder.js').EmbedderSpec): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   embedderStatus?(): Promise<import('../embedder/embedder.js').EmbedderStatus>;
   stopEmbedder?(): Promise<void>;
+  /** The engine container's live memory and CPU (from `docker stats`), for the health loop's memory guard. */
+  embedderStats?(): Promise<ContainerStats | undefined>;
   /** Build `tag` from a Dockerfile on THIS host's daemon (a runner's, over its connection). */
   buildImage?(tag: string, dockerfile: string, labels: Record<string, string>): Promise<{ ok: boolean; error?: string }>;
 
