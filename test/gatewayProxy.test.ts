@@ -266,4 +266,38 @@ describe('approving the console for a new browser', () => {
       if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
     }
   });
+
+  it('no pending store at all (2026.9 keeps them in its database) means ask the CLI, not "nothing pending"', async () => {
+    // Cooking Teacher, 2026-09-24: the file the fast path read is gone on
+    // 2026.9; taking that for "nobody waiting" left the browser on "Approve
+    // this browser" for good.
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try {
+      const { app, provider } = await setup();
+      provider.execResponses.set('sh', { code: 0, stdout: '__hb_pairing_unknown__\n', stderr: '' });
+      const pending = await app.inject({ method: 'GET', url: '/v1/agents/a1/console/pending', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(pending.json().pending).toBe(1); // from `devices list --json`
+      expect(provider.execLog.some((a) => a[0] === 'devices' && a[1] === 'list')).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
+    }
+  });
+
+  it('rows the shell read from the store are used as they are (no CLI)', async () => {
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    try {
+      const { app, provider } = await setup();
+      provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify([{ requestId: 'db-0000-1111', ts: Date.now() - 1000 }]), stderr: '' });
+      const pending = await app.inject({ method: 'GET', url: '/v1/agents/a1/console/pending', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(pending.json().pending).toBe(1);
+      expect(provider.execLog.some((a) => a[0] === 'devices' && a[1] === 'list')).toBe(false);
+      const res = await app.inject({ method: 'POST', url: '/v1/agents/a1/console/approve', headers: { 'x-hatchabot-owner': OWNER } });
+      expect(res.json().approved).toBe(1);
+      expect(provider.execLog.filter((a) => a[0] === 'devices' && a[1] === 'approve')).toEqual([['devices', 'approve', 'db-0000-1111']]);
+    } finally {
+      if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev;
+    }
+  });
 });

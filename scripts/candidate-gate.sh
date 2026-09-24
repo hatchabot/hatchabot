@@ -131,10 +131,12 @@ step "models list --json has the shape the app reads (key strings, provider-qual
 m="$(inagent "openclaw models list --provider anthropic --all --json 2>/dev/null" | json 'v=>{const a=Array.isArray(v)?v:(v&&Array.isArray(v.models)?v.models:[]);return a.filter(x=>x&&typeof x.key==="string"&&x.key.startsWith("anthropic/")).length}')"
 [ "${m:-0}" -ge 1 ] 2>/dev/null && ok || bad "no anthropic/* entries"
 
-step "devices list --json has pending[] and paired[]; devices/pending.json absent or JSON"
-d="$(inagent "openclaw devices list --json 2>/dev/null" | json 'v=>Array.isArray(v.pending)&&Array.isArray(v.paired)?"ok":"no"')"
-pf="$(inagent 'f=$HOME/.openclaw/devices/pending.json; if [ -f "$f" ]; then node -e "JSON.parse(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))" "$f" && echo ok; else echo absent; fi')"
-[ "$d" = ok ] && echo "$pf" | grep -qE 'ok|absent' && ok || bad "devices: $d · pending.json: $pf"
+step "devices list --json has pending[] and paired[]; the pending store is readable where this version keeps it"
+# 2026.7: devices/pending.json. 2026.9: the state database's device_pairing_pending
+# table (the file is gone — reading "absent" as "nobody waiting" left consoles on
+# "Approve this browser"). The app's own shell must find one of them.
+pf="$(inagent 'if [ -f "$HOME/.openclaw/devices/pending.json" ]; then echo file; elif [ -f "$HOME/.openclaw/state/openclaw.sqlite" ]; then node -e "const {DatabaseSync}=require(\"node:sqlite\");new DatabaseSync(process.argv[1],{readOnly:true}).prepare(\"select request_id,ts,refreshed_at_ms from device_pairing_pending\").all()" "$HOME/.openclaw/state/openclaw.sqlite" && echo database; else echo none; fi')"
+[ "$d" = ok ] && echo "$pf" | grep -qE '^(file|database)$' && ok || bad "devices: $d · pending store: $pf"
 
 step "the console answers at ?session=agent:$SLUG:main"
 code="$(inagent "curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18789/?session=agent:$SLUG:main'")"

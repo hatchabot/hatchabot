@@ -270,7 +270,9 @@ OpenClaw's own formats:
 4. CLI JSON shapes we parse: `sessions list`, `cron list`, `pairing list`,
    `models`, `--version`.
 5. Files we read directly: `sessions.json` (unread mark, last seen) and
-   `devices/pending.json` (console approval). *2026.8+: the session records
+   `devices/pending.json` (console approval; *2026.9: gone — pending requests
+   live in `state/openclaw.sqlite`, table `device_pairing_pending`, read there
+   by `src/orchestrator/pairing.ts`, v2.60.4*). *2026.8+: the session records
    moved into the agent's `openclaw-agent.sqlite` (`session_nodes.entry_json`,
    same entry shape, `delivery.kind` instead of `lastTo`); read there with
    `node:sqlite` when the file is gone (`sessionsReadShell`, v2.53.3).

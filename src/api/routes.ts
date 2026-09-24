@@ -56,6 +56,7 @@ import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
+import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
 import { estimateCost } from '../orchestrator/pricing.js';
@@ -4389,22 +4390,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const pendingConsoleRequests = async (agent: Agent): Promise<Array<{ requestId: string; ts: number }>> => {
     if (!agent.runtimeRef) return [];
     const provider = providerFor(agent.hostId);
-    // Fast path: read OpenClaw's pending store directly (~50 ms). The CLI takes
-    // over two seconds to start, and the panel polls this while someone stares
-    // at a pairing screen. Any surprise in the file falls back to the CLI.
+    // Fast path: read OpenClaw's pending store directly (~50 ms) — the JSON
+    // file on 2026.7, the state database on 2026.9 (pairing.ts). The CLI
+    // takes over two seconds to start, and the panel polls this while
+    // someone stares at a pairing screen. Anything the shell could not read
+    // or does not recognise falls back to the CLI: a missing store is not
+    // "nothing pending".
     try {
-      const raw = await provider.execShell(agent.runtimeRef, 'cat "$HOME/.openclaw/devices/pending.json" 2>/dev/null || echo "{}"');
-      // An empty answer is not "nothing pending" (the shell always prints at
-      // least {}): it means we learned nothing, so ask the CLI.
-      if (raw.code === 0 && raw.stdout.trim()) {
-        const parsed = JSON.parse(raw.stdout) as unknown;
-        const rows = (Array.isArray(parsed) ? parsed : Object.values((parsed ?? {}) as Record<string, unknown>)) as Array<Record<string, unknown>>;
-        if (rows.every((r) => r && typeof r === 'object' && typeof r.requestId === 'string' && typeof (r.ts ?? r.createdAtMs) === 'number')) {
-          const since = Date.now() - CONSOLE_PAIRING_WINDOW_MS;
-          return rows
-            .map((r) => ({ requestId: r.requestId as string, ts: (r.ts ?? r.createdAtMs) as number }))
-            .filter((r) => r.ts >= since && /^[A-Za-z0-9-]{8,64}$/.test(r.requestId));
-        }
+      const raw = await provider.execShell(agent.runtimeRef, pendingPairingShell());
+      const rows = raw.code === 0 ? parsePendingPairing(raw.stdout) : undefined;
+      if (rows) {
+        const since = Date.now() - CONSOLE_PAIRING_WINDOW_MS;
+        return rows.filter((r) => r.ts >= since && /^[A-Za-z0-9-]{8,64}$/.test(r.requestId));
       }
     } catch { /* fall through to the CLI */ }
     const res = await provider.exec(agent.runtimeRef, ['devices', 'list', '--json'], { timeoutMs: 20_000 });

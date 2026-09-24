@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.60.4] — 2026-09-24
+
+### Fixed
+- **"Approve this browser" is approved for you again on 2026.9 images.** OpenClaw 2026.9 keeps a browser's pairing request in its state database; the `devices/pending.json` file Hatchabot read first no longer exists, and a missing file was taken for "nobody waiting", so the console sat on OpenClaw's pairing screen (Cooking Teacher). The pending requests are now read from whichever store the version has — the file, else the database — and a store that cannot be read falls back to the CLI. A request a page keeps refreshing counts as fresh. The candidate gate checks the store the same way.
+
 ## [2.60.3] — 2026-09-24
 
 ### Fixed
