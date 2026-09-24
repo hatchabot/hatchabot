@@ -426,3 +426,28 @@ describe('the 2026.9 port (OpenClaw 2026.8 and later)', () => {
     expect(heal.rawShell).toContain('r.list');
   });
 });
+
+describe('channel plugins on an npm-install image (2026.8+ trust model)', () => {
+  const base = { agentId: 'todo', authMode: 'api-key' as const, model: 'm', openclawVersion: '2026.9.6' };
+  const slack = { botToken: 'x', appToken: 'y', allowFrom: [], rooms: { mode: 'off' as const } };
+  it('installs the official package offline from the baked cache instead of linking, and drops the old link paths in the heal', () => {
+    const cmds = buildConfigCommands({ ...base, channelPlugins: ['slack', 'discord'], pluginInstall: 'npm', slack, discord: { token: 't', applicationId: 'a', allowFrom: [], rooms: { mode: 'off' } } });
+    const raw = cmds.map((c) => c.rawShell ?? '').join('\n');
+    expect(raw).toContain('cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache');
+    expect(raw).toContain('npm_config_offline=true');
+    expect(raw).toContain('openclaw plugins install "@openclaw/slack@$V" --accept-capabilities --acknowledge-install-policy-warning --pin');
+    expect(raw).toContain('openclaw plugins install "@openclaw/discord@$V"');
+    expect(cmds.some((c) => c.argv.includes('--link') && /slack|discord/.test(c.argv.join(' ')))).toBe(false);
+    expect(cmds[0]!.rawShell).toContain('/opt/hatchabot/plugins/slack/');
+    // The cache line precedes the installs; the installs precede the enables.
+    const cache = cmds.findIndex((c) => c.rawShell?.includes('hb-npm-cache'));
+    const inst = cmds.findIndex((c) => c.rawShell?.includes('@openclaw/slack@$V'));
+    const en = cmds.findIndex((c) => c.argv.join(' ') === 'plugins enable slack');
+    expect(cache).toBeLessThan(inst); expect(inst).toBeLessThan(en);
+  });
+  it('a link image (2026.7, or absent label) links as before', () => {
+    const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2', channelPlugins: ['slack'], slack });
+    expect(cmds.some((c) => c.argv.includes('--link') && c.argv.join(' ').includes('slack'))).toBe(true);
+    expect(cmds.some((c) => c.rawShell?.includes('hb-npm-cache'))).toBe(false);
+  });
+});

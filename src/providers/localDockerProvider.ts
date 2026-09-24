@@ -12,7 +12,7 @@ import type {
   RuntimeSpec,
   RuntimeStatus,
 } from './provider.js';
-import { ProviderError, parseByteSize, parseChannelsLabel, parseEmbedEngineLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
+import { ProviderError, parseByteSize, parseChannelsLabel, parseEmbedEngineLabel, parsePluginInstallLabel, parsePluginsLabel, type ContainerStats, type EmbedEngine } from './provider.js';
 import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
@@ -491,17 +491,18 @@ export class LocalDockerProvider implements RuntimeProvider {
     const res = await this.#docker([
       'inspect',
       '-f',
-      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}`,
+      `{{.Image}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "hatchabot.gen" }}|{{range $k, $v := .NetworkSettings.Networks}}{{$k}},{{end}}|{{.Created}}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}`,
       container,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins] = res.stdout.trim().split('|');
+    const [imageId, openclawVersion, channels, gen, nets, created, engine, plugins, install] = res.stdout.trim().split('|');
     return {
       imageId,
       openclawVersion: openclawVersion || undefined,
       channels: parseChannelsLabel(channels),
       embedEngine: parseEmbedEngineLabel(engine),
       plugins: parsePluginsLabel(plugins),
+      pluginInstall: parsePluginInstallLabel(install),
       containerGen: Number(gen) || 0,
       onAgentNetwork: this.#onAgentNetwork((nets ?? '').split(',').filter(Boolean)),
       containerCreatedAt: created && !Number.isNaN(Date.parse(created)) ? new Date(created).toISOString() : undefined,
@@ -537,12 +538,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       'image',
       'inspect',
       '-f',
-      `{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}`,
+      `{{.Id}}|{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{ index .Config.Labels "org.hatchabot.channels" }}|{{ index .Config.Labels "org.hatchabot.embed-engine" }}|{{ index .Config.Labels "org.hatchabot.plugins" }}|{{ index .Config.Labels "org.hatchabot.plugin-install" }}`,
       image ?? this.image,
     ]);
     if (res.code !== 0) return {};
-    const [imageId, openclawVersion, channels, engine, plugins] = res.stdout.trim().split('|');
-    return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels), embedEngine: parseEmbedEngineLabel(engine), plugins: parsePluginsLabel(plugins) };
+    const [imageId, openclawVersion, channels, engine, plugins, install] = res.stdout.trim().split('|');
+    return { imageId, openclawVersion: openclawVersion || undefined, channels: parseChannelsLabel(channels), embedEngine: parseEmbedEngineLabel(engine), plugins: parsePluginsLabel(plugins), pluginInstall: parsePluginInstallLabel(install) };
   }
 
   async listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[] }[]> {

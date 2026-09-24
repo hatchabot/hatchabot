@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.56.0] — 2026-09-24
+
+### Fixed
+- **Discord and Slack on OpenClaw 2026.8+.** 2026.9's plugin trust model refuses a plugin linked from a local path anything keyed ("openKeyedStore is only available for trusted plugins"), so Discord failed to register on the first agents moved to 2026.9.6. Images for 2026.8+ now bake an npm cache (`PLUGIN_INSTALL=npm`, label `org.hatchabot.plugin-install`), and at seed time a channel plugin is installed into the agent's volume as the official npm package, offline from that cache — which OpenClaw records as `trusted-official`. About 35 MB in the image and 70 MB on the volume per channel an agent uses; the 2026.7 line keeps linking, with nothing on the volume. The old link paths are removed from the config on the way over.
+
 ## [2.55.3] — 2026-09-24
 
 ### Changed

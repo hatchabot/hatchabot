@@ -157,6 +157,15 @@ elif [ "$(node "$PINS" embed-engine "${OPENCLAW_VERSION}" 2>/dev/null || echo ba
   BAKED_ARG=(--build-arg "BAKED_PLUGINS=duckduckgo=@openclaw/duckduckgo-plugin")
 fi
 
+# 2026.8+ refuses linked channel plugins anything keyed (its plugin trust
+# model): those images bake an npm cache and agents install from it (offline).
+INSTALL_ARG=()
+if [ "$(node "$PINS" embed-engine "${OPENCLAW_VERSION}" 2>/dev/null || echo baked)" = none ]; then
+  INSTALL_ARG=(--build-arg "PLUGIN_INSTALL=${PLUGIN_INSTALL:-npm}")
+elif [ -n "${PLUGIN_INSTALL:-}" ]; then
+  INSTALL_ARG=(--build-arg "PLUGIN_INSTALL=${PLUGIN_INSTALL}")
+fi
+
 # Node.js: OpenClaw raises its floor over time (2026.9 needs 24.16+). Read what
 # this version asks for and take the lowest Node line that fits, so the proven
 # default stays on the line it was proven on.
@@ -191,6 +200,7 @@ docker build \
   "${NODE_ARG[@]}" \
   "${CHANNEL_ARG[@]}" \
   "${BAKED_ARG[@]}" \
+  "${INSTALL_ARG[@]}" \
   "${EXTRA_ARG[@]}" \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \

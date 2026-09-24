@@ -255,7 +255,15 @@ OpenClaw's own formats:
    web-search plugin is no longer bundled — doctor tries to install
    `@openclaw/duckduckgo-plugin` from npm on first sight of the config. The
    image now bakes it (`BAKED_PLUGINS`, label `org.hatchabot.plugins`) and the
-   writer links it like a channel plugin (v2.53.0).*
+   writer links it like a channel plugin (v2.53.0). Bigger: 2026.9's plugin
+   trust model refuses a LINKED Slack/Discord plugin anything keyed
+   (`PluginTrustRefusalError: openKeyedStore is only available for trusted
+   plugins… origin-path; --link and --force do not grant trusted plugin
+   state`) — found on Taco Agent. From v2.56.0 a 2026.8+ image bakes an npm
+   cache (`PLUGIN_INSTALL=npm`, label `org.hatchabot.plugin-install`) and the
+   seed installs `@openclaw/<channel>@<baked version>` into the volume
+   offline from it, which OpenClaw records as `trusted-official`. DuckDuckGo
+   stays linked (no keyed store).*
 3. The management agent's lockdown: tool and group names in `OPS_TOOLS_ALLOW`
    and `OPS_TOOLS_DENY`, and `mcp set`. The drift check will flag a miss; the
    management agent stays pinned and moves last.
@@ -272,6 +280,12 @@ OpenClaw's own formats:
 7. Claude Code CLI pin and the subscription-token path. *The second
    `models auth paste-token` (agent main's store) needs `--agent main` once
    two agents are configured (v2.53.2).*
+
+**Memory, 2026-09-24:** a 2026.9 gateway is ~1.0–1.2 GB RSS against ~380 MB
+on 2026.7 — measured from inside: main heap 424 MB live (GC tight, a heap cap
+gains nothing), the rest in the 6+4 worker isolates 2026.9 added and the
+SQLite caches of its three databases. Real usage, not slack; affordable on the
+Spark (45 × ~1 GB), a cost driver for shared hosts.
 
 **Status 2026-09-24:** `hatchabot-runtime:2026.9.6` passes the gate 16/16
 (v2.53.3, after four fixes found by five gate runs). Not yet exercised on a

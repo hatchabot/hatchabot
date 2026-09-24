@@ -206,7 +206,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // network).
     cmds.push({
       argv: [],
-      rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;if(c.meta&&"lastTouchedAt" in c.meta){delete c.meta.lastTouchedAt;n++}if(c.agents&&c.agents.defaults&&"memorySearch" in c.agents.defaults){delete c.agents.defaults.memorySearch;n++}c.agents=c.agents||{};if(c.agents.ownership!=="explicit"){c.agents.ownership="explicit";n++}${baked.has('duckduckgo') ? `c.plugins=c.plugins||{};c.plugins.load=c.plugins.load||{};c.plugins.load.paths=Array.isArray(c.plugins.load.paths)?c.plugins.load.paths:[];if(!c.plugins.load.paths.includes("${DUCKDUCKGO_PLUGIN_DIR}")){c.plugins.load.paths.push("${DUCKDUCKGO_PLUGIN_DIR}");n++}` : ''}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
+      rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;if(c.meta&&"lastTouchedAt" in c.meta){delete c.meta.lastTouchedAt;n++}if(c.agents&&c.agents.defaults&&"memorySearch" in c.agents.defaults){delete c.agents.defaults.memorySearch;n++}c.agents=c.agents||{};if(c.agents.ownership!=="explicit"){c.agents.ownership="explicit";n++}${patch.pluginInstall === 'npm' ? `c.plugins=c.plugins||{};c.plugins.load=c.plugins.load||{};if(Array.isArray(c.plugins.load.paths)){const k=c.plugins.load.paths.filter(x=>x.indexOf("/opt/hatchabot/plugins/slack/")!==0&&x.indexOf("/opt/hatchabot/plugins/discord/")!==0);if(k.length!==c.plugins.load.paths.length){c.plugins.load.paths=k;n++}}` : ''}${baked.has('duckduckgo') ? `c.plugins=c.plugins||{};c.plugins.load=c.plugins.load||{};c.plugins.load.paths=Array.isArray(c.plugins.load.paths)?c.plugins.load.paths:[];if(!c.plugins.load.paths.includes("${DUCKDUCKGO_PLUGIN_DIR}")){c.plugins.load.paths.push("${DUCKDUCKGO_PLUGIN_DIR}");n++}` : ''}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
     });
   }
   if (patch.embed) {
@@ -232,6 +232,26 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // "I mean it" options are given (2026.7 asked nothing for a link); the
   // Dockerfile reads them from `--help`, the writer knows them by version.
   const link = (dir: string): ConfigCommand => ({ argv: ['plugins', 'install', '--link', dir, ...(port ? ['--force', '--accept-capabilities', '--acknowledge-install-policy-warning'] : [])] });
+  // 2026.8+ (image label plugin-install=npm): a channel plugin is installed
+  // into the volume as the official npm package, offline from the cache the
+  // image carries, so OpenClaw's trust model accepts it ("trusted-official";
+  // a linked path is refused anything keyed — Taco Agent's Discord,
+  // 2026-09-24). The version is the one baked beside the cache. Static text:
+  // nothing of the agent's goes into the line. "Already installed" is a
+  // refusal, not a failure; a real failure surfaces at `plugins enable`.
+  const npmMode = patch.pluginInstall === 'npm';
+  if (npmMode) {
+    cmds.push({
+      argv: [],
+      rawShell: `rm -rf /tmp/hb-npm-cache && cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache 2>/dev/null; export npm_config_cache=/tmp/hb-npm-cache npm_config_offline=true npm_config_fetch_retries=0 npm_config_logs_dir=/tmp/hb-npm-logs`,
+    });
+  }
+  const channelPlugin = (kind: 'slack' | 'discord'): ConfigCommand => npmMode
+    ? {
+      argv: [],
+      rawShell: `V=$(node -p 'require("/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}/package.json").version') && openclaw plugins install "@openclaw/${kind}@$V" --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1 || true`,
+    }
+    : link(channelPluginDir(kind));
   // 2026.8+ images bake the DuckDuckGo plugin (no longer bundled with
   // OpenClaw); link it like a channel plugin, then enable as always.
   if (baked.has('duckduckgo')) cmds.push(link(DUCKDUCKGO_PLUGIN_DIR));
@@ -520,7 +540,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (plugins.has('slack')) {
     if (patch.slack) {
       const sl = patch.slack;
-      cmds.push(link(channelPluginDir('slack')));
+      cmds.push(channelPlugin('slack'));
       cmds.push({ argv: ['plugins', 'enable', 'slack'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.mode', 'socket'] });
@@ -544,7 +564,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (plugins.has('discord')) {
     if (patch.discord) {
       const dc = patch.discord;
-      cmds.push(link(channelPluginDir('discord')));
+      cmds.push(channelPlugin('discord'));
       cmds.push({ argv: ['plugins', 'enable', 'discord'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', groups(dc.rooms)] });

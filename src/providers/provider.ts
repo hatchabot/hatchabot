@@ -145,6 +145,8 @@ export interface OpenClawConfigPatch {
   /** Other plugins the image bakes (label org.hatchabot.plugins), linked at seed
    *  time: `duckduckgo` on OpenClaw 2026.8+, where web search is no longer bundled. */
   bakedPlugins?: string[];
+  /** See RuntimeInfo.pluginInstall. Absent = link. */
+  pluginInstall?: 'link' | 'npm';
   slack?: {
     botToken: string;
     appToken: string;
@@ -246,7 +248,7 @@ export interface RuntimeProvider {
   currentImageInfo(image?: string): Promise<RuntimeInfo>;
 
   /** Every tag of the runtime image repo on this daemon (candidates, versions, derived). */
-  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[] }[]>;
+  listImageTags(): Promise<{ tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: EmbedEngine; plugins?: string[]; pluginInstall?: 'link' | 'npm' }[]>;
 
   /** The isolated network's gateway address on this host (created on first
    *  use). Absent on providers without the concept (mock). */
@@ -380,6 +382,10 @@ export interface RuntimeInfo {
   /** Other plugins baked into the image by id (label org.hatchabot.plugins),
    *  e.g. ['duckduckgo'] on OpenClaw 2026.8+; linked into each agent at seed time. */
   plugins?: string[];
+  /** How channel plugins reach an agent (label org.hatchabot.plugin-install): `link` to the
+   *  image's copy (2026.7), or `npm` — installed into the volume from the image's npm cache
+   *  (2026.8+, whose trust model refuses linked plugins anything keyed). Absent = link. */
+  pluginInstall?: 'link' | 'npm';
   /** A container's: the setup generation it was made at (label hatchabot.gen; absent = 0). */
   containerGen?: number;
   /** A container's: when it was created (ISO) — i.e. the last rebuild. */
@@ -393,6 +399,10 @@ export type EmbedEngine = 'baked' | 'none';
 /** Parse the org.hatchabot.embed-engine label: only an explicit `none` means none (older images have no label). */
 export function parseEmbedEngineLabel(v: string | undefined): EmbedEngine {
   return (v ?? '').trim() === 'none' ? 'none' : 'baked';
+}
+
+export function parsePluginInstallLabel(v: string | undefined): 'link' | 'npm' {
+  return (v ?? '').trim() === 'npm' ? 'npm' : 'link';
 }
 
 /** Parse the org.hatchabot.plugins label (`id=package` pairs, comma-separated) into plugin ids. */

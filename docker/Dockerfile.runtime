@@ -196,8 +196,19 @@ ARG CHANNEL_PLUGIN_VERSION=2026.7.1
 # `duckduckgo=@openclaw/duckduckgo-plugin` for those versions; empty for the
 # proven default.
 ARG BAKED_PLUGINS=
+# How an agent gets its channel plugins at seed time. `link` (2026.7): a
+# `--link` to the copy baked below, nothing on the volume. `npm` (2026.8+):
+# OpenClaw's plugin trust model refuses a linked path anything keyed
+# ("openKeyedStore is only available for trusted plugins"), so the agent
+# installs the official npm package into its volume instead — offline, from
+# the npm cache this build leaves at /opt/hatchabot/npm-cache (the same
+# install below fills it). ~35 MB in the image, ~70 MB per agent that uses a
+# channel. scripts/build-runtime-image.sh picks the mode by version.
+ARG PLUGIN_INSTALL=link
 RUN export HOME=/tmp/chbuild \
  && mkdir -p "$HOME" /opt/hatchabot/plugins && echo '{"hasCompletedOnboarding": true}' > "$HOME/.claude.json" \
+ && case "${PLUGIN_INSTALL}" in link|npm) ;; *) echo "PLUGIN_INSTALL must be link or npm" >&2; exit 1;; esac \
+ && if [ "${PLUGIN_INSTALL}" = npm ]; then mkdir -p /opt/hatchabot/npm-cache && export npm_config_cache=/opt/hatchabot/npm-cache; fi \
  && HELP="$(openclaw plugins install --help 2>&1)" \
  && if echo "$HELP" | grep -q -- '--acknowledge-clawhub-risk'; then ACK="--acknowledge-clawhub-risk"; \
     else ACK="--accept-capabilities --acknowledge-install-policy-warning --force"; fi \
@@ -220,6 +231,7 @@ RUN export HOME=/tmp/chbuild \
 # which other plugins it carries (linked into each agent at seed time).
 LABEL org.hatchabot.channels="${CHANNEL_PLUGINS}"
 LABEL org.hatchabot.plugins="${BAKED_PLUGINS}"
+LABEL org.hatchabot.plugin-install="${PLUGIN_INSTALL}"
 # What this image has beyond the standard list, so the app can say so.
 LABEL org.hatchabot.extra-packages="${EXTRA_PACKAGES}"
 

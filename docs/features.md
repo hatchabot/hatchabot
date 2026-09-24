@@ -659,6 +659,10 @@ sheet walks through it in three steps; it takes about five minutes.
 - **Group chats** are off by default. You can let it answer in one Slack
   channel or one Discord server, by its ID; there it answers members only,
   and only when @mentioned.
+- **On OpenClaw 2026.8+ they are installed into the agent** as the official
+  npm package (offline, from a cache the image carries) rather than linked
+  from the image — that line's plugin trust model insists on it. About 70 MB
+  on the agent's volume per channel it uses.
 - **Needs a base image that includes them.** Images built from v1.31.0 carry
   both plugins (label `org.hatchabot.channels`); an agent on an older image
   shows "its base image can't do Slack yet".

@@ -41,6 +41,12 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           # 2026.8+ has no engine to bake: those images are built engine-free (step 4 of the embedder design).
           echo "engine=$(node scripts/runtime-pins.mjs embed-engine "$V")" >> "$GITHUB_OUTPUT"
+          # …and those bake the DuckDuckGo plugin and install channel plugins from an npm cache (trust model).
+          if [ "$(node scripts/runtime-pins.mjs embed-engine "$V")" = none ]; then
+            echo "baked=duckduckgo=@openclaw/duckduckgo-plugin" >> "$GITHUB_OUTPUT"; echo "install=npm" >> "$GITHUB_OUTPUT"
+          else
+            echo "baked=" >> "$GITHUB_OUTPUT"; echo "install=link" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -56,6 +62,8 @@ jobs:
           build-args: |
             OPENCLAW_VERSION=${{ steps.ver.outputs.version }}
             EMBED_ENGINE=${{ steps.ver.outputs.engine }}
+            BAKED_PLUGINS=${{ steps.ver.outputs.baked }}
+            PLUGIN_INSTALL=${{ steps.ver.outputs.install }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,scope=${{ matrix.arch }},mode=max
