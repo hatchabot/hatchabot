@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.56.4] — 2026-09-24
+
+### Changed
+- The top bar is plain again: the page's own background, no gold wash or shadow.
+
 ## [2.56.3] — 2026-09-24
 
 ### Changed

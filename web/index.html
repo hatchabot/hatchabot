@@ -397,10 +397,10 @@
   body.v2 .v2top { display:flex }
   .v2top { position:sticky; top:env(safe-area-inset-top, 0px); z-index:30; flex-direction:row; align-items:center; gap:8px;
            margin:0 -20px 14px; padding:12px 20px;
-           /* Its own colour — the accent, tinted into the page — fading out at the bottom edge. */
-           background:linear-gradient(180deg, color-mix(in srgb, var(--accent) 26%, var(--bg)) 0%, color-mix(in srgb, var(--accent) 14%, var(--bg)) 60%, color-mix(in srgb, var(--accent) 4%, var(--bg)) 100%);
-           box-shadow:0 10px 18px -12px color-mix(in srgb, var(--accent) 45%, transparent);
-           -webkit-backdrop-filter:saturate(1.4) blur(12px); backdrop-filter:saturate(1.4) blur(12px);
+           /* Plain: the page's own ground, no tint, no shadow (Chris, 2026-09-24 — the
+              gold wash was too much). Still sticky, with a hairline once the page scrolls. */
+           background:color-mix(in srgb, var(--bg) 92%, transparent);
+           -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px);
            border-bottom:1px solid transparent; transition:border-color .2s }
   .v2top.scrolled { border-bottom-color:var(--line) }
   .v2brand { display:flex; align-items:center; gap:10px; color:var(--text); text-decoration:none; font-size:20px; font-weight:650; letter-spacing:.2px }
