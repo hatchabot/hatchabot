@@ -10138,7 +10138,7 @@ function v2IconHTML(a, st) {
 
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
-const V2_VIEWS = [['group', 'Groups'], ['attention', 'Needs you'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
+const V2_VIEWS = [['group', 'Groups'], ['attention', 'Needs you'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['pinned', 'Pinned'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
 /** Time-since bins, oldest last; the key's leading digit keeps them in order. */
 function v2AgeBin(iso, verb) {
   if (!iso) return ['9', `Never ${verb}`];
@@ -10193,6 +10193,14 @@ function v2ViewKey(a, view = v2View) {
       return ['i:' + a.image, m ? `Derived image: ${m[1]}` : `Image: ${a.image.replace(/^hatchabot-runtime:/, '')}`];
     }
     case 'state': { const st = v2Status(a); return ['st:' + st.cls, st.label]; }
+    // Who has a pin (and to what), and who follows the fleet default — the
+    // ones a promote will not move (Chris, 2026-09-24). A pin to the default's
+    // own image is still a pin here: it stays put on the NEXT promote.
+    case 'pinned': {
+      if (!a.image) return ['p:9', 'Follows the fleet default'];
+      const m = /:derived-([a-z0-9-]+)$/.exec(a.image);
+      return ['p:' + a.image, `Pinned to ${m ? `derived image ${m[1]}` : a.image.replace(/^hatchabot-runtime:/, '')}${a.imageIsDefault ? ' (the fleet default today)' : ''}`];
+    }
     // What wants a click from you, most urgent bin first; the rest are "Fine".
     case 'attention': {
       if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs attention'];

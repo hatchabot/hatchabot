@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.5] — 2026-09-24
+
+### Added
+- **View by → Pinned:** agents pinned to an image, one section per tag (a pin to today's fleet default says so — it still will not move on the next promote), and a section for the ones that follow the fleet default. With the section ⚡ that is "unpin these" in two clicks: Bulk actions → Set runtime image → Fleet default.
+
 ## [2.59.4] — 2026-09-24
 
 ### Fixed
