@@ -114,6 +114,13 @@ import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
 import { eventLabel, IN_PROGRESS } from '../orchestrator/eventLabels.js';
+
+/** Rebuilds at once: 1–12; the default 6 fits an ordinary machine. */
+const MAX_REBUILD_CONCURRENCY = 12;
+function clampConcurrency(raw: string | undefined): number {
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n >= 1 ? Math.min(MAX_REBUILD_CONCURRENCY, n) : 6;
+}
 import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, statShell, tarArgv, uploadAllowed } from '../orchestrator/agentFiles.js';
 import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
@@ -734,23 +741,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // minute, so the cap decides how long "Rebuild all" takes. A rebuild that
   // CHECKPOINTS first makes an AI call on the agent's source, and running many
   // at once rate-limits that source (13 of 15 failed once) — so those stay few.
-  const REBUILD_CONCURRENCY = Math.max(1, Math.floor(Number(process.env.HATCHABOT_REBUILD_CONCURRENCY) || 6));
+  const REBUILD_CONCURRENCY = clampConcurrency(process.env.HATCHABOT_REBUILD_CONCURRENCY);
   const CHECKPOINT_CONCURRENCY = Math.max(1, Math.min(
     REBUILD_CONCURRENCY,
     Math.floor(Number(process.env.HATCHABOT_CHECKPOINT_CONCURRENCY) || 2),
   ));
-  const semaphore = (limit: number) => {
+  // Resizable: the owner sets "rebuild at once" in Settings while rebuilds
+  // may be queued (Chris, 2026-09-24 — six agents moving to 2026.9 at once
+  // all re-indexed memory through one engine). Raising it wakes waiters;
+  // lowering it lets the running ones finish and admits fewer after.
+  const semaphore = (initial: number) => {
+    let limit = initial;
     let used = 0;
     const waiting: Array<() => void> = [];
+    const admit = () => { while (used < limit && waiting.length) { used++; waiting.shift()!(); } };
     return {
       acquire: (): Promise<void> => {
         if (used < limit) { used++; return Promise.resolve(); }
         return new Promise((resolve) => waiting.push(resolve));
       },
-      release: (): void => {
-        const next = waiting.shift();
-        if (next) next(); else used--;
-      },
+      release: (): void => { used--; admit(); },
+      setLimit: (n: number): void => { limit = n; admit(); },
+      get limit() { return limit; },
     };
   };
   const rebuildGate = semaphore(REBUILD_CONCURRENCY);
@@ -1124,7 +1136,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // ceiling as a 429 at create time. 0 = no limit. Archived agents don't count.
     maxAgentsPerAccount: Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0),
     /** How many rebuilds run at once, so the app can estimate a fleet-wide one. */
-    rebuildConcurrency: REBUILD_CONCURRENCY,
+    rebuildConcurrency: rebuildGate.limit,
     /** The address /app-qr.svg encodes, so the app can name it beside the code. */
     appUrl: appUrlFor(),
     identity:
@@ -3314,6 +3326,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     policies: REBUILD_POLICIES,
     quietHours: process.env.HATCHABOT_REBUILD_QUIET_HOURS ?? '3-5',
   }));
+  /** How many rebuilds run at once on this machine (the rest wait their turn). Owner-set; lives in .env. */
+  app.get('/v1/rebuild-concurrency', async () => ({ atOnce: rebuildGate.limit, queued: rebuildQueued.size, running: inflight.size, max: MAX_REBUILD_CONCURRENCY }));
+  app.put<{ Body: { atOnce?: unknown } }>('/v1/rebuild-concurrency', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const n = Number(req.body?.atOnce);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_REBUILD_CONCURRENCY) return reply.code(400).send({ error: `atOnce must be a whole number from 1 to ${MAX_REBUILD_CONCURRENCY}` });
+    const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env');
+    const wrote = await writeEnvVar(envFile, 'HATCHABOT_REBUILD_CONCURRENCY', String(n), () => true,
+      'Written by Hatchabot: how many agents rebuild at once (Settings → Images → Automatic rebuilds).')
+      .catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
+    process.env.HATCHABOT_REBUILD_CONCURRENCY = String(n);
+    rebuildGate.setLimit(n); // live: queued rebuilds follow the new number at once
+    trace()('rebuild.concurrency_set', { atOnce: n });
+    return { atOnce: n };
+  });
+
   app.put<{ Body: { policy?: string } }>('/v1/rebuild-policy', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const policy = req.body?.policy;

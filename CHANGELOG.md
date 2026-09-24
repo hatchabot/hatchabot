@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.58.0] — 2026-09-24
+
+### Added
+- **Rebuild at once** (Settings → Images → Automatic rebuilds; `hatchabot rebuild-policy --at-once N`): how many rebuilds run at the same time on this machine (1–12, default 6), for bulk actions, Rebuild all and the automatic ones alike; the rest wait their turn. Applies to what is already queued. Bulk actions say the number. Route `GET/PUT /v1/rebuild-concurrency`.
+
 ## [2.57.0] — 2026-09-24
 
 ### Added

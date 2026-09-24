@@ -162,7 +162,7 @@ Commands:
   rebuild --outdated [--required] [--dry-run]
                                Rebuild every running agent that needs it (says
                                why); a stopped one is rebuilt when started
-  rebuild-policy [required-only|auto|manual]
+  rebuild-policy [required-only|auto|manual] [--at-once <N>]
                                When this machine rebuilds agents on its own:
                                required ones once idle (default), those plus
                                the rest in the quiet hours, or never
@@ -2076,6 +2076,15 @@ async function main() {
       return;
     }
     case 'rebuild-policy': {
+      if (flags.has('at-once')) {
+        const res = await api(ctx, '/v1/rebuild-concurrency', {
+          method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ atOnce: Number(flags.get('at-once')) }),
+        });
+        const r: any = await res.json();
+        if (!res.ok) fail(r.error ?? 'could not set it');
+        console.log(`rebuilds at once: ${r.atOnce}`);
+        if (!rest[0]) return;
+      }
       if (rest[0]) {
         const res = await api(ctx, '/v1/rebuild-policy', {
           method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ policy: rest[0] }),
@@ -2085,6 +2094,8 @@ async function main() {
       }
       const r: any = await (await api(ctx, '/v1/rebuild-policy')).json();
       console.log(`rebuild policy: ${r.policy}  (choices: ${r.policies.join(', ')}; quiet hours ${r.quietHours})`);
+      const c: any = await (await api(ctx, '/v1/rebuild-concurrency')).json().catch(() => null);
+      if (c) console.log(`rebuilds at once: ${c.atOnce} (1–${c.max}; --at-once N to change)${c.queued ? ` · ${c.queued} waiting` : ''}${c.running ? ` · ${c.running} running` : ''}`);
       return;
     }
     case 'snapshot': {

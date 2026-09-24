@@ -1948,6 +1948,11 @@
       </select>
       <span id="rbPolicyNote" class="sub grow"></span>
     </div>
+    <div class="pair" style="align-items:center;gap:8px;margin:8px 0 0;flex-wrap:wrap">
+      <label style="margin:0;width:auto" for="rbAtOnce">Rebuild at once</label>
+      <select id="rbAtOnce" aria-label="Rebuilds at once" style="width:auto" onchange="setRebuildAtOnce(this.value)"></select>
+      <span id="rbAtOnceNote" class="sub grow">Beyond this, rebuilds wait their turn. Fewer is gentler on the machine and the shared memory engine — 2 or 3 while moving agents to a new OpenClaw line, which rebuilds each one's memory index.</span>
+    </div>
     </div>
     <div id="rtCapsHome">
     <h4 style="margin:18px 0 4px">What agents can do</h4>
@@ -5233,8 +5238,9 @@ function faRenderAction() {
     $('faApplyBtn').disabled = !sel.length || !common.length;
   } else {
     $('faApplyBtn').disabled = !sel.length;
-    note = action === 'rebuild' ? 'Rebuilds each selected agent (memory kept, brief downtime). Stopped agents are skipped.'
-      : action === 'image' ? 'Pins each selected agent to the chosen image (Fleet default = unpin) and rebuilds the running ones onto it now, memory kept; stopped ones move when they start. A pinned agent stops following fleet promotes.'
+    const atOnce = Number(appConfig?.rebuildConcurrency) || 6;
+    note = action === 'rebuild' ? `Rebuilds each selected agent (memory kept, brief downtime), ${atOnce} at a time — the rest wait their turn (Settings → Images → Rebuild at once). Stopped agents are skipped.`
+      : action === 'image' ? `Pins each selected agent to the chosen image (Fleet default = unpin) and rebuilds the running ones onto it, ${atOnce} at a time, memory kept; stopped ones move when they start. A pinned agent stops following fleet promotes.`
       : action === 'stop' ? 'Stops each selected running agent. It keeps its bot.'
       : action === 'start' ? 'Starts each selected stopped agent.'
       : action === 'checkpoint' ? 'Each running agent writes its current conversation into memory (~20s and some tokens per agent — runs one at a time). Stopped agents are skipped; an agent whose AI source is out of credits will report "not saved".'
@@ -8907,6 +8913,7 @@ const REBUILD_POLICY_TEXT = {
   manual: 'Nothing happens on its own — the cards say what needs a rebuild.',
 };
 async function loadRebuildPolicy() {
+  void loadRebuildAtOnce();
   try {
     const r = await api('/v1/rebuild-policy');
     rebuildPolicyNow = r.policy;
@@ -8914,6 +8921,20 @@ async function loadRebuildPolicy() {
     sel.value = r.policy;
     $('rbPolicyNote').textContent = REBUILD_POLICY_TEXT[r.policy] + (r.policy === 'auto' ? ` Quiet hours: ${r.quietHours}h.` : '');
   } catch { /* older server — leave the default */ }
+}
+async function loadRebuildAtOnce() {
+  try {
+    const r = await api('/v1/rebuild-concurrency');
+    const sel = $('rbAtOnce'); if (!sel) return;
+    sel.innerHTML = Array.from({ length: r.max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join('');
+    sel.value = String(r.atOnce);
+    if (appConfig) appConfig.rebuildConcurrency = r.atOnce;
+  } catch { /* older server */ }
+}
+async function setRebuildAtOnce(n) {
+  try { await api('/v1/rebuild-concurrency', { method: 'PUT', body: { atOnce: Number(n) } }); toast(`Rebuilds at once: ${n}`); if (appConfig) appConfig.rebuildConcurrency = Number(n); }
+  catch (e) { toast(e.message, 12000); }
+  loadRebuildAtOnce();
 }
 async function setRebuildPolicy(policy) {
   try {

@@ -955,6 +955,14 @@ of two levels:
 - **recommended**: it runs an older image than the default (never for a
   pinned agent), or a release marked its change recommended.
 
+**Rebuild at once** (⚙ Settings → Images → Automatic rebuilds, or
+`hatchabot rebuild-policy --at-once N`; `HATCHABOT_REBUILD_CONCURRENCY`, 1–12,
+default 6): how many rebuilds run at the same time on this machine — from a
+bulk action, Rebuild all, or the automatic ones; the rest wait their turn and
+their cards say so. Fewer is gentler on the machine and on the shared memory
+engine: 2 or 3 while moving agents to a new OpenClaw line, which rebuilds
+each one's memory index. Changing it applies to what is already queued.
+
 What the machine does on its own is its owner's choice (⚙ Settings → Images →
 **Automatic rebuilds**; ⚙ → Runtime in the classic view; or `hatchabot rebuild-policy`):
 - *Required ones on their own* (the default): a required rebuild happens once
