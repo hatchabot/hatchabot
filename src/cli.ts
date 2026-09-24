@@ -1587,8 +1587,8 @@ async function main() {
       if (sub === 'unpin') {
         const agentRef = rest[1] ?? fail('usage: hatchabot image unpin <agent>');
         const a = await resolveAgent(ctx, agentRef);
-        await jsonPost(`/v1/agents/${a.id}`, { image: null }, 'PATCH');
-        console.log(`"${a.name}" returned to the fleet default image — applies on: hatchabot rebuild "${a.name}"`);
+        const r: any = await (await jsonPost(`/v1/agents/${a.id}`, { image: null }, 'PATCH')).json();
+        console.log(r.sameImage ? `"${a.name}" unpinned — it already runs the fleet default image, nothing to rebuild.` : `"${a.name}" returned to the fleet default image — applies on: hatchabot rebuild "${a.name}"`);
         return;
       }
 
@@ -1606,7 +1606,8 @@ async function main() {
         const agentRef = rest[1] ?? fail('usage: hatchabot image try <agent> <tag>');
         const image = rest[2] ?? fail('usage: hatchabot image try <agent> <tag>');
         const a = await resolveAgent(ctx, agentRef);
-        await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH');
+        const r: any = await (await jsonPost(`/v1/agents/${a.id}`, { image: toTag(image) }, 'PATCH')).json();
+        if (r.sameImage) { console.log(`"${a.name}" pinned to ${toTag(image)} — it already runs that image, nothing to rebuild.`); return; }
         await jsonPost(`/v1/agents/${a.id}/rebuild`, {}, 'POST');
         console.log(`"${a.name}" is rebuilding on ${toTag(image)} (memory kept). Undo: hatchabot image unpin "${a.name}" && hatchabot rebuild "${a.name}"`);
         return;

@@ -5081,9 +5081,9 @@ async function runTryOnAgents() {
 async function discardTrial(id, name) {
   if (!confirm(`Discard the trial: return "${name}" to the fleet default image and rebuild it now?`)) return;
   try {
-    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: null } });
-    await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
-    toast(`"${name}" is rebuilding on the fleet default.`, 6000);
+    const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image: null } });
+    if (r.sameImage) toast(`"${name}" is unpinned — it already runs the fleet default, so no rebuild.`, 6000);
+    else { await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} }); toast(`"${name}" is rebuilding on the fleet default.`, 6000); }
     await refresh(false); await loadRuntimeImages();
   } catch (e) { $('rtErr').textContent = e.message; }
 }
@@ -5379,8 +5379,8 @@ async function faApply() {
         await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
       } else if (action === 'image') {
         if ((a?.image ?? null) === image) { skipped++; continue; } // already there
-        await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image } });
-        if (a?.state === 'RUNNING' && a.runtimeRef) await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
+        const r = await api(`/v1/agents/${id}`, { method: 'PATCH', body: { image } });
+        if (!r.sameImage && a?.state === 'RUNNING' && a.runtimeRef) await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
       } else if (action === 'stop') {
         if (a?.state !== 'RUNNING') { skipped++; continue; }
         await api(`/v1/agents/${id}/stop`, { method: 'POST', body: {} });
@@ -9235,8 +9235,9 @@ async function saveImagePin() {
   const v = $('editImage').value.trim();
   const a = agents.find(x => x.id === editAgentId);
   try {
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
-    if (a?.state === 'RUNNING' && a.runtimeRef) {
+    const r = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
+    if (r.sameImage) toast(v ? `Pinned to ${v} — it already runs that image, so no rebuild.` : 'Back on the fleet default — it already runs that image, so no rebuild.');
+    else if (a?.state === 'RUNNING' && a.runtimeRef) {
       await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
       toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
     } else {

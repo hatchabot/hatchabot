@@ -213,3 +213,16 @@ describe('the agent list knows who runs the fleet default', () => {
     expect(Object.fromEntries(list.map((a: any) => [a.id, a.imageTrial]))).toEqual({ a1: false, a2: true });
   });
 });
+
+describe('a pin says whether it changes anything', () => {
+  it('PATCH image answers sameImage when the tag is the image the agent already runs', async () => {
+    const { f, provider } = await world();
+    provider.infoOverride.set('mock://a1', { imageId: 'img-A' }); // runs the default's image
+    const same = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { image: 'hatchabot-runtime:2026.7.1-2' } });
+    expect(same.json().sameImage).toBe(true);
+    const other = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { image: 'hatchabot-runtime:2026.9.4' } });
+    expect(other.json().sameImage).toBe(false);
+    const unpin = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: { image: null } });
+    expect(unpin.json().sameImage).toBe(true);
+  });
+});

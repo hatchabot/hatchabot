@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.8] — 2026-09-24
+
+### Fixed
+- Pinning an agent to a tag that is the image it already runs (the fleet default under another name; the candidate just promoted) — or unpinning one that already runs the default — records the pin without a rebuild, everywhere a pin is set: Pin & rebuild, Bulk actions → Set runtime image, the Images list's ✕ (discard trial), `hatchabot image try` and `unpin`. The server compares image identities, not tag names (`sameImage` on the PATCH answer).
+
 ## [2.59.7] — 2026-09-24
 
 ### Fixed

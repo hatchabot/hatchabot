@@ -158,8 +158,10 @@ export class MockProvider implements RuntimeProvider {
   imagePluginInstall: 'link' | 'npm' = 'link';
   /** What the mock image claims to run; tests set a 2026.8+ version to see the port paths. */
   imageOpenclawVersion = 'mock';
-  async currentImageInfo(_image?: string): Promise<RuntimeInfo> {
-    return { imageId: 'mock-image', openclawVersion: this.imageOpenclawVersion, channels: this.imageChannels, embedEngine: this.imageEmbedEngine, plugins: this.imagePlugins, pluginInstall: this.imagePluginInstall };
+  async currentImageInfo(image?: string): Promise<RuntimeInfo> {
+    // A named tag answers with that tag's id from `tags` (tests set them); the default answers 'mock-image'.
+    const known = image ? this.tags.find((t) => t.tag === image) : this.tags.find((t) => t.tag === 'hatchabot-runtime:latest');
+    return { imageId: known?.imageId ?? 'mock-image', openclawVersion: this.imageOpenclawVersion, channels: this.imageChannels, embedEngine: this.imageEmbedEngine, plugins: this.imagePlugins, pluginInstall: this.imagePluginInstall };
   }
 
   tags: { tag: string; imageId: string; createdAt?: string; size?: string; openclawVersion?: string; channels?: string[]; extraPackages?: string[]; embedEngine?: 'baked' | 'none' }[] = [{ tag: 'hatchabot-runtime:latest', imageId: 'mock-image' }];

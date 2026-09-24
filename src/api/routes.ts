@@ -3699,6 +3699,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       if (runsHere) store.setAgentMigratedTo(agent.id, null);
 
+      let sameImage: boolean | undefined;
       if (parsed.data.image !== undefined) {
         // Which image runs on this box is the MACHINE owner's call, like host
         // paths: any local image is runnable by name, including ones that have
@@ -3711,6 +3712,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // A wrong name fails the next rebuild with a clear error and Retry.
         store.setAgentImage(agent.id, parsed.data.image);
         detachClassIfDrifted(agent.id);
+        // Does the pin change what it runs? A tag that IS the image already
+        // running (the default under another name, the candidate just
+        // promoted) needs no rebuild — every pin-and-rebuild path asks this
+        // rather than comparing tag names (Chris, 2026-09-24).
+        if (agent.runtimeRef) {
+          try {
+            const prov = providerFor(agent.hostId);
+            const [running, target] = await Promise.all([prov.info(agent.runtimeRef), prov.currentImageInfo(parsed.data.image ?? undefined)]);
+            sameImage = !!running.imageId && !!target.imageId && running.imageId === target.imageId;
+          } catch { sameImage = undefined; }
+        }
       }
 
       if (parsed.data.sharedPaths) {
@@ -3896,7 +3908,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (flippingMemory) store.setAgentSharedMemory(agent.id, shared!);
       const classDetached = (switchingProfile || model !== undefined) && detachClassIfDrifted(agent.id);
 
-      return publicAgent(store.getAgent(agent.id)!, { classDetached });
+      return { ...publicAgent(store.getAgent(agent.id)!, { classDetached }), ...(sameImage !== undefined ? { sameImage } : {}) };
     },
   );
 
