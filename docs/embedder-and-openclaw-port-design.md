@@ -262,9 +262,22 @@ OpenClaw's own formats:
 4. CLI JSON shapes we parse: `sessions list`, `cron list`, `pairing list`,
    `models`, `--version`.
 5. Files we read directly: `sessions.json` (unread mark, last seen) and
-   `devices/pending.json` (console approval).
+   `devices/pending.json` (console approval). *2026.8+: the session records
+   moved into the agent's `openclaw-agent.sqlite` (`session_nodes.entry_json`,
+   same entry shape, `delivery.kind` instead of `lastTo`); read there with
+   `node:sqlite` when the file is gone (`sessionsReadShell`, v2.53.3).
+   `devices/pending.json` unchanged.*
 6. The console address and its `?session=agent:<slug>:main` parameter.
-7. Claude Code CLI pin and the subscription-token path.
+   *Unchanged (gate).*
+7. Claude Code CLI pin and the subscription-token path. *The second
+   `models auth paste-token` (agent main's store) needs `--agent main` once
+   two agents are configured (v2.53.2).*
+
+**Status 2026-09-24:** `hatchabot-runtime:2026.9.6` passes the gate 16/16
+(v2.53.3, after four fixes found by five gate runs). Not yet exercised on a
+2026.9 container: a Telegram-connected agent (channel config keys), the
+management agent's lockdown, and the `agents.defaults.systemAgent.agentId`
+hint doctor prints under explicit ownership. Next: try on one real agent.
 
 Make this repeatable: `scripts/candidate-gate.sh <image tag>` (`npm run
 gate:candidate -- <tag>`) makes a web-only agent on the live control plane,
