@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.7] — 2026-09-24
+
+### Fixed
+- Agents pinned to the tag that is now the fleet default's image (the candidate you promoted) no longer count as "on a trial image": no 🧪, no *Needs attention*, nothing to discard. A pin to any other image still does.
+
 ## [2.59.6] — 2026-09-24
 
 ### Changed

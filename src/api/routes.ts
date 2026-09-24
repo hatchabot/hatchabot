@@ -3453,7 +3453,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
-          imageTrial: !a.ops && !!a.image && (!a.classId || classes.get(a.classId)?.image !== a.image),
+          // A pin to the tag that IS the fleet default's image (the candidate just
+          // promoted) is no trial: nothing to discard, nothing to flag (Chris, 2026-09-24).
+          imageTrial: !a.ops && !!a.image && !(await defaultAliasesFor(a.hostId)).has(a.image) && (!a.classId || classes.get(a.classId)?.image !== a.image),
           /** What the viewer may do — drives which controls the app renders. */
           role,
           // The owner's applied setup ANSWERS are theirs — a member (or the

@@ -209,5 +209,7 @@ describe('the agent list knows who runs the fleet default', () => {
     const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: as })).json();
     const by = Object.fromEntries(list.map((a: any) => [a.id, a.imageIsDefault]));
     expect(by).toEqual({ a1: true, a2: false });
+    // …and only the pin to something else is a trial.
+    expect(Object.fromEntries(list.map((a: any) => [a.id, a.imageTrial]))).toEqual({ a1: false, a2: true });
   });
 });
