@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.2] — 2026-09-24
+
+### Fixed
+- After promoting an image, the offered Bulk actions dialog opened with nobody selected: it ticked by the list's "needs rebuild" flag, which lags the promote by a few seconds. It now ticks the followers the promote itself reported.
+
 ## [2.59.1] — 2026-09-24
 
 ### Changed

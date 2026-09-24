@@ -5087,7 +5087,13 @@ async function promoteImage(tag) {
     const r = await api('/v1/runtime/images/promote', { method: 'POST', body: { tag } });
     toast(`${r.promoted} is now the fleet default — ${r.followers.length} agent${r.followers.length === 1 ? '' : 's'} will adopt it on rebuild.`, 9000);
     await refresh(false); await loadRuntimeImages();
-    if (r.followers.length && confirm('Open Bulk actions with "Needs rebuild" selected?')) { aiDlg.close(); await openFleetActions(); faSelect('needs-rebuild'); }
+    // The promote's own answer names the followers; the list's "needs rebuild"
+    // flag lags behind it (the image check is cached a few seconds), so ticking
+    // by that flag selected nobody (Chris, 2026-09-24).
+    if (r.followers.length && confirm(`Open Bulk actions with the ${r.followers.length} agent${r.followers.length === 1 ? '' : 's'} that follow the fleet default selected?`)) {
+      aiDlg.close();
+      await openFleetActions({ ids: r.followers.filter(f => f.mine !== false).map(f => f.id), label: 'Following the fleet default' });
+    }
   } catch (e) { $('rtErr').textContent = e.message; }
 }
 async function startBaseBuild() {
