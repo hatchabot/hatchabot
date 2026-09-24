@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.60.1] — 2026-09-24
+
+### Fixed
+- **Console on OpenClaw 2026.9 behind Tailscale Serve/Funnel.** 2026.9's gateway counts Tailscale-owned headers (`Tailscale-User-Login`, `Tailscale-Funnel-Request`, …) as proxy-shaped traffic exactly like `X-Forwarded-*`, and refuses gateway-authenticated routes that carry them from an address it does not trust. The console proxy drops those too; it was still refusing every 2026.9 agent's chat after v2.60.0 for anyone arriving through Tailscale.
+
 ## [2.60.0] — 2026-09-24
 
 ### Fixed

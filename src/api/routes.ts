@@ -4362,7 +4362,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // 2026.7 already warned about them. They never belonged to the gateway.
     for (const k of Object.keys(h)) {
       const l = k.toLowerCase();
-      if (l.startsWith('x-forwarded-') || l === 'forwarded' || l === 'x-real-ip' || l === 'via' || l === 'x-client-ip' || l === 'true-client-ip' || l === 'cf-connecting-ip') delete h[k];
+      // Tailscale Serve/Funnel adds Tailscale-User-Login and friends; 2026.9's
+      // gateway counts "Tailscale-owned" headers as proxy-shaped too
+      // (resolveGatewayIngressAttribution: forwarded OR Tailscale headers
+      // from an untrusted address → refused). Meeting Scheduler, 2026-09-24.
+      if (l.startsWith('x-forwarded-') || l.startsWith('tailscale-') || l === 'forwarded' || l === 'x-real-ip' || l === 'via' || l === 'x-client-ip' || l === 'true-client-ip' || l === 'cf-connecting-ip') delete h[k];
     }
     return h;
   };

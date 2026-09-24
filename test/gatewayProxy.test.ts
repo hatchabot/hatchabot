@@ -143,10 +143,10 @@ describe('what the gateway is told about the caller', () => {
     const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
     process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
     const res = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/index.html`, { headers: {
-      'x-hatchabot-owner': OWNER, 'x-forwarded-for': '203.0.113.9', 'x-forwarded-proto': 'https', 'forwarded': 'for=203.0.113.9', 'x-real-ip': '203.0.113.9', 'via': '1.1 tailscale', 'x-custom': 'kept',
+      'x-hatchabot-owner': OWNER, 'x-forwarded-for': '203.0.113.9', 'x-forwarded-proto': 'https', 'forwarded': 'for=203.0.113.9', 'x-real-ip': '203.0.113.9', 'via': '1.1 tailscale', 'tailscale-user-login': 'someone@example.com', 'tailscale-funnel-request': '?1', 'x-custom': 'kept',
     } }).finally(() => { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; });
     expect(res.status).toBe(200);
-    for (const k of ['x-forwarded-for', 'x-forwarded-proto', 'forwarded', 'x-real-ip', 'via']) expect(lastGatewayHeaders[k]).toBeUndefined();
+    for (const k of ['x-forwarded-for', 'x-forwarded-proto', 'forwarded', 'x-real-ip', 'via', 'tailscale-user-login', 'tailscale-funnel-request']) expect(lastGatewayHeaders[k]).toBeUndefined();
     expect(lastGatewayHeaders['x-custom']).toBe('kept');
   });
 });
