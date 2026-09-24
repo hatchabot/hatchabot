@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.58.1] — 2026-09-24
+
+### Changed
+- **Setup is a collapsible strip above the manager's panel** ("⚑ Setup — 7 of 9 done · 2 left"; open it to see the steps) instead of a tile and a number in the panel; it disappears once everything is done (the account menu still opens it). The panel is now: numbers · Status · Bulk actions · Settings · New.
+- **View by → Needs you:** agents binned by what wants a click — needs attention, knocking, to read, to rebuild, fine. The panel's **to read** tile now opens this view instead of the first unread agent (which marked it read and made the tile vanish under the click).
+- **Phones:** the panel lays its tiles out as two wrapping rows (numbers, then actions with New last) instead of squeezing the actions into a column beside the numbers, and the Status tile — hidden on phones by a rule left over from the old header — is back.
+
 ## [2.58.0] — 2026-09-24
 
 ### Added

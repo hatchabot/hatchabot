@@ -430,10 +430,6 @@
   /* .appver centres itself in the classic header's row; under the wordmark it
      lines up with the H instead. */
   .v2top #v2AppVer { font-size:10px; line-height:1; margin:1px 0 0; align-self:flex-start }
-  @media (max-width: 640px) {
-    body.v2 #v2FleetBtn { display:none }
-  }
-  #v2SetupBtn { position:relative }
   .v2acct { position:relative }
   .v2avatar { width:38px; height:38px; border-radius:50%; border:1px solid var(--line); background:var(--panel-2); color:var(--text);
               font:inherit; font-weight:700; font-size:15px; cursor:pointer; display:grid; place-items:center; padding:0 }
@@ -466,6 +462,9 @@
   .hb-spin { width:16px; height:16px; border-radius:50%; border:2px solid var(--line); border-top-color:var(--accent); animation:hb-spin .8s linear infinite; flex:none }
   @keyframes hb-spin { to { transform:rotate(360deg) } }
   @media (prefers-reduced-motion: reduce) { .hb-spin { animation:none } }
+  .setup-strip { margin:6px 0 10px; padding:10px 18px }
+  .setup-strip summary::-webkit-details-marker { display:none }
+  .setup-strip[open] summary { margin-bottom:6px }
   .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
            grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
   .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
@@ -822,6 +821,15 @@
   @media (max-width:640px) {
     .v2hub { grid-template-columns:1fr }
     .v2face { display:none }
+    /* The manager's panel on a phone: the numbers as one wrapping row of
+       tiles, the actions as another below it, New last (Chris, 2026-09-24 —
+       the action tiles had been squeezed into a column beside the numbers). */
+    .v2hubrow { display:block }
+    .v2hubrow .v2stats { display:flex; flex-wrap:wrap; gap:12px 10px }
+    .v2hubrow .v2hubactions, .v2hubrow.wrapped .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 10px; flex:none; margin:12px 0 0; padding-top:12px; border-top:1px solid var(--line); justify-content:flex-start }
+    .v2hubrow .v2hubactions .v2btn.v2new { margin-left:auto }
+    .v2hubrow .v2stat, .v2hubrow .v2hubactions .v2btn { width:62px }
+    .v2hubrow .v2stats, .v2hubrow .v2hubactions, .v2hubrow.wrapped .v2hubactions { gap:12px 8px }
     .v2row { grid-template-columns:1fr; gap:4px }
     .v2grid { grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)) }
   }
@@ -930,7 +938,6 @@
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
           <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true">🎛️</span><span class="lbl">Status</span></button>
           <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
-          <button class="v2btn" id="v2SetupBtn" onclick="openSetupGuide()" title="Setup guide — what is done, what is left"><span class="v2glyph em" aria-hidden="true">🧭</span><span class="lbl">Setup</span><span class="v2count" id="v2SetupCount" hidden></span></button>
           <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
           <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
         </div>
@@ -3290,23 +3297,28 @@ function renderSetup() {
   // Until the first agent exists the guide shows itself; after that it is
   // opened on purpose, and says so in its heading.
   const left = steps.filter(s => !s.done && !s.optional).length; // optional steps never nag
-  const badge0 = $('v2SetupCount');
-  if (badge0) { badge0.textContent = String(left); badge0.hidden = !left; }
-  if (firstAgent && !setupOpen) { el.innerHTML = ''; return; }
   const done = steps.length - left;
+  // After the first agent the guide is a collapsible strip above the panel:
+  // one line while anything is left, opened on purpose; gone when all done
+  // (still reachable from the account menu, which opens it).
+  if (firstAgent && !left && !setupOpen) { el.innerHTML = ''; return; }
   const step = (n, s) => `
     <div style="display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)${s.done ? ';opacity:.6' : ''}">
       <span style="flex:none;width:26px;height:26px;border-radius:50%;background:${s.done ? 'var(--ok)' : s.optional ? 'transparent' : 'var(--accent)'};${s.optional && !s.done ? 'border:2px solid var(--line);color:var(--dim);' : 'color:var(--accent-ink);'}font-weight:800;display:flex;align-items:center;justify-content:center">${s.done ? '✓' : n}</span>
       <div class="grow"><div class="name" style="font-size:15px">${s.title}${s.optional ? ' <span class="sub" style="font-weight:400">(optional)</span>' : ''}</div>${s.done ? '' : s.body}</div>
     </div>`;
-  el.innerHTML = `
-    <div class="card" id="setupCard">
-      <div class="row">
-        <div class="name grow">${firstAgent ? `Setup guide — ${done} of ${steps.length} done` : 'Welcome 👋 — three steps to your first agent'}</div>
-        ${firstAgent ? '<button onclick="closeSetupGuide()" title="Close the guide — it stays in your account menu">✕ Close</button>' : ''}
-      </div>
-      ${firstAgent && done === steps.length ? '<p class="sub" style="margin:6px 0 0">Everything on the list is done. It stays here so you can check again after a change.</p>' : ''}
-      ${steps.map((s, i) => step(i + 1, s)).join('')}
+  const body = `${firstAgent && done === steps.length ? '<p class="sub" style="margin:6px 0 0">Everything on the list is done. It stays here so you can check again after a change.</p>' : ''}
+      ${steps.map((s, i) => step(i + 1, s)).join('')}`;
+  el.innerHTML = firstAgent
+    ? `<details class="card setup-strip" id="setupCard"${setupOpen ? ' open' : ''} ontoggle="setupOpen = this.open">
+        <summary style="cursor:pointer;list-style:none;display:flex;gap:10px;align-items:center">
+          <span class="name grow">⚑ Setup — ${done} of ${steps.length} done${left ? ` · <span style="color:var(--accent)">${left} left</span>` : ''}</span>
+          <span class="sub">${setupOpen ? 'Hide' : 'Show'}</span></summary>
+        ${body}
+      </details>`
+    : `<div class="card" id="setupCard">
+      <div class="row"><div class="name grow">Welcome 👋 — three steps to your first agent</div></div>
+      ${body}
     </div>`;
 }
 
@@ -10098,7 +10110,7 @@ function v2IconHTML(a, st) {
 
 // How the home screen is grouped: by the groups you made, or by where and on
 // what the agents run. A per-device choice; "group" is the one you can rearrange.
-const V2_VIEWS = [['group', 'Groups'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
+const V2_VIEWS = [['group', 'Groups'], ['attention', 'Needs you'], ['host', 'Machine'], ['source', 'AI source'], ['model', 'Model'], ['image', 'Image'], ['class', 'Class'], ['state', 'Status'], ['activity', 'Activity'], ['rebuilt', 'Rebuilt']];
 /** Time-since bins, oldest last; the key's leading digit keeps them in order. */
 function v2AgeBin(iso, verb) {
   if (!iso) return ['9', `Never ${verb}`];
@@ -10152,6 +10164,15 @@ function v2ViewKey(a) {
       return ['i:' + a.image, m ? `Derived image: ${m[1]}` : `Image: ${a.image.replace(/^hatchabot-runtime:/, '')}`];
     }
     case 'state': { const st = v2Status(a); return ['st:' + st.cls, st.label]; }
+    // What wants a click from you, most urgent bin first; the rest are "Fine".
+    case 'attention': {
+      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs attention'];
+      if ((pairings[a.id]?.length ?? 0) > 0) return ['n:2', '🔑 Knocking'];
+      if (v2Unread(a)) return ['n:3', '💬 To read'];
+      if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
+      if (agentAttention(a).length) return ['n:5', '⚠ Needs attention'];
+      return ['n:9', 'Fine'];
+    }
     default: return null;
   }
 }
@@ -11197,11 +11218,11 @@ function renderV2Stats() {
   const tiles = [
     { key: 'awake', emoji: '🐣', tone: 'var(--ok)', num: `${awake}<small>/${mine.length}</small>`,
       lab: 'awake', hot: awake < mine.length, go: () => openFleetHealth(), title: `${awake} of ${mine.length} agents running` },
-    setupLeft ? { key: 'setup', emoji: '⚑', tone: 'var(--accent)', num: `${setupDone}<small>/${setupTotal}</small>`,
-      lab: 'set up', hot: true, go: () => openSetupGuide(),
-      title: `Setup guide — ${setupLeft} step${setupLeft === 1 ? '' : 's'} left` } : null,
-    unread ? { key: 'unread', emoji: '💬', tone: 'var(--info)', num: unread, lab: unread === 1 ? 'to read' : 'to read', hot: true,
-      go: () => { const a = mine.find(v2Unread); if (a) v2Open(a.id); }, title: 'Agents with something new in their console' } : null,
+    // Setup is its own collapsible section above this panel (Chris, 2026-09-24).
+    // Leads to the Needs-you view, not into the first agent: opening one marked it
+    // read and the tile vanished under the click (Chris, 2026-09-24).
+    unread ? { key: 'unread', emoji: '💬', tone: 'var(--info)', num: unread, lab: 'to read', hot: true,
+      go: () => v2SetView('attention'), title: 'Agents with something new in their console — see them under View by → Needs you' } : null,
     v2PendingCount ? { key: 'confirm', emoji: '✅', tone: 'var(--accent)', num: v2PendingCount, lab: 'to confirm', hot: true,
       go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'Changes your manager has prepared' } : null,
     knocking ? { key: 'knock', emoji: '🔑', tone: 'var(--info)', num: knocking, lab: 'knocking', hot: true,
@@ -11269,10 +11290,22 @@ function v2HubWrapCheck() {
   const row = document.querySelector('.v2hubrow'); if (!row) return;
   const stats = $('v2Stats'), actions = $('v2HubActions');
   if (!stats || !actions || stats.hidden) { row.classList.remove('wrapped'); return; }
+  // A phone: every number stays, and the CSS lays the two groups out as two
+  // full-width rows of tiles (the media query below); nothing to measure.
+  if (matchMedia('(max-width:640px)').matches) {
+    for (const t of stats.querySelectorAll('[data-drop]')) t.hidden = false;
+    row.classList.add('wrapped');
+    return;
+  }
   row.classList.remove('wrapped'); // measure the natural layout, not the forced one
   const droppable = [...stats.querySelectorAll('[data-drop]')].sort((a, b) => Number(a.dataset.drop) - Number(b.dataset.drop));
   for (const t of droppable) t.hidden = false;
-  const fits = () => actions.offsetTop <= stats.offsetTop + 8;
+  // On one line means: the actions box starts beside the numbers AND is a
+  // single row of tiles (it shares the line as a flex item, so it can sit
+  // beside them yet be squeezed into a column — that is not "fits").
+  const tile = actions.querySelector('.v2btn:not([hidden])');
+  const oneRow = () => !tile || actions.getBoundingClientRect().height < tile.offsetHeight * 1.5;
+  const fits = () => actions.offsetTop <= stats.offsetTop + 8 && oneRow();
   // Drop the least useful numbers one by one until one line holds everything;
   // only when none are left does the panel fall back to two rows.
   for (const t of droppable) { if (fits()) break; t.hidden = true; }
