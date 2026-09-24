@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.59.0] — 2026-09-24
+
+### Added
+- **Bulk actions on a View-by section.** Every section header on the home screen (a group, or a bin of the current View by — an image, a status, a Needs-you bin, an activity age…) has a **⚡** that opens Bulk actions with exactly those agents ticked; and the current View by's sections are filter chips inside Bulk actions ("Image: 2026.9.6 (4)").
+
 ## [2.58.1] — 2026-09-24
 
 ### Changed

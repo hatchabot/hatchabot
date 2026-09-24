@@ -5115,7 +5115,12 @@ async function pollBaseBuild() {
   } catch { /* not host owner / transient */ }
 }
 
-async function openFleetActions() {
+/** Bulk actions on one View-by section: everything in it ticked, the dialog opened (Chris, 2026-09-24). */
+function v2BulkSection(key, label) {
+  const ids = faAgents().filter(a => v2ViewKey(a)[0] === key).map(a => a.id);
+  void openFleetActions({ ids, label });
+}
+async function openFleetActions(preset) {
   $('faErr').textContent = ''; $('faResults').innerHTML = '';
   // Classes power the "Set class" action + the class filter chips. Always
   // refetched (a class deleted in Settings must not linger), and the dialog
@@ -5148,6 +5153,17 @@ async function openFleetActions() {
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
   const attn = list.filter(a => agentAttention(a).length).length;
   if (attn) chips.push(['attention', `Needs attention (${attn})`]);
+  // The home screen's current View by, as chips: one per section it shows
+  // (image, status, needs-you, activity…), so a set you can see is a set you
+  // can act on. Groups, sources, classes and machines already have theirs.
+  if (v2View && !['group', 'source', 'class', 'host'].includes(v2View)) {
+    const viewLabel = (V2_VIEWS.find(([k]) => k === v2View) || [])[1] || v2View;
+    const bins = new Map();
+    for (const a of list) { const [k, l] = v2ViewKey(a); if (!bins.has(k)) bins.set(k, { l, n: 0 }); bins.get(k).n++; }
+    for (const [k, { l, n }] of [...bins].sort((x, y) => x[0].localeCompare(y[0]))) chips.push([`view:${k}`, `${viewLabel}: ${l} (${n})`]);
+  }
+  if (preset?.ids?.length) chips.unshift(['preset', `${preset.label || 'This section'} (${preset.ids.length})`]);
+  faPreset = preset?.ids ? new Set(preset.ids) : null;
   $('faFilters').innerHTML = chips.map(([key, label]) =>
     `<button class="hbtn" data-key="${esc(key)}" onclick="faSelect('${jsq(key)}')">${esc(label)}</button>`).join('');
   // The agent list (owner-set, live ordering).
@@ -5162,7 +5178,9 @@ async function openFleetActions() {
   $('faAction').value = 'model';
   faRenderAction();
   faCount();
+  if (preset?.ids?.length) faSelect('preset');
 }
+let faPreset = null;
 function faSelect(key) {
   // Highlight the chip that produced the current selection; hand-edits clear it.
   document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.toggle('fa-on', b.dataset.key === key));
@@ -5178,6 +5196,8 @@ function faSelect(key) {
     : key.startsWith('grp:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.group || '') === key.slice(4)
     : key.startsWith('host:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.hostId) === key.slice(5)
     : key.startsWith('cls:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.classId) === key.slice(4)
+    : key.startsWith('view:') ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && v2ViewKey(a)[0] === key.slice(5); }
+    : key === 'preset' ? (cb) => !!faPreset && faPreset.has(cb.dataset.id)
     : () => false;
   // A filter REPLACES the selection (so chips are predictable); Select-all is additive via its own control.
   document.querySelectorAll('.faCb').forEach(cb => { cb.checked = test(cb); });
@@ -10149,8 +10169,8 @@ function v2SetView(v) {
   renderV2();
 }
 /** The section an agent belongs to under the current view: [key, label]. */
-function v2ViewKey(a) {
-  switch (v2View) {
+function v2ViewKey(a, view = v2View) {
+  switch (view) {
     case 'host': { const h = hosts.find(x => x.id === a.hostId); return ['h:' + a.hostId, h ? (h.kind === 'local' ? 'This machine' : h.name) : 'Unknown machine']; }
     case 'source': { const p = profiles.find(x => x.id === a.aiProfileId); return ['s:' + a.aiProfileId, p ? p.name : 'Unknown source']; }
     case 'model': { const m = (a.model || a.profileDefaultModel || '').replace(/^.*\//, ''); return ['m:' + m, m || 'No model']; }
@@ -10241,6 +10261,7 @@ function renderV2() {
       <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
+          ${s.items.filter(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED').length > 1 ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
           <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
         </span></div>
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>

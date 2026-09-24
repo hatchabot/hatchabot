@@ -672,6 +672,15 @@ sheet walks through it in three steps; it takes about five minutes.
 
 Design and the verification notes: `docs/channels-slack-discord-design.md`.
 
+## Bulk actions on what you can see
+
+Every section on the home screen — a group, or a bin of whatever **View by**
+is showing (an image, a status, a Needs-you bin, an activity age…) — has a
+**⚡** in its header that opens Bulk actions with exactly those agents
+ticked. Inside Bulk actions, the current View by's sections are also filter
+chips ("Image: 2026.9.6 (4)"), next to the usual ones (all, running, stopped,
+needs rebuild, needs attention, each source, group, class and machine).
+
 ## The Setup log: what is it doing?
 
 An agent that says *Rebuilding* or *Setting up* for a while now says which
