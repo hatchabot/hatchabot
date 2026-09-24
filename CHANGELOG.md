@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.54.1] — 2026-09-24
+
+### Fixed
+- `hatchabot image promote` printed a crash after succeeding (its answer was never parsed).
+- A file named on the command line (`get -o`, `download -o`, `restore <file>`, `import <file>`) resolves against the directory the command was run from, also under a wrapper that changes into the install directory first (it exports `HATCHABOT_CWD`).
+
 ## [2.54.0] — 2026-09-24
 
 ### Added

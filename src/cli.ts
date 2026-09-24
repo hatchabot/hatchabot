@@ -422,6 +422,15 @@ function envQuote(v: string): string {
 // parser took any unlisted flag to have a value, so `--no-telegram` (missing
 // from the list) swallowed the next argument — `create --no-telegram Foo` lost
 // its name, `switch-source --rebuild --to X` lost its target (CLI audit, v2.33).
+/**
+ * A file the person named on the command line, resolved against THEIR
+ * directory. A wrapper that `cd`s into the install before running the CLI
+ * (the Spark's hbt shim does) exports HATCHABOT_CWD; without it the process
+ * cwd is theirs already. Found when `hbt get -o report.pdf` landed in the
+ * install directory (2026-09-24).
+ */
+const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
+
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
 const VALUE_FLAGS = new Set(['agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
@@ -1599,8 +1608,8 @@ async function main() {
       }
       if (sub === 'promote') {
         const tag = rest[1] ?? fail('usage: hatchabot image promote <tag>');
-        const r = (await jsonPost('/v1/runtime/images/promote', { tag: toTag(tag) }, 'POST')) as any;
-        console.log(`${r.promoted} is now ${r.now}. ${r.followers.length} agent(s) without a pin will adopt it on rebuild — hatchabot list shows "update available"; rebuild them via Bulk actions or: hatchabot rebuild <agent>`);
+        const r = (await (await jsonPost('/v1/runtime/images/promote', { tag: toTag(tag) }, 'POST')).json()) as any;
+        console.log(`${r.promoted} is now ${r.now}. ${(r.followers ?? []).length} agent(s) without a pin will adopt it on rebuild — hatchabot list shows "update available"; rebuild them via Bulk actions or: hatchabot rebuild <agent>`);
         return;
       }
       fail(`unknown: hatchabot image ${sub}\n  try: list | tags | derive | rebuild | rm | log | pin | unpin | try | promote`);
@@ -1836,7 +1845,7 @@ async function main() {
     case 'backup': { // 'backup' kept as an alias
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot download <agent> [-o file]'));
       const res = await api(ctx, `/v1/agents/${a.id}/backup`);
-      const out = flags.get('out') ?? `${a.slug}.hatchabot`;
+      const out = userPath(flags.get('out') ?? `${a.slug}.hatchabot`);
       // 0600: this archive embeds the live bot token, so it must not be
       // readable by other accounts on the machine (the note below says as much).
       await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
@@ -1850,7 +1859,7 @@ async function main() {
     }
     case 'restore': {
       const file = rest[0] ?? fail('usage: hatchabot restore <file> [--profile <aiProfileId>]');
-      const data = await readFile(file);
+      const data = await readFile(userPath(file));
       const params = new URLSearchParams();
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
       if (flags.has('host')) params.set('hostId', flags.get('host')!);
@@ -1866,7 +1875,7 @@ async function main() {
       // line below promised it hadn't. Default to excluding it; opt in loudly.
       const withMemory = flags.has('include-memory');
       const res = await api(ctx, `/v1/agents/${a.id}/export${withMemory ? '' : '?excludeMemory=1'}`);
-      const out = flags.get('out') ?? `${a.slug}.template.hatchabot`;
+      const out = userPath(flags.get('out') ?? `${a.slug}.template.hatchabot`);
       await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
       // `mode` only applies when the file is CREATED: writing over an existing,
       // world-readable file kept its old mode. Set it explicitly (CLI audit).
@@ -1879,7 +1888,7 @@ async function main() {
     }
     case 'import': { // template
       const file = rest[0] ?? fail('usage: hatchabot import <file> [--name <name>] [--profile <aiProfileId>] [--values <json>]');
-      const data = await readFile(file);
+      const data = await readFile(userPath(file));
       const params = new URLSearchParams();
       if (flags.has('name')) params.set('name', flags.get('name')!);
       if (flags.has('profile')) params.set('aiProfileId', flags.get('profile')!);
@@ -2138,7 +2147,7 @@ async function main() {
       const entry = (listing.entries ?? []).find((e: any) => e.name === leaf);
       const isDir = entry?.type === 'dir';
       const res = await api(ctx, `/v1/agents/${a.id}/fs/${isDir ? 'archive' : 'file'}?path=${encodeURIComponent(path)}`);
-      const out = flags.get('out') ?? (leaf + (isDir ? '.tar.gz' : ''));
+      const out = userPath(flags.get('out') ?? (leaf + (isDir ? '.tar.gz' : '')));
       const { createWriteStream } = await import('node:fs');
       const { pipeline } = await import('node:stream/promises');
       const { Readable } = await import('node:stream');
