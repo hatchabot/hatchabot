@@ -121,6 +121,15 @@ describe('Control UI websocket proxy', () => {
     expect(res.echoed).toBe('yes'); // a handshake that never pipes is a dead UI
   });
 
+  it('the 2026.9 form of the address (base path, no trailing slash) is the same socket', async () => {
+    // The 2026.9 app dials `ws://host` + its base path, which the proxy hands
+    // it without a trailing slash: /v1/agents/<id>/ui.
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const res = await upgrade(port, '/v1/agents/a1/ui');
+    expect(res.status).toContain('101');
+    expect(res.echoed).toBe('yes');
+  });
+
   it('destroys an upgrade with no session rather than forwarding it', async () => {
     // This is the hole that kept the websocket out of 0.63.0: a hand-rolled
     // principal would fall back to LOCAL_OWNER and forward anonymously.

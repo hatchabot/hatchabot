@@ -293,6 +293,16 @@ Spark (45 × ~1 GB), a cost driver for shared hosts.
 management agent's lockdown, and the `agents.defaults.systemAgent.agentId`
 hint doctor prints under explicit ownership. Next: try on one real agent.
 
+**Found on real agents (2026-09-24):** (a) the gateway refuses routes that
+carry `X-Forwarded-*` or `Tailscale-*` headers from an address it does not
+trust (`proxy_attribution_required`) — the console proxy strips both
+(v2.60.0/1); (b) the Control UI page is served with an empty base path and
+root-absolute asset links, which through `/v1/agents/<id>/ui/` never load
+("Control UI did not start") — the proxy moves the document onto its prefix
+(v2.60.3, `src/api/controlUiRebase.ts`). Both passed the gate, which reaches
+the gateway from inside the container; the gate now also loads the console
+through the proxy (`hatchabot console <agent> --check`).
+
 Make this repeatable: `scripts/candidate-gate.sh <image tag>` (`npm run
 gate:candidate -- <tag>`) makes a web-only agent on the live control plane,
 pins it to the candidate with `hatchabot image try`, and asserts items 1
