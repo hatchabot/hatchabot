@@ -240,24 +240,28 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
  */
 export async function announceToMembers(
   deps: RevokeDeps,
-  opts: { agentId: string; runtimeRef: string; accountId: string; text: string },
+  opts: { agentId: string; runtimeRef: string; accountId: string; text: string; kind?: ChannelKind },
 ): Promise<number> {
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
+  const kind = opts.kind ?? 'telegram';
+  // Telegram identities sit on the seat; Slack and Discord ones beside it.
   const targets = store
     .listMemberships(opts.agentId)
-    .filter((m) => m.status === 'active' && m.channelUserId);
+    .filter((m) => m.status === 'active')
+    .map((m) => (kind === 'telegram' ? m.channelUserId : store.memberIdentities(opts.agentId, m.userId)[kind]))
+    .filter((id): id is string => !!id);
   let sent = 0;
-  for (const m of targets) {
+  for (const id of targets) {
     const res = await provider
       .exec(opts.runtimeRef, [
-        'message', 'send', '--channel', 'telegram',
-        '--account', opts.accountId, '--target', m.channelUserId!, '-m', opts.text,
+        'message', 'send', '--channel', kind,
+        '--account', opts.accountId, '--target', kind === 'telegram' ? id : `user:${id}`, '-m', opts.text,
       ])
       .catch(() => ({ code: 1, stdout: '', stderr: 'exec failed' }));
     if (res.code === 0) sent++;
   }
-  log('members.announced', { agentId: opts.agentId, sent, of: targets.length });
+  log('members.announced', { agentId: opts.agentId, kind, sent, of: targets.length });
   return sent;
 }
 

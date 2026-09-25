@@ -2,6 +2,23 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.74.0] — 2026-09-25
+
+Telegram and Discord made equal wherever the platforms allow (`docs/channel-parity.md` is the ledger of what is equal and what stays different).
+
+### Added
+- **Discord bots are named for their agent**, like Telegram's: a pool bot on attach, any Discord bot on **🏷 Sync name** or when the agent is renamed. A rename Discord's hourly quota refuses is queued and applied later. The people on it are told.
+- **One card for every app on the agent.** The Telegram tab and the Discord tab draw the same card: name, ↻ Re-check (Telegram's now covers BotFather's group settings), Sync name, linked-to-you, warnings, Open, **🔁 Change bot…** (Discord has a swap now), Remove…, people and knocks, Group chats (Discord gained "every server it is in — people you admitted"), and **Who can reach it** on both. Members and invites live under Sharing for every app.
+- **Settings → Discord drawn like Settings → Telegram**: a status line, *Add a bot*, and the pool in the same groups (free / in use / shared / kept for an archived agent). Settings → Telegram gained ↻ Re-check on every spare, and everyone now sees their own and the shared bots there.
+- **What Discord people are told**, as on Telegram: a goodbye when the app is removed, the agent archived or deleted; "moving to…" on a swap; "this bot is now X" to a reused pool bot's previous regulars. Archiving parks the Discord bot and keeps it for the agent; restore takes it back unless another agent took it.
+- Known people are added on every app they are known on; an invitee's door reopens on every app; someone known on Discord who redeems an invite is admitted outright; a password-recovery link can travel by a Discord bot when no Telegram can carry it; **Settings → You** shows and unlinks your Discord identity.
+- CLI: `hatchabot discord add|remove <agent>`, `hatchabot discord bots`, `approve`/`deny --kind discord`. Management chat: `add_discord` (from the pool), `list_discord_bots`.
+
+### Changed
+- The Telegram tab's group chats, "who can reach it", rich messages and Change bot moved onto the card; the token block stays below it.
+- Setup-log lines for swaps, parking, farewells, forgotten approvals and knock settings.
+- README no longer calls Discord "coming next".
+
 ## [2.73.0] — 2026-09-25
 
 Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors, three mediums and seven lows fixed.

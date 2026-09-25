@@ -1460,66 +1460,7 @@
       </div>
     </div>
 
-    <label class="v2secstart" style="margin-top:14px">🚪 Who can reach it</label>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <select id="tgAllowKnocks" style="width:auto" onchange="saveAllowKnocks()">
-        <option value="off">Invite only (default)</option>
-        <option value="on">Anyone can knock</option>
-      </select>
-      <span class="sub" id="tgAllowKnocksHelp"></span>
-    </div>
-
-    <label class="v2secstart" style="margin-top:14px">✨ Rich messages <span style="color:var(--dim)">— formatting in replies</span></label>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <select id="tgRichMessages" style="width:auto" onchange="saveRichMessages()">
-        <option value="on">On (default)</option>
-        <option value="off">Off — plain text</option>
-      </select>
-      <span class="sub">bold, code blocks, links render properly · applies on the next <b>Rebuild</b></span>
-    </div>
-
-    <details class="sec-drawer v2secstart" id="tgGroupDrawer">
-      <summary><b>👥 Group chats</b> <span class="sub">— who it answers in groups, and the BotFather setup</span></summary>
-      <label style="margin-top:10px">Who may talk to it in groups</label>
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <select id="tgGroupMode" style="width:auto" onchange="onGroupModeChange()">
-          <option value="members">Members only (default) — people you've admitted</option>
-          <option value="off">Nobody — ignore groups entirely</option>
-          <option value="room">Everyone in ONE chosen room (mention-gated)</option>
-        </select>
-        <select id="tgGroupRoom" style="display:none;width:auto"></select>
-        <button id="tgGroupFindBtn" style="display:none" onclick="findGroupRooms()">Find rooms</button>
-        <button class="primary" onclick="saveGroupAccess()">Save</button>
-      </div>
-      <div class="sub" id="tgGroupModeHelp" style="margin-top:4px"></div>
-      <div class="sub" id="tgRoomMates" style="margin-top:4px" hidden></div>
-      <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
-        <button id="tgGroupBtn" onclick="checkGroupReadiness()">Check this bot's settings</button>
-        <span id="tgGroupStatus" class="sub"></span>
-      </div>
-      <div id="tgGroupResult" style="margin-top:6px"></div>
-      <details style="margin-top:8px">
-        <summary class="sub" style="cursor:pointer">How to enable groups at @BotFather (one-time, per bot)</summary>
-        <div class="sub" style="margin-top:6px">
-          Two <b>@BotFather</b> settings control this, and neither can be changed by
-          API — message @BotFather in Telegram:
-          <ol style="margin:6px 0 6px 18px;padding:0">
-            <li><code>/setjoingroups</code> → pick this bot → <b>Enable</b> (may it be added to groups)</li>
-            <li><code>/setprivacy</code> → pick this bot → <b>Disable</b> (may it read <i>all</i> group messages —
-              left on, it only sees /commands and @mentions, which reads as "the bot ignores the group")</li>
-          </ol>
-          Then add the bot to the group like any member. <b>If it was already in the
-          group when you changed privacy, remove and re-add it</b> — Telegram doesn't
-          apply the change retroactively. The agent still answers only admitted
-          members, so pair everyone in the group first.
-          ♻️ <b>Recycled pool bots keep these BotFather settings from their previous
-          life</b> — the check above always shows the live state, so run it rather
-          than assuming defaults.
-        </div>
-      </details>
-    </details>
-
-    <label class="v2secstart" style="margin-top:14px">🔑 The bot <span id="tgBotWho" style="color:var(--dim)"></span></label>
+    <label class="v2secstart" style="margin-top:4px">🔑 The bot <span id="tgBotWho" style="color:var(--dim)"></span></label>
     <div class="sub">Its token <i>is</i> this agent's identity on Telegram — treat it like a password.
       Reveal it to move the bot to another machine, or to reuse it somewhere else.</div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px">
@@ -1527,13 +1468,7 @@
       <button id="botTokenBtn" onclick="showBotToken()">Show</button>
     </div>
     <div class="sub" style="margin-top:6px">A bot's <b>@handle is fixed for life</b> — Telegram has no way to change it.
-      Its <b>display name</b> is not: that follows this agent's name, so renaming the agent renames the bot.
-      For a different handle the agent has to move to a different bot, which is what <b>Change bot</b> does.</div>
-    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap">
-      <button onclick="swapBot()">🔁 Change bot…</button>
-      <span class="sub">Takes a spare from the pool. Members and memory come with it; the Telegram
-        conversation does not — it tells everyone where it went first.</span>
-    </div>
+      Its <b>display name</b> follows this agent's name. For a different handle, <b>Change bot</b> on the card above moves the agent to a spare bot.</div>
   </section>
 
   <section id="paneEditEnv" role="tabpanel" hidden>
@@ -1823,20 +1758,32 @@
   </section>
 
   <section id="paneDiscord" role="tabpanel" hidden>
-    <div class="sub">Spare Discord bots. Removing Discord from an agent parks its bot here with its name and servers;
-      a new agent's Set up… offers a parked bot before asking for a token. Park one ahead of time: make it in the
-      <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a> (Bot → Reset Token,
-      turn on Message Content Intent) and paste the token.</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
-      <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="flex:1;min-width:220px;font-family:ui-monospace,monospace">
-      <button class="primary" id="dpoolAddBtn" onclick="addDiscordPoolBot()">Park it</button>
+    <div class="sub">
+      Spare Discord bots. With bots parked here an agent gets Discord
+      <b>instantly</b>, and removing Discord from an agent (or deleting it) parks its bot back, name and servers kept.
+      <details style="margin-top:4px"><summary style="cursor:pointer">Whose bots are whose</summary>
+      <div style="margin-top:4px">A bot belongs to whoever made it in the developer portal, so each account takes only
+      its own parked bots — plus <b>shared</b> house bots donated to everyone on this server.</div></details>
     </div>
+    <div class="pool-status" id="dpoolStatus"></div>
+    <h4 style="margin:0 0 4px">Add a bot</h4>
+    <div class="sub">
+      Make one in the <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a>
+      (New Application → Bot → Reset Token; turn on <b>Message Content Intent</b>, ~2 minutes), then paste its token — it's verified
+      with Discord before it's stored. Its name follows the agent it serves.
+    </div>
+    <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="font-family:ui-monospace,monospace">
     <label id="dpoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
       <input type="checkbox" id="dpoolShared" style="width:auto">
       <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
     </label>
     <div class="err" id="dpoolErr"></div>
-    <div id="dpoolList" style="margin-top:6px">Loading…</div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" id="dpoolAddBtn" onclick="addDiscordPoolBot()">Add to pool</button>
+    </div>
+
+    <h4 style="margin:18px 0 6px">Bot pool</h4>
+    <div id="dpoolList">Loading…</div>
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
@@ -1923,7 +1870,9 @@
       <div class="sub" style="margin:6px 0 18px">A new code replaces the old one.</div>
     </div>
     <h4 style="margin:0 0 4px">Your Telegram</h4>
-    <div id="tgLinkStatus" class="sub" style="margin:4px 0 18px">Loading…</div>
+    <div id="tgLinkStatus" class="sub" style="margin:4px 0 12px">Loading…</div>
+    <h4 style="margin:0 0 4px">Your Discord</h4>
+    <div id="dcLinkStatus" class="sub" style="margin:4px 0 18px">Loading…</div>
 
   </section>
 
@@ -3763,7 +3712,8 @@ async function loadPool() {
           ${b.leasedTo ? `<span class="sub">· ${esc(b.leasedToName || 'an agent')}</span>` : ''}</span>
         ${b.leasedTo
           ? `<span class="sub" title="Its agent would lose the bot it answers on. Delete or archive the agent instead — that parks the bot back here.">in use</span>`
-          : `<button class="hbtn danger" onclick="removePoolBot('${jsq(b.username)}')" title="Discard the stored token. The bot itself still exists at @BotFather.">🗑 Delete</button>`}
+          : `<span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button onclick="recheckPoolBot('${jsq(b.username)}', this)" title="Ask Telegram again: does the token still work, and what is the bot called">↻ Re-check</button>
+             ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removePoolBot('${jsq(b.username)}')" title="Discard the stored token. The bot itself still exists at @BotFather.">🗑 Delete</button>` : ''}</span>`}
       </div>`;
     el.innerHTML = bots.length
       ? GROUPS.map(([label, pick, hint]) => {
@@ -3782,17 +3732,49 @@ async function loadDiscordPool() {
   const el = $('dpoolList'); if (!el) return;
   const sharedRow = $('dpoolSharedRow'); if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
   try {
-    discordPool = (await api('/v1/discord-bots')).bots ?? [];
-    el.innerHTML = discordPool.length ? discordPool.map(b => `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
-        <span class="grow"><span class="v2chan-mark v2mk-discord" style="background:#5865f2;width:18px;height:18px;vertical-align:-4px">${V2_MARK_SVG.discord}</span> <b class="pii">${esc(b.botName || b.applicationId)}</b>${b.shared ? ' <span class="chip">shared</span>' : b.mine ? '' : ' <span class="sub">(someone else’s)</span>'}
+    const r = await api('/v1/discord-bots');
+    discordPool = r.bots ?? [];
+    const inUse = r.inUse ?? [];
+    const spare = discordPool.filter(b => !b.archivedFor);
+    const ready = Number(r.availableBots ?? spare.filter(b => b.mine || b.shared).length);
+    const st = $('dpoolStatus');
+    if (st) st.innerHTML = `<span class="pool-dot"${ready > 0 ? '' : ' style="color:var(--off)"'}>●</span>
+      <b>${ready}</b> spare bot${ready === 1 ? '' : 's'} ready${inUse.length ? ` <span class="sub">· ${inUse.length} in use by agents</span>` : ''}
+      ${ready ? '' : '<span class="sub">· an agent\u2019s Set up… will ask for a bot token</span>'}`;
+    // The same four questions Settings → Telegram answers, in the same order.
+    const rows = [
+      ...spare.map(b => ({ ...b, free: true })),
+      ...discordPool.filter(b => b.archivedFor).map(b => ({ ...b, free: true, kept: true })),
+      ...inUse.map(b => ({ ...b, free: false })),
+    ];
+    const GROUPS = [
+      ['Free — yours', b => b.free && b.mine && !b.kept, 'Ready for your next agent.'],
+      ['Kept for an archived agent', b => b.free && b.kept, 'Its agent takes it back on restore; another agent may take it first.'],
+      ['In use — yours', b => !b.free && b.mine, ''],
+      ['Free — shared with you', b => b.free && !b.mine && !b.kept, 'Parked by someone else on this server; your next agent can take one.'],
+      ['In use — someone else’s', b => !b.free && !b.mine, ''],
+    ];
+    const dmark = `<span class="v2chan-mark v2mk-discord" style="background:#5865f2;width:18px;height:18px;vertical-align:-4px">${V2_MARK_SVG.discord}</span>`;
+    const row = (b) => `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
+        <span class="grow">${dmark} <b class="pii">${esc(b.botName || b.applicationId)}</b>${b.shared ? ' <span class="chip">shared</span>' : ''}
+          ${!b.free ? `<span class="sub">· ${esc(b.agentName || 'an agent')}</span>` : ''}
           <div class="sub">${b.servers?.length ? `In ${b.servers.map(g => esc(g.name || g.id)).join(', ')}` : 'Not in any server yet'}${b.checkedAt ? ` · checked ${esc(ago(b.checkedAt))}` : ''}</div>
           ${b.warnings?.length ? `<ul class="v2chan-warn">${b.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}</span>
         <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-          ${b.addToServerUrl ? `<a class="btn" href="${esc(b.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
-          <button onclick="recheckDiscordPoolBot('${jsq(b.applicationId)}', this)" title="Ask Discord again: servers, intent">↻ Re-check</button>
-          ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removeDiscordPoolBot('${jsq(b.applicationId)}','${jsq(b.botName || b.applicationId)}')" title="Discard the stored token. The bot itself still exists in the developer portal.">🗑 Delete</button>` : ''}
-        </span></div>`).join('')
-      : '<div class="sub">None parked. Remove Discord from an agent and its bot lands here; or park one above.</div>';
+          ${b.free
+            ? `${b.addToServerUrl ? `<a class="btn" href="${esc(b.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
+               <button onclick="recheckDiscordPoolBot('${jsq(b.applicationId)}', this)" title="Ask Discord again: servers, intent">↻ Re-check</button>
+               ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removeDiscordPoolBot('${jsq(b.applicationId)}','${jsq(b.botName || b.applicationId)}')" title="Discard the stored token. The bot itself still exists in the Discord developer portal.">🗑 Delete</button>` : ''}`
+            : `<span class="sub" title="Its agent would lose the bot it answers on. Remove Discord from the agent (or delete or archive it) — that parks the bot back here.">in use</span>`}
+        </span></div>`;
+    el.innerHTML = rows.length
+      ? GROUPS.map(([label, pick, hint]) => {
+          const mine = rows.filter(pick);
+          if (!mine.length) return '';
+          return `<div style="margin:10px 0 0"><b style="font-size:13px">${label}</b> <span class="sub">· ${mine.length}</span>
+            ${hint ? `<div class="sub" style="margin:2px 0 0">${hint}</div>` : ''}</div>${mine.map(row).join('')}`;
+        }).join('')
+      : '<div class="sub">Empty — add a spare bot above, or park one when removing Discord from an agent.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 async function addDiscordPoolBot() {
@@ -3807,6 +3789,14 @@ async function addDiscordPoolBot() {
     await loadDiscordPool();
   } catch (e) { $('dpoolErr').textContent = e.message; }
   finally { $('dpoolAddBtn').disabled = false; }
+}
+async function recheckPoolBot(username, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api(`/v1/pool/${encodeURIComponent(username)}/recheck`, { method: 'POST', body: {} });
+    toast(r.alive ? `@${username} answers${r.botName ? ` as “${r.botName}”` : ''}.${r.warnings?.length ? ` ⚠ ${r.warnings.join(' ')}` : ''}` : `⚠ ${r.warnings?.[0] || `@${username} does not answer.`}`, 9000);
+  } catch (e) { toast(e.message, 8000); }
+  finally { btn.disabled = false; }
 }
 async function recheckDiscordPoolBot(id, btn) {
   btn.disabled = true;
@@ -8101,6 +8091,7 @@ async function addKnownPerson(userId, name) {
 }
 
 function onGroupModeChange() {
+  if (!$('tgGroupMode')) return;
   const room = $('tgGroupMode').value === 'room';
   $('tgGroupRoom').style.display = room ? '' : 'none';
   $('tgGroupFindBtn').style.display = room ? '' : 'none';
@@ -8113,15 +8104,16 @@ function onGroupModeChange() {
 
 function renderGroupAccess(a) {
   const ga = a?.groupAccess ?? { mode: 'members' };
+  const who = $('tgBotWho');
+  if (who) who.textContent = a?.botUsername ? `— @${a.botUsername}` : '';
+  if (!$('tgGroupMode')) return; // the card draws these now (2026-09-25)
   $('tgGroupMode').value = ga.mode;
   if (ga.mode === 'room' && ga.roomId) {
     $('tgGroupRoom').innerHTML = `<option value="${esc(ga.roomId)}">room ${esc(ga.roomId)}</option>`;
   }
   renderRoomMates(a, ga);
   onGroupModeChange();
-  $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
-  const who = $('tgBotWho');
-  if (who) who.textContent = a?.botUsername ? `— @${a.botUsername}` : '';
+  if ($('tgRichMessages')) $('tgRichMessages').value = a?.richMessages === false ? 'off' : 'on';
   renderAllowKnocks(a);
   // A non-default group setting is live state the owner should SEE — open
   // the drawer for it; the default keeps the tab compact.
@@ -9095,6 +9087,21 @@ async function loadMyAccount() {
        <button class="hbtn" onclick="unlinkTelegram()">Unlink</button>`
     : `Not linked — message one of your agents on Telegram and choose <b>That's me — link</b> on the request card.
        Linked, every agent you create admits your Telegram without pairing again.`;
+  const dc = $('dcLinkStatus');
+  if (dc) dc.innerHTML = myAccount.discordUserId
+    ? `✓ Linked (Discord id <code class="pii">${esc(myAccount.discordUserId)}</code>) — every Discord bot you attach admits you from its first build.
+       <button class="hbtn" onclick="unlinkDiscord()">Unlink</button>`
+    : `Not linked — send one of your agents a direct message on Discord and choose <b>That's me</b> on the request card.
+       Linked, every Discord bot you attach admits you without pairing again.`;
+}
+
+async function unlinkDiscord() {
+  if (!confirm('Unlink your Discord from this login?\n\nYour agents forget your Discord identity: each asks again ("That\'s me") the next time you message it, and stops admitting it at its next rebuild.')) return;
+  try {
+    await api('/v1/account/discord', { method: 'DELETE' });
+    toast('Unlinked.');
+    loadMyAccount();
+  } catch (e) { toast(e.message); }
 }
 
 async function unlinkTelegram() {
@@ -9372,15 +9379,17 @@ async function pushDefinition(id, masterName) {
   } catch (e) { toast(e.message, 10000); }
 }
 
-async function syncBotName(id, name) {
+async function syncBotName(id, name, kind = 'telegram') {
+  const label = V2_CHAN_LABEL[kind] || kind;
   try {
-    const r = await api(`/v1/agents/${id}/bot-name/sync`, { method: 'POST' });
-    if (r.ok) toast(`Telegram bot renamed to “${r.name}”.`);
+    const r = await api(`/v1/agents/${id}/bot-name/sync`, { method: 'POST', body: { kind } });
+    if (r.ok) toast(`${label} bot renamed to “${r.name}”.`);
     else if (r.retryAt) {
       const when = new Date(r.retryAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      toast(`Telegram won't accept another rename for this bot until ${when} — it's queued and will apply then.`);
-    } else toast(`Telegram refused the rename: ${r.error || 'unknown reason'}`);
+      toast(`${label} won't accept another rename for this bot until ${when} — it's queued and will apply then.`);
+    } else toast(`${label} refused the rename: ${r.error || 'unknown reason'}`, 9000);
     await refresh(false);
+    if (kind !== 'telegram') v2LoadChans(id);
   } catch (e) { toast(e.message); }
 }
 
@@ -10774,7 +10783,13 @@ function v2EmbedPanes(a, tab) {
     const pane = $(paneId); pane.hidden = false; slot.append(pane);
     // The one borrowed section with sub-sections of its own: card each one,
     // the way ⚙ Settings does. Idempotent, so reopening the sheet is free.
-    if (paneId === 'paneEditTg') v2Sectionise(pane, (kid) => kid.classList?.contains('v2secstart'));
+    if (paneId === 'paneEditTg') {
+      v2Sectionise(pane, (kid) => kid.classList?.contains('v2secstart'));
+      // Members live under Sharing (for every app); on the Telegram tab the
+      // card says so, and the block stays out of the way.
+      const mb = $('tgMembersBlock');
+      if (mb) mb.hidden = !$('v2Pane').querySelector('[data-v2slot="tgMembersBlock"]');
+    }
   }
   for (const [blockId] of V2_MOVED) {
     const blockSlot = $('v2Pane').querySelector(`[data-v2slot="${blockId}"]`);
@@ -10953,24 +10968,10 @@ function v2Pane(a, tab) {
       ${slot('paneEditSnap')}`;
     case 'ai': return slot('paneEditAi');
     case 'messaging': return a.state === 'ARCHIVED' ? row('Telegram', '<span>Archived agents have no bot. Restore it to get one.</span>') : `
-      ${a.state !== 'ARCHIVED' ? row('Telegram bot', a.botUsername
-        ? `<span>@${esc(a.botUsername)}</span>
-           ${run && a.deepLink ? `<a class="btn" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open</a>` : ''}
-           ${run && a.botDisplayName && a.botDisplayName !== a.name ? B('🏷 Sync name', `syncBotName('${id}','${n}')`, `title="Telegram shows it as '${esc(a.botDisplayName)}'"`) : ''}
-           ${run || a.state === 'STOPPED' ? B('Remove…', `v2RemoveTelegram('${id}','${n}','${jsq(a.botUsername)}')`, 'title="Hand the bot back to your pool; talk to it here only"') : ''}
-           <span class="sub">Optional. It's how you reach it from your phone, and how people reach it when this machine isn't reachable from where they are.</span>`
-        : a.webOnly && (run || a.state === 'STOPPED')
-          ? `<span>None — you talk to it here.</span>${B('Add a Telegram bot', `v2AddTelegram('${id}')`)}
-             <span class="sub">Add one to reach it from your phone, or to invite other people.${poolAvail > 0 ? ` ${poolAvail} ready in your pool, so it's instant.` : ''}</span>
-             <div id="v2TgToken" hidden style="flex-basis:100%;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-               <input type="text" id="v2TgTokenIn" placeholder="123456789:AA…" autocomplete="off" style="flex:1;min-width:200px">
-               <button class="primary" onclick="v2AddTelegram('${id}', true)">Connect</button>
-               <span class="sub" style="flex-basis:100%">No spare bots in your pool. In Telegram, message @BotFather, send /newbot, and paste the token it gives you.</span>
-             </div>`
-          : '<span class="sub">No Telegram bot.</span>') : ''}
+      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="telegram"><div class="sub">Loading…</div></div>
       ${a.botUsername ? slot('paneEditTg') : ''}`;
-    case 'channels': return `
-      <div id="v2Chans" data-agent="${esc(a.id)}"><div class="sub">Loading…</div></div>
+    case 'channels': return a.state === 'ARCHIVED' ? row('Discord', '<span>Archived agents have no bot. Restore it to get its Discord bot back.</span>') : `
+      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="discord,slack"><div class="sub">Loading…</div></div>
       ${previewing() ? '' : `<div class="sub" style="margin-top:8px">Slack is built too, but has not been tried against a real Slack app yet; add <code>?dev</code> to the address to work on it.</div>`}`;
     case 'knowledge': return `
       ${slot('paneEditData')}
@@ -11042,6 +11043,7 @@ let chanFor = null, chanKind = null, chanWatch = null, chanFields = null;
 
 async function v2LoadChans(id) {
   const box = $('v2Chans'); if (!box || box.dataset.agent !== id) return;
+  const kinds = (box.dataset.kinds || 'discord,slack').split(',');
   let r;
   try { r = await api(`/v1/agents/${id}/channels`); }
   catch (e) { box.innerHTML = `<div class="sub">${esc(e.message)}</div>`; return; }
@@ -11052,70 +11054,165 @@ async function v2LoadChans(id) {
   if (!$('v2Chans') || $('v2Chans').dataset.agent !== id) return; // the sheet moved on meanwhile
   const a = v2Find(id); if (!a) return;
   const canChange = a.state === 'RUNNING' || a.state === 'STOPPED';
+  const agentName = a.name || '';
+  const spare = r.spare || {};
+  const BG = { telegram: '#229ed9', slack: '#4a154b', discord: '#5865f2' };
+  // Every app is drawn from this one card: what it is called there, whether it
+  // knows you, what the last check found, where to open it, who is on it and
+  // who is knocking, where it answers besides DMs, and who may reach it.
   const card = (kind) => {
     const c = r.channels.find(x => x.kind === kind);
-    const mark = `<span class="v2chan-mark v2mk-${kind}" style="background:${kind === 'slack' ? '#4a154b' : '#5865f2'}">${V2_MARK_SVG[kind]}</span>`;
+    const mark = `<span class="v2chan-mark v2mk-${kind}" style="background:${BG[kind]}">${V2_MARK_SVG[kind]}</span>`;
     const label = V2_CHAN_LABEL[kind];
+    const spares = Number(spare[kind]) || 0;
     if (!c) {
-      const can = r.imageSupports.includes(kind);
+      const can = kind === 'telegram' || r.imageSupports.includes(kind);
+      const setup = kind === 'telegram' ? `v2AddTelegram('${jsq(id)}')` : `openChanSetup('${jsq(id)}','${kind}')`;
+      const blurb = {
+        telegram: `Reach it from your phone, and let other people reach it. ${spares ? `${spares} spare bot${spares === 1 ? '' : 's'} in your pool, so it's instant.` : 'No spare bot in your pool: you paste a token from @BotFather.'}`,
+        slack: 'Talk to it in your Slack workspace. You make a small Slack app for it; this takes about five minutes.',
+        discord: `Talk to it on Discord. ${spares ? `${spares} spare bot${spares === 1 ? '' : 's'} parked, so it's instant.` : 'You make a bot in the Discord developer portal (about five minutes), or park one under Settings → Discord.'}`,
+      }[kind];
       return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b>
-        ${can && canChange ? `<button onclick="openChanSetup('${jsq(id)}','${kind}')">Set up…</button>` : ''}</div>
-        <div class="sub">${can
-          ? (kind === 'slack' ? 'Talk to it in your Slack workspace. You make a small Slack app for it; this takes about five minutes.'
-                              : 'Talk to it on Discord. You make a bot for it on Discord; this takes about five minutes.')
-          : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Images), then Rebuild.`}</div></div>`;
+        ${can && canChange ? `<button onclick="${setup}">Set up…</button>` : ''}</div>
+        <div class="sub">${can ? blurb : `Its base image can't do ${label} yet. Promote a base image that includes it (Settings → Images), then Rebuild.`}</div>
+        ${kind === 'telegram' ? `<div id="v2TgToken" hidden style="flex-basis:100%;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="v2TgTokenIn" placeholder="123456789:AA…" autocomplete="off" style="flex:1;min-width:200px">
+          <button class="primary" onclick="v2AddTelegram('${jsq(id)}', true)">Connect</button>
+          <span class="sub" style="flex-basis:100%">In Telegram, message @BotFather, send /newbot, and paste the token it gives you.</span></div>` : ''}</div>`;
     }
     const rooms = c.rooms || { mode: 'off' };
-    const roomHelp = kind === 'slack'
-      ? 'The channel ID starts with C: open the channel, click its name, and it is at the bottom. Invite the app to that channel too.'
-      : 'The server ID is a long number: turn on Developer Mode (User Settings → Advanced), then right-click the server → Copy Server ID.';
+    const roomHelp = {
+      slack: 'The channel ID starts with C: open the channel, click its name, and it is at the bottom. Invite the app to that channel too.',
+      discord: 'The server ID is a long number: turn on Developer Mode (User Settings → Advanced), then right-click the server → Copy Server ID.',
+      telegram: 'Add the bot to the group, say anything in it, then Find rooms. BotFather must allow groups (/setjoingroups) and privacy mode must be off (/setprivacy) — Re-check tells you.',
+    }[kind];
     const servers = Array.isArray(c.servers) ? c.servers : [];
     const people = Array.isArray(c.people) ? c.people : [];
     const knocks = (pairings[id] ?? []).filter(p => (p.kind || 'telegram') === kind);
     const who = (p) => p.meta?.firstName || p.meta?.username || p.id;
-    // The bot's own servers as a picker; "another" keeps the typed-ID route.
     const known = servers.some(g => g.id === rooms.roomId);
+    // The rooms it may answer in: the bot's own servers as a picker (Discord),
+    // the rooms the gateway has seen (Telegram, via Find rooms), or an ID.
     const roomPicker = kind === 'discord' && servers.length ? `
         <select id="chanRoomPick-${kind}" style="width:auto"${rooms.mode === 'room' ? '' : ' hidden'} onchange="$('chanRoom-${kind}').hidden = this.value !== ''; if (this.value) $('chanRoom-${kind}').value = this.value">
           ${servers.map(g => `<option value="${esc(g.id)}"${rooms.roomId === g.id ? ' selected' : ''}>${esc(g.name || g.id)}</option>`).join('')}
           <option value=""${rooms.mode === 'room' && !known ? ' selected' : ''}>Another server (type its ID)</option>
-        </select>` : '';
-    const roomInputHidden = rooms.mode !== 'room' || (roomPicker && known);
+        </select>`
+      : kind === 'telegram' ? `
+        <select id="chanRoomPick-${kind}" style="width:auto"${rooms.mode === 'room' ? '' : ' hidden'} onchange="$('chanRoom-${kind}').value = this.value">
+          ${rooms.roomId ? `<option value="${esc(rooms.roomId)}" selected>room ${esc(rooms.roomId)}</option>` : '<option value="">— find rooms first —</option>'}
+        </select>
+        <button id="chanRoomFind-${kind}"${rooms.mode === 'room' ? '' : ' hidden'} onclick="chanFindRooms('${jsq(id)}', this)">Find rooms</button>` : '';
+    const roomInputHidden = rooms.mode !== 'room' || (kind === 'discord' && roomPicker && known) || kind === 'telegram';
+    const modeOptions = kind === 'slack'
+      ? [['off', 'Off: direct messages only'], ['room', 'One channel']]
+      : kind === 'discord'
+        ? [['off', 'Off: direct messages only'], ['members', 'Every server it is in — people you admitted, when @mentioned'], ['room', 'One server']]
+        : [['members', 'Any group — people you admitted, when @mentioned (default)'], ['off', 'Off: direct messages only'], ['room', 'One group — everyone in it, when @mentioned']];
+    const linked = c.youAreLinked ? '✓ Linked to you.'
+      : kind === 'telegram' ? 'Not linked to you yet: open it and say hi — your first message links you.'
+      : `Not linked to you yet: send it a direct message on ${label}, then approve the request that appears here with <b>That's me</b>.`;
+    const pending = c.pendingName;
     return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b><span>${esc(c.displayName || '')}</span>
-        ${canChange ? `<button onclick="chanRecheck('${jsq(id)}','${kind}', this)" title="Ask ${label} again: servers it is in, and whether anything still needs fixing">↻ Re-check</button>` : ''}</div>
-      <div class="sub">${c.youAreLinked ? '✓ Linked to you.' : `Not linked to you yet: send it a direct message on ${label}, then approve the request that appears here with <b>That's me</b>.`}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}</div>
+        ${canChange ? `<button onclick="chanRecheck('${jsq(id)}','${kind}', this)" title="Ask ${label} again: whether the bot answers, what it is called${kind === 'discord' ? ', servers it is in' : kind === 'telegram' ? ', its group settings at BotFather' : ''}, and whether anything still needs fixing">↻ Re-check</button>` : ''}
+        ${canChange && c.botName && agentName && c.botName !== agentName ? `<button onclick="syncBotName('${jsq(id)}','${jsq(agentName)}','${kind}')" style="border-color:var(--warn)" title="${label} shows the bot as '${esc(c.botName)}'; rename it to match the agent">🏷 Sync name</button>` : ''}</div>
+      <div class="sub">${linked}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}${pending?.retryAt ? ` <span style="color:var(--warn)" title="${label} allows a bot only a few name changes an hour">Rename to “${esc(pending.name || agentName)}” queued.</span>` : ''}</div>
       ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${kind === 'discord' ? `<div class="sub">${servers.length ? `In ${servers.length === 1 ? 'one server' : `${servers.length} servers`}: ${servers.map(g => `<b>${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any server yet.'} People can only message it once they share a server with it.</div>` : ''}
+      ${kind === 'telegram' ? `<div class="sub">Its @handle is fixed for life; its display name follows the agent's name.${c.pooled ? ' A pool bot: deleting or archiving the agent parks it for the next one.' : ' Your own bot: it stays yours.'}</div>` : ''}
       <div class="v2chan-h">
         ${c.deepLink ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
         ${c.addToServerUrl ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
+        ${canChange && kind !== 'slack' && spares > 0 ? `<button onclick="chanSwap('${jsq(id)}','${kind}')" title="Move it onto a spare bot from your pool: members and memory come with it; the old bot is parked, and everyone on it is told where to find it">🔁 Change bot…</button>` : ''}
         ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Remove…</button>` : ''}
       </div>
       <div class="v2chan-people">
         <b>People on ${label}</b>
-        ${people.length ? `<span>${people.map(p => `<span class="member linked">${p.you ? 'You' : `<span class="pii">${esc(p.displayName || p.userId.slice(0, 8))}</span>`}${p.role === 'owner' ? ' ★' : ''}</span>`).join(' ')}</span>` : `<span class="sub">Nobody yet${c.youAreLinked ? '' : ' — your own first message links you'}.</span>`}
+        ${people.length ? `<span>${people.map(p => `<span class="member linked">${p.you ? 'You' : `<span class="pii">${esc(p.displayName || p.userId.slice(0, 8))}</span>`}${p.role === 'owner' ? ' ★' : ''}</span>`).join(' ')}</span>` : `<span class="sub">Nobody linked yet.</span>`}
         ${knocks.map(p => `<div class="pair"><span class="grow">🔑 <b class="pii">${esc(who(p))}</b> wants to talk to it on ${label}</span>
           <button onclick="denyPair('${jsq(id)}','${jsq(p.code)}','${jsq(who(p))}','${kind}')" title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
           <button onclick="approve('${jsq(id)}','${jsq(p.code)}', true,'${kind}','${jsq(who(p))}')" title="This is you on ${label}: link it to your login">That's me</button>
           <button class="primary" onclick="approve('${jsq(id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button></div>`).join('')}
-        <span class="sub" style="flex-basis:100%">Anyone else who messages it gets a code and a knock here; or send them an invite from Sharing. Remove a member from Sharing and they are off every app.</span>
+        <span class="sub" style="flex-basis:100%">Members, invites and people you already know are under <b>Sharing</b>; removing a member takes them off every app.</span>
       </div>
       <div class="v2chan-rooms">
-        <label for="chanRoom-${kind}" style="margin:0">Group chats</label>
-        <select id="chanRoomMode-${kind}" style="width:auto" onchange="const on = this.value === 'room'; const pick = $('chanRoomPick-${kind}'); if (pick) { pick.hidden = !on; $('chanRoom-${kind}').hidden = !on || pick.value !== ''; if (on && pick.value) $('chanRoom-${kind}').value = pick.value; } else $('chanRoom-${kind}').hidden = !on">
-          <option value="off"${rooms.mode !== 'room' ? ' selected' : ''}>Off: direct messages only</option>
-          <option value="room"${rooms.mode === 'room' ? ' selected' : ''}>One ${kind === 'slack' ? 'channel' : 'server'}</option>
+        <label for="chanRoomMode-${kind}" style="margin:0">Group chats</label>
+        <select id="chanRoomMode-${kind}" style="width:auto" onchange="const on = this.value === 'room'; const pick = $('chanRoomPick-${kind}'); const find = $('chanRoomFind-${kind}'); if (pick) { pick.hidden = !on; $('chanRoom-${kind}').hidden = !on || ('${kind}' === 'telegram') || pick.value !== ''; if (on && pick.value) $('chanRoom-${kind}').value = pick.value; } else $('chanRoom-${kind}').hidden = !on; if (find) find.hidden = !on">
+          ${modeOptions.map(([v, t]) => `<option value="${v}"${rooms.mode === v ? ' selected' : ''}>${t}</option>`).join('')}
         </select>${roomPicker}
-        <input type="text" id="chanRoom-${kind}" placeholder="${kind === 'slack' ? 'C0123ABCD' : '123456789012345678'}" value="${esc(rooms.roomId || '')}"${roomInputHidden ? ' hidden' : ''} autocomplete="off">
+        <input type="text" id="chanRoom-${kind}" placeholder="${{ slack: 'C0123ABCD', discord: '123456789012345678', telegram: '-1001234567890' }[kind]}" value="${esc(rooms.roomId || '')}"${roomInputHidden ? ' hidden' : ''} autocomplete="off">
         ${canChange ? `<button onclick="chanSaveRooms('${jsq(id)}','${kind}', this)">Save</button>` : ''}
-        <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
-      </div></div>`;
+        <span class="sub" style="flex-basis:100%">${kind === 'telegram' ? 'In a group it answers only when @mentioned; "one group" opens that group to everyone in it.' : 'In a group it answers members only, and only when @mentioned.'} ${roomHelp}</span>
+      </div>
+      <div class="v2chan-rooms">
+        <label for="chanKnocks-${kind}" style="margin:0">Who can reach it</label>
+        <select id="chanKnocks-${kind}" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanAllowKnocks('${jsq(id)}', this.value === 'on')">
+          <option value="off"${r.allowKnocks ? '' : ' selected'}>Invite only (default)</option>
+          <option value="on"${r.allowKnocks ? ' selected' : ''}>Anyone can knock</option>
+        </select>
+        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Waiting for you.' : 'Only people you invite, or already know from another agent; strangers are turned away silently.'} One setting for every app this agent is on.</span>
+      </div>
+      ${kind === 'telegram' ? `<div class="v2chan-rooms">
+        <label for="chanRich-telegram" style="margin:0">Rich messages</label>
+        <select id="chanRich-telegram" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanRichMessages('${jsq(id)}', this.value === 'off')">
+          <option value="on"${c.richMessages === false ? '' : ' selected'}>On (default)</option>
+          <option value="off"${c.richMessages === false ? ' selected' : ''}>Off — plain text</option>
+        </select>
+        <span class="sub" style="flex-basis:100%">Bold, code blocks and links render properly; applies on the next Rebuild. (Discord and Slack always render them.)</span>
+      </div>` : ''}</div>`;
   };
   // Only what this browser is set up to see: an attached channel always
   // renders (never strand an agent that has one), the rest wait for preview.
   // Discord is offered to everyone; Slack waits for preview (untried against a real app) — an attached one always shows.
-  const kinds = ['discord', 'slack'].filter(k => k === 'discord' || previewing() || r.channels.some(x => x.kind === k));
-  box.innerHTML = kinds.map(card).join('');
+  const shown = kinds.filter(k => k !== 'slack' || previewing() || r.channels.some(x => x.kind === k));
+  box.innerHTML = shown.map(card).join('');
+}
+
+/** Move an agent onto a spare bot of the same app, telling everyone on the old one first. */
+async function chanSwap(id, kind) {
+  const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
+  if (!confirm(`Move "${a?.name ?? 'this agent'}" to a different ${label} bot?\n\n`
+    + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
+    + `• Everyone must open the NEW bot and say hi; ${label} will not move the old chat.\n`
+    + `• The old bot ${kind === 'telegram' ? 'goes back to the pool' : 'is parked under Settings → Discord'}, and its chat stops answering.\n\n`
+    + `The agent rebuilds afterwards — about a minute.`)) return;
+  try {
+    const r = kind === 'telegram'
+      ? await api(`/v1/agents/${id}/channel/swap`, { method: 'POST', body: {} })
+      : await api(`/v1/agents/${id}/channels/discord/swap`, { method: 'POST', body: {} });
+    toast(`Moved to ${kind === 'telegram' ? `@${r.to}` : `“${r.channel?.botName || 'the spare bot'}”`}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. Rebuilding…`, 10000);
+    await refresh(true);
+    v2LoadChans(id);
+  } catch (e) { toast(e.message, 9000); }
+}
+async function chanAllowKnocks(id, on) {
+  try {
+    await api(`/v1/agents/${id}/allow-knocks`, { method: 'POST', body: { on } });
+    const a = agents.find(x => x.id === id); if (a) a.allowKnocks = on;
+    toast(on ? 'Anyone can knock — you approve each one.' : 'Invite only — strangers are turned away.');
+    v2LoadChans(id);
+  } catch (e) { toast(e.message); }
+}
+async function chanRichMessages(id, off) {
+  try {
+    // null = clear back to the managed default (on) instead of pinning true.
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { richMessages: off ? false : null } });
+    toast(off ? 'Plain text — applies on the next Rebuild.' : 'Rich messages on (default) — applies on the next Rebuild.');
+    await refresh(false);
+  } catch (e) { toast(e.message, 10000); }
+}
+/** Telegram: the group chats the gateway has seen, as the room picker. */
+async function chanFindRooms(id, btn) {
+  btn.disabled = true;
+  try {
+    const { rooms } = await api(`/v1/agents/${id}/group-chats`);
+    if (!rooms.length) { toast('No group chats seen yet — add the bot to the group (privacy OFF at BotFather), say anything in it, then try again.', 9000); return; }
+    const pick = $('chanRoomPick-telegram'); const cur = $('chanRoom-telegram').value;
+    pick.innerHTML = rooms.map(r => `<option value="${esc(r.id)}"${r.id === cur ? ' selected' : ''}>room ${esc(r.id)}</option>`).join('');
+    $('chanRoom-telegram').value = pick.value;
+  } catch (e) { toast(e.message); }
+  finally { btn.disabled = false; }
 }
 
 async function openChanSetup(id, kind) {
@@ -11240,17 +11337,25 @@ async function chanRecheck(id, kind, btn) {
 async function chanSaveRooms(id, kind, btn) {
   const mode = $(`chanRoomMode-${kind}`).value;
   const roomId = $(`chanRoom-${kind}`).value.trim();
+  if (mode === 'room' && !roomId) { toast(kind === 'telegram' ? 'Pick the room first (Find rooms).' : 'Give the room ID first.'); return; }
   btn.disabled = true;
   try {
-    await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
-    toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : 'Saved: direct messages only. It restarts to apply this.', 6000);
+    if (kind === 'telegram') {
+      await api(`/v1/agents/${id}`, { method: 'PATCH', body: { groupAccess: { mode, ...(mode === 'room' ? { roomId } : {}) } } });
+      toast('Saved — applies on the next Rebuild.', 6000);
+    } else {
+      await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
+      toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : mode === 'members' ? 'Saved: every server it is in, for people you admitted. It restarts to apply this.' : 'Saved: direct messages only. It restarts to apply this.', 6000);
+    }
     await refresh(false);
+    v2LoadChans(id);
   } catch (e) { toast(e.message, 8000); }
   finally { btn.disabled = false; }
 }
 async function chanRemove(id, kind) {
   // (Discord: the bot is parked under Settings → Discord, name and servers kept.)
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
+  if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
   if (kind === 'discord'
     ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord. The bot is parked under Settings → Discord, with its name and servers, ready for another agent.`)
     : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The ${label} app stays yours; delete it on ${label} if you no longer want it. It restarts to apply this.`)) return;

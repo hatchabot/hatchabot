@@ -163,13 +163,18 @@ export interface OpenClawConfigPatch {
     dmPolicy?: 'pairing' | 'allowlist';
     allowFrom: string[];
     rooms: ChannelRooms;
+    /** The servers the bot is in (ids, from the last check): the rooms of `members` mode. */
+    servers?: string[];
     /** Reach Discord through this HTTP proxy (the management agent's jail). */
     proxy?: string;
   };
 }
 
 /** Where a Slack or Discord agent answers besides DMs: nowhere, or one room (members only, @mention). */
-export type ChannelRooms = { mode: 'off' } | { mode: 'room'; roomId: string };
+/** Where a Slack/Discord bot answers besides DMs: nowhere, one room by id, or
+ *  (Discord) every server it is in — admitted people only, @mention-gated, the
+ *  same three answers Telegram's group setting has. */
+export type ChannelRooms = { mode: 'off' } | { mode: 'members' } | { mode: 'room'; roomId: string };
 
 export type RuntimeStatus =
   /** The runtime host itself could not be reached — say nothing about the agent. */

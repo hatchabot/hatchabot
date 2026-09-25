@@ -120,6 +120,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/auth/family-accounts': 'app: secret — it takes a new password, and cannot be undone',
   'POST /v1/tailscale/serve': 'app: later — putting the app on the tailnet is a decision for whoever runs the machine',
   'POST /v1/agents/:id/channel/swap': 'app: fleet-wide/irreversible — it hands the agent a new identity and ends every conversation on the old one',
+  'POST /v1/agents/:id/channels/discord/swap': 'app: fleet-wide/irreversible — it hands the agent a new Discord identity and ends every conversation on the old one',
   'POST /v1/agents/:id/allow-knocks': 'app: later — who may reach an agent is a setting, not a change to run',
   'POST /v1/ai-profiles/:id/move': 'app: browser — the order the owner wants their sources listed in',
   'POST /v1/ai-profiles/:id/adopt-agents': 'set_source (one agent at a time)',
@@ -141,6 +142,7 @@ export const COVERAGE: Record<string, string> = {
   // ---- Telegram bots ----
   'POST /v1/pool': 'app: secret — adding a bot takes its token',
   'DELETE /v1/pool/:username': 'app: later — discard a pooled bot',
+  'POST /v1/pool/:username/recheck': 'app: browser — a re-check with Telegram from the pool view; nothing for the manager to decide',
 
   // ---- machines & servers ----
   'POST /v1/hosts': 'app: secret — a runner address and SSH setup',
@@ -172,6 +174,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/cli-tokens': 'app: secret — mints an access token',
   'DELETE /v1/cli-tokens/:id': 'app: later — revoke an access token',
   'DELETE /v1/account/telegram': 'app: later — unlink your Telegram',
+  'DELETE /v1/account/discord': 'app: later — unlink your Discord',
   'PUT /v1/operator-profile': 'app: later — "about you"',
   'POST /v1/inbox/:id/accept': 'app: later — accept an agent sent to you',
   'POST /v1/inbox/:id/dismiss': 'app: later — dismiss an agent sent to you',

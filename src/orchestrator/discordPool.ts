@@ -28,6 +28,10 @@ export interface DiscordBotRow {
   addToServerUrl?: string;
   checkedAt?: string;
   addedAt: string;
+  /** Whom the bot wrote to for its previous agent — told "this bot is now X" on reuse. */
+  priorChatIds?: string[];
+  /** The archived agent this bot is kept for: restore takes it back unless someone else did. */
+  archivedFor?: string;
 }
 
 /**
@@ -40,8 +44,17 @@ export async function parkDiscordBot(
   deps: { store: Store; secrets: SecretStore },
   ownerId: string,
   row: Channel,
+  opts: { archivedFor?: string } = {},
 ): Promise<DiscordBotRow> {
   const st = (row.settings ?? {}) as Record<string, unknown>;
+  // Whom it served: the people linked to the departing agent on Discord, so
+  // the next agent's lease can mark the seam for them (Telegram's rule).
+  const priorChatIds = deps.store
+    .listMemberships(row.agentId)
+    .filter((m) => m.status === 'active')
+    .map((m) => deps.store.memberIdentities(row.agentId, m.userId).discord)
+    .filter((id): id is string => !!id)
+    .slice(0, 64);
   const token = await deps.secrets.get(row.secretRef);
   const ref = discordPoolRef(row.accountId);
   await deps.secrets.put(ref, token);
@@ -59,6 +72,8 @@ export async function parkDiscordBot(
     addToServerUrl: typeof st.addToServerUrl === 'string' ? st.addToServerUrl : undefined,
     checkedAt: typeof st.checkedAt === 'string' ? st.checkedAt : undefined,
     addedAt: new Date().toISOString(),
+    priorChatIds,
+    archivedFor: opts.archivedFor,
   };
   deps.store.upsertDiscordBot(parked);
   if (row.secretRef !== ref) await deps.secrets.delete(row.secretRef).catch(() => {});

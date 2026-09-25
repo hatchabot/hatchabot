@@ -138,7 +138,7 @@ describe('adding someone you already know', () => {
     const H = { 'x-hatchabot-owner': OWNER };
 
     const list = await f.inject({ method: 'GET', url: '/v1/agents/a1/known-people', headers: H });
-    expect(list.json()).toEqual([{ userId: 'user-maria', name: 'Maria' }]);
+    expect(list.json()).toEqual([{ userId: 'user-maria', name: 'Maria', on: ['telegram'] }]);
 
     const add = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/known', headers: H, payload: { userId: 'user-maria' } });
     expect(add.statusCode).toBe(200);

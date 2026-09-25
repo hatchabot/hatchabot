@@ -633,6 +633,26 @@ screen. (The API and the code keep `channel` as the internal name; it never
 reaches a person.) An agent can be in more than one at a time, and its icon
 wears one mark per app.
 
+## Telegram and Discord: one card, the same controls
+
+Since v2.74.0 the agent's **Telegram** tab and **Discord** tab draw the same
+card: what the app calls the bot, **↻ Re-check** (Telegram: does the token
+still work, what is it called, and BotFather's group settings; Discord:
+servers and intent), **🏷 Sync name** when the bot's name has drifted from
+the agent's, whether you are linked, the warnings from the last check,
+**Open**, **🔁 Change bot…** (a spare from the pool; the old one is parked and
+everyone on it is told where the agent went), **Remove…**, **People on the
+app** with any knocks (*Not now* / *That's me* / *Let them in*), **Group
+chats** (Telegram: any group · off · one group; Discord: every server it is
+in · off · one server), and **Who can reach it** — one setting for every app.
+Telegram adds **Rich messages**; the token stays under the Telegram tab.
+Members, invites and people you already know are under **Sharing** for every
+app, and adding a known person admits them on every app the agent has that
+they are known on. Settings → **Telegram** and Settings → **Discord** share
+one layout too: a status line, *Add a bot*, and the pool in the same groups
+(free / in use, yours / shared), with a re-check on every spare. What the
+platforms keep different, and why, is the ledger in `docs/channel-parity.md`.
+
 ## Slack and Discord
 
 > **Discord is offered to everyone (v2.66.0); Slack still waits.** Slack is

@@ -49,7 +49,7 @@ describe('Slack and Discord at build time', () => {
     store.insertChannel({ id: 'cd', agentId: agent.id, kind: 'discord', accountId: '123', secretRef: `channel/${agent.id}/discord`, deepLink: 'x', createdAt: 'now' });
     const patch = (await buildRuntimeSpec(deps as never, agent.id)).workspace.configPatch;
     // Nobody admitted yet: pairing, so the owner's first message can be claimed.
-    expect(patch.discord).toEqual({ token: 'tok', applicationId: '123', dmPolicy: 'pairing', allowFrom: [], rooms: { mode: 'off' } });
+    expect(patch.discord).toEqual({ token: 'tok', applicationId: '123', dmPolicy: 'pairing', allowFrom: [], rooms: { mode: 'off' }, servers: [] });
   });
 
   it('an image without the plugin leaves the channel out instead of failing the build', async () => {

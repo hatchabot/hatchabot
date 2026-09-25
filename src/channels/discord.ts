@@ -21,6 +21,19 @@ const MESSAGE_CONTENT = (1 << 19) | (1 << 18);
 // Attach Files, Read Message History, Add Reactions.
 export const DISCORD_BOT_PERMISSIONS = (1024n + 2048n + (1n << 38n) + 16384n + 32768n + 65536n + 64n).toString();
 
+/**
+ * A Discord bot username for an agent's name. Discord's rules: 2–32
+ * characters; no `@`, `#`, `:` or code fences; not "discord" anywhere,
+ * not "everyone" or "here". A name that cannot be made to fit comes back
+ * undefined and the bot keeps its name.
+ */
+export function discordUsernameFor(agentName: string): string | undefined {
+  const cleaned = agentName.replace(/[@#:`]/g, '').replace(/\s+/g, ' ').trim().slice(0, 32).trim();
+  if (cleaned.length < 2) return undefined;
+  if (/discord/i.test(cleaned) || /^(everyone|here)$/i.test(cleaned)) return undefined;
+  return cleaned;
+}
+
 export function discordAddToServerUrl(applicationId: string): string {
   return `https://discord.com/oauth2/authorize?client_id=${encodeURIComponent(applicationId)}&scope=bot%20applications.commands&permissions=${DISCORD_BOT_PERMISSIONS}`;
 }
@@ -40,6 +53,45 @@ export function discordConnector(f: FetchLike = fetch): ChannelConnector {
     },
     credsFromSecret(secret) {
       return { token: secret };
+    },
+
+    // Discord has no "message a user" call: a DM is a channel opened with that
+    // person (idempotent — the same one comes back), then a message in it. It
+    // only works for people who share a server with the bot; a refusal is
+    // simply false. Used for the farewells and moving notes Telegram members
+    // get, and the "this bot is now X" marker on a reused pool bot.
+    async dm(secret, userId, text) {
+      if (!/^\d{15,25}$/.test(userId)) return false;
+      const headers = { Authorization: `Bot ${secret}`, 'content-type': 'application/json' };
+      try {
+        const ch = await callJson(f, 'Discord', `${API}/users/@me/channels`, { method: 'POST', headers, body: JSON.stringify({ recipient_id: userId }) });
+        if (ch.status !== 200 || !ch.body?.id) return false;
+        const msg = await callJson(f, 'Discord', `${API}/channels/${encodeURIComponent(String(ch.body.id))}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: text.slice(0, 2000) }) });
+        return msg.status === 200;
+      } catch { return false; }
+    },
+
+    // A bot's shown name IS its username (bots have no display name of their
+    // own), so this is a username change: Discord allows a bot a couple an
+    // hour, and refuses a few words. Pool bots are renamed when leased, like
+    // Telegram's; a bot the owner made is renamed on request, or when the
+    // agent is renamed.
+    async rename(secret, name) {
+      const username = discordUsernameFor(name);
+      if (!username) return { ok: false, note: 'Discord does not allow that as a bot name (2–32 characters; not "discord", "everyone" or "here").' };
+      const res = await callJson(f, 'Discord', `${API}/users/@me`, {
+        method: 'PATCH', headers: { Authorization: `Bot ${secret}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ username }),
+      }).catch((err: unknown) => ({ status: 0, body: undefined, note: err instanceof ConnectorError ? err.userMessage : String(err) } as { status: number; body: any; note?: string }));
+      if (res.status === 200) return { ok: true, name: String(res.body?.global_name ?? res.body?.username ?? username) };
+      if (res.status === 0) return { ok: false, note: (res as { note?: string }).note ?? "Couldn't reach Discord." };
+      const retry = Number(res.body?.retry_after);
+      if (res.status === 429 || /too fast|rate limit/i.test(String(res.body?.message ?? ''))) {
+        return { ok: false, note: `Discord allows a bot only a few name changes an hour — try again${Number.isFinite(retry) && retry > 0 ? ` in ${Math.ceil(retry / 60)} min` : ' later'}.` };
+      }
+      if (res.status === 401) return { ok: false, note: 'Discord refused the bot token. Re-check the bot, or reset its token and set it up again.' };
+      const detail = String(res.body?.errors?.username?._errors?.[0]?.message ?? res.body?.message ?? `HTTP ${res.status}`);
+      return { ok: false, note: `Discord refused the name: ${detail}` };
     },
 
     async verify(creds): Promise<VerifiedChannel> {

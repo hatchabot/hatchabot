@@ -32,9 +32,13 @@ describe('GET /v1/pool', () => {
     expect(mine.availableBots).toBe(1);
     // Stub-added with no owner → a shared house bot.
     expect(mine.bots).toEqual([{ username: 'sparebot', shared: true, mine: false }]);
+    // Everyone else sees their own bots and the shared ones (the Discord pool's rule) — never who parked a shared one.
     const theirs = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as('someone-else') })).json();
     expect(theirs.availableBots).toBe(1);
-    expect(theirs.bots).toBeUndefined(); // roster is host-owner detail
+    expect(theirs.bots).toEqual([{ username: 'sparebot', shared: true, mine: false }]);
+    await w.channel.pool.addToPool('privatebot', 'tok-2', 'owner-x');
+    const other = (await w.f.inject({ method: 'GET', url: '/v1/pool', headers: as('someone-else') })).json();
+    expect(other.bots.map((b: any) => b.username)).toEqual(['sparebot']); // owner-x's private bot is not theirs to see
   });
 });
 

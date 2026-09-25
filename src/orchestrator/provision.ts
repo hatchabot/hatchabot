@@ -525,7 +525,13 @@ export async function buildRuntimeSpec(
   embedDecision.set(agentId, { used: embed ? 'shared' : 'baked', before: agent.appliedEmbedMode ?? 'baked', openclawVersion });
   const roomsOf = (c: Channel): ChannelRooms => {
     const r = (c.settings?.rooms ?? {}) as { mode?: string; roomId?: unknown };
+    if (r.mode === 'members') return { mode: 'members' };
     return r.mode === 'room' && typeof r.roomId === 'string' && r.roomId ? { mode: 'room', roomId: r.roomId } : { mode: 'off' };
+  };
+  /** The servers a Discord bot was in at its last check — the rooms of `members` mode. */
+  const serversOf = (c: Channel): string[] => {
+    const list = (c.settings?.servers ?? []) as Array<{ id?: unknown }>;
+    return Array.isArray(list) ? list.map((g) => String(g?.id ?? '')).filter(Boolean) : [];
   };
   // The same door rule as Telegram (below): allowlist once somebody is
   // admitted, pairing only while nobody is or the owner allows knocks. Discord
@@ -543,7 +549,7 @@ export async function buildRuntimeSpec(
     const allowFrom = store.listAllowedChannelUserIds(agentId, 'discord');
     discord = {
       token: await secrets.get(discordRow.secretRef), applicationId: discordRow.accountId,
-      dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(discordRow),
+      dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(discordRow), servers: serversOf(discordRow),
     };
   }
   // Debug door: each agent's Control UI published on a stable host port

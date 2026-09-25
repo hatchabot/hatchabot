@@ -43,6 +43,26 @@ export interface ChannelConnector {
   secretValue(creds: Record<string, string>): string;
   /** The fields back out of a stored secret, so a re-check can run verify() without asking the owner to paste again. */
   credsFromSecret(secret: string): Record<string, string>;
+  /**
+   * Point the bot's name at the agent's, when the platform allows it. Best
+   * effort by contract: a refusal comes back as `ok: false` with the reason
+   * in plain words, never as a throw. `name` is what the bot is called now.
+   */
+  rename?(secret: string, name: string): Promise<RenameOutcome>;
+  /**
+   * One direct message from the bot to a person, sent from this machine (no
+   * container needed — a farewell reaches people after the agent is gone).
+   * True when the platform accepted it.
+   */
+  dm?(secret: string, userId: string, text: string): Promise<boolean>;
+}
+
+export interface RenameOutcome {
+  ok: boolean;
+  /** The bot's name after the call (the new one, or the one it kept). */
+  name?: string;
+  /** Why not, in plain words. */
+  note?: string;
 }
 
 /** A refusal the owner can act on. The message never contains a credential. */

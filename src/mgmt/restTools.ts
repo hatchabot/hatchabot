@@ -271,6 +271,20 @@ export const REST_TOOLS: RestTool[] = [
     card: ({ agent }) => `✈ Take "${agent!.name}" off Telegram. Its bot returns to your pool, and its Telegram contacts lose access and get a goodbye.`,
   },
   {
+    name: 'list_discord_bots', tier: 'read',
+    description: 'The Discord bots this server knows: the spares parked under Settings → Discord (name, servers, warnings, shared or not) and the ones agents use right now. No tokens.',
+    input_schema: obj({}),
+    call: () => ({ method: 'GET', path: '/v1/discord-bots' }),
+  },
+  {
+    name: 'add_discord', tier: 'mutate', agentArg: true,
+    description: 'Give an agent a Discord bot from the spare bots parked under Settings → Discord (instant, no token). If none is parked, the owner must paste a bot token in the app — tokens never go through chat.',
+    input_schema: obj({ agent: agentRef }, ['agent']),
+    call: ({ agent }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/channels/discord`, body: { pooled: 'first' } }),
+    card: ({ agent }) => `✈ Give "${agent!.name}" a spare Discord bot, then rebuild it so it answers there`,
+    done: (r) => (r && typeof r === 'object' && 'botName' in r ? `It is “${String((r as { botName: string }).botName)}” on Discord.` : undefined),
+  },
+  {
     name: 'remove_channel', tier: 'mutate', agentArg: true,
     description: "Take an agent off Slack or Discord. It keeps its memory; people stop reaching it there. The owner's Slack or Discord app is left as it is. (Connecting one needs tokens, so that is done in the app, never here.)",
     input_schema: obj({ agent: agentRef, channel: { type: 'string', enum: ['slack', 'discord'] } }, ['agent', 'channel']),

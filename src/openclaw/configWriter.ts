@@ -604,11 +604,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push(channelPlugin('discord'));
       cmds.push({ argv: ['plugins', 'enable', 'discord'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
-      const discordRoom = dc.rooms.mode === 'room' && dc.allowFrom.length > 0 ? dc.rooms.roomId : undefined; // see the Slack note above
-      cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', discordRoom ? 'allowlist' : 'disabled'] });
-      const guilds = discordRoom
-        ? { [discordRoom]: { requireMention: true, ignoreOtherMentions: true, users: dc.allowFrom } }
-        : {};
+      // The rooms it answers in, each for admitted people only (see the Slack
+      // note above): one by id, or every server it is in ('members' — the
+      // same answer Telegram's default gives, which on Discord has to be
+      // spelled out per server since a guild entry is what admits a room).
+      const roomIds = dc.allowFrom.length === 0 ? []
+        : dc.rooms.mode === 'room' ? [dc.rooms.roomId]
+        : dc.rooms.mode === 'members' ? (dc.servers ?? []).filter((g) => /^\d{17,20}$/.test(g))
+        : [];
+      cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', roomIds.length ? 'allowlist' : 'disabled'] });
+      const guilds = Object.fromEntries(roomIds.map((g) => [g, { requireMention: true, ignoreOtherMentions: true, users: dc.allowFrom }]));
       cmds.push({ argv: ['config', 'set', 'channels.discord.guilds', JSON.stringify(guilds)] });
       // Discord's websocket ignores HTTPS_PROXY; it has its own setting.
       if (dc.proxy) cmds.push({ argv: ['config', 'set', 'channels.discord.proxy', dc.proxy], sensitive: true });

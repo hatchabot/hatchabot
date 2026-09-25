@@ -119,3 +119,36 @@ describe('Discord', () => {
     expect(DISCORD_BOT_PERMISSIONS).toBe('274878024768');
   });
 });
+
+describe('Discord bot names (2026-09-25)', () => {
+  it('a username Discord accepts, or none', async () => {
+    const { discordUsernameFor } = await import('../src/channels/discord.js');
+    expect(discordUsernameFor('To Do Agent')).toBe('To Do Agent');
+    expect(discordUsernameFor('  Taco @home #1: yes  ')).toBe('Taco home 1 yes');
+    expect(discordUsernameFor('x')).toBeUndefined();
+    expect(discordUsernameFor('My Discord Helper')).toBeUndefined();
+    expect(discordUsernameFor('everyone')).toBeUndefined();
+    expect(discordUsernameFor('A'.repeat(40))).toHaveLength(32);
+  });
+  it('rename PATCHes the bot user; a rate limit and a refusal come back in words, never thrown', async () => {
+    const { discordConnector } = await import('../src/channels/discord.js');
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    let answer: { status: number; body: unknown } = { status: 200, body: { username: 'To Do Agent', global_name: null } };
+    const f = async (url: string, init?: RequestInit) => { calls.push({ url, init: init! }); return new Response(JSON.stringify(answer.body), { status: answer.status, headers: { 'content-type': 'application/json' } }); };
+    const conn = discordConnector(f as never);
+    expect(await conn.rename!('tok-secret', 'To Do Agent')).toEqual({ ok: true, name: 'To Do Agent' });
+    expect(calls[0]!.url).toBe('https://discord.com/api/v10/users/@me');
+    expect(calls[0]!.init.method).toBe('PATCH');
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ username: 'To Do Agent' });
+    expect(String((calls[0]!.init.headers as Record<string, string>).Authorization)).toBe('Bot tok-secret');
+    answer = { status: 429, body: { message: 'You are being rate limited.', retry_after: 1800 } };
+    const limited = await conn.rename!('tok-secret', 'Taco');
+    expect(limited.ok).toBe(false); expect(limited.note).toContain('30 min');
+    answer = { status: 400, body: { message: 'Invalid Form Body', errors: { username: { _errors: [{ message: 'Username cannot contain "discord"' }] } } } };
+    const refused = await conn.rename!('tok-secret', 'Taco');
+    expect(refused.ok).toBe(false); expect(refused.note).toContain('cannot contain');
+    expect(refused.note).not.toContain('tok-secret');
+    expect((await conn.rename!('tok-secret', 'x')).note).toContain('2–32');
+  });
+});
+

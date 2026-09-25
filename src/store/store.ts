@@ -573,6 +573,11 @@ export class Store {
       // added to one after it shipped needs this line or every read of it
       // throws on an upgraded install (it did: v2.14.0, caught 2026-09-21).
       `ALTER TABLE pairing_window ADD COLUMN expect TEXT`,
+      // A parked Discord bot: whom it last wrote to (told "this bot is now X"
+      // when reused), and which archived agent it is kept for (restore takes
+      // it back if nobody else did).
+      `ALTER TABLE discord_bots ADD COLUMN prior_chat_ids TEXT`,
+      `ALTER TABLE discord_bots ADD COLUMN archived_for TEXT`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -1316,14 +1321,22 @@ export class Store {
     secretRef: r.secret_ref, ownerId: r.owner_id ?? null,
     servers: r.servers ? safeJson(r.servers, []) : [], warnings: r.warnings ? safeJson(r.warnings, []) : [],
     addToServerUrl: r.add_to_server_url ?? undefined, checkedAt: r.checked_at ?? undefined, addedAt: r.added_at,
+    priorChatIds: r.prior_chat_ids ? safeJson(r.prior_chat_ids, []) : [], archivedFor: r.archived_for ?? undefined,
   });
   upsertDiscordBot(b: DiscordBotRow): void {
     this.db.prepare(
-      `INSERT INTO discord_bots (application_id, bot_user_id, bot_name, secret_ref, owner_id, servers, warnings, add_to_server_url, checked_at, added_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO discord_bots (application_id, bot_user_id, bot_name, secret_ref, owner_id, servers, warnings, add_to_server_url, checked_at, added_at, prior_chat_ids, archived_for)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(application_id) DO UPDATE SET bot_user_id = excluded.bot_user_id, bot_name = excluded.bot_name, secret_ref = excluded.secret_ref,
-         owner_id = excluded.owner_id, servers = excluded.servers, warnings = excluded.warnings, add_to_server_url = excluded.add_to_server_url, checked_at = excluded.checked_at`,
-    ).run(b.applicationId, b.botUserId ?? null, b.botName ?? null, b.secretRef, b.ownerId, JSON.stringify(b.servers), JSON.stringify(b.warnings), b.addToServerUrl ?? null, b.checkedAt ?? null, b.addedAt);
+         owner_id = excluded.owner_id, servers = excluded.servers, warnings = excluded.warnings, add_to_server_url = excluded.add_to_server_url, checked_at = excluded.checked_at,
+         prior_chat_ids = excluded.prior_chat_ids, archived_for = excluded.archived_for`,
+    ).run(b.applicationId, b.botUserId ?? null, b.botName ?? null, b.secretRef, b.ownerId, JSON.stringify(b.servers), JSON.stringify(b.warnings), b.addToServerUrl ?? null, b.checkedAt ?? null, b.addedAt,
+      b.priorChatIds?.length ? JSON.stringify(b.priorChatIds) : null, b.archivedFor ?? null);
+  }
+  /** The parked bot an archived agent left behind, if nobody took it meanwhile. */
+  discordBotArchivedFor(agentId: string): DiscordBotRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM discord_bots WHERE archived_for = ?`).get(agentId) as any;
+    return r ? this.#rowToDiscordBot(r) : undefined;
   }
   getDiscordBot(applicationId: string): DiscordBotRow | undefined {
     const r = this.db.prepare(`SELECT * FROM discord_bots WHERE application_id = ?`).get(applicationId) as any;
@@ -3222,16 +3235,24 @@ export class Store {
    * invite link and no pairing. The owner is excluded (they are every agent's
    * owner already), as is anyone already on the target agent.
    */
-  knownPeopleFor(ownerId: string, exceptAgentId?: string): Array<{ userId: string; name: string; channelUserId: string }> {
+  knownPeopleFor(ownerId: string, exceptAgentId?: string): Array<{ userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>> }> {
+    // Everyone admitted to one of this owner's agents with an identity on any
+    // channel: Telegram on the seat, Slack/Discord beside it. One row per
+    // person, the newest id per channel.
     const rows = this.db
       .prepare(
         `SELECT m.user_id, m.channel_user_id, MAX(m.display_name) AS name
            FROM memberships m JOIN agents a ON a.id = m.agent_id
-          WHERE a.owner_id = ? AND m.status = 'active' AND m.channel_user_id IS NOT NULL
-            AND m.user_id != ? AND m.role != 'owner'
+          WHERE a.owner_id = ? AND m.status = 'active' AND m.user_id != ? AND m.role != 'owner'
           GROUP BY m.user_id, m.channel_user_id`,
       )
-      .all(ownerId, ownerId) as Array<{ user_id: string; channel_user_id: string; name: string | null }>;
+      .all(ownerId, ownerId) as Array<{ user_id: string; channel_user_id: string | null; name: string | null }>;
+    const ids = this.db
+      .prepare(
+        `SELECT i.user_id, i.kind, i.channel_user_id FROM member_identities i JOIN agents a ON a.id = i.agent_id
+          WHERE a.owner_id = ? AND i.user_id != ? ORDER BY i.bound_at ASC`,
+      )
+      .all(ownerId, ownerId) as Array<{ user_id: string; kind: ChannelKind; channel_user_id: string }>;
     const already = new Set(
       exceptAgentId
         ? (this.db
@@ -3239,9 +3260,24 @@ export class Store {
             .all(exceptAgentId) as Array<{ user_id: string }>).map((r) => r.user_id)
         : [],
     );
-    return rows
-      .filter((r) => !already.has(r.user_id))
-      .map((r) => ({ userId: r.user_id, name: r.name || 'Member', channelUserId: r.channel_user_id }));
+    const people = new Map<string, { userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>> }>();
+    for (const r of rows) {
+      const p = people.get(r.user_id) ?? { userId: r.user_id, name: r.name || 'Member', identities: {} };
+      if (r.channel_user_id) { p.channelUserId = r.channel_user_id; p.identities.telegram = r.channel_user_id; }
+      if (r.name && p.name === 'Member') p.name = r.name;
+      people.set(r.user_id, p);
+    }
+    for (const i of ids) {
+      const p = people.get(i.user_id);
+      if (p) p.identities[i.kind] = i.channel_user_id;
+    }
+    return [...people.values()].filter((p) => !already.has(p.userId) && Object.keys(p.identities).length > 0);
+  }
+
+  /** Put another bot on the same channel: the row changes, the people bound there stay (a swap, not a removal). */
+  replaceChannelRow(agentId: string, kind: ChannelKind, next: Channel): void {
+    this.db.prepare(`DELETE FROM channels WHERE agent_id = ? AND kind = ?`).run(agentId, kind);
+    this.insertChannel(next);
   }
 
   /** The @handle the invite this person redeemed named, if it named one — so
@@ -3494,6 +3530,11 @@ export class Store {
       .prepare(`SELECT channel_user_id FROM member_identities WHERE user_id = ? AND kind = ? ORDER BY bound_at DESC LIMIT 1`)
       .get(userId, kind) as { channel_user_id: string } | undefined;
     return r?.channel_user_id;
+  }
+
+  /** Forget a user's identity on a channel everywhere (the account-level unlink Telegram has). */
+  unbindIdentityEverywhere(userId: string, kind: Exclude<ChannelKind, 'telegram'>): number {
+    return this.db.prepare(`DELETE FROM member_identities WHERE user_id = ? AND kind = ?`).run(userId, kind).changes;
   }
 
   /** The active member bound to this Slack or Discord identity, if any. */

@@ -25,6 +25,11 @@ function fakeConnector(kind: 'slack' | 'discord', accountId = kind === 'slack' ?
     hosts: [],
     secretValue: (c) => String(c.token),
     credsFromSecret: (secret) => ({ token: secret }),
+    async rename(secret, name) {
+      renameCalls.push([kind, secret, name]);
+      if (name === 'Refused') return { ok: false, note: 'Discord allows a bot only a few name changes an hour — try again later.' };
+      return { ok: true, name };
+    },
     async verify(c) {
       if (c.token !== 'ok-good') throw new ConnectorError('The platform refused it.');
       verifyCalls.push(kind);
@@ -40,6 +45,7 @@ function fakeConnector(kind: 'slack' | 'discord', accountId = kind === 'slack' ?
   };
 }
 const verifyCalls: string[] = [];
+const renameCalls: Array<[string, string, string]> = [];
 
 async function setup(opts: { imageChannels?: string[] } = {}) {
   const store = new Store(new Database(':memory:'));
@@ -355,6 +361,38 @@ describe('who the owner is on a new channel (2026-09-25)', () => {
     expect(r.json().error).not.toContain('Tax'); // another owner's agent name stays theirs
     expect(() => store.insertChannel({ id: 'c-a', agentId: a, kind: 'discord', accountId: '1234567890123456789', secretRef: 'y', deepLink: 'y', createdAt: 'now' }))
       .toThrow(/already attached/);
+  });
+});
+
+describe('the bot is named for the agent (2026-09-25)', () => {
+  it('a pool bot is renamed on attach and the card follows; a pasted bot keeps its name until Sync name; the Setup log has the outcome', async () => {
+    const { store, secrets, add, inject } = await setup();
+    renameCalls.length = 0;
+    await secrets.put('discord-pool/1234567890123456789', 'ok-good');
+    store.upsertDiscordBot({ applicationId: '1234567890123456789', botName: 'Bot Pool 10', secretRef: 'discord-pool/1234567890123456789', ownerId: OWNER, servers: [], warnings: [], addedAt: 'now' });
+    const id = add({ name: 'To Do Agent' });
+    const r = await inject('POST', `/v1/agents/${id}/channels/discord`, { pooled: '1234567890123456789' });
+    expect(r.statusCode).toBe(202);
+    expect(renameCalls).toEqual([['discord', 'ok-good', 'To Do Agent']]);
+    expect(r.json().botName).toBe('To Do Agent');
+    expect(r.json().displayName).toMatch(/^@To Do Agent in Home/);
+    expect(store.listEvents([id]).some((e) => e.event === 'channel.renamed' && (e.detail as any).ok === true)).toBe(true);
+    // Pasted: not renamed unasked.
+    const other = add({ name: 'Taco' });
+    store.deleteChannelForAgent(id, 'discord'); renameCalls.length = 0;
+    await inject('POST', `/v1/agents/${other}/channels/discord`, { token: 'ok-good' });
+    expect(renameCalls).toEqual([]);
+    const sync = await inject('POST', `/v1/agents/${other}/bot-name/sync`, { kind: 'discord' });
+    expect(sync.json()).toEqual({ ok: true, name: 'Taco' });
+    expect(renameCalls).toEqual([['discord', 'ok-good', 'Taco']]);
+    // Renaming the agent renames its bot too; a refusal is recorded, not fatal.
+    renameCalls.length = 0;
+    expect((await inject('PATCH', `/v1/agents/${other}`, { name: 'Refused' })).statusCode).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(renameCalls).toEqual([['discord', 'ok-good', 'Refused']]);
+    expect(store.getChannelForAgent(other, 'discord')?.settings?.botName).toBe('Taco');
+    expect(store.listEvents([other]).some((e) => e.event === 'channel.renamed' && (e.detail as any).ok === false && String((e.detail as any).note).includes('few name changes'))).toBe(true);
+    expect((await inject('POST', `/v1/agents/${other}/bot-name/sync`, { kind: 'slack' })).statusCode).toBe(409); // it has no Slack
   });
 });
 

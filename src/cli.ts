@@ -212,6 +212,7 @@ Commands:
   revert <agent> <snapshotId>  Roll those files back (current state is saved first)
   token <agent>                Reveal the agent's Telegram bot token
   telegram remove <agent> [--yes]
+  discord add|remove <agent> [--yes]     discord bots
                                Take its bot away: the bot goes back to your pool,
                                the agent keeps everything and becomes web-only
   logs <agent> [-n <lines>]    Recent runtime output
@@ -446,7 +447,7 @@ function envQuote(v: string): string {
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
-const VALUE_FLAGS = new Set(['at-once', 'agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
+const VALUE_FLAGS = new Set(['kind', 'at-once', 'agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1687,7 +1688,7 @@ async function main() {
     case 'approve': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot approve <agent> <code>'));
       const code = rest[1] ?? fail('give the pairing code (see: hatchabot pairing)');
-      const res: any = await (await jsonPost(`/v1/agents/${a.id}/pairing/approve`, { code })).json();
+      const res: any = await (await jsonPost(`/v1/agents/${a.id}/pairing/approve`, { code, ...(flags.get('kind') ? { kind: flags.get('kind') } : {}) })).json();
       console.log(res.member?.alreadyMember
         ? `${res.member.displayName} is already a member — access restored`
         : `${res.member?.displayName ?? 'Guest'} is in — now a member`);
@@ -1696,7 +1697,7 @@ async function main() {
     case 'deny': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot deny <agent> <code>'));
       const code = rest[1] ?? fail('give the pairing code (see: hatchabot pairing)');
-      await jsonPost(`/v1/agents/${a.id}/pairing/deny`, { code });
+      await jsonPost(`/v1/agents/${a.id}/pairing/deny`, { code, ...(flags.get('kind') ? { kind: flags.get('kind') } : {}) });
       console.log('turned away — not a ban; they can ask again by messaging the bot');
       return;
     }
@@ -2061,6 +2062,33 @@ async function main() {
       }
       const r: any = await (await api(ctx, `/v1/agents/${a.id}/telegram`, { method: 'DELETE' })).json();
       console.log(`@${r.released ?? a.botUsername} is back in your pool. "${a.name}" is rebuilding as a web-only agent — talk to it in the app; a bot can be attached again later.`);
+      return;
+    }
+    case 'discord': {
+      const sub = rest[0];
+      if (sub === 'bots') {
+        const r: any = await (await api(ctx, '/v1/discord-bots')).json();
+        const spare = r.bots ?? [], used = r.inUse ?? [];
+        if (!spare.length && !used.length) { console.log('No Discord bots: none parked, none in use.'); return; }
+        for (const b of spare) console.log(`spare  ${b.botName ?? b.applicationId}${b.shared ? '  (shared)' : ''}${b.servers?.length ? `  in ${b.servers.map((g: any) => g.name || g.id).join(', ')}` : '  not in any server'}${b.warnings?.length ? `  ⚠ ${b.warnings.length}` : ''}`);
+        for (const b of used) console.log(`in use ${b.botName ?? b.applicationId}  → ${b.agentName}${b.shared ? '  (house bot)' : ''}`);
+        return;
+      }
+      if (sub !== 'remove' && sub !== 'add') fail('usage: hatchabot discord add|remove <agent> [--yes] | discord bots');
+      const a = await resolveAgent(ctx, rest[1] ?? fail(`usage: hatchabot discord ${sub} <agent> [--yes]`));
+      if (sub === 'add') {
+        const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/discord`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pooled: 'first' }) })).json();
+        if (r.error) fail(r.error);
+        console.log(`"${a.name}" is now “${r.botName ?? r.displayName ?? 'a Discord bot'}” on Discord — rebuilding so it answers there (memory kept).`);
+        return;
+      }
+      if (!flags.has('yes')) {
+        const typed = await askLine(`Take "${a.name}" off Discord?\nIt keeps everything it knows; people who reach it on Discord lose access. Its bot is parked under Settings → Discord for another agent. It restarts to apply this. [y/N] `);
+        if (!/^y(es)?$/i.test(typed.trim())) fail('not confirmed — nothing changed');
+      }
+      const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/discord`, { method: 'DELETE' })).json();
+      if (r.error) fail(r.error);
+      console.log(`"${a.name}" is off Discord${r.parked ? '; its bot is parked for another agent' : ''}. It is rebuilding.`);
       return;
     }
     case 'skip-telegram': {
