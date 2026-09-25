@@ -1042,7 +1042,11 @@ export class LocalDockerProvider implements RuntimeProvider {
         // glibc capped at two malloc arenas and the threads bounded; without
         // the cap it crept (~7 MB/min — hours of storms reached 2 GiB). So
         // 2 GiB is enough; raising the cap was never the fix.
-        '-c', '2048', '-ub', '512', '-t', String(Math.min(8, cpus().length || 8)), '--threads-http', '4', '--host', '0.0.0.0', '--port', '8080',
+        // The physical batch must hold the longest chunk an agent sends: at
+        // 512 the server refused a 546-token chunk outright ("input is too
+        // large to process"), and that agent's index never built (the manager,
+        // 2026-09-25). One batch per context: 2048 tokens.
+        '-c', '2048', '-b', '2048', '-ub', '2048', '-t', String(Math.min(8, cpus().length || 8)), '--threads-http', '4', '--host', '0.0.0.0', '--port', '8080',
         '--api-key-file', `/keys/${EMBED_MODEL_BASENAME(spec.serverKeyFile)}`, '--no-webui',
       ], IO_TIMEOUT_MS);
       if (run.code !== 0) throw new ProviderError(`embedder failed: ${run.stderr.slice(-500)}`, 'Could not start the embedding service.');

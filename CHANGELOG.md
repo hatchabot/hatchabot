@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.77.2] — 2026-09-25
+
+### Fixed
+- **The shared memory search service refused long chunks.** Its physical batch was 512 tokens, so an agent whose memory held a 546-token chunk got "input is too large to process" and its index never built (the manager, 2026-09-25). The batch now matches the context (2048). Applies when the service is restarted (Settings → Hosts, or `hatchabot embedder restart`), which the deploy does.
+
 ## [2.77.1] — 2026-09-25
 
 ### Fixed
