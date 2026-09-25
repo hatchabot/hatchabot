@@ -67,7 +67,10 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     row(d.agentId).tokens += d.delta;
     const b = bucket(d.at); if (b) b.tokens += d.delta;
   }
-  if (period === 'week') {
+  // Requests: the hour view needs five-minute slots; the day and week views
+  // bin by the hour, and the hourly table has a week of history (the slots
+  // only began with v2.70.0 and would undercount a day until they fill).
+  if (period !== 'hour') {
     for (const h of store.modelCallHoursForAgents(ids, hourOf(from))) {
       const r = row(h.agentId); r.requests += h.ok + h.failed + h.limited; r.limited += h.limited;
       const b = bucket(`${h.hour}:00:00Z`); if (b) { b.requests += h.ok + h.failed + h.limited; b.limited += h.limited; }

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.71.1] — 2026-09-25
+
+### Fixed
+- Status → Usage's Day view counts requests from the hourly records (a week of history), not the five-minute slots that only began filling in v2.70.0 and would have undercounted a day until they had one.
+
 ## [2.71.0] — 2026-09-25
 
 ### Changed
