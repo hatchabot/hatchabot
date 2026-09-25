@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.75.2] — 2026-09-25
+
+### Changed
+- **Health probes no longer boot the OpenClaw CLI inside every container.** The reconcile loop asked each running agent `openclaw health` every two minutes (about a second of CPU per agent, per probe — a core of constant churn across a fifty-agent fleet, showing as a load of 7 on an idle machine). The probe is now one HTTP request to the gateway's own `/health` from this machine; the CLI stays as the fallback for a remote daemon or an unreachable container.
+
 ## [2.75.1] — 2026-09-25
 
 ### Changed

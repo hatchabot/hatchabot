@@ -25,6 +25,8 @@ import { batchConfigCommands, buildConfigCommands, describeConfigCommands, WORKS
 const execFileP = promisify(execFile);
 
 export interface LocalDockerOptions {
+  /** The HTTP client the health probe uses (tests). */
+  fetchImpl?: typeof fetch;
   /** Image built by scripts/build-runtime-image.sh. */
   image?: string;
   /** Container name prefix. */
@@ -63,6 +65,8 @@ export const LEGACY_PREFIXES = ['agentclaw'] as const;
 /** basename() for a model path — the container sees the file under /models. */
 const EMBED_MODEL_BASENAME = (p: string): string => p.split('/').pop() ?? p;
 const IMAGE_REF_RE = /^[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
+/** The port the gateway listens on inside every agent container (published per agent on the host). */
+const GATEWAY_PORT = 18789;
 /** Bound for volume import/export and seeding (large tarballs, slow runners). */
 const IO_TIMEOUT_MS = Number(process.env.HATCHABOT_DOCKER_IO_TIMEOUT_MS ?? 15 * 60_000);
 
@@ -75,8 +79,10 @@ export class LocalDockerProvider implements RuntimeProvider {
   readonly remote: boolean;
   /** Connection args prepended to every docker invocation (`-H <host>` or none). */
   readonly #conn: string[];
+  readonly #fetch: typeof fetch;
 
   constructor(opts: LocalDockerOptions = {}) {
+    this.#fetch = opts.fetchImpl ?? fetch;
     this.image = opts.image ?? 'hatchabot-runtime:latest';
     this.prefix = opts.prefix ?? DEFAULT_PREFIX;
     this.docker = opts.docker ?? 'docker';
@@ -415,7 +421,7 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async status(runtimeRef: string): Promise<RuntimeStatus> {
     const { container } = this.#names(runtimeRef);
-    const res = await this.#docker(['inspect', '-f', '{{.State.Status}}', container]);
+    const res = await this.#docker(['inspect', '-f', '{{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}', container]);
     if (res.code !== 0) {
       // A daemon that is down is NOT a container that is gone. Conflating them
       // let a boot-order race mark every healthy agent FAILED — and the owner's
@@ -441,13 +447,24 @@ export class LocalDockerProvider implements RuntimeProvider {
       // vanished runtime gets flagged for Retry.
       return { phase: 'absent' };
     }
-    const state = res.stdout.trim();
+    const [state = '', ip] = res.stdout.trim().split(/\s+/);
     if (state === 'exited' || state === 'created' || state === 'paused') {
       return { phase: 'stopped' };
     }
     if (state === 'running') {
-      // OpenClaw's own health command is the readiness signal — it queries the
-      // gateway over its local socket and exits non-zero until it's serving.
+      // The gateway's own /health over HTTP, straight from this machine: a
+      // millisecond, no process in the container. The CLI (`openclaw health`)
+      // boots Node inside the container for about a second of CPU each time,
+      // and with the reconcile loop probing every running agent that was a
+      // core of churn across a 50-agent fleet (2026-09-25). The CLI remains
+      // the fallback: a remote daemon's containers are not on this machine's
+      // network, and a container the host cannot reach is judged the old way.
+      if (!this.remote && ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+        try {
+          const r = await this.#fetch(`http://${ip}:${GATEWAY_PORT}/health`, { signal: AbortSignal.timeout(2500) });
+          return { phase: 'running', healthy: r.ok };
+        } catch { /* unreachable from here: ask the CLI */ }
+      }
       const health = await this.exec(runtimeRef, ['health']);
       return { phase: 'running', healthy: health.code === 0 };
     }

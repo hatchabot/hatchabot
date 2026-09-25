@@ -302,6 +302,36 @@ describe('daemon-access errors are unknown, not absent', () => {
   });
 });
 
+describe('a running container is judged by the gateway\'s HTTP health (2026-09-25)', () => {
+  const inspectStub = (out: string) => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-health-'));
+    const log = join(d, 'argv.log');
+    const st = join(d, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncase "$1" in inspect) echo "${out}";; esac\nexit 0\n`, { mode: 0o755 });
+    return { st, argv: () => readFileSync(log, 'utf8') };
+  };
+  it('one GET to the container\'s address, no process in the container; a refusal is unhealthy', async () => {
+    const calls: string[] = [];
+    const ok = { st: inspectStub('running 172.18.0.25 '), fetchImpl: (async (u: string) => { calls.push(u); return new Response('ok', { status: 200 }); }) as never };
+    const p = new LocalDockerProvider({ docker: ok.st.st, image: 'test-image:latest', fetchImpl: ok.fetchImpl });
+    expect(await p.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper')).toEqual({ phase: 'running', healthy: true });
+    expect(calls).toEqual(['http://172.18.0.25:18789/health']);
+    expect(ok.st.argv()).not.toContain('exec');
+    const down = new LocalDockerProvider({ docker: inspectStub('running 172.18.0.25 ').st, image: 'test-image:latest', fetchImpl: (async () => new Response('', { status: 503 })) as never });
+    expect(await down.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper')).toEqual({ phase: 'running', healthy: false });
+  });
+  it('falls back to the CLI when the address is unreachable or absent', async () => {
+    const noIp = inspectStub('running ');
+    const p = new LocalDockerProvider({ docker: noIp.st, image: 'test-image:latest', fetchImpl: (async () => { throw new Error('never called'); }) as never });
+    expect(await p.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper')).toEqual({ phase: 'running', healthy: true });
+    expect(noIp.argv()).toMatch(/exec .* openclaw health/);
+    const unreachable = inspectStub('running 10.9.9.9 ');
+    const q = new LocalDockerProvider({ docker: unreachable.st, image: 'test-image:latest', fetchImpl: (async () => { throw new TypeError('fetch failed'); }) as never });
+    expect(await q.status('df918a55-88cd-4d00-a17c-b8415a26ceb6/kitchen-helper')).toEqual({ phase: 'running', healthy: true });
+    expect(unreachable.argv()).toMatch(/exec .* openclaw health/);
+  });
+});
+
 describe('a stalled daemon is not a missing container', () => {
   it('reports unknown, never absent, when docker inspect times out', async () => {
     // A timed-out inspect has empty stderr, so the daemon-down regex can't
