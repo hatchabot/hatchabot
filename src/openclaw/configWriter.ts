@@ -243,7 +243,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (npmMode) {
     cmds.push({
       argv: [],
-      rawShell: `rm -rf /tmp/hb-npm-cache && cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache 2>/dev/null; export npm_config_cache=/tmp/hb-npm-cache npm_config_offline=true npm_config_fetch_retries=0 npm_config_logs_dir=/tmp/hb-npm-logs`,
+      // A missing cache must not end the seed here (`set -e` acts on the
+      // last command of an && list): the install that needs it fails at its
+      // own, named step instead.
+      rawShell: `rm -rf /tmp/hb-npm-cache; cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache 2>/dev/null || true; export npm_config_cache=/tmp/hb-npm-cache npm_config_offline=true npm_config_fetch_retries=0 npm_config_logs_dir=/tmp/hb-npm-logs`,
     });
   }
   // OpenClaw installs the Brave search plugin into the volume by itself when a
@@ -261,8 +264,15 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       argv: [],
       // Installed once; reinstalled (--force) only when the image's baked
       // version moved, so a rebuild onto a newer image does not keep an old
-      // copy (28th audit).
-      rawShell: `V=$(node -p 'require("/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}/package.json").version') && H=$(cat /home/node/.openclaw/npm/projects/openclaw-${kind}-*/node_modules/@openclaw/${kind}/package.json 2>/dev/null | node -p 'try{JSON.parse(require("fs").readFileSync(0,"utf8")).version}catch(e){""}'); if [ "$H" != "$V" ]; then openclaw plugins install "@openclaw/${kind}@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1; fi || true`,
+      // copy (28th audit). The probe for the installed version is one node
+      // process that always exits 0: its first form piped `cat` of a glob
+      // into node, and on a volume that had never had the plugin the glob
+      // matched nothing, `cat` failed, `pipefail` made the assignment fail
+      // and `set -e` ended the seed there — every FIRST Discord attach on a
+      // 2026.9 agent failed, with a stale stderr line as the only clue (To
+      // Do Agent, 2026-09-25). A rebuild after a hand install passed, since
+      // the probe then found a file.
+      rawShell: `V=$(node -p 'require("/opt/hatchabot/plugins/${kind}/node_modules/@openclaw/${kind}/package.json").version'); H=$(node -e 'const fs=require("fs");const d="/home/node/.openclaw/npm/projects";let v="";try{for(const n of fs.readdirSync(d).sort()){if(!n.startsWith("openclaw-${kind}-"))continue;try{v=JSON.parse(fs.readFileSync(d+"/"+n+"/node_modules/@openclaw/${kind}/package.json","utf8")).version||""}catch{}}}catch{}process.stdout.write(v)'); if [ "$H" != "$V" ]; then openclaw plugins install "@openclaw/${kind}@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1; fi || true`,
     }
     : link(channelPluginDir(kind));
   // 2026.8+ images bake the DuckDuckGo plugin (no longer bundled with

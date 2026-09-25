@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   batchConfigCommands,
   buildConfigCommands,
@@ -465,6 +469,37 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     const inst = cmds.findIndex((c) => c.rawShell?.includes('@openclaw/slack@$V'));
     const en = cmds.findIndex((c) => c.argv.join(' ') === 'plugins enable slack');
     expect(cache).toBeLessThan(inst); expect(inst).toBeLessThan(en);
+  });
+  it('the install probe never ends the seed: no copy yet → install; the baked version present → skip (To Do Agent, 2026-09-25)', () => {
+    // Run the real line under the seed's own shell options, with a stub
+    // `openclaw` that records its calls. Before the fix, a volume that had
+    // never had the plugin made the probe's `cat` fail, and `pipefail` +
+    // `set -e` ended the seed on that line — every first Discord attach.
+    const home = mkdtempSync(join(tmpdir(), 'hb-seed-'));
+    try {
+      const opt = join(home, 'opt'); mkdirSync(join(opt, 'plugins/discord/node_modules/@openclaw/discord'), { recursive: true });
+      writeFileSync(join(opt, 'plugins/discord/node_modules/@openclaw/discord/package.json'), JSON.stringify({ version: '2026.9.6' }));
+      mkdirSync(join(home, 'bin')); const calls = join(home, 'calls');
+      writeFileSync(join(home, 'bin/openclaw'), `#!/usr/bin/env bash\necho "$*" >> ${JSON.stringify(calls)}\necho "Installed plugin: discord"\n`, { mode: 0o755 });
+      const line = buildConfigCommands({ ...base, channelPlugins: ['discord'], pluginInstall: 'npm', discord: { token: 't', applicationId: 'a', allowFrom: [], rooms: { mode: 'off' } } })
+        .find((c) => c.rawShell?.includes('@openclaw/discord@$V'))!.rawShell!
+        .replaceAll('/opt/hatchabot', opt).replaceAll('/home/node', home);
+      const run = () => spawnSync('bash', ['-c', `set -euo pipefail\n${line}\necho seed-continues`], { encoding: 'utf8', env: { ...process.env, PATH: `${join(home, 'bin')}:${process.env.PATH}` } });
+      // Never installed: the seed goes on, and the install ran.
+      let r = run();
+      expect(r.status).toBe(0); expect(r.stdout).toContain('seed-continues');
+      expect(readFileSync(calls, 'utf8')).toContain('plugins install @openclaw/discord@2026.9.6 --force');
+      // The baked version is on the volume (in a generation directory, as 2026.9 names them): skipped.
+      const proj = join(home, '.openclaw/npm/projects/openclaw-discord-c0892df945__openclaw-generation__g-1/node_modules/@openclaw/discord');
+      mkdirSync(proj, { recursive: true }); writeFileSync(join(proj, 'package.json'), JSON.stringify({ version: '2026.9.6' }));
+      writeFileSync(calls, '');
+      r = run();
+      expect(r.status).toBe(0); expect(readFileSync(calls, 'utf8')).toBe('');
+      // An older copy: reinstalled.
+      writeFileSync(join(proj, 'package.json'), JSON.stringify({ version: '2026.8.1' }));
+      r = run();
+      expect(r.status).toBe(0); expect(readFileSync(calls, 'utf8')).toContain('plugins install @openclaw/discord@2026.9.6');
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
   it('reinstalls a drifted brave plugin from the cache when the image carries it, only then', () => {
     const withBrave = buildConfigCommands({ ...base, pluginInstall: 'npm', bakedPlugins: ['duckduckgo', 'brave'] });

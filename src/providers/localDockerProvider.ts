@@ -20,7 +20,7 @@ import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
 const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
-import { batchConfigCommands, buildConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { batchConfigCommands, buildConfigCommands, describeConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
 const execFileP = promisify(execFile);
 
@@ -293,7 +293,16 @@ export class LocalDockerProvider implements RuntimeProvider {
       const script: string[] = ['#!/usr/bin/env bash', 'set -euo pipefail',
         // Anything in here that reaches for npm (doctor repairing a plugin it
         // finds on the volume) must give up at once, not retry for minutes.
-        'export npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm_config_fetch_retry_maxtimeout=5000'];
+        // (The retry floor is set below its ceiling: npm refuses the pair
+        // otherwise, "minTimeout is greater than maxTimeout".)
+        'export npm_config_fetch_retries=0 npm_config_fetch_timeout=5000 npm_config_fetch_retry_mintimeout=1000 npm_config_fetch_retry_maxtimeout=5000',
+        // The step that ends the seed names itself on stderr, so a failure
+        // reads "seed failed at <step>", not the last thing any earlier,
+        // optional step happened to print (the llama-cpp line that hid the
+        // real cause for two attempts, To Do Agent 2026-09-25). Labels are
+        // the redacted log form: no token ever appears in one.
+        `trap 'echo "${SEED_STEP_MARK}$__hb_step" >&2' ERR`,
+        '__hb_step=setup'];
       // $HOME is the volume, so anything the agent installs or configures for
       // itself persists. Make the conventional targets exist and be usable:
       //  - ~/.local/bin on PATH, so a tool it installs is runnable by name
@@ -308,7 +317,10 @@ export class LocalDockerProvider implements RuntimeProvider {
         'export NPM_CONFIG_PREFIX="$HOME/.npm-global"',
         'EOF',
       );
-      for (const cmd of batchConfigCommands(buildConfigCommands(spec.workspace.configPatch))) {
+      const cmds = batchConfigCommands(buildConfigCommands(spec.workspace.configPatch));
+      const labels = describeConfigCommands(cmds);
+      for (const [i, cmd] of cmds.entries()) {
+        script.push(`__hb_step=${shq(seedStepLabel(labels[i]!))}`);
         const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
         const base = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
         const line = cmd.optional ? `${base} || true` : base;
@@ -318,7 +330,7 @@ export class LocalDockerProvider implements RuntimeProvider {
             : line,
         );
       }
-      script.push(`mkdir -p ${shq(workspaceDir)}`);
+      script.push('__hb_step=workspace', `mkdir -p ${shq(workspaceDir)}`);
       for (const name of Object.keys(spec.workspace.files)) {
         const dest = `${workspaceDir}/${name}`;
         // Nested seeds (skills/gog/SKILL.md) need their directory first; the
@@ -362,10 +374,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         ], IO_TIMEOUT_MS);
       }
       if (res.code !== 0) {
-        throw new ProviderError(
-          `seed failed: ${res.stderr.slice(-2000) || res.stdout.slice(-2000)}`,
-          'Setting up the agent workspace failed.',
-        );
+        throw new ProviderError(seedFailure(res), 'Setting up the agent workspace failed.');
       }
     } finally {
       await rm(seedDir, { recursive: true, force: true });
@@ -1195,6 +1204,28 @@ export class LocalDockerProvider implements RuntimeProvider {
 /** Minimal single-quote shell escaping for the generated seed script. */
 function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Prefix of the stderr line the seed's ERR trap writes: the step it died in. */
+export const SEED_STEP_MARK = '__hb_seed_step_failed__: ';
+
+/** A step's name for the trap line: the redacted log form, one line, short. */
+export function seedStepLabel(described: string): string {
+  return described.replace(/^sh: /, 'shell: ').replace(/\s+/g, ' ').slice(0, 96);
+}
+
+/**
+ * The seed's failure, worded from what it wrote: the step named by the trap
+ * first, then the last of stderr and stdout — OpenClaw puts many of its
+ * errors on stdout, which the stderr-only tail used to drop.
+ */
+export function seedFailure(res: { stdout: string; stderr: string }): string {
+  const marks = res.stderr.split('\n').filter((l) => l.startsWith(SEED_STEP_MARK));
+  const step = marks.length ? marks[marks.length - 1]!.slice(SEED_STEP_MARK.length).trim() : '';
+  const err = res.stderr.split('\n').filter((l) => !l.startsWith(SEED_STEP_MARK)).join('\n').trim().slice(-1500);
+  const out = res.stdout.trim().slice(-500);
+  const detail = [err, out].filter(Boolean).join('\n--- stdout ---\n');
+  return `seed failed${step ? ` at ${JSON.stringify(step)}` : ''}: ${detail || '(no output)'}`;
 }
 
 

@@ -750,7 +750,10 @@ An agent that says *Rebuilding* or *Setting up* for a while now says which
 step it is on — on its ⚙ sheet ("Working on: rebuilding the memory index — it
 came up partial · 3 min ago") — and **Setup log** (also in the Checks row)
 opens its whole trail: every step of a setup, rebuild or move with its time,
-in plain words, newest first; failures with their reason. Moving onto a new
+in plain words, newest first; failures with their reason — a setup that
+fails while writing the agent's settings names the step it failed in
+(`seed failed at "openclaw plugins enable discord": …`), followed by what
+that step printed. Moving onto a new
 OpenClaw line is the slow case: its migrations run and the memory index is
 rebuilt, minutes on an agent with a long history. The **Activity** view is the
 other half — the agent's own output. CLI: `hatchabot events <agent> [-n 40]`.

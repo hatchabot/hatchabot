@@ -1,9 +1,9 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalDockerProvider } from '../src/providers/localDockerProvider.js';
+import { LocalDockerProvider, SEED_STEP_MARK, seedFailure, seedStepLabel } from '../src/providers/localDockerProvider.js';
 
 /**
  * The only real provider, and previously untested — mutation testing showed
@@ -111,6 +111,38 @@ describe('seed script — the guards that protect an agent’s memory', () => {
     // can never break out of its argument and execute.
     expect(seed()).toContain(`'\\''`);
     expect(seed()).not.toMatch(/^\s*touch \/tmp\/pwned/m);
+  });
+});
+
+describe('a failed seed names the step it died in (To Do Agent, 2026-09-25)', () => {
+  it('the script marks each step, and the ERR trap writes the current one to stderr', async () => {
+    await provider.provision(spec({ workspace: { files: {}, configPatch: { agentId: 'kitchen-helper', authMode: 'api-key', openclawVersion: '2026.9.6', pluginInstall: 'npm' } } }) as any);
+    const script = seed();
+    expect(script).toContain(`trap 'echo "${SEED_STEP_MARK}$__hb_step" >&2' ERR`);
+    expect(script).toContain("__hb_step='openclaw plugins enable duckduckgo'");
+    expect(script).toContain('npm_config_fetch_retry_mintimeout=1000'); // below the 5 s ceiling, or npm refuses the pair
+    // Run it for real with an `openclaw` that fails on that step: the trap line names it.
+    const d = mkdtempSync(join(tmpdir(), 'acl-seedrun-'));
+    writeFileSync(join(d, 'openclaw'), '#!/usr/bin/env bash\nif [ "$1 $2 $3" = "plugins enable duckduckgo" ]; then echo "Plugin not found" ; exit 1; fi\nexit 0\n', { mode: 0o755 });
+    const r = spawnSync('bash', [SEED_COPY], { encoding: 'utf8', env: { ...process.env, PATH: `${d}:${process.env.PATH}`, HOME: d } });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(`${SEED_STEP_MARK}openclaw plugins enable duckduckgo`);
+    expect(seedFailure(r)).toMatch(/^seed failed at "openclaw plugins enable duckduckgo": /);
+  });
+  it('the error leads with the step and keeps stdout, where OpenClaw puts many of its errors', async () => {
+    expect(seedFailure({ stderr: `[skills] noise\n${SEED_STEP_MARK}shell: V=$(node -p ...)\n`, stdout: 'Updated 24 config paths.\nnpm error something\n' }))
+      .toBe('seed failed at "shell: V=$(node -p ...)": [skills] noise\n--- stdout ---\nUpdated 24 config paths.\nnpm error something');
+    expect(seedFailure({ stderr: '', stdout: '' })).toBe('seed failed: (no output)');
+    expect(seedFailure({ stderr: 'boom\n', stdout: '' })).toBe('seed failed: boom');
+    // No secret reaches a label: the stdin-fed and batch forms are the redacted log form.
+    expect(seedStepLabel('<redacted> | openclaw models auth paste-token')).toBe('<redacted> | openclaw models auth paste-token');
+    expect(seedStepLabel('sh: ' + 'x'.repeat(200))).toHaveLength(96);
+    // The provider surfaces it: a docker whose seed run fails with a marked stderr.
+    const dd = mkdtempSync(join(tmpdir(), 'acl-seedfail-'));
+    const st = join(dd, 'docker');
+    writeFileSync(st, `#!/usr/bin/env bash\ncase "$*" in *seed.sh*) echo "Updated 3 config paths."; echo "${SEED_STEP_MARK}openclaw plugins enable discord" >&2; exit 1;; esac\nexit 0\n`, { mode: 0o755 });
+    await expect(new LocalDockerProvider({ docker: st, image: 'test-image:latest' }).provision(spec() as any))
+      .rejects.toThrow('seed failed at "openclaw plugins enable discord": Updated 3 config paths.'); // stdout alone needs no divider
   });
 });
 

@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.72.3] — 2026-09-25
+
+### Fixed
+- **The first Discord attach on a 2026.9 agent failed its rebuild** (To Do Agent, after a source switch and a bot from the pool). The seed's check for an already-installed channel plugin piped a `cat` of a path glob into node; on a volume that had never had the plugin the glob matched nothing, `cat` failed, and under `pipefail` + `set -e` the seed ended on that line — before the install it was deciding about. A rebuild after a hand install passed, since the check then found a file, which is why it looked intermittent. The check is now one node process that always succeeds; a missing npm cache cannot end the seed on its own line either.
+- **A failed seed now says which step failed.** The error read as "seed failed: Plugin llama-cpp is not associated with a tracked package install…" — the last thing an earlier, optional step had printed, not the cause. Each step names itself and the error leads with it (`seed failed at "openclaw plugins enable discord": …`), followed by the tail of stderr and of stdout, where OpenClaw puts many of its errors. Labels are the redacted log form: no token appears in one.
+- The seed's npm retry floor was above its ceiling, so any npm call it made failed with "minTimeout is greater than maxTimeout" rather than a plain timeout.
+
 ## [2.72.2] — 2026-09-25
 
 ### Changed
