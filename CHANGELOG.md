@@ -2,6 +2,18 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.73.0] — 2026-09-25
+
+Security audit of Telegram and Discord (`docs/audit-2026-09-25.md`). Two majors, three mediums and seven lows fixed.
+
+### Security
+- **The owner's first message no longer means "whoever writes first".** A new Discord (or Slack) bot knows its owner from any agent they are already linked on; otherwise the owner's own first DM shows up as a request they approve with *That's me* — no first-message window on a bot a whole server can see. A brand-new Telegram bot keeps its window, but an id this machine already knows as somebody (a member anywhere, another account's link) or a regular of the recycled bot is never taken for the owner, and only a well-formed id is ever bound.
+- **A Telegram bot cannot survive in an agent's settings after a swap or an archive → restore**: the whole accounts object is written, replaced, on every build. (Both this agent and the bot's next agent used to poll it.)
+- **Removing a channel forgets everyone it had admitted** on the agent's volume — OpenClaw's own approval store outlived a detach, and the next Discord or Slack bot admitted the people the owner had dropped.
+- **A room with nobody admitted is closed**, not open to everyone in it: the app refuses room mode until someone is linked, and the settings writer writes such a room closed.
+- **A failed setup's text is redacted** before it becomes an event every member can read.
+- Token checks (park a bot, add a bot, add a channel) share the login throttle. The machine owner's token reveal answers only for the house's bots and their own; the owner's reveal is logged. An imported file's bot token is checked with Telegram and must be the bot the file names. One agent per bot is enforced by the database (a race answers 409). A bot from the shared Discord pool goes back to the shared pool. A spare Telegram bot's token pasted by hand is refused with a pointer to the pool. A "bot already connected" refusal names only the caller's own agent.
+
 ## [2.72.3] — 2026-09-25
 
 ### Fixed

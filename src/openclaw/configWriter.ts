@@ -524,13 +524,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // known members must not land back in pairing-pending. (Was previously
     // allowlist-only — members silently dropped on rebuild.)
     if (allowFrom?.length || dmPolicy === 'allowlist') account.allowFrom = allowFrom ?? [];
+    // The WHOLE accounts object, replaced — never one key merged in. The
+    // config lives on the volume, so the bot this agent had before a swap
+    // (or before it was archived) stayed in it under its own username, and
+    // after the rebuild both this agent and the bot's next agent polled it
+    // (the same fault the no-bot branch below closed for detach, 2026-09-25).
     cmds.push({
-      argv: [
-        'config',
-        'set',
-        `channels.telegram.accounts.${accountId}`,
-        JSON.stringify(account),
-      ],
+      argv: ['config', 'set', 'channels.telegram.accounts', JSON.stringify({ [accountId]: account }), '--replace'],
       sensitive: true,
     });
 
@@ -568,7 +568,6 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   //    token does not live on in the volume's config. Two small writes, not
   //    one big one: OpenClaw refuses a write that halves the config's size.
   const plugins = new Set(patch.channelPlugins ?? []);
-  const groups = (rooms: ChannelRooms | undefined) => (rooms?.mode === 'room' ? 'allowlist' : 'disabled');
   if (plugins.has('slack')) {
     if (patch.slack) {
       const sl = patch.slack;
@@ -576,10 +575,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push({ argv: ['plugins', 'enable', 'slack'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.mode', 'socket'] });
-      cmds.push({ argv: ['config', 'set', 'channels.slack.groupPolicy', groups(sl.rooms)] });
+      // A room with nobody admitted yet is written CLOSED: OpenClaw reads a
+      // room entry without `users` as "everyone in it", so the whole
+      // workspace could have driven the agent until its owner linked
+      // (2026-09-25). The app refuses room mode until someone is linked;
+      // this is the belt to that brace.
+      const slackRoom = sl.rooms.mode === 'room' && sl.allowFrom.length > 0 ? sl.rooms.roomId : undefined;
+      cmds.push({ argv: ['config', 'set', 'channels.slack.groupPolicy', slackRoom ? 'allowlist' : 'disabled'] });
       // Rooms by ID only (names never match under allowlist), members only, @mention.
-      const rooms = sl.rooms.mode === 'room'
-        ? { [sl.rooms.roomId]: { enabled: true, requireMention: true, ...(sl.allowFrom.length ? { users: sl.allowFrom } : {}) } }
+      const rooms = slackRoom
+        ? { [slackRoom]: { enabled: true, requireMention: true, users: sl.allowFrom } }
         : {};
       cmds.push({ argv: ['config', 'set', 'channels.slack.channels', JSON.stringify(rooms)] });
       cmds.push({
@@ -599,9 +604,10 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push(channelPlugin('discord'));
       cmds.push({ argv: ['plugins', 'enable', 'discord'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
-      cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', groups(dc.rooms)] });
-      const guilds = dc.rooms.mode === 'room'
-        ? { [dc.rooms.roomId]: { requireMention: true, ignoreOtherMentions: true, ...(dc.allowFrom.length ? { users: dc.allowFrom } : {}) } }
+      const discordRoom = dc.rooms.mode === 'room' && dc.allowFrom.length > 0 ? dc.rooms.roomId : undefined; // see the Slack note above
+      cmds.push({ argv: ['config', 'set', 'channels.discord.groupPolicy', discordRoom ? 'allowlist' : 'disabled'] });
+      const guilds = discordRoom
+        ? { [discordRoom]: { requireMention: true, ignoreOtherMentions: true, users: dc.allowFrom } }
         : {};
       cmds.push({ argv: ['config', 'set', 'channels.discord.guilds', JSON.stringify(guilds)] });
       // Discord's websocket ignores HTTPS_PROXY; it has its own setting.

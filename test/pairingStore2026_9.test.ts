@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { pairingListShell, parsePairingList } from '../src/orchestrator/claim.js';
-import { denyPairing, grantChannelAccess, revokeMember } from '../src/orchestrator/members.js';
+import { denyPairing, grantChannelAccess, revokeMember, scrubChannelAllowlist } from '../src/orchestrator/members.js';
 
 /**
  * OpenClaw 2026.9 keeps pairing requests and approvals in its state database;
@@ -123,6 +123,26 @@ describe('pairing requests on a 2026.9 volume (database, no files)', () => {
       expect(cfg.telegram.accounts.FamBot.allowFrom).toEqual(['777']);
       expect(cfg.discord.accounts.hatchabot.allowFrom).toEqual([]);
     } finally { v.done(); }
+  });
+});
+
+describe('removing a channel forgets its approvals on the volume (2026-09-25)', () => {
+  it('the allow rows, the pending requests and the credentials file for that channel go; the other channel keeps its own', async () => {
+    const { store, provider, runtimeRef } = await world();
+    provider.execResponses.set('sh-volume', { code: 0, stdout: '3\n', stderr: '' });
+    expect(await scrubChannelAllowlist({ store, provider }, { agentId: 'a1', runtimeRef, kind: 'discord', accountId: 'hatchabot' })).toBe(true);
+    const script = provider.execLog.find((a) => a[0] === 'sh-volume')![1]!;
+    const v = volume();
+    try {
+      writeFileSync(join(v.dir, 'credentials', 'discord-hatchabot-allowFrom.json'), JSON.stringify({ allowFrom: ['123456789012345678'] }));
+      expect(Number(run(v, script).trim())).toBe(3); // 1 allow row, 1 request, 1 file
+      expect(v.rows(`select channel_key, entry from channel_pairing_allow_entries order by entry`)).toEqual([{ channel_key: 'telegram', entry: '555' }, { channel_key: 'telegram', entry: '777' }]);
+      expect(v.rows(`select channel_key from channel_pairing_requests`)).toEqual([{ channel_key: 'telegram' }]);
+      expect(existsSync(join(v.dir, 'credentials', 'discord-hatchabot-allowFrom.json'))).toBe(false);
+      expect(run(v, script).trim()).toBe('0'); // twice is fine
+    } finally { v.done(); }
+    // An account key that is not a plain name never reaches the volume.
+    expect(await scrubChannelAllowlist({ store, provider }, { agentId: 'a1', runtimeRef, kind: 'telegram', accountId: 'bad name' })).toBe(false);
   });
 });
 

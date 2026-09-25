@@ -1,6 +1,7 @@
 import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { normalizeHandle, type Store } from '../store/store.js';
+import { ID_SHAPE } from './channelIds.js';
 
 /**
  * First-contact claim (the §12.4 owner-lockout fix), built on OpenClaw's
@@ -44,6 +45,11 @@ export interface ClaimOptions {
   kind?: ChannelKind;
   /** How long to keep watching for the owner's first message. */
   timeoutMs?: number;
+  /** Ids that must never be claimed for this seat even when nothing else is
+   *  known about them: the people who chatted with a recycled bot's previous
+   *  agent (they were just told "this bot is now X", right as the window
+   *  opens). */
+  excludeIds?: string[];
   /** Who this window is for — a Telegram @handle or numeric id. Set, only a
    *  matching knock is ever claimed. */
   expect?: string;
@@ -152,6 +158,7 @@ export async function claimFirstContact(
     expect: opts.expect,
   });
   const expect = normalizeHandle(opts.expect);
+  const excluded = new Set(opts.excludeIds ?? []);
   // The agent rests in `allowlist`, where a stranger's DM is dropped in
   // silence. Somebody we are waiting for is not yet on the list, so the door
   // has to be `pairing` for as long as the window stands — and no longer.
@@ -203,6 +210,18 @@ export async function claimFirstContact(
       // that id here would swap two people's identities.
       const claimable = requests.filter((r) => {
         if (expect && normalizeHandle(r.id) !== expect && normalizeHandle(r.meta?.username) !== expect) return false;
+        // Only a shape the platform issues is ever bound: a malformed id would
+        // be a member the door never admits and the scrub refuses to touch.
+        if (!ID_SHAPE[kind].test(r.id)) return false;
+        if (excluded.has(r.id)) return false;
+        // An OWNER seat with no named handle is "the first knock": the person
+        // a brand-new bot's username was given to. It must never be an id this
+        // machine already knows as somebody — a member of another agent, a
+        // different owner's link, the previous agent's regulars — or a
+        // stranger's first message would become the owner's identity, seed
+        // every later agent, and receive the owner's recovery links
+        // (2026-09-25).
+        if (!expect && deps.store.channelUserBoundAnywhere(kind, r.id)) return false;
         return kind === 'telegram'
           ? !deps.store.getActiveMembershipByChannelUser(opts.agentId, r.id)
           : !deps.store.getMemberByIdentity(opts.agentId, kind, r.id);

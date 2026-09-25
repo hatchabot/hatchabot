@@ -363,6 +363,14 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     await this.#applyDisplayName(row.secret_ref, row.username, agentName);
   }
 
+  /** Whom a pool bot wrote to about its previous agent (empty for a fresh bot). */
+  priorChatIds(username: string): string[] {
+    const row = this.db
+      .prepare(`SELECT prior_chat_ids FROM telegram_pool WHERE username = ? COLLATE NOCASE`)
+      .get(username) as { prior_chat_ids?: string | null } | undefined;
+    try { const v = JSON.parse(row?.prior_chat_ids ?? '[]'); return Array.isArray(v) ? v.map(String) : []; } catch { return []; }
+  }
+
   /**
    * Tell anyone who previously chatted with this bot that it now serves someone
    * else. Only fires for a bot that has served before — a never-used one has no
@@ -412,10 +420,9 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
           }).catch(() => {}),
         ),
       );
-      // Consumed: the next release captures a fresh list for the next lease.
-      this.db
-        .prepare(`UPDATE telegram_pool SET prior_chat_ids = NULL WHERE username = ? COLLATE NOCASE`)
-        .run(username);
+      // Kept (not cleared): the owner claim that follows this lease must know
+      // whom the bot just wrote to, so none of them is taken for the new
+      // owner's first message. The next release overwrites the list.
     } catch {
       /* cosmetic — never blocks a lease */
     }
@@ -477,11 +484,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
             )
             .all(departing) as Array<{ id: string }>
         ).map((r) => r.id).filter((id) => /^\d{1,32}$/.test(id)).slice(0, 64);
-        if (prior.length) {
-          this.db
-            .prepare(`UPDATE telegram_pool SET prior_chat_ids = ? WHERE username = ? COLLATE NOCASE`)
-            .run(JSON.stringify(prior), accountId);
-        }
+        // Always written, empty included: the previous life's list must not
+        // outlive it and be announced (or excluded) again after this one.
+        this.db
+          .prepare(`UPDATE telegram_pool SET prior_chat_ids = ? WHERE username = ? COLLATE NOCASE`)
+          .run(prior.length ? JSON.stringify(prior) : null, accountId);
       } catch { /* no memberships table (isolated harness) → nothing to capture */ }
     }
 

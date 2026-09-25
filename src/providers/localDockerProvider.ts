@@ -374,7 +374,9 @@ export class LocalDockerProvider implements RuntimeProvider {
         ], IO_TIMEOUT_MS);
       }
       if (res.code !== 0) {
-        throw new ProviderError(seedFailure(res), 'Setting up the agent workspace failed.');
+        // The failure text is recorded as an event every member of the agent
+        // can read: whatever the CLI echoed of a rejected value is redacted.
+        throw new ProviderError(seedFailure(res, secretValuesOf(spec)), 'Setting up the agent workspace failed.');
       }
     } finally {
       await rm(seedDir, { recursive: true, force: true });
@@ -1206,6 +1208,27 @@ function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Every secret a seed carries: token-like values in the config patch and the env. */
+export function secretValuesOf(spec: RuntimeSpec): string[] {
+  const out = new Set<string>();
+  const KEY = /token|secret|password|passphrase|api[_-]?key|key$/i;
+  const walk = (v: unknown, key: string): void => {
+    if (typeof v === 'string') { if (KEY.test(key) && v.length >= 8) out.add(v); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, key); return; }
+    if (v && typeof v === 'object') for (const [k, x] of Object.entries(v as Record<string, unknown>)) walk(x, k);
+  };
+  walk(spec.workspace.configPatch, '');
+  walk(spec.env ?? {}, '');
+  return [...out];
+}
+
+/** The text with every secret value replaced, longest first (a token inside a longer one). */
+export function redact(text: string, secrets: string[]): string {
+  let out = text;
+  for (const v of [...secrets].sort((a, b) => b.length - a.length)) out = out.split(v).join('<redacted>');
+  return out;
+}
+
 /** Prefix of the stderr line the seed's ERR trap writes: the step it died in. */
 export const SEED_STEP_MARK = '__hb_seed_step_failed__: ';
 
@@ -1219,7 +1242,8 @@ export function seedStepLabel(described: string): string {
  * first, then the last of stderr and stdout — OpenClaw puts many of its
  * errors on stdout, which the stderr-only tail used to drop.
  */
-export function seedFailure(res: { stdout: string; stderr: string }): string {
+export function seedFailure(res: { stdout: string; stderr: string }, secrets: string[] = []): string {
+  res = { stdout: redact(res.stdout, secrets), stderr: redact(res.stderr, secrets) };
   const marks = res.stderr.split('\n').filter((l) => l.startsWith(SEED_STEP_MARK));
   const step = marks.length ? marks[marks.length - 1]!.slice(SEED_STEP_MARK.length).trim() : '';
   const err = res.stderr.split('\n').filter((l) => !l.startsWith(SEED_STEP_MARK)).join('\n').trim().slice(-1500);

@@ -353,6 +353,12 @@ export interface ImportOptions {
   image?: 'build' | 'drop';
   /** The caller owns this machine — the only one who may build an image here. */
   mayBuild?: boolean;
+  /**
+   * Checks a bot token with Telegram and returns its username. Set by the
+   * app; a file could otherwise name someone else's bot with a junk token,
+   * and the agent would poll a dead token behind a link to their bot.
+   */
+  verifyToken?: (token: string) => Promise<string>;
 }
 
 /**
@@ -568,6 +574,14 @@ async function importAgentInner(
     }
 
     if (manifest.channel) {
+      if (opts.verifyToken) {
+        let username: string;
+        try { username = await opts.verifyToken(manifest.channel.botToken); }
+        catch { throw new TransferError('Telegram rejected the bot token in this file. Export the agent again, or import it and add a bot afterwards.'); }
+        if (username.toLowerCase() !== manifest.channel.accountId.toLowerCase()) {
+          throw new TransferError(`The token in this file belongs to @${username}, not @${manifest.channel.accountId}.`);
+        }
+      }
       await secrets.put(secretRef, manifest.channel.botToken);
       store.insertChannel({
         id: randomUUID(),

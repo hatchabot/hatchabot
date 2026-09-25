@@ -229,3 +229,55 @@ describe('the claim says hello', () => {
     expect(sent.join(' ')).toMatch(/Connected/);
   }, 10_000);
 });
+
+describe('the owner claim never takes a known person (2026-09-25)', () => {
+  // An owner window with no named handle is "the first knock". A Discord bot
+  // is visible to a whole server and a recycled Telegram bot has just written
+  // to its previous agent's regulars, so the first knock is only claimed when
+  // the id is nobody this machine knows.
+  async function world(kind: 'telegram' | 'discord', requests: Array<{ id: string; code: string }>) {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'a1', workspace: { files: {}, configPatch: { agentId: 'a1', authMode: 'api-key' } }, env: {} });
+    for (const [id, owner] of [['a1', 'u1'], ['b1', 'u2']] as const) {
+      store.insertAgent({ id, ownerId: owner, name: id, slug: id, state: 'RUNNING', aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      store.insertMembership({ id: `m-${id}`, agentId: id, userId: owner, role: 'owner', status: 'active' });
+    }
+    provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ requests }), stderr: '' });
+    provider.execResponses.set('pairing approve', { code: 0, stdout: 'ok', stderr: '' });
+    const claim = (extra: Record<string, unknown> = {}) => claimFirstContact(
+      { store, provider, sleep: async () => {} },
+      { agentId: 'a1', runtimeRef, accountId: 'bot', forUserId: 'u1', kind, timeoutMs: 1000, pollIntervalMs: 1, ...extra } as never,
+    );
+    return { store, claim };
+  }
+
+  it('Telegram: a member of another owner\'s agent, or another account\'s link, is passed over for a fresh id', async () => {
+    const { store, claim } = await world('telegram', [{ id: '555', code: 'AAAA' }, { id: '777', code: 'BBBB' }, { id: '999', code: 'CCCC' }]);
+    store.insertMembership({ id: 'm-x', agentId: 'b1', userId: 'u9', role: 'user', channelUserId: '555', status: 'active' });
+    store.setAccountTelegram('u2', '777');
+    expect(await claim()).toBe('999');
+    expect(store.getMembership('a1', 'u1')?.channelUserId).toBe('999');
+  });
+
+  it('Telegram: the recycled bot\'s previous regulars are excluded even when unknown to the store; nobody else → the window closes unclaimed', async () => {
+    const { store, claim } = await world('telegram', [{ id: '4242', code: 'AAAA' }]);
+    expect(await claim({ excludeIds: ['4242'] })).toBeNull();
+    expect(store.getMembership('a1', 'u1')?.channelUserId).toBeFalsy();
+  });
+
+  it('Discord: an identity bound on any agent is never the owner\'s first message; a malformed id is never bound', async () => {
+    const { store, claim } = await world('discord', [{ id: 'not-an-id', code: 'AAAA' }, { id: '123456789012345678', code: 'BBBB' }, { id: '987654321098765432', code: 'CCCC' }]);
+    store.insertMembership({ id: 'm-y', agentId: 'b1', userId: 'u3', role: 'user', status: 'active' });
+    store.bindMemberIdentity('b1', 'u3', 'discord', '123456789012345678');
+    expect(await claim()).toBe('987654321098765432');
+    expect(store.memberIdentities('a1', 'u1').discord).toBe('987654321098765432');
+  });
+
+  it('a window that names its person still claims exactly them, known or not', async () => {
+    const { store, claim } = await world('telegram', [{ id: '555', code: 'AAAA' }]);
+    store.insertMembership({ id: 'm-x', agentId: 'b1', userId: 'u9', role: 'user', channelUserId: '555', status: 'active' });
+    expect(await claim({ expect: '555' })).toBe('555');
+  });
+});
+

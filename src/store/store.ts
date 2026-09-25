@@ -64,6 +64,14 @@ function rowToLocalAccount(r: LocalAccountRow): LocalAccount {
  * `setAgentState`, which enforces the §11.4 transition table — there is no
  * other way to move an agent between states.
  */
+/** The bot is already another agent's: the unique index said so. */
+export class ChannelTakenError extends Error {
+  constructor(readonly kind: ChannelKind, readonly accountId: string) {
+    super(`channel ${kind}:${accountId} is already attached to an agent`);
+    this.name = 'ChannelTakenError';
+  }
+}
+
 export class Store {
   constructor(private readonly db: Database.Database) {
     this.#migrate();
@@ -647,6 +655,13 @@ export class Store {
     // two rows of one kind keeps working (the old code read only the first).
     try {
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS channels_agent_kind ON channels (agent_id, kind)`);
+    } catch { /* duplicate rows: leave the index off rather than refuse to start */ }
+    // One agent per bot: two attaches racing past the "already connected"
+    // check (each waiting on the platform's verify) both inserted, and two
+    // containers then polled one token (2026-09-25). The database is the
+    // last check; insertChannel turns the refusal into ChannelTakenError.
+    try {
+      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS channels_kind_account ON channels (kind, account_id)`);
     } catch { /* duplicate rows: leave the index off rather than refuse to start */ }
     // The vault health view looks up attachments by connection_id (not the PK's
     // leading agent_id column), so give that its own index.
@@ -1238,12 +1253,26 @@ export class Store {
   // ---- Channels ----------------------------------------------------------
 
   insertChannel(c: Channel): void {
+    // A tombstone (DELETED agent) that still holds this bot's row is a
+    // remnant, not a claim: the bot is free again, and the unique index
+    // below must not hold it against the next agent.
     this.db
-      .prepare(
-        `INSERT INTO channels (id, agent_id, kind, account_id, secret_ref, deep_link, created_at, settings)
-         VALUES (@id, @agentId, @kind, @accountId, @secretRef, @deepLink, @createdAt, @settings)`,
-      )
-      .run({ ...c, settings: c.settings ? JSON.stringify(c.settings) : null });
+      .prepare(`DELETE FROM channels WHERE kind = ? AND account_id = ? COLLATE NOCASE AND agent_id IN (SELECT id FROM agents WHERE state = 'DELETED')`)
+      .run(c.kind, c.accountId);
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO channels (id, agent_id, kind, account_id, secret_ref, deep_link, created_at, settings)
+           VALUES (@id, @agentId, @kind, @accountId, @secretRef, @deepLink, @createdAt, @settings)`,
+        )
+        .run({ ...c, settings: c.settings ? JSON.stringify(c.settings) : null });
+    } catch (err) {
+      const code = (err as { code?: string }).code ?? '';
+      if (code.startsWith('SQLITE_CONSTRAINT') && /channels\.account_id/.test(String((err as Error).message))) {
+        throw new ChannelTakenError(c.kind, c.accountId);
+      }
+      throw err;
+    }
   }
 
   /** The agent's channel of one kind. Telegram by default: every older caller means Telegram. */
@@ -3439,6 +3468,32 @@ export class Store {
       )
       .run(agentId, userId, kind, channelUserId, new Date().toISOString());
     return res.changes > 0;
+  }
+
+  /**
+   * Is this channel id already somebody on this machine — any agent's member
+   * seat (Telegram) or bound identity (Slack/Discord), any owner? The owner
+   * claim refuses such an id: a known person's knock is never "the owner's
+   * first message".
+   */
+  channelUserBoundAnywhere(kind: ChannelKind, channelUserId: string): boolean {
+    if (kind === 'telegram') {
+      if (this.db.prepare(`SELECT 1 FROM memberships WHERE channel_user_id = ? LIMIT 1`).get(channelUserId)) return true;
+      return !!this.db.prepare(`SELECT 1 FROM accounts WHERE telegram_user_id = ? LIMIT 1`).get(channelUserId);
+    }
+    return !!this.db.prepare(`SELECT 1 FROM member_identities WHERE kind = ? AND channel_user_id = ? LIMIT 1`).get(kind, channelUserId);
+  }
+
+  /**
+   * This user's identity on a channel, from ANY agent they are bound on (their
+   * own or one they were admitted to) — the newest binding. The seed for a
+   * new attachment, so a person known here never faces a first-knock claim.
+   */
+  identityOfUserAnywhere(userId: string, kind: Exclude<ChannelKind, 'telegram'>): string | undefined {
+    const r = this.db
+      .prepare(`SELECT channel_user_id FROM member_identities WHERE user_id = ? AND kind = ? ORDER BY bound_at DESC LIMIT 1`)
+      .get(userId, kind) as { channel_user_id: string } | undefined;
+    return r?.channel_user_id;
   }
 
   /** The active member bound to this Slack or Discord identity, if any. */

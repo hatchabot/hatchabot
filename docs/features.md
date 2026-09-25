@@ -654,7 +654,8 @@ name, servers and token, instead of throwing the token away. A parked bot can
 be parked ahead of time too (paste its token there; the machine owner can
 share one with everyone), re-checked with Discord, or deleted. An agent's
 Set up… offers a parked bot before asking for a token, so moving a bot
-between agents is Remove on one and pick it on the other. The first creation
+between agents is Remove on one and pick it on the other. A bot taken from
+the shared pool goes back to the shared pool when removed. The first creation
 of a bot, turning on its intent and adding it to a server stay manual:
 Discord has no API for those.
 
@@ -679,13 +680,19 @@ group-chat changes.
   and says in plain words what is wrong (a token in the wrong box, a missing
   scope, the intent turned off). Tokens are stored like every other secret and
   never shown to an AI.
-- **People**: your first direct message links you, as with Telegram. Others
-  join with an invite link, where they choose the app they'll use, or by
-  messaging the bot and being let in from the "wants to talk" card, which now
-  says which app they came from. Removing a member takes them off every app.
+- **People**: if you are already linked on Discord (or Slack) on any of your
+  agents, a new bot knows you from its first build. If not, send it a direct
+  message and approve the request that appears on the card with **That's
+  me** — a Discord bot can be seen by a whole server, so nobody is linked on
+  a first message alone (unlike a brand-new Telegram bot, whose username
+  only you know). Others join with an invite link, where they choose the app
+  they'll use, or by messaging the bot and being let in from the "wants to
+  talk" card, which says which app they came from. Removing a member takes
+  them off every app; removing the app forgets everyone it had admitted.
 - **Group chats** are off by default. You can let it answer in one Slack
   channel or one Discord server, by its ID; there it answers members only,
-  and only when @mentioned.
+  and only when @mentioned. A room can be chosen once someone is linked — a
+  room with nobody admitted would be open to everyone in it.
 - **On OpenClaw 2026.8+ they are installed into the agent** as the official
   npm package (offline, from a cache the image carries) rather than linked
   from the image — that line's plugin trust model insists on it. About 70 MB

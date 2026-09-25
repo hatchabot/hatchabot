@@ -336,10 +336,14 @@ describe('an agent without a bot converges: Telegram off, accounts emptied', () 
     expect(argFor(cmds, 'channels.telegram.enabled')).toBe('false');
     expect(argFor(cmds, 'channels.telegram.accounts')).toBe('{}');
   });
-  it('a build with a bot writes it on, and never the empty-accounts line', () => {
+  it('a build with a bot writes the whole accounts object, replaced — the previous bot\'s entry cannot survive a swap or a restore (2026-09-25)', () => {
     const cmds = buildConfigCommands({ ...base, telegram: { accountId: 'b', botToken: 't', dmPolicy: 'pairing' as const, allowFrom: ['1'] } });
     expect(argFor(cmds, 'channels.telegram.enabled')).toBe('true');
-    expect(argFor(cmds, 'channels.telegram.accounts')).toBeUndefined();
+    const line = cmds.find((c) => c.argv[2] === 'channels.telegram.accounts')!;
+    expect(JSON.parse(line.argv[3]!)).toEqual({ b: { enabled: true, botToken: 't', dmPolicy: 'pairing', allowFrom: ['1'] } });
+    expect(line.argv).toContain('--replace');
+    expect(line.sensitive).toBe(true);
+    expect(cmds.some((c) => c.argv[2]?.startsWith('channels.telegram.accounts.'))).toBe(false); // never a per-key merge
   });
 });
 
@@ -500,6 +504,19 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
       r = run();
       expect(r.status).toBe(0); expect(readFileSync(calls, 'utf8')).toContain('plugins install @openclaw/discord@2026.9.6');
     } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+  it('a room with nobody admitted is written closed: no guild or channel entry, group policy disabled (2026-09-25)', () => {
+    const closed = buildConfigCommands({ ...base, channelPlugins: ['slack', 'discord'], pluginInstall: 'npm',
+      slack: { ...slack, rooms: { mode: 'room', roomId: 'C012AB3CD' } },
+      discord: { token: 't', applicationId: 'a', allowFrom: [], rooms: { mode: 'room', roomId: '123456789012345678' } } });
+    expect(argFor(closed, 'channels.discord.groupPolicy')).toBe('disabled');
+    expect(JSON.parse(argFor(closed, 'channels.discord.guilds')!)).toEqual({});
+    expect(argFor(closed, 'channels.slack.groupPolicy')).toBe('disabled');
+    expect(JSON.parse(argFor(closed, 'channels.slack.channels')!)).toEqual({});
+    const open = buildConfigCommands({ ...base, channelPlugins: ['discord'], pluginInstall: 'npm',
+      discord: { token: 't', applicationId: 'a', allowFrom: ['123456789012345678'], rooms: { mode: 'room', roomId: '999999999999999999' } } });
+    expect(argFor(open, 'channels.discord.groupPolicy')).toBe('allowlist');
+    expect(JSON.parse(argFor(open, 'channels.discord.guilds')!)).toEqual({ '999999999999999999': { requireMention: true, ignoreOtherMentions: true, users: ['123456789012345678'] } });
   });
   it('reinstalls a drifted brave plugin from the cache when the image carries it, only then', () => {
     const withBrave = buildConfigCommands({ ...base, pluginInstall: 'npm', bakedPlugins: ['duckduckgo', 'brave'] });

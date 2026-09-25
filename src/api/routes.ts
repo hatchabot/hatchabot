@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname as osHostname, totalmem } from 'node:os';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { normalizeHandle, type SectionSort, type Store } from '../store/store.js';
+import { ChannelTakenError, normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
@@ -22,6 +22,7 @@ import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
 import { randomBytes } from 'node:crypto';
 import { hashPassword, passwordProblem, usernameProblem } from './accountsAuth.js';
+import { noteFailure, throttled } from './auth.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
 import { APP_VERSION } from '../domain/appVersion.js';
@@ -107,7 +108,7 @@ import {
 } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, setDmPolicy } from '../orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, setDmPolicy } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
@@ -190,6 +191,12 @@ export interface ApiDeps {
   publicUrl?: string;
   /** Test seam for the Google OAuth round-trip (token exchange, userinfo, revoke). */
   oauthFetch?: typeof fetch;
+  /**
+   * Checks an imported file's bot token with Telegram (its username comes
+   * back). Set by the app; the harnesses leave it unset and import fixtures
+   * with made-up tokens.
+   */
+  verifyImportedToken?: (token: string) => Promise<string>;
   /** Drives the login screen the unauthenticated page renders. */
   authMode?: 'password' | 'accounts' | 'identity';
   /** Set in identity mode: lets the join flow bind a membership to an account. */
@@ -452,6 +459,11 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * list endpoints and provides no isolation the moment a second owner exists
    * (docs/identity.md phase 1).
    */
+  const TOKEN_CHECK_THROTTLED = 'Too many token checks — wait a few minutes and try again.';
+  /** Whom a recycled pool bot just wrote to; never the owner's first knock. */
+  const priorChatIdsOf = (username: string): string[] =>
+    (deps.channel.pool as { priorChatIds?: (u: string) => string[] }).priorChatIds?.(username) ?? [];
+
   const ownedAgent = (req: FastifyRequest, id: string): Agent | undefined => {
     const agent = store.getAgent(id);
     if (!agent || agent.ownerId !== ownerIdOf(req)) return undefined;
@@ -723,6 +735,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             // The same half hour an invitee gets. Ten minutes is a short leash
             // for "make the agent, then go and find it in Telegram".
             timeoutMs: 30 * 60_000,
+            excludeIds: priorChatIdsOf(channelRow.accountId),
           },
         ).catch((err) => app.log.error({ err, agentId }, 'owner claim failed'));
       }
@@ -2390,10 +2403,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const body = parsed.data;
     const token = body.token.trim();
     if (!token) return reply.code(400).send({ error: 'Paste a bot token from @BotFather.' });
+    // The login throttle, on token checks too: a pasted token is checked with
+    // the platform, and a bad one counts like a wrong password (2026-09-25).
+    if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
     let username: string;
     try {
       username = await verifyBotToken(token);
     } catch (err) {
+      noteFailure(req, ownerIdOf(req));
       return reply.code(400).send({
         error: err instanceof InvalidBotTokenError ? err.message : 'Could not verify that token with Telegram.',
       });
@@ -5881,6 +5898,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
     const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
     if (token) {
+      if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
       try {
         const { username } = await deps.channel.submitToken(agent.id, token);
         const inUseBy = store.findAgentUsingAccount(username);
@@ -5888,8 +5906,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           deps.channel.discardPending?.(agent.id);
           return reply.code(400).send({ error: `That bot is already connected to "${inUseBy.name}". Each agent needs its own bot — create another with @BotFather.` });
         }
+        // A spare bot's token pasted by hand went down the manual path and
+        // left the pool row unleased; the next lease of that bot then failed
+        // the agent it went to (2026-09-25). The pool is the way to it.
+        if (deps.channel.pool.owns(username)) {
+          deps.channel.discardPending?.(agent.id);
+          return reply.code(409).send({ error: `@${username} is a spare bot in the pool. Leave the token box empty and the agent takes a spare — or remove it from the pool first.` });
+        }
       } catch (err) {
-        if (err instanceof InvalidBotTokenError) return reply.code(400).send({ error: err.userMessage });
+        if (err instanceof InvalidBotTokenError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); }
         throw err;
       }
     }
@@ -5931,7 +5956,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!ownerKnown && agent.runtimeRef) {
       void claimFirstContact(
         { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: result.accountId, forUserId: agent.ownerId, timeoutMs: 30 * 60_000 },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: result.accountId, forUserId: agent.ownerId, timeoutMs: 30 * 60_000, excludeIds: priorChatIdsOf(result.accountId) },
       ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim after attach failed'));
     }
     return reply.code(202).send({ username: result.accountId, deepLink: result.deepLink, ownerKnown });
@@ -5965,6 +5990,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.setAgentPendingAction(agent.id, null);
     store.setAgentWebOnly(agent.id, true);
     trace(agent.id)('channel.detached', { accountId: row.accountId });
+    await scrubChannelAllowlist(
+      { store, provider, log: trace(agent.id) },
+      { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: row.accountId },
+    ).catch(() => false);
     kickRebuild(agent.id);
     return reply.code(202).send({ released: row.accountId });
   });
@@ -6030,9 +6059,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!conn) return reply.code(404).send({ error: 'Discord is not available.' });
     const body = { token: String(req.body?.token ?? '') };
     if (req.body?.shared && !ownsLocalHost(req)) return reply.code(403).send({ error: 'Only the machine owner can share a bot with everyone.' });
+    if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
     let verified;
     try { verified = await conn.verify(body); }
-    catch (err) { if (err instanceof ConnectorError) return reply.code(400).send({ error: err.userMessage }); throw err; }
+    catch (err) { if (err instanceof ConnectorError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); } throw err; }
     const using = store.findAgentUsingAccount(verified.accountId, 'discord');
     if (using) return reply.code(409).send({ error: `That bot is connected to "${using.name}". Remove it there first — it parks itself here.` });
     if (store.getDiscordBot(verified.accountId)) return reply.code(409).send({ error: 'That bot is already parked.' });
@@ -6125,46 +6155,68 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       try { body = { token: await secrets.get(pooled.secretRef) }; }
       catch { return reply.code(409).send({ error: 'That parked bot has lost its token — delete it from the pool and park it again.' }); }
     }
+    if (!pooled && throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
     let verified;
     let secretValue: string;
     try {
       verified = await conn.verify(body);
       secretValue = conn.secretValue(body);
     } catch (err) {
-      if (err instanceof ConnectorError) return reply.code(400).send({ error: err.userMessage });
+      if (err instanceof ConnectorError) {
+        if (!pooled) noteFailure(req, ownerIdOf(req));
+        return reply.code(400).send({ error: err.userMessage });
+      }
       throw err;
     }
     const clash = store.findAgentUsingAccount(verified.accountId, kind);
     if (clash && clash.id !== agent.id) {
-      return reply.code(409).send({ error: `That ${conn.label} app is already connected to "${clash.name}". Each agent needs its own app.` });
+      // The name only when it is the caller's own agent: a token in hand does
+      // not buy another owner's agent names.
+      const where = clash.ownerId === ownerIdOf(req) ? ` to "${clash.name}"` : ' to another agent on this machine';
+      return reply.code(409).send({ error: `That ${conn.label} app is already connected${where}. Each agent needs its own app.` });
     }
     const secretRef = `channel/${agent.id}/${kind}`;
     await secrets.put(secretRef, secretValue);
-    store.insertChannel({
-      id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
-      deepLink: verified.deepLink, createdAt: new Date().toISOString(),
-      settings: {
-        ...verified.settings,
-        displayName: verified.displayName,
-        ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
-        warnings: verified.warnings,
-        rooms: { mode: 'off' },
-      },
-    });
+    try {
+      store.insertChannel({
+        id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
+        deepLink: verified.deepLink, createdAt: new Date().toISOString(),
+        settings: {
+          ...verified.settings,
+          displayName: verified.displayName,
+          ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
+          warnings: verified.warnings,
+          rooms: { mode: 'off' },
+          // Remembered so a house bot goes back to the house when removed.
+          ...(pooled && pooled.ownerId === null ? { pooledShared: true } : {}),
+        },
+      });
+    } catch (err) {
+      if (err instanceof ChannelTakenError) {
+        // Two attaches raced past the check above (each waiting on the platform).
+        await secrets.delete(secretRef).catch(() => {});
+        return reply.code(409).send({ error: `That ${conn.label} app was just connected to another agent. Each agent needs its own app.` });
+      }
+      throw err;
+    }
     if (pooled) {
       store.deleteDiscordBot(pooled.applicationId);
       if (pooled.secretRef !== secretRef) await secrets.delete(pooled.secretRef).catch(() => {});
     }
-    trace(agent.id)('channel.attached', { kind, accountId: verified.accountId, fromPool: !!pooled });
-    kickRebuild(agent.id);
-    // The owner's first DM on the new channel links them (the same claim as a
-    // new agent's Telegram). The watcher waits out the rebuild by itself.
-    if (!store.memberIdentities(agent.id, agent.ownerId)[kind]) {
-      void claimFirstContact(
-        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-        { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: CHANNEL_ACCOUNT, forUserId: agent.ownerId, kind, timeoutMs: 20 * 60_000 },
-      ).catch((err) => app.log.error({ err, agentId: agent.id }, 'owner claim failed'));
+    // The owner's identity on this channel: known from any agent they are on,
+    // it is bound here now and the rebuild admits it — no first message to
+    // wait for. Not known, the owner's own first DM shows up as a knock they
+    // approve with "That's me": a Discord bot is visible to a whole server,
+    // so "the first person to write wins the owner's seat" is no rule for it
+    // (2026-09-25). Telegram keeps its claim window: a new bot's username is
+    // known to its owner alone.
+    let ownerKnown = !!store.memberIdentities(agent.id, agent.ownerId)[kind];
+    if (!ownerKnown) {
+      const elsewhere = store.identityOfUserAnywhere(agent.ownerId, kind);
+      if (elsewhere) ownerKnown = store.bindMemberIdentity(agent.id, agent.ownerId, kind, elsewhere);
     }
+    trace(agent.id)('channel.attached', { kind, accountId: verified.accountId, fromPool: !!pooled, ownerKnown });
+    kickRebuild(agent.id);
     return reply.code(202).send(publicChannel(store.getChannelForAgent(agent.id, kind)!));
   });
 
@@ -6219,6 +6271,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           : 'Give the server ID (a long number: right-click the server with Developer Mode on → Copy Server ID).',
       });
     }
+    // A room with nobody admitted would be open to everyone in it (OpenClaw
+    // reads no `users` as "anyone"), so the room waits for the first link.
+    if (mode === 'room' && !peopleOn(agent, conn.kind).length) {
+      return reply.code(409).send({ error: `Link yourself first: send the bot a direct message and approve it under ${conn.label} ("That's me"). Then choose a room.` });
+    }
     store.setChannelSettings(agent.id, conn.kind, { ...(row.settings ?? {}), rooms: mode === 'room' ? { mode, roomId } : { mode } });
     trace(agent.id)('channel.rooms', { kind: conn.kind, mode });
     if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) kickRebuild(agent.id);
@@ -6243,7 +6300,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!parked) await secrets.delete(row.secretRef).catch(() => {});
     store.deleteChannelForAgent(agent.id, conn.kind);
     trace(agent.id)('channel.detached', { kind: conn.kind, accountId: row.accountId, parked });
-    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) kickRebuild(agent.id);
+    if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
+      // OpenClaw's own approval store outlives the config: scrubbed, or the
+      // next bot under this account key admits the people this one had.
+      await scrubChannelAllowlist(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: conn.kind, accountId: CHANNEL_ACCOUNT },
+      ).catch(() => false);
+      kickRebuild(agent.id);
+    }
     return reply.code(202).send({ removed: conn.kind, parked });
   });
 
@@ -6411,15 +6476,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * nothing references (an orphaned token). One lookup for the inventory and
    * for revealing a single token, so they can never disagree about what exists.
    */
-  const botSecretRefs = (): Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string }> => {
-    const rows = new Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string }>();
+  const botSecretRefs = (): Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string; ownerId?: string | null }> => {
+    const rows = new Map<string, { secretRef: string; where: string; agentName?: string; agentState?: string; ownerId?: string | null }>();
     for (const a of store.listAllActiveAgents()) {
       const ch = store.getChannelForAgent(a.id);
-      if (ch) rows.set(ch.accountId.toLowerCase(), { secretRef: ch.secretRef, where: 'agent', agentName: a.name, agentState: a.state });
+      if (ch) rows.set(ch.accountId.toLowerCase(), { secretRef: ch.secretRef, where: 'agent', agentName: a.name, agentState: a.state, ownerId: a.ownerId });
     }
     for (const p of deps.channel.pool.list?.() ?? []) {
       const u = p.username.toLowerCase();
-      if (!rows.has(u)) rows.set(u, { secretRef: p.secretRef, where: p.leasedTo ? 'pool-leased' : 'pool-free' });
+      if (!rows.has(u)) rows.set(u, { secretRef: p.secretRef, where: p.leasedTo ? 'pool-leased' : 'pool-free', ownerId: p.ownerId ?? null });
     }
     for (const ref of store.listSecretRefs('telegram/bot/%')) {
       const u = ref.split('/')[2]!.toLowerCase();
@@ -6439,6 +6504,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const username = req.params.username.replace(/^@/, '').toLowerCase();
     const row = botSecretRefs().get(username);
     if (!row) return reply.code(404).send({ error: `This server holds no token for @${username}.` });
+    // The machine owner's reveal reaches the HOUSE's bots and their own — not
+    // another person's pasted bot or private spare (2026-09-25).
+    if (row.ownerId && row.ownerId !== ownerIdOf(req)) return reply.code(403).send({ error: `@${username} belongs to another person on this machine; its token is theirs to see.` });
     const token = await secrets.get(row.secretRef).catch(() => undefined);
     if (!token) return reply.code(409).send({ error: 'The stored token is missing.' });
     app.log.warn({ username, where: row.where, ownerId: ownerIdOf(req) }, 'telegram.bot_token_revealed');
@@ -6697,6 +6765,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
     if (!agent || !channel) return reply.code(404).send({ error: 'Not found' });
+    app.log.warn({ agentId: agent.id, username: channel.accountId, ownerId: ownerIdOf(req) }, 'telegram.bot_token_revealed');
     return {
       accountId: channel.accountId,
       botToken: await secrets.get(channel.secretRef),
@@ -7268,7 +7337,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // No id yet — trace() picks it up from the orchestrator's log detail.
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId) },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken },
         );
         return reply.code(201).send(publicAgent(agent));
       } catch (err) {
@@ -7907,7 +7976,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const agent = await importAgent(
           { store, secrets, provider: providerFor(host.id), channel: deps.channel, log: trace(), embedder: embedderForProvision },
           body,
-          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId) },
+          { ownerId, aiProfileId: req.query.aiProfileId, hostId: host.id, ...imageChoice(req.query.image, host, ownerId), verifyToken: deps.verifyImportedToken },
         );
         return reply.code(201).send({ ...publicAgent(agent), kind: 'agent' });
       } catch (err) {

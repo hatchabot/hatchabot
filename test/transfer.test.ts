@@ -63,6 +63,22 @@ async function seedSourceAgent(src: Awaited<ReturnType<typeof installation>>) {
   return runtimeRef;
 }
 
+describe('an imported bot token is checked (2026-09-25)', () => {
+  it('the app\'s verifier must accept it and name the same bot; a file naming someone else\'s bot is refused and nothing is left behind', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    await expect(importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => 'someone_elses_bot' })).rejects.toThrow(/belongs to @someone_elses_bot, not @kitchenbot/);
+    expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+    await expect(importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => { throw new Error('401'); } })).rejects.toThrow(/Telegram rejected the bot token/);
+    const seen: string[] = [];
+    const agent = await importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async (t) => { seen.push(t); return 'KitchenBot'; } }); // case-insensitive, as Telegram is
+    expect(seen).toEqual(['bot-token-123']);
+    expect(dst.store.getChannelForAgent(agent.id)?.accountId).toBe('kitchenbot');
+  });
+});
+
 describe('export failure handling', () => {
   it('restarts a running agent if the snapshot fails after quiescing', async () => {
     const src = await installation();

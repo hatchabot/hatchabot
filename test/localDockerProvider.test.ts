@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LocalDockerProvider, SEED_STEP_MARK, seedFailure, seedStepLabel } from '../src/providers/localDockerProvider.js';
+import { LocalDockerProvider, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel } from '../src/providers/localDockerProvider.js';
 
 /**
  * The only real provider, and previously untested — mutation testing showed
@@ -128,6 +128,16 @@ describe('a failed seed names the step it died in (To Do Agent, 2026-09-25)', ()
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(`${SEED_STEP_MARK}openclaw plugins enable duckduckgo`);
     expect(seedFailure(r)).toMatch(/^seed failed at "openclaw plugins enable duckduckgo": /);
+  });
+  it('nothing secret survives into the failure text: every token-like value of the spec is replaced (2026-09-25)', () => {
+    const spec = { workspace: { files: {}, configPatch: { agentId: 'k', authMode: 'oauth-claude-cli', setupToken: 'sk-ant-oat01-SECRETSETUP', gatewayToken: 'gw-SECRET-1234', telegram: { accountId: 'b', botToken: '123456:ABC-SECRET-TOKEN', allowFrom: ['1'] }, discord: { token: 'MTIz.SECRET.discord-token', applicationId: '1' }, model: 'm' } }, env: { BRAVE_API_KEY: 'brave-secret-key', HATCHABOT_MEMORY_CAP: '3g' } } as never;
+    const values = secretValuesOf(spec);
+    expect(values).toEqual(expect.arrayContaining(['sk-ant-oat01-SECRETSETUP', 'gw-SECRET-1234', '123456:ABC-SECRET-TOKEN', 'MTIz.SECRET.discord-token', 'brave-secret-key']));
+    expect(values).not.toContain('3g'); expect(values).not.toContain('m'); expect(values).not.toContain('b');
+    const out = seedFailure({ stderr: 'config set refused value "123456:ABC-SECRET-TOKEN" at channels.telegram.accounts.b.botToken\n', stdout: 'token MTIz.SECRET.discord-token rejected' }, values);
+    expect(out).not.toContain('SECRET');
+    expect(out).toContain('refused value "<redacted>"');
+    expect(out).toContain('token <redacted> rejected');
   });
   it('the error leads with the step and keeps stdout, where OpenClaw puts many of its errors', async () => {
     expect(seedFailure({ stderr: `[skills] noise\n${SEED_STEP_MARK}shell: V=$(node -p ...)\n`, stdout: 'Updated 24 config paths.\nnpm error something\n' }))

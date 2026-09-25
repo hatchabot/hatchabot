@@ -61,6 +61,8 @@ async function setup(opts: { imageChannels?: string[] } = {}) {
       id, ownerId: OWNER, name: 'Tax', slug: id, state: 'STOPPED', aiProfileId: 'p1', hostId: 'h1', runtimeRef: 'mock://' + id,
       persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now', ...over,
     } as never);
+    // The owner seat every real agent is born with.
+    store.insertMembership({ id: `m-${id}`, agentId: id, userId: String(over.ownerId ?? OWNER), role: 'owner', status: 'active' });
     return id;
   };
   const inject = (method: string, url: string, payload?: unknown, headers = H) => f.inject({ method: method as never, url, headers, payload: payload as never });
@@ -128,7 +130,7 @@ describe('adding Slack or Discord', () => {
 
 describe('checking again, and who it answers', () => {
   it('re-check asks the platform again from the stored token: servers and warnings refresh, nothing is pasted or returned', async () => {
-    const { inject, add, secrets } = await setup();
+    const { inject, add, secrets, store } = await setup();
     const id = add();
     verifyCalls.length = 0;
     const first = (await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' })).json();
@@ -142,7 +144,8 @@ describe('checking again, and who it answers', () => {
     expect(again.json().checkedAt).toBeTruthy();
     expect(JSON.stringify(again.json())).not.toContain('ok-good');
     expect(secrets.map.get(`channel/${id}/discord`)).toBe('ok-good'); // untouched
-    // Rooms survive a re-check.
+    // Rooms survive a re-check. (A room needs someone linked first.)
+    store.bindMemberIdentity(id, OWNER, 'discord', '111111111111111111');
     await inject('PATCH', `/v1/agents/${id}/channels/discord`, { rooms: { mode: 'room', roomId: '123456789012345678' } });
     const third = (await inject('POST', `/v1/agents/${id}/channels/discord/recheck`)).json();
     expect(third.rooms).toEqual({ mode: 'room', roomId: '123456789012345678' });
@@ -153,7 +156,6 @@ describe('checking again, and who it answers', () => {
     const { inject, add, store } = await setup();
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
-    store.insertMembership({ id: 'm1', agentId: id, userId: OWNER, role: 'owner', status: 'active' } as never);
     store.insertMembership({ id: 'm2', agentId: id, userId: 'user-ann', role: 'user', status: 'active', displayName: 'Ann' } as never);
     store.insertMembership({ id: 'm3', agentId: id, userId: 'user-bob', role: 'user', status: 'active', displayName: 'Bob' } as never);
     store.bindMemberIdentity(id, OWNER, 'discord', '1');
@@ -166,10 +168,15 @@ describe('checking again, and who it answers', () => {
 });
 
 describe('changing and removing', () => {
-  it('room access takes ids only, per platform', async () => {
-    const { add, inject } = await setup();
+  it('room access takes ids only, per platform — and waits for the first link, or the room would be open to everyone in it (2026-09-25)', async () => {
+    const { add, inject, store } = await setup();
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' });
+    const early = await inject('PATCH', `/v1/agents/${id}/channels/slack`, { rooms: { mode: 'room', roomId: 'C012AB3CD' } });
+    expect(early.statusCode).toBe(409);
+    expect(early.json().error).toContain('Link yourself first');
+    expect((await inject('PATCH', `/v1/agents/${id}/channels/slack`, { rooms: { mode: 'off' } })).statusCode).toBe(200); // off is always allowed
+    store.bindMemberIdentity(id, OWNER, 'slack', 'U0OWNER');
     expect((await inject('PATCH', `/v1/agents/${id}/channels/slack`, { rooms: { mode: 'room', roomId: '#general' } })).statusCode).toBe(400);
     const ok = await inject('PATCH', `/v1/agents/${id}/channels/slack`, { rooms: { mode: 'room', roomId: 'C012AB3CD' } });
     expect(ok.statusCode).toBe(200);
@@ -299,3 +306,55 @@ describe('the management agent\'s remove_channel tool', () => {
     expect(riskOf('remove_channel')).toBe('disruptive');
   });
 });
+
+describe('who the owner is on a new channel (2026-09-25)', () => {
+  it('unknown: no first-message window — the owner approves their own knock with "That\'s me"', async () => {
+    const { store, add, inject } = await setup();
+    const id = add();
+    expect((await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' })).statusCode).toBe(202);
+    expect(store.pairingWindow(id)).toBeFalsy(); // a Discord bot is visible to a whole server: nobody is linked on a first message alone
+    expect(store.memberIdentities(id, OWNER).discord).toBeUndefined();
+    expect((await inject('GET', `/v1/agents/${id}/channels`)).json().channels[0].youAreLinked).toBe(false);
+  });
+
+  it('known from another agent: bound at once, admitted from the first build, still no window', async () => {
+    const { store, add, inject } = await setup();
+    const other = add(); // where the owner linked before (their knock, approved as "That's me")
+    store.bindMemberIdentity(other, OWNER, 'discord', '111111111111111111');
+    const id = add();
+    expect((await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' })).statusCode).toBe(202);
+    expect(store.memberIdentities(id, OWNER).discord).toBe('111111111111111111');
+    expect(store.listAllowedChannelUserIds(id, 'discord')).toEqual(['111111111111111111']);
+    expect(store.pairingWindow(id)).toBeFalsy();
+    expect((await inject('GET', `/v1/agents/${id}/channels`)).json().channels[0].youAreLinked).toBe(true);
+  });
+
+  it('a bot taken from the shared pool goes back to the shared pool when removed', async () => {
+    const { store, secrets, add, inject } = await setup();
+    await secrets.put('discord-pool/1234567890123456789', 'ok-good');
+    store.upsertDiscordBot({ applicationId: '1234567890123456789', secretRef: 'discord-pool/1234567890123456789', ownerId: null, servers: [], warnings: [], addedAt: 'now' });
+    const id = add();
+    expect((await inject('POST', `/v1/agents/${id}/channels/discord`, { pooled: '1234567890123456789' })).statusCode).toBe(202);
+    expect(store.getDiscordBot('1234567890123456789')).toBeUndefined();
+    expect((await inject('DELETE', `/v1/agents/${id}/channels/discord`)).json().parked).toBe(true);
+    expect(store.getDiscordBot('1234567890123456789')?.ownerId).toBeNull();
+    // A bot the owner pasted themselves parks under them.
+    const mine = add();
+    store.deleteDiscordBot('1234567890123456789'); await secrets.delete('discord-pool/1234567890123456789');
+    await inject('POST', `/v1/agents/${mine}/channels/discord`, { token: 'ok-good' });
+    await inject('DELETE', `/v1/agents/${mine}/channels/discord`);
+    expect(store.getDiscordBot('1234567890123456789')?.ownerId).toBe(OWNER);
+  });
+
+  it('one agent per bot is enforced by the database too, and the clash message names only the caller\'s own agent', async () => {
+    const { store, add, inject } = await setup();
+    const a = add(), b = add({ ownerId: 'someone-else' });
+    store.insertChannel({ id: 'c-b', agentId: b, kind: 'discord', accountId: '1234567890123456789', secretRef: 'x', deepLink: 'x', createdAt: 'now' });
+    const r = await inject('POST', `/v1/agents/${a}/channels/discord`, { token: 'ok-good' });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).not.toContain('Tax'); // another owner's agent name stays theirs
+    expect(() => store.insertChannel({ id: 'c-a', agentId: a, kind: 'discord', accountId: '1234567890123456789', secretRef: 'y', deepLink: 'y', createdAt: 'now' }))
+      .toThrow(/already attached/);
+  });
+});
+

@@ -12,7 +12,7 @@ import { LocalSecretStore } from './secrets/localSecretStore.js';
 import { MockProvider } from './providers/mockProvider.js';
 import { LocalDockerProvider } from './providers/localDockerProvider.js';
 import { TelegramPoolProvisioner } from './channels/telegramPool.js';
-import { TelegramManualProvisioner } from './channels/telegramManual.js';
+import { TelegramManualProvisioner, verifyBotToken } from './channels/telegramManual.js';
 import { CompositeTelegramProvisioner } from './channels/composite.js';
 import { registerRoutes } from './api/routes.js';
 import { authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from './api/auth.js';
@@ -171,6 +171,7 @@ await registerRoutes(app, {
   webIndexPath: resolve(import.meta.dirname, '../web/index.html'),
   webJoinPath: resolve(import.meta.dirname, '../web/join.html'),
   publicUrl: process.env.HATCHABOT_PUBLIC_URL,
+  verifyImportedToken: (token) => verifyBotToken(token),
   authMode: authModeFromEnv(),
   verifier:
     authModeFromEnv() === 'identity'

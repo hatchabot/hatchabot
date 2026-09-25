@@ -45,12 +45,15 @@ export async function parkDiscordBot(
   const token = await deps.secrets.get(row.secretRef);
   const ref = discordPoolRef(row.accountId);
   await deps.secrets.put(ref, token);
+  // Taken from the shared pool → returned to it. Without this, a house bot
+  // became the private bot of whoever used it last (2026-09-25).
+  const fromShared = st.pooledShared === true;
   const parked: DiscordBotRow = {
     applicationId: row.accountId,
     botUserId: typeof st.botUserId === 'string' ? st.botUserId : undefined,
     botName: typeof st.botName === 'string' ? st.botName : undefined,
     secretRef: ref,
-    ownerId,
+    ownerId: fromShared ? null : ownerId,
     servers: Array.isArray(st.servers) ? (st.servers as DiscordBotRow['servers']) : [],
     warnings: Array.isArray(st.warnings) ? (st.warnings as string[]) : [],
     addToServerUrl: typeof st.addToServerUrl === 'string' ? st.addToServerUrl : undefined,

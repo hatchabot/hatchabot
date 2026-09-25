@@ -11083,7 +11083,7 @@ async function v2LoadChans(id) {
     const roomInputHidden = rooms.mode !== 'room' || (roomPicker && known);
     return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b><span>${esc(c.displayName || '')}</span>
         ${canChange ? `<button onclick="chanRecheck('${jsq(id)}','${kind}', this)" title="Ask ${label} again: servers it is in, and whether anything still needs fixing">↻ Re-check</button>` : ''}</div>
-      <div class="sub">${c.youAreLinked ? '✓ Linked to you.' : `Not linked to you yet: send it a direct message on ${label} and your first message links you.`}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}</div>
+      <div class="sub">${c.youAreLinked ? '✓ Linked to you.' : `Not linked to you yet: send it a direct message on ${label}, then approve the request that appears here with <b>That's me</b>.`}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}</div>
       ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${kind === 'discord' ? `<div class="sub">${servers.length ? `In ${servers.length === 1 ? 'one server' : `${servers.length} servers`}: ${servers.map(g => `<b>${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any server yet.'} People can only message it once they share a server with it.</div>` : ''}
       <div class="v2chan-h">
@@ -11210,9 +11210,9 @@ function chanShowConnected(c) {
     ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
     <ol class="v2steps">
       ${c.addToServerUrl ? `<li><a class="btn primary" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add it to your server</a>. People can only message it once they share a server with it.</li>` : ''}
-      <li><a class="btn${c.addToServerUrl ? '' : ' primary'}" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open ${label}</a> and send it a direct message. Your first message links you to it.</li>
+      <li><a class="btn${c.addToServerUrl ? '' : ' primary'}" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open ${label}</a> and send it a direct message. ${c.youAreLinked ? 'It already knows you.' : `Your message shows up here as a request: approve it with <b>That's me</b>. (A ${label} bot can be seen by a whole server, so nobody is linked on their first message alone.)`}</li>
     </ol>
-    <div class="v2wait" id="chanWait"><span class="spinner" aria-hidden="true"></span> Waiting for your first message…</div>`;
+    <div class="v2wait" id="chanWait"><span class="spinner" aria-hidden="true"></span> ${c.youAreLinked ? 'Restarting…' : 'Waiting for your request…'}</div>`;
   clearInterval(chanWatch);
   const id = chanFor, kind = chanKind;
   chanWatch = setInterval(async () => {

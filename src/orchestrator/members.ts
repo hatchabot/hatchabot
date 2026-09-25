@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
+import { ACCOUNT_SHAPE, ID_SHAPE } from './channelIds.js';
 import { approvePairing, listPairingRequests, PAIRING_DB, PAIRING_DB_JS, pairingStorePath } from './claim.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
 
@@ -335,7 +336,6 @@ export async function grantChannelAccess(
   opts: { agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string; channelUserId: string },
 ): Promise<void> {
   const log = deps.log ?? (() => {});
-  const ID_SHAPE: Record<ChannelKind, RegExp> = { telegram: /^\d{1,32}$/, slack: /^[UW][A-Z0-9]{2,31}$/, discord: /^\d{15,25}$/ };
   if (!ID_SHAPE[opts.kind].test(opts.channelUserId) || !/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) {
     throw new AdmitError('That chat id has an unexpected shape, so the allowlist was not touched.');
   }
@@ -383,6 +383,44 @@ export async function grantChannelAccess(
 }
 
 /**
+ * Forget everyone a channel had admitted, on the volume, when the channel is
+ * removed from the agent. The rebuild rewrites the CONFIG allowlist from
+ * memberships, but OpenClaw also unions in its own approval store (the
+ * 2026.9 allow rows, the 2026.7 credentials file), and that outlived a
+ * detach: the next bot attached under the same account key (`hatchabot` for
+ * every Discord and Slack bot) admitted the people the owner had dropped,
+ * with no membership to show for it (2026-09-25). Best effort by contract:
+ * the caller logs a failure; the rebuild that follows still writes the
+ * config from scratch.
+ */
+export async function scrubChannelAllowlist(
+  deps: RevokeDeps,
+  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; accountId: string },
+): Promise<boolean> {
+  const log = deps.log ?? (() => {});
+  if (!ACCOUNT_SHAPE.test(opts.accountId)) return false;
+  const t = { channel: opts.kind, acct: opts.accountId, cred: `/home/node/.openclaw/credentials/${opts.kind}-${opts.accountId.toLowerCase()}-allowFrom.json` };
+  const script = `node -e '
+    const fs = require("fs");
+    const t = ${JSON.stringify(t)};
+    let n = 0;
+    if (fs.existsSync(t.cred)) { fs.unlinkSync(t.cred); n++; }
+    if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) {
+      ${PAIRING_DB_JS.open(false)}
+      n += db.prepare("delete from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?)").run(t.channel, t.acct).changes;
+      n += db.prepare("delete from channel_pairing_requests where channel_key = ? and lower(account_id) = lower(?)").run(t.channel, t.acct).changes;
+    }
+    console.log(String(n));'`;
+  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
+  if (res.code !== 0) {
+    log('channel.allowlist_scrub_failed', { agentId: opts.agentId, kind: opts.kind });
+    return false;
+  }
+  log('channel.allowlist_scrubbed', { agentId: opts.agentId, kind: opts.kind, removed: Number(res.stdout.trim()) || 0 });
+  return true;
+}
+
+/**
  * Flip an agent's DM policy on its volume, live.
  *
  * `allowlist` is the resting state: OpenClaw drops a DM from anyone not on
@@ -410,7 +448,6 @@ export async function setDmPolicy(
 ): Promise<boolean> {
   const log = deps.log ?? (() => {});
   if (!/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) return false;
-  const ID_SHAPE: Record<ChannelKind, RegExp> = { telegram: /^\d{1,32}$/, slack: /^[UW][A-Z0-9]{2,31}$/, discord: /^\d{15,25}$/ };
   const admit = (opts.allowFrom ?? []).filter((id) => ID_SHAPE[opts.kind].test(id));
   const target = { channel: opts.kind, acct: opts.accountId, policy: opts.policy, admit };
   const script = `node -e '
@@ -486,7 +523,6 @@ export async function revokeMember(
   // last rebuild still admitted — the exact hole "Revoke for real" missed.
   // The credentials FILENAME is lowercased (OpenClaw's on-disk convention);
   // the config KEY keeps the case configWriter seeded.
-  const ID_SHAPE: Record<ChannelKind, RegExp> = { telegram: /^\d{1,32}$/, slack: /^[UW][A-Z0-9]{2,31}$/, discord: /^\d{15,25}$/ };
   const targets: Array<{ channel: string; acct: string; id: string; cred: string }> = [];
   for (const kind of Object.keys(ids) as ChannelKind[]) {
     const id = ids[kind]!;

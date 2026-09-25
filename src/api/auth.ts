@@ -54,7 +54,7 @@ function throttleKeys(req: FastifyRequest, who?: string): string[] {
   if (who) keys.push(`user:${who.trim().toLowerCase()}`);
   return keys;
 }
-function throttled(req: FastifyRequest, who?: string): boolean {
+export function throttled(req: FastifyRequest, who?: string): boolean {
   for (const k of throttleKeys(req, who)) {
     const f = failures.get(k);
     if (!f) continue;
@@ -63,7 +63,7 @@ function throttled(req: FastifyRequest, who?: string): boolean {
   }
   return false;
 }
-function noteFailure(req: FastifyRequest, who?: string): void {
+export function noteFailure(req: FastifyRequest, who?: string): void {
   for (const k of throttleKeys(req, who)) {
     const f = failures.get(k);
     if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
