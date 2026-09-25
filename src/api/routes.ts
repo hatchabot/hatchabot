@@ -8539,11 +8539,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     catch { return 'telegram'; }
   };
 
+  // Every open dashboard asks every running agent for its knocks on each
+  // poll; the answer is a file read in the container (a docker exec each).
+  // One answer serves every tab for half a minute; approve and deny clear it
+  // so the card changes at once. Off in tests, which change the file between reads.
+  const knockCache = new Map<string, { at: number; value: Awaited<ReturnType<typeof pairingRequestsFor>> }>();
+  const KNOCK_CACHE_MS = process.env.VITEST ? 0 : Number(process.env.HATCHABOT_KNOCK_CACHE_MS ?? 30_000);
+  const forgetKnocks = (agentId: string) => knockCache.delete(agentId);
   app.get<{ Params: { id: string } }>('/v1/agents/:id/pairing', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef || !store.listChannelsForAgent(agent.id).length) return reply.code(404).send({ error: 'Not found' });
     if (agent.state !== 'RUNNING') return [];
-    return pairingRequestsFor(agent);
+    const hit = knockCache.get(agent.id);
+    if (hit && Date.now() - hit.at < KNOCK_CACHE_MS) return hit.value;
+    const value = await pairingRequestsFor(agent);
+    if (KNOCK_CACHE_MS > 0) knockCache.set(agent.id, { at: Date.now(), value });
+    return value;
   });
 
   // Every pending "wants to join" request across the caller's RUNNING agents,
@@ -8673,6 +8684,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // They are on the list now, so the door goes back to silence (unless
         // a window is still open for someone else, or the agent is open).
         await restDoor(agent);
+        forgetKnocks(agent.id);
         return { approved: true, member: admitted };
       } catch (err) {
         if (err instanceof AdmitError) return reply.code(400).send({ error: err.userMessage });
@@ -8695,6 +8707,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
       if (!code) return reply.code(400).send({ error: 'code required' });
       try {
+        forgetKnocks(agent.id);
         const out = await denyPairing(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           { agentId: agent.id, runtimeRef: agent.runtimeRef, code, kind },

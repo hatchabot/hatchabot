@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.75.3] — 2026-09-25
+
+### Changed
+- An agent's pending knocks are answered from a half-minute cache: every open dashboard asked every running agent on each poll (a file read in the container each time). Approve and deny clear it, so the card changes at once.
+
 ## [2.75.2] — 2026-09-25
 
 ### Changed
