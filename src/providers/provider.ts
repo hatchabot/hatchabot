@@ -156,6 +156,8 @@ export interface OpenClawConfigPatch {
     dmPolicy?: 'pairing' | 'allowlist';
     allowFrom: string[];
     rooms: ChannelRooms;
+    /** The channels the app is in (ids, from the last check): the rooms of `members` mode. */
+    servers?: string[];
   };
   discord?: {
     token: string;

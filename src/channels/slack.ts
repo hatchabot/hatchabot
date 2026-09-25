@@ -124,13 +124,45 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       const team = String(auth.body.team ?? 'your workspace');
       const teamId = String(auth.body.team_id ?? '');
       const botName = String(auth.body.user ?? 'the bot');
+      // The channels the app has been invited to: the rooms of "every
+      // channel it is in", and the picker for one. Best effort — an app
+      // without channels:read simply lists none.
+      let servers: Array<{ id: string; name: string }> = [];
+      try {
+        const chans = await callJson(f, 'Slack', 'https://slack.com/api/users.conversations?types=public_channel%2Cprivate_channel&exclude_archived=true&limit=100', {
+          method: 'GET', headers: { Authorization: `Bearer ${botToken}` },
+        });
+        if (chans.body?.ok && Array.isArray(chans.body.channels)) {
+          servers = chans.body.channels.slice(0, 50).map((c: any) => ({ id: String(c.id), name: String(c.name ?? c.id) }));
+        }
+      } catch { /* listing is decoration */ }
       return {
         accountId: String(auth.body.user_id),
         displayName: `@${botName} in ${team}`,
         deepLink: `https://slack.com/app_redirect?app=${encodeURIComponent(appId)}${teamId ? `&team=${encodeURIComponent(teamId)}` : ''}`,
-        settings: { team, teamId, appId, botName },
+        settings: { team, teamId, appId, botName, servers, checkedAt: new Date().toISOString() },
         warnings,
       };
+    },
+
+    // A DM is a conversation opened with the person (idempotent), then a
+    // message in it. Needs im:write and chat:write, which the manifest asks
+    // for. The farewells and moving notes Telegram members get.
+    async dm(secret, userId, text) {
+      if (!/^[UW][A-Z0-9]{2,31}$/.test(userId)) return false;
+      const creds = this.credsFromSecret(secret);
+      const botToken = creds.botToken ?? '';
+      if (!botToken) return false;
+      const json = (method: string, body: unknown) => callJson(f, 'Slack', `https://slack.com/api/${method}`, {
+        method: 'POST', headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(body),
+      });
+      try {
+        const open = await json('conversations.open', { users: userId });
+        const channel = open.body?.ok ? open.body?.channel?.id : undefined;
+        if (!channel) return false;
+        const msg = await json('chat.postMessage', { channel, text: text.slice(0, 4000) });
+        return msg.body?.ok === true;
+      } catch { return false; }
     },
   };
 }

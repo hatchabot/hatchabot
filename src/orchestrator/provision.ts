@@ -542,7 +542,7 @@ export async function buildRuntimeSpec(
   if (slackRow && channelPlugins.includes('slack')) {
     const t = JSON.parse(await secrets.get(slackRow.secretRef)) as { botToken: string; appToken: string };
     const allowFrom = store.listAllowedChannelUserIds(agentId, 'slack');
-    slack = { botToken: t.botToken, appToken: t.appToken, dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(slackRow) };
+    slack = { botToken: t.botToken, appToken: t.appToken, dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(slackRow), servers: serversOf(slackRow) };
   }
   let discord: OpenClawConfigPatch['discord'];
   if (discordRow && channelPlugins.includes('discord')) {

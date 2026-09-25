@@ -6,7 +6,9 @@
 > connectors and the tests stay live. It comes out of preview when a real Slack
 > app and a real Discord bot have run for a while.
 
-Status, 2026-09-18: **built in v1.31.0** (steps 1–6 and 8). Step 7, Slack and
+Status, 2026-09-25: Discord public since v2.66.0; both apps have every
+control Telegram has (v2.74.0/v2.75.0, ledger in `channel-parity.md`); Slack
+waits for one real-app trial. Earlier status, 2026-09-18: **built in v1.31.0** (steps 1–6 and 8). Step 7, Slack and
 Discord for the management agent, is not done: adding a channel is refused for
 it. Not yet tried with a real Slack app or Discord bot. It does not depend on the OpenClaw 2026.9 port; it works on
 today's 2026.7.1-2.

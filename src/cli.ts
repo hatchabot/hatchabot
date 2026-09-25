@@ -213,6 +213,7 @@ Commands:
   token <agent>                Reveal the agent's Telegram bot token
   telegram remove <agent> [--yes]
   discord add|remove <agent> [--yes]     discord bots
+  slack add|remove <agent> [--yes]       slack apps
                                Take its bot away: the bot goes back to your pool,
                                the agent keeps everything and becomes web-only
   logs <agent> [-n <lines>]    Recent runtime output
@@ -2064,31 +2065,33 @@ async function main() {
       console.log(`@${r.released ?? a.botUsername} is back in your pool. "${a.name}" is rebuilding as a web-only agent — talk to it in the app; a bot can be attached again later.`);
       return;
     }
-    case 'discord': {
+    case 'discord':
+    case 'slack': {
+      const app_ = cmd, Label = app_ === 'slack' ? 'Slack' : 'Discord', poolPath = app_ === 'slack' ? '/v1/slack-apps' : '/v1/discord-bots';
       const sub = rest[0];
-      if (sub === 'bots') {
-        const r: any = await (await api(ctx, '/v1/discord-bots')).json();
+      if (sub === 'bots' || sub === 'apps') {
+        const r: any = await (await api(ctx, poolPath)).json();
         const spare = r.bots ?? [], used = r.inUse ?? [];
-        if (!spare.length && !used.length) { console.log('No Discord bots: none parked, none in use.'); return; }
-        for (const b of spare) console.log(`spare  ${b.botName ?? b.applicationId}${b.shared ? '  (shared)' : ''}${b.servers?.length ? `  in ${b.servers.map((g: any) => g.name || g.id).join(', ')}` : '  not in any server'}${b.warnings?.length ? `  ⚠ ${b.warnings.length}` : ''}`);
+        if (!spare.length && !used.length) { console.log(`No ${Label} bots: none parked, none in use.`); return; }
+        for (const b of spare) console.log(`spare  ${b.botName ?? b.applicationId}${b.shared ? '  (shared)' : ''}${b.archivedFor ? '  (kept for an archived agent)' : ''}${b.servers?.length ? `  in ${b.servers.map((g: any) => g.name || g.id).join(', ')}` : `  not in any ${app_ === 'slack' ? 'channel' : 'server'}`}${b.warnings?.length ? `  ⚠ ${b.warnings.length}` : ''}`);
         for (const b of used) console.log(`in use ${b.botName ?? b.applicationId}  → ${b.agentName}${b.shared ? '  (house bot)' : ''}`);
         return;
       }
-      if (sub !== 'remove' && sub !== 'add') fail('usage: hatchabot discord add|remove <agent> [--yes] | discord bots');
-      const a = await resolveAgent(ctx, rest[1] ?? fail(`usage: hatchabot discord ${sub} <agent> [--yes]`));
+      if (sub !== 'remove' && sub !== 'add') fail(`usage: hatchabot ${app_} add|remove <agent> [--yes] | ${app_} ${app_ === 'slack' ? 'apps' : 'bots'}`);
+      const a = await resolveAgent(ctx, rest[1] ?? fail(`usage: hatchabot ${app_} ${sub} <agent> [--yes]`));
       if (sub === 'add') {
-        const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/discord`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pooled: 'first' }) })).json();
+        const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/${app_}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pooled: 'first' }) })).json();
         if (r.error) fail(r.error);
-        console.log(`"${a.name}" is now “${r.botName ?? r.displayName ?? 'a Discord bot'}” on Discord — rebuilding so it answers there (memory kept).`);
+        console.log(`"${a.name}" is now “${r.botName ?? r.displayName ?? `a ${Label} bot`}” on ${Label} — rebuilding so it answers there (memory kept).`);
         return;
       }
       if (!flags.has('yes')) {
-        const typed = await askLine(`Take "${a.name}" off Discord?\nIt keeps everything it knows; people who reach it on Discord lose access. Its bot is parked under Settings → Discord for another agent. It restarts to apply this. [y/N] `);
+        const typed = await askLine(`Take "${a.name}" off ${Label}?\nIt keeps everything it knows; people who reach it on ${Label} lose access. Its bot is parked under Settings → ${Label} for another agent. It restarts to apply this. [y/N] `);
         if (!/^y(es)?$/i.test(typed.trim())) fail('not confirmed — nothing changed');
       }
-      const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/discord`, { method: 'DELETE' })).json();
+      const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/${app_}`, { method: 'DELETE' })).json();
       if (r.error) fail(r.error);
-      console.log(`"${a.name}" is off Discord${r.parked ? '; its bot is parked for another agent' : ''}. It is rebuilding.`);
+      console.log(`"${a.name}" is off ${Label}${r.parked ? '; its bot is parked for another agent' : ''}. It is rebuilding.`);
       return;
     }
     case 'skip-telegram': {

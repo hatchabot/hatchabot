@@ -580,12 +580,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       // workspace could have driven the agent until its owner linked
       // (2026-09-25). The app refuses room mode until someone is linked;
       // this is the belt to that brace.
-      const slackRoom = sl.rooms.mode === 'room' && sl.allowFrom.length > 0 ? sl.rooms.roomId : undefined;
-      cmds.push({ argv: ['config', 'set', 'channels.slack.groupPolicy', slackRoom ? 'allowlist' : 'disabled'] });
+      const slackRooms = sl.allowFrom.length === 0 ? []
+        : sl.rooms.mode === 'room' ? [sl.rooms.roomId]
+        : sl.rooms.mode === 'members' ? (sl.servers ?? []).filter((c) => /^[CG][A-Z0-9]{8,}$/.test(c))
+        : [];
+      cmds.push({ argv: ['config', 'set', 'channels.slack.groupPolicy', slackRooms.length ? 'allowlist' : 'disabled'] });
       // Rooms by ID only (names never match under allowlist), members only, @mention.
-      const rooms = slackRoom
-        ? { [slackRoom]: { enabled: true, requireMention: true, users: sl.allowFrom } }
-        : {};
+      const rooms = Object.fromEntries(slackRooms.map((c) => [c, { enabled: true, requireMention: true, users: sl.allowFrom }]));
       cmds.push({ argv: ['config', 'set', 'channels.slack.channels', JSON.stringify(rooms)] });
       cmds.push({
         argv: ['config', 'set', 'channels.slack.accounts', JSON.stringify({

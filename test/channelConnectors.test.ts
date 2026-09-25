@@ -120,6 +120,34 @@ describe('Discord', () => {
   });
 });
 
+describe('Slack: the channels it is in, and a DM from the host (2026-09-25)', () => {
+  it('verify lists the channels the app is in; a workspace that refuses the listing simply lists none', async () => {
+    const withChans: Route = (u, i) => (u.includes('/users.conversations') ? { body: { ok: true, channels: [{ id: 'C0GENERAL', name: 'general' }, { id: 'G0PRIV', name: 'family' }] } } : slackOk(u, i));
+    const v = await slackConnector(fakeFetch(withChans).f as never).verify({ botToken: BOT, appToken: APP });
+    expect(v.settings.servers).toEqual([{ id: 'C0GENERAL', name: 'general' }, { id: 'G0PRIV', name: 'family' }]);
+    expect(v.settings.checkedAt).toBeTruthy();
+    const none = await slackConnector(fakeFetch(slackOk).f as never).verify({ botToken: BOT, appToken: APP });
+    expect(none.settings.servers).toEqual([]);
+  });
+  it('dm opens the conversation with the bot token and posts; a refusal is false, never thrown', async () => {
+    const posted: Array<{ url: string; body: any; auth?: string }> = [];
+    const route: Route = (u, i) => {
+      posted.push({ url: u, body: i?.body ? JSON.parse(String(i.body)) : undefined, auth: (i?.headers as Record<string, string>)?.Authorization });
+      if (u.endsWith('/conversations.open')) return { body: { ok: true, channel: { id: 'D0DM' } } };
+      if (u.endsWith('/chat.postMessage')) return { body: { ok: true } };
+      return { body: { ok: false, error: 'unknown_method' } };
+    };
+    const conn = slackConnector(fakeFetch(route).f as never);
+    const secret = conn.secretValue({ botToken: BOT, appToken: APP });
+    expect(await conn.dm!(secret, 'U0MARIA', 'hello')).toBe(true);
+    expect(posted[0]).toMatchObject({ url: 'https://slack.com/api/conversations.open', body: { users: 'U0MARIA' }, auth: `Bearer ${BOT}` });
+    expect(posted[1]).toMatchObject({ url: 'https://slack.com/api/chat.postMessage', body: { channel: 'D0DM', text: 'hello' } });
+    expect(await conn.dm!(secret, 'not-an-id', 'x')).toBe(false);
+    const refusing = slackConnector(fakeFetch(() => ({ body: { ok: false, error: 'cannot_dm_bot' } })).f as never);
+    expect(await refusing.dm!(secret, 'U0MARIA', 'x')).toBe(false);
+  });
+});
+
 describe('Discord bot names (2026-09-25)', () => {
   it('a username Discord accepts, or none', async () => {
     const { discordUsernameFor } = await import('../src/channels/discord.js');

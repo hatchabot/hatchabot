@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
 import { computeUsagePeriod, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
-import { discordPoolRef, parkDiscordBot, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
+import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -533,10 +533,10 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
     return results.filter(Boolean).length;
   };
   /** A parked Discord bot this caller may take: the one named, or the first of theirs / the house's. */
-  const parkedBotToTake = (me: string, pooled: string): DiscordBotRow | undefined => {
-    if (pooled === 'first') return store.listDiscordBots(me).find((b) => !b.archivedFor) ?? store.listDiscordBots(me)[0];
+  const parkedBotToTake = (me: string, pooled: string, kind: 'discord' | 'slack' = 'discord'): DiscordBotRow | undefined => {
+    if (pooled === 'first') return store.listDiscordBots(me, kind).find((b) => !b.archivedFor); // a bot kept for an archived agent is not offered
     const b = store.getDiscordBot(pooled);
-    return b && (b.ownerId === null || b.ownerId === me) ? b : undefined;
+    return b && (b.kind ?? 'discord') === kind && (b.ownerId === null || b.ownerId === me) ? b : undefined;
   };
 
   const ownedAgent = (req: FastifyRequest, id: string): Agent | undefined => {
@@ -6179,63 +6179,69 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     })));
 
   // ---- spare Discord bots (discordPool.ts) ----------------------------------
-  const discordBotView = (req: FastifyRequest) => {
+  /**
+   * The spare-bot pool, per app: Discord bots and Slack apps park here with
+   * their tokens, name and rooms, and an agent's Set up… (or `pooled`) takes
+   * one. One view: the spares this viewer may take, and the bots agents wear
+   * right now — the machine owner sees everyone's, others their own and the
+   * shared ones (Telegram's roster rule).
+   */
+  const poolView = (req: FastifyRequest, kind: 'discord' | 'slack') => {
     const me = ownerIdOf(req);
-    const rows = ownsLocalHost(req) ? store.listAllDiscordBots() : store.listDiscordBots(me);
-    // The bots agents wear right now, beside the spares — one roster, like
-    // Telegram's: the machine owner sees everyone's, others their own.
+    const rows = ownsLocalHost(req) ? store.listAllDiscordBots(kind) : store.listDiscordBots(me, kind);
     const inUse = store.listAllActiveAgents()
       .filter((a) => ownsLocalHost(req) || a.ownerId === me)
       .flatMap((a) => {
-        const ch = store.getChannelForAgent(a.id, 'discord');
+        const ch = store.getChannelForAgent(a.id, kind);
         if (!ch) return [];
         const st = (ch.settings ?? {}) as Record<string, unknown>;
         return [{
           applicationId: ch.accountId, botName: typeof st.botName === 'string' ? st.botName : undefined,
           servers: Array.isArray(st.servers) ? (st.servers as Array<{ id: string; name: string }>) : [],
+          team: typeof st.team === 'string' ? st.team : undefined,
           agentId: a.id, agentName: a.name, mine: a.ownerId === me, shared: st.pooledShared === true,
         }];
       });
-    return { bots: rows.map((b) => publicDiscordBot(b, me)), inUse, availableBots: store.listDiscordBots(me).length };
+    return { kind, bots: rows.map((b) => publicDiscordBot(b, me)), inUse, availableBots: store.listDiscordBots(me, kind).filter((b) => !b.archivedFor).length };
   };
-  app.get('/v1/discord-bots', async (req) => discordBotView(req));
-
-  /** Park a bot by its token: checked with Discord, stored under the pool, never returned. */
-  app.post<{ Body: { token?: string; shared?: boolean } }>('/v1/discord-bots', async (req, reply) => {
-    const conn = connectorFor('discord');
-    if (!conn) return reply.code(404).send({ error: 'Discord is not available.' });
-    const body = { token: String(req.body?.token ?? '') };
-    if (req.body?.shared && !ownsLocalHost(req)) return reply.code(403).send({ error: 'Only the machine owner can share a bot with everyone.' });
+  const discordBotView = (req: FastifyRequest) => poolView(req, 'discord');
+  const parkedBotFor = (req: FastifyRequest, id: string, kind: 'discord' | 'slack', reply: FastifyReply): DiscordBotRow | undefined => {
+    const b = store.getDiscordBot(id);
+    const me = ownerIdOf(req);
+    if (!b || (b.kind ?? 'discord') !== kind || (b.ownerId !== null && b.ownerId !== me && !ownsLocalHost(req))) { void reply.code(404).send({ error: 'No such parked bot.' }); return undefined; }
+    return b;
+  };
+  /** Park a bot by its token(s): checked with the platform, stored under the pool, never returned. */
+  const poolPark = (kind: 'discord' | 'slack') => async (req: FastifyRequest<{ Body: Record<string, unknown> }>, reply: FastifyReply) => {
+    const conn = connectorFor(kind);
+    if (!conn) return reply.code(404).send({ error: `${kind} is not available.` });
+    const body: Record<string, string> = {};
+    for (const f of conn.fields) body[f.key] = String((req.body as Record<string, unknown> | undefined)?.[f.key] ?? '');
+    const shared = (req.body as { shared?: boolean } | undefined)?.shared === true;
+    if (shared && !ownsLocalHost(req)) return reply.code(403).send({ error: 'Only the machine owner can share a bot with everyone.' });
     if (throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
     let verified;
     try { verified = await conn.verify(body); }
     catch (err) { if (err instanceof ConnectorError) { noteFailure(req, ownerIdOf(req)); return reply.code(400).send({ error: err.userMessage }); } throw err; }
-    const using = store.findAgentUsingAccount(verified.accountId, 'discord');
-    if (using) return reply.code(409).send({ error: `That bot is connected to "${using.name}". Remove it there first — it parks itself here.` });
+    const using = store.findAgentUsingAccount(verified.accountId, kind);
+    if (using) return reply.code(409).send({ error: `That bot is connected to ${using.ownerId === ownerIdOf(req) ? `"${using.name}"` : 'another agent'}. Remove it there first — it parks itself here.` });
     if (store.getDiscordBot(verified.accountId)) return reply.code(409).send({ error: 'That bot is already parked.' });
     const st = verified.settings as Record<string, unknown>;
-    const ref = discordPoolRef(verified.accountId);
+    const ref = poolRef(kind, verified.accountId);
     await secrets.put(ref, conn.secretValue(body));
     const row: DiscordBotRow = {
       applicationId: verified.accountId, botUserId: typeof st.botUserId === 'string' ? st.botUserId : undefined, botName: typeof st.botName === 'string' ? st.botName : undefined,
-      secretRef: ref, ownerId: req.body?.shared ? null : ownerIdOf(req),
+      secretRef: ref, ownerId: shared ? null : ownerIdOf(req),
       servers: Array.isArray(st.servers) ? (st.servers as DiscordBotRow['servers']) : [], warnings: verified.warnings,
-      addToServerUrl: verified.addToServerUrl, checkedAt: new Date().toISOString(), addedAt: new Date().toISOString(),
+      addToServerUrl: verified.addToServerUrl, checkedAt: new Date().toISOString(), addedAt: new Date().toISOString(), kind,
     };
     store.upsertDiscordBot(row);
-    return { bot: publicDiscordBot(row, ownerIdOf(req)), ...discordBotView(req) };
-  });
-
-  const parkedBotFor = (req: FastifyRequest, id: string, reply: FastifyReply): DiscordBotRow | undefined => {
-    const b = store.getDiscordBot(id);
-    const me = ownerIdOf(req);
-    if (!b || (b.ownerId !== null && b.ownerId !== me && !ownsLocalHost(req))) { void reply.code(404).send({ error: 'No such parked bot.' }); return undefined; }
-    return b;
+    return { bot: publicDiscordBot(row, ownerIdOf(req)), ...poolView(req, kind) };
   };
-  /** Ask Discord again about a parked bot (servers it joined, warnings cleared). */
-  app.post<{ Params: { id: string } }>('/v1/discord-bots/:id/recheck', async (req, reply) => {
-    const b = parkedBotFor(req, req.params.id, reply); if (!b) return reply;
-    const conn = connectorFor('discord')!;
+  /** Ask the platform again about a parked bot (rooms it joined, warnings cleared). */
+  const poolRecheck = (kind: 'discord' | 'slack') => async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const b = parkedBotFor(req, req.params.id, kind, reply); if (!b) return reply;
+    const conn = connectorFor(kind)!;
     let secret: string;
     try { secret = await secrets.get(b.secretRef); } catch { return reply.code(409).send({ error: 'That parked bot has lost its token — delete it and park it again.' }); }
     let verified;
@@ -6245,15 +6251,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const next: DiscordBotRow = { ...b, botName: typeof st.botName === 'string' ? st.botName : b.botName, servers: Array.isArray(st.servers) ? (st.servers as DiscordBotRow['servers']) : [], warnings: verified.warnings, addToServerUrl: verified.addToServerUrl ?? b.addToServerUrl, checkedAt: new Date().toISOString() };
     store.upsertDiscordBot(next);
     return { bot: publicDiscordBot(next, ownerIdOf(req)) };
-  });
-  /** Forget a parked bot: the stored token is discarded; the bot itself lives on at Discord. A shared bot is the machine owner's to delete. */
-  app.delete<{ Params: { id: string } }>('/v1/discord-bots/:id', async (req, reply) => {
-    const b = parkedBotFor(req, req.params.id, reply); if (!b) return reply;
+  };
+  /** Forget a parked bot: the stored token is discarded; the bot itself lives on at the platform. A shared bot is the machine owner's to delete. */
+  const poolRemove = (kind: 'discord' | 'slack') => async (req: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
+    const b = parkedBotFor(req, req.params.id, kind, reply); if (!b) return reply;
     if (b.ownerId === null && !ownsLocalHost(req)) return reply.code(403).send({ error: 'A shared bot is the machine owner\'s to delete.' });
     await secrets.delete(b.secretRef).catch(() => {});
     store.deleteDiscordBot(b.applicationId);
-    return { deleted: b.applicationId, ...discordBotView(req) };
-  });
+    return { deleted: b.applicationId, ...poolView(req, kind) };
+  };
+  // Literal paths: the management-chat coverage ledger is checked against them.
+  app.get('/v1/discord-bots', async (req) => poolView(req, 'discord'));
+  app.post<{ Body: Record<string, unknown> }>('/v1/discord-bots', poolPark('discord'));
+  app.post<{ Params: { id: string } }>('/v1/discord-bots/:id/recheck', poolRecheck('discord'));
+  app.delete<{ Params: { id: string } }>('/v1/discord-bots/:id', poolRemove('discord'));
+  app.get('/v1/slack-apps', async (req) => poolView(req, 'slack'));
+  app.post<{ Body: Record<string, unknown> }>('/v1/slack-apps', poolPark('slack'));
+  app.post<{ Params: { id: string } }>('/v1/slack-apps/:id/recheck', poolRecheck('slack'));
+  app.delete<{ Params: { id: string } }>('/v1/slack-apps/:id', poolRemove('slack'));
 
   app.get<{ Querystring: { name?: string } }>('/v1/channels/slack/manifest', async (req) =>
     slackManifest(String(req.query?.name ?? '').slice(0, 80)));
@@ -6275,7 +6290,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       /** The agent-wide door, shown on every card: applies to every app. */
       allowKnocks: !!agent.allowKnocks,
       /** Spare bots ready for a swap, per app. */
-      spare: { telegram: deps.channel.pool.availableCount?.(agent.ownerId) ?? 0, discord: store.listDiscordBots(agent.ownerId).filter((b) => !b.archivedFor).length },
+      spare: { telegram: deps.channel.pool.availableCount?.(agent.ownerId) ?? 0, discord: store.listDiscordBots(agent.ownerId, 'discord').filter((b) => !b.archivedFor).length, slack: store.listDiscordBots(agent.ownerId, 'slack').filter((b) => !b.archivedFor).length },
     };
   });
 
@@ -6300,10 +6315,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     let body = (req.body ?? {}) as Record<string, string>;
     // A parked bot (Settings → Discord bots): its token comes from the pool, nothing is pasted.
     let pooled: DiscordBotRow | undefined;
-    if (kind === 'discord' && typeof body.pooled === 'string' && body.pooled) {
-      pooled = parkedBotToTake(ownerIdOf(req), body.pooled);
-      if (!pooled) return reply.code(404).send({ error: body.pooled === 'first' ? 'No spare Discord bot is parked. Park one under ⚙ Settings → Discord, or paste a token.' : 'No such parked bot.' });
-      try { body = { token: await secrets.get(pooled.secretRef) }; }
+    if (typeof body.pooled === 'string' && body.pooled) {
+      pooled = parkedBotToTake(ownerIdOf(req), body.pooled, kind);
+      if (!pooled) return reply.code(404).send({ error: body.pooled === 'first' ? `No spare ${conn.label} bot is parked. Park one under ⚙ Settings → ${conn.label}, or paste a token.` : 'No such parked bot.' });
+      try { body = conn.credsFromSecret(await secrets.get(pooled.secretRef)); }
       catch { return reply.code(409).send({ error: 'That parked bot has lost its token — delete it from the pool and park it again.' }); }
     }
     if (!pooled && throttled(req, ownerIdOf(req))) return reply.code(429).send({ error: TOKEN_CHECK_THROTTLED });
@@ -6388,41 +6403,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * servers; the new one is named for the agent; the chat is told where to
    * find it next.
    */
-  app.post<{ Params: { id: string }; Body: { pooled?: string } }>('/v1/agents/:id/channels/discord/swap', async (req, reply) => {
+  app.post<{ Params: { id: string; kind: string }; Body: { pooled?: string } }>('/v1/agents/:id/channels/:kind/swap', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (busyNow(agent, reply)) return reply;
     if (agent.state !== 'RUNNING' && agent.state !== 'STOPPED') return reply.code(409).send({ error: `It is ${agent.state.toLowerCase()} — wait for it to settle first.` });
-    const conn = connectorFor('discord');
-    const old = store.getChannelForAgent(agent.id, 'discord');
-    if (!conn || !old) return reply.code(409).send({ error: 'This agent has no Discord bot to change.' });
+    const conn = connectorFor(req.params.kind);
+    if (!conn) return reply.code(404).send({ error: 'Unknown channel.' });
+    const kind = conn.kind;
+    const old = store.getChannelForAgent(agent.id, kind);
+    if (!old) return reply.code(409).send({ error: `This agent has no ${conn.label} bot to change.` });
     const me = ownerIdOf(req);
-    const wanted = typeof req.body?.pooled === 'string' && req.body.pooled ? store.getDiscordBot(req.body.pooled) : store.listDiscordBots(me)[0];
-    if (!wanted || (wanted.ownerId !== null && wanted.ownerId !== me)) {
-      return reply.code(409).send({ error: 'No spare bot to move to. Park one under ⚙ Settings → Discord, then try again.' });
+    const wanted = parkedBotToTake(me, typeof req.body?.pooled === 'string' && req.body.pooled ? req.body.pooled : 'first', kind);
+    if (!wanted) {
+      return reply.code(409).send({ error: `No spare bot to move to. Park one under ⚙ Settings → ${conn.label}, then try again.` });
     }
     let token: string;
     try { token = await secrets.get(wanted.secretRef); } catch { return reply.code(409).send({ error: 'That parked bot has lost its token — delete it from the pool and park it again.' }); }
     let verified;
     try { verified = await conn.verify(conn.credsFromSecret(token)); }
     catch (err) { if (err instanceof ConnectorError) return reply.code(400).send({ error: `The spare bot: ${err.userMessage}` }); throw err; }
-    const clash = store.findAgentUsingAccount(verified.accountId, 'discord');
+    const clash = store.findAgentUsingAccount(verified.accountId, kind);
     if (clash) return reply.code(409).send({ error: 'That bot is already connected to an agent.' });
     // Say goodbye where people still are, then park the old bot.
     const newName = String((verified.settings as Record<string, unknown>).botName ?? 'its new bot');
-    const told = agent.state === 'RUNNING'
-      ? await announceToMembers({ store, provider: providerFor(agent.hostId), log: trace(agent.id) }, {
-          agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: CHANNEL_ACCOUNT, kind: 'discord',
-          text: `📮 ${agent.name} is moving to the bot “${newName}”. Message that one from now on — this chat will stop answering. Everything it knows comes with it.`,
-        }).catch(() => 0)
-      : 0;
+    const told = await dmChannelPeople(agent, kind, old.secretRef, `📮 ${agent.name} is moving to the bot “${newName}”. Message that one from now on — this chat will stop answering. Everything it knows comes with it.`);
     let parked = false;
     try { await parkDiscordBot({ store, secrets }, agent.ownerId, old); parked = true; }
-    catch (err) { trace(agent.id)('channel.park_failed', { kind: 'discord', error: String(err).slice(0, 200) }); await secrets.delete(old.secretRef).catch(() => {}); }
-    const secretRef = `channel/${agent.id}/discord`;
+    catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); await secrets.delete(old.secretRef).catch(() => {}); }
+    const secretRef = `channel/${agent.id}/${kind}`;
     await secrets.put(secretRef, token);
-    store.replaceChannelRow(agent.id, 'discord', {
-      id: randomUUID(), agentId: agent.id, kind: 'discord', accountId: verified.accountId, secretRef,
+    store.replaceChannelRow(agent.id, kind, {
+      id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
       deepLink: verified.deepLink, createdAt: new Date().toISOString(),
       settings: {
         ...verified.settings, displayName: verified.displayName,
@@ -6433,11 +6445,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     });
     store.deleteDiscordBot(wanted.applicationId);
     if (wanted.secretRef !== secretRef) await secrets.delete(wanted.secretRef).catch(() => {});
-    trace(agent.id)('channel.swapped', { kind: 'discord', from: old.accountId, to: verified.accountId, told, parked });
-    const fresh = store.getChannelForAgent(agent.id, 'discord')!;
+    trace(agent.id)('channel.swapped', { kind, from: old.accountId, to: verified.accountId, told, parked });
+    const fresh = store.getChannelForAgent(agent.id, kind)!;
     if (conn.rename) await renameChannelBot(agent, fresh, agent.name);
     const started = kickRebuild(agent.id);
-    return { swapped: true, from: old.accountId, to: verified.accountId, told, parked, rebuilding: started, channel: publicChannel(store.getChannelForAgent(agent.id, 'discord')!) };
+    return { swapped: true, from: old.accountId, to: verified.accountId, told, parked, rebuilding: started, channel: publicChannel(store.getChannelForAgent(agent.id, kind)!) };
   });
 
   /**
@@ -6537,16 +6549,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const row = store.getChannelForAgent(agent.id, conn.kind);
     if (!row) return reply.code(404).send({ error: `It has no ${conn.label}.` });
     if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
-    // A Discord bot is parked for the next agent (its token, servers and
-    // name kept) rather than thrown away; Slack's tokens are discarded.
+    // The bot is parked for the next agent (its tokens, rooms and name kept)
+    // rather than thrown away — Discord's and Slack's alike.
     // Say goodbye while the token is still the agent's (Telegram's detach
     // farewell): people who reached it here lose it.
     const told = await dmChannelPeople(agent, conn.kind, row.secretRef, `👋 ${agent.name} no longer answers on ${conn.label}. Its owner took it off ${conn.label}; it is not gone. Reach it another way, or ask its owner.`);
     let parked = false;
-    if (conn.kind === 'discord') {
-      try { await parkDiscordBot({ store, secrets }, agent.ownerId, row); parked = true; }
-      catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
-    }
+    try { await parkDiscordBot({ store, secrets }, agent.ownerId, row); parked = true; }
+    catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
     if (!parked) await secrets.delete(row.secretRef).catch(() => {});
     store.deleteChannelForAgent(agent.id, conn.kind);
     trace(agent.id)('channel.detached', { kind: conn.kind, accountId: row.accountId, parked, told });
@@ -9059,13 +9069,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Discord, like Telegram: the bot is parked (kept for this agent, so a
       // restore takes it back unless somebody used it meanwhile) and the
       // people on it are told. Slack's tokens are the owner's app: left as is.
-      const dc = store.getChannelForAgent(agent.id, 'discord');
-      if (dc) {
-        const told = await dmChannelPeople(agent, 'discord', dc.secretRef, `📥 ${agent.name} has been archived by its owner. This bot does not answer for it while it is archived.`);
+      for (const kind of ['discord', 'slack'] as const) {
+        const dc = store.getChannelForAgent(agent.id, kind);
+        if (!dc) continue;
+        const told = await dmChannelPeople(agent, kind, dc.secretRef, `📥 ${agent.name} has been archived by its owner. This bot does not answer for it while it is archived.`);
         try { await parkDiscordBot({ store, secrets }, agent.ownerId, dc, { archivedFor: agent.id }); }
-        catch (err) { trace(agent.id)('channel.park_failed', { kind: 'discord', error: String(err).slice(0, 200) }); await secrets.delete(dc.secretRef).catch(() => {}); }
-        store.deleteChannelForAgent(agent.id, 'discord');
-        trace(agent.id)('channel.detached', { kind: 'discord', accountId: dc.accountId, parked: true, told, archived: true });
+        catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); await secrets.delete(dc.secretRef).catch(() => {}); }
+        store.deleteChannelForAgent(agent.id, kind);
+        trace(agent.id)('channel.detached', { kind, accountId: dc.accountId, parked: true, told, archived: true });
       }
     } catch (err) {
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -9090,26 +9101,29 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.state !== 'ARCHIVED') {
       return reply.code(409).send({ error: 'That agent is not archived.' });
     }
-    // The Discord bot it left in the pool comes back to it, if still there.
-    const kept = store.discordBotArchivedFor(agent.id);
-    if (kept && !store.getChannelForAgent(agent.id, 'discord')) {
+    // The bots it left in the pool come back to it, if still there. Their
+    // identity is checked with the platform again (a Slack deep link needs the
+    // app id; a Discord one the bot user) so the row is whole.
+    for (const kind of ['discord', 'slack'] as const) {
+      const kept = store.discordBotArchivedFor(agent.id, kind);
+      const conn = connectorFor(kind);
+      if (!kept || !conn || store.getChannelForAgent(agent.id, kind)) continue;
       try {
-        const token = await secrets.get(kept.secretRef);
-        const secretRef = `channel/${agent.id}/discord`;
-        await secrets.put(secretRef, token);
+        const secret = await secrets.get(kept.secretRef);
+        const verified = await conn.verify(conn.credsFromSecret(secret));
+        const secretRef = `channel/${agent.id}/${kind}`;
+        await secrets.put(secretRef, secret);
         store.insertChannel({
-          id: randomUUID(), agentId: agent.id, kind: 'discord', accountId: kept.applicationId, secretRef,
-          deepLink: kept.botUserId ? `https://discord.com/users/${encodeURIComponent(kept.botUserId)}` : `https://discord.com/users/${encodeURIComponent(kept.applicationId)}`,
-          createdAt: new Date().toISOString(),
-          settings: { botUserId: kept.botUserId, botName: kept.botName, servers: kept.servers, warnings: kept.warnings, addToServerUrl: kept.addToServerUrl, checkedAt: kept.checkedAt,
-            displayName: kept.botName ? (kept.servers.length ? `@${kept.botName} in ${kept.servers.map((g) => g.name || g.id).join(', ')}` : `@${kept.botName}`) : undefined,
-            rooms: { mode: 'off' }, ...(kept.ownerId === null ? { pooledShared: true } : {}) },
+          id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
+          deepLink: verified.deepLink, createdAt: new Date().toISOString(),
+          settings: { ...verified.settings, displayName: verified.displayName, ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
+            warnings: verified.warnings, rooms: { mode: 'off' }, ...(kept.ownerId === null ? { pooledShared: true } : {}) },
         });
         store.deleteDiscordBot(kept.applicationId);
         if (kept.secretRef !== secretRef) await secrets.delete(kept.secretRef).catch(() => {});
-        trace(agent.id)('channel.attached', { kind: 'discord', accountId: kept.applicationId, fromPool: true, restored: true });
+        trace(agent.id)('channel.attached', { kind, accountId: verified.accountId, fromPool: true, restored: true });
       } catch (err) {
-        app.log.warn({ agentId: agent.id, err: String(err) }, 'discord bot not restored');
+        app.log.warn({ agentId: agent.id, kind, err: String(err) }, 'parked bot not restored');
       }
     }
     store.setAgentState(agent.id, 'PROVISIONING');
@@ -9198,7 +9212,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     for (const other of store.listChannelsForAgent(agent.id)) {
       const told = await dmChannelPeople(agent, other.kind, other.secretRef, `👋 ${agent.name} has been deleted by its owner. This bot no longer answers for it.`);
       if (told) trace(agent.id)('channel.farewell', { kind: other.kind, told });
-      if (other.kind === 'discord' && req.query.recycleBot !== '0') {
+      if (req.query.recycleBot !== '0') {
         try { await parkDiscordBot({ store, secrets }, agent.ownerId, other); continue; }
         catch (err) { app.log.warn({ agentId: agent.id, err: String(err) }, 'discord bot park failed'); }
       }

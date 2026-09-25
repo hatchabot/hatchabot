@@ -277,6 +277,20 @@ export const REST_TOOLS: RestTool[] = [
     call: () => ({ method: 'GET', path: '/v1/discord-bots' }),
   },
   {
+    name: 'list_slack_apps', tier: 'read',
+    description: 'The Slack apps this server knows: the spares parked under Settings → Slack (name, workspace, channels, warnings, shared or not) and the ones agents use right now. No tokens.',
+    input_schema: obj({}),
+    call: () => ({ method: 'GET', path: '/v1/slack-apps' }),
+  },
+  {
+    name: 'add_slack', tier: 'mutate', agentArg: true,
+    description: 'Give an agent a Slack app from the spares parked under Settings → Slack (instant, no tokens). If none is parked, the owner must paste the two tokens in the app — tokens never go through chat.',
+    input_schema: obj({ agent: agentRef }, ['agent']),
+    call: ({ agent }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/channels/slack`, body: { pooled: 'first' } }),
+    card: ({ agent }) => `✈ Give "${agent!.name}" a spare Slack app, then rebuild it so it answers there`,
+    done: (r) => (r && typeof r === 'object' && 'displayName' in r ? `It is ${String((r as { displayName: string }).displayName)}.` : undefined),
+  },
+  {
     name: 'add_discord', tier: 'mutate', agentArg: true,
     description: 'Give an agent a Discord bot from the spare bots parked under Settings → Discord (instant, no token). If none is parked, the owner must paste a bot token in the app — tokens never go through chat.',
     input_schema: obj({ agent: agentRef }, ['agent']),

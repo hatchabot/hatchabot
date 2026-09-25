@@ -655,11 +655,16 @@ platforms keep different, and why, is the ledger in `docs/channel-parity.md`.
 
 ## Slack and Discord
 
-> **Discord is offered to everyone (v2.66.0); Slack still waits.** Slack is
-> built and tested against a fake, but has not been tried against a real
-> Slack app, so the app keeps it behind `?dev` in the address (not
-> remembered). An agent that already has Slack attached keeps showing and
-> managing it either way.
+> **Discord is offered to everyone (v2.66.0); Slack has every control the
+> others have (v2.75.0) and waits for one real-app trial.** Slack is built and
+> tested against a fake Slack. Until someone has connected a real Slack app
+> and seen it answer, its tab and Settings → Slack appear where something
+> Slack already exists, or with `?dev` in the address. The trial takes about
+> ten minutes: under an agent's Slack tab, *Set up…* → *Copy app manifest* →
+> create the app from the manifest at api.slack.com → install it → paste the
+> two tokens; then DM the app in Slack, approve your knock with *That's me*,
+> and say hi. What to report if it fails: the card's warnings, the Setup log,
+> and `hatchabot logs <agent>`.
 
 An agent can also be reached on Discord (and Slack), beside or instead of
 Telegram. Both connect outward from this machine, so nothing here has to be
@@ -668,9 +673,10 @@ which you make on that platform and paste into the agent's **Discord** tab →
 **Set up…**. The sheet walks through it in three steps; it takes about five
 minutes.
 
-**Spare Discord bots.** Removing Discord from an agent, or deleting the
-agent, parks its bot under ⚙ Settings → **Discord** with its
-name, servers and token, instead of throwing the token away. A parked bot can
+**Spare Discord bots, spare Slack apps.** Removing Discord or Slack from an
+agent, deleting or archiving the agent, parks its bot (or app, with both
+tokens) under ⚙ Settings → **Discord** or **Slack** with its name and
+servers (channels), instead of throwing the tokens away. A parked bot can
 be parked ahead of time too (paste its token there; the machine owner can
 share one with everyone), re-checked with Discord, or deleted. An agent's
 Set up… offers a parked bot before asking for a token, so moving a bot
@@ -692,7 +698,11 @@ group-chat changes.
 - **Slack** needs two tokens from one app: the bot token (`xoxb-`) and an
   app-level token (`xapp-`) with `connections:write`. **Copy app manifest**
   gives Slack everything else (Socket Mode, scopes, events), named for the
-  agent. A free Slack workspace allows 10 apps.
+  agent. A free Slack workspace allows 10 apps. Slack has no API to rename an
+  app, so its name is the manifest's; everything else on the card (Re-check
+  with the channels it is in, Change bot, Remove, people and knocks, group
+  chats: off / every channel it is in / one channel, who can reach it) is the
+  same as Discord's, and so are the goodbyes, moving notes and parking.
 - **Discord** needs the bot token, with **Message Content Intent** turned on.
   After connecting, **Add to a server** puts the bot in one of yours; people
   can only message it once they share a server with it.

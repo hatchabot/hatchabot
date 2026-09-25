@@ -578,6 +578,8 @@ export class Store {
       // it back if nobody else did).
       `ALTER TABLE discord_bots ADD COLUMN prior_chat_ids TEXT`,
       `ALTER TABLE discord_bots ADD COLUMN archived_for TEXT`,
+      // The same pool holds parked Slack apps (their two tokens in one secret).
+      `ALTER TABLE discord_bots ADD COLUMN kind TEXT NOT NULL DEFAULT 'discord'`,
       // The account's linked Telegram identity ("That's me" on a pairing card):
       // the durable, account-level form of what knownChannelUserId used to
       // infer from membership rows — survives deleting every agent, and lets a
@@ -1322,33 +1324,34 @@ export class Store {
     servers: r.servers ? safeJson(r.servers, []) : [], warnings: r.warnings ? safeJson(r.warnings, []) : [],
     addToServerUrl: r.add_to_server_url ?? undefined, checkedAt: r.checked_at ?? undefined, addedAt: r.added_at,
     priorChatIds: r.prior_chat_ids ? safeJson(r.prior_chat_ids, []) : [], archivedFor: r.archived_for ?? undefined,
+    kind: (r.kind ?? 'discord') as 'discord' | 'slack',
   });
   upsertDiscordBot(b: DiscordBotRow): void {
     this.db.prepare(
-      `INSERT INTO discord_bots (application_id, bot_user_id, bot_name, secret_ref, owner_id, servers, warnings, add_to_server_url, checked_at, added_at, prior_chat_ids, archived_for)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO discord_bots (application_id, bot_user_id, bot_name, secret_ref, owner_id, servers, warnings, add_to_server_url, checked_at, added_at, prior_chat_ids, archived_for, kind)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(application_id) DO UPDATE SET bot_user_id = excluded.bot_user_id, bot_name = excluded.bot_name, secret_ref = excluded.secret_ref,
          owner_id = excluded.owner_id, servers = excluded.servers, warnings = excluded.warnings, add_to_server_url = excluded.add_to_server_url, checked_at = excluded.checked_at,
-         prior_chat_ids = excluded.prior_chat_ids, archived_for = excluded.archived_for`,
+         prior_chat_ids = excluded.prior_chat_ids, archived_for = excluded.archived_for, kind = excluded.kind`,
     ).run(b.applicationId, b.botUserId ?? null, b.botName ?? null, b.secretRef, b.ownerId, JSON.stringify(b.servers), JSON.stringify(b.warnings), b.addToServerUrl ?? null, b.checkedAt ?? null, b.addedAt,
-      b.priorChatIds?.length ? JSON.stringify(b.priorChatIds) : null, b.archivedFor ?? null);
+      b.priorChatIds?.length ? JSON.stringify(b.priorChatIds) : null, b.archivedFor ?? null, b.kind ?? 'discord');
   }
-  /** The parked bot an archived agent left behind, if nobody took it meanwhile. */
-  discordBotArchivedFor(agentId: string): DiscordBotRow | undefined {
-    const r = this.db.prepare(`SELECT * FROM discord_bots WHERE archived_for = ?`).get(agentId) as any;
+  /** The parked bot an archived agent left behind on that app, if nobody took it meanwhile. */
+  discordBotArchivedFor(agentId: string, kind: 'discord' | 'slack' = 'discord'): DiscordBotRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM discord_bots WHERE archived_for = ? AND kind = ?`).get(agentId, kind) as any;
     return r ? this.#rowToDiscordBot(r) : undefined;
   }
   getDiscordBot(applicationId: string): DiscordBotRow | undefined {
     const r = this.db.prepare(`SELECT * FROM discord_bots WHERE application_id = ?`).get(applicationId) as any;
     return r ? this.#rowToDiscordBot(r) : undefined;
   }
-  /** A viewer's own parked bots plus the shared ones. */
-  listDiscordBots(viewerId: string): DiscordBotRow[] {
-    return (this.db.prepare(`SELECT * FROM discord_bots WHERE owner_id = ? OR owner_id IS NULL ORDER BY added_at`).all(viewerId) as any[]).map(this.#rowToDiscordBot);
+  /** A viewer's own parked bots plus the shared ones, on one app. */
+  listDiscordBots(viewerId: string, kind: 'discord' | 'slack' = 'discord'): DiscordBotRow[] {
+    return (this.db.prepare(`SELECT * FROM discord_bots WHERE (owner_id = ? OR owner_id IS NULL) AND kind = ? ORDER BY added_at`).all(viewerId, kind) as any[]).map(this.#rowToDiscordBot);
   }
-  /** Every parked bot, for the machine owner's view. */
-  listAllDiscordBots(): DiscordBotRow[] {
-    return (this.db.prepare(`SELECT * FROM discord_bots ORDER BY added_at`).all() as any[]).map(this.#rowToDiscordBot);
+  /** Every parked bot on one app, for the machine owner's view. */
+  listAllDiscordBots(kind: 'discord' | 'slack' = 'discord'): DiscordBotRow[] {
+    return (this.db.prepare(`SELECT * FROM discord_bots WHERE kind = ? ORDER BY added_at`).all(kind) as any[]).map(this.#rowToDiscordBot);
   }
   deleteDiscordBot(applicationId: string): void {
     this.db.prepare(`DELETE FROM discord_bots WHERE application_id = ?`).run(applicationId);

@@ -1779,11 +1779,41 @@
     </label>
     <div class="err" id="dpoolErr"></div>
     <div class="actions" style="justify-content:flex-start">
-      <button class="primary" id="dpoolAddBtn" onclick="addDiscordPoolBot()">Add to pool</button>
+      <button class="primary" id="dpoolAddBtn" onclick="addPoolBot('discord')">Add to pool</button>
     </div>
 
     <h4 style="margin:18px 0 6px">Bot pool</h4>
     <div id="dpoolList">Loading…</div>
+  </section>
+
+  <section id="paneSlack" role="tabpanel" hidden>
+    <div class="sub">
+      Spare Slack apps. With apps parked here an agent gets Slack
+      <b>instantly</b>, and removing Slack from an agent (or deleting it) parks its app back, workspace and channels kept.
+      <details style="margin-top:4px"><summary style="cursor:pointer">Whose apps are whose</summary>
+      <div style="margin-top:4px">An app belongs to whoever made it at api.slack.com, so each account takes only
+      its own parked apps — plus <b>shared</b> house apps donated to everyone on this server. A free Slack workspace allows 10 apps.</div></details>
+    </div>
+    <div class="pool-status" id="spoolStatus"></div>
+    <h4 style="margin:0 0 4px">Add an app</h4>
+    <div class="sub">
+      Make one at <a href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noopener">api.slack.com</a> from a manifest
+      (<button type="button" class="hbtn" onclick="chanCopyManifest(this, 'Hatchabot agent')">Copy app manifest</button>), install it to your workspace,
+      then paste its two tokens — they're verified with Slack before they're stored. Its name is set in the manifest; Slack has no API to rename it.
+    </div>
+    <input type="password" id="spoolBot" placeholder="xoxb-… (Bot User OAuth Token)" autocomplete="off" style="font-family:ui-monospace,monospace">
+    <input type="password" id="spoolApp" placeholder="xapp-… (App-Level Token, connections:write)" autocomplete="off" style="font-family:ui-monospace,monospace;margin-top:6px">
+    <label id="spoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+      <input type="checkbox" id="spoolShared" style="width:auto">
+      <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
+    </label>
+    <div class="err" id="spoolErr"></div>
+    <div class="actions" style="justify-content:flex-start">
+      <button class="primary" id="spoolAddBtn" onclick="addPoolBot('slack')">Add to pool</button>
+    </div>
+
+    <h4 style="margin:18px 0 6px">App pool</h4>
+    <div id="spoolList">Loading…</div>
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
@@ -2592,6 +2622,7 @@ const DEV = new URLSearchParams(location.search).has('dev');
 const previewing = () => DEV;
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
 let discordPoolAvail = 0; // parked Discord bots (Settings → Discord), for the spare-bots tile
+let slackPoolAvail = 0; // parked Slack apps (Settings → Slack)
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
 let availableSource = {}; // profile id -> 'runtime' | 'curated' — was the list PROBED live, or the offline fallback
@@ -3354,7 +3385,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', discord: 'paneDiscord', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
+const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', discord: 'paneDiscord', slack: 'paneSlack', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
 /**
  * v2 regroups the Settings panel's classic tabs by what people come to do:
@@ -3368,6 +3399,7 @@ const V2_SETTINGS = [
   ['classes', 'Classes', ['classes']],
   ['pool', 'Telegram', ['pool']],
   ['discord', 'Discord', ['discord']],
+  ['slack', 'Slack', ['slack']],
   ['conn', 'Connections', ['conn']],
   ['machines', 'Hosts', ['hosts', 'servers']],
   // One tab for every image on the machine: the fleet's own first, then the
@@ -3412,7 +3444,7 @@ function showTab(name) {
     for (const pane of g[2]) { showTabPane(pane); v2Sectionise($(TABS[pane])); } // runs each pane's loader
     for (const [key, pane] of Object.entries(TABS)) $(pane).hidden = !g[2].includes(key);
     for (const h of document.querySelectorAll('.v2settingshead')) h.hidden = g[2].length < 2;
-    $('v2SettingsTabs').innerHTML = V2_SETTINGS.map(([k, label]) =>
+    $('v2SettingsTabs').innerHTML = V2_SETTINGS.filter(([k]) => k !== 'slack' || slackVisible()).map(([k, label]) =>
       `<button class="tab" role="tab" aria-selected="${k === g[0]}" onclick="showTab('${k}')">${label}</button>`).join('');
     return;
   }
@@ -3429,7 +3461,8 @@ function showTabPane(name) {
   if (name === 'conn') loadConnections();
   if (name === 'hosts') { loadHosts(); loadEmbedder(); }
   if (name === 'pool') loadPool();
-  if (name === 'discord') void loadDiscordPool();
+  if (name === 'discord') void loadPoolPane('discord');
+  if (name === 'slack') void loadPoolPane('slack');
   if (name === 'backups') loadBackups();
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
   if (name === 'security') { loadPosture(); void loadCliTokens(); }
@@ -3726,25 +3759,36 @@ async function loadPool() {
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
-// ---- spare Discord bots (Settings → Discord) ------------------
-let discordPool = [];
-async function loadDiscordPool() {
-  const el = $('dpoolList'); if (!el) return;
-  const sharedRow = $('dpoolSharedRow'); if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
+// ---- spare Discord bots and Slack apps (Settings → Discord / Slack) ------------------
+/** Slack waits for a real-app trial: shown where something Slack already exists, or in preview. */
+function slackVisible() {
+  return previewing() || slackPoolAvail > 0 || agents.some(a => (a.otherChannels || []).some(c => c.kind === 'slack'));
+}
+const POOL_UI = {
+  discord: { path: '/v1/discord-bots', pfx: 'dpool', label: 'Discord', room: 'server', rooms: 'servers', mark: 'discord', bg: '#5865f2' },
+  slack: { path: '/v1/slack-apps', pfx: 'spool', label: 'Slack', room: 'channel', rooms: 'channels', mark: 'slack', bg: '#4a154b' },
+};
+let discordPool = [], slackPool = [];
+async function loadDiscordPool() { return loadPoolPane('discord'); }
+async function loadPoolPane(kind) {
+  const U = POOL_UI[kind]; if (!U) return;
+  const el = $(`${U.pfx}List`); if (!el) return;
+  const sharedRow = $(`${U.pfx}SharedRow`); if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
   try {
-    const r = await api('/v1/discord-bots');
-    discordPool = r.bots ?? [];
+    const r = await api(U.path);
+    const pool = r.bots ?? [];
+    if (kind === 'discord') discordPool = pool; else slackPool = pool;
     const inUse = r.inUse ?? [];
-    const spare = discordPool.filter(b => !b.archivedFor);
+    const spare = pool.filter(b => !b.archivedFor);
     const ready = Number(r.availableBots ?? spare.filter(b => b.mine || b.shared).length);
-    const st = $('dpoolStatus');
+    const st = $(`${U.pfx}Status`);
     if (st) st.innerHTML = `<span class="pool-dot"${ready > 0 ? '' : ' style="color:var(--off)"'}>●</span>
-      <b>${ready}</b> spare bot${ready === 1 ? '' : 's'} ready${inUse.length ? ` <span class="sub">· ${inUse.length} in use by agents</span>` : ''}
-      ${ready ? '' : '<span class="sub">· an agent\u2019s Set up… will ask for a bot token</span>'}`;
+      <b>${ready}</b> spare ${kind === 'slack' ? 'app' : 'bot'}${ready === 1 ? '' : 's'} ready${inUse.length ? ` <span class="sub">· ${inUse.length} in use by agents</span>` : ''}
+      ${ready ? '' : `<span class="sub">· an agent’s Set up… will ask for ${kind === 'slack' ? 'the app’s tokens' : 'a bot token'}</span>`}`;
     // The same four questions Settings → Telegram answers, in the same order.
     const rows = [
       ...spare.map(b => ({ ...b, free: true })),
-      ...discordPool.filter(b => b.archivedFor).map(b => ({ ...b, free: true, kept: true })),
+      ...pool.filter(b => b.archivedFor).map(b => ({ ...b, free: true, kept: true })),
       ...inUse.map(b => ({ ...b, free: false })),
     ];
     const GROUPS = [
@@ -3754,18 +3798,18 @@ async function loadDiscordPool() {
       ['Free — shared with you', b => b.free && !b.mine && !b.kept, 'Parked by someone else on this server; your next agent can take one.'],
       ['In use — someone else’s', b => !b.free && !b.mine, ''],
     ];
-    const dmark = `<span class="v2chan-mark v2mk-discord" style="background:#5865f2;width:18px;height:18px;vertical-align:-4px">${V2_MARK_SVG.discord}</span>`;
+    const mark = `<span class="v2chan-mark v2mk-${U.mark}" style="background:${U.bg};width:18px;height:18px;vertical-align:-4px">${V2_MARK_SVG[U.mark]}</span>`;
     const row = (b) => `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
-        <span class="grow">${dmark} <b class="pii">${esc(b.botName || b.applicationId)}</b>${b.shared ? ' <span class="chip">shared</span>' : ''}
+        <span class="grow">${mark} <b class="pii">${esc(b.botName || b.applicationId)}</b>${b.shared ? ' <span class="chip">shared</span>' : ''}${b.team ? ` <span class="sub">in ${esc(b.team)}</span>` : ''}
           ${!b.free ? `<span class="sub">· ${esc(b.agentName || 'an agent')}</span>` : ''}
-          <div class="sub">${b.servers?.length ? `In ${b.servers.map(g => esc(g.name || g.id)).join(', ')}` : 'Not in any server yet'}${b.checkedAt ? ` · checked ${esc(ago(b.checkedAt))}` : ''}</div>
+          <div class="sub">${b.servers?.length ? `In ${b.servers.map(g => esc(g.name || g.id)).join(', ')}` : `Not in any ${U.room} yet`}${b.checkedAt ? ` · checked ${esc(ago(b.checkedAt))}` : ''}</div>
           ${b.warnings?.length ? `<ul class="v2chan-warn">${b.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}</span>
         <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
           ${b.free
             ? `${b.addToServerUrl ? `<a class="btn" href="${esc(b.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
-               <button onclick="recheckDiscordPoolBot('${jsq(b.applicationId)}', this)" title="Ask Discord again: servers, intent">↻ Re-check</button>
-               ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removeDiscordPoolBot('${jsq(b.applicationId)}','${jsq(b.botName || b.applicationId)}')" title="Discard the stored token. The bot itself still exists in the Discord developer portal.">🗑 Delete</button>` : ''}`
-            : `<span class="sub" title="Its agent would lose the bot it answers on. Remove Discord from the agent (or delete or archive it) — that parks the bot back here.">in use</span>`}
+               <button onclick="recheckPoolApp('${kind}','${jsq(b.applicationId)}', this)" title="Ask ${U.label} again: ${U.rooms}, and whether anything still needs fixing">↻ Re-check</button>
+               ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removePoolApp('${kind}','${jsq(b.applicationId)}','${jsq(b.botName || b.applicationId)}')" title="Discard the stored token${kind === 'slack' ? 's' : ''}. The ${kind === 'slack' ? 'app' : 'bot'} itself still exists at ${U.label}.">🗑 Delete</button>` : ''}`
+            : `<span class="sub" title="Its agent would lose the ${kind === 'slack' ? 'app' : 'bot'} it answers on. Remove ${U.label} from the agent (or delete or archive it) — that parks it back here.">in use</span>`}
         </span></div>`;
     el.innerHTML = rows.length
       ? GROUPS.map(([label, pick, hint]) => {
@@ -3774,21 +3818,36 @@ async function loadDiscordPool() {
           return `<div style="margin:10px 0 0"><b style="font-size:13px">${label}</b> <span class="sub">· ${mine.length}</span>
             ${hint ? `<div class="sub" style="margin:2px 0 0">${hint}</div>` : ''}</div>${mine.map(row).join('')}`;
         }).join('')
-      : '<div class="sub">Empty — add a spare bot above, or park one when removing Discord from an agent.</div>';
+      : `<div class="sub">Empty — add a spare above, or park one when removing ${U.label} from an agent.</div>`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
-async function addDiscordPoolBot() {
-  const token = $('dpoolToken').value.trim();
-  $('dpoolErr').textContent = '';
-  if (!token) { $('dpoolErr').textContent = 'Paste the bot token first.'; return; }
-  $('dpoolAddBtn').disabled = true;
+async function addPoolBot(kind) {
+  const U = POOL_UI[kind];
+  const body = kind === 'slack'
+    ? { botToken: $('spoolBot').value.trim(), appToken: $('spoolApp').value.trim(), shared: $('spoolShared').checked }
+    : { token: $('dpoolToken').value.trim(), shared: $('dpoolShared').checked };
+  $(`${U.pfx}Err`).textContent = '';
+  if (kind === 'slack' ? !(body.botToken && body.appToken) : !body.token) { $(`${U.pfx}Err`).textContent = kind === 'slack' ? 'Paste both tokens first.' : 'Paste the bot token first.'; return; }
+  $(`${U.pfx}AddBtn`).disabled = true;
   try {
-    const r = await api('/v1/discord-bots', { method: 'POST', body: { token, shared: $('dpoolShared').checked } });
-    $('dpoolToken').value = ''; $('dpoolShared').checked = false;
-    toast(`${r.bot.botName || 'The bot'} is parked${r.bot.warnings?.length ? ` — ${r.bot.warnings.length} thing${r.bot.warnings.length === 1 ? '' : 's'} to fix` : ''}.`);
-    await loadDiscordPool();
-  } catch (e) { $('dpoolErr').textContent = e.message; }
-  finally { $('dpoolAddBtn').disabled = false; }
+    const r = await api(U.path, { method: 'POST', body });
+    if (kind === 'slack') { $('spoolBot').value = ''; $('spoolApp').value = ''; $('spoolShared').checked = false; }
+    else { $('dpoolToken').value = ''; $('dpoolShared').checked = false; }
+    toast(`${r.bot.botName || 'It'} is parked${r.bot.warnings?.length ? ` — ${r.bot.warnings.length} thing${r.bot.warnings.length === 1 ? '' : 's'} to fix` : ''}.`);
+    await loadPoolPane(kind);
+  } catch (e) { $(`${U.pfx}Err`).textContent = e.message; }
+  finally { $(`${U.pfx}AddBtn`).disabled = false; }
+}
+async function recheckPoolApp(kind, id, btn) {
+  btn.disabled = true;
+  try { await api(`${POOL_UI[kind].path}/${encodeURIComponent(id)}/recheck`, { method: 'POST', body: {} }); await loadPoolPane(kind); }
+  catch (e) { toast(e.message, 8000); btn.disabled = false; }
+}
+async function removePoolApp(kind, id, name) {
+  const U = POOL_UI[kind];
+  if (!confirm(`Delete ${name} from the pool?\n\nHatchabot discards its stored token${kind === 'slack' ? 's' : ''}. The ${kind === 'slack' ? 'app' : 'bot'} itself still exists — remove it for good at ${U.label}.`)) return;
+  try { await api(`${U.path}/${encodeURIComponent(id)}`, { method: 'DELETE' }); await loadPoolPane(kind); }
+  catch (e) { toast(e.message, 10000); }
 }
 async function recheckPoolBot(username, btn) {
   btn.disabled = true;
@@ -10236,7 +10295,8 @@ async function refresh(withMeta) {
     // COUNT plus a tiny roster, so the cost is noise next to /v1/agents.
     api('/v1/pool').then(p => {
       poolAvail = p.availableBots;
-      api('/v1/discord-bots').then(d => { discordPoolAvail = (d.bots || []).length; }).catch(() => {});
+      api('/v1/discord-bots').then(d => { discordPoolAvail = (d.bots || []).filter(b => !b.archivedFor).length; }).catch(() => {});
+      api('/v1/slack-apps').then(d => { slackPoolAvail = (d.bots || []).filter(b => !b.archivedFor).length; }).catch(() => {});
       const el = $('poolInfo');
       el.hidden = false; // always shown — "0 instant bots ready" is useful too
       const n = p.availableBots;
@@ -10727,7 +10787,7 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', previewing() ? 'Slack & Discord' : 'Discord'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', 'Discord'], ['slack', 'Slack'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
 /** Where each classic edit tab now lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
 const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
@@ -10833,7 +10893,8 @@ function v2RenderSheetBar() {
 function v2RenderSheet() {
   const a = v2Find(v2AgentId); if (!a) return v2Close();
   v2RenderSheetBar();
-  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'files' || k === 'advanced') : V2_TABS;
+  const hasSlack = previewing() || (a.otherChannels || []).some(c => c.kind === 'slack') || slackPoolAvail > 0;
+  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'files' || k === 'advanced') : V2_TABS.filter(([k]) => k !== 'slack' || hasSlack);
   if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
   $('v2Tabs').hidden = !tabs.length;
   $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
@@ -10971,8 +11032,10 @@ function v2Pane(a, tab) {
       <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="telegram"><div class="sub">Loading…</div></div>
       ${a.botUsername ? slot('paneEditTg') : ''}`;
     case 'channels': return a.state === 'ARCHIVED' ? row('Discord', '<span>Archived agents have no bot. Restore it to get its Discord bot back.</span>') : `
-      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="discord,slack"><div class="sub">Loading…</div></div>
-      ${previewing() ? '' : `<div class="sub" style="margin-top:8px">Slack is built too, but has not been tried against a real Slack app yet; add <code>?dev</code> to the address to work on it.</div>`}`;
+      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="discord"><div class="sub">Loading…</div></div>`;
+    case 'slack': return a.state === 'ARCHIVED' ? row('Slack', '<span>Archived agents have no app. Restore it to get its Slack app back.</span>') : `
+      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="slack"><div class="sub">Loading…</div></div>
+      ${previewing() ? `<div class="sub" style="margin-top:8px">Slack has not been tried against a real Slack app yet: connect one and say what breaks.</div>` : ''}`;
     case 'knowledge': return `
       ${slot('paneEditData')}
       ${slot('paneEditConn')}
@@ -11094,19 +11157,19 @@ async function v2LoadChans(id) {
     const known = servers.some(g => g.id === rooms.roomId);
     // The rooms it may answer in: the bot's own servers as a picker (Discord),
     // the rooms the gateway has seen (Telegram, via Find rooms), or an ID.
-    const roomPicker = kind === 'discord' && servers.length ? `
+    const roomPicker = (kind === 'discord' || kind === 'slack') && servers.length ? `
         <select id="chanRoomPick-${kind}" style="width:auto"${rooms.mode === 'room' ? '' : ' hidden'} onchange="$('chanRoom-${kind}').hidden = this.value !== ''; if (this.value) $('chanRoom-${kind}').value = this.value">
           ${servers.map(g => `<option value="${esc(g.id)}"${rooms.roomId === g.id ? ' selected' : ''}>${esc(g.name || g.id)}</option>`).join('')}
-          <option value=""${rooms.mode === 'room' && !known ? ' selected' : ''}>Another server (type its ID)</option>
+          <option value=""${rooms.mode === 'room' && !known ? ' selected' : ''}>Another ${kind === 'slack' ? 'channel' : 'server'} (type its ID)</option>
         </select>`
       : kind === 'telegram' ? `
         <select id="chanRoomPick-${kind}" style="width:auto"${rooms.mode === 'room' ? '' : ' hidden'} onchange="$('chanRoom-${kind}').value = this.value">
           ${rooms.roomId ? `<option value="${esc(rooms.roomId)}" selected>room ${esc(rooms.roomId)}</option>` : '<option value="">— find rooms first —</option>'}
         </select>
         <button id="chanRoomFind-${kind}"${rooms.mode === 'room' ? '' : ' hidden'} onclick="chanFindRooms('${jsq(id)}', this)">Find rooms</button>` : '';
-    const roomInputHidden = rooms.mode !== 'room' || (kind === 'discord' && roomPicker && known) || kind === 'telegram';
+    const roomInputHidden = rooms.mode !== 'room' || ((kind === 'discord' || kind === 'slack') && roomPicker && known) || kind === 'telegram';
     const modeOptions = kind === 'slack'
-      ? [['off', 'Off: direct messages only'], ['room', 'One channel']]
+      ? [['off', 'Off: direct messages only'], ['members', 'Every channel it is in — people you admitted, when @mentioned'], ['room', 'One channel']]
       : kind === 'discord'
         ? [['off', 'Off: direct messages only'], ['members', 'Every server it is in — people you admitted, when @mentioned'], ['room', 'One server']]
         : [['members', 'Any group — people you admitted, when @mentioned (default)'], ['off', 'Off: direct messages only'], ['room', 'One group — everyone in it, when @mentioned']];
@@ -11116,15 +11179,16 @@ async function v2LoadChans(id) {
     const pending = c.pendingName;
     return `<div class="v2chan"><div class="v2chan-h">${mark}<b>${label}</b><span>${esc(c.displayName || '')}</span>
         ${canChange ? `<button onclick="chanRecheck('${jsq(id)}','${kind}', this)" title="Ask ${label} again: whether the bot answers, what it is called${kind === 'discord' ? ', servers it is in' : kind === 'telegram' ? ', its group settings at BotFather' : ''}, and whether anything still needs fixing">↻ Re-check</button>` : ''}
-        ${canChange && c.botName && agentName && c.botName !== agentName ? `<button onclick="syncBotName('${jsq(id)}','${jsq(agentName)}','${kind}')" style="border-color:var(--warn)" title="${label} shows the bot as '${esc(c.botName)}'; rename it to match the agent">🏷 Sync name</button>` : ''}</div>
+        ${canChange && kind !== 'slack' && c.botName && agentName && c.botName !== agentName ? `<button onclick="syncBotName('${jsq(id)}','${jsq(agentName)}','${kind}')" style="border-color:var(--warn)" title="${label} shows the bot as '${esc(c.botName)}'; rename it to match the agent">🏷 Sync name</button>` : ''}</div>
       <div class="sub">${linked}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}${pending?.retryAt ? ` <span style="color:var(--warn)" title="${label} allows a bot only a few name changes an hour">Rename to “${esc(pending.name || agentName)}” queued.</span>` : ''}</div>
       ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${kind === 'discord' ? `<div class="sub">${servers.length ? `In ${servers.length === 1 ? 'one server' : `${servers.length} servers`}: ${servers.map(g => `<b>${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any server yet.'} People can only message it once they share a server with it.</div>` : ''}
+      ${kind === 'slack' ? `<div class="sub">${c.team ? `In the <b>${esc(c.team)}</b> workspace. ` : ''}${servers.length ? `In ${servers.length === 1 ? 'one channel' : `${servers.length} channels`}: ${servers.map(g => `<b>#${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any channel yet: invite it with /invite in a channel.'}</div>` : ''}
       ${kind === 'telegram' ? `<div class="sub">Its @handle is fixed for life; its display name follows the agent's name.${c.pooled ? ' A pool bot: deleting or archiving the agent parks it for the next one.' : ' Your own bot: it stays yours.'}</div>` : ''}
       <div class="v2chan-h">
         ${c.deepLink ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
         ${c.addToServerUrl ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
-        ${canChange && kind !== 'slack' && spares > 0 ? `<button onclick="chanSwap('${jsq(id)}','${kind}')" title="Move it onto a spare bot from your pool: members and memory come with it; the old bot is parked, and everyone on it is told where to find it">🔁 Change bot…</button>` : ''}
+        ${canChange && spares > 0 ? `<button onclick="chanSwap('${jsq(id)}','${kind}')" title="Move it onto a spare bot from your pool: members and memory come with it; the old bot is parked, and everyone on it is told where to find it">🔁 Change bot…</button>` : ''}
         ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Remove…</button>` : ''}
       </div>
       <div class="v2chan-people">
@@ -11175,12 +11239,12 @@ async function chanSwap(id, kind) {
   if (!confirm(`Move "${a?.name ?? 'this agent'}" to a different ${label} bot?\n\n`
     + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
     + `• Everyone must open the NEW bot and say hi; ${label} will not move the old chat.\n`
-    + `• The old bot ${kind === 'telegram' ? 'goes back to the pool' : 'is parked under Settings → Discord'}, and its chat stops answering.\n\n`
+    + `• The old ${kind === 'slack' ? 'app' : 'bot'} ${kind === 'telegram' ? 'goes back to the pool' : `is parked under Settings → ${label}`}, and its chat stops answering.\n\n`
     + `The agent rebuilds afterwards — about a minute.`)) return;
   try {
     const r = kind === 'telegram'
       ? await api(`/v1/agents/${id}/channel/swap`, { method: 'POST', body: {} })
-      : await api(`/v1/agents/${id}/channels/discord/swap`, { method: 'POST', body: {} });
+      : await api(`/v1/agents/${id}/channels/${kind}/swap`, { method: 'POST', body: {} });
     toast(`Moved to ${kind === 'telegram' ? `@${r.to}` : `“${r.channel?.botName || 'the spare bot'}”`}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. Rebuilding…`, 10000);
     await refresh(true);
     v2LoadChans(id);
@@ -11242,15 +11306,17 @@ async function openChanSetup(id, kind) {
       <li><b>Copy its token.</b> Same page: press <i>Reset Token</i> and copy it. After you connect, you'll add the bot to a server of yours.</li>
     </ol>`;
   if (!fields.length) { toast("Couldn't reach the server for the setup steps — try again in a moment."); return; }
-  // A parked Discord bot: pick it and skip the portal entirely.
+  // A parked bot or app: pick it and skip the portal entirely.
   let parkedHtml = '';
-  if (kind === 'discord') {
-    try { discordPool = (await api('/v1/discord-bots')).bots ?? []; } catch { discordPool = []; }
-    if (discordPool.length) parkedHtml = `<div class="v2chan" style="margin-bottom:10px"><b>Use a parked bot</b>
+  if (kind === 'discord' || kind === 'slack') {
+    let pool = [];
+    try { pool = (await api(POOL_UI[kind].path)).bots ?? []; } catch { pool = []; }
+    if (kind === 'discord') discordPool = pool; else slackPool = pool;
+    if (pool.length) parkedHtml = `<div class="v2chan" style="margin-bottom:10px"><b>Use a parked ${kind === 'slack' ? 'app' : 'bot'}</b>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
-        <select id="chanPooled" style="flex:1;min-width:200px"><option value="">— make a new bot instead (steps below) —</option>
-          ${discordPool.map(b => `<option value="${esc(b.applicationId)}">${esc(b.botName || b.applicationId)}${b.servers?.length ? ` — in ${esc(b.servers.map(g => g.name || g.id).join(', '))}` : ' — not in any server yet'}</option>`).join('')}</select>
-      </div><div class="sub" style="margin-top:4px">Parked when Discord was removed from an agent, or parked ahead under Settings → Discord. It keeps its name and servers.</div></div>`;
+        <select id="chanPooled" style="flex:1;min-width:200px"><option value="">— make a new ${kind === 'slack' ? 'app' : 'bot'} instead (steps below) —</option>
+          ${pool.map(b => `<option value="${esc(b.applicationId)}">${esc(b.botName || b.applicationId)}${b.servers?.length ? ` — in ${esc(b.servers.map(g => g.name || g.id).join(', '))}` : ' — not in any server yet'}</option>`).join('')}</select>
+      </div><div class="sub" style="margin-top:4px">Parked when ${V2_CHAN_LABEL[kind]} was removed from an agent, or parked ahead under Settings → ${V2_CHAN_LABEL[kind]}. It keeps its name and ${kind === 'slack' ? 'channels' : 'servers'}.</div></div>`;
   }
   $('chanBody').innerHTML = parkedHtml + steps + fields.map(f => `
     <label for="chanF-${esc(f.key)}">${esc(f.label)}</label>
@@ -11266,10 +11332,10 @@ function chanCheckField(el) {
   el.setAttribute('aria-invalid', ok ? 'false' : 'true');
   el.style.borderColor = ok ? '' : 'var(--bad)';
 }
-async function chanCopyManifest(btn) {
-  const a = v2Find(chanFor); if (!a) return;
+async function chanCopyManifest(btn, fallbackName) {
+  const name = v2Find(chanFor)?.name || fallbackName; if (!name) return;
   try {
-    const m = await api(`/v1/channels/slack/manifest?name=${encodeURIComponent(a.name)}`);
+    const m = await api(`/v1/channels/slack/manifest?name=${encodeURIComponent(name)}`);
     const text = JSON.stringify(m, null, 2);
     try { await navigator.clipboard.writeText(text); btn.textContent = '✓ Copied'; }
     catch {
@@ -11356,12 +11422,12 @@ async function chanRemove(id, kind) {
   // (Discord: the bot is parked under Settings → Discord, name and servers kept.)
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
-  if (kind === 'discord'
+  if (kind !== 'slack'
     ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord. The bot is parked under Settings → Discord, with its name and servers, ready for another agent.`)
-    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The ${label} app stays yours; delete it on ${label} if you no longer want it. It restarts to apply this.`)) return;
+    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It restarts to apply this.`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
-    toast(r.parked ? 'Discord removed — the bot is parked for another agent.' : `${label} removed.`, 5000);
+    toast(r.parked ? `${label} removed — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} removed.`, 5000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }

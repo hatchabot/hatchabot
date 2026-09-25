@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.75.0] — 2026-09-25
+
+Slack brought level with Telegram and Discord (`docs/channel-parity.md`), still waiting for one real-app trial before it is offered to everyone.
+
+### Added
+- **A Slack pool** (Settings → **Slack**): park an app's two tokens ahead of time, or by removing Slack from an agent (or deleting or archiving it — restore takes a kept app back). An agent's *Set up…* offers a parked app; **🔁 Change bot…** moves an agent onto one. The pane is drawn like Settings → Telegram and Discord.
+- **A Slack tab on the agent** with the same card as the others: Re-check now lists the channels the app is in, Group chats gained "every channel it is in — people you admitted", Change bot, and the goodbye, moving and reused-app notes people on Telegram and Discord get (Slack DMs sent from this machine).
+- CLI: `hatchabot slack add|remove <agent>`, `hatchabot slack apps`, `approve`/`deny --kind slack`. Management chat: `add_slack`, `list_slack_apps`.
+- The Slack tab and pane appear where something Slack already exists, or with `?dev`; the trial steps are in `docs/features.md`.
+
+### Changed
+- Removing Slack from an agent parks the app instead of discarding its tokens.
+
 ## [2.74.0] — 2026-09-25
 
 Telegram and Discord made equal wherever the platforms allow (`docs/channel-parity.md` is the ledger of what is equal and what stays different).

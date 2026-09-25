@@ -15,6 +15,8 @@ import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 
 export const discordPoolRef = (applicationId: string) => `discord-pool/${applicationId}`;
+/** Where a parked bot's secret lives: one namespace per app. Slack's holds both tokens as JSON. */
+export const poolRef = (kind: 'discord' | 'slack', applicationId: string) => `${kind}-pool/${applicationId}`;
 
 export interface DiscordBotRow {
   applicationId: string;
@@ -32,6 +34,8 @@ export interface DiscordBotRow {
   priorChatIds?: string[];
   /** The archived agent this bot is kept for: restore takes it back unless someone else did. */
   archivedFor?: string;
+  /** Which app the bot is for. Discord when absent (the pool began as Discord's). */
+  kind?: 'discord' | 'slack';
 }
 
 /**
@@ -47,16 +51,17 @@ export async function parkDiscordBot(
   opts: { archivedFor?: string } = {},
 ): Promise<DiscordBotRow> {
   const st = (row.settings ?? {}) as Record<string, unknown>;
-  // Whom it served: the people linked to the departing agent on Discord, so
+  const kind = row.kind === 'slack' ? 'slack' : 'discord';
+  // Whom it served: the people linked to the departing agent on that app, so
   // the next agent's lease can mark the seam for them (Telegram's rule).
   const priorChatIds = deps.store
     .listMemberships(row.agentId)
     .filter((m) => m.status === 'active')
-    .map((m) => deps.store.memberIdentities(row.agentId, m.userId).discord)
+    .map((m) => deps.store.memberIdentities(row.agentId, m.userId)[kind])
     .filter((id): id is string => !!id)
     .slice(0, 64);
   const token = await deps.secrets.get(row.secretRef);
-  const ref = discordPoolRef(row.accountId);
+  const ref = poolRef(kind, row.accountId);
   await deps.secrets.put(ref, token);
   // Taken from the shared pool → returned to it. Without this, a house bot
   // became the private bot of whoever used it last (2026-09-25).
@@ -74,6 +79,7 @@ export async function parkDiscordBot(
     addedAt: new Date().toISOString(),
     priorChatIds,
     archivedFor: opts.archivedFor,
+    kind,
   };
   deps.store.upsertDiscordBot(parked);
   if (row.secretRef !== ref) await deps.secrets.delete(row.secretRef).catch(() => {});
@@ -92,5 +98,7 @@ export function publicDiscordBot(b: DiscordBotRow, viewerId: string) {
     addedAt: b.addedAt,
     shared: b.ownerId === null,
     mine: b.ownerId === viewerId,
+    archivedFor: b.archivedFor,
+    kind: b.kind ?? 'discord',
   };
 }

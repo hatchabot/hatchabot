@@ -38,7 +38,7 @@ describe('Slack and Discord at build time', () => {
     const patch = (await buildRuntimeSpec(deps as never, agent.id)).workspace.configPatch;
     expect(patch.channelPlugins).toEqual(['slack', 'discord']);
     // Somebody is admitted, so the door rests in allowlist — Telegram's rule (2026-09-25).
-    expect(patch.slack).toEqual({ botToken: 'xoxb-1', appToken: 'xapp-1', dmPolicy: 'allowlist', allowFrom: ['U111'], rooms: { mode: 'room', roomId: 'C012AB3CD' } });
+    expect(patch.slack).toEqual({ botToken: 'xoxb-1', appToken: 'xapp-1', dmPolicy: 'allowlist', allowFrom: ['U111'], rooms: { mode: 'room', roomId: 'C012AB3CD' }, servers: [] });
     expect(patch.discord).toBeUndefined();
     expect(patch.telegram).toBeUndefined();
   });

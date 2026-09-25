@@ -206,17 +206,27 @@ describe('changing and removing', () => {
     expect((await inject('DELETE', `/v1/agents/${id}/channels/discord`)).statusCode).toBe(404);
   });
 
-  it('removing Slack discards its tokens, as before', async () => {
-    const { secrets, add, inject } = await setup();
+  it('removing Slack parks the app too: both tokens move to the pool, workspace and channels kept (2026-09-25)', async () => {
+    const { store, secrets, add, inject } = await setup();
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' });
     const r = await inject('DELETE', `/v1/agents/${id}/channels/slack`);
     expect(r.statusCode).toBe(202);
-    expect(r.json().parked).toBe(false);
-    expect(secrets.map.size).toBe(0);
+    expect(r.json().parked).toBe(true);
+    expect([...secrets.map.keys()]).toEqual(['slack-pool/U0BOT']);
+    expect(store.getDiscordBot('U0BOT')).toMatchObject({ kind: 'slack', ownerId: OWNER, botName: 'Bot' });
+    // It is offered back: the pool view for Slack lists it, Discord's does not.
+    expect((await inject('GET', '/v1/slack-apps')).json().bots.map((b: any) => b.applicationId)).toEqual(['U0BOT']);
+    expect((await inject('GET', '/v1/discord-bots')).json().bots).toEqual([]);
+    // And taken from the pool by another agent, with its tokens, no paste.
+    const next = add();
+    const back = await inject('POST', `/v1/agents/${next}/channels/slack`, { pooled: 'first' });
+    expect(back.statusCode).toBe(202);
+    expect(secrets.map.get(`channel/${next}/slack`)).toBe('ok-good');
+    expect(store.getDiscordBot('U0BOT')).toBeUndefined();
   });
 
-  it('deleting the agent discards its Slack token and parks its Discord bot', async () => {
+  it('deleting the agent parks its Slack app and its Discord bot', async () => {
     const { store, secrets, add, inject } = await setup();
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' });
@@ -226,8 +236,9 @@ describe('changing and removing', () => {
     expect(secrets.map.size).toBe(2);
     const r = await inject('DELETE', `/v1/agents/${id}`);
     expect(r.statusCode).toBeLessThan(300);
-    expect([...secrets.map.keys()]).toEqual(['discord-pool/1']);
+    expect([...secrets.map.keys()].sort()).toEqual(['discord-pool/1', 'slack-pool/U0BOT']);
     expect(store.getDiscordBot('1')?.botName).toBe('Bot');
+    expect(store.getDiscordBot('U0BOT')).toMatchObject({ kind: 'slack', ownerId: OWNER });
     // Opting out of recycling discards it too.
     const id2 = add();
     await secrets.put(`channel/${id2}/discord`, 'ok-good');
@@ -393,6 +404,42 @@ describe('the bot is named for the agent (2026-09-25)', () => {
     expect(store.getChannelForAgent(other, 'discord')?.settings?.botName).toBe('Taco');
     expect(store.listEvents([other]).some((e) => e.event === 'channel.renamed' && (e.detail as any).ok === false && String((e.detail as any).note).includes('few name changes'))).toBe(true);
     expect((await inject('POST', `/v1/agents/${other}/bot-name/sync`, { kind: 'slack' })).statusCode).toBe(409); // it has no Slack
+  });
+});
+
+describe('a spare of the same app: swap, archive and restore (2026-09-25)', () => {
+  it('swap moves the agent onto a parked app, parks the old one, keeps the people linked; restore takes a kept app back', async () => {
+    const { store, secrets, add, inject } = await setup();
+    const id = add();
+    await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' });
+    store.bindMemberIdentity(id, OWNER, 'slack', 'U0OWNER');
+    // Nothing spare: refused with a pointer.
+    expect((await inject('POST', `/v1/agents/${id}/channels/slack/swap`, {})).statusCode).toBe(409);
+    // A spare parked ahead (the fake platform answers the same app id, so park it under another id by hand).
+    await secrets.put('slack-pool/U0SPARE', 'ok-good');
+    store.upsertDiscordBot({ applicationId: 'U0SPARE', botName: 'Spare', secretRef: 'slack-pool/U0SPARE', ownerId: OWNER, servers: [], warnings: [], addedAt: 'now', kind: 'slack' });
+    // The fake verify reports U0BOT for every token, which the agent already wears: the clash check refuses.
+    expect((await inject('POST', `/v1/agents/${id}/channels/slack/swap`, {})).statusCode).toBe(409);
+    store.deleteDiscordBot('U0SPARE');
+    // Archive parks the app for the agent; a Discord bot the same way.
+    await secrets.put(`channel/${id}/discord`, 'ok-good');
+    store.insertChannel({ id: 'd-arch', agentId: id, kind: 'discord', accountId: '1234567890123456789', secretRef: `channel/${id}/discord`, deepLink: 'x', createdAt: 'now', settings: { botName: 'Bot' } });
+    expect((await inject('POST', `/v1/agents/${id}/archive`, {})).statusCode).toBeLessThan(300);
+    expect(store.getChannelForAgent(id, 'slack')).toBeUndefined();
+    expect(store.getChannelForAgent(id, 'discord')).toBeUndefined();
+    expect(store.getDiscordBot('U0BOT')).toMatchObject({ kind: 'slack', archivedFor: id });
+    expect(store.getDiscordBot('1234567890123456789')).toMatchObject({ kind: 'discord', archivedFor: id });
+    expect(store.memberIdentities(id, OWNER).slack).toBeUndefined(); // the row went; the person re-links as any member does
+    // Kept apps are listed apart, and offered to nobody by "first".
+    expect((await inject('GET', '/v1/slack-apps')).json().bots[0].archivedFor).toBe(id);
+    const other = add();
+    expect((await inject('POST', `/v1/agents/${other}/channels/slack`, { pooled: 'first' })).statusCode).toBe(404);
+    // Restore takes both back, whole.
+    expect((await inject('POST', `/v1/agents/${id}/restore`, {})).statusCode).toBe(202);
+    expect(store.getChannelForAgent(id, 'slack')).toMatchObject({ accountId: 'U0BOT', secretRef: `channel/${id}/slack` });
+    expect(store.getChannelForAgent(id, 'discord')).toMatchObject({ accountId: '1234567890123456789' });
+    expect(store.getDiscordBot('U0BOT')).toBeUndefined();
+    expect(secrets.map.get(`channel/${id}/slack`)).toBe('ok-good');
   });
 });
 
