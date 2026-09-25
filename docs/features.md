@@ -655,16 +655,14 @@ platforms keep different, and why, is the ledger in `docs/channel-parity.md`.
 
 ## Slack and Discord
 
-> **Discord is offered to everyone (v2.66.0); Slack has every control the
-> others have (v2.75.0) and waits for one real-app trial.** Slack is built and
-> tested against a fake Slack. Until someone has connected a real Slack app
-> and seen it answer, its tab and Settings → Slack appear where something
-> Slack already exists, or with `?dev` in the address. The trial takes about
-> ten minutes: under an agent's Slack tab, *Set up…* → *Copy app manifest* →
-> create the app from the manifest at api.slack.com → install it → paste the
-> two tokens; then DM the app in Slack, approve your knock with *That's me*,
-> and say hi. What to report if it fails: the card's warnings, the Setup log,
-> and `hatchabot logs <agent>`.
+> **Discord (v2.66.0) and Slack (v2.75.1) are offered to everyone.** Slack
+> was built and tested against a fake Slack and made public on the owner's
+> call before a real-app trial; connecting one takes about ten minutes: under
+> an agent's Slack tab, *Set up…* → *Copy app manifest* → create the app from
+> the manifest at api.slack.com → install it → paste the two tokens; then DM
+> the app in Slack, approve your knock with *That's me*, and say hi. If it
+> does not answer: the card's warnings, the Setup log, and
+> `hatchabot logs <agent>` say why.
 
 An agent can also be reached on Discord (and Slack), beside or instead of
 Telegram. Both connect outward from this machine, so nothing here has to be

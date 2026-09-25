@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.75.1] — 2026-09-25
+
+### Changed
+- **Slack is offered to everyone.** The Slack tab on every agent and Settings → Slack show without `?dev`, on the owner's call ahead of a real-app trial. Connecting one is the ten-minute walk in `docs/features.md`.
+
 ## [2.75.0] — 2026-09-25
 
 Slack brought level with Telegram and Discord (`docs/channel-parity.md`), still waiting for one real-app trial before it is offered to everyone.

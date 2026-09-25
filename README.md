@@ -1,7 +1,7 @@
 # Hatchabot
 
 **Run private AI agents for your family on your own hardware, reachable from
-Telegram, Discord or the app itself** — with Slack built and waiting for a real-app trial.
+Telegram, Discord, Slack or the app itself**.
 
 Hatchabot turns a machine you already own into a home for persistent AI agents.
 Each agent lives in its own container, remembers things across conversations,
@@ -27,7 +27,7 @@ task-first tour of everything the app does today — creating, training, moving,
 adopting, backing up, and operating a fleet of agents.
 
 ```
-   You (web app / CLI)     Family (Telegram or Discord — Slack next)
+   You (web app / CLI)     Family (Telegram, Discord or Slack)
             │                          │
       ┌─────▼──────────────────────────▼─────┐
       │        Hatchabot control plane       │
@@ -45,7 +45,7 @@ adopting, backing up, and operating a fleet of agents.
   automatic snapshots before every change so a bad edit is always undoable.
 - **A front door they already have.** Family members chat with an agent like
   any other contact on Telegram — no AI account, no app, no setup on their
-  side (Discord too; Slack is built and comes next). An agent can also have no
+  side (Discord and Slack too). An agent can also have no
   chat app at all and be talked to in the Hatchabot app.
 - **Private by default.** A stranger who finds an agent's bot gets silence:
   only people you invited, or who already use one of your agents, get
@@ -419,7 +419,7 @@ Working and used daily by its author, but young — expect rough edges.
 
 - **SQLite, single node.** Fine for a household; Postgres is the intended path
   for anything larger.
-- **Telegram and Discord.** Both are offered to everyone, with the same controls (a spare-bot pool, one card per app on the agent, the same doors). Slack is built (v1.31.0) and hidden behind `?dev` until it has been tested against a real app; nothing else is
+- **Telegram, Discord and Slack.** All three are offered to everyone, with the same controls (a spare-bot pool, one card per app on the agent, the same doors); nothing else is
   implemented.
 - **Cloud hosting isn't built.** Hatchabot runs on machines you own.
   [docs/identity.md](docs/identity.md) and the architecture are shaped for it,

@@ -89,11 +89,9 @@ exists because BotFather caps an account at about 20 bots; Discord has no cap.
 
 ## Slack, specifically
 
-Slack has every control the others have, tested against a fake Slack; one
-real-app trial is what stands between it and being offered to everyone.
-Until then its tab and pane appear where something Slack already exists (an
-attached app, a parked one) or with `?dev` in the address. Slack keeps two
-differences of its own: an app cannot be renamed by API (the manifest names
+Slack has every control the others have and is offered to everyone since
+v2.75.1 (made public on the owner's call, tested against a fake Slack; a real
+app has not been connected yet). Slack keeps two differences of its own: an app cannot be renamed by API (the manifest names
 it, so *Sync name* is not offered), and a DM from the app needs the
 `im:write` and `chat:write` scopes the manifest asks for.
 

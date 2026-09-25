@@ -3760,10 +3760,8 @@ async function loadPool() {
 }
 
 // ---- spare Discord bots and Slack apps (Settings → Discord / Slack) ------------------
-/** Slack waits for a real-app trial: shown where something Slack already exists, or in preview. */
-function slackVisible() {
-  return previewing() || slackPoolAvail > 0 || agents.some(a => (a.otherChannels || []).some(c => c.kind === 'slack'));
-}
+/** Slack is offered to everyone (v2.75.1). */
+function slackVisible() { return true; }
 const POOL_UI = {
   discord: { path: '/v1/discord-bots', pfx: 'dpool', label: 'Discord', room: 'server', rooms: 'servers', mark: 'discord', bg: '#5865f2' },
   slack: { path: '/v1/slack-apps', pfx: 'spool', label: 'Slack', room: 'channel', rooms: 'channels', mark: 'slack', bg: '#4a154b' },
@@ -10893,8 +10891,7 @@ function v2RenderSheetBar() {
 function v2RenderSheet() {
   const a = v2Find(v2AgentId); if (!a) return v2Close();
   v2RenderSheetBar();
-  const hasSlack = previewing() || (a.otherChannels || []).some(c => c.kind === 'slack') || slackPoolAvail > 0;
-  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'files' || k === 'advanced') : V2_TABS.filter(([k]) => k !== 'slack' || hasSlack);
+  const tabs = !v2Mine(a) ? [] : a.state === 'ARCHIVED' ? V2_TABS.filter(([k]) => k === 'overview' || k === 'files' || k === 'advanced') : V2_TABS;
   if (tabs.length && !tabs.some(([k]) => k === v2Tab)) v2Tab = 'overview';
   $('v2Tabs').hidden = !tabs.length;
   $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
@@ -11034,8 +11031,7 @@ function v2Pane(a, tab) {
     case 'channels': return a.state === 'ARCHIVED' ? row('Discord', '<span>Archived agents have no bot. Restore it to get its Discord bot back.</span>') : `
       <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="discord"><div class="sub">Loading…</div></div>`;
     case 'slack': return a.state === 'ARCHIVED' ? row('Slack', '<span>Archived agents have no app. Restore it to get its Slack app back.</span>') : `
-      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="slack"><div class="sub">Loading…</div></div>
-      ${previewing() ? `<div class="sub" style="margin-top:8px">Slack has not been tried against a real Slack app yet: connect one and say what breaks.</div>` : ''}`;
+      <div id="v2Chans" data-agent="${esc(a.id)}" data-kinds="slack"><div class="sub">Loading…</div></div>`;
     case 'knowledge': return `
       ${slot('paneEditData')}
       ${slot('paneEditConn')}
@@ -11229,7 +11225,7 @@ async function v2LoadChans(id) {
   // Only what this browser is set up to see: an attached channel always
   // renders (never strand an agent that has one), the rest wait for preview.
   // Discord is offered to everyone; Slack waits for preview (untried against a real app) — an attached one always shows.
-  const shown = kinds.filter(k => k !== 'slack' || previewing() || r.channels.some(x => x.kind === k));
+  const shown = kinds;
   box.innerHTML = shown.map(card).join('');
 }
 
