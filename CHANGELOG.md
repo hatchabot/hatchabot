@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.72.2] — 2026-09-25
+
+### Changed
+- The dashboard's **Status** tile is a drawn pulse line in the healthy green instead of the knobs emoji, which rendered as a grey blur.
+- The **spare bots** tile counts parked Discord bots too and wears both app badges; its tooltip says how many of each. With only Discord spares it opens Settings → Discord.
+
 ## [2.72.1] — 2026-09-25
 
 ### Changed

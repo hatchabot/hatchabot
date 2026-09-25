@@ -53,8 +53,8 @@ The header holds:
   **memory in use** (every container's live memory, opening Status →
   Resources; it turns amber and counts the containers when any has been
   running into its memory cap), **last backup** (amber past
-  36h), **spare bots** (wearing the same Telegram badge the agent icons do, so it
-  reads as spare *Telegram* bots), and — only when they are not zero — **to read**, **to
+  36h), **spare bots** (Telegram and Discord bots parked and ready, wearing the same
+  app badges the agent icons do), and — only when they are not zero — **to read**, **to
   confirm**, **knocking** and **to rebuild**. Each tile opens the screen that
   acts on it.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows

@@ -557,6 +557,13 @@
   /* The same soft wash as the selected View by / Sort buttons and the manager's icon tile: gold at 17%, a light gold edge, the plus in ink. */
   .v2hubactions .v2btn.v2new .v2glyph { background:color-mix(in srgb, var(--accent) 17%, var(--panel)); border:1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); color:var(--text); box-shadow:none }
   .v2hubactions .v2btn.v2new .v2glyph svg { display:block } /* a drawn plus, dead centre — a typed one sits high */
+  /* Status: a drawn pulse line in the "healthy" green — the knobs emoji read as a grey blur (Chris, 2026-09-25). */
+  #v2FleetBtn .v2glyph { color:var(--ok) }
+  #v2FleetBtn .v2glyph svg { display:block }
+  /* Spare bots: both apps' marks in the corner, Discord tucked behind Telegram. */
+  .v2stat .tile .v2tgs { position:absolute; right:-6px; bottom:-6px; display:flex; z-index:1 }
+  .v2stat .tile .v2tgs .v2tg { position:static; right:auto; bottom:auto }
+  .v2stat .tile .v2tgs .v2tg + .v2tg { margin-left:-7px }
   .v2hubactions .v2btn.v2new:hover .v2glyph { transform:translateY(-1px); box-shadow:0 6px 14px rgba(0,0,0,.14) }
   .v2hubactions .v2btn .lbl { display:block !important; font-size:11px; line-height:1.25; color:var(--dim); text-align:center }
   .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
@@ -947,7 +954,7 @@
           <div class="v2stats" id="v2Stats" hidden></div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
-          <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true">🎛️</span><span class="lbl">Status</span></button>
+          <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 12.5 6.5 12.5 9.5 5 13.5 19.5 16.5 10.5 18.5 12.5 21.5 12.5"/></svg></span><span class="lbl">Status</span></button>
           <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
           <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
           <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
@@ -2635,6 +2642,7 @@ if (DEMO) document.documentElement.classList.add('demo');
 const DEV = new URLSearchParams(location.search).has('dev');
 const previewing = () => DEV;
 let poolAvail = 0; // instant bots ready — drives the create dialog's pool checkbox
+let discordPoolAvail = 0; // parked Discord bots (Settings → Discord), for the spare-bots tile
 let availableModels = {}; // profile id -> string[] the source's runtime actually serves (refetched on every open)
 let staleModels = {};     // profile id -> string[] it still lists but the runtime won't serve
 let availableSource = {}; // profile id -> 'runtime' | 'curated' — was the list PROBED live, or the offline fallback
@@ -10219,6 +10227,7 @@ async function refresh(withMeta) {
     // COUNT plus a tiny roster, so the cost is noise next to /v1/agents.
     api('/v1/pool').then(p => {
       poolAvail = p.availableBots;
+      api('/v1/discord-bots').then(d => { discordPoolAvail = (d.bots || []).length; }).catch(() => {});
       const el = $('poolInfo');
       el.hidden = false; // always shown — "0 instant bots ready" is useful too
       const n = p.availableBots;
@@ -11583,11 +11592,11 @@ function renderV2Stats() {
       num: backupAgeH < 1 ? '<small>just now</small>' : backupAgeH < 48 ? `${Math.round(backupAgeH)}<small>h</small>` : `${Math.round(backupAgeH / 24)}<small>d</small>`,
       lab: 'last backup', hot: backupAgeH > 36, go: () => openAiDlg('backups'),
       title: backupAgeH > 36 ? 'The nightly backup has not run — open Backups' : 'Age of the newest backup set' } : null,
-    { key: 'bots', emoji: '🤖', tone: poolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail, lab: 'spare bots', hot: false,
-      // The same Telegram badge the agent icons wear, so "spare" reads as
-      // "spare Telegram bots" without spelling it out under a 72px tile.
-      art: `<span class="v2tg v2mk-telegram" aria-hidden="true">${V2_MARK_SVG.telegram}</span>`,
-      go: () => openAiDlg('pool'), title: 'Telegram bots parked and ready for a new agent' },
+    { key: 'bots', emoji: '🤖', tone: poolAvail + discordPoolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail + discordPoolAvail, lab: 'spare bots', hot: false,
+      // The same app badges the agent icons wear, so "spare" reads as "spare
+      // Telegram and Discord bots" without spelling it out under a 72px tile.
+      art: `<span class="v2tgs" aria-hidden="true">${discordPoolAvail ? `<span class="v2tg v2mk-discord">${V2_MARK_SVG.discord}</span>` : ''}${poolAvail || !discordPoolAvail ? `<span class="v2tg v2mk-telegram">${V2_MARK_SVG.telegram}</span>` : ''}</span>`,
+      go: () => openAiDlg(discordPoolAvail && !poolAvail ? 'discord' : 'pool'), title: `${poolAvail} Telegram and ${discordPoolAvail} Discord bot${poolAvail + discordPoolAvail === 1 ? '' : 's'} parked and ready for a new agent` },
   ].filter(Boolean).slice(0, 8);
   // One line, always (Chris, 2026-09-24): when the numbers and the action
   // tiles do not fit, the least actionable numbers go first — asks/5h, then
