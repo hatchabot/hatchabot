@@ -776,6 +776,26 @@ describe('a pinned runtime image reaches docker', () => {
   });
 });
 
+describe('Discord rests behind the same door as Telegram', () => {
+  it('pairing while nobody is admitted; allowlist once someone is; pairing again when the owner allows knocks', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    w.store.insertChannel({ id: 'cd', agentId: agent.id, kind: 'discord', accountId: '1', secretRef: 'z', deepLink: 'z', createdAt: 'now' });
+    await w.secrets.put('z', 'discord-token');
+    await rebuildAgent(w.deps, agent.id);
+    let dc = (w.provider as MockProvider).lastSpec!.workspace.configPatch.discord!;
+    expect(dc.dmPolicy).toBe('pairing'); // nobody on the list yet: reachable
+    w.store.bindMemberIdentity(agent.id, agent.ownerId, 'discord', '123456789012345678');
+    await rebuildAgent(w.deps, agent.id);
+    dc = (w.provider as MockProvider).lastSpec!.workspace.configPatch.discord!;
+    expect(dc.dmPolicy).toBe('allowlist');
+    expect(dc.allowFrom).toEqual(['123456789012345678']);
+    w.store.setAllowKnocks(agent.id, true);
+    await rebuildAgent(w.deps, agent.id);
+    expect((w.provider as MockProvider).lastSpec!.workspace.configPatch.discord!.dmPolicy).toBe('pairing');
+  });
+});
+
 describe('the memory cap reaches docker, the environment and AGENTS.md', () => {
   it('its own cap, else its class\'s, else the fleet default — and the agent is told', async () => {
     const w = await world();

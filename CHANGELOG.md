@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.71.0] — 2026-09-25
+
+### Changed
+- **Discord (and Slack) rest behind the same door as Telegram.** Once anyone is admitted, strangers who DM the bot are dropped in silence instead of getting a pairing code; the door opens to pairing only while nobody is admitted, while an invite or first-message window is open, or when the owner turns on "anyone can knock" — which now applies to every app the agent is on, and closes again on every app.
+- **Status → Usage is by period, and instant.** Hour, Day and Week: tokens and requests per agent in that window, two charts of the same (5-minute, hourly, 2-hour buckets), the billing split and an API cost estimate for that window — all from the samples Hatchabot takes every ten minutes, so it opens at once instead of reading every container. The lifetime ranking and the "~tokens/hr" lifetime average are gone: they read as live use when the use was days ago. The 30-day daily trend stays below, and its daily point is now written by the sampler rather than only when the view was opened.
+
 ## [2.70.0] — 2026-09-25
 
 ### Added

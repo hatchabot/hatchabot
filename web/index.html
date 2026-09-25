@@ -2204,9 +2204,9 @@
     <button class="hbtn" onclick="loadFleetUsage()">Refresh</button>
   </div>
   <div class="sub" style="margin:4px 0 0">
-    Running agents ranked by cumulative tokens (input + output), from their OpenClaw
-    sessions. Usage, not a bill — subscription and local agents have no per-token cost.
-    Stopped agents aren't counted: usage is read live from each container.
+    What your agents used in the last hour, day or week — tokens (input + output) and requests, per
+    agent — from the usage samples Hatchabot takes every ten minutes. Usage, not a bill: subscription
+    and local agents have no per-token cost.
   </div>
   <div id="fleetUsageBody" style="margin-top:14px">Loading…</div>
   <div class="actions" style="justify-content:flex-end;border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
@@ -7443,45 +7443,63 @@ function openFleetUsage() {
   fleetUsageDlg.showModal();
   loadFleetUsage();
 }
+// The period of the Status → Usage view (hour, day, week); remembered per browser.
+let fleetUsagePeriod = (() => { try { return localStorage.getItem('hb-fleet-usage-period') || 'day'; } catch { return 'day'; } })();
+function setFleetUsagePeriod(p) {
+  fleetUsagePeriod = ['hour', 'day', 'week'].includes(p) ? p : 'day';
+  try { localStorage.setItem('hb-fleet-usage-period', fleetUsagePeriod); } catch {}
+  void loadFleetUsage();
+}
 async function loadFleetUsage() {
-  $('fleetUsageBody').innerHTML = 'Loading…';
+  if (!$('fleetUsageBody').childElementCount) $('fleetUsageBody').innerHTML = 'Loading…';
   try {
-    // Keep agents/profiles fresh so billingLine() resolves each row.
-    try { agents = await api('/v1/agents'); agentsLoaded = true; } catch { /* keep last-known */ }
-    renderFleetUsage(await api('/v1/usage'));
+    // From the sampler's records, not the containers: it answers at once.
+    renderFleetUsage(await api(`/v1/usage/periods?period=${fleetUsagePeriod}`));
   } catch (e) {
     $('fleetUsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`;
   }
 }
+/** Small bar chart of one series over the period's buckets; refusals stack in red. */
+function fleetUsageBars(buckets, key, unitLabel, period) {
+  const max = Math.max(1, ...buckets.map(b => b[key]));
+  const W = period === 'hour' ? 44 : period === 'day' ? 22 : 6, H = 40, top = 1, w = buckets.length * W;
+  const label = (b) => period === 'week'
+    ? new Date(b.at).toLocaleString([], { weekday: 'short', hour: 'numeric' })
+    : new Date(b.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const bars = buckets.map((b, i) => {
+    const v = b[key], h = v ? Math.max(2, Math.round((v / max) * H)) : 0;
+    if (!h) return '';
+    const lh = key === 'requests' && b.limited ? Math.min(h, Math.max(2, Math.round((b.limited / max) * H))) : 0;
+    const tip = `${label(b)}: ${key === 'tokens' ? fmtTokens(v) + ' tokens' : `${v} request${v === 1 ? '' : 's'}${b.limited ? ` — ${b.limited} rate-limited` : ''}`}`;
+    return `<g><title>${esc(tip)}</title><rect class="bar" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${h - lh}"/>${lh ? `<rect class="lim" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${lh}"/>` : ''}</g>`;
+  }).join('');
+  return `<div class="su-cap"><span>${esc(unitLabel)}</span><span>peak ${key === 'tokens' ? fmtTokens(max) : fmtN(max)}</span></div>
+    <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="${esc(unitLabel)} over the last ${period}">
+    <line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>`;
+}
 function renderFleetUsage(f) {
-  if (!f.agents.length) {
-    $('fleetUsageBody').innerHTML = `<div class="sub">${f.skipped
-      ? `No running agents to measure — ${f.skipped} stopped (usage is read live, so stopped agents aren't counted).`
-      : 'No agents yet.'}</div>`;
-    return;
-  }
-  const max = f.agents[0].totalTokens || 1; // top agent sets the bar scale
+  const period = f.period || fleetUsagePeriod;
+  const span = period === 'hour' ? 'last hour' : period === 'day' ? 'last 24 hours' : 'last 7 days';
+  const per = period === 'hour' ? 'per 5 minutes' : period === 'day' ? 'per hour' : 'per 2 hours';
+  const btn = (p, l) => `<button class="su-period${period === p ? ' on' : ''}" onclick="setFleetUsagePeriod('${p}')" aria-pressed="${period === p}">${l}</button>`;
+  const partial = f.countingSince && Date.parse(f.countingSince) > Date.parse(f.from)
+    ? `<div class="sub" style="margin:4px 0 8px">Counting began ${esc(ago(f.countingSince))} for the newest agent, so this window is partial for it.</div>` : '';
+  const max = f.agents[0]?.tokens || f.agents[0]?.requests || 1;
   const rows = f.agents.map((a, i) => {
-    const pct = Math.max(2, Math.round((a.totalTokens / max) * 100));
-    const modelDesc = (a.byModel || []).map(m => esc(m.model)).join(', ') || (a.billing === 'included' ? esc(a.profileName || 'subscription') : '');
+    const pct = Math.max(2, Math.round(((a.tokens || a.requests) / max) * 100));
     const cost = usageCost(a);
-    return `<div class="pair" style="padding:6px 0;align-items:flex-start" title="${esc((a.byModel || []).map(m => m.model + ': ' + fmtTokens(m.tokens)).join('\n'))}">
+    return `<div class="pair" style="padding:6px 0;align-items:flex-start">
       <span class="grow">
         <span class="sub" style="display:inline-block;width:1.4em">${i + 1}.</span> <b>${esc(a.name)}</b>
-        <span class="sub"> · ${a.sessions} session${a.sessions > 1 ? 's' : ''}${a.lastActive ? ' · ' + ago(a.lastActive) : ''} · <a href="#" onclick="event.preventDefault(); fleetUsageDlg.close(); openEdit('${a.id}','${jsq(a.name)}','ai')" title="Change this agent's model — applies instantly, no rebuild" style="color:var(--accent);text-decoration:none">${modelDesc || 'set model'} ✎</a></span>
+        <span class="sub"> · ${fmtN(a.requests)} request${a.requests === 1 ? '' : 's'}${a.limited ? ` · <b style="color:var(--bad)">${a.limited}</b> refused` : ''}${a.model ? ` · ${esc(a.model)}` : ''}${a.state !== 'RUNNING' ? ` · ${esc(a.state.toLowerCase())}` : ''} · <a href="#" onclick="event.preventDefault(); fleetUsageDlg.close(); openEdit('${a.id}','${jsq(a.name)}')">open</a></span>
         <div style="height:5px;border-radius:3px;background:var(--accent);opacity:.85;width:${pct}%;margin-top:5px;min-width:6px"></div>
       </span>
       <span style="text-align:right;margin-left:10px;white-space:nowrap">
-        <b>${fmtTokens(a.totalTokens)}</b>
-        ${a.tokensPerHour != null ? `<div class="sub" title="Lifetime average — total tokens ÷ time since this agent's first session">~${fmtTokens(a.tokensPerHour)}/hr</div>` : ''}
+        <b>${fmtTokens(a.tokens)}</b> <span class="sub">tokens</span>
         ${cost.text ? `<div class="sub"${cost.dim ? '' : ' style="color:var(--warn)"'}>${cost.text}</div>` : ''}
       </span>
     </div>`;
   }).join('');
-  const totalCost = f.cost
-    ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>`
-    : '';
-  // Where the fleet runs: token split across billing categories.
   const bb = f.byBilling || {};
   const bTot = (bb.included || 0) + (bb.api || 0) + (bb.local || 0) || 1;
   const seg = (key, label, color) => (bb[key] > 0)
@@ -7489,22 +7507,23 @@ function renderFleetUsage(f) {
   const legend = (key, label, color) => (bb[key] > 0)
     ? `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${color};display:inline-block"></span>${label} ${Math.round(bb[key] / bTot * 100)}%</span>` : '';
   const breakdown = (bb.included || bb.api || bb.local) ? `
-    <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:2px 0 6px">
-      ${seg('included', 'Subscription (included)', 'var(--ok)')}${seg('api', 'API key (billed)', 'var(--warn)')}${seg('local', 'Local (free)', '#6b8fb5')}
+    <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:2px 0 6px">${seg('included', 'Subscription', 'var(--ok)')}${seg('api', 'API', 'var(--warn)')}${seg('local', 'Local', '#6b8fb5')}</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${legend('included', 'subscription', 'var(--ok)')}${legend('api', 'API', 'var(--warn)')}${legend('local', 'local', '#6b8fb5')}</div>` : '';
+  const totalCost = f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '';
+  $('fleetUsageBody').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <span class="su-periods" style="margin:0">${btn('hour', 'Hour')}${btn('day', 'Day')}${btn('week', 'Week')}</span>
+      <span class="sub">${f.sampledAt ? `updated ${esc(ago(f.sampledAt))}` : ''}</span>
     </div>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-      ${legend('included', 'Subscription', 'var(--ok)')}${legend('api', 'API-billed', 'var(--warn)')}${legend('local', 'Local', '#6b8fb5')}
-    </div>` : '';
-  const fleetRate = f.agents.reduce((s, a) => s + (a.tokensPerHour || 0), 0);
-  $('fleetUsageBody').innerHTML =
-    `<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:8px;flex-wrap:wrap">
-       <span><span style="font-size:22px;font-weight:700">${fmtTokens(f.totalTokens)}</span> <span class="sub">tokens${fleetRate > 0 ? ` · ~${fmtTokens(fleetRate)}/hr` : ''} · ${f.counted} running agent${f.counted > 1 ? 's' : ''}</span> ${totalCost}</span>
-       ${f.skipped ? `<span class="sub">${f.skipped} not counted (live-only)</span>` : ''}
-     </div>
-     ${breakdown}
-     <div id="fleetUsageTrend"></div>
-     ${f.cost ? `<div class="sub" style="margin:-2px 0 10px">Cost is an estimate over ${f.cost.agents} API-keyed agent${f.cost.agents > 1 ? 's' : ''}: OpenClaw reports combined input + output tokens, so it's a range (low = all input, high = all output). Subscription and local agents cost $0.</div>` : ''}
-     ${rows}`;
+    <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
+    ${partial}
+    ${breakdown}
+    ${f.totals.tokens ? fleetUsageBars(f.buckets, 'tokens', `Tokens ${per}`, period) : ''}
+    ${f.totals.requests ? fleetUsageBars(f.buckets, 'requests', `Requests ${per}`, period) : ''}
+    ${f.totals.tokens || f.totals.requests ? `<div class="su-cap" style="margin-bottom:8px"><span>${esc(span.replace('last ', '')).replace(/^/, '')} ago</span><span>now</span></div>` : ''}
+    ${rows || `<div class="sub" style="margin:8px 0">Nothing used in the ${span}.</div>`}
+    <h4 class="v2sec" style="margin-top:14px">Per day, last 30 days</h4>
+    <div id="fleetUsageTrend"></div>`;
   void renderUsageTrend();
 }
 

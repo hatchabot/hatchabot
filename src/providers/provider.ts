@@ -152,12 +152,15 @@ export interface OpenClawConfigPatch {
   slack?: {
     botToken: string;
     appToken: string;
+    /** As for Telegram: `allowlist` once somebody is admitted (strangers are dropped in silence), `pairing` only while nobody is or the owner allows knocks. Absent = pairing. */
+    dmPolicy?: 'pairing' | 'allowlist';
     allowFrom: string[];
     rooms: ChannelRooms;
   };
   discord?: {
     token: string;
     applicationId: string;
+    dmPolicy?: 'pairing' | 'allowlist';
     allowFrom: string[];
     rooms: ChannelRooms;
     /** Reach Discord through this HTTP proxy (the management agent's jail). */

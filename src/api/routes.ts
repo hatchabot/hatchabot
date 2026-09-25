@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
+import { computeUsagePeriod, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -1488,10 +1489,31 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // the exact % of a Claude plan isn't readable with a setup-token.
   let usageSampling: Promise<unknown> | null = null;
   let usageSampledAt: string | undefined;
+  /**
+   * The daily trend point, from the newest counter reading of every agent —
+   * the Usage view used to write it only when someone opened it, and only
+   * from a live read of each container.
+   */
+  const snapshotUsageFromSamples = () => {
+    const byOwner = new Map<string, Agent[]>();
+    for (const a of store.listAllActiveAgents()) { const l = byOwner.get(a.ownerId) ?? []; l.push(a); byOwner.set(a.ownerId, l); }
+    for (const [ownerId, list] of byOwner) {
+      const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
+      let total = 0, any = false;
+      for (const a of list) {
+        const t = store.latestTokenTotal(a.id); if (t === undefined) continue;
+        any = true; total += t;
+        const p = store.getAIProfile(a.aiProfileId);
+        const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
+        byBilling[billing] = (byBilling[billing] ?? 0) + t;
+      }
+      if (any) store.upsertUsageSnapshot(ownerId, { day: new Date().toISOString().slice(0, 10), totalTokens: total, byBilling });
+    }
+  };
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
-      .then((r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); return r; })
+      .then((r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); } return r; })
       .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
       .finally(() => { usageSampling = null; });
     return usageSampling;
@@ -5550,6 +5572,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.get('/v1/usage', async (req) => computeFleetUsage(ownerIdOf(req)));
 
+  /** The fleet's use in the last hour, day or week, from what the sampler recorded — answers at once. */
+  app.get<{ Querystring: { period?: string } }>('/v1/usage/periods', async (req, reply) => {
+    const period = String(req.query?.period ?? 'day');
+    if (!(USAGE_PERIODS as string[]).includes(period)) return reply.code(400).send({ error: 'period must be hour, day or week' });
+    return { ...computeUsagePeriod(store, ownerIdOf(req), period as UsagePeriod), sampledAt: usageSampledAt };
+  });
+
   /** Daily fleet-usage snapshots for the trend chart, oldest → newest, with a
    *  day-over-day delta (cumulative counter, so the delta approximates that
    *  day's consumption; a session reset can make it dip, hence never negative). */
@@ -8269,13 +8298,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const restDoor = async (agent: Agent): Promise<void> => {
     if (agent.allowKnocks || !agent.runtimeRef || agent.state !== 'RUNNING') return;
     if (store.pairingWindow(agent.id)) return; // somebody is expected right now
-    const channelRow = store.getChannelForAgent(agent.id, 'telegram');
-    const admit = store.listAllowedChannelUserIds(agent.id);
-    if (!channelRow || !admit.length) return;
-    await setDmPolicy(
-      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-      { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, policy: 'allowlist', allowFrom: admit },
-    ).catch(() => false);
+    // Every app the agent is on, not just Telegram: a Discord door left in
+    // pairing let anyone sharing a server knock for ever (2026-09-25).
+    for (const ch of store.listChannelsForAgent(agent.id)) {
+      const admit = store.listAllowedChannelUserIds(agent.id, ch.kind);
+      if (!admit.length) continue; // nobody yet: stay reachable
+      await setDmPolicy(
+        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+        { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: ch.kind, accountId: ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT, policy: 'allowlist', allowFrom: admit },
+      ).catch(() => false);
+    }
   };
 
   /**
@@ -8446,13 +8478,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     trace(agent.id)('agent.allow_knocks', { on: parsed.data.on });
     // Live, not at the next rebuild: "anyone can knock" that only takes
     // effect in a minute or two is a setting people press twice.
-    const channelRow = store.getChannelForAgent(agent.id, 'telegram');
-    if (agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
+    if (agent.runtimeRef && agent.state === 'RUNNING') {
       if (parsed.data.on) {
-        await setDmPolicy(
-          { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-          { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: 'telegram', accountId: channelRow.accountId, policy: 'pairing' },
-        ).catch(() => false);
+        for (const ch of store.listChannelsForAgent(agent.id)) {
+          await setDmPolicy(
+            { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+            { agentId: agent.id, runtimeRef: agent.runtimeRef, kind: ch.kind, accountId: ch.kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT, policy: 'pairing' },
+          ).catch(() => false);
+        }
       } else {
         await restDoor({ ...agent, allowKnocks: false });
       }

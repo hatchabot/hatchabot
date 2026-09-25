@@ -37,7 +37,8 @@ describe('Slack and Discord at build time', () => {
     const { deps, agent } = await setup();
     const patch = (await buildRuntimeSpec(deps as never, agent.id)).workspace.configPatch;
     expect(patch.channelPlugins).toEqual(['slack', 'discord']);
-    expect(patch.slack).toEqual({ botToken: 'xoxb-1', appToken: 'xapp-1', allowFrom: ['U111'], rooms: { mode: 'room', roomId: 'C012AB3CD' } });
+    // Somebody is admitted, so the door rests in allowlist — Telegram's rule (2026-09-25).
+    expect(patch.slack).toEqual({ botToken: 'xoxb-1', appToken: 'xapp-1', dmPolicy: 'allowlist', allowFrom: ['U111'], rooms: { mode: 'room', roomId: 'C012AB3CD' } });
     expect(patch.discord).toBeUndefined();
     expect(patch.telegram).toBeUndefined();
   });
@@ -47,7 +48,8 @@ describe('Slack and Discord at build time', () => {
     await secrets.put(`channel/${agent.id}/discord`, 'tok');
     store.insertChannel({ id: 'cd', agentId: agent.id, kind: 'discord', accountId: '123', secretRef: `channel/${agent.id}/discord`, deepLink: 'x', createdAt: 'now' });
     const patch = (await buildRuntimeSpec(deps as never, agent.id)).workspace.configPatch;
-    expect(patch.discord).toEqual({ token: 'tok', applicationId: '123', allowFrom: [], rooms: { mode: 'off' } });
+    // Nobody admitted yet: pairing, so the owner's first message can be claimed.
+    expect(patch.discord).toEqual({ token: 'tok', applicationId: '123', dmPolicy: 'pairing', allowFrom: [], rooms: { mode: 'off' } });
   });
 
   it('an image without the plugin leaves the channel out instead of failing the build', async () => {

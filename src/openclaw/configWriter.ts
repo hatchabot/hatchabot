@@ -574,7 +574,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push({ argv: ['config', 'set', 'channels.slack.channels', JSON.stringify(rooms)] });
       cmds.push({
         argv: ['config', 'set', 'channels.slack.accounts', JSON.stringify({
-          [CHANNEL_ACCOUNT]: { enabled: true, botToken: sl.botToken, appToken: sl.appToken, dmPolicy: 'pairing', allowFrom: sl.allowFrom },
+          [CHANNEL_ACCOUNT]: { enabled: true, botToken: sl.botToken, appToken: sl.appToken, dmPolicy: sl.dmPolicy ?? 'pairing', allowFrom: sl.allowFrom },
         })],
         sensitive: true,
       });
@@ -598,7 +598,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       if (dc.proxy) cmds.push({ argv: ['config', 'set', 'channels.discord.proxy', dc.proxy], sensitive: true });
       cmds.push({
         argv: ['config', 'set', 'channels.discord.accounts', JSON.stringify({
-          [CHANNEL_ACCOUNT]: { enabled: true, token: dc.token, applicationId: dc.applicationId, dmPolicy: 'pairing', allowFrom: dc.allowFrom },
+          [CHANNEL_ACCOUNT]: { enabled: true, token: dc.token, applicationId: dc.applicationId, dmPolicy: dc.dmPolicy ?? 'pairing', allowFrom: dc.allowFrom },
         })],
         sensitive: true,
       });

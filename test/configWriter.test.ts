@@ -448,6 +448,10 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
   const slack = { botToken: 'x', appToken: 'y', allowFrom: [], rooms: { mode: 'off' as const } };
   it('installs the official package offline from the baked cache instead of linking, and drops the old link paths in the heal', () => {
     const cmds = buildConfigCommands({ ...base, channelPlugins: ['slack', 'discord'], pluginInstall: 'npm', slack, discord: { token: 't', applicationId: 'a', allowFrom: [], rooms: { mode: 'off' } } });
+    // The door rule travels: a Discord with members admitted rests in allowlist (Telegram's rule, 2026-09-25).
+    const closed = buildConfigCommands({ ...base, channelPlugins: ['discord'], pluginInstall: 'npm', discord: { token: 't', applicationId: 'a', dmPolicy: 'allowlist', allowFrom: ['123456789012345678'], rooms: { mode: 'off' } } });
+    expect(JSON.parse(argFor(closed, 'channels.discord.accounts')!).hatchabot.dmPolicy).toBe('allowlist');
+    expect(JSON.parse(argFor(cmds, 'channels.discord.accounts')!).hatchabot.dmPolicy).toBe('pairing'); // absent = pairing, as before
     const raw = cmds.map((c) => c.rawShell ?? '').join('\n');
     expect(raw).toContain('cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache');
     expect(raw).toContain('npm_config_offline=true');

@@ -527,16 +527,23 @@ export async function buildRuntimeSpec(
     const r = (c.settings?.rooms ?? {}) as { mode?: string; roomId?: unknown };
     return r.mode === 'room' && typeof r.roomId === 'string' && r.roomId ? { mode: 'room', roomId: r.roomId } : { mode: 'off' };
   };
+  // The same door rule as Telegram (below): allowlist once somebody is
+  // admitted, pairing only while nobody is or the owner allows knocks. Discord
+  // was hardwired to pairing, so anyone sharing a server could always knock
+  // (2026-09-25).
+  const doorFor = (allowFrom: string[]): 'pairing' | 'allowlist' => !allowFrom.length || agent.allowKnocks ? 'pairing' : 'allowlist';
   let slack: OpenClawConfigPatch['slack'];
   if (slackRow && channelPlugins.includes('slack')) {
     const t = JSON.parse(await secrets.get(slackRow.secretRef)) as { botToken: string; appToken: string };
-    slack = { botToken: t.botToken, appToken: t.appToken, allowFrom: store.listAllowedChannelUserIds(agentId, 'slack'), rooms: roomsOf(slackRow) };
+    const allowFrom = store.listAllowedChannelUserIds(agentId, 'slack');
+    slack = { botToken: t.botToken, appToken: t.appToken, dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(slackRow) };
   }
   let discord: OpenClawConfigPatch['discord'];
   if (discordRow && channelPlugins.includes('discord')) {
+    const allowFrom = store.listAllowedChannelUserIds(agentId, 'discord');
     discord = {
       token: await secrets.get(discordRow.secretRef), applicationId: discordRow.accountId,
-      allowFrom: store.listAllowedChannelUserIds(agentId, 'discord'), rooms: roomsOf(discordRow),
+      dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(discordRow),
     };
   }
   // Debug door: each agent's Control UI published on a stable host port

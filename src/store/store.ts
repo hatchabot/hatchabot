@@ -2280,6 +2280,46 @@ export class Store {
     return (this.db.prepare(`SELECT agent_id, slot, ok, limited, failed FROM model_call_slots WHERE profile_id = ? AND slot >= ?`).all(profileId, fromSlot) as
       Array<{ agent_id: string; slot: string; ok: number; limited: number; failed: number }>).map((r) => ({ agentId: r.agent_id, slot: r.slot, ok: r.ok, limited: r.limited, failed: r.failed }));
   }
+  /** Calls in five-minute slots for a set of agents (any source), from `fromSlot`. */
+  modelCallSlotsForAgents(agentIds: Set<string>, fromSlot: string): Array<{ agentId: string; slot: string; ok: number; limited: number; failed: number }> {
+    if (!agentIds.size) return [];
+    return (this.db.prepare(`SELECT agent_id, slot, ok, limited, failed FROM model_call_slots WHERE slot >= ? AND agent_id IN (${[...agentIds].map(() => '?').join(',')})`).all(fromSlot, ...agentIds) as
+      Array<{ agent_id: string; slot: string; ok: number; limited: number; failed: number }>).map((r) => ({ agentId: r.agent_id, slot: r.slot, ok: r.ok, limited: r.limited, failed: r.failed }));
+  }
+  /** Calls per hour for a set of agents (any source), from `fromHour`. */
+  modelCallHoursForAgents(agentIds: Set<string>, fromHour: string): Array<{ agentId: string; hour: string; ok: number; limited: number; failed: number }> {
+    if (!agentIds.size) return [];
+    return (this.db.prepare(`SELECT agent_id, hour, ok, limited, failed FROM model_call_hours WHERE hour >= ? AND agent_id IN (${[...agentIds].map(() => '?').join(',')})`).all(fromHour, ...agentIds) as
+      Array<{ agent_id: string; hour: string; ok: number; limited: number; failed: number }>).map((r) => ({ agentId: r.agent_id, hour: r.hour, ok: r.ok, limited: r.limited, failed: r.failed }));
+  }
+  /**
+   * Tokens consumed per sample since `fromIso`, per agent: each sample's rise
+   * over the previous one (a counter reset counts the new total), stamped
+   * with the sample's time — what a usage chart bins by period.
+   */
+  tokenDeltas(agentIds: Set<string>, fromIso: string): Array<{ agentId: string; at: string; delta: number }> {
+    if (!agentIds.size) return [];
+    const rows = this.db.prepare(
+      `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
+         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ?), ?)
+       ORDER BY agent_id, at`,
+    ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
+    const out: Array<{ agentId: string; at: string; delta: number }> = [];
+    let prev: (typeof rows)[number] | undefined;
+    for (const r of rows) {
+      if (prev && prev.agent_id === r.agent_id && r.at >= fromIso) {
+        const d = r.total >= prev.total ? r.total - prev.total : r.total;
+        if (d > 0) out.push({ agentId: r.agent_id, at: r.at, delta: d });
+      }
+      prev = r;
+    }
+    return out;
+  }
+  /** The newest token counter reading for an agent, if any. */
+  latestTokenTotal(agentId: string): number | undefined {
+    const r = this.db.prepare(`SELECT total FROM token_samples WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(agentId) as { total: number } | undefined;
+    return r?.total;
+  }
   addLimitHit(agentId: string, profileId: string, at: string, model: string): void {
     this.db.prepare(`INSERT OR IGNORE INTO limit_hits (agent_id, profile_id, at, model) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, model || null);
   }
