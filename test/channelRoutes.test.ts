@@ -178,28 +178,102 @@ describe('changing and removing', () => {
     expect((await inject('PATCH', `/v1/agents/${id}/channels/slack`, { rooms: { mode: 'everyone' } })).statusCode).toBe(400);
   });
 
-  it('removal deletes the row and the token', async () => {
+  it('removing Discord parks the bot: row gone, token moved to the pool, name and servers kept', async () => {
     const { store, secrets, add, inject } = await setup();
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
     const r = await inject('DELETE', `/v1/agents/${id}/channels/discord`);
     expect(r.statusCode).toBe(202);
+    expect(r.json().parked).toBe(true);
     expect(store.getChannelForAgent(id, 'discord')).toBeUndefined();
-    expect(secrets.map.size).toBe(0);
+    expect([...secrets.map.keys()]).toEqual(['discord-pool/1234567890123456789']);
+    const parked = store.getDiscordBot('1234567890123456789')!;
+    expect(parked).toMatchObject({ ownerId: OWNER, botName: 'Bot' });
+    expect(parked.servers.length).toBeGreaterThan(0); // what the last check knew travels with it
     expect((await inject('DELETE', `/v1/agents/${id}/channels/discord`)).statusCode).toBe(404);
   });
 
-  it('deleting the agent leaves no Slack or Discord token behind', async () => {
+  it('removing Slack discards its tokens, as before', async () => {
+    const { secrets, add, inject } = await setup();
+    const id = add();
+    await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' });
+    const r = await inject('DELETE', `/v1/agents/${id}/channels/slack`);
+    expect(r.statusCode).toBe(202);
+    expect(r.json().parked).toBe(false);
+    expect(secrets.map.size).toBe(0);
+  });
+
+  it('deleting the agent discards its Slack token and parks its Discord bot', async () => {
     const { store, secrets, add, inject } = await setup();
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' });
     // (a second add would wait for the first rebuild; seed it directly)
     await secrets.put(`channel/${id}/discord`, 'ok-good');
-    store.insertChannel({ id: 'd1', agentId: id, kind: 'discord', accountId: '1', secretRef: `channel/${id}/discord`, deepLink: 'x', createdAt: 'now' });
+    store.insertChannel({ id: 'd1', agentId: id, kind: 'discord', accountId: '1', secretRef: `channel/${id}/discord`, deepLink: 'x', createdAt: 'now', settings: { botName: 'Bot' } });
     expect(secrets.map.size).toBe(2);
     const r = await inject('DELETE', `/v1/agents/${id}`);
     expect(r.statusCode).toBeLessThan(300);
-    expect(secrets.map.size).toBe(0);
+    expect([...secrets.map.keys()]).toEqual(['discord-pool/1']);
+    expect(store.getDiscordBot('1')?.botName).toBe('Bot');
+    // Opting out of recycling discards it too.
+    const id2 = add();
+    await secrets.put(`channel/${id2}/discord`, 'ok-good');
+    store.insertChannel({ id: 'd2', agentId: id2, kind: 'discord', accountId: '2', secretRef: `channel/${id2}/discord`, deepLink: 'x', createdAt: 'now' });
+    await inject('DELETE', `/v1/agents/${id2}?recycleBot=0`);
+    expect(store.getDiscordBot('2')).toBeUndefined();
+    expect(secrets.map.has(`channel/${id2}/discord`)).toBe(false);
+  });
+});
+
+describe('the Discord bot pool', () => {
+  it('parks a bot by token (checked, never returned), lists it, and an agent attaches it without pasting', async () => {
+    const { store, secrets, add, inject } = await setup();
+    const parked = await inject('POST', '/v1/discord-bots', { token: 'ok-good' });
+    expect(parked.statusCode).toBe(200);
+    expect(JSON.stringify(parked.json())).not.toContain('ok-good');
+    expect(parked.json().bot).toMatchObject({ applicationId: '1234567890123456789', botName: 'Bot', mine: true, shared: false });
+    expect(secrets.map.get('discord-pool/1234567890123456789')).toBe('ok-good');
+    expect((await inject('POST', '/v1/discord-bots', { token: 'ok-good' })).statusCode).toBe(409); // already parked
+    expect((await inject('POST', '/v1/discord-bots', { token: 'ok-bad' })).statusCode).toBe(400);
+    const list = (await inject('GET', '/v1/discord-bots')).json();
+    expect(list.bots.map((b: any) => b.applicationId)).toEqual(['1234567890123456789']);
+
+    const id = add();
+    const att = await inject('POST', `/v1/agents/${id}/channels/discord`, { pooled: '1234567890123456789' });
+    expect(att.statusCode).toBe(202);
+    expect(store.getChannelForAgent(id, 'discord')?.accountId).toBe('1234567890123456789');
+    expect(store.getDiscordBot('1234567890123456789')).toBeUndefined(); // taken
+    expect([...secrets.map.keys()]).toEqual([`channel/${id}/discord`]);
+    expect(secrets.map.get(`channel/${id}/discord`)).toBe('ok-good');
+    // A bot that is in use cannot be parked again from a token.
+    expect((await inject('POST', '/v1/discord-bots', { token: 'ok-good' })).statusCode).toBe(409);
+  });
+
+  it('a parked bot is its owner\'s; a shared one is everyone\'s to take and the machine owner\'s to delete', async () => {
+    const { add, inject } = await setup();
+    await inject('POST', '/v1/discord-bots', { token: 'ok-good' });
+    const other = { 'x-hatchabot-owner': 'user-other' };
+    expect((await inject('GET', '/v1/discord-bots', undefined, other)).json().bots).toEqual([]);
+    const id = add({ ownerId: 'user-other' });
+    expect((await inject('POST', `/v1/agents/${id}/channels/discord`, { pooled: '1234567890123456789' }, other)).statusCode).toBe(404);
+    expect((await inject('DELETE', '/v1/discord-bots/1234567890123456789', undefined, other)).statusCode).toBe(404);
+    // Only the machine owner may share; setup()'s OWNER owns the host.
+    expect((await inject('POST', '/v1/discord-bots', { token: 'ok-good', shared: true }, other)).statusCode).toBe(403);
+    expect((await inject('DELETE', '/v1/discord-bots/1234567890123456789')).statusCode).toBe(200);
+    const shared = await inject('POST', '/v1/discord-bots', { token: 'ok-good', shared: true });
+    expect(shared.json().bot.shared).toBe(true);
+    expect((await inject('GET', '/v1/discord-bots', undefined, other)).json().bots.map((b: any) => b.shared)).toEqual([true]);
+    expect((await inject('DELETE', '/v1/discord-bots/1234567890123456789', undefined, other)).statusCode).toBe(403);
+  });
+
+  it('re-check refreshes a parked bot from Discord', async () => {
+    const { inject } = await setup();
+    verifyCalls.length = 0;
+    await inject('POST', '/v1/discord-bots', { token: 'ok-good' });
+    const r = await inject('POST', '/v1/discord-bots/1234567890123456789/recheck');
+    expect(r.statusCode).toBe(200);
+    expect(r.json().bot.servers).toEqual([{ id: '100', name: 'Home' }, { id: '200', name: 'Work' }]);
+    expect(r.json().bot.warnings).toEqual([]);
   });
 });
 

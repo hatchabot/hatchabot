@@ -18,6 +18,7 @@ import type {
   MemberRole,
   ChannelKind,
 } from '../domain/types.js';
+import type { DiscordBotRow } from '../orchestrator/discordPool.js';
 import { assertTransition } from '../domain/stateMachine.js';
 
 /** How a group section sorts itself: A→Z by name, or newest first. */
@@ -241,6 +242,12 @@ export class Store {
         PRIMARY KEY (agent_id, profile_id, slot)
       );
       CREATE INDEX IF NOT EXISTS model_call_slots_profile ON model_call_slots (profile_id, slot);
+      -- Spare Discord bots (discordPool.ts): a parked token, its servers and
+      -- warnings, owned by an account or shared (owner_id NULL).
+      CREATE TABLE IF NOT EXISTS discord_bots (
+        application_id TEXT PRIMARY KEY, bot_user_id TEXT, bot_name TEXT, secret_ref TEXT NOT NULL,
+        owner_id TEXT, servers TEXT, warnings TEXT, add_to_server_url TEXT, checked_at TEXT, added_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS usage_cursor (
         agent_id TEXT PRIMARY KEY, last_ts TEXT NOT NULL, last_ok TEXT, last_limited TEXT
       );
@@ -1274,6 +1281,36 @@ export class Store {
   }
 
   /** Remove the agent's channel of one kind (Telegram by default), or with 'all' every one. */
+  // ---- spare Discord bots (discordPool.ts) ----------------------------------
+  #rowToDiscordBot = (r: any): DiscordBotRow => ({
+    applicationId: r.application_id, botUserId: r.bot_user_id ?? undefined, botName: r.bot_name ?? undefined,
+    secretRef: r.secret_ref, ownerId: r.owner_id ?? null,
+    servers: r.servers ? safeJson(r.servers, []) : [], warnings: r.warnings ? safeJson(r.warnings, []) : [],
+    addToServerUrl: r.add_to_server_url ?? undefined, checkedAt: r.checked_at ?? undefined, addedAt: r.added_at,
+  });
+  upsertDiscordBot(b: DiscordBotRow): void {
+    this.db.prepare(
+      `INSERT INTO discord_bots (application_id, bot_user_id, bot_name, secret_ref, owner_id, servers, warnings, add_to_server_url, checked_at, added_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(application_id) DO UPDATE SET bot_user_id = excluded.bot_user_id, bot_name = excluded.bot_name, secret_ref = excluded.secret_ref,
+         owner_id = excluded.owner_id, servers = excluded.servers, warnings = excluded.warnings, add_to_server_url = excluded.add_to_server_url, checked_at = excluded.checked_at`,
+    ).run(b.applicationId, b.botUserId ?? null, b.botName ?? null, b.secretRef, b.ownerId, JSON.stringify(b.servers), JSON.stringify(b.warnings), b.addToServerUrl ?? null, b.checkedAt ?? null, b.addedAt);
+  }
+  getDiscordBot(applicationId: string): DiscordBotRow | undefined {
+    const r = this.db.prepare(`SELECT * FROM discord_bots WHERE application_id = ?`).get(applicationId) as any;
+    return r ? this.#rowToDiscordBot(r) : undefined;
+  }
+  /** A viewer's own parked bots plus the shared ones. */
+  listDiscordBots(viewerId: string): DiscordBotRow[] {
+    return (this.db.prepare(`SELECT * FROM discord_bots WHERE owner_id = ? OR owner_id IS NULL ORDER BY added_at`).all(viewerId) as any[]).map(this.#rowToDiscordBot);
+  }
+  /** Every parked bot, for the machine owner's view. */
+  listAllDiscordBots(): DiscordBotRow[] {
+    return (this.db.prepare(`SELECT * FROM discord_bots ORDER BY added_at`).all() as any[]).map(this.#rowToDiscordBot);
+  }
+  deleteDiscordBot(applicationId: string): void {
+    this.db.prepare(`DELETE FROM discord_bots WHERE application_id = ?`).run(applicationId);
+  }
   deleteChannelForAgent(agentId: string, kind: ChannelKind | 'all' = 'telegram'): void {
     if (kind === 'all') {
       this.db.prepare(`DELETE FROM channels WHERE agent_id = ?`).run(agentId);

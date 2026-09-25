@@ -648,6 +648,16 @@ which you make on that platform and paste into the agent's **Discord** tab →
 **Set up…**. The sheet walks through it in three steps; it takes about five
 minutes.
 
+**Spare Discord bots.** Removing Discord from an agent, or deleting the
+agent, parks its bot under ⚙ Settings → Telegram → **Discord bots** with its
+name, servers and token, instead of throwing the token away. A parked bot can
+be parked ahead of time too (paste its token there; the machine owner can
+share one with everyone), re-checked with Discord, or deleted. An agent's
+Set up… offers a parked bot before asking for a token, so moving a bot
+between agents is Remove on one and pick it on the other. The first creation
+of a bot, turning on its intent and adding it to a server stay manual:
+Discord has no API for those.
+
 The **Discord** tab, once connected, is the whole picture: which servers the
 bot is in, **Add to a server**, **Open in Discord**, **People on Discord**
 (who is linked there, and anyone knocking, with *Let them in* / *That's me*

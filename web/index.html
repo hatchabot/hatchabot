@@ -1775,6 +1775,22 @@
 
     <h4 style="margin:18px 0 6px">Bot pool</h4>
     <div id="poolList">Loading…</div>
+
+    <h4 style="margin:22px 0 4px">Discord bots</h4>
+    <div class="sub">Spare Discord bots. Removing Discord from an agent parks its bot here with its name and servers;
+      a new agent's Set up… offers a parked bot before asking for a token. Park one ahead of time: make it in the
+      <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a> (Bot → Reset Token,
+      turn on Message Content Intent) and paste the token.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="flex:1;min-width:220px;font-family:ui-monospace,monospace">
+      <button class="primary" id="dpoolAddBtn" onclick="addDiscordPoolBot()">Park it</button>
+    </div>
+    <label id="dpoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+      <input type="checkbox" id="dpoolShared" style="width:auto">
+      <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
+    </label>
+    <div class="err" id="dpoolErr"></div>
+    <div id="dpoolList" style="margin-top:6px">Loading…</div>
     <details class="sec-drawer" id="botInvDrawer">
       <summary><b>🔎 Every bot this server has a token for</b> <span class="sub">— the ones your agents use AND the spares, live-checked against BotFather, whose cap is about 20 per Telegram account</span></summary>
       <div class="sub" style="margin-top:6px">
@@ -3707,6 +3723,7 @@ async function loadBotInventory() {
 
 async function loadPool() {
   const el = $('poolList');
+  void loadDiscordPool();
   try {
     // Donating a bot to the house is the machine owner's call; parking your own
     // is not. Show only what this account can actually do.
@@ -3746,6 +3763,49 @@ async function loadPool() {
         }).join('')
       : '<div class="sub">Empty — add a spare bot above, or park one when deleting an agent.</div>';
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+
+// ---- spare Discord bots (Settings → Telegram → Discord bots) ------------------
+let discordPool = [];
+async function loadDiscordPool() {
+  const el = $('dpoolList'); if (!el) return;
+  const sharedRow = $('dpoolSharedRow'); if (sharedRow) sharedRow.style.display = myAccount.hostOwner ? '' : 'none';
+  try {
+    discordPool = (await api('/v1/discord-bots')).bots ?? [];
+    el.innerHTML = discordPool.length ? discordPool.map(b => `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line)">
+        <span class="grow"><span class="v2chan-mark v2mk-discord" style="background:#5865f2;width:18px;height:18px;vertical-align:-4px">${V2_MARK_SVG.discord}</span> <b class="pii">${esc(b.botName || b.applicationId)}</b>${b.shared ? ' <span class="chip">shared</span>' : b.mine ? '' : ' <span class="sub">(someone else’s)</span>'}
+          <div class="sub">${b.servers?.length ? `In ${b.servers.map(g => esc(g.name || g.id)).join(', ')}` : 'Not in any server yet'}${b.checkedAt ? ` · checked ${esc(ago(b.checkedAt))}` : ''}</div>
+          ${b.warnings?.length ? `<ul class="v2chan-warn">${b.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}</span>
+        <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+          ${b.addToServerUrl ? `<a class="btn" href="${esc(b.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
+          <button onclick="recheckDiscordPoolBot('${jsq(b.applicationId)}', this)" title="Ask Discord again: servers, intent">↻ Re-check</button>
+          ${b.mine || myAccount.hostOwner ? `<button class="hbtn danger" onclick="removeDiscordPoolBot('${jsq(b.applicationId)}','${jsq(b.botName || b.applicationId)}')" title="Discard the stored token. The bot itself still exists in the developer portal.">🗑 Delete</button>` : ''}
+        </span></div>`).join('')
+      : '<div class="sub">None parked. Remove Discord from an agent and its bot lands here; or park one above.</div>';
+  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+}
+async function addDiscordPoolBot() {
+  const token = $('dpoolToken').value.trim();
+  $('dpoolErr').textContent = '';
+  if (!token) { $('dpoolErr').textContent = 'Paste the bot token first.'; return; }
+  $('dpoolAddBtn').disabled = true;
+  try {
+    const r = await api('/v1/discord-bots', { method: 'POST', body: { token, shared: $('dpoolShared').checked } });
+    $('dpoolToken').value = ''; $('dpoolShared').checked = false;
+    toast(`${r.bot.botName || 'The bot'} is parked${r.bot.warnings?.length ? ` — ${r.bot.warnings.length} thing${r.bot.warnings.length === 1 ? '' : 's'} to fix` : ''}.`);
+    await loadDiscordPool();
+  } catch (e) { $('dpoolErr').textContent = e.message; }
+  finally { $('dpoolAddBtn').disabled = false; }
+}
+async function recheckDiscordPoolBot(id, btn) {
+  btn.disabled = true;
+  try { await api(`/v1/discord-bots/${encodeURIComponent(id)}/recheck`, { method: 'POST', body: {} }); await loadDiscordPool(); }
+  catch (e) { toast(e.message, 8000); btn.disabled = false; }
+}
+async function removeDiscordPoolBot(id, name) {
+  if (!confirm(`Delete ${name} from the pool?\n\nHatchabot discards its stored token. The bot itself still exists — remove it for good in the Discord developer portal.`)) return;
+  try { await api(`/v1/discord-bots/${encodeURIComponent(id)}`, { method: 'DELETE' }); await loadDiscordPool(); }
+  catch (e) { toast(e.message, 10000); }
 }
 
 /**
@@ -11073,7 +11133,17 @@ async function openChanSetup(id, kind) {
       <li><b>Copy its token.</b> Same page: press <i>Reset Token</i> and copy it. After you connect, you'll add the bot to a server of yours.</li>
     </ol>`;
   if (!fields.length) { toast("Couldn't reach the server for the setup steps — try again in a moment."); return; }
-  $('chanBody').innerHTML = steps + fields.map(f => `
+  // A parked Discord bot: pick it and skip the portal entirely.
+  let parkedHtml = '';
+  if (kind === 'discord') {
+    try { discordPool = (await api('/v1/discord-bots')).bots ?? []; } catch { discordPool = []; }
+    if (discordPool.length) parkedHtml = `<div class="v2chan" style="margin-bottom:10px"><b>Use a parked bot</b>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+        <select id="chanPooled" style="flex:1;min-width:200px"><option value="">— make a new bot instead (steps below) —</option>
+          ${discordPool.map(b => `<option value="${esc(b.applicationId)}">${esc(b.botName || b.applicationId)}${b.servers?.length ? ` — in ${esc(b.servers.map(g => g.name || g.id).join(', '))}` : ' — not in any server yet'}</option>`).join('')}</select>
+      </div><div class="sub" style="margin-top:4px">Parked when Discord was removed from an agent, or parked ahead under Settings → Telegram → Discord bots. It keeps its name and servers.</div></div>`;
+  }
+  $('chanBody').innerHTML = parkedHtml + steps + fields.map(f => `
     <label for="chanF-${esc(f.key)}">${esc(f.label)}</label>
     <input type="password" id="chanF-${esc(f.key)}" data-key="${esc(f.key)}" data-pattern="${esc(f.pattern)}" autocomplete="off" spellcheck="false"
       oninput="chanCheckField(this)">
@@ -11102,8 +11172,12 @@ async function chanCopyManifest(btn) {
 }
 async function chanConnect(btn) {
   const body = {};
-  for (const el of chanDlg.querySelectorAll('input[data-key]')) body[el.dataset.key] = el.value.trim();
-  if (Object.values(body).some(v => !v)) { $('chanErr').textContent = 'Fill in every box first.'; return; }
+  const pooled = $('chanPooled')?.value;
+  if (pooled) body.pooled = pooled;
+  else {
+    for (const el of chanDlg.querySelectorAll('input[data-key]')) body[el.dataset.key] = el.value.trim();
+    if (Object.values(body).some(v => !v)) { $('chanErr').textContent = 'Fill in every box first, or pick a parked bot.'; return; }
+  }
   btn.disabled = true; btn.textContent = 'Checking…'; $('chanErr').textContent = '';
   try {
     const c = await api(`/v1/agents/${chanFor}/channels/${chanKind}`, { method: 'POST', body });
@@ -11163,11 +11237,14 @@ async function chanSaveRooms(id, kind, btn) {
   finally { btn.disabled = false; }
 }
 async function chanRemove(id, kind) {
+  // (Discord: the bot is parked under Settings → Telegram → Discord bots, name and servers kept.)
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
-  if (!confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The ${label} app stays yours; delete it on ${label} if you no longer want it. It restarts to apply this.`)) return;
+  if (kind === 'discord'
+    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord. The bot is parked under Settings → Telegram → Discord bots, with its name and servers, ready for another agent.`)
+    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The ${label} app stays yours; delete it on ${label} if you no longer want it. It restarts to apply this.`)) return;
   try {
-    await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
-    toast(`${label} removed.`, 5000);
+    const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
+    toast(r.parked ? 'Discord removed — the bot is parked for another agent.' : `${label} removed.`, 5000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }
