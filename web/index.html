@@ -154,6 +154,11 @@
   .su-status.limited { color:var(--bad) }
   .su-stats { display:flex; flex-wrap:wrap; gap:4px 18px; font-size:12.5px; color:var(--dim); margin:4px 0 6px; font-variant-numeric:tabular-nums }
   .su-stats b { color:var(--text); font-weight:600 }
+  .su-axis { position:relative; height:14px; font-size:10.5px; color:var(--dim); margin:2px 0 6px }
+  .su-axis span { position:absolute; top:0; transform:translateX(-50%); white-space:nowrap }
+  .su-axis span:first-child { transform:none }
+  .su-axis span:last-child { transform:translateX(-100%) }
+  .su-chart .tick { stroke:var(--line); stroke-width:1; stroke-dasharray:2 2 }
   .su-periods { display:inline-flex; gap:2px; margin-left:8px; vertical-align:middle }
   .su-period { font:inherit; font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--line); background:none; color:var(--dim); cursor:pointer }
   .su-period.on { color:var(--text); border-color:var(--accent); background:color-mix(in srgb, var(--accent) 17%, transparent) }
@@ -4465,6 +4470,25 @@ function renderLimitBanner() {
   el.hidden = !limited.length;
   el.innerHTML = limited.map(s => `⛔ <b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — its ${s.agents} agent${s.agents === 1 ? '' : 's'} can't answer until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
 }
+/**
+ * Time markers for a bar chart over a period (Chris, 2026-09-25): which
+ * buckets get a label, in local time — every 15 minutes over an hour, every
+ * 6 hours over a day, each midnight over a week — plus the axis row and the
+ * tick lines to draw at those bar positions.
+ */
+function usageAxis(buckets, period, barW) {
+  const marks = [];
+  buckets.forEach((b, i) => {
+    const d = new Date(b.at);
+    if (period === 'hour') { if (d.getMinutes() % 15 === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })]); }
+    else if (period === 'day') { if (d.getHours() % 6 === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric' })]); }
+    else if (d.getHours() === 0) marks.push([i, d.toLocaleDateString([], { weekday: 'short' })]);
+  });
+  const w = buckets.length * barW || 1;
+  const ticks = marks.map(([i]) => `<line class="tick" x1="${i * barW}" x2="${i * barW}" y1="0" y2="100%"/>`).join('');
+  const axis = `<div class="su-axis">${marks.map(([i, l]) => `<span style="left:${(i * barW / w * 100).toFixed(2)}%">${esc(l)}</span>`).join('')}<span style="left:100%">now</span></div>`;
+  return { ticks, axis };
+}
 // The usage chart's period: a week in two-hour bars, a day in hourly bars, or
 // the last hour in five-minute bars (Chris, 2026-09-24). Remembered per browser.
 let usagePeriod = (() => { try { return localStorage.getItem('hb-usage-period') || 'week'; } catch { return 'week'; } })();
@@ -4503,12 +4527,13 @@ function sourceUsageChart(u) {
     return `<g><title>${esc(tip)}</title><rect class="bar" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${h - lh}"/>${lh ? `<rect class="lim" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${lh}"/>` : ''}</g>`;
   }).join('');
   const btn = (p, l) => `<button class="su-period${usagePeriod === p ? ' on' : ''}" onclick="setUsagePeriod('${p}')" aria-pressed="${usagePeriod === p}">${l}</button>`;
+  const ax = usageAxis(buckets, usagePeriod, W);
   // Captions are HTML, not SVG text, so they stay readable when the chart scales down on a phone.
   return `<div class="su-cap"><span>Requests ${unit} <span class="su-periods">${btn('week', 'Week')}${btn('day', 'Day')}${btn('hour', 'Hour')}</span></span><span>peak ${fmtN(max)}</span></div>
-    <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="Requests over the last ${usagePeriod}, ${unit}; red marks rate-limit refusals">
-    <line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>
+    <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="Requests over the last ${usagePeriod} (${span} to now), ${unit}; red marks rate-limit refusals">
+    ${ax.ticks}<line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>
     ${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>
-    <div class="su-cap"><span>${span}</span><span>now</span></div>`;
+    ${ax.axis}`;
 }
 function sourceUsagePanel(p) {
   const u = sourceUsageOf(p.id);
@@ -7473,9 +7498,10 @@ function fleetUsageBars(buckets, key, unitLabel, period) {
     const tip = `${label(b)}: ${key === 'tokens' ? fmtTokens(v) + ' tokens' : `${v} request${v === 1 ? '' : 's'}${b.limited ? ` — ${b.limited} rate-limited` : ''}`}`;
     return `<g><title>${esc(tip)}</title><rect class="bar" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${h - lh}"/>${lh ? `<rect class="lim" x="${i * W}" y="${top + H - h}" width="${W - 1.5}" height="${lh}"/>` : ''}</g>`;
   }).join('');
+  const ax = usageAxis(buckets, period, W);
   return `<div class="su-cap"><span>${esc(unitLabel)}</span><span>peak ${key === 'tokens' ? fmtTokens(max) : fmtN(max)}</span></div>
     <svg class="su-chart" viewBox="0 0 ${w} ${top + H + 1}" role="img" aria-label="${esc(unitLabel)} over the last ${period}">
-    <line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>`;
+    ${ax.ticks}<line class="peak" x1="0" x2="${w}" y1="${top + 0.5}" y2="${top + 0.5}"/>${bars}<line class="base" x1="0" x2="${w}" y1="${top + H + 0.5}" y2="${top + H + 0.5}"/></svg>${ax.axis}`;
 }
 function renderFleetUsage(f) {
   const period = f.period || fleetUsagePeriod;
@@ -7520,7 +7546,7 @@ function renderFleetUsage(f) {
     ${breakdown}
     ${f.totals.tokens ? fleetUsageBars(f.buckets, 'tokens', `Tokens ${per}`, period) : ''}
     ${f.totals.requests ? fleetUsageBars(f.buckets, 'requests', `Requests ${per}`, period) : ''}
-    ${f.totals.tokens || f.totals.requests ? `<div class="su-cap" style="margin-bottom:8px"><span>${esc(span.replace('last ', '')).replace(/^/, '')} ago</span><span>now</span></div>` : ''}
+
     ${rows || `<div class="sub" style="margin:8px 0">Nothing used in the ${span}.</div>`}
     <h4 class="v2sec" style="margin-top:14px">Per day, last 30 days</h4>
     <div id="fleetUsageTrend"></div>`;

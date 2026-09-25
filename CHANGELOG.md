@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.71.2] — 2026-09-25
+
+### Changed
+- Time markers under the usage charts (Status → Usage and each AI source's chart): labelled ticks every 15 minutes over an hour, every 6 hours over a day, each midnight over a week, in your local time.
+
 ## [2.71.1] — 2026-09-25
 
 ### Fixed
