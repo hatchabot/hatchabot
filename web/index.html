@@ -500,17 +500,20 @@
     .v2hubactions .v2btn .v2glyph { width:50px; height:50px; border-radius:15px; font-size:24px }
     body.v2 .v2hubactions .v2btn, body.v2 .v2hubactions .v2btn:hover, body.v2 .v2hubactions .v2btn.v2new, body.v2 .v2hubactions .v2btn.v2new:hover { width:60px }
   }
-  .v2hubagent { padding:0; width:72px; display:grid; gap:5px; justify-items:center }
-  /* The manager is the one agent that is not one of the fleet: same tile size
-     as its numbers and actions, a heavier edge to say so. The status ring
-     (::after) keeps its own inset, so a rebuilding or paused manager still
-     reads normally. */
-  .v2hubagent .v2ic { width:56px; height:56px; border-radius:17px; font-size:27px;
+  /* Written as .v2hubrow .v2hubagent: the generic .v2agent rule (padding
+     6px, gap 8px) is declared later and would otherwise win the tie, which
+     set the manager's tile 6px below the others (Chris, 2026-09-24). */
+  .v2hubrow .v2hubagent { padding:0; width:72px; display:grid; gap:5px; justify-items:center; align-content:start }
+  /* The manager is the one agent that is not one of the fleet: same outer
+     size as its numbers and actions (56px + a 1px edge = 58px; here 54px + a
+     heavier 2px edge), so the row's tops line up. The status ring (::after)
+     keeps its own inset, so a rebuilding or paused manager still reads normally. */
+  .v2hubrow .v2hubagent .v2ic { width:54px; height:54px; border-radius:17px; font-size:27px;
                       border:2px solid color-mix(in srgb, var(--text) 34%, var(--line));
                       box-shadow:0 3px 8px rgba(0,0,0,.16) }
-  .v2hubagent:hover .v2ic { box-shadow:0 6px 14px rgba(0,0,0,.22) }
-  .v2hubagent .v2ic::after { inset:-6px; border-radius:23px }
-  .v2hubagent .v2name { font-size:11px; font-weight:650; max-width:72px; line-height:1.25 }
+  .v2hubrow .v2hubagent:hover .v2ic { box-shadow:0 6px 14px rgba(0,0,0,.22) }
+  .v2hubrow .v2hubagent .v2ic::after { inset:-6px; border-radius:23px }
+  .v2hubrow .v2hubagent .v2name { font-size:11px; font-weight:650; max-width:72px; line-height:1.25; color:var(--dim) }
   .hub-ops .v2hubhead { display:none }
   /* Before the first agent list arrives, the hub shows its icon and nothing
      that would have to be taken back a moment later. */
@@ -828,7 +831,7 @@
     /* A phone: the same single flow, tighter; the manager's tile stays. */
     .v2hubrow { gap:12px 8px }
     .v2hubrow .v2stat, .v2hubrow .v2hubactions .v2btn, .v2hubrow .v2hubagent { width:60px }
-    .v2hubrow .v2hubagent .v2ic { width:50px; height:50px; border-radius:15px; font-size:24px }
+    .v2hubrow .v2hubagent .v2ic { width:48px; height:48px; border-radius:15px; font-size:24px }
     .v2hubrow .v2hubagent .v2ic::after { inset:-6px; border-radius:21px }
     .v2row { grid-template-columns:1fr; gap:4px }
     .v2grid { grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)) }

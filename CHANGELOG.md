@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.68.1] — 2026-09-24
+
+### Fixed
+- The Hatchabot agent's dashboard tile sat a few pixels below the others (a generic tile rule won a tie); it now shares the row's top line and label baseline, on a phone too.
+
 ## [2.68.0] — 2026-09-24
 
 ### Fixed
