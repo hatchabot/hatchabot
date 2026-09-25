@@ -505,6 +505,10 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
       expect(r.status).toBe(0); expect(readFileSync(calls, 'utf8')).toContain('plugins install @openclaw/discord@2026.9.6');
     } finally { rmSync(home, { recursive: true, force: true }); }
   });
+  it('the runtime\'s own recurring heartbeat is off on 2026.8+ (it ran as the unused "main" agent and failed hourly), untouched on 2026.7', () => {
+    expect(argFor(buildConfigCommands({ ...base, pluginInstall: 'npm' }), 'agents.defaults.heartbeat.every')).toBe('0m');
+    expect(argFor(buildConfigCommands({ ...base, openclawVersion: '2026.7.1' }), 'agents.defaults.heartbeat.every')).toBeUndefined();
+  });
   it('a room with nobody admitted is written closed: no guild or channel entry, group policy disabled (2026-09-25)', () => {
     const closed = buildConfigCommands({ ...base, channelPlugins: ['slack', 'discord'], pluginInstall: 'npm',
       slack: { ...slack, rooms: { mode: 'room', roomId: 'C012AB3CD' } },

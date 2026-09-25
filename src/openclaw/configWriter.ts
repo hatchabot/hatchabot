@@ -293,6 +293,14 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   }
 
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
+  // OpenClaw's own recurring heartbeat (hourly on a token login) runs as its
+  // default "main" agent against ~/.openclaw/workspace — not this agent, and
+  // a legacy layout on 2026.9 it fails on every hour ("Legacy workspace setup
+  // state requires migration", every 2026.9 agent, 2026-09-25). Working, it
+  // would be a model call an hour per agent on the shared plan for nothing;
+  // Hatchabot's Schedule tab is the recurring-task surface. Off. Event
+  // wakes (a backgrounded command finishing) are unaffected.
+  if (port) cmds.push({ argv: ['config', 'set', 'agents.defaults.heartbeat.every', '0m'] });
 
   // Web search is MANDATORY for every agent (Chris, 2026-09-04): always on.
   // The keyless DuckDuckGo plugin (enabled below) is the baseline; a

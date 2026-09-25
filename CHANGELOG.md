@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.75.4] — 2026-09-25
+
+### Fixed
+- **The runtime's own hourly heartbeat is off on 2026.8+.** It ran as OpenClaw's unused default "main" agent against a legacy workspace and failed every hour on every 2026.9 agent ("Legacy workspace setup state requires migration"); working, it would have been a model call an hour per agent on the shared plan for nothing. Applies at each agent's next rebuild. Scheduled tasks are unaffected.
+
 ## [2.75.3] — 2026-09-25
 
 ### Changed
