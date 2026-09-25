@@ -188,7 +188,7 @@ LABEL org.hatchabot.embed-engine="${EMBED_ENGINE}"
 # Their version follows OpenClaw's; scripts/build-runtime-image.sh picks it.
 # See docs/channels-slack-discord-design.md.
 ARG CHANNEL_PLUGINS=slack,discord
-ARG CHANNEL_PLUGIN_VERSION=2026.7.1
+ARG CHANNEL_PLUGIN_VERSION=2026.9.6
 # Other plugins baked the same way, as `<id>=<npm package>` pairs. From
 # OpenClaw 2026.8 the web-search plugin is no longer bundled with OpenClaw
 # (2026.7 had `duckduckgo` built in): every agent needs it, and an agent must

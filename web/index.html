@@ -2494,7 +2494,7 @@
 
 <dialog id="migrateDlg" style="width:min(560px,96vw)">
   <h3 style="margin:0 0 4px">Migrate all agents off <span id="migrateFrom"></span></h3>
-  <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick and rebuilds (3 at a time). Then the old source can be deleted.</div>
+  <div class="sub" style="margin-bottom:10px">Host-owner action. Every agent on this source — <b>including other accounts'</b> — moves to the shared source you pick and rebuilds (as many at once as Rebuild-at-once allows). Then the old source can be deleted.</div>
   <div id="migrateAgents" class="sub" style="margin:0 0 10px;max-height:160px;overflow:auto"></div>
   <label>Move them to <span class="sub">(only shared sources can take other accounts' agents)</span></label>
   <select id="migrateTo"></select>
@@ -5676,7 +5676,7 @@ async function runMigrate() {
     const r = await api(`/v1/ai-profiles/${migrateState.id}/migrate-agents`, { method: 'POST', body: {
       toProfileId: to, rebuild: true, checkpoint: $('migrateCheckpoint').checked, recoverAfter: $('migrateRecover').checked } });
     migrateDlg.close();
-    toast(`Moved ${r.switched} of ${r.agents} agent${r.agents === 1 ? '' : 's'} (${r.otherAccounts} other account${r.otherAccounts === 1 ? '' : 's'}) — rebuilding ${r.rebuilding}, 3 at a time. Delete "${migrateState.name}" once they're done.${(r.skipped || []).length ? ' Skipped: ' + r.skipped.map(s => s.name).join(', ') : ''}`, 12000);
+    toast(`Moved ${r.switched} of ${r.agents} agent${r.agents === 1 ? '' : 's'} (${r.otherAccounts} other account${r.otherAccounts === 1 ? '' : 's'}) — rebuilding ${r.rebuilding}. Delete "${migrateState.name}" once they're done.${(r.skipped || []).length ? ' Skipped: ' + r.skipped.map(s => s.name).join(', ') : ''}`, 12000);
     await refresh(true); renderAiList();
   } catch (e) { $('migrateErr').textContent = e.message; }
   finally { $('migrateBtn').disabled = false; }
@@ -5882,7 +5882,7 @@ async function loadCliTokens() {
 }
 
 async function revokeCliToken(id, label) {
-  if (!confirm(`Revoke the "${label}" token?\n\nAnything signed in with it — a terminal, a cluster server, the legacy management bot — stops working immediately.`)) return;
+  if (!confirm(`Revoke the "${label}" token?\n\nAnything signed in with it — a terminal, a cluster server — stops working immediately.`)) return;
   try { await api(`/v1/cli-tokens/${id}`, { method: 'DELETE' }); toast('Revoked.'); loadCliTokens(); }
   catch (e) { toast(e.message); }
 }
@@ -6570,7 +6570,7 @@ function cardMenu(a) {
 
 /** The pool is empty and there is no spare token: finish the agent without a bot. */
 async function skipTelegram(id, name) {
-  if (!confirm(`Finish "${name}" without Telegram?\n\nYou talk to it here in Hatchabot; a bot can be attached later from its Messaging tab.`)) return;
+  if (!confirm(`Finish "${name}" without Telegram?\n\nYou talk to it here in Hatchabot; a bot can be attached later from its Telegram tab.`)) return;
   try { await api(`/v1/agents/${id}/channel-token`, { method: 'POST', body: { webOnly: true } }); toast(`${name} is finishing without Telegram`); await refresh(false); }
   catch (e) { toast(e.message, 12000); }
 }
@@ -7808,7 +7808,7 @@ async function setEmbedDefault(mode) {
 }
 async function embedMoveAll(mode, when) {
   const what = mode === 'shared' ? 'the shared memory search service' : 'their own engine';
-  if (!confirm(`Move every agent on this machine to ${what}?\n\n${when === 'now' ? 'Idle ones rebuild now, two at a time; any mid-conversation wait for the quiet hours.' : 'They rebuild in the quiet hours, never mid-conversation.'} Memory is kept; each re-indexes its memory search afterwards.`)) return;
+  if (!confirm(`Move every agent on this machine to ${what}?\n\n${when === 'now' ? 'Idle ones rebuild now, as many at once as Rebuild-at-once allows; any mid-conversation wait for the quiet hours.' : 'They rebuild in the quiet hours, never mid-conversation.'} Memory is kept; each re-indexes its memory search afterwards.`)) return;
   try {
     const r = await api('/v1/embed/move-all', { method: 'POST', body: { mode, when } });
     toast(`${r.switched} switched — ${r.queued} rebuilding now, ${r.deferred} in the quiet hours.`, 12000);
@@ -10540,7 +10540,7 @@ function v2AgeBin(iso, verb) {
 let v2View = (() => { try { const v = localStorage.getItem('hb-v2-view'); return V2_VIEWS.some(([k]) => k === v) ? v : 'group'; } catch { return 'group'; } })();
 // One Sort for every view: Manual (the order you arranged by hand — Groups
 // only, where dragging works), Name, or Activity. Name and Activity order the
-// agents on screen and never touch the arrangement; Fleet → Tools has the
+// agents on screen and never touch the arrangement; Status has the
 // buttons that rewrite it. Remembered per device.
 let v2Sort = (() => { try { const v = JSON.parse(localStorage.getItem('hb-v2-sort') || 'null'); return v && ['age', 'name', 'activity'].includes(v.key) ? v : { key: 'age', dir: -1 }; } catch { return { key: 'age', dir: -1 }; } })();
 function v2SetSort(key) {
@@ -11484,8 +11484,8 @@ async function chanRemove(id, kind) {
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
   if (kind !== 'slack'
-    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord. The bot is parked under Settings → Discord, with its name and servers, ready for another agent.`)
-    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It restarts to apply this.`)) return;
+    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. It restarts to apply this.`)
+    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It restarts to apply this.`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
     toast(r.parked ? `${label} removed — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} removed.`, 5000);

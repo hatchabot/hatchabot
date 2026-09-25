@@ -123,7 +123,7 @@ export const REST_TOOLS: RestTool[] = [
   // ---- agent lifecycle -----------------------------------------------------
   {
     name: 'archive_agent', tier: 'mutate', agentArg: true,
-    description: 'Archive an agent: it keeps everything it learned but stops running and hands its Telegram bot back to the pool. Reversible with restore_agent.',
+    description: 'Archive an agent: it keeps everything it learned but stops running; its Telegram bot goes back to the pool and a Discord or Slack app is parked for it. Reversible with restore_agent.',
     input_schema: obj({ agent: agentRef }, ['agent']),
     call: ({ agent }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/archive`, body: { checkpoint: true } }),
     card: ({ agent }) => `📥 Archive "${agent!.name}". It saves the current chat to memory first, stops, and returns its bot to the pool. Restore brings it back on a new bot.`,
@@ -300,7 +300,7 @@ export const REST_TOOLS: RestTool[] = [
   },
   {
     name: 'remove_channel', tier: 'mutate', agentArg: true,
-    description: "Take an agent off Slack or Discord. It keeps its memory; people stop reaching it there. The owner's Slack or Discord app is left as it is. (Connecting one needs tokens, so that is done in the app, never here.)",
+    description: "Take an agent off Slack or Discord. It keeps its memory; the people it talked to there get a goodbye and stop reaching it; the bot or app is parked under Settings → Discord/Slack for another agent. (Connecting one needs tokens, so that is done in the app, never here.)",
     input_schema: obj({ agent: agentRef, channel: { type: 'string', enum: ['slack', 'discord'] } }, ['agent', 'channel']),
     call: ({ agent, input }) => {
       if (input.channel !== 'slack' && input.channel !== 'discord') throw new Error('channel must be "slack" or "discord".');

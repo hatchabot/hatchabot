@@ -113,18 +113,18 @@ The header holds:
   opens the agent's settings. An agent that needs you opens straight to
   settings instead.
 - **Settings are one sheet with tabs**: Overview, Personality, AI, Data,
-  Telegram, Slack & Discord, Sharing, Schedule, Advanced. **Overview** sets
-  its group and class; **Telegram** holds the agent's bot (add, remove,
-  members, group chats, formatting); **Data** is delineated into Folders, Git
-  repos, Connections and History; **Slack & Discord** is under construction
-  (see *Slack and Discord* below). The editors live right in those tabs, not
+  Files, Telegram, Discord, Slack, Sharing, Schedule, Advanced. **Overview** sets
+  its group and class; **Telegram**, **Discord** and **Slack** each hold that
+  app's bot (connect, remove, rooms, re-check); **Sharing** holds members,
+  invites and peers; **Data** is delineated into Folders, Git repos,
+  Connections and History. The editors live right in those tabs, not
   one panel deeper. Every button from the classic card is in one of them.
 - **Every panel slides in from the right** with **‹ Back** at the top. Panels
   stack: Back returns to whatever opened it.
-- **Machine settings have nine tabs**: You (your account, other accounts,
-  "about you"), AI (sources), Classes (agent classes), Telegram (the bot
-  pool), Connections (Google accounts, plus the voice-notes and web-search
-  keys), Hosts (runners, other Hatchabot servers), Images (base images first —
+- **Machine settings have eleven tabs**: You (your account, other accounts,
+  "about you"), AI (sources, plus the voice-notes and web-search keys),
+  Classes (agent classes), Telegram (the bot pool), Discord and Slack (parked
+  bots and apps), Connections (Google accounts), Hosts (runners, other Hatchabot servers), Images (base images first —
   try a candidate on one agent, promote, delete; building one is the Hatchabot
   agent's job, not a form here — then derived images), Backups, Security.
   Every section on every tab is drawn inside its own outlined card.
@@ -217,7 +217,7 @@ Claude source exists.
 **Telegram is optional.** Tick **No Telegram** when creating an agent (or
 `hatchabot create <name> --no-telegram`) and it uses no bot at all: you talk to
 it by clicking its icon, which opens its OpenClaw console. Add a bot later from
-its Overview (**Add a Telegram bot**: instant from your pool, or paste a
+its Telegram tab (**Connect**: instant from your pool, or paste a
 BotFather token) when you want to reach it from your phone or invite people.
 **Remove…** on the same row does the reverse. The bot goes back to your pool,
 its Telegram contacts get a goodbye, and you keep talking to it in the app.
@@ -230,7 +230,7 @@ To create an agent, tap **+** in the web app: name it, optionally answer
 when more than one host exists — pick where it runs ("Runs on"). A "Keep
 memory private" checkbox decides shared vs private memory at birth.
 
-Every agent needs a Telegram bot — its identity on Telegram. Telegram has no
+An agent that is on Telegram has its own bot — its identity there. Telegram has no
 API to mint bots, so normally you're walked through creating one at
 [@BotFather](https://t.me/botfather) and pasting its token (~60 seconds).
 When you delete the agent, the bot still exists on Telegram's side — and its
@@ -314,8 +314,8 @@ knows).
 ## Training & memory
 
 To edit an agent's mind, open **⚙ Settings** on its card. The sheet's tabs are
-**Overview · Personality · AI · Data · Telegram · Slack & Discord · Sharing ·
-Schedule · Advanced** (the classic look has Definition · Snapshots · AI · Data ·
+**Overview · Personality · AI · Data · Files · Telegram · Discord · Slack ·
+Sharing · Schedule · Advanced** (the classic look has Definition · Snapshots · AI · Data ·
 Telegram · Environment).
 
 - **Definition** — rename the agent, edit SOUL.md / AGENTS.md / MEMORY.md,
@@ -413,12 +413,13 @@ and children render **indented under the master's card**. **⬇ Push to
 children** re-renders every child's SOUL/AGENTS from the master's *current*
 files, keeping each child's own values (snapshot per child; MEMORY.md never
 touched). Lineage is also recorded when you Clone, or when a 📨 Send is
-accepted on the same server. Child→master distillation ("propose this
-learning back to the master") is the designed next step.
+accepted on the same server. Child→master distillation is built: a child's
+⋯ → **💡 Propose to master** (or `POST /v1/agents/:id/distill`) turns a
+lesson into a proposal the master's owner confirms or cancels.
 
 **Web search is on for every agent** (keyless DuckDuckGo baseline; the
 config is written explicitly on every rebuild). Upgrade the whole fleet to
-Brave with one **Fleet search key** (⚙ Settings → Connections — Show reveals it to the machine owner; same
+Brave with one **Fleet search key** (⚙ Settings → AI — Show reveals it to the machine owner; same
 sharing caveats as the media key); a per-agent `BRAVE_API_KEY` env var (or
 an env-target template field) overrides it with that agent's own quota.
 Provider auto-detection comes from the key names.
@@ -450,7 +451,7 @@ in Hatchabot. Tick any and **Bring in selected**. For each one, adopt:
 
 The originals are only read and keep working until you retire them. A manual
 path is under "Or point at a workspace folder manually". CLI:
-`hatchabot adopt <workspace-dir> <name> [--reuse-bot] [--bot-token <tok>]` —
+`hatchabot adopt <workspace-dir> <name> [--reuse-bot] [--profile <id>]` —
 `--reuse-bot` takes over the workspace's existing bot instead of spending a
 new bot slot.
 
@@ -593,10 +594,10 @@ back to **Anyone can knock** if you want an agent the world may ask for.
 agent by exposure and now names its audience — *"can message it: Chris (you),
 Maria"* — with anyone invited but not yet linked marked as such, since they
 cannot reach it until they message the bot. Per agent, the same people are
-under ⚙ Settings → Telegram → **Members**, with Remove.
+under ⚙ Settings → Sharing → **Members**, with Remove.
 
 Members show on the card (when there's more than one) and always under
-⚙ Settings → Telegram → **Members** — role, Telegram-link status, Remove,
+⚙ Settings → Sharing → **Members** — role, Telegram-link status, Remove,
 and Invite… in one place. CLI: `hatchabot invite`, `approve`, `deny`,
 `members`, `kick`.
 
@@ -627,7 +628,7 @@ empty screen.
 ## Chat apps
 
 **Chat app** is what Hatchabot calls the places an agent can be talked to:
-Telegram today, Slack and Discord next. Not "channel" — Slack and Discord both
+Telegram, Discord and Slack. Not "channel" — Slack and Discord both
 use that word for a *room*, so "connect a channel" would mean two things on one
 screen. (The API and the code keep `channel` as the internal name; it never
 reaches a person.) An agent can be in more than one at a time, and its icon
@@ -756,7 +757,7 @@ A container's memory cap is a ceiling, not a reservation, so one agent can
 have 8 GB while the rest sit at 3 GB and nothing is wasted. The fleet default
 (`HATCHABOT_AGENT_MEMORY`, 3g) covers OpenClaw's own baseline with headroom;
 a **class** can carry a cap for its agents (Settings → Classes), and an
-**agent** its own (its sheet → Runtime → **Memory cap**, or `hatchabot memory
+**agent** its own (its sheet → Advanced → **Memory cap**, or `hatchabot memory
 <agent> 6g`). A change applies to the running container right away, no
 rebuild, and sticks across rebuilds. A member may go up to the machine's
 per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, 8g); the machine's owner
@@ -837,7 +838,7 @@ and `dig`, so "can it reach that?" needs nothing extra.
 
 Need something else in it? Ask your Hatchabot agent: *"build a base candidate
 with tcpdump"*. It comes back as a card naming the packages; confirming builds
-a **candidate** with its own tag (`2026.7.1-2-plus-tcpdump`). Nothing changes
+a **candidate** with its own tag (`2026.9.6-plus-tcpdump`). Nothing changes
 for any agent until you try it on one from Settings → Images and then
 promote it. At most eight packages, apt names only, and an image with extras is
 never built as the fleet default directly.
@@ -878,7 +879,7 @@ default** at the top to put it back. **Pin & rebuild** does both at once — the
 
 ## Fleet operations
 
-**📊 Health** (header) is the fleet dashboard: counts (running / stopped /
+**Status → Health** is the fleet dashboard: counts (running / stopped /
 failed / working), a "needs attention" list (failed agents with their reason,
 agents waiting for a bot, running agents idle over 14 days), and a per-agent
 line with state, model, and last activity. The host owner also sees **backup
@@ -1092,7 +1093,8 @@ each one's memory index. Changing it applies to what is already queued.
 What the machine does on its own is its owner's choice (⚙ Settings → Images →
 **Automatic rebuilds**; ⚙ → Runtime in the classic view; or `hatchabot rebuild-policy`):
 - *Required ones on their own* (the default): a required rebuild happens once
-  the agent has been idle for 10 minutes, two at a time — never mid-reply,
+  the agent has been idle for 10 minutes, up to the Rebuild-at-once setting
+  (default 6) together — never mid-reply,
   never the Hatchabot agent, never a stopped agent (a rebuild would start it).
   A stopped agent that needs one comes up rebuilt the next time it is started.
 - *Required, plus the rest overnight*: recommended ones too, in the quiet hours

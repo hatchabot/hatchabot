@@ -11,7 +11,7 @@ equal, and what the platforms keep different.
 
 Both tabs draw one card per app with the same rows, in the same order:
 
-| Row | Telegram | Discord | Slack (behind `?dev`) |
+| Row | Telegram | Discord | Slack |
 |---|---|---|---|
 | Name as the app shows it | display name + @handle | bot name (its username) | app name |
 | ↻ Re-check | getMe: alive, name, BotFather group settings | servers, intent, name | scopes, workspace |

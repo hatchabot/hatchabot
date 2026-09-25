@@ -35,7 +35,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/agents/:id/move-host': 'app: later — move to another runner',
   'POST /v1/agents/:id/rehost': 'app: fleet-wide/irreversible — moves the agent to another Hatchabot server',
   'POST /v1/agents/:id/send': 'app: later — send a copy to another account',
-  'POST /v1/agents/:id/bot-name/sync': 'app: later — rename the Telegram bot to match',
+  'POST /v1/agents/:id/bot-name/sync': 'app: later — rename the Telegram or Discord bot to match',
   'POST /v1/agents/:id/adopt-workspace': 'app: browser — adopting a hand-built OpenClaw workspace from host paths',
   'POST /v1/agents/import': 'app: browser — uploading a .hatchabot file',
   'POST /v1/agents/restore': 'app: browser — uploading a backup file',

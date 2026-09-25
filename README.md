@@ -66,10 +66,10 @@ adopting, backing up, and operating a fleet of agents.
   to — so every change is a reviewable commit, not a write into your disk. A public
   repo needs no key at all: tick **Public repo** and it is cloned read-only over https. Pair
   it with a local model and nothing leaves the machine at all.
-- **Organize your fleet.** Sort agents into named groups and arrange them: drag a
-  card by its ⠿ grip or a name in the left legend (drop it in another group to move
-  it there), ▲5 / ▼5 to jump five places, pick a position number under the arrows (1 = top),
-  Shift-click any arrow to go to the top or bottom, or sort a group — or every group — A→Z.
+- **Organize your fleet.** Sort agents into named groups and arrange them: drag an
+  icon onto another group, or into the empty strip to start a new group and name it
+  in place; sort by age, name or activity. (The classic look keeps the ⠿ grip,
+  ▲5 / ▼5 and position numbers.)
 - **Manage scheduled tasks.** See an agent's cron jobs (⏰ Tasks), enable or
   disable them, run one now to test, or delete one — no shelling into the
   container. Tasks live on the agent's durable volume and survive rebuilds.
@@ -91,9 +91,9 @@ adopting, backing up, and operating a fleet of agents.
   quietly stopped responding.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
-  A recent-activity card summarizes it; **See all →** opens the full audit log,
-  filterable by agent and showing each event's recorded detail. The management
-  bot can read the same timeline (`list_events`).
+  Overview → Checks → Logs and each agent's Setup log show it, filterable by
+  agent with each event's recorded detail. The Hatchabot agent can read the same
+  timeline (`list_events`).
 - **Shared or private memory.** A family agent's memory is common to everyone
   in it — and everyone is told so. A personal agent's isn't.
 - **Portability.** **Rehost** an agent to another Hatchabot server in one step —
@@ -330,8 +330,8 @@ src/
   openclaw/     Surgical openclaw.json patching + workspace seeding
   orchestrator/ Provisioning, claim, invites, members, snapshots, transfer
   api/          Fastify routes, auth modes, identity verification
-  mgmt/         the tool broker every management surface shares (web chat, the
-                Hatchabot agent, and the legacy Telegram bot in bot.ts/index.ts)
+  mgmt/         the tool broker every management surface shares (the web chat
+                and the Hatchabot agent)
   cli.ts        The hatchabot command
 web/            The app and the invitee join page: single files, no build step
 ```
@@ -453,4 +453,3 @@ MIT — see [LICENSE](LICENSE).
 | `HATCHABOT_SSH_DIR` | server | Override the runner-setup SSH dir. |
 | `OPENCLAW_STATE_DB` | server | Override the adopted-OpenClaw state DB path (cron import). |
 | `HATCHABOT_OPENCLAW_GATEWAY_UNIT` | server | systemd unit name quiesced during adopt. |
-| `HATCHABOT_MGMT_OWNER` / `HATCHABOT_MGMT_PAIRING_POLL_MS` | mgmt bot | Audit owner label; approval-push poll interval. |

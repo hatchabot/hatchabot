@@ -28,15 +28,25 @@ if [ ! -f .env ]; then
   say "Creating .env…"
   # Family accounts are the default: a home box is usually shared, and one
   # password means one owner of everything and a terminal trip to reset it.
-  echo "How will people sign in?"
-  echo "  1) An account for each person — their own agents, and a forgotten"
-  echo "     password is a link you send them  (recommended)"
-  echo "  2) One shared password"
-  read -r -p "Choose [1]: " SIGNIN
-  SIGNIN="${SIGNIN:-1}"
+  # Unattended (a provisioner installing for a tenant, a test bed): answer
+  # with HATCHABOT_SETUP_SIGNIN=accounts|password, HATCHABOT_SETUP_PASSWORD,
+  # HATCHABOT_SETUP_PORT, and HATCHABOT_SETUP_ENV (extra .env lines, e.g.
+  # DOCKER_HOST and the port bases of a tenant on a shared host).
+  case "${HATCHABOT_SETUP_SIGNIN:-}" in
+    accounts) SIGNIN=1 ;;
+    password) SIGNIN=2 ;;
+    "")
+      echo "How will people sign in?"
+      echo "  1) An account for each person — their own agents, and a forgotten"
+      echo "     password is a link you send them  (recommended)"
+      echo "  2) One shared password"
+      read -r -p "Choose [1]: " SIGNIN
+      SIGNIN="${SIGNIN:-1}" ;;
+    *) echo "HATCHABOT_SETUP_SIGNIN must be accounts or password."; exit 1 ;;
+  esac
   PW=""
   if [ "$SIGNIN" = "2" ]; then
-    read -r -s -p "Choose an app password (what you'll type to open the web app): " PW; echo
+    if [ -n "${HATCHABOT_SETUP_PASSWORD:-}" ]; then PW="$HATCHABOT_SETUP_PASSWORD"; else read -r -s -p "Choose an app password (what you'll type to open the web app): " PW; echo; fi
     [ -n "$PW" ] || { echo "Password cannot be empty."; exit 1; }
     # systemd's EnvironmentFile and the shell read a quoted apostrophe
     # differently, so a password holding one never matched on Linux.
@@ -55,9 +65,10 @@ if [ ! -f .env ]; then
       # anywhere else it needs the setup code the server prints when it starts.
       echo "HATCHABOT_AUTH=accounts"
     fi
-    echo "PORT=8080"
+    echo "PORT=${HATCHABOT_SETUP_PORT:-8080}"
     echo "# Set when reachable beyond localhost, e.g. via Tailscale — used in invite links:"
     echo "# HATCHABOT_PUBLIC_URL=http://<this-machine>.<tailnet>.ts.net:8080"
+    if [ -n "${HATCHABOT_SETUP_ENV:-}" ]; then printf '%s\n' "$HATCHABOT_SETUP_ENV"; fi
   } > .env
   chmod 600 .env
 else

@@ -41,6 +41,13 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           # 2026.8+ has no engine to bake: those images are built engine-free (step 4 of the embedder design).
           echo "engine=$(node scripts/runtime-pins.mjs embed-engine "$V")" >> "$GITHUB_OUTPUT"
+          # Slack/Discord (and the baked search plugins) are published in step with OpenClaw: the
+          # newest plugin release not newer than this OpenClaw, like scripts/build-runtime-image.sh.
+          # v2.77.x built 2026.9.6 against the Dockerfile's old 2026.7.1 pin and failed on both arches.
+          LIST="$(npm view @openclaw/slack versions --json 2>/dev/null || echo '[]')"
+          PICK="$(node scripts/runtime-pins.mjs plugin "$V" "$LIST" 2>/dev/null || true)"
+          [ -n "$PICK" ] || PICK="$(grep -oP 'ARG CHANNEL_PLUGIN_VERSION=\K\S+' docker/Dockerfile.runtime)"
+          echo "channel=$PICK" >> "$GITHUB_OUTPUT"
           # …and those bake the DuckDuckGo plugin and install channel plugins from an npm cache (trust model).
           if [ "$(node scripts/runtime-pins.mjs embed-engine "$V")" = none ]; then
             echo "baked=duckduckgo=@openclaw/duckduckgo-plugin,brave=@openclaw/brave-plugin" >> "$GITHUB_OUTPUT"; echo "install=npm" >> "$GITHUB_OUTPUT"
@@ -62,6 +69,7 @@ jobs:
           build-args: |
             OPENCLAW_VERSION=${{ steps.ver.outputs.version }}
             EMBED_ENGINE=${{ steps.ver.outputs.engine }}
+            CHANNEL_PLUGIN_VERSION=${{ steps.ver.outputs.channel }}
             BAKED_PLUGINS=${{ steps.ver.outputs.baked }}
             PLUGIN_INSTALL=${{ steps.ver.outputs.install }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true

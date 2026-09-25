@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { eventLabel } from '../src/orchestrator/eventLabels.js';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { EMBED_MODEL_PATH, EMBED_PLUGIN_DIR } from '../src/openclaw/configWriter.js';
 
 /**
@@ -35,6 +37,19 @@ describe('OPENCLAW_VERSION: Dockerfile ARG ↔ build script default', () => {
     );
     expect(df?.[1]).toBeTruthy();
     expect(df?.[1]).toBe(sh?.[1]);
+  });
+  // The Slack/Discord plugins are published in step with OpenClaw and import
+  // from it; a pin from an older line fails to load (v2.77.0–.2 built 2026.9.6
+  // against 2026.7.1 and the image workflow failed on both arches). The CI
+  // workflow resolves the pin from npm; this is the offline floor.
+  it('the channel plugin pin is from the same OpenClaw line, and CI passes one', () => {
+    const dfText = read('docker/Dockerfile.runtime');
+    const oc = /ARG OPENCLAW_VERSION=(\d+)\.(\d+)\./.exec(dfText);
+    const ch = /ARG CHANNEL_PLUGIN_VERSION=(\d+)\.(\d+)\./.exec(dfText);
+    expect(ch?.slice(1)).toEqual(oc?.slice(1));
+    const wf = read('.github/workflows/runtime-image.yml');
+    expect(wf).toContain('runtime-pins.mjs plugin');
+    expect(wf).toContain('CHANNEL_PLUGIN_VERSION=${{ steps.ver.outputs.channel }}');
   });
 });
 
@@ -267,5 +282,20 @@ describe('console session: the page ↔ configWriter agent ids', () => {
     expect(html).toMatch(/\/ui\/chat\?session=\$\{session\}/);
     expect(html).toContain('`agent:${slug}:main`');
     expect(read('src/openclaw/configWriter.ts')).toMatch(/'agents',\s*'add'/);
+  });
+});
+
+describe('every event the code records has plain words', () => {
+  // The Setup log and the Checks → Logs view print eventLabel(); an event
+  // without one shows its raw name (`migrate.pool_retire_failed`). The
+  // 2026-09-25 review found 115 of 163 like that. Walk src for the names.
+  it('eventLabels.ts covers each name passed to trace()/log()/recordEvent()', () => {
+    const files: string[] = [];
+    const walk = (d: string) => { for (const f of readdirSync(d)) { const p = join(d, f); if (statSync(p).isDirectory()) walk(p); else if (p.endsWith('.ts')) files.push(p); } };
+    walk('src');
+    const re = /(?:trace\([^()]*\)|\blog\??|recordEvent|\.event|logEvent|emit)\(\s*'([a-z][a-z0-9_]*\.[a-z0-9_.]+)'/g;
+    const missing = new Set<string>();
+    for (const f of files) for (const m of readFileSync(f, 'utf8').matchAll(re)) if (eventLabel(m[1]!) === m[1]) missing.add(m[1]!);
+    expect([...missing].sort()).toEqual([]);
   });
 });

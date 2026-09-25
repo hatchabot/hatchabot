@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.78.0] — 2026-09-25
+
+### Added
+- **Every end-user use case, enumerated and checked.** `docs/use-cases.md` lists 175 use cases across setup, accounts, creating and shaping agents, AI sources, chat apps, memory, tasks, operations, the home screen, backups, runners, the Hatchabot agent and security, each with the surfaces it lives on and the test that exercises it; `scripts/use-case-coverage.mjs --check` keeps the coverage column honest. 26 routes had no test at all (tailnet, runner key, image copy, embedder stop/restart, derived-image rebuild and log, pool re-check, parked Slack apps, group readiness, the inspector, peers, account unlinks, in-app Send, inbox dismiss, agent QR, anyone-can-knock): `test/routeGaps2.test.ts` covers each one's authorisation edge and happy path.
+- **Every recorded event has plain words in the Setup log.** 115 of 163 event names (moves, migrations, restores, reconciliation, members, connections, tasks…) showed as raw names; all are labelled, and a drift guard fails when a new one is recorded without a label.
+- **Unattended host setup.** `scripts/setup-host.sh` takes its answers from `HATCHABOT_SETUP_SIGNIN`, `HATCHABOT_SETUP_PASSWORD`, `HATCHABOT_SETUP_PORT` and `HATCHABOT_SETUP_ENV`, for tenant installs on a shared host.
+
+### Fixed
+- **No published runtime image since v2.76.0.** The image workflow built OpenClaw 2026.9.6 with the Slack/Discord plugins pinned at 2026.7.1 (not published for DuckDuckGo; Discord could not import the newer plugin SDK), so `ghcr.io/hatchabot/runtime:v2.76.0`–`v2.77.2` never appeared and fresh installs built locally. The Dockerfile pin follows OpenClaw's line, the workflow resolves the plugin version from npm like the local build script, and a drift guard ties the two pins together.
+- **Stale wording the review found.** features.md (the sheet's tabs, eleven machine-settings tabs, where the search and media keys, members and the memory cap live, distillation is built, Health is under Status, Telegram is optional, adopt's flags, rebuild concurrency), README (fleet organising, the removed management bot and its variables), channel-parity (Slack is public); the web's "Messaging tab", "3 at a time"/"two at a time" and "legacy management bot"; the Discord removal prompt now says the goodbye goes out and the agent restarts, like Slack's; `approve`/`deny --kind` in the CLI usage; the chat's `archive_agent`/`remove_channel` say what happens to a Discord or Slack app. The behavioural inconsistencies (CLI confirmations, three apply defaults for a source switch, naming) are listed in docs/use-cases.md for a decision.
+
 ## [2.77.2] — 2026-09-25
 
 ### Fixed

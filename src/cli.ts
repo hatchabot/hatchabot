@@ -196,8 +196,8 @@ Commands:
                                --drop-pin runs its default image instead
   invite <agent>               Mint a join link for the web flow
   pairing [<agent>]            Pending "wants to talk" requests
-  approve <agent> <code>       Let a pending requester in (creates a member)
-  deny <agent> <code>          Turn a pending requester away (not a ban)
+  approve <agent> <code> [--kind discord|slack]   Let a pending requester in (creates a member)
+  deny <agent> <code> [--kind discord|slack]      Turn a pending requester away (not a ban)
   members <agent>              List members
   kick <agent> <userId>        Revoke a member
   env <agent>                  List env var names (values are write-only)
@@ -1803,7 +1803,7 @@ async function main() {
         body: JSON.stringify({ toProfileId: to.id, rebuild: true, checkpoint: !flags.has('no-checkpoint'), recoverAfter: flags.has('recover') }),
       });
       const r = (await res.json()) as any;
-      console.log(`moved ${r.switched} of ${r.agents}; rebuilding ${r.rebuilding} (3 at a time)${(r.skipped ?? []).length ? '; skipped: ' + r.skipped.map((s: any) => s.name).join(', ') : ''}`);
+      console.log(`moved ${r.switched} of ${r.agents}; rebuilding ${r.rebuilding}${(r.skipped ?? []).length ? '; skipped: ' + r.skipped.map((s: any) => s.name).join(', ') : ''}`);
       console.log(`watch: hatchabot list --all   ·  then delete "${from.name}" in the app once none remain on it`);
       return;
     }
