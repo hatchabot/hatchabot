@@ -539,6 +539,15 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
         ? { [groupAccess.roomId]: { groupPolicy: 'open', requireMention: true } }
         : {};
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groups', JSON.stringify(groups), '--replace'] });
+  } else {
+    // No bot: turn Telegram OFF and empty its accounts, every build. The
+    // config lives on the volume, so a bot this agent USED to have stayed in
+    // it after the bot was moved to another agent — both containers then
+    // polled the same bot and fought over its messages (Ethernet cable fix →
+    // Genetic Algorithm Trading, 2026-09-24). Same convergent removal as
+    // Slack and Discord below.
+    cmds.push({ argv: ['config', 'set', 'channels.telegram.enabled', 'false'] });
+    cmds.push({ argv: ['config', 'set', 'channels.telegram.accounts', '{}'] });
   }
 
   // Slack and Discord (docs/channels-slack-discord-design.md). Only for

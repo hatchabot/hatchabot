@@ -323,6 +323,22 @@ describe('telegram rich messages (managed default ON)', () => {
   });
 });
 
+describe('an agent without a bot converges: Telegram off, accounts emptied', () => {
+  const base = { agentId: 'a1', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
+  it('a web-only build turns Telegram off and drops any account a previous build left on the volume', () => {
+    // The bot moved to another agent; this one's config still carried it, and
+    // both containers polled the same bot (2026-09-24).
+    const cmds = buildConfigCommands(base);
+    expect(argFor(cmds, 'channels.telegram.enabled')).toBe('false');
+    expect(argFor(cmds, 'channels.telegram.accounts')).toBe('{}');
+  });
+  it('a build with a bot writes it on, and never the empty-accounts line', () => {
+    const cmds = buildConfigCommands({ ...base, telegram: { accountId: 'b', botToken: 't', dmPolicy: 'pairing' as const, allowFrom: ['1'] } });
+    expect(argFor(cmds, 'channels.telegram.enabled')).toBe('true');
+    expect(argFor(cmds, 'channels.telegram.accounts')).toBeUndefined();
+  });
+});
+
 describe('session continuity (idle window + active-memory)', () => {
   const base = { agentId: 'cross-country-agent', model: 'm', authMode: 'api-key' as const, provider: 'ollama' as const, gatewayToken: 'x' };
   it('writes a 30-day idle reset window so overnight gaps resume, not reset', () => {

@@ -422,7 +422,9 @@ export async function setDmPolicy(
     console.log("set");'`;
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
   const out = res.stdout.trim();
-  log('channel.dm_policy', { agentId: opts.agentId, policy: opts.policy, result: res.code === 0 ? out : `failed:${res.code}` });
+  // A sweep re-asserts the policy every few minutes; "unchanged" is not news
+  // (it filled Genetic Algorithm Trading's Setup log, 2026-09-24).
+  if (!(res.code === 0 && out === 'unchanged')) log('channel.dm_policy', { agentId: opts.agentId, policy: opts.policy, result: res.code === 0 ? out : `failed:${res.code}` });
   return res.code === 0 && (out === 'set' || out === 'unchanged');
 }
 

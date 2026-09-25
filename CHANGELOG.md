@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.68.0] — 2026-09-24
+
+### Fixed
+- **A bot moved to another agent no longer keeps answering from the old one.** Removing Telegram from an agent rebuilt it, but the bot's account stayed in its OpenClaw config on the volume, so once the bot was attached elsewhere both containers polled it and fought over its messages (Ethernet cable fix → Genetic Algorithm Trading). A build without a bot now turns Telegram off and empties its accounts, the same convergent removal Slack and Discord already had.
+- The Setup log no longer fills with "chat access policy applied" from the sweep that re-checks it every few minutes; only a change or a failure is recorded.
+
+### Changed
+- **The dashboard is one row of equal tiles.** The Hatchabot agent's own tile is the same size as the others and comes first, then the numbers, then the actions; left-justified, wrapping onto as many lines as the width needs, no dividing line, nothing dropped. New is always last and at the right, on a phone too.
+
 ## [2.67.0] — 2026-09-24
 
 ### Added

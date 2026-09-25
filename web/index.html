@@ -466,8 +466,10 @@
   .setup-strip summary::-webkit-details-marker { display:none }
   .setup-strip[open] summary { margin-bottom:6px }
   .v2hub { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px 18px; display:grid;
-           grid-template-columns:auto 1fr; gap:14px 16px; align-items:start; margin:6px 0 26px }
-  .v2face { width:52px; height:52px; border-radius:15px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px }
+           grid-template-columns:1fr; gap:10px; align-items:start; margin:6px 0 26px }
+  /* The manager's own tile is the first of the row, the same size as the
+     others (Chris, 2026-09-24: one row of equal tiles, no dividing line). */
+  .v2face { width:56px; height:56px; border-radius:17px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px; margin-top:0 }
   .v2face.live { background:none; width:auto; height:auto; font-size:inherit; display:block; color:var(--text) }
   /* The manager's dashboard: the fleet in six tiles, in the same language as
      the agent icons — a tinted rounded square with an emoji sticker. Each one
@@ -493,22 +495,22 @@
      four, which silently hid half the dashboard on the device most likely to
      be glanced at. */
   @media (max-width:560px) {
-    .v2stats { gap:10px }
     .v2stat { width:60px }
     .v2stat .tile { width:50px; height:50px; border-radius:15px }
+    .v2hubactions .v2btn .v2glyph { width:50px; height:50px; border-radius:15px; font-size:24px }
+    body.v2 .v2hubactions .v2btn, body.v2 .v2hubactions .v2btn:hover, body.v2 .v2hubactions .v2btn.v2new, body.v2 .v2hubactions .v2btn.v2new:hover { width:60px }
   }
-  .v2hubagent { padding:8px 6px 2px }
-  /* The manager is the one agent that is not one of the fleet, and the page
-     should say so before you read a word: a heavier edge and a real shadow, so
-     it sits above the card rather than on it. The status ring (::after) keeps
-     its own inset, so a rebuilding or paused manager still reads normally. */
-  .v2hubagent .v2ic { width:88px; height:88px; border-radius:26px; font-size:44px;
+  .v2hubagent { padding:0; width:72px; display:grid; gap:5px; justify-items:center }
+  /* The manager is the one agent that is not one of the fleet: same tile size
+     as its numbers and actions, a heavier edge to say so. The status ring
+     (::after) keeps its own inset, so a rebuilding or paused manager still
+     reads normally. */
+  .v2hubagent .v2ic { width:56px; height:56px; border-radius:17px; font-size:27px;
                       border:2px solid color-mix(in srgb, var(--text) 34%, var(--line));
-                      box-shadow:0 8px 20px rgba(0,0,0,.22), 0 2px 5px rgba(0,0,0,.14) }
-  .v2hubagent:hover .v2ic { box-shadow:0 12px 26px rgba(0,0,0,.26), 0 3px 7px rgba(0,0,0,.16) }
-  .v2hubagent .v2ic::after { inset:-8px; border-radius:33px }
-  .v2hubagent .v2name { font-weight:650 }
-  .v2hubagent .v2name { font-size:13.5px; font-weight:600; max-width:110px }
+                      box-shadow:0 3px 8px rgba(0,0,0,.16) }
+  .v2hubagent:hover .v2ic { box-shadow:0 6px 14px rgba(0,0,0,.22) }
+  .v2hubagent .v2ic::after { inset:-6px; border-radius:23px }
+  .v2hubagent .v2name { font-size:11px; font-weight:650; max-width:72px; line-height:1.25 }
   .hub-ops .v2hubhead { display:none }
   /* Before the first agent list arrives, the hub shows its icon and nothing
      that would have to be taken back a moment later. */
@@ -520,18 +522,13 @@
   .v2hubhead .spacer { flex:1 }
   /* The fleet's actions live with the manager, not in the header (Chris,
      2026-09-23), as icon tiles in the same row as its numbers. */
-  .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:16px 14px; margin:4px 0 2px }
-  .v2hubrow .v2stats { margin:0 }
-  /* The action tiles follow the numbers, left-justified; only New stands at
-     the far right (Chris, 2026-09-24). */
-  .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 14px; flex:1; margin-left:0 }
+  /* One wrapping row of equal tiles: the manager, the numbers, the actions,
+     left-justified, as many lines as the width needs, no dividing line. The
+     one rule: New is last and stands at the right (Chris, 2026-09-24). The
+     two groups are display:contents so every tile wraps as one flow. */
+  .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:14px 14px; margin:4px 0 2px }
+  .v2hubrow .v2stats, .v2hubrow .v2hubactions { display:contents }
   .v2hubactions .v2btn.v2new { margin-left:auto }
-  /* No room for the numbers and the actions on one line: the actions take a
-     line of their own, under the numbers and starting where they start, with
-     a hairline between — two rows of the same tiles otherwise read as one
-     jumble (Chris, 2026-09-24). v2HubWrapCheck() sets the class. */
-  .v2hubrow.wrapped .v2hubactions { flex-basis:100%; margin-left:0; justify-content:flex-start; padding-top:14px; border-top:1px solid var(--line) }
-  .v2hubrow.wrapped .v2hubactions .v2btn.v2new { margin-left:auto }
   /* Written with body.v2 in front: the v2-wide "every main action shares a
      surface" rule (body.v2 .v2new) otherwise paints the tile's button grey. */
   body.v2 .v2hubactions .v2btn, body.v2 .v2hubactions .v2btn:hover, body.v2 .v2hubactions .v2btn.v2new, body.v2 .v2hubactions .v2btn.v2new:hover {
@@ -828,17 +825,11 @@
   .v2menu h4 { margin:10px 0 2px; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--dim) }
   .v2menu button { text-align:left; justify-content:flex-start }
   @media (max-width:640px) {
-    .v2hub { grid-template-columns:1fr }
-    .v2face { display:none }
-    /* The manager's panel on a phone: the numbers as one wrapping row of
-       tiles, the actions as another below it, New last (Chris, 2026-09-24 —
-       the action tiles had been squeezed into a column beside the numbers). */
-    .v2hubrow { display:block }
-    .v2hubrow .v2stats { display:flex; flex-wrap:wrap; gap:12px 10px }
-    .v2hubrow .v2hubactions, .v2hubrow.wrapped .v2hubactions { display:flex; flex-wrap:wrap; gap:12px 10px; flex:none; margin:12px 0 0; padding-top:12px; border-top:1px solid var(--line); justify-content:flex-start }
-    .v2hubrow .v2hubactions .v2btn.v2new { margin-left:auto }
-    .v2hubrow .v2stat, .v2hubrow .v2hubactions .v2btn { width:62px }
-    .v2hubrow .v2stats, .v2hubrow .v2hubactions, .v2hubrow.wrapped .v2hubactions { gap:12px 8px }
+    /* A phone: the same single flow, tighter; the manager's tile stays. */
+    .v2hubrow { gap:12px 8px }
+    .v2hubrow .v2stat, .v2hubrow .v2hubactions .v2btn, .v2hubrow .v2hubagent { width:60px }
+    .v2hubrow .v2hubagent .v2ic { width:50px; height:50px; border-radius:15px; font-size:24px }
+    .v2hubrow .v2hubagent .v2ic::after { inset:-6px; border-radius:21px }
     .v2row { grid-template-columns:1fr; gap:4px }
     .v2grid { grid-template-columns:repeat(auto-fill, minmax(84px, 1fr)) }
   }
@@ -937,11 +928,11 @@
   <div id="agents"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents…</div></div>
   <div id="v2home" class="v2only">
     <section class="v2hub" aria-labelledby="v2HubTitle">
-      <div class="v2face" aria-hidden="true">🐣</div>
       <div class="v2hubmain">
         <div class="v2hubhead"><h2 id="v2HubTitle">Hatchabot</h2><span id="v2HubLlm"></span><span class="spacer"></span><span id="v2HubTools"></span></div>
         <div id="v2OpsBox" hidden></div>
         <div class="v2hubrow">
+          <div class="v2face" aria-hidden="true">🐣</div>
           <div class="v2stats" id="v2Stats" hidden></div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
@@ -11505,33 +11496,10 @@ async function loadBackupAge() {
 
 /** Do the numbers and the action tiles share a line? If not, lay the actions out as their own row. */
 function v2HubWrapCheck() {
-  const row = document.querySelector('.v2hubrow'); if (!row) return;
-  const stats = $('v2Stats'), actions = $('v2HubActions');
-  if (!stats || !actions || stats.hidden) { row.classList.remove('wrapped'); return; }
-  // A phone: every number stays, and the CSS lays the two groups out as two
-  // full-width rows of tiles (the media query below); nothing to measure.
-  if (matchMedia('(max-width:640px)').matches) {
-    for (const t of stats.querySelectorAll('[data-drop]')) t.hidden = false;
-    row.classList.add('wrapped');
-    return;
-  }
-  row.classList.remove('wrapped'); // measure the natural layout, not the forced one
-  const droppable = [...stats.querySelectorAll('[data-drop]')].sort((a, b) => Number(a.dataset.drop) - Number(b.dataset.drop));
-  for (const t of droppable) t.hidden = false;
-  // On one line means: the actions box starts beside the numbers AND is a
-  // single row of tiles (it shares the line as a flex item, so it can sit
-  // beside them yet be squeezed into a column — that is not "fits").
-  const tile = actions.querySelector('.v2btn:not([hidden])');
-  const oneRow = () => !tile || actions.getBoundingClientRect().height < tile.offsetHeight * 1.5;
-  const fits = () => actions.offsetTop <= stats.offsetTop + 8 && oneRow();
-  // Drop the least useful numbers one by one until one line holds everything;
-  // only when none are left does the panel fall back to two rows.
-  for (const t of droppable) { if (fits()) break; t.hidden = true; }
-  row.classList.toggle('wrapped', !fits());
-}
-if (typeof ResizeObserver !== 'undefined') {
-  const hubRow = document.querySelector('.v2hubrow');
-  if (hubRow) new ResizeObserver(() => v2HubWrapCheck()).observe(hubRow.parentElement);
+  // The row wraps by itself now (Chris, 2026-09-24): every tile stays, in one
+  // flow, New last at the right. Nothing to measure; nothing dropped.
+  const stats = $('v2Stats'); if (!stats) return;
+  for (const t of stats.querySelectorAll('[data-drop]')) t.hidden = false;
 }
 
 function v2RenderHub() {
