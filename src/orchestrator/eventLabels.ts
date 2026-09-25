@@ -38,6 +38,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'embed.forced_shared': 'its image has no memory engine: using the shared service',
   'embed.engineless_refused': 'its image has no memory engine and the shared service is unavailable',
   'embed.mode': 'memory search engine switched',
+  'memory.peaks_cleared': 'memory peak and cap-hit readings cleared',
   'memory.cap_set': (d) => `memory cap ${d.cap === 'default' ? 'back to the default' : d.cap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.live ? ' — applied to the running container' : ''}`,
   'snapshot.captured': 'memory files snapshotted',
   'memory.checkpointed': 'conversation written to memory',

@@ -547,6 +547,11 @@ export class Store {
       // Per-agent and per-class memory cap (memoryCap.ts); the baseline hides cap hits from before the last change.
       `ALTER TABLE agents ADD COLUMN memory_cap TEXT`,
       `ALTER TABLE agents ADD COLUMN memory_cap_baseline INTEGER`,
+      // "Clear peaks" on Status → Resources: the peak the kernel keeps is
+      // since the container started and root's to reset, so the app keeps
+      // its own high-water mark from when the owner last cleared it.
+      `ALTER TABLE agents ADD COLUMN memory_peak_since INTEGER`,
+      `ALTER TABLE agents ADD COLUMN memory_peak_cleared_at TEXT`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
       `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
@@ -1125,6 +1130,34 @@ export class Store {
    * Move a group section one place up/down in the viewer's list, by rewriting
    * the whole section order after the swap. Returns false at the boundary.
    */
+  /** Forget an agent's peaks: cap hits count from `capHitsNow`, the peak from the next reading. */
+  clearMemoryPeaks(agentId: string, capHitsNow: number): void {
+    this.db.prepare(`UPDATE agents SET memory_cap_baseline = ?, memory_peak_since = 0, memory_peak_cleared_at = ?, updated_at = ? WHERE id = ?`)
+      .run(capHitsNow, new Date().toISOString(), new Date().toISOString(), agentId);
+  }
+  /** A reading above the high-water mark kept since the last clear raises it; returns the mark. */
+  bumpMemoryPeak(agentId: string, bytes: number): number {
+    const r = this.db.prepare(`SELECT memory_peak_since AS p, memory_peak_cleared_at AS at FROM agents WHERE id = ?`).get(agentId) as { p: number | null; at: string | null } | undefined;
+    if (!r?.at) return bytes;
+    const mark = Math.max(r.p ?? 0, bytes);
+    if (mark > (r.p ?? 0)) this.db.prepare(`UPDATE agents SET memory_peak_since = ? WHERE id = ?`).run(mark, agentId);
+    return mark;
+  }
+
+  /** Rename a group: every agent of the owner in it, and its place in the order. */
+  renameGroup(ownerId: string, from: string, to: string): number {
+    return this.db.transaction(() => {
+      const n = this.db.prepare(`UPDATE agents SET group_name = ?, updated_at = ? WHERE owner_id = ? AND group_name = ? AND state != 'DELETED'`)
+        .run(to, new Date().toISOString(), ownerId, from).changes;
+      const order = this.db.prepare(`SELECT sort_order FROM agent_group_order WHERE owner_id = ? AND group_name = ?`).get(ownerId, from) as { sort_order: number } | undefined;
+      if (order) {
+        this.db.prepare(`DELETE FROM agent_group_order WHERE owner_id = ? AND group_name IN (?, ?)`).run(ownerId, from, to);
+        this.db.prepare(`INSERT INTO agent_group_order (owner_id, group_name, sort_order) VALUES (?, ?, ?)`).run(ownerId, to, order.sort_order);
+      }
+      return n;
+    })();
+  }
+
   moveGroup(ownerId: string, groupName: string, dir: 'up' | 'down'): boolean {
     const groups = [
       ...new Set(this.listVisibleAgents(ownerId).map((a) => a.group).filter((g): g is string => !!g)),
@@ -3679,6 +3712,8 @@ function rowToAgent(r: any): Agent {
     cronTriggers: !!r.cron_triggers,
     memoryCap: r.memory_cap ?? undefined,
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,
+    memoryPeakSince: r.memory_peak_since ?? undefined,
+    memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,
     embedMode: r.embed_mode === 'shared' ? 'shared' : undefined,
     appliedEmbedMode: r.applied_embed_mode === 'shared' ? 'shared' : r.applied_embed_mode === 'baked' ? 'baked' : undefined,
     embedIndexedAt: r.embed_indexed_at ?? undefined,

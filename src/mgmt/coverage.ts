@@ -95,6 +95,9 @@ export const COVERAGE: Record<string, string> = {
 
   // ---- groups, classes, plans ----
   'POST /v1/groups/sort': 'app: later — sort a group A→Z',
+  'POST /v1/groups/rename': 'app: browser — renaming a section of the home screen',
+  'POST /v1/agents/:id/resources/clear': 'app: browser — forgetting a peak reading on the Resources view',
+  'POST /v1/resources/clear': 'app: browser — forgetting every peak reading on the Resources view',
   'POST /v1/groups/move': 'app: later — reorder groups',
   'POST /v1/agent-classes': 'app: later — define a class',
   'PUT /v1/agent-classes/:id': 'app: later — edit a class',

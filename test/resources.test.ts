@@ -65,4 +65,19 @@ describe('GET /v1/resources', () => {
     const names = r.hosts[0].containers.map((c: any) => c.agentName ?? c.role).sort();
     expect(names).toEqual(['shared-with-me', 'theirs']); // the local host is everyone's to list; its agents are not
   });
+
+  it('after a clear the cap hits count from now and the peak is the highest reading since; one agent or all of mine', async () => {
+    const f = await box();
+    const me = { 'x-hatchabot-owner': 'o' };
+    const before = (await f.inject({ method: 'GET', url: '/v1/resources', headers: me })).json().hosts[0].containers.find((c: any) => c.agentName === 'mine');
+    expect(before).toMatchObject({ memPeakBytes: 2e9, memCapHits: 1203 });
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/mine/resources/clear', headers: me, payload: {} })).json()).toEqual({ cleared: 1 });
+    const after = (await f.inject({ method: 'GET', url: '/v1/resources', headers: me })).json().hosts[0].containers.find((c: any) => c.agentName === 'mine');
+    expect(after.memCapHits).toBe(0);
+    expect(after.memPeakBytes).toBe(300e6); // the current reading is the new high-water mark
+    expect(after.clearedAt).toBeTruthy();
+    // Not the caller's agent: refused. All of mine: counts them.
+    expect((await f.inject({ method: 'POST', url: '/v1/agents/theirs/resources/clear', headers: me, payload: {} })).statusCode).toBe(404);
+    expect((await f.inject({ method: 'POST', url: '/v1/resources/clear', headers: me, payload: {} })).json().cleared).toBeGreaterThanOrEqual(3); // the machine owner clears every agent
+  });
 });

@@ -710,6 +710,9 @@
     .classrow { grid-template-columns:1fr 1fr }
     .classrow .cname, .classrow .cadd { grid-column:1 / -1 }
   }
+  .group-header.new-group-drop { display:none; border:2px dashed var(--accent); border-radius:10px; opacity:.85; margin-top:14px; justify-content:center }
+  body.dragging .group-header.new-group-drop { display:flex }
+  .group-name.editing { outline:2px solid var(--accent); border-radius:6px; padding:0 4px; background:var(--bg) }
   .v2chan { border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin:10px 0; display:flex; flex-direction:column; gap:8px }
   .v2chan-h { display:flex; align-items:center; gap:10px; flex-wrap:wrap }
   .v2chan-h b { font-size:15px }
@@ -969,7 +972,7 @@
     </section>
     <div id="v2groups"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents… <span class="sub">(a few seconds on a big fleet: every agent is checked)</span></div></div>
     <div class="v2dropstrips">
-      <div class="v2newgroup" id="v2NewGroup">Drop here to start a new group</div>
+      <div class="v2newgroup" id="v2NewGroup">＋ Drop here to start a new group — you name it right there</div>
       <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first</div>
     </div>
   </div>
@@ -2322,9 +2325,10 @@
 </dialog>
 
 <dialog id="fleetResDlg" style="width:min(720px,96vw)">
-  <div style="display:flex;justify-content:space-between;align-items:baseline">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap">
     <h3 style="margin:0">Resources</h3>
-    <span class="sub" id="fleetResAt"></span>
+    <span style="display:flex;gap:8px;align-items:baseline"><span class="sub" id="fleetResAt"></span>
+      <button class="hbtn" onclick="fleetResClear()" title="Forget every peak and cap-hit reading; they count from now (the containers keep running)">Clear peaks</button></span>
   </div>
   <div class="sub" style="margin:4px 0 0">
     Live CPU and memory per agent, as Docker measures it — refreshed every few seconds while this is open.
@@ -7845,10 +7849,17 @@ function fleetResDraw(r) {
           <td style="text-align:right;font-variant-numeric:tabular-nums">${c.cpuPct.toFixed(1)}%</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '% of ' + mb(c.memLimitBytes) : '—'}</td>
-          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memPeakBytes ? mb(c.memPeakBytes) : '—'}</td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub"${c.clearedAt ? ` title="Since you cleared it ${esc(ago(c.clearedAt))} ago"` : ''}>${c.memPeakBytes ? mb(c.memPeakBytes) : '—'}${c.agentId && c.mine !== false ? ` <button class="hbtn" style="padding:0 4px;font-size:11px" onclick="fleetResClear('${jsq(c.agentId)}')" title="Forget this agent's peak and cap hits; they count from now">×</button>` : ''}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums"${c.memCapHits || c.memOomKills ? ' style="text-align:right;font-variant-numeric:tabular-nums;color:var(--warn);font-weight:600"' : ' class="sub"'}>${c.memCapHits === undefined ? '—' : `${c.memCapHits}${c.memOomKills ? ` · killed ${c.memOomKills}×` : ''}`}</td></tr>`).join('')}
       </tbody></table>${h.totals?.machineMemBytes && h.totals.memPeakBytes > 0.8 * h.totals.machineMemBytes ? `<div class="sub" style="margin-top:6px;color:var(--warn)">⚠ If every container hit its peak at once they would want ${mb(h.totals.memPeakBytes)} of this machine's ${mb(h.totals.machineMemBytes)}. Caps are ceilings, not reservations — but this is close: lower some caps or move agents.</div>` : ''}${rows.some(c => c.memCapHits) ? `<div class="sub" style="margin-top:6px">⚠ ${rows.filter(c => c.memCapHits).length === 1 ? 'One container has' : `${rows.filter(c => c.memCapHits).length} containers have`} run into the memory cap. An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top of that: give that agent more (its sheet → Runtime → Memory cap, applied right away) or ask it to run smaller jobs.</div>` : ''}` : ''}</div>`;
   }).join('') || '<div class="sub">Nothing running.</div>';
+}
+async function fleetResClear(agentId) {
+  try {
+    const r = await api(agentId ? `/v1/agents/${agentId}/resources/clear` : '/v1/resources/clear', { method: 'POST', body: {} });
+    toast(agentId ? 'Peak and cap hits cleared — they count from now.' : `Peaks cleared on ${r.cleared} agent${r.cleared === 1 ? '' : 's'} — they count from now.`);
+    fleetResLast = null; await loadFleetResources?.();
+  } catch (e) { toast(e.message, 8000); }
 }
 async function openFleetResources() {
   fleetResDlg.showModal();
@@ -9741,7 +9752,7 @@ function dragPlace() {
   const t = dragTarget(st.root, drag.x, drag.y); st.target = t;
   drag.line.hidden = !t;
   if (t) Object.assign(drag.line.style, { top: `${t.y}px`, left: `${t.left}px`, width: `${t.width}px` });
-  drag.ghost.textContent = st.name + (t && t.group !== st.group ? `  → ${t.group || 'Default'}` : '');
+  drag.ghost.textContent = st.name + (t && t.group !== st.group ? `  → ${t.group === NEW_GROUP_DROP ? 'a new group' : (t.group || 'Default')}` : '');
   drag.ghost.style.transform = `translate(${drag.x + 14}px, ${drag.y + 12}px)`;
 }
 function dragAutoScroll() {
@@ -9795,6 +9806,16 @@ window.addEventListener('pointerup', async (e) => {
   drag.suppressClick = true; setTimeout(() => { drag.suppressClick = false; }, 0); // only the click this same release produces
   if (!t) return;
   try {
+    if (t.group === NEW_GROUP_DROP) {
+      // A fresh group with a placeholder name, then straight into renaming it.
+      const taken = new Set(agents.map(a => a.group).filter(Boolean));
+      let fresh = 'New group'; for (let i = 2; taken.has(fresh); i++) fresh = `New group ${i}`;
+      await api(`/v1/agents/${id}`, { method: 'PATCH', body: { group: fresh } });
+      await refresh(false);
+      const header = document.querySelector(`.group-header[data-group="${CSS.escape(fresh)}"] .group-name`);
+      if (header) { header.scrollIntoView({ block: 'center' }); editGroupName(header); }
+      return;
+    }
     const r = await api(`/v1/agents/${id}/move`, { method: 'POST', body: t.before ? { before: t.before } : { before: null, group: t.group } });
     if ((r.group ?? '') !== group) toast(`${name} moved to ${r.group || 'Default'}`);
     await refresh(false);
@@ -9806,6 +9827,33 @@ window.addEventListener('click', (e) => { if (drag.suppressClick) { e.preventDef
 dragStartOn($('agents'), true, () => window);
 dragStartOn($('tocList'), false, () => $('tocList'));
 // ---- end drag to reorder ------------------------------------------------------
+
+const NEW_GROUP_DROP = '__new_group__';
+/** Rename a group where it stands: the name becomes editable; Enter saves, Escape puts it back. */
+function editGroupName(el) {
+  if (!el || el.isContentEditable) return;
+  const from = el.textContent.trim();
+  el.contentEditable = 'plaintext-only'; el.classList.add('editing');
+  el.focus();
+  const range = document.createRange(); range.selectNodeContents(el); getSelection().removeAllRanges(); getSelection().addRange(range);
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    el.contentEditable = 'false'; el.classList.remove('editing');
+    const to = el.textContent.replace(/\s+/g, ' ').trim().slice(0, 48);
+    if (!save || !to || to === from) { el.textContent = from; return; }
+    try {
+      await api('/v1/groups/rename', { method: 'POST', body: { from, to } });
+      toast(`Group renamed to ${to}`);
+      await refresh(false);
+    } catch (e) { el.textContent = from; toast(e.message, 8000); }
+  };
+  el.onkeydown = (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+    else if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+  };
+  el.onblur = () => finish(true);
+}
 
 async function moveGroup(name, dir) {
   try {
@@ -9898,7 +9946,8 @@ function renderAgents() {
     if (!g && lastGroup === null) html += `<div class="group-header" data-group="Default" data-drop-group=""><span class="grow">Default</span>
       <span class="seg">${sortBtns('', 'mv')}</span></div>`;
     if (g && g !== lastGroup) html += `<div class="group-header" data-group="${esc(g)}" data-drop-group="${esc(g)}">
-      <span class="grow">${esc(g)}</span>
+      <span class="grow group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }">${esc(g)}</span>
+      <button class="mv" title="Rename this group" aria-label="Rename group" onclick="editGroupName(this.closest('.group-header').querySelector('.group-name'))">✏️</button>
       <span class="seg">${sortBtns(g, 'mv')}<button class="mv" title="Move this group up" aria-label="Move group up" onclick="moveGroup('${jsq(g)}','up')">${MV_ICON.up}</button><button class="mv" title="Move this group down" aria-label="Move group down" onclick="moveGroup('${jsq(g)}','down')">${MV_ICON.down}</button></span>
     </div>`;
     lastGroup = g;
@@ -9907,6 +9956,9 @@ function renderAgents() {
   // Belt-and-suspenders: anything still unemitted (a lineage cycle from bad
   // data) renders flat rather than vanishing.
   for (const a of live) if (!emitted.has(a.id)) html += agentCard(a);
+  // Shown only while an icon is being dragged: drop it here to start a group
+  // (named on the spot, in place).
+  if (live.length) html += `<div class="group-header new-group-drop" data-group="${NEW_GROUP_DROP}" data-drop-group="${NEW_GROUP_DROP}"><span class="grow">＋ New group — drop here</span></div>`;
   const parked = archivedAgents();
   if (parked.length) {
     // `open` is restored from the last render: this list re-renders on every
@@ -10613,9 +10665,9 @@ function renderV2() {
   v2SectionsNow = sections;
   const html = viewBar + sections.map(s => `
     <section class="v2group${v2IsCollapsed(s.key) ? ' collapsed' : ''}">
-      <div class="v2ghead"><h3>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
+      <div class="v2ghead"><h3${s.key.startsWith('g:') && s.drop ? ` class="group-name" tabindex="0" title="Double-click to rename" ondblclick="editGroupName(this)" onkeydown="if (event.key === 'Enter' && !this.isContentEditable) { event.preventDefault(); editGroupName(this); }"` : ''}>${esc(s.label)}</h3><span class="n">${s.items.length}</span>
         <span class="v2gtools">
-          ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
+          ${s.key.startsWith('g:') && s.drop ? `<button onclick="editGroupName(this.closest('.v2ghead').querySelector('h3'))" title="Rename this group" aria-label="Rename group">✏️</button><button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
           ${s.items.length ? `<button onclick="v2CopySection('${jsq(s.key)}')" title="Copy the names of the agents in this section" aria-label="Copy agent names">⧉</button>` : ''}
           ${v2View === 'attention' && ['n:1', 'n:4', 'n:5'].includes(s.key) && s.items.some(({ a }) => v2Mine(a)) ? `<button onclick="clearAttentionSection('${jsq(s.key)}')" title="Clear these from Needs you — each comes back if something new happens to it" aria-label="Clear from Needs you">🔕</button>` : ''}
@@ -10756,10 +10808,15 @@ window.addEventListener('pointerup', async (e) => {
     }
     if (a.state === 'ARCHIVED') { await restoreAgent(a.id, a.name); return; }
     if (t.newGroup) {
-      const name = (prompt(`Name the new group for "${a.name}":`) || '').trim();
-      if (!name) return renderV2();
-      await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: name } });
-      toast(`${a.name} moved to ${name}`);
+      // A fresh group with a placeholder name, then straight into renaming it
+      // where it stands (no prompt box, Chris 2026-09-25).
+      const taken = new Set(agents.map(x => x.group).filter(Boolean));
+      let fresh = 'New group'; for (let i = 2; taken.has(fresh); i++) fresh = `New group ${i}`;
+      await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: fresh } });
+      await refresh(false);
+      const head = [...document.querySelectorAll('#v2groups .v2ghead h3.group-name')].find(h => h.textContent.trim() === fresh);
+      if (head) { head.scrollIntoView({ block: 'center' }); editGroupName(head); }
+      return;
     } else {
       // Positions inside a group are sorted on screen, so a drop is a move
       // BETWEEN groups; a drop back into the same one changes nothing.

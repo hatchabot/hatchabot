@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.77.0] — 2026-09-25
+
+### Added
+- **Drag an icon to start a group.** While dragging, a dashed "＋ New group — drop here" strip appears at the bottom of the home screen; dropping there makes the group and puts its name under your cursor. Every group name is renamed in place: double-click it or press ✏️, type, Enter (Escape puts it back). The rename carries the group's agents and its place in the order.
+- **Clear peaks** on Status → Resources, for the whole view or one agent (× beside its peak): cap hits count from that moment and the peak becomes the highest reading seen since, with when you cleared it. The kernel's own counters only ever grow.
+
 ## [2.76.0] — 2026-09-25
 
 ### Changed

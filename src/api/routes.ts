@@ -1882,6 +1882,41 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     value.catch(() => statsCache.delete(hostId));
     return value;
   };
+  /** The peak to show: the kernel's since the container started, or the app's high-water mark since the owner cleared it. */
+  const peakSinceClear = (a: Agent, kernelPeak: number | undefined, current: number | undefined): number | undefined => {
+    if (!a.memoryPeakClearedAt) return kernelPeak;
+    return current === undefined ? Math.max(a.memoryPeakSince ?? 0, 0) || undefined : store.bumpMemoryPeak(a.id, current);
+  };
+  /** Forget the peaks and cap hits of these agents: they count from now. */
+  const clearPeaksOf = async (agentsToClear: Agent[]): Promise<number> => {
+    let n = 0;
+    const byHost = new Map<string, Agent[]>();
+    for (const a of agentsToClear) byHost.set(a.hostId, [...(byHost.get(a.hostId) ?? []), a]);
+    for (const [hostId, list] of byHost) {
+      const provider = providerFor(hostId);
+      let rows: ContainerStats[] = [];
+      try { rows = provider.stats ? await statsFor(hostId, provider) : []; } catch { rows = []; }
+      const hits = new Map(rows.map((r) => [r.name, r.memCapHits ?? 0]));
+      for (const a of list) {
+        store.clearMemoryPeaks(a.id, hits.get(a.runtimeRef?.replace(/^docker:\/\//, '') ?? '') ?? 0);
+        trace(a.id)('memory.peaks_cleared', { agentId: a.id });
+        n++;
+      }
+    }
+    return n;
+  };
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/resources/clear', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    await clearPeaksOf([agent]);
+    return { cleared: 1 };
+  });
+  /** Every agent of the caller's — every agent on the machine for its owner. */
+  app.post('/v1/resources/clear', async (req) => {
+    const list = ownsLocalHost(req) ? store.listAllActiveAgents() : store.listAgents(ownerIdOf(req));
+    return { cleared: await clearPeaksOf(list.filter((a) => a.runtimeRef)) };
+  });
+
   app.get('/v1/resources', async (req) => {
     const ownerId = ownerIdOf(req);
     const owner = ownsLocalHost(req);
@@ -1897,6 +1932,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const a = everyone.get(r.name);
           if (a) {
             if (!visible.has(r.name) && !owner) return [];
+            // Since the owner last cleared the peaks (Status → Resources), when they did.
+            r = { ...r, memPeakBytes: peakSinceClear(a, r.memPeakBytes, r.memBytes), memCapHits: r.memCapHits === undefined ? undefined : Math.max(0, r.memCapHits - (a.memoryCapBaseline ?? 0)), clearedAt: a.memoryPeakClearedAt } as typeof r & { clearedAt?: string };
             return [{ ...r, agentId: a.id, agentName: a.name, role: a.ops ? 'hatchabot' as const : 'agent' as const, mine: a.ownerId === ownerId, shared: a.ownerId !== ownerId && visible.has(r.name) }];
           }
           if (!owner) return [];
@@ -3703,7 +3740,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // container actually runs with, and how it has fared against it.
           memoryCap: a.memoryCap,
           memoryCapEffective: rebuild?.running.memoryLimitBytes ? formatMemoryCap(rebuild.running.memoryLimitBytes) : memoryCapFor(store, a),
-          memoryPeakBytes: rebuild?.running.memPeakBytes,
+          memoryPeakBytes: peakSinceClear(a, rebuild?.running.memPeakBytes, undefined),
           memoryCapHits: rebuild?.running.memCapHits === undefined ? undefined : Math.max(0, rebuild.running.memCapHits - (a.memoryCapBaseline ?? 0)),
           memoryKills: rebuild?.running.memOomKills,
           peersPending: peersPendingSet.has(a.id),
@@ -5157,6 +5194,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   );
 
   // Reorder a whole group section up/down in the caller's list.
+  /** Rename a group: its agents and its place in the order follow. */
+  app.post<{ Body: { from?: string; to?: string } }>('/v1/groups/rename', async (req, reply) => {
+    const parsed = z.object({ from: z.string().trim().min(1).max(48), to: z.string().trim().min(1).max(48) }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: 'Give the group\'s current name and its new one (up to 48 characters).' });
+    const { from, to } = parsed.data;
+    if (from === to) return { renamed: 0 };
+    const n = store.renameGroup(ownerIdOf(req), from, to);
+    if (!n) return reply.code(404).send({ error: `No group called "${from}".` });
+    return { renamed: n, group: to };
+  });
   app.post<{ Body: { group?: string; dir?: string } }>('/v1/groups/move', async (req, reply) => {
     const { group, dir } = (req.body ?? {}) as { group?: string; dir?: string };
     if (!group || (dir !== 'up' && dir !== 'down')) {

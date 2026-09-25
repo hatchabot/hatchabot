@@ -779,6 +779,14 @@ shown). Inside Bulk actions, the current View by's sections are also filter
 chips ("Image: 2026.9.6 (4)"), next to the usual ones (all, running, stopped,
 needs rebuild, needs attention, each source, group, class and machine).
 
+## Groups on the home screen: drag to make one, rename in place
+
+Drag an agent's icon and a dashed **＋ New group — drop here** strip appears at
+the bottom of the list: drop the icon there and a group is made around it,
+with its name ready to type. Any group's name can be renamed where it stands:
+double-click it (or press its ✏️), type, Enter saves, Escape puts it back. A
+rename carries every agent in the group and the group's place in the order.
+
 ## The Setup log: what is it doing?
 
 An agent that says *Rebuilding* or *Setting up* for a while now says which
@@ -1264,3 +1272,13 @@ Docker and a real Telegram bot, then tears everything down — it never touches
 your real server or agents. Put a throwaway BotFather token in a git-ignored
 `.env.smoke` at the repo root (`HATCHABOT_SMOKE_BOT_TOKEN=…`); without one
 the test skips cleanly, so it's safe in CI or cron.
+
+## Status → Resources: clearing the peaks
+
+The **peak** column is the most memory a container has used since it started,
+and **cap hits** how often it ran into its cap — both kept by the kernel, so
+they only ever grow. **Clear peaks** (the whole view) or the × beside one
+agent's peak forgets them: cap hits count from that moment, and the peak
+becomes the highest reading seen since (the column says when you cleared it).
+The containers keep running; nothing else changes.
+

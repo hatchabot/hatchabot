@@ -45,3 +45,19 @@ describe('POST /v1/groups/move', () => {
     expect(bad.statusCode).toBe(400);
   });
 });
+
+describe('POST /v1/groups/rename (2026-09-25)', () => {
+  it('renames every agent in the group and keeps its place in the order; a missing group is a 404', async () => {
+    const { store, f } = await world();
+    await f.inject({ method: 'POST', url: '/v1/groups/move', headers: as, payload: { group: 'Finance', dir: 'up' } });
+    const r = await f.inject({ method: 'POST', url: '/v1/groups/rename', headers: as, payload: { from: 'Finance', to: 'Money' } });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ renamed: 1, group: 'Money' });
+    expect(store.listAgents(OWNER).map((a) => [a.id, a.group])).toEqual([['fin1', 'Money'], ['alpha1', 'Alpha']]); // still first
+    expect((await f.inject({ method: 'POST', url: '/v1/groups/rename', headers: as, payload: { from: 'Finance', to: 'X' } })).statusCode).toBe(404);
+    expect((await f.inject({ method: 'POST', url: '/v1/groups/rename', headers: as, payload: { from: 'Money' } })).statusCode).toBe(400);
+    // Another account's groups are not this caller's to rename.
+    expect((await f.inject({ method: 'POST', url: '/v1/groups/rename', headers: { 'x-hatchabot-owner': 'someone-else' }, payload: { from: 'Money', to: 'Mine' } })).statusCode).toBe(404);
+  });
+});
+
