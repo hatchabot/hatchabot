@@ -55,7 +55,7 @@ import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orche
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
-import { addCron, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { CronSystemOwnedError, addCron, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { createRequire } from 'node:module';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -3281,6 +3281,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         : undefined;
     },
     appUrl: () => appUrlFor(),
+    // Discord: the manager's bot DMs the owner's linked Discord identity, from here.
+    sendDiscord: async (ownerId, text) => {
+      const ops = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+      const row = ops && store.getChannelForAgent(ops.id, 'discord');
+      const me = ops && store.memberIdentities(ops.id, ownerId).discord;
+      const conn = connectorFor('discord');
+      if (!row || !me || !conn?.dm) return false;
+      const secret = await secrets.get(row.secretRef).catch(() => undefined);
+      return secret ? conn.dm(secret, me, text) : false;
+    },
     log: (event, detail) => app.log.info(detail, event),
   });
 
@@ -5758,6 +5768,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
         return { ok: true, enabled };
       } catch (err) {
+        if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
@@ -5841,6 +5852,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (!ok) return reply.code(502).send({ error: "Couldn't delete that task — it may no longer exist." });
         return { ok: true };
       } catch (err) {
+        if (err instanceof CronSystemOwnedError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         throw err;
       }
@@ -6300,7 +6312,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const conn = connectorFor(req.params.kind);
     if (!conn) return reply.code(404).send({ error: 'Unknown channel.' });
     const kind = conn.kind;
-    if (agent.ops) return reply.code(409).send({ error: `${conn.label} is not available for the Hatchabot agent yet.` });
+    // The manager may have Discord (its pushes and its chat); Slack's websocket is not routed through its jail yet.
+    if (agent.ops && kind !== 'discord') return reply.code(409).send({ error: `${conn.label} is not available for the Hatchabot agent yet.` });
     if (store.getChannelForAgent(agent.id, kind)) return reply.code(409).send({ error: `It already has ${conn.label}. Remove it first to connect a different app.` });
     if (!agent.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) {
       return reply.code(409).send({ error: `Wait until it is running (it is ${agent.state.toLowerCase()}).` });
@@ -8575,11 +8588,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       .listAllActiveAgents()
       .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);
     if (!live.length) return;
-    // An owner can only be pushed to if their manager has a Telegram bot.
+    // An owner can only be pushed to if their manager has a Telegram or a Discord bot.
     const pushable = new Set(
       store
         .listAllActiveAgents()
-        .filter((a) => a.ops && a.state === 'RUNNING' && store.getChannelForAgent(a.id, 'telegram'))
+        .filter((a) => a.ops && a.state === 'RUNNING' && (store.getChannelForAgent(a.id, 'telegram') || store.getChannelForAgent(a.id, 'discord')))
         .map((a) => a.ownerId),
     );
     const found = new Map<string, { ownerId: string; headline: string }>();

@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 
 # Default = the version the fleet is proven on (candidate/promote flow above
 # is how this moves forward).
-OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.7.1-2}"
+OPENCLAW_VERSION="${OPENCLAW_VERSION:-2026.9.6}"
 # Where the built image lands. Follows HATCHABOT_IMAGE when that is set, so a
 # server pointed at another repo builds into the repo it actually reads
 # (HATCHABOT_IMAGE_REPO still wins if someone sets it explicitly).

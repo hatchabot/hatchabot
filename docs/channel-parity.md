@@ -23,7 +23,7 @@ Both tabs draw one card per app with the same rows, in the same order:
 | 🔁 Change bot… (a spare from the pool) | ✓ | ✓ | ✓ (Settings → Slack) |
 | Remove… (parks the bot) | ✓ (back to the pool) | ✓ (parked under Settings → Discord) | ✓ (parked with both tokens under Settings → Slack) |
 | People on the app + knocks (Not now / That's me / Let them in) | ✓ | ✓ | ✓ |
-| Group chats | any group (members, @mention) · off · one group (everyone in it) | every server it is in (members, @mention) · off · one server | every channel it is in (members, @mention) · off · one channel |
+| Group chats | any group (members, @mention) · off · one group (members, @mention) | every server it is in (members, @mention) · off · one server | every channel it is in (members, @mention) · off · one channel |
 | Who can reach it (invite only / anyone can knock) | one setting for every app | same | same |
 | Rich messages | on / off | — (always rendered) | — |
 
@@ -74,8 +74,6 @@ exists because BotFather caps an account at about 20 bots; Discord has no cap.
   reach anyone who ever opened the chat.
 - **Telegram has no server list**, so no *Add to a server*, and its group
   picker is *Find rooms* (the groups the bot has been spoken to in).
-- **Telegram's one-group mode opens that group to everyone in it** (Telegram
-  groups carry no per-user list); Discord's rooms admit members only.
 - **Rich messages** is a Telegram setting; Discord and Slack always render
   formatting.
 - **Owner token reveal** (`Show` on the Telegram tab, the inventory) exists

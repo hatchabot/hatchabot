@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createOpsPush } from '../src/ops/push.js';
+import { createOpsPush, PushBudget } from '../src/ops/push.js';
 
 /**
  * The push the retired Telegram management bot used to do, through the
@@ -85,3 +85,31 @@ describe('announcing a join request once', () => {
     expect(unannounced(seen, ['a1:AB', 'a3:EF', 'a2:CD'])).toEqual(['a2:CD']);
   });
 });
+
+describe('a push budget, and Discord when Telegram cannot carry it (2026-09-25)', () => {
+  it('six an hour per owner: the sixth says so, the seventh is dropped, the hour turning frees it', () => {
+    let t = 0;
+    const b = new PushBudget(3, () => t);
+    expect([b.take('o'), b.take('o'), b.take('o'), b.take('o')]).toEqual(['send', 'send', 'last', 'drop']);
+    expect(b.take('other')).toBe('send'); // per owner
+    t = 3_600_001;
+    expect(b.take('o')).toBe('send');
+  });
+  it('the push itself honours it, and falls back to a Discord DM when the manager has no Telegram', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const push = createOpsPush({ botToken: async () => 'T', chatId: () => '99', fetchImpl: stubFetch(calls), perHour: 2 });
+    expect(await push.waiting('o1', 'one')).toBe(true);
+    expect(await push.waiting('o1', 'two')).toBe(true);
+    expect(String(calls[1]!.body.text)).toContain('last of these for this hour');
+    expect(await push.waiting('o1', 'three')).toBe(false);
+    expect(calls).toHaveLength(2);
+    const dms: string[] = [];
+    const viaDiscord = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, sendDiscord: async (_o, text) => { dms.push(text); return true; }, fetchImpl: stubFetch(calls) });
+    expect(await viaDiscord.waiting('o2', 'Someone wants to talk to "Taco".', 'Let them in under Waiting for you.')).toBe(true);
+    expect(dms[0]).toContain('Taco'); expect(dms[0]).toContain('Confirm it in the Hatchabot app.');
+    expect(calls).toHaveLength(2); // Telegram untouched
+    const nothing = createOpsPush({ botToken: async () => undefined, chatId: () => undefined, fetchImpl: stubFetch(calls) });
+    expect(await nothing.waiting('o3', 'x')).toBe(false);
+  });
+});
+

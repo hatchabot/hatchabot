@@ -107,7 +107,7 @@ Commands:
                                (default: all of yours). --rebuild applies now,
                                else each shows "rebuild to apply".
   create <name> [--persona <text>] [--profile <id|name>] [--host <id>]
-         [--private] [--bot-token <tok>] [--no-telegram] [--timeout <min>]
+         [--private] [--no-telegram] [--timeout <min>]
                                Create an agent and wait for it to boot (up to
                                15 min). Without --profile it gets your ⭐
                                default AI source, as in the app.
@@ -172,7 +172,7 @@ Commands:
   rename <agent> <new name>    Change the display name
   ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
                                (applies on the agent's next rebuild)
-  adopt <workspace-dir> <name> [--reuse-bot] [--bot-token <tok>] [--profile <id>]
+  adopt <workspace-dir> <name> [--reuse-bot] [--profile <id>]
                                Turn an existing OpenClaw agent's workspace
                                into a managed Hatchabot agent (copies the
                                WHOLE folder; the original is only read)
@@ -448,7 +448,7 @@ function envQuote(v: string): string {
 const userPath = (p: string): string => resolve(process.env.HATCHABOT_CWD || process.cwd(), p);
 
 const BOOL_FLAGS = new Set(['private', 'yes', 'help', 'none', 'no-engine', 'overwrite', 'reuse-bot', 'rw', 'candidate', 'check', 'all', 'include-memory', 'drop-pin', 'build-image', 'host-owner', 'cli-token', 'outdated', 'required', 'dry-run', 'now', 'no-checkpoint', 'recover', 'public', 'no-telegram', 'rebuild', 'json', 'wait', 'quiet']);
-const VALUE_FLAGS = new Set(['kind', 'at-once', 'agents', 'base', 'bot-token', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
+const VALUE_FLAGS = new Set(['kind', 'at-once', 'agents', 'base', 'email', 'from', 'host', 'label', 'lines', 'name', 'new-password', 'out', 'password', 'persona', 'profile', 'to', 'token', 'url', 'values', 'version', 'timeout', 'every', 'cron', 'tz', 'message', 'limit', 'token-days', 'sort']);
 
 export function parseArgs(argv: string[]) {
   const flags = new Map<string, string>();
@@ -1278,10 +1278,12 @@ async function main() {
       console.log(`creating "${name}"…`);
       let a = await pollAgent(created.id);
       if (a.pendingAction?.type === 'bot_token') {
-        let tok = flags.get('bot-token');
+        // Never on the command line (it would sit in shell history and `ps`):
+        // typed unseen at the prompt, or HATCHABOT_BOT_TOKEN for a script.
+        let tok = process.env.HATCHABOT_BOT_TOKEN?.trim();
         if (!tok) {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
-          tok = await askLine('Paste bot token: ');
+          tok = await askSecret('Paste bot token (hidden): ');
         }
         const sub: any = await (await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok })).json();
         console.log(`bot @${sub.username} attached — provisioning…`);
@@ -1408,11 +1410,11 @@ async function main() {
           a = await pollAgent(a.id);
         } else if (a.pendingAction?.type === 'bot_token') {
           console.log(a.pendingAction.instructions ?? 'A Telegram bot token is needed.');
-          let tok = flags.get('bot-token');
+          let tok = process.env.HATCHABOT_BOT_TOKEN?.trim();
           // A wrong or already-used token is a typo-grade mistake, and we are
           // sitting at a prompt — ask again rather than discard the agent.
           for (let attempt = 0; ; attempt++) {
-            if (!tok) tok = await askLine('Paste bot token: ');
+            if (!tok) tok = await askSecret('Paste bot token (hidden): ');
             try {
               await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok });
               break;

@@ -19,6 +19,10 @@ export interface OpsPushDeps {
   chatId(ownerId: string): string | undefined;
   /** Where the owner opens Hatchabot (shown as a link). */
   appUrl?(): string | undefined;
+  /** A DM through the manager's Discord bot to the owner, when it has one and the owner is linked there. */
+  sendDiscord?(ownerId: string, text: string): Promise<boolean>;
+  /** How many pushes an owner may get per hour (a flood of knocks must not become a flood of pushes). */
+  perHour?: number;
   fetchImpl?: typeof fetch;
   log?(event: string, detail: Record<string, unknown>): void;
 }
@@ -45,19 +49,47 @@ export function unannounced(seen: Set<string>, current: readonly string[]): stri
   return fresh;
 }
 
+/**
+ * At most `perHour` pushes per owner per hour; the one that crosses the line
+ * is replaced by a single "and more" note, the rest are dropped until the
+ * hour turns. Anyone can knock at a bot that allows knocks, and each knock
+ * used to be a message to the owner's phone (2026-09-25).
+ */
+export class PushBudget {
+  #sent = new Map<string, number[]>();
+  constructor(readonly perHour = 6, readonly now: () => number = Date.now) {}
+  /** 'send' | 'last' (send, but say it is the last for a while) | 'drop'. */
+  take(ownerId: string): 'send' | 'last' | 'drop' {
+    const t = this.now();
+    const recent = (this.#sent.get(ownerId) ?? []).filter((x) => t - x < 3_600_000);
+    if (recent.length >= this.perHour) { this.#sent.set(ownerId, recent); return 'drop'; }
+    recent.push(t); this.#sent.set(ownerId, recent);
+    return recent.length === this.perHour ? 'last' : 'send';
+  }
+}
+
 export function createOpsPush(deps: OpsPushDeps): OpsPush {
+  const budget = new PushBudget(deps.perHour ?? 6);
   return {
     async waiting(ownerId, headline, detail) {
       const chatId = deps.chatId(ownerId);
-      if (!chatId) return false; // no linked Telegram: nothing to push to
-      const token = await deps.botToken(ownerId).catch(() => undefined);
-      if (!token) return false; // the manager has no bot
+      const token = chatId ? await deps.botToken(ownerId).catch(() => undefined) : undefined;
+      if (!token && !deps.sendDiscord) return false; // nowhere to push to
+      const slot = budget.take(ownerId);
+      if (slot === 'drop') { deps.log?.('ops.push', { ok: false, error: 'hourly push limit; more is waiting in the app' }); return false; }
       const where = deps.appUrl?.();
       const text = [
         headline.trim().slice(0, MAX),
         detail?.trim() ? detail.trim().slice(0, MAX) : '',
+        slot === 'last' ? 'That is the last of these for this hour — anything more waits in the app.' : '',
         where ? `Confirm it in Hatchabot: ${where}` : 'Confirm it in the Hatchabot app.',
       ].filter(Boolean).join('\n\n');
+      if (!token) {
+        // No Telegram to carry it: the manager's Discord bot, when the owner is linked there.
+        const ok = await deps.sendDiscord!(ownerId, text).catch(() => false);
+        deps.log?.('ops.push', { ok, via: 'discord', ...(ok ? {} : { error: 'no Discord to carry it' }) });
+        return ok;
+      }
       try {
         const send = deps.fetchImpl ?? fetch;
         const res = await send(`https://api.telegram.org/bot${token}/sendMessage`, {

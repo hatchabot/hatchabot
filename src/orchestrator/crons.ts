@@ -14,6 +14,10 @@ import type { RuntimeProvider } from '../providers/provider.js';
 export interface Cron {
   id: string;
   name?: string;
+  /** Declared by OpenClaw itself (its weekly skill review, memory dreaming, the
+   *  heartbeat): shown, never editable or deletable — the gateway refuses
+   *  ("system-owned monitor jobs cannot be removed by cron clients", 2026.9). */
+  system?: boolean;
   description?: string;
   enabled: boolean;
   /** 'cron' | 'every' | 'at'. */
@@ -56,7 +60,8 @@ function normalizeCron(j: Record<string, any>): Cron {
   const p = (j.payload ?? {}) as Record<string, any>;
   return {
     id: String(j.id),
-    name: typeof j.name === 'string' ? j.name : undefined,
+    name: typeof j.displayName === 'string' ? j.displayName : typeof j.name === 'string' ? j.name : undefined,
+    system: typeof j.declarationKey === 'string' && j.declarationKey.length > 0,
     description: typeof j.description === 'string' ? j.description : undefined,
     enabled: !!j.enabled,
     scheduleKind: s.kind,
@@ -209,6 +214,14 @@ export async function addCron(
   }
 }
 
+/** The gateway refused because the task is OpenClaw's own, not the owner's to change. */
+export class CronSystemOwnedError extends Error {
+  readonly userMessage = 'That task is built into OpenClaw (it runs its own upkeep); it cannot be changed or deleted from here.';
+  constructor() { super('system-owned cron job'); this.name = 'CronSystemOwnedError'; }
+}
+const refusedAsSystem = (res: { code: number; stderr: string; stdout: string }): boolean =>
+  res.code !== 0 && /system-owned/i.test(`${res.stderr}\n${res.stdout}`);
+
 /** Enable or disable a task. Job ids are globally unique, so no agent filter. */
 export async function setCronEnabled(
   provider: RuntimeProvider,
@@ -217,6 +230,7 @@ export async function setCronEnabled(
   enabled: boolean,
 ): Promise<boolean> {
   const res = await provider.exec(runtimeRef, ['cron', enabled ? 'enable' : 'disable', jobId]);
+  if (refusedAsSystem(res)) throw new CronSystemOwnedError();
   return res.code === 0;
 }
 
@@ -238,5 +252,6 @@ export async function deleteCron(
   jobId: string,
 ): Promise<boolean> {
   const res = await provider.exec(runtimeRef, ['cron', 'rm', jobId]);
+  if (refusedAsSystem(res)) throw new CronSystemOwnedError();
   return res.code === 0;
 }

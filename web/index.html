@@ -8482,6 +8482,14 @@ function renderCrons(crons) {
   }
   $('cronList').innerHTML = crons.map(c => {
     const msg = (c.message || '').replace(/\s+/g, ' ').trim();
+    // OpenClaw's own upkeep (its weekly skill review, memory dreaming): shown so
+    // nothing runs unseen, but the gateway refuses to change or remove it.
+    if (c.system) return `<div class="pair" style="align-items:flex-start">
+      <span class="grow">
+        <b>${esc(c.name || '(unnamed task)')}</b> <span class="chip" title="Declared by OpenClaw itself; it cannot be changed or deleted from here">built into OpenClaw</span>
+        <div class="sub">⏱ ${esc(cronScheduleLabel(c))}</div>
+        ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
+      </span></div>`;
     return `<div class="pair" style="align-items:flex-start">
       <span class="grow">
         <b>${esc(c.name || '(unnamed task)')}</b> ${c.enabled ? '' : '<span style="color:var(--dim)">· disabled</span>'}
@@ -11168,7 +11176,7 @@ async function v2LoadChans(id) {
       ? [['off', 'Off: direct messages only'], ['members', 'Every channel it is in — people you admitted, when @mentioned'], ['room', 'One channel']]
       : kind === 'discord'
         ? [['off', 'Off: direct messages only'], ['members', 'Every server it is in — people you admitted, when @mentioned'], ['room', 'One server']]
-        : [['members', 'Any group — people you admitted, when @mentioned (default)'], ['off', 'Off: direct messages only'], ['room', 'One group — everyone in it, when @mentioned']];
+        : [['members', 'Any group — people you admitted, when @mentioned (default)'], ['off', 'Off: direct messages only'], ['room', 'One group — people you admitted, when @mentioned']];
     const linked = c.youAreLinked ? '✓ Linked to you.'
       : kind === 'telegram' ? 'Not linked to you yet: open it and say hi — your first message links you.'
       : `Not linked to you yet: send it a direct message on ${label}, then approve the request that appears here with <b>That's me</b>.`;
@@ -11203,7 +11211,7 @@ async function v2LoadChans(id) {
         </select>${roomPicker}
         <input type="text" id="chanRoom-${kind}" placeholder="${{ slack: 'C0123ABCD', discord: '123456789012345678', telegram: '-1001234567890' }[kind]}" value="${esc(rooms.roomId || '')}"${roomInputHidden ? ' hidden' : ''} autocomplete="off">
         ${canChange ? `<button onclick="chanSaveRooms('${jsq(id)}','${kind}', this)">Save</button>` : ''}
-        <span class="sub" style="flex-basis:100%">${kind === 'telegram' ? 'In a group it answers only when @mentioned; "one group" opens that group to everyone in it.' : 'In a group it answers members only, and only when @mentioned.'} ${roomHelp}</span>
+        <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
       </div>
       <div class="v2chan-rooms">
         <label for="chanKnocks-${kind}" style="margin:0">Who can reach it</label>

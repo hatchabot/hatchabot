@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { listCrons, setCronEnabled, runCronNow, deleteCron } from '../src/orchestrator/crons.js';
+import { listCrons, setCronEnabled, runCronNow, deleteCron, CronSystemOwnedError } from '../src/orchestrator/crons.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
@@ -285,3 +285,23 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
     expect(add).not.toContain('--announce');
   });
 });
+
+describe("OpenClaw's own tasks (2026-09-25)", () => {
+  it('a declared job is marked system, shown by its display name; removing or changing it is a clear refusal, not "may no longer exist"', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('cron list', { code: 0, stdout: JSON.stringify({ jobs: [
+      { id: 'sys-1', declarationKey: 'skill-collection-review:kitchen', displayName: 'Skill collection review (kitchen)', name: 'skill-collection-review-kitchen', enabled: true, schedule: { kind: 'every', everyMs: 604800000 }, payload: { kind: 'agentTurn', message: 'Review…' } },
+      { id: 'job-9', name: 'Mine', enabled: true, schedule: { kind: 'cron', expr: '0 9 * * *' }, payload: { kind: 'agentTurn', message: 'x' } },
+    ] }), stderr: '' });
+    const crons = await listCrons(p, ref, 'kitchen');
+    expect(crons.map((c) => [c.id, c.system, c.name])).toEqual([['sys-1', true, 'Skill collection review (kitchen)'], ['job-9', false, 'Mine']]);
+    p.execResponses.set('cron rm', { code: 1, stdout: '', stderr: 'Error: system-owned monitor jobs cannot be removed by cron clients' });
+    await expect(deleteCron(p, ref, 'sys-1')).rejects.toBeInstanceOf(CronSystemOwnedError);
+    p.execResponses.set('cron disable', { code: 1, stdout: '', stderr: 'Error: system-owned monitor jobs cannot be edited by cron clients' });
+    await expect(setCronEnabled(p, ref, 'sys-1', false)).rejects.toBeInstanceOf(CronSystemOwnedError);
+    p.execResponses.set('cron rm', { code: 1, stdout: '', stderr: 'no such job' });
+    expect(await deleteCron(p, ref, 'gone')).toBe(false); // still the plain "no longer exists" answer
+  });
+});
+

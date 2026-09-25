@@ -125,11 +125,13 @@ describe('adding Slack or Discord', () => {
     expect(r.json().error).toMatch(/already connected to "Tax"/);
   });
 
-  it('is the owner\'s alone, and not offered to the Hatchabot agent yet', async () => {
+  it('is the owner\'s alone; the Hatchabot agent may have Discord (its pushes) but not Slack yet', async () => {
     const { add, inject } = await setup();
     const id = add();
     expect((await inject('POST', `/v1/agents/${id}/channels/slack`, { token: 'ok-good' }, { 'x-hatchabot-owner': 'stranger' })).statusCode).toBe(404);
-    expect((await inject('POST', `/v1/agents/${add({ ops: true })}/channels/discord`, { token: 'ok-good' })).statusCode).toBe(409);
+    const ops = add({ ops: true });
+    expect((await inject('POST', `/v1/agents/${ops}/channels/slack`, { token: 'ok-good' })).statusCode).toBe(409);
+    expect((await inject('POST', `/v1/agents/${ops}/channels/discord`, { token: 'ok-good' })).statusCode).toBe(202);
     expect((await inject('POST', `/v1/agents/${id}/channels/whatsapp`, { token: 'ok-good' })).statusCode).toBe(404);
   });
 });

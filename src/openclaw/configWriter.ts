@@ -550,11 +550,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // ignored). 'room' is deliberately never channel-wide open: exactly one
     // bound chat id, mention-gated, so the accident blast radius is the one
     // room the owner picked.
-    const policy = groupAccess?.mode === 'off' ? 'disabled' : 'allowlist';
+    // A room admits the people this agent admits (the group allow list falls
+    // back to the DM one), never everyone in it — the rule Discord's and
+    // Slack's rooms have had; Telegram's room was `open` until 2026-09-25.
+    // A room with nobody admitted yet is written closed, like theirs.
+    const admitted = (allowFrom?.length ?? 0) > 0;
+    const policy = groupAccess?.mode === 'off' || (groupAccess?.mode === 'room' && !admitted) ? 'disabled' : 'allowlist';
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groupPolicy', policy] });
     const groups =
-      groupAccess?.mode === 'room' && groupAccess.roomId
-        ? { [groupAccess.roomId]: { groupPolicy: 'open', requireMention: true } }
+      groupAccess?.mode === 'room' && groupAccess.roomId && admitted
+        ? { [groupAccess.roomId]: { groupPolicy: 'allowlist', requireMention: true } }
         : {};
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groups', JSON.stringify(groups), '--replace'] });
   } else {

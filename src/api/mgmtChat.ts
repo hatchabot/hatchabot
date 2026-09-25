@@ -265,6 +265,7 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       : vendor === 'anthropic' ? ['api.anthropic.com']
       : [];
     if (store.getChannelForAgent(agent.id)) hosts.push('api.telegram.org');
+    if (store.getChannelForAgent(agent.id, 'discord')) hosts.push('discord.com', 'gateway.discord.gg', 'cdn.discordapp.com', 'media.discordapp.net');
     return hosts;
   };
   setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, peerOk: deps.opsPeerOk, log: (event, detail) => app.log.info(detail, event) });

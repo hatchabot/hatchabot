@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.76.0] — 2026-09-25
+
+### Changed
+- **OpenClaw 2026.9.6 is the version every install gets** (the fleet here has run it for a day): the image build and the published runtime image default to it, on Node 24, and `stable` and `beta` point at this release. Agents follow it on their next rebuild; an agent pinned to an older image keeps it.
+- **A Telegram group admits the people you admitted**, like a Discord server or a Slack channel: "one group" no longer opens that group to everyone in it, and a room with nobody admitted yet is written closed.
+- **Pushes to your phone are capped at six an hour** per owner; the sixth says so, and anything more waits under "Waiting for you" in the app.
+- **The manager can be on Discord.** Its bot may be attached under the Hatchabot agent's Discord tab; when the manager has no Telegram, pending knocks and confirmations reach you as a Discord DM from it instead.
+- **OpenClaw's own tasks show as "built into OpenClaw"** on the Schedule tab (its weekly skill review, memory dreaming) with no Edit, Disable or Delete: the gateway refuses to change them, which the app used to report as "it may no longer exist" (Genetic Algorithm Trading, 2026-09-25).
+- `hatchabot create` and `adopt` no longer take `--bot-token` on the command line (it sat in shell history): the token is typed unseen at the prompt, or given as `HATCHABOT_BOT_TOKEN` for a script.
+
 ## [2.75.4] — 2026-09-25
 
 ### Fixed

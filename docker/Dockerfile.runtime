@@ -16,7 +16,7 @@
 # The Node.js line follows what the OpenClaw being baked requires (its npm
 # "engines"). scripts/build-runtime-image.sh picks it; a bare build gets the
 # one the default OpenClaw below is proven on.
-ARG NODE_IMAGE=node:22-slim
+ARG NODE_IMAGE=node:24-slim
 FROM ${NODE_IMAGE}
 
 # Keep this in step with scripts/build-runtime-image.sh's default, so a bare
@@ -27,7 +27,7 @@ FROM ${NODE_IMAGE}
 # validated by whoever asks — see src/api/routes.ts. Empty by default, so the
 # fleet's image is exactly the list above.
 ARG EXTRA_PACKAGES=
-ARG OPENCLAW_VERSION=2026.7.1-2
+ARG OPENCLAW_VERSION=2026.9.6
 # Pinned, not "latest": docker caches this layer per OPENCLAW_VERSION, so
 # "latest" silently means "whatever was latest the FIRST time this host
 # built it" — two hosts building the same tag got different claude-code

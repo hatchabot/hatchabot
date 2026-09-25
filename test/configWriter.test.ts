@@ -290,7 +290,13 @@ describe('group-chat access (GroupAccess → openclaw config)', () => {
     const cmds = buildConfigCommands(tg({ mode: 'room', roomId: '-1001234567890' }));
     expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('allowlist'); // channel stays closed
     const groups = JSON.parse(argFor(cmds, 'channels.telegram.groups')!);
-    expect(groups).toEqual({ '-1001234567890': { groupPolicy: 'open', requireMention: true } });
+    expect(groups).toEqual({ '-1001234567890': { groupPolicy: 'allowlist', requireMention: true } }); // admitted people only, since 2026-09-25
+  });
+
+  it("'room' with nobody admitted yet is written closed (2026-09-25)", () => {
+    const cmds = buildConfigCommands({ ...tg({ mode: 'room', roomId: '-1001234567890' }), telegram: { ...tg({ mode: 'room', roomId: '-1001234567890' }).telegram, allowFrom: [] } });
+    expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('disabled');
+    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
   });
 
   it("switching back to 'members' converges: policy allowlist, groups emptied", () => {

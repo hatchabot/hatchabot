@@ -74,8 +74,10 @@ describe('the memory search engine in an image', () => {
         return execFileSync('bash', ['scripts/build-runtime-image.sh'], { encoding: 'utf8', cwd: process.cwd(), env: { ...process.env, DRYRUN: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
       } catch (e) { const x = e as { stdout?: string; stderr?: string }; return String(x.stdout ?? '') + String(x.stderr ?? ''); }
     };
-    expect(run({})).toMatch(/hatchabot-runtime:2026\.7\.1-2 \(OpenClaw 2026\.7\.1-2, engine baked\)/);
-    expect(run({ EMBED_ENGINE: 'none' })).toMatch(/hatchabot-runtime:2026\.7\.1-2-lite \(.*engine none\)/);
+    // The default is 2026.9.6 since v2.76.0: an engine-free image by rule.
+    expect(run({})).toMatch(/hatchabot-runtime:2026\.9\.6 \(OpenClaw 2026\.9\.6, engine none\)/);
+    expect(run({ OPENCLAW_VERSION: '2026.7.1-2' })).toMatch(/hatchabot-runtime:2026\.7\.1-2 \(OpenClaw 2026\.7\.1-2, engine baked\)/);
+    expect(run({ OPENCLAW_VERSION: '2026.7.1-2', EMBED_ENGINE: 'none' })).toMatch(/hatchabot-runtime:2026\.7\.1-2-lite \(.*engine none\)/);
     expect(run({ OPENCLAW_VERSION: '2026.9.4' })).toMatch(/hatchabot-runtime:2026\.9\.4 \(OpenClaw 2026\.9\.4, engine none\)/);
     expect(run({ OPENCLAW_VERSION: '2026.9.4', EMBED_ENGINE: 'baked' })).toMatch(/no embedding engine to bake/);
     expect(run({ EMBED_ENGINE: 'sideways' })).toMatch(/must be baked or none/);
