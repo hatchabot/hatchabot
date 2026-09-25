@@ -649,7 +649,7 @@ which you make on that platform and paste into the agent's **Discord** tab →
 minutes.
 
 **Spare Discord bots.** Removing Discord from an agent, or deleting the
-agent, parks its bot under ⚙ Settings → Telegram → **Discord bots** with its
+agent, parks its bot under ⚙ Settings → **Discord** with its
 name, servers and token, instead of throwing the token away. A parked bot can
 be parked ahead of time too (paste its token there; the machine owner can
 share one with everyone), re-checked with Discord, or deleted. An agent's

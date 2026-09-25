@@ -2,10 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.72.1] — 2026-09-25
+
+### Changed
+- Spare Discord bots have their own Settings tab, **Discord**, instead of a section under Telegram.
+
 ## [2.72.0] — 2026-09-25
 
 ### Added
-- **A Discord bot pool.** Removing Discord from an agent, or deleting the agent, parks its bot under Settings → Telegram → Discord bots with its name, servers and token, instead of discarding the token. Park one ahead by pasting its token (checked with Discord; the machine owner can share it with everyone), re-check it, or delete it. An agent's Set up… offers a parked bot before asking for a token, so moving a bot between agents is Remove on one and pick it on the other. Tokens are never returned by the API.
+- **A Discord bot pool.** Removing Discord from an agent, or deleting the agent, parks its bot under Settings → Discord with its name, servers and token, instead of discarding the token. Park one ahead by pasting its token (checked with Discord; the machine owner can share it with everyone), re-check it, or delete it. An agent's Set up… offers a parked bot before asking for a token, so moving a bot between agents is Remove on one and pick it on the other. Tokens are never returned by the API.
 
 ## [2.71.2] — 2026-09-25
 

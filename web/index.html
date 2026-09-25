@@ -1588,6 +1588,7 @@
     <button class="tab" id="tabOperator" role="tab" aria-selected="false" onclick="showTab('operator')">👤 You</button>
     <button class="tab" id="tabConn" role="tab" aria-selected="false" onclick="showTab('conn')">Connections</button>
     <button class="tab" id="tabPool" role="tab" aria-selected="false" onclick="showTab('pool')">Telegram</button>
+    <button class="tab" id="tabDiscord" role="tab" aria-selected="false" onclick="showTab('discord')">Discord</button>
     <button class="tab" id="tabBackups" role="tab" aria-selected="false" onclick="showTab('backups')">Backups</button>
     <button class="tab" id="tabRuntime" role="tab" aria-selected="false" onclick="showTab('runtime')">Runtime</button>
     <button class="tab" id="tabSecurity" role="tab" aria-selected="false" onclick="showTab('security')">🛡 Security</button>
@@ -1775,22 +1776,6 @@
 
     <h4 style="margin:18px 0 6px">Bot pool</h4>
     <div id="poolList">Loading…</div>
-
-    <h4 style="margin:22px 0 4px">Discord bots</h4>
-    <div class="sub">Spare Discord bots. Removing Discord from an agent parks its bot here with its name and servers;
-      a new agent's Set up… offers a parked bot before asking for a token. Park one ahead of time: make it in the
-      <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a> (Bot → Reset Token,
-      turn on Message Content Intent) and paste the token.</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
-      <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="flex:1;min-width:220px;font-family:ui-monospace,monospace">
-      <button class="primary" id="dpoolAddBtn" onclick="addDiscordPoolBot()">Park it</button>
-    </div>
-    <label id="dpoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
-      <input type="checkbox" id="dpoolShared" style="width:auto">
-      <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
-    </label>
-    <div class="err" id="dpoolErr"></div>
-    <div id="dpoolList" style="margin-top:6px">Loading…</div>
     <details class="sec-drawer" id="botInvDrawer">
       <summary><b>🔎 Every bot this server has a token for</b> <span class="sub">— the ones your agents use AND the spares, live-checked against BotFather, whose cap is about 20 per Telegram account</span></summary>
       <div class="sub" style="margin-top:6px">
@@ -1828,6 +1813,23 @@
     </details>
     </div>
 
+  </section>
+
+  <section id="paneDiscord" role="tabpanel" hidden>
+    <div class="sub">Spare Discord bots. Removing Discord from an agent parks its bot here with its name and servers;
+      a new agent's Set up… offers a parked bot before asking for a token. Park one ahead of time: make it in the
+      <a href="https://discord.com/developers/applications" target="_blank" rel="noopener">developer portal</a> (Bot → Reset Token,
+      turn on Message Content Intent) and paste the token.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <input type="password" id="dpoolToken" placeholder="Discord bot token" autocomplete="off" style="flex:1;min-width:220px;font-family:ui-monospace,monospace">
+      <button class="primary" id="dpoolAddBtn" onclick="addDiscordPoolBot()">Park it</button>
+    </div>
+    <label id="dpoolSharedRow" style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:400;margin-top:6px">
+      <input type="checkbox" id="dpoolShared" style="width:auto">
+      <span>Share with everyone on this server <span class="sub">— otherwise only your agents can take it</span></span>
+    </label>
+    <div class="err" id="dpoolErr"></div>
+    <div id="dpoolList" style="margin-top:6px">Loading…</div>
   </section>
 
   <section id="paneServers" role="tabpanel" hidden>
@@ -3395,7 +3397,7 @@ async function createSubscriptionProfile() {
 
 // ---- AI sources -------------------------------------------------------------
 
-const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
+const TABS = { ai: 'paneAi', classes: 'paneClasses', hosts: 'paneHosts', pool: 'panePool', discord: 'paneDiscord', servers: 'paneServers', conn: 'paneConn', access: 'paneAccess', backups: 'paneBackups', runtime: 'paneRuntime', security: 'paneSecurity', operator: 'paneOperator' };
 
 /**
  * v2 regroups the Settings panel's classic tabs by what people come to do:
@@ -3408,6 +3410,7 @@ const V2_SETTINGS = [
   ['ai', 'AI', ['ai']],
   ['classes', 'Classes', ['classes']],
   ['pool', 'Telegram', ['pool']],
+  ['discord', 'Discord', ['discord']],
   ['conn', 'Connections', ['conn']],
   ['machines', 'Hosts', ['hosts', 'servers']],
   // One tab for every image on the machine: the fleet's own first, then the
@@ -3469,6 +3472,7 @@ function showTabPane(name) {
   if (name === 'conn') loadConnections();
   if (name === 'hosts') { loadHosts(); loadEmbedder(); }
   if (name === 'pool') loadPool();
+  if (name === 'discord') void loadDiscordPool();
   if (name === 'backups') loadBackups();
   if (name === 'runtime' || name === 'derived') loadRuntime(); // also fills the derived list
   if (name === 'security') { loadPosture(); void loadCliTokens(); }
@@ -3723,7 +3727,6 @@ async function loadBotInventory() {
 
 async function loadPool() {
   const el = $('poolList');
-  void loadDiscordPool();
   try {
     // Donating a bot to the house is the machine owner's call; parking your own
     // is not. Show only what this account can actually do.
@@ -3765,7 +3768,7 @@ async function loadPool() {
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
-// ---- spare Discord bots (Settings → Telegram → Discord bots) ------------------
+// ---- spare Discord bots (Settings → Discord) ------------------
 let discordPool = [];
 async function loadDiscordPool() {
   const el = $('dpoolList'); if (!el) return;
@@ -11141,7 +11144,7 @@ async function openChanSetup(id, kind) {
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
         <select id="chanPooled" style="flex:1;min-width:200px"><option value="">— make a new bot instead (steps below) —</option>
           ${discordPool.map(b => `<option value="${esc(b.applicationId)}">${esc(b.botName || b.applicationId)}${b.servers?.length ? ` — in ${esc(b.servers.map(g => g.name || g.id).join(', '))}` : ' — not in any server yet'}</option>`).join('')}</select>
-      </div><div class="sub" style="margin-top:4px">Parked when Discord was removed from an agent, or parked ahead under Settings → Telegram → Discord bots. It keeps its name and servers.</div></div>`;
+      </div><div class="sub" style="margin-top:4px">Parked when Discord was removed from an agent, or parked ahead under Settings → Discord. It keeps its name and servers.</div></div>`;
   }
   $('chanBody').innerHTML = parkedHtml + steps + fields.map(f => `
     <label for="chanF-${esc(f.key)}">${esc(f.label)}</label>
@@ -11237,10 +11240,10 @@ async function chanSaveRooms(id, kind, btn) {
   finally { btn.disabled = false; }
 }
 async function chanRemove(id, kind) {
-  // (Discord: the bot is parked under Settings → Telegram → Discord bots, name and servers kept.)
+  // (Discord: the bot is parked under Settings → Discord, name and servers kept.)
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'discord'
-    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord. The bot is parked under Settings → Telegram → Discord bots, with its name and servers, ready for another agent.`)
+    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord. The bot is parked under Settings → Discord, with its name and servers, ready for another agent.`)
     : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label}. The ${label} app stays yours; delete it on ${label} if you no longer want it. It restarts to apply this.`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
