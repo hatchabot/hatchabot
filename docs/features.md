@@ -1073,9 +1073,17 @@ a pinned base image, or each derived image by name), **Class**, **Status**,
 **Activity** (when each agent last did something: the last hour, today, this
 week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
 its container was last built),
-read-only, remembered per device. The bar appears once there is more than
-one agent; the read-only views list their bins alphabetically (the two time
-views newest first), with *Shared with me* and *Archived* last. On the same
+read-only, remembered per device. **Needs you** bins by what wants you:
+Knocking, To read, To rebuild, Needs attention, Fine — and **Cleared**: an
+agent you have taken out of the way with 🔕 (on the section's header for
+everyone in it, or on the agent's own sheet under its notices). Clearing
+remembers what was flagged, so the agent comes back the moment something
+new happens to it — a new restart, a new reason to rebuild, a failure —
+and **Show again** on its sheet brings it back by hand. Knocking and To
+read are not cleared this way: they go away by answering. The bar appears
+once there is more than one agent; the read-only views list their bins
+alphabetically (the two time views newest first), with *Shared with me* and
+*Archived* last. On the same
 bar in every view, **Age** (newest agent first), **Name** (A→Z) or
 **Activity** (most recently active first) orders the agents within each bin;
 press the active one again to flip it. Dragging an agent's icon still moves

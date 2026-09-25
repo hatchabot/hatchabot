@@ -3726,6 +3726,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
            *  immediate. `null` clears (the app then shows a picked default). */
           icon: z.string().refine(validIcon, { message: 'icon must be a single emoji' }).nullable().optional(),
           iconColor: z.string().refine(validIconColor, { message: 'iconColor must look like #3a8fd0' }).nullable().optional(),
+          /** Clear it from Needs you: what was flagged, as the app fingerprints it; it shows again when that changes. `null` shows it again now. */
+          attentionAck: z.string().max(4000).nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -3746,12 +3748,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.cronTriggers === undefined &&
         parsed.data.embedMode === undefined &&
         parsed.data.memoryCap === undefined &&
+        parsed.data.attentionAck === undefined &&
         parsed.data.icon === undefined &&
         parsed.data.iconColor === undefined
       ) {
         return reply.code(400).send({ error: 'Nothing to update' });
       }
 
+      if (parsed.data.attentionAck !== undefined) store.setAgentAttentionAck(agent.id, parsed.data.attentionAck);
       if (parsed.data.icon !== undefined || parsed.data.iconColor !== undefined) {
         store.setAgentIcon(agent.id, parsed.data.icon, parsed.data.iconColor);
       }

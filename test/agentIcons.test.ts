@@ -88,6 +88,24 @@ describe('picking icons', () => {
   });
 });
 
+describe('clearing an agent from Needs you', () => {
+  it('PATCH stores the fingerprint of what was flagged, the list carries it, and null shows it again', async () => {
+    const { store, f } = await world();
+    store.insertAgent(agent('a1', 'Stock Advisor'));
+    let r = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { attentionAck: 'rebuild:the fleet default moved\nrestart:1' } });
+    expect(r.statusCode).toBe(200);
+    expect(store.getAgent('a1')?.attentionAck).toBe('rebuild:the fleet default moved\nrestart:1');
+    const list = (await f.inject({ method: 'GET', url: '/v1/agents', headers: H })).json();
+    expect(list.find((a: any) => a.id === 'a1').attentionAck).toBe('rebuild:the fleet default moved\nrestart:1');
+    r = await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: H, payload: { attentionAck: null } });
+    expect(r.statusCode).toBe(200);
+    expect(store.getAgent('a1')?.attentionAck).toBeUndefined();
+    // Someone else's agent cannot be cleared.
+    expect((await f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: { 'x-hatchabot-owner': 'user-other' }, payload: { attentionAck: 'x' } })).statusCode).toBe(404);
+    await f.close();
+  });
+});
+
 describe('icon routes', () => {
   it('PATCH sets and clears an icon, and rejects a non-emoji', async () => {
     const { store, f } = await world();

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.67.0] — 2026-09-24
+
+### Added
+- **Clear an agent from Needs you.** 🔕 on a Needs-you section's header clears everyone in it; 🔕 Clear from Needs you on an agent's sheet clears that one. A cleared agent sits under **Cleared** instead of nagging, and comes back by itself when something new happens to it (a new restart, a new reason to rebuild, a failure); Show again brings it back by hand. Remembered on the server, so every device agrees. Knocking and To read still clear by answering.
+
 ## [2.66.0] — 2026-09-24
 
 ### Added

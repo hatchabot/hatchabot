@@ -525,6 +525,8 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN memory_cap TEXT`,
       `ALTER TABLE agents ADD COLUMN memory_cap_baseline INTEGER`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
+      // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
+      `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
       // Installation-wide default AI source for NEW agents (single-select):
       // preselected in the create form and preferred by importTemplate's
       // silent fallback — the "household default" once per-member profiles
@@ -2650,6 +2652,9 @@ export class Store {
   }
 
   /** Home-screen icon. `undefined` leaves that half alone; `null` clears it. */
+  setAgentAttentionAck(id: string, ack: string | null): void {
+    this.db.prepare(`UPDATE agents SET attention_ack = ? WHERE id = ?`).run(ack, id);
+  }
   setAgentIcon(id: string, icon: string | null | undefined, color: string | null | undefined): void {
     const now = new Date().toISOString();
     if (icon !== undefined) this.db.prepare(`UPDATE agents SET icon = ?, updated_at = ? WHERE id = ?`).run(icon, now, id);
@@ -3465,6 +3470,7 @@ function rowToAgent(r: any): Agent {
     classId: r.class_id ?? undefined,
     icon: r.icon ?? undefined,
     iconColor: r.icon_color ?? undefined,
+    attentionAck: r.attention_ack ?? undefined,
     webOnly: !!r.web_only,
     ops: !!r.ops,
     sortOrder: r.sort_order ?? undefined,

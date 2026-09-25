@@ -186,6 +186,8 @@ export interface Agent {
    *  Absent until chosen (by the owner, or picked from the name). Cosmetic. */
   icon?: string;
   iconColor?: string;
+  /** What was being flagged when the owner cleared it from Needs you (a fingerprint the app computes); unset = nothing cleared. */
+  attentionAck?: string;
   /** No Telegram bot: talked to only through Hatchabot (the OpenClaw console).
    *  Provisioning skips the bot step; one can be added (or removed) later. */
   webOnly?: boolean;

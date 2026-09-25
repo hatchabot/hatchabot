@@ -6333,6 +6333,9 @@ function agentNotices(a, opts = {}) {
         <button class="primary" onclick="rebuild('${a.id}')">Rebuild</button></div>` : ''}
       ${a.state === 'FAILED' && a.stateReason && !opts.skipFailure ? `<div class="reason">${esc(a.stateReason)}</div>` : ''}
       ${botNameNote(a)}
+      ${attentionFingerprint(a) && v2Mine(a) ? (attentionCleared(a)
+        ? `<div class="pair sub">🔕 <span class="grow">Cleared from Needs you — it comes back if something new happens.</span><button onclick="clearAttention('${a.id}', false)">Show again</button></div>`
+        : `<div class="pair sub"><span class="grow"></span><button onclick="clearAttention('${a.id}')" title="Take it out of Needs you until something new happens">🔕 Clear from Needs you</button></div>`) : ''}
       ${a.state === 'ARCHIVED' ? `<div class="pair">📥 <span class="grow">Archived — everything is kept, but its Telegram bot went back in the pool for another agent. Restore gives it a <b>new</b> bot; members will need the new link.</span></div>` : ''}
       ${(isRechecking(a) ? [] : (a.dataSources ?? []).filter(d => d.syncError)).map(d => `
         <div class="pair">
@@ -9756,28 +9759,58 @@ function recheckNote(a) {
   return n ? `<div class="pair">🛠 <span class="grow sub">Working on it — ${n} issue${n > 1 ? 's' : ''} will be re-checked when this finishes; anything still wrong reappears here.</span></div>` : '';
 }
 
+// "Clear from Needs you": what is flagged, as a stable fingerprint (kinds, not
+// counts that tick — more cap hits do not re-flag; a NEW restart or a new
+// rebuild reason does). Stored on the agent, so every device agrees.
+function attentionFingerprint(a) {
+  const keys = [a.state === 'FAILED' ? 'state:FAILED' : '', a.opsDrift ? 'opsDrift' : '', ...agentAttention(a).map(x => x.key)].filter(Boolean);
+  return keys.length ? keys.sort().join('\n') : '';
+}
+/** True when the owner cleared exactly what is flagged now (nothing new since). */
+function attentionCleared(a) {
+  return !!a.attentionAck && a.attentionAck === attentionFingerprint(a);
+}
+async function clearAttention(id, on = true) {
+  const a = agents.find(x => x.id === id); if (!a) return;
+  try {
+    await api(`/v1/agents/${id}`, { method: 'PATCH', body: { attentionAck: on ? attentionFingerprint(a) : null } });
+    a.attentionAck = on ? attentionFingerprint(a) : undefined;
+    toast(on ? `${a.name} cleared from Needs you — it comes back if something new happens.` : `${a.name} is back under Needs you.`);
+    await refresh(false);
+  } catch (e) { toast(e.message); }
+}
+async function clearAttentionSection(key) {
+  const list = (v2SectionsNow.find(s => s.key === key)?.items ?? []).map(({ a }) => a).filter(a => v2Mine(a) && attentionFingerprint(a) && !attentionCleared(a));
+  if (!list.length) return toast('Nothing to clear here.');
+  let n = 0;
+  for (const a of list) {
+    try { await api(`/v1/agents/${a.id}`, { method: 'PATCH', body: { attentionAck: attentionFingerprint(a) } }); a.attentionAck = attentionFingerprint(a); n++; } catch { /* next */ }
+  }
+  toast(`Cleared ${n} agent${n === 1 ? '' : 's'} from Needs you — they come back if something new happens.`);
+  await refresh(false);
+}
 function agentAttention(a) {
   const out = [];
   // The reason is printed beside the status; the list only says there is one,
   // so a long explanation isn't repeated twice on the same screen.
-  if (a.state === 'FAILED') out.push({ icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
-  if (a.pendingAction) out.push({ icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
+  if (a.state === 'FAILED') out.push({ key: 'failed', icon: '❗', why: a.stateReason ? 'it failed — the reason is beside its status' : 'it failed', failure: true });
+  if (a.pendingAction) out.push({ key: 'pending', icon: '✋', why: a.pendingAction.type === 'bot_token' ? 'waiting for a Telegram bot token' : 'a step is waiting on you' });
   const rechecking = isRechecking(a);
   const unsynced = rechecking ? [] : (a.dataSources || []).filter(d => d.syncError);
-  if (unsynced.length) out.push({ icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
-  if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ icon: '⚙', why: 'template setup values not filled in' });
-  if (a.opsDrift) out.push({ icon: '🔒', why: `its safety settings were changed (${a.opsDrift}), so its access to Hatchabot is paused — Rebuild it to restore them` });
-  if (a.migratedTo) out.push({ icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
-  if (sourceUsageOf(a.aiProfileId)?.status === 'limited') out.push({ icon: '⛔', why: `its AI source is being rate-limited (since ${clock(sourceUsageOf(a.aiProfileId).limitedSince)})` });
-  if (a.imageTrial) out.push({ icon: '🧪', why: `on trial image ${a.image} (Runtime → ✕ to discard)` });
+  if (unsynced.length) out.push({ key: 'unsynced:' + unsynced.map(d => d.mountName).join(','), icon: '⚠', why: unsynced.map(d => `${d.mountName} didn't sync — ${d.syncError}`).join('; ') });
+  if (a.persona && /\{\{\s*[a-z][a-z0-9_]*\s*\}\}/.test(a.persona)) out.push({ key: 'template', icon: '⚙', why: 'template setup values not filled in' });
+  if (a.opsDrift) out.push({ key: 'opsDrift', icon: '🔒', why: `its safety settings were changed (${a.opsDrift}), so its access to Hatchabot is paused — Rebuild it to restore them` });
+  if (a.migratedTo) out.push({ key: 'migrated', icon: '📦', why: `moved to ${a.migratedTo} — this is a leftover copy` });
+  if (sourceUsageOf(a.aiProfileId)?.status === 'limited') out.push({ key: 'limited', icon: '⛔', why: `its AI source is being rate-limited (since ${clock(sourceUsageOf(a.aiProfileId).limitedSince)})` });
+  if (a.imageTrial) out.push({ key: 'trial:' + a.image, icon: '🧪', why: `on trial image ${a.image} (Runtime → ✕ to discard)` });
   const rebuild = [];
   if (a.pendingModel && a.pendingModel !== a.model) rebuild.push(`switches to ${a.pendingModel} on rebuild`);
   if (a.rebuild) rebuild.push(...a.rebuild.reasons);
   if (a.peersPending) rebuild.push('peer changes need a rebuild');
-  if (rebuild.length && !rechecking) out.push({ icon: a.rebuild?.level === 'required' ? '⚠' : '🔄', why: rebuild.join('; ') });
-  if (a.botNamePending) out.push({ icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
-  if (a.memoryCapHits || a.memoryKills) out.push({ icon: '🧠', why: `${a.memoryKills ? `${a.memoryKills} of its processes ${a.memoryKills === 1 ? 'was' : 'were'} killed for memory` : `it hit its memory cap ${a.memoryCapHits}×`} (${a.memoryCapEffective ? capLabel(a.memoryCapEffective) : 'default cap'}) — raise it under Runtime → Memory cap, or ask it to run smaller jobs` });
-  if (a.selfRestarts) out.push({ icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
+  if (rebuild.length && !rechecking) out.push({ key: 'rebuild:' + rebuild.join('|'), icon: a.rebuild?.level === 'required' ? '⚠' : '🔄', why: rebuild.join('; ') });
+  if (a.botNamePending) out.push({ key: 'botName', icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
+  if (a.memoryCapHits || a.memoryKills) out.push({ key: 'memory', icon: '🧠', why: `${a.memoryKills ? `${a.memoryKills} of its processes ${a.memoryKills === 1 ? 'was' : 'were'} killed for memory` : `it hit its memory cap ${a.memoryCapHits}×`} (${a.memoryCapEffective ? capLabel(a.memoryCapEffective) : 'default cap'}) — raise it under Runtime → Memory cap, or ask it to run smaller jobs` });
+  if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
   return out;
 }
 
@@ -10297,9 +10330,10 @@ function v2ViewKey(a, view = v2View) {
     }
     // What wants a click from you, most urgent bin first; the rest are "Fine".
     case 'attention': {
-      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs attention'];
       if ((pairings[a.id]?.length ?? 0) > 0) return ['n:2', '🔑 Knocking'];
       if (v2Unread(a)) return ['n:3', '💬 To read'];
+      if (attentionCleared(a)) return ['n:8', '🔕 Cleared'];
+      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs attention'];
       if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
       if (agentAttention(a).length) return ['n:5', '⚠ Needs attention'];
       return ['n:9', 'Fine'];
@@ -10375,6 +10409,7 @@ function renderV2() {
           ${s.key.startsWith('g:') && s.drop ? `<button onclick="moveGroup('${jsq(s.drop)}','up')" title="Move this group up" aria-label="Move group up">↑</button><button onclick="moveGroup('${jsq(s.drop)}','down')" title="Move this group down" aria-label="Move group down">↓</button>` : ''}
           ${s.items.some(({ a }) => v2Mine(a) && a.state !== 'ARCHIVED') ? `<button onclick="v2BulkSection('${jsq(s.key)}','${jsq(s.label)}')" title="Bulk actions on the agents in this section">⚡</button>` : ''}
           ${s.items.length ? `<button onclick="v2CopySection('${jsq(s.key)}')" title="Copy the names of the agents in this section" aria-label="Copy agent names">⧉</button>` : ''}
+          ${v2View === 'attention' && ['n:1', 'n:4', 'n:5'].includes(s.key) && s.items.some(({ a }) => v2Mine(a)) ? `<button onclick="clearAttentionSection('${jsq(s.key)}')" title="Clear these from Needs you — each comes back if something new happens to it" aria-label="Clear from Needs you">🔕</button>` : ''}
           <button onclick="v2Fold('${jsq(s.key)}')" aria-expanded="${!v2IsCollapsed(s.key)}">${v2IsCollapsed(s.key) ? 'Show' : 'Hide'}</button>
         </span></div>
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
@@ -11369,7 +11404,7 @@ function renderV2Stats() {
   const awake = mine.filter(a => a.state === 'RUNNING').length;
   const unread = mine.filter(v2Unread).length;
   const knocking = mine.reduce((n, a) => n + (pairings[a.id]?.length ?? 0), 0);
-  const stale = mine.filter(a => a.rebuild).length;
+  const stale = mine.filter(a => a.rebuild && !attentionCleared(a)).length;
   const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
   const tokens1h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window1h?.tokens ?? 0), 0);
   const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');
