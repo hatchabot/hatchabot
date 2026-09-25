@@ -38,6 +38,11 @@ export function parseModelCalls(text: string): ModelCall[] {
 
 /** UTC hour bucket, e.g. 2026-09-15T17. */
 export function hourOf(iso: string): string { return iso.slice(0, 13); }
+/** The five-minute slot an instant falls in: "2026-09-25T01:25". */
+export function slotOf(iso: string): string {
+  const m = Math.floor((Number(iso.slice(14, 16)) || 0) / 5) * 5;
+  return `${iso.slice(0, 14)}${String(m).padStart(2, '0')}`;
+}
 
 const DAY = 86_400_000;
 export /** How many agents to sample at once, and how long one whole pass may take. */
@@ -74,16 +79,20 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
       const text = await provider.modelCallLog(runtimeRef, since);
       const fresh = parseModelCalls(text).filter((c) => c.at > since);
       const buckets = new Map<string, { ok: number; limited: number; failed: number }>();
+      const slots = new Map<string, { ok: number; limited: number; failed: number }>();
       let lastOk: string | undefined, lastLimited: string | undefined, maxAt = since;
       for (const c of fresh) {
         const b = buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
-        if (c.status >= 200 && c.status < 300) { b.ok++; lastOk = c.at; }
-        else if (c.status === 429) { b.limited++; lastLimited = c.at; store.addLimitHit(a.id, a.aiProfileId, c.at, c.model); limited++; }
-        else b.failed++;
+        const sb = slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
+        if (c.status >= 200 && c.status < 300) { b.ok++; sb.ok++; lastOk = c.at; }
+        else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, a.aiProfileId, c.at, c.model); limited++; }
+        else { b.failed++; sb.failed++; }
         buckets.set(hourOf(c.at), b);
+        slots.set(slotOf(c.at), sb);
         if (c.at > maxAt) maxAt = c.at;
       }
       store.addModelCallHours(a.id, a.aiProfileId, buckets);
+      store.addModelCallSlots(a.id, a.aiProfileId, slots);
       calls += fresh.length;
       // No new calls: still move the cursor on (minus a little), so an idle agent
       // isn't rescanned from a week ago every pass.
@@ -131,6 +140,8 @@ export interface SourceUsage {
   topAgents: Array<{ name: string; requests: number; tokens: number; limited: number }>;
   /** 168 hourly buckets, oldest first. */
   hourly: Array<{ hour: string; ok: number; limited: number }>;
+  /** 288 five-minute buckets covering the last day, oldest first (the chart's hour and day views). */
+  slots: Array<{ slot: string; ok: number; limited: number }>;
   /** Other accounts' agents on a source you own count toward the same limit (counts only). */
   others?: { agents: number; requests5h: number; requests7d: number };
 }
@@ -190,6 +201,15 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
       b.ok += r.ok + r.failed; b.limited += r.limited;
       hourMap.set(r.hour, b);
     }
+    const slotStart = slotOf(new Date(now - DAY).toISOString());
+    const slotMap = new Map<string, { ok: number; limited: number }>();
+    for (const r of store.modelCallSlotsFor(p.id, slotStart)) {
+      if (!myIds.has(r.agentId)) continue;
+      const b = slotMap.get(r.slot) ?? { ok: 0, limited: 0 };
+      b.ok += r.ok + r.failed; b.limited += r.limited;
+      slotMap.set(r.slot, b);
+    }
+    const slotsList = Array.from({ length: 288 }, (_, i) => slotOf(new Date(now - (287 - i) * 300_000).toISOString()));
     const entry: SourceUsage = {
       id: p.id, name: p.name, agents: my.length,
       window1h: { ...w(h1), tokens: tokensFor(myIds, t1) },
@@ -199,6 +219,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
       status, limitedSince, lastLimitAt, lastOkAt, limitHits7d: hits.length, topAgents,
       tokensSince: store.firstTokenSampleAt(p.id, myIds),
       hourly: hours.map((hour) => ({ hour, ...(hourMap.get(hour) ?? { ok: 0, limited: 0 }) })),
+      slots: slotsList.map((slot) => ({ slot, ...(slotMap.get(slot) ?? { ok: 0, limited: 0 }) })),
     };
     if (p.ownerId === ownerId) {
       const theirIds = new Set(all.filter((a) => a.aiProfileId === p.id && a.ownerId !== ownerId).map((a) => a.id));

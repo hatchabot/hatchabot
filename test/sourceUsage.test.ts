@@ -71,6 +71,10 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     expect(src!.status).toBe('limited');
     expect(src!.limitedSince).toBe('2026-09-15T15:48:58.345Z');
     expect(src!.hourly).toHaveLength(168);
+    // Five-minute slots for the hour/day views: the two 429s at 15:48 and 15:49 share one slot (×2 agents).
+    expect(src!.slots).toHaveLength(288);
+    expect(src!.slots.find((x) => x.slot === '2026-09-15T15:45')).toEqual({ slot: '2026-09-15T15:45', ok: 0, limited: 4 });
+    expect(src!.slots.find((x) => x.slot === '2026-09-15T14:30')).toEqual({ slot: '2026-09-15T14:30', ok: 2, limited: 0 });
     expect(src!.others).toEqual({ agents: 1, requests5h: 3, requests7d: 4 }); // counts only, no names
     // a later success clears it
     provider.modelCallLines += '\n' + line('2026-09-15T18:01:30.000Z', 200); // logged after the last pass, as real lines are

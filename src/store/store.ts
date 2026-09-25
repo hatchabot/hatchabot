@@ -233,6 +233,14 @@ export class Store {
         PRIMARY KEY (agent_id, profile_id, hour)
       );
       CREATE INDEX IF NOT EXISTS model_call_hours_profile ON model_call_hours (profile_id, hour);
+      -- The same counts in five-minute slots ("2026-09-25T01:25"), for the
+      -- hour and day views of the usage chart; pruned with the hours.
+      CREATE TABLE IF NOT EXISTS model_call_slots (
+        agent_id TEXT NOT NULL, profile_id TEXT, slot TEXT NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 0, limited INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (agent_id, profile_id, slot)
+      );
+      CREATE INDEX IF NOT EXISTS model_call_slots_profile ON model_call_slots (profile_id, slot);
       CREATE TABLE IF NOT EXISTS usage_cursor (
         agent_id TEXT PRIMARY KEY, last_ts TEXT NOT NULL, last_ok TEXT, last_limited TEXT
       );
@@ -2260,6 +2268,18 @@ export class Store {
     );
     this.db.transaction(() => { for (const [h, b] of buckets) up.run(agentId, profileId, h, b.ok, b.limited, b.failed); })();
   }
+  addModelCallSlots(agentId: string, profileId: string, buckets: Map<string, { ok: number; limited: number; failed: number }>): void {
+    const up = this.db.prepare(
+      `INSERT INTO model_call_slots (agent_id, profile_id, slot, ok, limited, failed) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id, profile_id, slot) DO UPDATE SET
+         ok = ok + excluded.ok, limited = limited + excluded.limited, failed = failed + excluded.failed`,
+    );
+    this.db.transaction(() => { for (const [sl, b] of buckets) up.run(agentId, profileId, sl, b.ok, b.limited, b.failed); })();
+  }
+  modelCallSlotsFor(profileId: string, fromSlot: string): Array<{ agentId: string; slot: string; ok: number; limited: number; failed: number }> {
+    return (this.db.prepare(`SELECT agent_id, slot, ok, limited, failed FROM model_call_slots WHERE profile_id = ? AND slot >= ?`).all(profileId, fromSlot) as
+      Array<{ agent_id: string; slot: string; ok: number; limited: number; failed: number }>).map((r) => ({ agentId: r.agent_id, slot: r.slot, ok: r.ok, limited: r.limited, failed: r.failed }));
+  }
   addLimitHit(agentId: string, profileId: string, at: string, model: string): void {
     this.db.prepare(`INSERT OR IGNORE INTO limit_hits (agent_id, profile_id, at, model) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, model || null);
   }
@@ -2308,6 +2328,7 @@ export class Store {
   pruneSourceUsage(beforeIso: string): void {
     this.db.transaction(() => {
       this.db.prepare(`DELETE FROM model_call_hours WHERE hour < ?`).run(beforeIso.slice(0, 13));
+      this.db.prepare(`DELETE FROM model_call_slots WHERE slot < ?`).run(beforeIso.slice(0, 16));
       this.db.prepare(`DELETE FROM limit_hits WHERE at < ?`).run(beforeIso);
       this.db.prepare(`DELETE FROM token_samples WHERE at < ?`).run(beforeIso);
     })();

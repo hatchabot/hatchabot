@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.70.0] — 2026-09-25
+
+### Added
+- **Usage chart periods.** The requests chart under each AI source (Settings → AI) has Week, Day and Hour: a week in two-hour bars, a day in hourly bars, the last hour in five-minute bars. Calls are now also counted in five-minute slots for the last day; the choice is remembered per browser.
+
 ## [2.69.0] — 2026-09-25
 
 ### Fixed
