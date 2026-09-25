@@ -54,6 +54,30 @@ export interface ClaimOptions {
 export const PAIRING_STORE = '/home/node/.openclaw/credentials/telegram-pairing.json';
 /** The same store for any channel: OpenClaw names it `<channel>-pairing.json`. */
 export const pairingStorePath = (kind: ChannelKind = 'telegram') => `/home/node/.openclaw/credentials/${kind}-pairing.json`;
+/**
+ * OpenClaw 2026.9 keeps pairing requests and approvals in its state database
+ * instead of the credentials files (tables `channel_pairing_requests` and
+ * `channel_pairing_allow_entries`); the files are simply absent. Every read
+ * or surgery below tries the file first, then the database — a missing file
+ * is not "nothing there" (Taco Agent's Discord knock was invisible, and the
+ * owner's own first message was never claimed, 2026-09-24).
+ */
+export const PAIRING_DB = '/home/node/.openclaw/state/openclaw.sqlite';
+/** JS for the on-volume scripts (no single quotes: they sit inside `node -e '…'`). */
+export const PAIRING_DB_JS = {
+  open: (readOnly: boolean) => `const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(${JSON.stringify(PAIRING_DB)}${readOnly ? ', { readOnly: true }' : ''}); ${readOnly ? '' : 'db.exec("PRAGMA busy_timeout=5000");'}`,
+};
+
+/** The shell that prints a channel's pending requests as the file's JSON, from whichever store exists. */
+export function pairingListShell(kind: ChannelKind): string {
+  const file = JSON.stringify(pairingStorePath(kind));
+  const node = [
+    PAIRING_DB_JS.open(true),
+    `const rows = db.prepare("select request_id, code, created_at, last_seen_at, meta_json from channel_pairing_requests where channel_key = ?").all(${JSON.stringify(kind)});`,
+    'process.stdout.write(JSON.stringify({ version: 1, requests: rows.map((r) => { let meta = {}; try { meta = JSON.parse(r.meta_json || "{}"); } catch (e) {} return { id: r.request_id, code: r.code, createdAt: r.created_at, lastSeenAt: r.last_seen_at, meta }; }) }));',
+  ].join(' ');
+  return `if [ -f ${file} ]; then cat ${file}; elif [ -f ${JSON.stringify(PAIRING_DB)} ]; then node -e '${node}' 2>/dev/null || true; fi`;
+}
 
 /**
  * Read pending pairing requests by reading the store FILE, not by running
@@ -75,7 +99,7 @@ export async function listPairingRequests(
   accountId: string,
   kind: ChannelKind = 'telegram',
 ): Promise<PairingRequest[]> {
-  const res = await provider.execShell(runtimeRef, `cat ${JSON.stringify(pairingStorePath(kind))} 2>/dev/null || true`);
+  const res = await provider.execShell(runtimeRef, pairingListShell(kind));
   if (res.code !== 0 || !res.stdout.trim()) return [];
   // The file holds every account's requests for this agent; the CLI filtered by
   // --account, so keep that behaviour where the entry says which one it is.
@@ -246,5 +270,6 @@ export function parsePairingList(stdout: string): PairingRequest[] {
       : [];
   return arr
     .filter((r: any) => r && typeof r.id !== 'undefined' && typeof r.code === 'string')
-    .map((r: any) => ({ id: String(r.id), code: r.code, meta: r.meta }));
+    // Discord's meta says `tag`/`name` where Telegram's says `username`/`firstName`; the app reads the latter.
+    .map((r: any) => ({ id: String(r.id), code: r.code, meta: r.meta && typeof r.meta === 'object' ? { ...r.meta, username: r.meta.username ?? r.meta.tag, firstName: r.meta.firstName ?? r.meta.name } : r.meta }));
 }

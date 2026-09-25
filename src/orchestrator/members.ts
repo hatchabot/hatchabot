@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import { approvePairing, listPairingRequests, pairingStorePath } from './claim.js';
+import { approvePairing, listPairingRequests, PAIRING_DB, PAIRING_DB_JS, pairingStorePath } from './claim.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
 
 /**
@@ -294,7 +294,13 @@ export async function denyPairing(
   const script = `node -e '
     const fs = require("fs");
     const f = ${JSON.stringify(pairingStorePath(opts.kind ?? 'telegram'))};
-    if (!fs.existsSync(f)) { console.log("0"); process.exit(0); }
+    if (!fs.existsSync(f)) {
+      // 2026.9: the request is a row in the state database.
+      if (!fs.existsSync(${JSON.stringify(PAIRING_DB)})) { console.log("0"); process.exit(0); }
+      ${PAIRING_DB_JS.open(false)}
+      const r = db.prepare("delete from channel_pairing_requests where channel_key = ? and code = ?").run(${JSON.stringify(opts.kind ?? 'telegram')}, ${JSON.stringify(opts.code)});
+      console.log(String(r.changes)); process.exit(0);
+    }
     const d = JSON.parse(fs.readFileSync(f, "utf8"));
     const before = Array.isArray(d.requests) ? d.requests.length : 0;
     d.requests = (Array.isArray(d.requests) ? d.requests : [])
@@ -352,9 +358,16 @@ export async function grantChannelAccess(
       if (!a.some((x) => String(x) === t.id)) a.push(t.id);
       return a;
     };
-    const d = fs.existsSync(t.cred) ? JSON.parse(fs.readFileSync(t.cred, "utf8")) : {};
-    d.allowFrom = add(d.allowFrom);
-    writeAtomic(t.cred, d);
+    if (fs.existsSync(${JSON.stringify(PAIRING_DB)}) && !fs.existsSync(t.cred)) {
+      // 2026.9: approvals are rows in the state database, not a file.
+      ${PAIRING_DB_JS.open(false)}
+      const next = db.prepare("select coalesce(max(sort_order), -1) + 1 as n from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?)").get(t.channel, t.acct).n;
+      db.prepare("insert or ignore into channel_pairing_allow_entries (channel_key, account_id, entry, sort_order, updated_at) values (?, ?, ?, ?, ?)").run(t.channel, t.acct, t.id, next, Date.now());
+    } else {
+      const d = fs.existsSync(t.cred) ? JSON.parse(fs.readFileSync(t.cred, "utf8")) : {};
+      d.allowFrom = add(d.allowFrom);
+      writeAtomic(t.cred, d);
+    }
     const cfgPath = "/home/node/.openclaw/openclaw.json";
     if (fs.existsSync(cfgPath)) {
       const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
@@ -506,6 +519,10 @@ export async function revokeMember(
     const cfgPath = "/home/node/.openclaw/openclaw.json";
     const cfg = fs.existsSync(cfgPath) ? JSON.parse(fs.readFileSync(cfgPath, "utf8")) : null;
     let cfgChanged = false;
+    // 2026.9: approvals are rows in the state database — scrub them there too,
+    // or a removed member stays admitted by the store the gateway unions in.
+    let db = null;
+    if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) { const { DatabaseSync } = require("node:sqlite"); db = new DatabaseSync(${JSON.stringify(PAIRING_DB)}); db.exec("PRAGMA busy_timeout=5000"); }
     for (const t of targets) {
       const drop = (arr) => (Array.isArray(arr) ? arr.filter((x) => String(x) !== t.id) : arr);
       if (fs.existsSync(t.cred)) {
@@ -513,6 +530,7 @@ export async function revokeMember(
         d.allowFrom = drop(d.allowFrom || []);
         writeAtomic(t.cred, d);
       }
+      if (db) db.prepare("delete from channel_pairing_allow_entries where channel_key = ? and lower(account_id) = lower(?) and entry = ?").run(t.channel, t.acct, t.id);
       const acc = cfg && cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
         && cfg.channels[t.channel].accounts[t.acct];
       if (acc && Array.isArray(acc.allowFrom)) { acc.allowFrom = drop(acc.allowFrom); cfgChanged = true; }

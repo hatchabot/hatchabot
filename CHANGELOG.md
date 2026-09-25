@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.69.0] — 2026-09-25
+
+### Fixed
+- **Knocks and first messages work again on OpenClaw 2026.9.** That line keeps pairing requests and approvals in its state database; the credentials files Hatchabot read and edited are absent there, so a person who messaged a 2026.9 agent's bot got a pairing code and nothing else: no knock card, and the owner's own first message on a freshly connected Discord was never claimed (Taco Agent). Listing, turning away, admitting a known person and removing a member now use the database when the files are gone, so a removed member is really gone there too. The candidate gate checks the pairing store the same way.
+
 ## [2.68.1] — 2026-09-24
 
 ### Fixed

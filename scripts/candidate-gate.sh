@@ -138,6 +138,13 @@ step "devices list --json has pending[] and paired[]; the pending store is reada
 pf="$(inagent 'if [ -f "$HOME/.openclaw/devices/pending.json" ]; then echo file; elif [ -f "$HOME/.openclaw/state/openclaw.sqlite" ]; then node -e "const {DatabaseSync}=require(\"node:sqlite\");new DatabaseSync(process.argv[1],{readOnly:true}).prepare(\"select request_id,ts,refreshed_at_ms from device_pairing_pending\").all()" "$HOME/.openclaw/state/openclaw.sqlite" && echo database; else echo none; fi')"
 [ "$d" = ok ] && echo "$pf" | grep -qE '^(file|database)$' && ok || bad "devices: $d · pending store: $pf"
 
+# 2026.9 also moved chat pairing (requests + approvals) into the state database:
+# with the files gone, a knock was invisible and the owner's first message was
+# never claimed. The app's own list shell must find the store where it is.
+step "chat pairing requests are readable where this version keeps them (file or database)"
+pr="$(inagent 'if [ -f "$HOME/.openclaw/credentials/telegram-pairing.json" ]; then echo file; elif [ -f "$HOME/.openclaw/state/openclaw.sqlite" ]; then node -e "const {DatabaseSync}=require(\"node:sqlite\");const db=new DatabaseSync(process.argv[1],{readOnly:true});db.prepare(\"select request_id, code, meta_json from channel_pairing_requests where channel_key = ?\").all(\"telegram\");db.prepare(\"select entry from channel_pairing_allow_entries\").all()" "$HOME/.openclaw/state/openclaw.sqlite" && echo database; else echo none; fi')"
+echo "$pr" | grep -qE '^(file|database)$' && ok || bad "pairing store: $pr"
+
 step "the console answers at ?session=agent:$SLUG:main"
 code="$(inagent "curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18789/?session=agent:$SLUG:main'")"
 [ "$code" = 200 ] && ok || bad "HTTP $code"
