@@ -865,7 +865,7 @@ export class LocalDockerProvider implements RuntimeProvider {
   #opsNetworkName(agentId: string): string { return `${this.prefix}-ops-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
   #doormanName(agentId: string): string { return `${this.prefix}-doorman-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
 
-  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsPort: number; consolePort: number }): Promise<{ network: string; doorHost: string; doorPort: number }> {
+  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsPort: number; consolePort: number; embedPort?: number }): Promise<{ network: string; doorHost: string; doorPort: number }> {
     const agentContainer = opts.runtimeRef
       ? this.#names(opts.runtimeRef).container
       : this.#namesFor({ agentId: opts.agentId, slug: opts.slug }).container;
@@ -885,7 +885,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     // The doorman is replaced on every build: its routes carry the ports.
     const name = this.#doormanName(opts.agentId);
     await this.#docker(['rm', '-f', name]);
-    const routes = JSON.stringify(doormanRoutes({ opsPort: opts.opsPort, agentContainer }));
+    const routes = JSON.stringify(doormanRoutes({ opsPort: opts.opsPort, agentContainer, embedPort: opts.embedPort }));
     const run = await this.#docker([
       'run', '-d', '--name', name,
       '--network', network, '--network-alias', DOORMAN_ALIAS,

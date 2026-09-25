@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.77.1] — 2026-09-25
+
+### Fixed
+- **The Hatchabot agent's memory search on 2026.9.** The manager lives in a jailed network with no route to the shared memory search service's door, so on an engine-free image its memory index never built ("connect ENETUNREACH"). Its doorman now carries that door too, like its console. Applies at the manager's next rebuild.
+
 ## [2.77.0] — 2026-09-25
 
 ### Added

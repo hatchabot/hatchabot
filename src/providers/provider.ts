@@ -278,7 +278,7 @@ export interface RuntimeProvider {
     /** The port Hatchabot's door listens on (reached at Docker's host alias). */
     opsPort: number;
     /** Host port the console is published on (the agent's usual gateway port). */
-    consolePort: number;
+    consolePort: number; embedPort?: number;
   }): Promise<{ network: string; doorHost: string; doorPort: number }>;
   /** Take a management agent's jail down: the doorman and the network. */
   removeOpsJail?(agentId: string): Promise<void>;

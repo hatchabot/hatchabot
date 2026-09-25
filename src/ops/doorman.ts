@@ -33,6 +33,8 @@ export const DOORMAN_ALIAS = 'doorman';
 export const DOORMAN_DOOR_PORT = 8091;
 /** The console's way in: published on the host, forwarded to the agent's gateway. */
 export const DOORMAN_CONSOLE_PORT = 18790;
+/** Where the jailed manager reaches the shared memory search service (its door on this machine). */
+export const DOORMAN_EMBED_PORT = 8093;
 /** Docker maps this name to the host on every platform (`--add-host=…:host-gateway`). */
 export const HOST_ALIAS = 'host.docker.internal';
 
@@ -66,9 +68,15 @@ export function doormanScript(): string {
  * bridge gateway on Linux, the host's loopback on Docker Desktop). See
  * `ensureOpsServer`, which binds them in that order.
  */
-export function doormanRoutes(opts: { opsPort: number; agentContainer: string }): DoormanRoute[] {
+export function doormanRoutes(opts: { opsPort: number; agentContainer: string; embedPort?: number }): DoormanRoute[] {
   return [
     { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: opts.opsPort },
     { listen: DOORMAN_CONSOLE_PORT, host: opts.agentContainer, port: 18789 },
+    // The shared memory search service's door binds this machine's Docker
+    // address, which the jail cannot route to: the doorman carries it, like
+    // the console. On an engine-free image (2026.8+) the manager has no
+    // engine of its own, so without this its memory index never builds
+    // (found on the manager's move to 2026.9, 2026-09-25).
+    ...(opts.embedPort ? [{ listen: DOORMAN_EMBED_PORT, host: HOST_ALIAS, port: opts.embedPort }] : []),
   ];
 }

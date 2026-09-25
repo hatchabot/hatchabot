@@ -13,6 +13,7 @@ import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } 
 import { ProviderError } from '../providers/provider.js';
 import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
+import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot } from './snapshots.js';
@@ -587,12 +588,17 @@ export async function buildRuntimeSpec(
     // on Linux and on Docker Desktop, where the host cannot listen on a Docker
     // address at all (docs/ops-agent-design.md).
     const at = await ensureOpsServer([await deps.provider.hostGatewayAddress?.()]);
+    // The memory search door, when the manager uses the shared service: its
+    // port rides on the doorman, and the agent is pointed at the doorman.
+    const embedUrl = embed ? (() => { try { return new URL(embed.baseUrl); } catch { return undefined; } })() : undefined;
+    const embedPort = embedUrl ? Number(embedUrl.port) || (embedUrl.protocol === 'https:' ? 443 : 80) : undefined;
     const jail = deps.provider.ensureOpsJail
       ? await deps.provider.ensureOpsJail({
         agentId, slug: agent.slug, runtimeRef: agent.runtimeRef,
-        opsPort: at.port, consolePort: gateway.port,
+        opsPort: at.port, consolePort: gateway.port, embedPort,
       })
       : { doorHost: at.host, doorPort: at.port }; // providers without networks (mock)
+    if (embed && embedUrl && deps.provider.ensureOpsJail) embed = { ...embed, baseUrl: `http://${jail.doorHost}:${DOORMAN_EMBED_PORT}${embedUrl.pathname === '/' ? '' : embedUrl.pathname}` };
     ops = {
       host: jail.doorHost,
       token,
