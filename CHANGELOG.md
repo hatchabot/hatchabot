@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.83.2] — 2026-09-26
+
+### Changed
+- **A sleeping agent notices a Telegram message within 20 seconds** (was a minute); with the gateway's start, the first reply after a sleep takes about a minute.
+
 ## [2.83.1] — 2026-09-26
 
 ### Fixed

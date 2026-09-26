@@ -2080,7 +2080,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     setInterval(() => { void hibernateSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'hibernate sweep failed')); },
       Number(process.env.HATCHABOT_HIBERNATE_SWEEP_MS) || 5 * 60_000).unref();
     setInterval(() => { void wakeSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'wake sweep failed')); },
-      Number(process.env.HATCHABOT_WAKE_POLL_MS) || 60_000).unref();
+      // Every 20 s: a getUpdates per sleeper is one cheap call, and the reply to
+      // the first message after a sleep is the poll plus the gateway's start.
+      Number(process.env.HATCHABOT_WAKE_POLL_MS) || 20_000).unref();
   }
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).

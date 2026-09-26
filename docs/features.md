@@ -1193,7 +1193,9 @@ engine the same way. CLI: `hatchabot embedder default [shared|baked]`,
 **Sleep** (`HATCHABOT_HIBERNATE_AFTER`, off unless set; `hatchabot
 hibernate|wake <agent>`): an agent quiet that long is stopped with its volume
 kept and shows 💤 *Asleep*. Someone writing to it on Telegram, you opening its
-console, or `hatchabot ask` wakes it in a few seconds. Never put to sleep:
+console, or `hatchabot ask` wakes it; the first reply after a sleep takes
+about a minute (the message is noticed within 20 s, then the gateway starts).
+Never put to sleep:
 agents on Discord or Slack (nothing queues their messages), agents with their
 own scheduled tasks, and agents set to stay awake (`hibernate: "never"`).
 
