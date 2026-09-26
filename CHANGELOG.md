@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.81.2] — 2026-09-26
+
+### Fixed
+- **`hbt tasks` marks OpenClaw's own jobs.** The listing showed the weekly "Skill collection review" like any task, and "no scheduled tasks" never appeared once an agent ran 2026.9 (the app already labels them "built into OpenClaw"). The listing says so now, and the autonomous-agent regression counts only the agent's own tasks after `tasks rm` — the one check that failed in today's clean-install run of stable.
+
 ## [2.81.1] — 2026-09-26
 
 ### Fixed

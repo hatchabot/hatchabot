@@ -117,7 +117,8 @@ echo "$r" | grep -q "BANANA-$NONCE" && ok || bad "reply: $(echo "$r" | head -c 2
 
 step "tasks rm"
 $HB tasks "$NAME" rm heartbeat --yes >/dev/null 2>&1
-$HB tasks "$NAME" 2>&1 | grep -q "no scheduled tasks" && ok || bad "$($HB tasks "$NAME" 2>&1 | head -2)"
+# OpenClaw 2026.9 lists its own built-in jobs (the weekly skill review) too: only the agent's own tasks must be gone.
+[ "$($HB tasks "$NAME" --json 2>/dev/null | json "v=>v.filter(c=>!c.system).length")" = 0 ] && ok || bad "$($HB tasks "$NAME" 2>&1 | head -2)"
 
 step "delete"
 if [ "$KEEP" = 1 ]; then RESULTS+=("– delete skipped (--keep)"); echo "skipped (--keep)"; else

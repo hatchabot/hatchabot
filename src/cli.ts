@@ -2376,10 +2376,11 @@ async function main() {
       if (!sub) {
         const list = await listTasks();
         if (flags.has('json')) return console.log(JSON.stringify(list, null, 2));
-        if (!list.length) return console.log(`"${a.name}" has no scheduled tasks. Add one: hatchabot tasks "${a.name}" add <name> --every 1h --message "…"`);
+        if (!list.some((t) => !t.system)) console.log(`"${a.name}" has no scheduled tasks of its own. Add one: hatchabot tasks "${a.name}" add <name> --every 1h --message "…"`);
+        if (!list.length) return;
         const w = Math.max(4, ...list.map((t) => (t.name ?? '').length));
         for (const t of list) {
-          console.log(`${t.id.slice(0, 8)}  ${(t.name ?? '').padEnd(w)}  ${schedule(t).padEnd(26)} ${t.enabled ? 'on ' : 'off'}  last: ${t.lastStatus ?? 'never'} ${t.lastRunAtMs ? whenAgo(t.lastRunAtMs) : ''}${t.consecutiveErrors ? ` (${t.consecutiveErrors} failing)` : ''}  next: ${t.enabled ? whenIn(t.nextRunAtMs) : 'paused'}`);
+          console.log(`${t.id.slice(0, 8)}  ${(t.name ?? '').padEnd(w)}  ${schedule(t).padEnd(26)} ${t.enabled ? 'on ' : 'off'}  ${t.system ? 'built into OpenClaw  ' : ''}last: ${t.lastStatus ?? 'never'} ${t.lastRunAtMs ? whenAgo(t.lastRunAtMs) : ''}${t.consecutiveErrors ? ` (${t.consecutiveErrors} failing)` : ''}  next: ${t.enabled ? whenIn(t.nextRunAtMs) : 'paused'}`);
         }
         return;
       }
