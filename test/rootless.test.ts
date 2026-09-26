@@ -63,6 +63,11 @@ describe('the Docker provider under rootless Docker', () => {
     expect(calls).toEqual(['http://127.0.0.1:19107/health']);
     await provider.ensureOpsJail({ agentId: 'a1', slug: 'kitchen', opsPort: 8091, consolePort: 19200 });
     expect(argv()).toContain('--add-host host.docker.internal:10.0.2.2');
+    // The workspace seed is streamed in over stdin, as for a remote daemon: the one-shot cannot read this user's private tmp dir.
+    await provider.provision({ agentId: 'df918a55-88cd-4d00-a17c-b8415a26ceb6', slug: 'kitchen', workspace: { files: { 'SOUL.md': '# soul' }, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as never).catch(() => {});
+    const seedRun = argv().split('\n').find((l) => l.startsWith('run --rm') && l.includes('seed'));
+    expect(seedRun).toContain('tar xz -C /tmp/hatchabot-seed');
+    expect(seedRun).not.toContain('/seed:ro');
     // The service containers read this user's 0600 key files: as container root, which is this user here.
     expect(await provider.containerUserFor(process.getuid!(), process.getgid!())).toBe('0:0');
     expect(await provider.containerUserFor(process.getuid!() + 1, 5)).toBe(`${process.getuid!() + 1}:5`);

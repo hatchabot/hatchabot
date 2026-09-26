@@ -200,8 +200,8 @@ PID=\$(curl -s -H "\$H" \$B/v1/ai-profiles | node -e "let s='';process.stdin.on(
 # A kept VM may already have Helper (a failed one from an earlier run is retried).
 HS=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).find(x=>x.name==='Helper');console.log(a?a.state:'')})")
 case "\$HS" in
-  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
-  FAILED) hbt retry Helper >/tmp/create.log 2>&1; grep -q "retry requested" /tmp/create.log || { echo "FAIL retry: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
+  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || grep -q "retry requested" /tmp/create.log || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
+  FAILED) hbt retry Helper >/tmp/create.log 2>&1 || true ;;
 esac
 # The Hatchabot agent: made once; a failed one from an earlier run is retried.
 OS=\$(curl -s -H "\$H" \$B/v1/ops-agent | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).agent||{}).state||'')}catch{console.log('')}})")

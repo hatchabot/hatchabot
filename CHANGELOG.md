@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.4] — 2026-09-25
+
+### Fixed
+- **Agents build under rootless Docker.** The workspace seed was bind-mounted from the owner's private temp directory into a one-shot that runs as `node`; under rootless that user is a subordinate id on the host and the seed died with "bash: /seed/seed.sh: Permission denied". A rootless daemon now gets the seed the way a remote daemon does — streamed in as a tar over stdin. Found by the shared-host bed.
+
 ## [2.79.3] — 2026-09-25
 
 ### Fixed

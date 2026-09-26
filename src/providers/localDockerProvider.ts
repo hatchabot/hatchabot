@@ -307,7 +307,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       // /seed (mount point pre-exists). Remotely it's streamed in as a tar and
       // must be extracted somewhere the NON-ROOT runtime user can create — /seed
       // is at the root fs (root-owned), so use a world-writable tmp path.
-      const seedBase = this.remote ? '/tmp/hatchabot-seed' : '/seed';
+      // Rootless Docker streams too: the seed dir is this user's private tmp,
+      // and the one-shot runs as `node`, which under rootless is a subordinate
+      // id on the host — "bash: /seed/seed.sh: Permission denied" (2026-09-25).
+      const streamSeed = this.remote || (await this.rootless());
+      const seedBase = streamSeed ? '/tmp/hatchabot-seed' : '/seed';
       // The seed must be idempotent: rebuilds re-run it against a volume that
       // already holds a live workspace. Config sets are naturally re-runnable
       // (and SHOULD re-run — they re-apply current tokens/allowlists), but
@@ -372,9 +376,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       }
 
       let res: ExecResult;
-      if (this.remote) {
-        // The seed dir is on THIS box; a remote daemon can't bind-mount it, so
-        // stream it in as a tar over stdin and extract inside the one-shot.
+      if (streamSeed) {
+        // The seed dir is on THIS box; a remote daemon can't bind-mount it (and
+        // a rootless one can't read it), so stream it in as a tar over stdin
+        // and extract inside the one-shot.
         const tar = await execFileP('tar', ['cz', '-C', seedDir, '.'], {
           encoding: 'buffer',
           maxBuffer: 256 * 1024 * 1024,
