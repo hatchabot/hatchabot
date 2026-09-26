@@ -73,3 +73,18 @@ $INSTALL || { rollback; exit 3; }
 $RESTART || { rollback; exit 1; }
 rm -rf node_modules.prev
 echo "Now on $TARGET."
+
+# The runtime image this release defaults to (OpenClaw X in the Dockerfile),
+# if the machine does not have it yet. Until 2026-09-25 an upgrade left the
+# image the install had first built — a MacBook on v2.80.0 still ran agents
+# on OpenClaw 2026.7.1-2 two releases after 2026.9.6 became "the version
+# every install gets". Best effort: a failed pull is a line here, never a
+# failed upgrade, and the app's Settings → Images does the same on demand.
+if [ "${HATCHABOT_UPGRADE_IMAGE:-1}" = 1 ] && command -v docker >/dev/null 2>&1; then
+  WANT="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
+  HAVE="$(docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+  if [ -n "$WANT" ] && [ "$HAVE" != "$WANT" ]; then
+    echo "The runtime image here carries OpenClaw ${HAVE:-nothing}; this release's default is $WANT — fetching it (a few GB; agents move to it on their next rebuild)…"
+    ./scripts/build-runtime-image.sh || echo "⚠ Could not fetch the $WANT image now — run ./scripts/build-runtime-image.sh later, or Settings → Images."
+  fi
+fi

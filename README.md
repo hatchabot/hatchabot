@@ -137,7 +137,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main
 The script checks prerequisites, installs dependencies, generates a `.env`
 (asking how people will sign in — an account for each person is the default, a single shared password the other choice), pulls the pre-built agent runtime image (or builds it if the pull fails),
 installs a background service, and links the `hatchabot` CLI (also `hbt`, when that name is free). `hatchabot doctor` checks the result. It's safe to
-re-run. To **upgrade** later: `hatchabot upgrade` (the newest release on your channel; `hatchabot upgrade v2.31.3` rolls back).
+re-run. To **upgrade** later: `hatchabot upgrade` (the newest release on your channel; `hatchabot upgrade v2.31.3` rolls back). When a release moves to a newer OpenClaw, the upgrade also fetches that runtime image and agents move to it on their next rebuild (`HATCHABOT_UPGRADE_IMAGE=0` to skip; Settings → Images does the same on demand).
 
 **Release channels.** The installer takes the **`stable`** release unless told
 otherwise, and remembers the channel so an upgrade stays on it:

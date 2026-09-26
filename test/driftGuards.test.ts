@@ -311,4 +311,12 @@ describe('the installer and upgrade never close a pipe early', () => {
       expect(src.match(/\|\s*head -1\b/g) ?? [], f).toEqual([]);
     }
   });
+  // An upgrade brings the release's default runtime image along; before
+  // 2026-09-25 a machine kept the image its install had first built.
+  it('upgrade fetches the default runtime image when the machine lacks it', () => {
+    const src = read('scripts/upgrade.sh');
+    expect(src).toContain("sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime");
+    expect(src).toContain('org.agentclaw.openclaw-version');
+    expect(src).toContain('./scripts/build-runtime-image.sh || echo');
+  });
 });

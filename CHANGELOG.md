@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.1] — 2026-09-25
+
+### Fixed
+- **`hbt upgrade` brings the release's runtime image along.** It only ever updated the app, so a machine kept the image its install had first built — a MacBook on v2.80.0 was still running agents on OpenClaw 2026.7.1-2, two releases after 2026.9.6 became the version every install gets, with nothing saying so. After the restart, when the machine's `:latest` image carries a different OpenClaw than the release's default, the upgrade pulls the published image (or builds it) and makes it the fleet default; agents move to it on their next rebuild. A failed pull is a line of advice, never a failed upgrade; `HATCHABOT_UPGRADE_IMAGE=0` skips it.
+
 ## [2.80.0] — 2026-09-25
 
 ### Changed
