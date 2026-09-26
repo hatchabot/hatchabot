@@ -10683,7 +10683,7 @@ function renderV2() {
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
-          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || v2View !== 'group' ? ' data-v2fixed="1"' : ''}
+          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
@@ -10803,6 +10803,10 @@ function v2DropTarget(x, y, st) {
   if (!grid) return null;
   const group = grid.dataset.v2drop;
   if (group === V2_ARCHIVE) return { zone: grid, archive: true };
+  // Outside the Groups view the bins are computed (by machine, model, …):
+  // an icon can still be carried to a new group, to Archived or to the bin,
+  // but not placed in another bin (Chris, 2026-09-25: dragging only worked in Groups).
+  if (v2View !== 'group') return null;
   const tiles = [...grid.querySelectorAll('.v2agent:not(.v2child)')].filter(t => t !== st.el);
   let best = null, bestD = Infinity;
   for (const t of tiles) {
@@ -10849,6 +10853,7 @@ window.addEventListener('pointerup', async (e) => {
       const taken = new Set(agents.map(x => x.group).filter(Boolean));
       let fresh = 'New group'; for (let i = 2; taken.has(fresh); i++) fresh = `New group ${i}`;
       await api(`/v1/agents/${a.id}/move`, { method: 'POST', body: { before: null, group: fresh } });
+      if (v2View !== 'group') v2SetView('group'); // the new group is only visible there, and its name is asked for right away
       await refresh(false);
       const head = [...document.querySelectorAll('#v2groups .v2ghead h3.group-name')].find(h => h.textContent.trim() === fresh);
       if (head) { head.scrollIntoView({ block: 'center' }); editGroupName(head); }

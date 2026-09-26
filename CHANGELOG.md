@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.2] — 2026-09-25
+
+### Changed
+- **Icons can be dragged in every view.** Dragging only worked under *Groups*; the other views (by machine, AI source, model, …) are computed bins, so an icon could not be dropped into another bin there — but it can still be carried to a new group, to Archived, or to the delete strip, and now is. Starting a new group from another view switches to *Groups*, where the group appears and its name is asked for in place.
+
 ## [2.80.1] — 2026-09-25
 
 ### Fixed
