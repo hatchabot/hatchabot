@@ -6492,7 +6492,8 @@ function agentCard(a) {
         ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef && hosts.length > 1
           ? `<button onclick="moveHostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to another runner in this cluster — same bot, same members, only the machine changes">Move</button>` : ''}
         <!-- lifecycle -->
-        ${a.state === 'STOPPED' ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
+        ${a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${a.id}','wake')" title="Asleep — start it now">💤 Wake</button>` : ''}
+        ${a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${a.id}','start')">Start</button>` : ''}
         ${(a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef
           ? `<button onclick="rebuild('${a.id}')" title="New container, memory kept">Rebuild</button>` : ''}
         ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${a.id}','provision')">Retry</button>` : ''}
@@ -6581,6 +6582,7 @@ function cardMenu(a) {
   // its place on the card.
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="act('${a.id}','stop')" title="Pause it. Keeps its Telegram bot — use Archive to hand that back.">Stop</button>`);
+    items.push(`<button onclick="act('${a.id}','hibernate')" title="Stop it with its volume kept; a Telegram message, its console or an ask wakes it">💤 Sleep</button>`);
   }
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
@@ -11067,7 +11069,9 @@ function v2RenderSheetBar() {
   $('v2AgentBar').innerHTML = `${v2Mine(a) ? `<span role="button" tabindex="0" title="Change its icon" onclick="openV2Icon('${jsq(a.id)}')" onkeydown="if(event.key==='Enter')openV2Icon('${jsq(a.id)}')">${v2IconHTML(a, st)}</span>` : v2IconHTML(a, st)}
     <div class="v2ttl"><b id="v2AgentName">${esc(a.name)}</b>${!v2Mine(a) ? '<span>shared with you</span>' : ''}</div>
     <span class="v2pill ${v2PillCls(st)}"${st.why.length ? ` title="${esc(st.why.join(' · '))}"` : ''}>${st.glyph || '●'} ${esc(st.label)}</span>
-    ${a.state === 'STOPPED' ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
+    ${a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${jsq(a.id)}','wake')" title="Start it now — a Telegram message, opening its console or an ask would too">💤 Wake</button>` : ''}
+    ${a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
+    ${a.state === 'RUNNING' && v2Mine(a) && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤 Sleep</button>` : ''}
     ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
     ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')">📤 Restore</button><button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button>` : ''}
     ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}

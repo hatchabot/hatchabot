@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.83.4] — 2026-09-26
+
+### Added
+- **Wake and Sleep buttons on an agent.** A sleeping agent's sheet (and its classic card) shows 💤 Wake where Start would be; a running agent gets 💤 Sleep beside Stop, offered only for Telegram and web agents since Discord and Slack ones cannot sleep.
+
+## [2.83.3] — 2026-09-26
+
+No changes: the release before the buttons landed.
+
 ## [2.83.2] — 2026-09-26
 
 ### Changed
