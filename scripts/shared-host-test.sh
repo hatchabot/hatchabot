@@ -201,9 +201,14 @@ PID=\$(curl -s -H "\$H" \$B/v1/ai-profiles | node -e "let s='';process.stdin.on(
 HS=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).find(x=>x.name==='Helper');console.log(a?a.state:'')})")
 case "\$HS" in
   "") hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
-  FAILED) hbt retry Helper >/tmp/create.log 2>&1 || { echo "FAIL retry: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
+  FAILED) hbt retry Helper >/tmp/create.log 2>&1; grep -q "retry requested" /tmp/create.log || { echo "FAIL retry: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
 esac
-curl -s -o /dev/null -H "\$H" -H 'content-type: application/json' -d "{\"aiProfileId\":\"\$PID\"}" \$B/v1/ops-agent
+# The Hatchabot agent: made once; a failed one from an earlier run is retried.
+OS=\$(curl -s -H "\$H" \$B/v1/ops-agent | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).agent||{}).state||'')}catch{console.log('')}})")
+case "\$OS" in
+  "") curl -s -o /dev/null -H "\$H" -H 'content-type: application/json' -d "{\"aiProfileId\":\"\$PID\"}" \$B/v1/ops-agent ;;
+  FAILED) hbt retry Hatchabot >/dev/null 2>&1 ;;
+esac
 for _ in \$(seq 1 150); do
   R=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).filter(x=>x.name!=='Hatchabot');console.log(a.filter(x=>x.state==='RUNNING').length+'/'+a.length)})" 2>/dev/null)
   O=\$(curl -s -H "\$H" \$B/v1/ops-agent | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).agent||{}).state||'none')}catch{console.log('?')}})")

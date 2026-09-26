@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.3] — 2026-09-25
+
+### Fixed
+- **The memory search service under rootless Docker.** Its two containers run as the machine owner's uid so they can read the owner's 0600 key files; under rootless Docker that number inside the container is a subordinate id, and llama-server died on "failed to open file /keys/server-key" in a restart loop. Under rootless the owner *is* the container's root, so the service containers run as uid 0 there — unprivileged on the host, and able to read the files. Found by the shared-host bed.
+
 ## [2.79.2] — 2026-09-25
 
 ### Fixed

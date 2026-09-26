@@ -953,6 +953,17 @@ export class LocalDockerProvider implements RuntimeProvider {
     return res.code === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
   }
 
+  /**
+   * The container user that reads files this process owns. Root Docker: the
+   * same uid. Rootless: this user IS the container's root (uid 0), and the
+   * same number inside the container is a subordinate id that cannot open a
+   * 0600 file — the embedder died on its key file (shared-host bed, 2026-09-25).
+   */
+  async containerUserFor(uid: number, gid: number): Promise<string> {
+    if (!this.remote && (await this.rootless()) && typeof process.getuid === 'function' && uid === process.getuid()) return '0:0';
+    return `${uid}:${gid}`;
+  }
+
   #rootless?: Promise<boolean>;
   /** Is this daemon rootless? Asked once; HATCHABOT_DOCKER_ROOTLESS=1|0 overrides the probe. */
   rootless(): Promise<boolean> {
@@ -1086,7 +1097,7 @@ export class LocalDockerProvider implements RuntimeProvider {
         '--memory', process.env.HATCHABOT_EMBEDDER_MEMORY ?? '2g', '--pids-limit', '64',
         // As this user, so it can read the 0600 key file; the key is a FILE,
         // never an argument — argv is world-readable in /proc (27th audit).
-        '--user', `${spec.uid}:${spec.gid}`,
+        '--user', await this.containerUserFor(spec.uid, spec.gid),
         '-v', `${spec.modelPath}:/models/${EMBED_MODEL_BASENAME(spec.modelPath)}:ro`,
         '-v', `${dirname(spec.serverKeyFile)}:/keys:ro`,
         spec.image,
@@ -1120,7 +1131,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       '-p', `${spec.doorBind}:${spec.doorPort}:8093`,
       '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--memory', '128m', '--pids-limit', '64',
-      '--user', `${spec.uid}:${spec.gid}`,
+      '--user', await this.containerUserFor(spec.uid, spec.gid),
       // The DIRECTORY, not the file: Hatchabot replaces the file by rename,
       // and a bind-mounted file would keep the old inode — a re-minted key
       // would never be seen until the door restarted.

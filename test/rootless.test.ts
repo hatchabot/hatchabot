@@ -49,6 +49,7 @@ describe('the Docker provider under rootless Docker', () => {
     expect(calls).toEqual(['http://172.17.0.2:18789/health']);
     await provider.ensureOpsJail({ agentId: 'a1', slug: 'kitchen', opsPort: 8091, consolePort: 19200 });
     expect(argv()).toContain('--add-host host.docker.internal:host-gateway');
+    expect(await provider.containerUserFor(process.getuid!(), process.getgid!())).toBe(`${process.getuid!()}:${process.getgid!()}`);
   });
 
   it('rootless: nothing to bind, the alias points at 10.0.2.2, health is probed on the published loopback port', async () => {
@@ -62,6 +63,9 @@ describe('the Docker provider under rootless Docker', () => {
     expect(calls).toEqual(['http://127.0.0.1:19107/health']);
     await provider.ensureOpsJail({ agentId: 'a1', slug: 'kitchen', opsPort: 8091, consolePort: 19200 });
     expect(argv()).toContain('--add-host host.docker.internal:10.0.2.2');
+    // The service containers read this user's 0600 key files: as container root, which is this user here.
+    expect(await provider.containerUserFor(process.getuid!(), process.getgid!())).toBe('0:0');
+    expect(await provider.containerUserFor(process.getuid!() + 1, 5)).toBe(`${process.getuid!() + 1}:5`);
     // Asked once: the second answer comes from memory.
     await provider.rootless();
     expect(argv().split('\n').filter((l) => l.startsWith('info --format')).length).toBe(1);
