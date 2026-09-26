@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Agent } from '../src/domain/types.js';
-import { hibernateAfterMs, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../src/orchestrator/hibernate.js';
+import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../src/orchestrator/hibernate.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 /**
@@ -87,11 +87,23 @@ describe('waking', () => {
     expect(urls[0]).toBe('https://api.telegram.org/botfake-token-Z/getUpdates?limit=1&timeout=0');
     mail = true;
     expect(await wakeSweep(deps)).toEqual([id]);
+    // Woken: the idle rule leaves it alone for a while, so it can fetch and answer.
+    expect(await hibernateSweep(deps, Date.now(), 6 * HOUR)).toEqual([]);
+    expect(await hibernateBlocker(deps, w.store.getAgent(id)!, Date.now(), 6 * HOUR)).toBe('woke recently');
     const a = w.store.getAgent(id)!;
     expect(a.state).toBe('RUNNING');
     expect(a.hibernatedAt).toBeUndefined();
     expect(w.provider.runtimes.get(a.runtimeRef!)?.phase).toBe('running');
     expect(deps.events).toContainEqual([id, 'agent.woken']);
+    // The update the gateway had handled but not yet confirmed when the container
+    // stopped is still "waiting": it is not mail. Only a newer one is.
+    const later = await seedRunningAgent(w, { id: 'b1', slug: 'later', accountId: 'laterbot', botToken: 'fake-token-Y' });
+    let waiting = 41;
+    deps.fetchImpl = (async (u: string | URL | Request) => new Response(JSON.stringify({ ok: true, result: String(u).includes('fake-token-Y') ? [{ update_id: waiting }] : [] }))) as typeof fetch;
+    await hibernateAgent(deps, w.store.getAgent(later)!, 'test');
+    expect(await wakeSweep(deps)).toEqual([]); // update 41 was already there when it slept
+    waiting = 42;
+    expect(await wakeSweep(deps)).toEqual([later]);
     // A stopped agent the owner stopped is not a sleeper: nothing wakes it.
     w.store.setAgentState(id, 'STOPPED');
     expect(await wakeSweep(deps)).toEqual([]);

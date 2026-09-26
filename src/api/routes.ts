@@ -2064,7 +2064,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent.hibernatedAt || agent.state !== 'STOPPED') return agent;
     const woken = await wakeAgent(hibernateDeps, agent, why);
     const provider = providerFor(woken.hostId);
-    const deadline = Date.now() + Number(process.env.HATCHABOT_WAKE_TIMEOUT_MS ?? 45_000);
+    // A 2026.9 gateway takes 20–60 s to answer on a loaded box: the first console
+    // open after a sleep timed out at 45 s (Meeting Scheduler, 2026-09-26).
+    const deadline = Date.now() + Number(process.env.HATCHABOT_WAKE_TIMEOUT_MS ?? 120_000);
     while (Date.now() < deadline) {
       const st = await provider.status(woken.runtimeRef!).catch(() => undefined);
       if (st?.phase === 'running' && st.healthy) break;

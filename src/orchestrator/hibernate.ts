@@ -18,6 +18,13 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
 
+/** The update waiting at the door when the agent went to sleep, per agent: only a NEWER one is mail. */
+const markOf = new Map<string, number>();
+/** When each agent was last woken: a fresh sleeper needs time to fetch and answer before the idle rule sees it. */
+const wokenAt = new Map<string, number>();
+/** How long after a wake the idle rule leaves an agent alone. */
+export const WAKE_GRACE_MS = Number(process.env.HATCHABOT_WAKE_GRACE_MS) || 30 * 60_000;
+
 export interface HibernateDeps {
   store: Store;
   secrets: SecretStore;
@@ -47,6 +54,7 @@ export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: numbe
   if (a.hostId !== deps.store.localHostId()) return 'on another host';
   if (deps.isBusy(a.id)) return 'busy';
   if (a.hibernate === 'never') return 'set to stay awake';
+  if (now - (wokenAt.get(a.id) ?? 0) < WAKE_GRACE_MS) return 'woke recently';
   const kinds = deps.store.listChannelsForAgent(a.id).map((c) => c.kind);
   if (kinds.some((k) => k !== 'telegram')) return 'on Discord or Slack (nothing queues their messages)';
   const last = (await deps.lastActiveFor(a).catch(() => undefined)) ?? a.updatedAt ?? a.createdAt;
@@ -60,6 +68,11 @@ export async function hibernateBlocker(deps: HibernateDeps, a: Agent, now: numbe
 export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string): Promise<Agent> {
   const provider = deps.providerFor(a.hostId);
   await provider.stop(a.runtimeRef!);
+  // The gateway confirms an update only on its NEXT poll: the last message it
+  // handled is still "waiting" once the container is stopped, and it woke the
+  // agent two seconds after it slept (the Spark, 2026-09-26). Remember what is
+  // waiting now; only something newer is mail.
+  markOf.set(a.id, (await telegramWaiting(deps, a)) ?? 0);
   deps.store.setAgentState(a.id, 'STOPPED');
   const at = new Date().toISOString();
   deps.store.setHibernated(a.id, at);
@@ -91,6 +104,8 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
   if (a.runtimeRef) await provider.start(a.runtimeRef);
   deps.store.setAgentState(a.id, 'RUNNING');
   deps.store.setHibernated(a.id, null);
+  wokenAt.set(a.id, Date.now());
+  markOf.delete(a.id);
   deps.log(a.id)('agent.woken', { why });
   return deps.store.getAgent(a.id)!;
 }
@@ -101,19 +116,26 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
  * confirms nothing — the gateway fetches from its own offset when it is back.
  * (A negative offset would confirm everything before it: never that here.)
  */
-export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<boolean> {
+export async function telegramWaiting(deps: HibernateDeps, a: Agent): Promise<number | undefined> {
   const ch = deps.store.listChannelsForAgent(a.id).find((c) => c.kind === 'telegram');
-  if (!ch) return false;
+  if (!ch) return undefined;
   let token: string;
-  try { token = await deps.secrets.get(ch.secretRef); } catch { return false; }
+  try { token = await deps.secrets.get(ch.secretRef); } catch { return undefined; }
   const f = deps.fetchImpl ?? fetch;
   try {
     const res = await f(`https://api.telegram.org/bot${token}/getUpdates?limit=1&timeout=0`, { signal: AbortSignal.timeout(8000) });
-    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: unknown[] };
-    return body.ok === true && Array.isArray(body.result) && body.result.length > 0;
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; result?: Array<{ update_id?: number }> };
+    if (body.ok !== true || !Array.isArray(body.result) || !body.result.length) return undefined;
+    return Number(body.result[0]?.update_id) || 0;
   } catch {
-    return false;
+    return undefined;
   }
+}
+/** Mail = an update newer than the one that was already waiting when the agent went to sleep. */
+export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<boolean> {
+  const waiting = await telegramWaiting(deps, a);
+  if (waiting === undefined) return false;
+  return waiting > (markOf.get(a.id) ?? 0);
 }
 
 /** The wake sweep: sleeping agents with mail waiting get up. Returns who did. */

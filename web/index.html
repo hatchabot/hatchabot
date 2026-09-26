@@ -2448,6 +2448,8 @@
       <option value="image">Set runtime image (rebuild)</option>
       <option value="stop">Stop</option>
       <option value="start">Start</option>
+      <option value="wake">Wake (asleep agents)</option>
+      <option value="sleep">Put to sleep (idle Telegram / web agents)</option>
       <option value="peers-connect">Connect to each other (agent-to-agent)</option>
       <option value="peers-disconnect">Disconnect from each other</option>
     </select>
@@ -5383,7 +5385,8 @@ async function openFleetActions(preset) {
     chips.push([`host:${h}`, `${host ? host.name : 'host'} (${list.filter(a => a.hostId === h).length})`]);
   }
   chips.push(['running', `Running (${list.filter(a => a.state === 'RUNNING').length})`]);
-  chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED').length})`]);
+  chips.push(['stopped', `Stopped (${list.filter(a => a.state === 'STOPPED' && !a.hibernatedAt).length})`]);
+  if (list.some(a => a.hibernatedAt)) chips.push(['asleep', `Asleep (${list.filter(a => a.state === 'STOPPED' && !!a.hibernatedAt).length})`]);
   const needsRebuild = (a) => !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
   const needs = list.filter(needsRebuild).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
@@ -5411,7 +5414,7 @@ async function openFleetActions(preset) {
   $('faList').innerHTML = list.map(a => {
     const p = profiles.find(x => x.id === a.aiProfileId);
     return `<label class="pair" style="padding:4px 0;cursor:pointer;align-items:center;gap:8px;margin:0">
-      <input type="checkbox" class="faCb" data-id="${esc(a.id)}" data-src="${esc(a.aiProfileId)}" data-state="${esc(a.state)}" onchange="faManual()" style="width:auto;flex:none">
+      <input type="checkbox" class="faCb" data-id="${esc(a.id)}" data-src="${esc(a.aiProfileId)}" data-state="${esc(a.state)}" data-asleep="${a.hibernatedAt && a.state === 'STOPPED' ? 1 : 0}" onchange="faManual()" style="width:auto;flex:none">
       <span class="grow"><b>${esc(a.name)}</b>
         <span class="sub">· ${esc(p ? p.name : 'source')} · ${esc((a.model || '').replace(/^.*\//, '') || '—')} · ${esc(a.state.toLowerCase())}</span></span>
     </label>`;
@@ -5434,7 +5437,8 @@ function faSelect(key) {
   document.querySelectorAll('#faFilters .hbtn').forEach(b => b.classList.toggle('fa-on', b.dataset.key === key));
   const test = key === 'all' ? () => true
     : key === 'running' ? (cb) => cb.dataset.state === 'RUNNING'
-    : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED'
+    : key === 'stopped' ? (cb) => cb.dataset.state === 'STOPPED' && cb.dataset.asleep !== '1'
+    : key === 'asleep' ? (cb) => cb.dataset.asleep === '1'
     : key === 'needs-rebuild' ? (cb) => {
         const a = agents.find(x => x.id === cb.dataset.id);
         return !!a && !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
@@ -5523,6 +5527,8 @@ function faRenderAction() {
       : action === 'image' ? `Pins each selected agent to the chosen image (Fleet default = unpin) and rebuilds the running ones onto it, ${atOnce} at a time, memory kept; stopped ones move when they start. A pinned agent stops following fleet promotes.`
       : action === 'stop' ? 'Stops each selected running agent. It keeps its bot.'
       : action === 'start' ? 'Starts each selected stopped agent.'
+      : action === 'wake' ? 'Wakes each selected sleeping agent (💤). Others are left as they are.'
+      : action === 'sleep' ? 'Stops each selected running agent with its volume kept, to be woken by a Telegram message, its console or an ask. Agents on Discord or Slack are skipped: nothing queues their messages.'
       : action === 'checkpoint' ? 'Each running agent writes its current conversation into memory (~20s and some tokens per agent — runs one at a time). Stopped agents are skipped; an agent whose AI source is out of credits will report "not saved".'
       : '';
   }
@@ -5616,6 +5622,13 @@ async function faApply() {
       } else if (action === 'start') {
         if (a?.state !== 'STOPPED') { skipped++; continue; }
         await api(`/v1/agents/${id}/start`, { method: 'POST', body: {} });
+      } else if (action === 'wake') {
+        if (!a?.hibernatedAt || a.state !== 'STOPPED') { skipped++; continue; }
+        await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} });
+      } else if (action === 'sleep') {
+        if (a?.state !== 'RUNNING') { skipped++; continue; }
+        try { await api(`/v1/agents/${id}/hibernate`, { method: 'POST', body: {} }); }
+        catch (e) { if (/Discord or Slack/.test(e.message)) { skipped++; continue; } throw e; }
       }
       ok++;
     } catch (e) { failed++; if (reasons.length < 3) reasons.push(`${a?.name || id}: ${e.message}`); }
@@ -8780,6 +8793,23 @@ async function openGateway(id, slug) {
     return;
   }
   try {
+    // A sleeping agent is woken first, with the cover saying so — the proxy's
+    // own wake used to time out before the gateway answered (2026-09-26).
+    const sleeper = (agents || []).find(x => x.id === id);
+    if (sleeper?.hibernatedAt && sleeper.state === 'STOPPED') {
+      $('consoleTitle').textContent = sleeper.name;
+      $('consoleCover').hidden = false; $('consoleCover').lastElementChild.textContent = 'Waking it up — about a minute…';
+      $('consoleFrame').src = 'about:blank';
+      $('consoleDlg').showModal();
+      await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }).catch(() => {});
+      for (let i = 0; i < 150; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        if (!$('consoleDlg').open) return;
+        try { const h = await api(`/v1/agents/${id}/health`); if (h.healthy || h.ok) break; } catch { /* not yet */ }
+      }
+      $('consoleCover').lastElementChild.textContent = 'Connecting this browser…';
+      await refresh(false);
+    }
     const g = await api(`/v1/agents/${id}/gateway`);
     // Proxied same-origin through the control plane so the gateway port can
     // stay bound to the host's loopback. Pass ONLY the token: the Control UI

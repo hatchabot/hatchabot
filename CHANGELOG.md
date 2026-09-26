@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.83.1] — 2026-09-26
+
+### Fixed
+- **A sleeper was woken by the message it had already handled.** The gateway confirms a Telegram update only on its next poll, so the last message it answered was still "waiting" once the container stopped: an agent slept, woke two seconds later "for a waiting message", and slept again (the Spark, 2026-09-26). The update waiting at bedtime is remembered and only a newer one counts as mail; a woken agent is left alone by the idle rule for half an hour so it can fetch and answer.
+- **Opening a sleeping agent's console said "The agent's gateway did not answer."** The console now wakes it first and shows "Waking it up — about a minute…" until the gateway answers; the server's own wait went from 45 s to two minutes for a loaded box.
+
+### Added
+- **Bulk actions: Wake and Put to sleep**, with an "Asleep" filter chip; the "Stopped" chip no longer counts sleepers.
+
 ## [2.83.0] — 2026-09-26
 
 ### Changed
