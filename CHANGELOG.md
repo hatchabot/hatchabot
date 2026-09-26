@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.81.0] — 2026-09-26
+
+### Added
+- **One memory search service per host: guest keys.** The tenant that runs the service mints a named key for a neighbour (`hbt embedder guest-add <name>`, shown once with the three `.env` lines the neighbour sets: `HATCHABOT_EMBED_URL`, `HATCHABOT_EMBED_KEY`, `HATCHABOT_EMBED_MODEL`); the neighbour's Hatchabot then starts no engine of its own and its agents use that door, each guest with its own key, rate limit and log line. `guests` lists them, `guest-rm` stops a key at once. Machine owner only. `scripts/shared-host-test.sh --shared-embedder` builds it; docs/shared-host.md explains it. This is the cloud's S0b: about 500 MiB resident and a 2 GiB cap less per tenant.
+
 ## [2.80.9] — 2026-09-25
 
 ### Fixed

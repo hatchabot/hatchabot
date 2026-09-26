@@ -1985,6 +1985,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post('/v1/embedder/start', embedderAction('start'));
   app.post('/v1/embedder/stop', embedderAction('stop'));
   app.post('/v1/embedder/restart', embedderAction('restart'));
+  // Guest keys: other tenants of a shared host use this machine's service
+  // (docs/shared-host.md). Machine owner only; a key is shown once.
+  app.get('/v1/embedder/guests', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    return { guests: embedder.listGuests() };
+  });
+  app.post<{ Body: { name?: string } }>('/v1/embedder/guests', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const name = (req.body as { name?: string } | null)?.name?.trim() ?? '';
+    let key: string;
+    try { key = embedder.addGuest(name); } catch (err) { return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) }); }
+    app.log.warn({ guest: name, ownerId: ownerIdOf(req) }, 'embed.guest_key_issued');
+    // Where a guest's agents reach the door: the address containers see this
+    // machine at (10.0.2.2 for a rootless neighbour; the bridge gateway on root Docker).
+    const host = (await localProvider().hostAddressForAgents?.().catch(() => undefined)) ?? '127.0.0.1';
+    return reply.code(201).send({
+      name, key, model: EMBED_MODEL_ALIAS,
+      url: `http://${host}:${embedder.doorPort}/v1`,
+      env: `HATCHABOT_EMBED_URL=http://${host}:${embedder.doorPort}/v1\nHATCHABOT_EMBED_KEY=${key}\nHATCHABOT_EMBED_MODEL=${EMBED_MODEL_ALIAS}`,
+    });
+  });
+  app.delete<{ Params: { name: string } }>('/v1/embedder/guests/:name', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    if (!embedder.removeGuest(req.params.name)) return reply.code(404).send({ error: 'No such guest.' });
+    return { removed: req.params.name };
+  });
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     // At boot: a machine whose runtime image carries no engine (every image
     // since 2026.9.6) needs the service for every agent, so an untouched

@@ -139,6 +139,8 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/embedder/start': 'app: later — the machine\'s embedding service (Settings → Hosts, or hatchabot embedder start)',
   'POST /v1/embedder/stop': 'app: later — the machine\'s embedding service (Settings → Hosts, or hatchabot embedder stop)',
   'POST /v1/embedder/restart': 'app: later — the machine\'s embedding service (Settings → Hosts, or hatchabot embedder restart)',
+  'POST /v1/embedder/guests': 'app: secret — a guest key is shown once (hatchabot embedder guest-add)',
+  'DELETE /v1/embedder/guests/:name': 'app: later — remove a guest key (hatchabot embedder guest-rm)',
   'PUT /v1/rebuild-policy': 'app: later — the machine\'s rebuild policy (Settings → Images → Automatic rebuilds, or hatchabot rebuild-policy)',
   'PUT /v1/rebuild-concurrency': 'app: later — how many rebuilds run at once (Settings → Images → Automatic rebuilds, or hatchabot rebuild-policy --at-once N)',
   'DELETE /v1/media-key': 'app: later — remove the Gemini key',

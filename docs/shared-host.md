@@ -70,6 +70,29 @@ HATCHABOT_PUBLIC_URL=https://t1.example.com" \
   hbt accounts create owner --host-owner --cli-token --json
 ```
 
+## One memory search service per host
+
+Every tenant's Hatchabot would otherwise run its own engine (about 500 MiB
+resident, capped at 2 GiB). One engine per host serves them all: the tenant
+that runs it mints a **guest key** per neighbour, and the neighbour's
+Hatchabot points its agents at that door instead of starting an engine.
+
+```
+# on the tenant that runs the service (t1)
+hbt embedder guest-add t2          # prints the key once, with the three lines below
+# in t2's .env, then restart t2's Hatchabot
+HATCHABOT_EMBED_URL=http://10.0.2.2:8091/v1
+HATCHABOT_EMBED_KEY=<the key>
+HATCHABOT_EMBED_MODEL=embeddinggemma
+```
+
+The door treats a guest like an agent: its own key, its own rate limit
+(`HATCHABOT_EMBED_PER_MIN`), its own log line — never a body. `hbt embedder
+guest-rm t2` stops the key at once. Leave the service tenant's door port out
+of its socket-owner rule (the key is the gate there), and give the service
+tenant's slice the engine's 2 GiB. `scripts/shared-host-test.sh
+--shared-embedder` builds this and checks that tenant 2 runs no engine.
+
 ## Keeping tenants apart
 
 Host loopback on means a container can dial any `127.0.0.1` port on the

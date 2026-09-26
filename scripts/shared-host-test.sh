@@ -9,6 +9,8 @@
 #   scripts/shared-host-test.sh --channel stable --keep
 #   scripts/shared-host-test.sh --ai-source "Claude Max Setup Token"
 #                                                       # …and each tenant talks to an agent and to its manager
+#   scripts/shared-host-test.sh --shared-embedder ...   # one memory search service per host: tenant 2+ use
+#                                                       # tenant 1's engine through a guest key (S0b)
 #
 # In a fresh Ubuntu 24.04 VM (LXD, on this machine):
 #   1. host prep, as root, once: Docker Engine, the rootless packages, Node 22,
@@ -29,7 +31,7 @@
 # VM has no internet until Docker's firewall lets LXD's bridge through; the
 # script checks and says how.
 set -uo pipefail
-CHANNEL=latest; KEEP=0; AI_SOURCE=""; TENANTS=2; VM=""
+CHANNEL=latest; KEEP=0; AI_SOURCE=""; TENANTS=2; VM=""; SHARED=0
 INSTALLER_URL="https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
     --keep) KEEP=1; shift ;;
     --ai-source) AI_SOURCE="$2"; shift 2 ;;
     --tenants) TENANTS="$2"; shift 2 ;;
+    --shared-embedder) SHARED=1; shift ;;
     --vm) VM="$2"; shift 2 ;;                 # reuse a VM this script kept (host prep is skipped if done)
     --installer-url) INSTALLER_URL="$2"; shift 2 ;;
     -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -159,8 +162,10 @@ HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
   fi
 
   # Its ports answer only its own user, the router, and root — never another tenant or another tenant's containers.
+  # With one engine per host, tenant 1's memory search door stays open to every tenant: the guest key is its gate.
+  EMBED_RULE="${EMBED[$u]}, "; [ "$SHARED" = 1 ] && [ "$i" = 1 ] && EMBED_RULE=""
   root >"$OUT/$u-nft.log" 2>&1 <<EOF
-nft add rule inet hb out oif lo tcp dport { ${PORT[$u]}, ${OPS[$u]}, ${EMBED[$u]}, ${GWBASE[$u]}-$((GWBASE[$u] + 99)) } meta skuid != { ${UIDOF[$u]}, \$(id -u caddy), 0 } reject with tcp reset
+nft add rule inet hb out oif lo tcp dport { ${PORT[$u]}, ${OPS[$u]}, ${EMBED_RULE}${GWBASE[$u]}-$((GWBASE[$u] + 99)) } meta skuid != { ${UIDOF[$u]}, \$(id -u caddy), 0 } reject with tcp reset
 EOF
 done
 
@@ -191,6 +196,22 @@ for i in $(seq 1 "$TENANTS"); do
     tenanti "$u" "hatchabot login --token ${TOKEN[$u]} --url $B" >/dev/null 2>&1
   fi
 
+  # One engine per host (S0b): tenant 2+ get a guest key from tenant 1's service (t1 is signed in by now)
+  # and point their agents at its door — 10.0.2.2 is where a rootless neighbour's containers reach this machine.
+  if [ "$SHARED" = 1 ] && [ "$i" -gt 1 ]; then
+    G=$(tenanti t1 "hbt embedder guest-add $u --json" 2>/dev/null | grep '^{' | tail -1)
+    GUEST_ENV=$(printf %s "$G" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).env)}catch{console.log('')}})")
+    if [ -n "$GUEST_ENV" ]; then
+      printf '%s\n' "$GUEST_ENV" >"$OUT/$u-guest.env"; chmod 600 "$OUT/$u-guest.env"
+      L file push "$OUT/$u-guest.env" "$VM/home/$u/guest.env" --uid "${UIDOF[$u]}" --gid "${UIDOF[$u]}" --mode 0600 >/dev/null; rm -f "$OUT/$u-guest.env"
+      tenanti "$u" "hbt embedder stop" >/dev/null 2>&1   # a kept VM's own engine goes; the guest key replaces it
+      tenant "$u" "sed -i '/^HATCHABOT_EMBED_/d' ~/hatchabot/.env; cat ~/guest.env >> ~/hatchabot/.env; rm -f ~/guest.env; systemctl --user restart hatchabot" >/dev/null 2>&1
+      for _ in $(seq 1 30); do [ "$(tenant "$u" "curl -s -o /dev/null -w '%{http_code}' $B/v1/config" | tr -d '\r')" = 200 ] && break; sleep 2; done
+      ok "$u: guest key minted by t1's memory search service; $u points at its door"
+    else
+      bad "$u: could not mint a guest key on t1 — ${G:-no output}"
+    fi
+  fi
   tenanti "$u" 'hatchabot doctor --json' >"$OUT/$u-doctor.json" 2>/dev/null
   DOC=$(node -e "const v=JSON.parse(require('fs').readFileSync('$OUT/$u-doctor.json','utf8'));const l=v.lines||v.report||[];const bad=l.filter(x=>x.level==='fail').map(x=>x.text);const d=l.find(x=>/^Docker /.test(x.text));console.log((bad.length?'FAIL '+bad.join(' · '):'OK')+'|'+(d&&/rootless/.test(d.text)?'rootless':'no-rootless-line'))" 2>/dev/null || echo "FAIL unreadable|?")
   case "$DOC" in OK\|rootless) ok "$u: doctor all good, and it says Docker is rootless" ;; OK\|*) bad "$u: doctor is fine but does not mention rootless Docker" ;; *) bad "$u: doctor — ${DOC%%|*}" ;; esac
@@ -238,6 +259,10 @@ EOF
     # Any number is an answer that came through its door (whether it counts itself is the model's call).
     grep -qE '^MANAGER.*\b([0-9]+|one|two|three)\b' "$OUT/$u-agents.log" && ok "$u: the Hatchabot agent answered through its door (doorman → 10.0.2.2:${OPS[$u]})" \
       || bad "$u: the Hatchabot agent did not answer — $(grep '^MANAGER' "$OUT/$u-agents.log" | cut -c1-160)"
+    if [ "$SHARED" = 1 ] && [ "$i" -gt 1 ]; then
+      E=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker ps --format '{{.Names}}' | grep -c -- '-embedder\$'" | tr -d '\r')
+      [ "$E" = 0 ] && ok "$u: runs no engine of its own — its agents use t1's through the guest key" || bad "$u: started its own engine despite the guest key"
+    fi
     # The memory cap reached the container: cgroup delegation works under the user slice.
     # Agent containers carry no role label (the doorman, manager jail and service containers do).
     CAP=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker inspect \$(docker ps --format '{{.Names}} {{.Label \"hatchabot.role\"}}' | awk '\$2==\"\" && \$1 ~ /^$u-/ {print \$1}' | sed -n 1p) --format '{{.HostConfig.Memory}}' 2>/dev/null" | tr -d '\r')

@@ -243,6 +243,26 @@ describe('what provisioning is handed', () => {
   });
 });
 
+describe('guest keys: other Hatchabots on the host share this engine', () => {
+  it('a guest key lands in the keys file under guest:<name>, a re-add rotates it, removal drops it', async () => {
+    const w = world();
+    const key = w.svc.addGuest('t2');
+    expect(key).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    const keys = () => JSON.parse(readFileSync(w.svc.keysFile, 'utf8')) as Record<string, string>;
+    expect(keys()[embedKeyHash(key)]).toBe('guest:t2');
+    expect(fileMode(w.svc.guestsFile)).toBe(0o600);
+    expect(w.svc.listGuests().map((g) => g.name)).toEqual(['t2']);
+    const again = w.svc.addGuest('t2');
+    expect(again).not.toBe(key);
+    expect(keys()[embedKeyHash(key)]).toBeUndefined();
+    expect(keys()[embedKeyHash(again)]).toBe('guest:t2');
+    expect(() => w.svc.addGuest('Not A Name')).toThrow(/guest name/);
+    expect(w.svc.removeGuest('t2')).toBe(true);
+    expect(w.svc.removeGuest('t2')).toBe(false);
+    expect(keys()[embedKeyHash(again)]).toBeUndefined();
+  });
+});
+
 describe('over the API', () => {
   it('anyone signed in sees the status; only the machine owner starts or stops it', async () => {
     const store = new Store(new Database(':memory:'));
@@ -255,5 +275,14 @@ describe('over the API', () => {
     const st = await f.inject({ method: 'GET', url: '/v1/embedder', headers: { 'x-hatchabot-owner': 'member' } });
     expect(st.json()).toMatchObject({ enabled: false, embedder: 'absent', door: 'absent' });
     expect((await f.inject({ method: 'POST', url: '/v1/embedder/start', headers: { 'x-hatchabot-owner': 'member' }, payload: {} })).statusCode).toBe(403);
+    // Guest keys: the owner mints one and sees it once, with the .env lines for the other Hatchabot; a member may not.
+    expect((await f.inject({ method: 'POST', url: '/v1/embedder/guests', headers: { 'x-hatchabot-owner': 'member' }, payload: { name: 't2' } })).statusCode).toBe(403);
+    const made = await f.inject({ method: 'POST', url: '/v1/embedder/guests', headers: { 'x-hatchabot-owner': OWNER }, payload: { name: 't2' } });
+    expect(made.statusCode).toBe(201);
+    expect(made.json().env).toMatch(/^HATCHABOT_EMBED_URL=http:\/\/[\w.]+:8093\/v1\nHATCHABOT_EMBED_KEY=[A-Za-z0-9_-]{32}\nHATCHABOT_EMBED_MODEL=embeddinggemma$/);
+    expect((await f.inject({ method: 'GET', url: '/v1/embedder/guests', headers: { 'x-hatchabot-owner': OWNER } })).json().guests.map((g: { name: string }) => g.name)).toEqual(['t2']);
+    expect((await f.inject({ method: 'POST', url: '/v1/embedder/guests', headers: { 'x-hatchabot-owner': OWNER }, payload: { name: 'bad name' } })).statusCode).toBe(400);
+    expect((await f.inject({ method: 'DELETE', url: '/v1/embedder/guests/t2', headers: { 'x-hatchabot-owner': OWNER } })).json()).toEqual({ removed: 't2' });
+    expect((await f.inject({ method: 'DELETE', url: '/v1/embedder/guests/t2', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(404);
   });
 });

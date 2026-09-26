@@ -241,6 +241,10 @@ Commands:
                                The machine's embedding service: one engine for
                                every agent's semantic memory search (Settings →
                                Hosts). Nothing uses it until an agent is switched to it.
+  embedder guests | guest-add <name> [--json] | guest-rm <name>
+                               Keys for other Hatchabots (the tenants of a shared
+                               host) to use this machine's service: guest-add prints
+                               the key ONCE with the three .env lines they set.
   embedder use <agent> shared|baked
                                Which engine an agent's memory search uses —
                                the shared service, or the one in its image.
@@ -2117,6 +2121,26 @@ async function main() {
           ? await (await api(ctx, '/v1/embed-default', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ default: rest[1] }) })).json()
           : await (await api(ctx, '/v1/embed-default')).json();
         console.log(`new agents use: ${r.default === 'shared' ? 'the shared service' : "the image's own engine"} · ${r.shared} of ${r.total} agents on the shared service${r.pending ? ` · ${r.pending} waiting for a rebuild` : ''}`);
+        return;
+      }
+      if (sub === 'guests') {
+        const r: any = await (await api(ctx, '/v1/embedder/guests')).json();
+        if (flags.has('json')) return console.log(JSON.stringify(r.guests));
+        if (!r.guests.length) return console.log('No guests. hatchabot embedder guest-add <name> mints a key for another Hatchabot on this host.');
+        for (const g of r.guests) console.log(`  ${g.name.padEnd(24)} since ${g.addedAt.slice(0, 10)}`);
+        return;
+      }
+      if (sub === 'guest-add') {
+        const name = rest[1] ?? fail('usage: hatchabot embedder guest-add <name> [--json]');
+        const r: any = await (await jsonPost('/v1/embedder/guests', { name })).json();
+        if (flags.has('json')) return console.log(JSON.stringify(r));
+        console.log(`Guest "${r.name}" — its key is shown once. In that Hatchabot's .env (then restart it):\n${r.env}`);
+        return;
+      }
+      if (sub === 'guest-rm') {
+        const name = rest[1] ?? fail('usage: hatchabot embedder guest-rm <name>');
+        await api(ctx, `/v1/embedder/guests/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        console.log(`Guest "${name}" removed — its key stops working at the door now.`);
         return;
       }
       if (sub === 'move-all') {

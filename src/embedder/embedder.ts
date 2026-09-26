@@ -17,7 +17,7 @@
  * Nothing uses the service until an agent is switched to it (step 2).
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, rmSync, statSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -108,6 +108,44 @@ export class EmbedderService {
   get dir(): string { return join(this.#o.dataDir, 'embed'); }
   get enabledFile(): string { return join(this.dir, 'enabled'); }
   get keysFile(): string { return join(this.dir, 'keys.json'); }
+  /**
+   * Guests: named keys for callers that are not this Hatchabot's agents — the
+   * other tenants of a shared host, each pointed at this machine's door with
+   * HATCHABOT_EMBED_URL and its own key (one engine per host, docs/shared-host.md).
+   * The door treats a guest like an agent: its key, its rate limit, its log line.
+   */
+  get guestsFile(): string { return join(this.dir, 'guests.json'); }
+  #guests(): Record<string, { hash: string; addedAt: string }> {
+    try { return JSON.parse(readFileSync(this.guestsFile, 'utf8')) as Record<string, { hash: string; addedAt: string }>; } catch { return {}; }
+  }
+  #writeGuests(g: Record<string, { hash: string; addedAt: string }>): void {
+    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    const tmp = `${this.guestsFile}.tmp`;
+    writeFileSync(tmp, JSON.stringify(g), { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, this.guestsFile);
+  }
+  listGuests(): Array<{ name: string; addedAt: string }> {
+    return Object.entries(this.#guests()).map(([name, g]) => ({ name, addedAt: g.addedAt })).sort((a, b) => a.name.localeCompare(b.name));
+  }
+  /** Mint a guest's key: returned once, only its hash is kept. A name in use gets a NEW key (rotation). */
+  addGuest(name: string): string {
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name)) throw new Error('A guest name is 1–32 lowercase letters, digits or dashes.');
+    const key = randomBytes(24).toString('base64url');
+    const g = this.#guests();
+    g[name] = { hash: embedKeyHash(key), addedAt: new Date().toISOString() };
+    this.#writeGuests(g);
+    this.syncKeys();
+    return key;
+  }
+  removeGuest(name: string): boolean {
+    const g = this.#guests();
+    if (!(name in g)) return false;
+    delete g[name];
+    this.#writeGuests(g);
+    this.syncKeys();
+    return true;
+  }
   /** The server's key: a file, never an argument (argv is world-readable in /proc). */
   get serverKeyFile(): string { return join(this.dir, 'server-key'); }
   get modelPath(): string { return join(this.#o.dataDir, 'models', EMBED_MODEL_FILE); }
@@ -164,6 +202,7 @@ export class EmbedderService {
     const gone = new Set(['ARCHIVED', 'DELETING', 'DELETED']);
     const keys: Record<string, string> = {};
     for (const t of this.#o.store.listEmbedTokens()) if (!gone.has(t.state)) keys[t.tokenHash] = t.agentId;
+    for (const [name, g] of Object.entries(this.#guests())) keys[g.hash] = `guest:${name}`;
     const tmp = `${this.keysFile}.tmp`;
     writeFileSync(tmp, JSON.stringify(keys), { mode: 0o600 });
     chmodSync(tmp, 0o600);
