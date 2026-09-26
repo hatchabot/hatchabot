@@ -67,6 +67,23 @@ const EMBED_MODEL_BASENAME = (p: string): string => p.split('/').pop() ?? p;
 const IMAGE_REF_RE = /^[a-z0-9][a-z0-9._\/-]*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
 /** The port the gateway listens on inside every agent container (published per agent on the host). */
 const GATEWAY_PORT = 18789;
+/**
+ * Rootless Docker (a tenant on a shared host, docs/architecture.md §5 of the
+ * cloud): the daemon and its containers live in the user's own network
+ * namespace. Two things differ from root Docker, both proven in an LXD VM on
+ * 2026-09-25:
+ *  - the host cannot reach a container's address (172.17.0.x is inside the
+ *    namespace), so agents are reached only through their published loopback
+ *    ports — the health probe below uses the port instead of the address;
+ *  - `host.docker.internal:host-gateway` points at the namespace's own bridge
+ *    (nothing of Hatchabot's listens there). Containers reach the host's
+ *    loopback at slirp4netns's address instead — once the daemon runs with
+ *    DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false — so the doorman
+ *    is pointed there, and the door and the memory-search door bind loopback.
+ * A socket-owner firewall rule per tenant port keeps other tenants (and their
+ * containers, whose connections arrive as their user) out.
+ */
+const ROOTLESS_HOST_ADDRESS = '10.0.2.2';
 /** Bound for volume import/export and seeding (large tarballs, slow runners). */
 const IO_TIMEOUT_MS = Number(process.env.HATCHABOT_DOCKER_IO_TIMEOUT_MS ?? 15 * 60_000);
 
@@ -421,7 +438,9 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async status(runtimeRef: string): Promise<RuntimeStatus> {
     const { container } = this.#names(runtimeRef);
-    const res = await this.#docker(['inspect', '-f', '{{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}', container]);
+    // State, the container's addresses, and the host port its gateway is
+    // published on (empty when nothing is published).
+    const res = await this.#docker(['inspect', '-f', `{{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{with index .NetworkSettings.Ports "${GATEWAY_PORT}/tcp"}}{{(index . 0).HostPort}}{{end}}`, container]);
     if (res.code !== 0) {
       // A daemon that is down is NOT a container that is gone. Conflating them
       // let a boot-order race mark every healthy agent FAILED — and the owner's
@@ -447,7 +466,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       // vanished runtime gets flagged for Retry.
       return { phase: 'absent' };
     }
-    const [state = '', ip] = res.stdout.trim().split(/\s+/);
+    const [addrs = '', published = ''] = res.stdout.trim().split('|');
+    const [state = '', ip] = addrs.trim().split(/\s+/);
     if (state === 'exited' || state === 'created' || state === 'paused') {
       return { phase: 'stopped' };
     }
@@ -459,9 +479,15 @@ export class LocalDockerProvider implements RuntimeProvider {
       // core of churn across a 50-agent fleet (2026-09-25). The CLI remains
       // the fallback: a remote daemon's containers are not on this machine's
       // network, and a container the host cannot reach is judged the old way.
-      if (!this.remote && ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) {
+      // Rootless: the address is inside the daemon's namespace; the published
+      // loopback port is the way in.
+      const rootless = !this.remote && (await this.rootless());
+      const url = this.remote ? undefined
+        : rootless ? (/^\d+$/.test(published.trim()) ? `http://127.0.0.1:${published.trim()}` : undefined)
+        : ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip) ? `http://${ip}:${GATEWAY_PORT}` : undefined;
+      if (url) {
         try {
-          const r = await this.#fetch(`http://${ip}:${GATEWAY_PORT}/health`, { signal: AbortSignal.timeout(2500) });
+          const r = await this.#fetch(`${url}/health`, { signal: AbortSignal.timeout(2500) });
           return { phase: 'running', healthy: r.ok };
         } catch { /* unreachable from here: ask the CLI */ }
       }
@@ -890,7 +916,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       'run', '-d', '--name', name,
       '--network', network, '--network-alias', DOORMAN_ALIAS,
       // Maps to this machine on every platform — the one thing the doorman may reach.
-      '--add-host', `${HOST_ALIAS}:host-gateway`,
+      '--add-host', `${HOST_ALIAS}:${await this.hostAliasTarget()}`,
       '--restart', 'unless-stopped',
       '--label', 'hatchabot.role=doorman', '--label', `hatchabot.agent=${opts.agentId}`,
       // The console's way in, on this machine's loopback only.
@@ -921,9 +947,37 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   async hostGatewayAddress(): Promise<string | undefined> {
+    if (!this.remote && (await this.rootless())) return undefined; // the bridge is inside the namespace: not bindable here
     const res = await this.#docker(['network', 'inspect', 'bridge', '--format', '{{(index .IPAM.Config 0).Gateway}}']);
     const ip = res.stdout.trim();
     return res.code === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
+  }
+
+  #rootless?: Promise<boolean>;
+  /** Is this daemon rootless? Asked once; HATCHABOT_DOCKER_ROOTLESS=1|0 overrides the probe. */
+  rootless(): Promise<boolean> {
+    const forced = process.env.HATCHABOT_DOCKER_ROOTLESS;
+    if (forced === '1' || forced === 'true') return Promise.resolve(true);
+    if (forced === '0' || forced === 'false') return Promise.resolve(false);
+    this.#rootless ??= this.#docker(['info', '--format', '{{.SecurityOptions}}']).then(
+      (r) => r.code === 0 && /\bname=rootless\b/.test(r.stdout),
+      () => false,
+    );
+    return this.#rootless;
+  }
+
+  /** What `host.docker.internal` maps to in a container this provider starts. */
+  async hostAliasTarget(): Promise<string> {
+    const set = process.env.HATCHABOT_HOST_ALIAS_IP?.trim();
+    if (set) return set;
+    return !this.remote && (await this.rootless()) ? ROOTLESS_HOST_ADDRESS : 'host-gateway';
+  }
+
+  async hostAddressForAgents(): Promise<string | undefined> {
+    const set = process.env.HATCHABOT_HOST_ALIAS_IP?.trim();
+    if (set && /^\d{1,3}(\.\d{1,3}){3}$/.test(set)) return set;
+    if (!this.remote && (await this.rootless())) return ROOTLESS_HOST_ADDRESS;
+    return this.hostGatewayAddress();
   }
 
   async removeOpsJail(agentId: string): Promise<void> {

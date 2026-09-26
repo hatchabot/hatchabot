@@ -35,6 +35,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # could see (found by a clean-VM install, 2026-09-23). No terminal: "no".
 ask() {
   local a=n
+  # Unattended (a provisioner installing for a tenant, a test bed): HATCHABOT_YES=1 says yes to every offer.
+  if [ "${HATCHABOT_YES:-}" = 1 ]; then return 0; fi
   if { : >/dev/tty; } 2>/dev/null; then
     printf '%s [y/N] ' "$1" >/dev/tty
     read -r a </dev/tty || a=n

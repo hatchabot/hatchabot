@@ -155,6 +155,12 @@ say "Linking the hatchabot CLI…"
 # The CLI is optional, so a failure here never sinks the setup.
 ./scripts/link-cli.sh --no-doctor || echo "⚠ Could not link the hatchabot command — run ./scripts/link-cli.sh later."
 mkdir -p ~/.config/hatchabot
+# The CLI assumes port 8080: an install on another port (a tenant on a shared
+# host, a second install) tells it here so `hbt` works without --url.
+P="$(sed -n 's/^PORT=//p' .env | head -1)"
+if [ -n "$P" ] && [ "$P" != 8080 ] && ! grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null; then
+  echo "HATCHABOT_URL=http://127.0.0.1:$P" >> ~/.config/hatchabot/env
+fi
 if ! grep -q '^HATCHABOT_PASSWORD=' ~/.config/hatchabot/env 2>/dev/null; then
   # A hand-written .env may have no password line (e.g. identity mode) —
   # the CLI prompts in that case, so don't let set -e die on the last step.

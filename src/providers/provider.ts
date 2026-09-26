@@ -288,6 +288,10 @@ export interface RuntimeProvider {
   /** The address a container reaches this machine on, if the host can bind it
    *  (Linux: the docker bridge's gateway; Docker Desktop: nothing bindable). */
   hostGatewayAddress?(): Promise<string | undefined>;
+  /** The address a container uses to reach services on this machine's
+   *  loopback — the bridge gateway, or under rootless Docker the slirp4netns
+   *  host address. Undefined when there is none (Docker Desktop). */
+  hostAddressForAgents?(): Promise<string | undefined>;
   /** A running container's address on its network, for host→container calls
    *  where no port is published (isolated runtimes). */
   containerIp?(runtimeRef: string): Promise<string | undefined>;

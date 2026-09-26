@@ -570,7 +570,11 @@ export async function buildRuntimeSpec(
   const callToken = peerIds.length ? await secrets.get(`agent-call-token/${agentId}`).catch(() => undefined) : undefined;
   if (callToken) {
     perAgentEnv.HATCHABOT_AGENT_TOKEN = callToken;
-    perAgentEnv.HATCHABOT_INTERNAL_URL = process.env.HATCHABOT_INTERNAL_URL ?? 'http://172.17.0.1:8080';
+    // Where the agent reaches this Hatchabot: the address containers see this
+    // machine at, and the port this instance listens on (several instances
+    // share a rootless host, each on its own port).
+    perAgentEnv.HATCHABOT_INTERNAL_URL = process.env.HATCHABOT_INTERNAL_URL
+      ?? `http://${(await deps.provider.hostAddressForAgents?.()) ?? '172.17.0.1'}:${process.env.PORT?.trim() || 8080}`;
   }
   // The management agent: a fresh propose-only key on every build, and the
   // address of the ops server — its tools and its only way to its AI provider.

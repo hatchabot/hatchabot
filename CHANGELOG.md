@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.0] — 2026-09-25
+
+### Added
+- **Hatchabot under rootless Docker** — one tenant of a shared host (Hatchabot Cloud's S0). A rootless daemon keeps its containers in the user's own network namespace: this machine cannot reach a container's address, and `host.docker.internal:host-gateway` points into that namespace where nothing of Hatchabot's listens (measured in an LXD VM). Hatchabot now detects a rootless daemon and probes agents on their published loopback ports, points every doorman at `10.0.2.2` (slirp4netns's host address, with host loopback on), binds the management agent's door and the memory-search door on loopback, and tells peered agents the right address and port. `hatchabot doctor` says when Docker is rootless. `HATCHABOT_HOST_ALIAS_IP` and `HATCHABOT_DOCKER_ROOTLESS` override the probe. docs/shared-host.md is the recipe; `scripts/shared-host-test.sh` builds two tenants in a throwaway VM, talks to an agent and the Hatchabot agent in each, and proves neither tenant's shell nor containers can reach the other's ports while the router and root can.
+- **Unattended install.** `HATCHABOT_YES=1` answers the installer's offers; `HATCHABOT_SETUP_SIGNIN`, `HATCHABOT_SETUP_PASSWORD`, `HATCHABOT_SETUP_PORT` and `HATCHABOT_SETUP_ENV` answer setup-host.sh. An install on a port other than 8080 records it for the CLI, so `hbt` needs no `--url`.
+
 ## [2.78.0] — 2026-09-25
 
 ### Added

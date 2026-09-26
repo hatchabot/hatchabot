@@ -12,7 +12,7 @@ import { tailnetInfo } from './ops/tailnet.js';
 export interface DoctorFacts {
   nodeVersion: string;
   dockerCli: boolean;
-  dockerDaemon: { ok: boolean; arch?: string; version?: string; error?: string };
+  dockerDaemon: { ok: boolean; arch?: string; version?: string; error?: string; rootless?: boolean };
   runtimeImage?: { openclawVersion?: string; sizeGb?: number };
   envFile: { present: boolean; secretKey: boolean; password: boolean; authMode: string; publicUrl?: string };
   db: { path: string; present: boolean; sizeMb?: number };
@@ -38,7 +38,7 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   out.push(major >= 22 ? { level: 'ok', text: `Node ${f.nodeVersion}` } : { level: 'fail', text: `Node ${f.nodeVersion} — 22+ required`, fix: 'Install Node 22 (https://nodejs.org) and re-run ./scripts/restart.sh' });
   if (!f.dockerCli) out.push({ level: 'fail', text: 'Docker is not installed', fix: 'https://docs.docker.com/engine/install/ (Linux) or Docker Desktop (macOS)' });
   else if (!f.dockerDaemon.ok) out.push({ level: 'fail', text: `Docker is installed but not reachable${f.dockerDaemon.error ? ` (${f.dockerDaemon.error})` : ''}`, fix: 'Start Docker; on Linux add yourself to the docker group: sudo usermod -aG docker $USER, then log out and in' });
-  else out.push({ level: 'ok', text: `Docker ${f.dockerDaemon.version ?? ''} (${f.dockerDaemon.arch ?? '?'})` });
+  else out.push({ level: 'ok', text: `Docker ${f.dockerDaemon.version ?? ''} (${f.dockerDaemon.arch ?? '?'})${f.dockerDaemon.rootless ? ' — rootless: agents reach this machine at 10.0.2.2; the doors listen on loopback' : ''}` });
   if (f.dockerDaemon.ok) {
     if (!f.runtimeImage) out.push({ level: 'fail', text: 'Runtime image hatchabot-runtime:latest is missing — agents cannot start', fix: './scripts/build-runtime-image.sh (pulls the published image, builds only if that fails)' });
     else out.push({ level: 'ok', text: `Runtime image: OpenClaw ${f.runtimeImage.openclawVersion ?? '?'}${f.runtimeImage.sizeGb ? ` · ${f.runtimeImage.sizeGb.toFixed(1)} GB` : ''}` });
@@ -138,7 +138,10 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   if (env.HATCHABOT_TLS_CERT && /^http:\/\/(localhost|127\.0\.0\.1)/.test(url)) url = url.replace(/^http:/, 'https:');
   const dockerCli = !!sh('docker', ['--version']);
   const info = dockerCli ? sh('docker', ['version', '--format', '{{.Server.Version}}|{{.Server.Arch}}']) : undefined;
-  const dockerDaemon = info ? { ok: true, version: info.split('|')[0], arch: info.split('|')[1] } : { ok: false, error: dockerCli ? 'daemon not reachable' : undefined };
+  const secopts = info ? sh('docker', ['info', '--format', '{{.SecurityOptions}}']) : undefined;
+  const dockerDaemon = info
+    ? { ok: true, version: info.split('|')[0], arch: info.split('|')[1], rootless: /\bname=rootless\b/.test(secopts ?? '') }
+    : { ok: false, error: dockerCli ? 'daemon not reachable' : undefined };
   let runtimeImage: DoctorFacts['runtimeImage'];
   if (dockerDaemon.ok) {
     const img = sh('docker', ['image', 'inspect', '--format', '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}|{{.Size}}', process.env.HATCHABOT_IMAGE ?? env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest']);
