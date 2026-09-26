@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.81.4] — 2026-09-26
+
+### Fixed
+- **The lightning bolt on a group did nothing.** The per-section bulk action looked the section's agents up by a key that is empty under the default Groups view, and threw before the dialog opened. It uses the section's real key now, and the section's chip is no longer listed twice.
+
 ## [2.81.3] — 2026-09-26
 
 ### Fixed

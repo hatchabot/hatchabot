@@ -5327,7 +5327,11 @@ async function pollBaseBuild() {
 
 /** Bulk actions on one View-by section: everything in it ticked, the dialog opened (Chris, 2026-09-24). */
 function v2BulkSection(key, label) {
-  const ids = faAgents().filter(a => v2ViewKey(a)[0] === key).map(a => a.id);
+  // The same key the sections are built with: under Groups v2ViewKey() is null
+  // and the key is the group name — indexing null threw, and the bolt did
+  // nothing in the default view (Chris, 2026-09-26).
+  const keyOf = (a) => { const k = v2ViewKey(a); return k ? k[0] : 'g:' + (a.group || ''); };
+  const ids = faAgents().filter(a => keyOf(a) === key).map(a => a.id);
   void openFleetActions({ ids, label });
 }
 // The section's agent names, one per line, in the order shown — for a
@@ -5381,7 +5385,12 @@ async function openFleetActions(preset) {
     for (const a of list) { const [k, l] = v2ViewKey(a); if (!bins.has(k)) bins.set(k, { l, n: 0 }); bins.get(k).n++; }
     for (const [k, { l, n }] of [...bins].sort((x, y) => x[0].localeCompare(y[0]))) chips.push([`view:${k}`, `${viewLabel}: ${l} (${n})`]);
   }
-  if (preset?.ids?.length) chips.unshift(['preset', `${preset.label || 'This section'} (${preset.ids.length})`]);
+  if (preset?.ids?.length) {
+    const label = `${preset.label || 'This section'} (${preset.ids.length})`;
+    // The section's own chip (a group, a source…) says the same thing: one chip, ticked.
+    const dup = chips.findIndex(([, l]) => l === label); if (dup >= 0) chips.splice(dup, 1);
+    chips.unshift(['preset', label]);
+  }
   faPreset = preset?.ids ? new Set(preset.ids) : null;
   $('faFilters').innerHTML = chips.map(([key, label]) =>
     `<button class="hbtn" data-key="${esc(key)}" onclick="faSelect('${jsq(key)}')">${esc(label)}</button>`).join('');
