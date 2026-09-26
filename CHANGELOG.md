@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.7] — 2026-09-25
+
+### Changed
+- **The memory search service comes up with Hatchabot.** On a machine whose runtime image has no engine of its own (every image since 2026.9.6) the service is needed by every agent, so an untouched service now starts fifteen seconds after boot instead of waiting for a rebuild to trip over it. A service the owner stopped stays stopped; an external server needs no start.
+
 ## [2.80.6] — 2026-09-25
 
 ### Fixed

@@ -1192,9 +1192,10 @@ engine the same way. CLI: `hatchabot embedder default [shared|baked]`,
 
 **Memory search service** (⚙ Settings → Hosts → *Memory search service*,
 machine owner; `hatchabot embedder [status|start|stop|restart]`). It turns
-itself on the first time the machine owner's own agent needs it (every image
-since 2026.9.6 relies on it); a Stop is remembered, and nobody's agent turns
-it back on. One engine
+itself on when Hatchabot starts on a machine whose runtime image has no engine
+of its own (every image since 2026.9.6), and the first time the machine
+owner's own agent needs it; a Stop is remembered, and nothing turns it back
+on but the owner. One engine
 on this machine for every agent's semantic memory search, instead of one
 inside each agent (about 290 MB each). Two hardened containers: the engine
 (llama.cpp serving the same EmbeddingGemma model the runtime image bakes,

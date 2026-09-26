@@ -1986,6 +1986,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post('/v1/embedder/stop', embedderAction('stop'));
   app.post('/v1/embedder/restart', embedderAction('restart'));
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    // At boot: a machine whose runtime image carries no engine (every image
+    // since 2026.9.6) needs the service for every agent, so an untouched
+    // service comes up with Hatchabot instead of waiting for a rebuild to
+    // trip over it (Chris, 2026-09-25: the tool comes up by itself). A service
+    // the owner stopped stays stopped; an external server needs no start.
+    setTimeout(() => {
+      void (async () => {
+        if (embedder.enabled || embedder.stoppedByOwner || embedder.external) return;
+        const local = store.localHostId();
+        if (!local) return;
+        const info = await providerFor(local).currentImageInfo().catch(() => undefined);
+        if (info?.embedEngine !== 'none') return;
+        trace()('embed.auto_started', { by: 'boot: the runtime image has no engine of its own' });
+        await embedder.start();
+      })().catch((err) => app.log.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
+    }, Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000).unref();
     // An enabled service that fell over comes back; a fleet event says so.
     setInterval(() => {
       void embedder.healthTick().then((r) => { if (r === 'restarted') app.log.warn('embedder restarted by the health loop'); })
