@@ -15,14 +15,14 @@ import { as, makeWorld, seedRunningAgent } from './support/world.js';
  */
 
 /** A docker stub that answers like a daemon of the given kind. */
-function stubDocker(kind: 'root' | 'rootless') {
+function stubDocker(kind: 'root' | 'rootless' | 'desktop') {
   const dir = mkdtempSync(join(tmpdir(), 'hb-rootless-'));
   const log = join(dir, 'argv.log');
   const stub = join(dir, 'docker');
   writeFileSync(stub, `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> ${JSON.stringify(log)}
 case "$1 $2" in
-  "info --format") echo '[name=seccomp,profile=builtin${kind === 'rootless' ? ' name=rootless name=cgroupns' : ''}]' ;;
+  "info --format") echo '${kind === 'desktop' ? 'Docker Desktop' : 'Ubuntu 24.04.3 LTS'}|[name=seccomp,profile=builtin${kind === 'rootless' ? ' name=rootless name=cgroupns' : ''}]' ;;
   "network inspect") echo '172.17.0.1' ;;
   "inspect -f") echo 'running 172.17.0.2 |19107' ;;
 esac
@@ -77,6 +77,18 @@ describe('the Docker provider under rootless Docker', () => {
     // Asked once: the second answer comes from memory.
     await provider.rootless();
     expect(argv().split('\n').filter((l) => l.startsWith('info --format')).length).toBe(1);
+  });
+
+  it('Docker Desktop: no bridge address to bind (the doors take loopback), agents reach the machine as host.docker.internal', async () => {
+    const { provider, calls } = stubDocker('desktop');
+    expect(await provider.desktop()).toBe(true);
+    expect(await provider.rootless()).toBe(false);
+    expect(await provider.hostGatewayAddress()).toBeUndefined();
+    expect(await provider.hostAddressForAgents()).toBe('host.docker.internal');
+    expect(await provider.hostAliasTarget()).toBe('host-gateway');
+    // The Mac cannot reach a container's address inside Docker's VM: health is probed on the published port.
+    expect(await provider.status('mock://kitchen')).toEqual({ phase: 'running', healthy: true });
+    expect(calls).toEqual(['http://127.0.0.1:19107/health']);
   });
 
   it('HATCHABOT_HOST_ALIAS_IP and HATCHABOT_DOCKER_ROOTLESS override the probe (pasta, an unusual bridge)', async () => {

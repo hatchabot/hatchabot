@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.5] — 2026-09-25
+
+### Fixed
+- **The memory search service starts on Docker Desktop.** Its door was published on the docker bridge's address, which on a Mac lives inside Docker's VM, so a rebuild died with "embed door failed: … listen tcp4 172.17.0.1:8093: bind: can't assign requested address". Docker Desktop is now recognised like rootless Docker: the door and the management agent's door bind loopback, agents reach the machine as `host.docker.internal`, and health is probed on each agent's published port instead of a container address the Mac cannot reach. `HATCHABOT_DOCKER_DESKTOP=1|0` overrides the probe.
+
 ## [2.80.4] — 2026-09-25
 
 ### Fixed

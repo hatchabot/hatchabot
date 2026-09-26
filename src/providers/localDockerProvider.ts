@@ -488,11 +488,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       // core of churn across a 50-agent fleet (2026-09-25). The CLI remains
       // the fallback: a remote daemon's containers are not on this machine's
       // network, and a container the host cannot reach is judged the old way.
-      // Rootless: the address is inside the daemon's namespace; the published
-      // loopback port is the way in.
-      const rootless = !this.remote && (await this.rootless());
+      // Rootless: the address is inside the daemon's namespace; Docker Desktop:
+      // inside its VM. The published loopback port is the way in on both.
+      const viaPort = !this.remote && ((await this.rootless()) || (await this.desktop()));
       const url = this.remote ? undefined
-        : rootless ? (/^\d+$/.test(published.trim()) ? `http://127.0.0.1:${published.trim()}` : undefined)
+        : viaPort ? (/^\d+$/.test(published.trim()) ? `http://127.0.0.1:${published.trim()}` : undefined)
         : ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip) ? `http://${ip}:${GATEWAY_PORT}` : undefined;
       if (url) {
         try {
@@ -956,7 +956,10 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   async hostGatewayAddress(): Promise<string | undefined> {
-    if (!this.remote && (await this.rootless())) return undefined; // the bridge is inside the namespace: not bindable here
+    // Rootless: the bridge is inside the user's namespace. Docker Desktop: inside
+    // its VM (a MacBook's memory-search door died on "listen tcp4 172.17.0.1:8093:
+    // can't assign requested address", 2026-09-25). Neither is bindable here.
+    if (!this.remote && ((await this.rootless()) || (await this.desktop()))) return undefined;
     const res = await this.#docker(['network', 'inspect', 'bridge', '--format', '{{(index .IPAM.Config 0).Gateway}}']);
     const ip = res.stdout.trim();
     return res.code === 0 && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
@@ -973,17 +976,33 @@ export class LocalDockerProvider implements RuntimeProvider {
     return `${uid}:${gid}`;
   }
 
-  #rootless?: Promise<boolean>;
-  /** Is this daemon rootless? Asked once; HATCHABOT_DOCKER_ROOTLESS=1|0 overrides the probe. */
-  rootless(): Promise<boolean> {
-    const forced = process.env.HATCHABOT_DOCKER_ROOTLESS;
-    if (forced === '1' || forced === 'true') return Promise.resolve(true);
-    if (forced === '0' || forced === 'false') return Promise.resolve(false);
-    this.#rootless ??= this.#docker(['info', '--format', '{{.SecurityOptions}}']).then(
-      (r) => r.code === 0 && /\bname=rootless\b/.test(r.stdout),
-      () => false,
+  #daemon?: Promise<{ rootless: boolean; desktop: boolean }>;
+  /** What kind of daemon this is, asked once: rootless, and Docker Desktop
+   *  (macOS, Windows), whose bridge lives inside its VM so no bridge address
+   *  can be bound on this machine. */
+  #daemonKind(): Promise<{ rootless: boolean; desktop: boolean }> {
+    this.#daemon ??= this.#docker(['info', '--format', '{{.OperatingSystem}}|{{.SecurityOptions}}']).then(
+      (r) => ({
+        rootless: r.code === 0 && /\bname=rootless\b/.test(r.stdout),
+        desktop: r.code === 0 && /docker desktop/i.test(r.stdout),
+      }),
+      () => ({ rootless: false, desktop: false }),
     );
-    return this.#rootless;
+    return this.#daemon;
+  }
+  /** Is this daemon rootless? HATCHABOT_DOCKER_ROOTLESS=1|0 overrides the probe. */
+  async rootless(): Promise<boolean> {
+    const forced = process.env.HATCHABOT_DOCKER_ROOTLESS;
+    if (forced === '1' || forced === 'true') return true;
+    if (forced === '0' || forced === 'false') return false;
+    return (await this.#daemonKind()).rootless;
+  }
+  /** Docker Desktop? HATCHABOT_DOCKER_DESKTOP=1|0 overrides the probe. */
+  async desktop(): Promise<boolean> {
+    const forced = process.env.HATCHABOT_DOCKER_DESKTOP;
+    if (forced === '1' || forced === 'true') return true;
+    if (forced === '0' || forced === 'false') return false;
+    return (await this.#daemonKind()).desktop;
   }
 
   /** What `host.docker.internal` maps to in a container this provider starts. */
@@ -997,6 +1016,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const set = process.env.HATCHABOT_HOST_ALIAS_IP?.trim();
     if (set && /^\d{1,3}(\.\d{1,3}){3}$/.test(set)) return set;
     if (!this.remote && (await this.rootless())) return ROOTLESS_HOST_ADDRESS;
+    if (!this.remote && (await this.desktop())) return HOST_ALIAS; // Docker Desktop defines it for every container
     return this.hostGatewayAddress();
   }
 
