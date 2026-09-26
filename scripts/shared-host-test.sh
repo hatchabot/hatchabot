@@ -114,8 +114,9 @@ id $u >/dev/null 2>&1 || useradd -m -s /bin/bash $u
 loginctl enable-linger $u
 # A memory ceiling on everything the tenant runs: reclaim starts at MemoryHigh, MemoryMax is the wall.
 # Measured 2026-09-25: control plane ~120 MiB + embedder ~500 MiB + the Hatchabot agent ~1.4 GiB + one agent ~0.8 GiB
-# ≈ 3 GiB resident; at MemoryHigh=3G the slice was throttled into D state (load 42 on 6 CPUs). 7G/8G here.
-systemctl set-property user-\$(id -u $u).slice MemoryHigh=7G MemoryMax=8G TasksMax=2048 >/dev/null 2>&1 || true
+# ≈ 3 GiB resident; at MemoryHigh=3G the slice was throttled into D state (load 42 on 6 CPUs). So no soft
+# line for now (Chris, 2026-09-25: "too tight") — only the wall, 8G, with the product's 3g cap per agent inside it.
+systemctl set-property user-\$(id -u $u).slice MemoryHigh=infinity MemoryMax=8G TasksMax=2048 >/dev/null 2>&1 || true
 sleep 1; echo "uid \$(id -u $u)"
 EOF
   UIDOF[$u]=$(grep -o 'uid [0-9]*' "$OUT/$u-user.log" | awk '{print $2}')
@@ -199,14 +200,14 @@ for i in $(seq 1 "$TENANTS"); do
     cat >"$OUT/$u-agents.sh" <<EOF
 #!/usr/bin/env bash
 B=$B; H="authorization: Bearer ${TOKEN[$u]}"
-node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' >/tmp/body.json
-curl -s -H "\$H" -H 'content-type: application/json' --data @/tmp/body.json \$B/v1/ai-profiles >/dev/null; rm -f /tmp/body.json ~/.cred
+node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' >$HOME/body.json
+curl -s -H "\$H" -H 'content-type: application/json' --data @$HOME/body.json \$B/v1/ai-profiles >/dev/null; rm -f $HOME/body.json ~/.cred
 PID=\$(curl -s -H "\$H" \$B/v1/ai-profiles | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].id))")
 # A kept VM may already have Helper (a failed one from an earlier run is retried).
 HS=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).find(x=>x.name==='Helper');console.log(a?a.state:'')})")
 case "\$HS" in
-  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || grep -q "retry requested" /tmp/create.log || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
-  FAILED) hbt retry Helper >/tmp/create.log 2>&1 || true ;;
+  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >$HOME/create.log 2>&1 || grep -q "retry requested" $HOME/create.log || { echo "FAIL create: \$(tail -1 $HOME/create.log)"; exit 0; } ;;
+  FAILED) hbt retry Helper >$HOME/create.log 2>&1 || true ;;
 esac
 # The Hatchabot agent: made once; a failed one from an earlier run is retried.
 OS=\$(curl -s -H "\$H" \$B/v1/ops-agent | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log((JSON.parse(s).agent||{}).state||'')}catch{console.log('')}})")

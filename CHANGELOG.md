@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.7] — 2026-09-25
+
+### Changed
+- **Shared-host bed: an 8 GiB wall per tenant, no soft line.** `MemoryHigh` throttled a tenant whose processes held more than it into uninterruptible sleep; the bed and docs/shared-host.md now set only `MemoryMax=8G` (Chris: the 3 GiB line was too tight) with the product's 3 GiB cap per agent inside it. The bed's scratch files live in the tenant's home, not the shared /tmp, where the second tenant could not overwrite the first's. Run 11 on v2.79.6: both tenants' agents and Hatchabot agents answer through their doors under rootless Docker; every isolation check passes.
+
 ## [2.79.6] — 2026-09-25
 
 ### Fixed

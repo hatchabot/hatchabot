@@ -45,14 +45,15 @@ a 1 GiB cap thrashed at its ceiling and restarted after every question
 control plane (~120 MiB), the memory search service (~500 MiB, capped at
 2 GiB), the Hatchabot agent and each agent — about 3 GiB resident for one
 agent, and a `MemoryHigh` below that throttles the whole slice into
-uninterruptible sleep (load 42 on 6 CPUs). 7 GiB high / 8 GiB max is a
-working floor for a one-agent tenant.
+uninterruptible sleep (load 42 on 6 CPUs). For now: no `MemoryHigh` at all
+and `MemoryMax=8G` — a wall, never a throttle — with the 3 GiB cap per agent
+inside it.
 
 Per tenant (`t1`, on port 8101; give each tenant its own port set):
 
 ```
 useradd -m -s /bin/bash t1 && loginctl enable-linger t1
-systemctl set-property user-$(id -u t1).slice MemoryHigh=7G MemoryMax=8G
+systemctl set-property user-$(id -u t1).slice MemoryHigh=infinity MemoryMax=8G
 su - t1
   mkdir -p ~/.config/systemd/user/docker.service.d
   printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false\n' > ~/.config/systemd/user/docker.service.d/loopback.conf
