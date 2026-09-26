@@ -6278,7 +6278,7 @@ async function offerFolders(items) {
   }
   if (!finds.length) return;
   const lines = finds.map(f => `  • ${f.path}  →  ${f.name}`).join('\n');
-  if (!confirm(`These agents read folders outside their workspace:\n\n${lines}\n\nShare them read-only (mounted at their original path) so the agents can still reach them? You can change this in ⚙ Configuration later.`)) return;
+  if (!confirm(`These agents read folders outside their workspace:\n\n${lines}\n\nShare them read-only (mounted at their original path) so the agents can still reach them — each is rebuilt now, which stops whatever it is doing? You can change this in ⚙ Configuration later.`)) return;
   const toRebuild = new Set();
   for (const f of finds) {
     try {
@@ -8293,7 +8293,7 @@ async function swapBot() {
     + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
     + `• Everyone (${people === 1 ? 'just you' : `${people} people`}) must open the NEW bot and say hi. Telegram will not move the old chat.\n`
     + `• The old bot goes back to the pool, and its chat stops answering.\n\n`
-    + `The agent rebuilds afterwards — about a minute.`)) return;
+    + `The agent rebuilds afterwards — about a minute; anything it is doing stops.`)) return;
   try {
     const r = await api(`/v1/agents/${editAgentId}/channel/swap`, { method: 'POST', body: {} });
     toast(`Moved to @${r.to}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. Rebuilding…`, 10000);
@@ -8639,7 +8639,22 @@ async function shareInviteTg() {
   catch { /* user cancelled the share sheet, or it's unavailable — no-op */ }
 }
 
+/**
+ * Every action that rebuilds a RUNNING agent right now asks first — a rebuild
+ * stops whatever the agent is doing (Chris added Telegram to an agent mid-job,
+ * 2026-09-25). A stopped agent has nothing to interrupt, so no question then.
+ * `what` names the action; the answer is the user's, so the caller stops on false.
+ */
+function confirmRebuild(id, what) {
+  const a = agents.find(x => x.id === id);
+  if (!a || a.state !== 'RUNNING') return true;
+  const now = a.busy
+    ? `It is working on something right now — that stops, unfinished, and it starts again from its memory.`
+    : `Anything it is doing stops, and it starts again from its memory.`;
+  return confirm(`${what} rebuilds "${a.name}" now, which takes it offline for a minute or two.\n${now}\n\nGo ahead?`);
+}
 async function rebuild(id) {
+  if (!confirmRebuild(id, 'Rebuild')) return;
   try {
     await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
     toast('Rebuilding — memory is kept');
@@ -9546,6 +9561,7 @@ async function saveImagePin() {
     const r = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { image: v || null } });
     if (r.sameImage) toast(v ? `Pinned to ${v} — it already runs that image, so no rebuild.` : 'Back on the fleet default — it already runs that image, so no rebuild.');
     else if (a?.state === 'RUNNING' && a.runtimeRef) {
+      if (!confirmRebuild(editAgentId, v ? `Moving onto ${v}` : 'Returning to the fleet default image')) { toast('Pinned — it moves onto that image at its next rebuild.', 6000); await refresh(false); return; }
       await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
       toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
     } else {
@@ -11184,6 +11200,7 @@ async function v2AddTelegram(id, withToken) {
     body.token = $('v2TgTokenIn').value.trim();
     if (!body.token) return toast('Paste the token from @BotFather first.');
   }
+  if (!confirmRebuild(id, 'Connecting Telegram')) return;
   try {
     const r = await api(`/v1/agents/${id}/telegram`, { method: 'POST', body });
     toast(`Connected @${r.username} — rebuilding so it answers there (memory kept).`, 6000);
@@ -11194,7 +11211,7 @@ async function v2AddTelegram(id, withToken) {
   }
 }
 async function v2RemoveTelegram(id, name, bot) {
-  if (!confirm(`Take @${bot} off "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. It restarts to apply this.`)) return;
+  if (!confirm(`Take @${bot} off "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
   try {
     await api(`/v1/agents/${id}/telegram`, { method: 'DELETE' });
     toast(`@${bot} is back in your pool.`, 6000);
@@ -11342,7 +11359,7 @@ async function chanSwap(id, kind) {
     + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
     + `• Everyone must open the NEW bot and say hi; ${label} will not move the old chat.\n`
     + `• The old ${kind === 'slack' ? 'app' : 'bot'} ${kind === 'telegram' ? 'goes back to the pool' : `is parked under Settings → ${label}`}, and its chat stops answering.\n\n`
-    + `The agent rebuilds afterwards — about a minute.`)) return;
+    + `The agent rebuilds afterwards — about a minute; anything it is doing stops.`)) return;
   try {
     const r = kind === 'telegram'
       ? await api(`/v1/agents/${id}/channel/swap`, { method: 'POST', body: {} })
@@ -11455,6 +11472,7 @@ async function chanConnect(btn) {
     for (const el of chanDlg.querySelectorAll('input[data-key]')) body[el.dataset.key] = el.value.trim();
     if (Object.values(body).some(v => !v)) { $('chanErr').textContent = 'Fill in every box first, or pick a parked bot.'; return; }
   }
+  if (!confirmRebuild(chanFor, `Connecting ${V2_CHAN_LABEL[chanKind] ?? chanKind}`)) return;
   btn.disabled = true; btn.textContent = 'Checking…'; $('chanErr').textContent = '';
   try {
     const c = await api(`/v1/agents/${chanFor}/channels/${chanKind}`, { method: 'POST', body });
@@ -11512,6 +11530,7 @@ async function chanSaveRooms(id, kind, btn) {
       await api(`/v1/agents/${id}`, { method: 'PATCH', body: { groupAccess: { mode, ...(mode === 'room' ? { roomId } : {}) } } });
       toast('Saved — applies on the next Rebuild.', 6000);
     } else {
+      if (!confirmRebuild(id, 'Changing its group chats')) { btn.disabled = false; return; }
       await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
       toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : mode === 'members' ? 'Saved: every server it is in, for people you admitted. It restarts to apply this.' : 'Saved: direct messages only. It restarts to apply this.', 6000);
     }
@@ -11525,8 +11544,8 @@ async function chanRemove(id, kind) {
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
   if (kind !== 'slack'
-    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. It restarts to apply this.`)
-    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It restarts to apply this.`)) return;
+    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. It rebuilds now — anything it is doing stops.`)
+    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
     toast(r.parked ? `${label} removed — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} removed.`, 5000);

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.3] — 2026-09-25
+
+### Changed
+- **Every action that rebuilds a running agent asks first.** Connecting or removing Telegram, Discord or Slack, changing a bot, changing group chats, moving onto another image and the Rebuild button itself all rebuild the agent right away, and a rebuild stops whatever it is doing — Chris added Telegram to an agent that was mid-job. One question now, naming the action and the agent, and saying it is busy when it is; a stopped agent has nothing to interrupt and is not asked about. The Discord/Slack group-chat change said "applies on the next Rebuild" while rebuilding at once; it says so now.
+
 ## [2.80.2] — 2026-09-25
 
 ### Changed
