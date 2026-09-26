@@ -77,8 +77,17 @@ fi
 
 if docker image inspect hatchabot-runtime:latest >/dev/null 2>&1; then
   # An existing install may have promoted a NEWER image to :latest — a default
-  # build here would silently demote it (learned the hard way).
-  say "Runtime image already present — keeping the existing :latest."
+  # build here would silently demote it (learned the hard way). An OLDER one
+  # (a reinstall on a box that kept its images) is brought up to this
+  # release's default, the way an upgrade does (2026-09-25).
+  WANT="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
+  HAVE="$(docker image inspect hatchabot-runtime:latest --format '{{ index .Config.Labels "org.agentclaw.openclaw-version" }}' 2>/dev/null || true)"
+  if [ -n "$WANT" ] && [ -n "$HAVE" ] && [ "$HAVE" != "$WANT" ] && [ "$(printf '%s\n%s\n' "$HAVE" "$WANT" | sed 's/-/~/' | sort -V | sed -n 1p)" = "$(printf '%s' "$HAVE" | sed 's/-/~/')" ]; then
+    say "Runtime image here carries OpenClaw $HAVE; this release's default is $WANT — fetching it…"
+    ./scripts/build-runtime-image.sh || echo "⚠ Could not fetch the $WANT image now — run ./scripts/build-runtime-image.sh later, or Settings → Images."
+  else
+    say "Runtime image already present — keeping the existing :latest."
+  fi
 else
   say "Building the agent runtime image (a few minutes on first run)…"
   ./scripts/build-runtime-image.sh

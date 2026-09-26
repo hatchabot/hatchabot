@@ -74,9 +74,28 @@ agent_names() {
       console.log(String(r.runtime_ref).replace(/^docker:\/\//, ""));' "$DB_PATH" 2>/dev/null)
 }
 NAMES="$(agent_names)"
+agent_ids() {
+  [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
+  (cd "$REPO" && node -e '
+    const db = require("better-sqlite3")(process.argv[1], { readonly: true });
+    for (const r of db.prepare("SELECT id FROM agents").all()) console.log(r.id);' "$DB_PATH" 2>/dev/null)
+}
+PREFIX="${HATCHABOT_PREFIX:-hatchabot}"
 containers() {
   [ -n "$NAMES" ] || return 0
   for n in $NAMES; do docker ps -aq --filter "name=^/$n$" 2>/dev/null; done
+}
+# The service containers of THIS install: its agents' doormen (by the agent
+# label), and the memory search service pair under this install's prefix.
+# Left behind, a doorman kept its console port and an embedder its old key,
+# and a reinstall failed on both (a MacBook, 2026-09-25).
+service_containers() {
+  for id in $(agent_ids); do docker ps -aq --filter "label=hatchabot.role=doorman" --filter "label=hatchabot.agent=$id" 2>/dev/null; done
+  docker ps -aq --filter "name=^/$PREFIX-embedder$" --filter "name=^/$PREFIX-embed-door$" 2>/dev/null
+}
+service_networks() {
+  for id in $(agent_ids); do docker network ls -q --filter "name=^$PREFIX-ops-$(echo "$id" | tr -cd 'A-Za-z0-9' | cut -c1-12)$" 2>/dev/null; done
+  docker network ls -q --filter "name=^$PREFIX-embed$" 2>/dev/null
 }
 volumes() {
   [ -n "$NAMES" ] || return 0
@@ -164,6 +183,14 @@ if have docker; then
   else
     echo "  none running"
   fi
+  # The doormen and the memory search service hold nothing of the agents'
+  # (a rebuild or the next start makes them afresh), so they go even without
+  # --purge: a reinstall must not meet them on its ports.
+  SIDS="$(service_containers | sort -u)"
+  if [ -n "$SIDS" ]; then
+    # shellcheck disable=SC2086
+    docker rm -f $SIDS >/dev/null 2>&1 && echo "  removed $(echo "$SIDS" | wc -l | tr -d ' ') service containers (doormen, memory search)"
+  fi
 fi
 
 if [ "$PURGE" = 1 ]; then
@@ -191,6 +218,9 @@ if [ "$PURGE" = 1 ]; then
       echo "  none"
     fi
     docker network rm hatchabot-agents >/dev/null 2>&1 && echo "  removed the hatchabot-agents network"
+    NIDS="$(service_networks | sort -u)"
+    # shellcheck disable=SC2086
+    [ -n "$NIDS" ] && docker network rm $NIDS >/dev/null 2>&1 && echo "  removed $(echo "$NIDS" | wc -l | tr -d ' ') service networks"
   fi
   say "Deleting local state…"
   # The whole directory only when it is Hatchabot's own (the install's data/

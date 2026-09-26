@@ -1993,12 +1993,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // the owner stopped stays stopped; an external server needs no start.
     setTimeout(() => {
       void (async () => {
-        if (embedder.enabled || embedder.stoppedByOwner || embedder.external) return;
-        const local = store.localHostId();
-        if (!local) return;
-        const info = await providerFor(local).currentImageInfo().catch(() => undefined);
-        if (info?.embedEngine !== 'none') return;
-        trace()('embed.auto_started', { by: 'boot: the runtime image has no engine of its own' });
+        if (embedder.stoppedByOwner || embedder.external) return;
+        // An enabled service is started again too: start is idempotent, and it
+        // is what replaces an embedder left over from a previous install that
+        // still wears the old key (a MacBook reinstall, 2026-09-25).
+        if (!embedder.enabled) {
+          const local = store.localHostId();
+          if (!local) return;
+          const info = await providerFor(local).currentImageInfo().catch(() => undefined);
+          if (info?.embedEngine !== 'none') return;
+          trace()('embed.auto_started', { by: 'boot: the runtime image has no engine of its own' });
+        }
         await embedder.start();
       })().catch((err) => app.log.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
     }, Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000).unref();

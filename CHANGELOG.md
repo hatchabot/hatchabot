@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.8] — 2026-09-25
+
+### Fixed
+- **A reinstall beside a previous install's leftovers comes up on its own.** The uninstall knew only the agents' containers, so a doorman kept its console port and the memory search service's engine kept running with the old install's key; on a MacBook the new Hatchabot agent failed with "Could not connect the management agent's doorman to this machine" (port already allocated) and every agent's memory index got 401s. Now: the uninstall removes this install's doormen and memory search containers (and, with `--purge`, their networks); the provider removes an orphan doorman of its own prefix that holds the port it needs and retries; the engine container carries a hash of its key and is replaced when the key changed; and the service is started again at every boot, which is what applies that. A reinstall on a box that kept an older runtime image fetches this release's default, the way an upgrade does; a promoted newer image stays.
+
 ## [2.80.7] — 2026-09-25
 
 ### Changed

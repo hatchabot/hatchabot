@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import type { Readable } from 'node:stream';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createServer, connect } from 'node:net';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -921,11 +921,12 @@ export class LocalDockerProvider implements RuntimeProvider {
     const name = this.#doormanName(opts.agentId);
     await this.#docker(['rm', '-f', name]);
     const routes = JSON.stringify(doormanRoutes({ opsPort: opts.opsPort, agentContainer, embedPort: opts.embedPort }));
-    const run = await this.#docker([
+    const alias = await this.hostAliasTarget();
+    const runDoorman = () => this.#docker([
       'run', '-d', '--name', name,
       '--network', network, '--network-alias', DOORMAN_ALIAS,
       // Maps to this machine on every platform — the one thing the doorman may reach.
-      '--add-host', `${HOST_ALIAS}:${await this.hostAliasTarget()}`,
+      '--add-host', `${HOST_ALIAS}:${alias}`,
       '--restart', 'unless-stopped',
       '--label', 'hatchabot.role=doorman', '--label', `hatchabot.agent=${opts.agentId}`,
       // The console's way in, on this machine's loopback only.
@@ -936,6 +937,21 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--entrypoint', 'node',
       this.image, '-e', doormanScript(),
     ]);
+    let run = await runDoorman();
+    if (run.code !== 0 && /port is already allocated/i.test(run.stderr)) {
+      // A doorman of a previous install (the uninstall never knew it) still
+      // holds this console port: a MacBook reinstall failed here (2026-09-25).
+      // Only a doorman of THIS prefix that serves another agent is an orphan.
+      await this.#docker(['rm', '-f', name]);
+      const holder = await this.#docker(['ps', '-q', '--filter', `publish=${opts.consolePort}`, '--filter', 'label=hatchabot.role=doorman']);
+      const ids = holder.stdout.trim().split(/\s+/).filter(Boolean);
+      for (const id of ids) {
+        const who = await this.#docker(['inspect', id, '--format', '{{.Name}} {{ index .Config.Labels "hatchabot.agent" }}']);
+        const [cname = '', agent = ''] = who.stdout.trim().split(/\s+/);
+        if (cname.replace(/^\//, '').startsWith(`${this.prefix}-doorman-`) && agent !== opts.agentId) await this.#docker(['rm', '-f', id]);
+      }
+      run = await runDoorman();
+    }
     if (run.code !== 0) {
       throw new ProviderError(`doorman failed: ${run.stderr.slice(-500)}`, 'Could not start the management agent’s doorman container.');
     }
@@ -1113,12 +1129,22 @@ export class LocalDockerProvider implements RuntimeProvider {
       }
     }
     // The server: the model read-only, no ports, nothing writable but /tmp.
+    // llama-server reads its key file once, at start: a container left over
+    // from a previous install (the uninstall never knew it) kept answering
+    // with the OLD key, and every agent's memory index got 401s (a MacBook,
+    // 2026-09-25). The key's hash rides on the container as a label, and a
+    // container wearing another key is replaced.
     const embedder = this.#embedderName();
+    const keyHash = (() => { try { return createHash('sha256').update(readFileSync(spec.serverKeyFile)).digest('hex').slice(0, 16); } catch { return ''; } })();
+    if ((await this.#containerState(embedder)) !== 'absent' && keyHash) {
+      const worn = await this.#docker(['inspect', embedder, '--format', '{{ index .Config.Labels "hatchabot.embed-key" }}']);
+      if (worn.code === 0 && worn.stdout.trim() !== keyHash) await this.#docker(['rm', '-f', embedder]);
+    }
     if ((await this.#containerState(embedder)) === 'absent') {
       if (!IMAGE_REF_RE.test(spec.image.replace(/@sha256:[0-9a-f]{64}$/, ''))) throw new ProviderError(`bad embedder image ${spec.image}`, 'The embedding service image name is not valid.');
       const run = await this.#docker([
         'run', '-d', '--name', embedder, '--network', net, '--network-alias', 'embedder',
-        '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder',
+        '--restart', 'unless-stopped', '--label', 'hatchabot.role=embedder', '--label', `hatchabot.embed-key=${keyHash}`,
         '--read-only', '--tmpfs', '/tmp', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
         '-e', 'MALLOC_ARENA_MAX=2',
         // 2 GiB: indexing several agents at once pushed the server past 1 GiB
