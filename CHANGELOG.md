@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.84.0] — 2026-09-26
+
+### Changed
+- **A more compact dashboard.** The numbers (awake, tokens per hour, spare bots, and the ones that appear when something needs you) are a row of small pills beside the Hatchabot agent, each still a door to its screen; Status, Bulk actions and Settings are ordinary buttons right-justified beside New. On a phone the pills wrap and the buttons keep their icons.
+
 ## [2.83.4] — 2026-09-26
 
 ### Added
