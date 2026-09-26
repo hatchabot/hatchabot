@@ -180,7 +180,12 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const hits = store.limitHitsFor(p.id, t7).filter((h) => myIds.has(h.agentId));
     let status: SourceUsage['status'] = lastOkAt || lastLimitAt ? 'ok' : 'idle';
     let limitedSince: string | undefined;
-    if (lastLimitAt && (!lastOkAt || lastLimitAt > lastOkAt)) {
+    // A refusal counts as current only within the limit's own window: a Claude
+    // plan's 5-hour window, minutes for an API key. Before this, "rate-limited"
+    // stuck from the last refusal until some agent happened to call again — a
+    // MacBook showed it 19 hours after its plan had reset (2026-09-25).
+    const stillCounts = lastLimitAt ? now - Date.parse(lastLimitAt) <= (p.kind === 'subscription' ? 5 * 3_600_000 : 15 * 60_000) : false;
+    if (lastLimitAt && stillCounts && (!lastOkAt || lastLimitAt > lastOkAt)) {
       status = 'limited';
       limitedSince = hits.filter((h) => !lastOkAt || h.at > lastOkAt).map((h) => h.at).sort()[0] ?? lastLimitAt;
     }

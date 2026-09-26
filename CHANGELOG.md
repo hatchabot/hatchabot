@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.4] — 2026-09-25
+
+### Fixed
+- **"Rate-limited" no longer outlives the limit.** A source stayed marked rate-limited from its last refused call until some agent happened to call it again — a MacBook showed it 19 hours after its Claude plan had reset, with no calls in between. A refusal now counts as current only inside the limit's own window (five hours for a Claude plan, fifteen minutes for an API key); after that the source is shown as fine until a call says otherwise.
+
 ## [2.80.3] — 2026-09-25
 
 ### Changed

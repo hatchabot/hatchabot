@@ -76,6 +76,10 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     expect(src!.slots.find((x) => x.slot === '2026-09-15T15:45')).toEqual({ slot: '2026-09-15T15:45', ok: 0, limited: 4 });
     expect(src!.slots.find((x) => x.slot === '2026-09-15T14:30')).toEqual({ slot: '2026-09-15T14:30', ok: 2, limited: 0 });
     expect(src!.others).toEqual({ agents: 1, requests5h: 3, requests7d: 4 }); // counts only, no names
+    // …and so does the plan's 5-hour window passing with no call at all: the
+    // limit has reset by then, whether or not anyone tried.
+    expect(summarizeSourceUsage(store, OWNER, NOW + 5 * 3_600_000)[0]!.status).toBe('ok');
+    expect(summarizeSourceUsage(store, OWNER, NOW + 2 * 3_600_000)[0]!.status).toBe('limited');
     // a later success clears it
     provider.modelCallLines += '\n' + line('2026-09-15T18:01:30.000Z', 200); // logged after the last pass, as real lines are
     await sampleSourceUsage(deps, NOW + 120_000);
