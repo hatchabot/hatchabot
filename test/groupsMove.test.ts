@@ -39,7 +39,11 @@ describe('POST /v1/groups/move', () => {
     const { store, f } = await world();
     const res = await f.inject({ method: 'POST', url: '/v1/groups/move', headers: as, payload: { group: 'Finance', dir: 'up' } });
     expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, moved: true });
     expect(store.listAgents(OWNER).map((a) => a.id)).toEqual(['fin1', 'alpha1']);
+    // Now the top group: another "up" changes nothing, and says so (the button looked dead).
+    const top = await f.inject({ method: 'POST', url: '/v1/groups/move', headers: as, payload: { group: 'Finance', dir: 'up' } });
+    expect(top.json()).toEqual({ ok: true, moved: false });
 
     const bad = await f.inject({ method: 'POST', url: '/v1/groups/move', headers: as, payload: { group: 'Finance' } });
     expect(bad.statusCode).toBe(400);

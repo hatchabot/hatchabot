@@ -9885,7 +9885,12 @@ function editGroupName(el) {
 
 async function moveGroup(name, dir) {
   try {
-    await api('/v1/groups/move', { method: 'POST', body: { group: name, dir } });
+    const r = await api('/v1/groups/move', { method: 'POST', body: { group: name, dir } });
+    if (r && r.moved === false) {
+      // Agents without a group always sit first, so the top named group cannot go above them.
+      toast(dir === 'up' ? `"${name}" is already the top group — agents with no group always come first.` : `"${name}" is already the last group.`, 5000);
+      return;
+    }
     await refresh(false);
   } catch (e) { toast(e.message); }
 }

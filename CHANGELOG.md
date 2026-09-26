@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.81.3] — 2026-09-26
+
+### Fixed
+- **A group's up/down arrow says when it cannot move.** The first named group cannot go above the agents that have no group (they always come first), and the last cannot go lower; the click changed nothing and said nothing, which looked like the arrows were broken. The route now reports whether the group moved, and the app says "already the top group" or "already the last group".
+
 ## [2.81.2] — 2026-09-26
 
 ### Fixed

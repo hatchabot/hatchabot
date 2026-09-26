@@ -5273,8 +5273,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!group || (dir !== 'up' && dir !== 'down')) {
       return reply.code(400).send({ error: 'group and dir ("up" | "down") are required.' });
     }
-    store.moveGroup(ownerIdOf(req), group, dir);
-    return { ok: true };
+    // false at the boundary: the caller says so — a click that changed nothing used to look broken.
+    const moved = store.moveGroup(ownerIdOf(req), group, dir);
+    return { ok: true, moved };
   });
 
   // ---- Scheduled tasks (OpenClaw crons) ----------------------------------
