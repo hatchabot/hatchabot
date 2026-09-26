@@ -87,9 +87,11 @@ describe('waking', () => {
     expect(urls[0]).toBe('https://api.telegram.org/botfake-token-Z/getUpdates?limit=1&timeout=0');
     mail = true;
     expect(await wakeSweep(deps)).toEqual([id]);
-    // Woken: the idle rule leaves it alone for a while, so it can fetch and answer.
+    // Woken: the idle clock restarts at the wake (kept in the store, so a restart cannot forget it).
+    expect(w.store.getAgent(id)!.wokenAt).toBeTruthy();
     expect(await hibernateSweep(deps, Date.now(), 6 * HOUR)).toEqual([]);
-    expect(await hibernateBlocker(deps, w.store.getAgent(id)!, Date.now(), 6 * HOUR)).toBe('woke recently');
+    expect(await hibernateBlocker(deps, w.store.getAgent(id)!, Date.now(), 6 * HOUR)).toBe('active recently');
+    expect(await hibernateBlocker(deps, w.store.getAgent(id)!, Date.now() + 7 * HOUR, 6 * HOUR)).toBeUndefined();
     const a = w.store.getAgent(id)!;
     expect(a.state).toBe('RUNNING');
     expect(a.hibernatedAt).toBeUndefined();
@@ -101,6 +103,7 @@ describe('waking', () => {
     let waiting = 41;
     deps.fetchImpl = (async (u: string | URL | Request) => new Response(JSON.stringify({ ok: true, result: String(u).includes('fake-token-Y') ? [{ update_id: waiting }] : [] }))) as typeof fetch;
     await hibernateAgent(deps, w.store.getAgent(later)!, 'test');
+    expect(w.store.getAgent(later)!.hibernateMark).toBe(41); // the bedtime mark, in the store
     expect(await wakeSweep(deps)).toEqual([]); // update 41 was already there when it slept
     waiting = 42;
     expect(await wakeSweep(deps)).toEqual([later]);

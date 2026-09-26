@@ -149,6 +149,10 @@ export interface Agent {
   hibernatedAt?: string;
   /** `never`: this agent stays awake whatever the machine's idle rule says. */
   hibernate?: 'never';
+  /** When it was last woken: the idle clock restarts here, so a woken agent is not put straight back. */
+  wokenAt?: string;
+  /** The Telegram update that was already waiting when it went to sleep; only a newer one is mail. */
+  hibernateMark?: number;
   /**
    * Optional per-agent model override, chosen from the profile's model menu.
    * Absent = follow the profile's default. Ignored for local profiles (only

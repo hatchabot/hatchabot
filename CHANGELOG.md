@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.84.2] — 2026-09-26
+
+### Fixed
+- **A woken agent went back to sleep after the next restart.** The grace after a wake and the bedtime mark lived in the server's memory; a deploy forgot them, and the next sweep put agents that had just been woken (Meeting Scheduler, Idea Advisor) straight back. Both are in the database now, and a wake restarts the whole idle period rather than a half-hour grace.
+
 ## [2.84.1] — 2026-09-26
 
 ### Changed

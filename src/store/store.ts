@@ -555,6 +555,10 @@ export class Store {
       // Hibernation (hibernate.ts): when the idle sweep put it to sleep, and an agent's opt-out.
       `ALTER TABLE agents ADD COLUMN hibernated_at TEXT`,
       `ALTER TABLE agents ADD COLUMN hibernate TEXT`,
+      // The wake time and the bedtime mark must survive a restart: kept in memory,
+      // a deploy forgot every wake and the next sweep put woken agents straight back (2026-09-26).
+      `ALTER TABLE agents ADD COLUMN woken_at TEXT`,
+      `ALTER TABLE agents ADD COLUMN hibernate_mark INTEGER`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
       `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
@@ -3334,8 +3338,10 @@ export class Store {
 
   /** Anyone who finds the bot may knock, instead of invitees and people the
    *  owner already knows. Off by default, per agent. */
-  setHibernated(agentId: string, at: string | null): void {
-    this.db.prepare(`UPDATE agents SET hibernated_at = ? WHERE id = ?`).run(at, agentId);
+  /** Asleep since `at` with the update that was waiting then; `null` = awake (the wake time is recorded). */
+  setHibernated(agentId: string, at: string | null, mark?: number): void {
+    if (at) this.db.prepare(`UPDATE agents SET hibernated_at = ?, hibernate_mark = ? WHERE id = ?`).run(at, mark ?? null, agentId);
+    else this.db.prepare(`UPDATE agents SET hibernated_at = NULL, hibernate_mark = NULL, woken_at = ? WHERE id = ?`).run(new Date().toISOString(), agentId);
   }
   setHibernatePolicy(agentId: string, policy: 'never' | null): void {
     this.db.prepare(`UPDATE agents SET hibernate = ? WHERE id = ?`).run(policy, agentId);
@@ -3725,6 +3731,8 @@ function rowToAgent(r: any): Agent {
     memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,
     hibernatedAt: r.hibernated_at ?? undefined,
     hibernate: r.hibernate === 'never' ? 'never' : undefined,
+    wokenAt: r.woken_at ?? undefined,
+    hibernateMark: typeof r.hibernate_mark === 'number' ? r.hibernate_mark : undefined,
     embedMode: r.embed_mode === 'shared' ? 'shared' : undefined,
     appliedEmbedMode: r.applied_embed_mode === 'shared' ? 'shared' : r.applied_embed_mode === 'baked' ? 'baked' : undefined,
     embedIndexedAt: r.embed_indexed_at ?? undefined,
