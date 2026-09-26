@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.1] — 2026-09-25
+
+### Fixed
+- **A fresh install could not create its first agent.** Since 2026.9.6 became the default (v2.76.0) every image is engine-free and relies on the machine's memory search service, and the 27th-audit rule that no agent starts that service on someone's behalf left a new install's first agent dead with "the memory search service is not turned on (Settings → Hosts)". Found by the shared-host bed's two fresh tenants. The machine owner's own agent now turns an untouched service on (`embed.auto_started` in its Setup log); a service the owner stopped stays stopped for everyone, and the refusal says so.
+
 ## [2.79.0] — 2026-09-25
 
 ### Added

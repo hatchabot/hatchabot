@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -217,11 +217,29 @@ describe('what provisioning is handed', () => {
     expect(JSON.parse(readFileSync(w.svc.keysFile, 'utf8'))).toEqual({ [embedKeyHash(creds.token)]: 'a1' });
   });
 
-  it('the service off: nothing is started on an agent owner\'s behalf — the agent is built on its own engine', async () => {
+  it('the service off: nothing is started on another agent owner\'s behalf', async () => {
     const w = await app();
-    await expect(w.adapter.credentialsFor('a1')).rejects.toThrow(/turned on/);
+    w.store.insertAgent({ id: 'a2', ownerId: 'someone-else', name: 'a2', slug: 'a2', state: 'RUNNING', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: true, webOnly: true, createdAt: 'now', updatedAt: 'now' } as never);
+    await expect(w.adapter.credentialsFor('a2')).rejects.toThrow(/turned on/);
     expect(w.provider.embedder.embedder).toBe('absent');
     expect(w.store.listEmbedTokens()).toEqual([]);
+  });
+
+  it('the service untouched: the machine owner\'s own agent turns it on (a fresh install\'s first agent); stopped on purpose stays stopped', async () => {
+    const w = await app();
+    // Start itself (model, keys, containers) is covered above; here it is a stand-in that leaves the service on.
+    let started = 0;
+    w.svc.start = async () => { started++; mkdirSync(w.svc.dir, { recursive: true }); writeFileSync(w.svc.enabledFile, 'now\n'); rmSync(w.svc.stoppedFile, { force: true }); w.svc.status = async () => ({ embedder: 'running', door: 'running', doorAddress: '127.0.0.1:8093', enabled: true, modelPresent: true }); return w.svc.status(); };
+    w.svc.syncKeys = () => {};
+    const creds = await w.adapter.credentialsFor('a1');
+    expect(started).toBe(1);
+    expect(creds.baseUrl).toBe('http://host.docker.internal:8093/v1');
+    expect(w.store.listEmbedTokens().map((t) => t.agentId)).toEqual(['a1']);
+    // The owner stops it: even their own agent is refused now, and says why.
+    await w.svc.stop();
+    expect(w.svc.stoppedByOwner).toBe(true);
+    await expect(w.adapter.credentialsFor('a1')).rejects.toThrow(/stopped by the machine's owner/);
+    expect(started).toBe(1);
   });
 });
 

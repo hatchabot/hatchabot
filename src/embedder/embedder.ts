@@ -113,6 +113,10 @@ export class EmbedderService {
   get modelPath(): string { return join(this.#o.dataDir, 'models', EMBED_MODEL_FILE); }
   get external(): string | undefined { return process.env.HATCHABOT_EMBED_URL?.trim() || undefined; }
   get enabled(): boolean { return existsSync(this.enabledFile); }
+  /** Written by Stop: the machine owner turned the service off on purpose,
+   *  as opposed to a fresh install where nobody has touched it yet. */
+  get stoppedFile(): string { return join(this.dir, 'stopped'); }
+  get stoppedByOwner(): boolean { return existsSync(this.stoppedFile); }
   get doorPort(): number { return Number(process.env.HATCHABOT_EMBED_PORT) || 8093; }
 
   /** One operation at a time: a health tick must not race a Stop. */
@@ -217,6 +221,7 @@ export class EmbedderService {
         throw err;
       }
       writeFileSync(this.enabledFile, `${new Date().toISOString()}\n`);
+      rmSync(this.stoppedFile, { force: true });
       this.#o.log?.('embedder.started', { door: s.doorAddress });
       return this.status();
     });
@@ -225,6 +230,8 @@ export class EmbedderService {
   stop(): Promise<EmbedderView> {
     return this.#serial(async () => {
       rmSync(this.enabledFile, { force: true });
+      mkdirSync(this.dir, { recursive: true });
+      writeFileSync(this.stoppedFile, `${new Date().toISOString()}\n`);
       await this.#o.provider().stopEmbedder?.();
       this.#o.log?.('embedder.stopped', {});
       return this.status();

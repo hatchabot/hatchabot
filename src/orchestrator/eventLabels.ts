@@ -108,6 +108,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'definition.pushed': (d) => `definition pushed to ${Number(d.count ?? d.to ?? 0) || 'its'} children`,
   'derived.remove_failed': 'Docker would not remove the image',
   'embed.default_set': 'default memory search engine set',
+  'embed.auto_started': 'the memory search service was turned on for this agent',
   'embed.move_all': 'every agent moved to the shared memory search',
   'export.restart_failed': 'did not restart after the export',
   'host.drain_stop_failed': 'an agent would not stop for the drain',

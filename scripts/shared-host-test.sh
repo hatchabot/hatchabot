@@ -139,7 +139,11 @@ HATCHABOT_PREFIX=$u
 HATCHABOT_MAX_AGENTS_TOTAL=3
 HATCHABOT_AGENT_MEMORY=1g
 HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
-  tenant "$u" "HATCHABOT_YES=1 HATCHABOT_CHANNEL=$CHANNEL HATCHABOT_SETUP_SIGNIN=accounts HATCHABOT_SETUP_PORT=${PORT[$u]} HATCHABOT_SETUP_ENV=$(printf %q "$ENV_LINES") bash -c \"\\\$(curl -fsSL $INSTALLER_URL)\"" >"$OUT/$u-install.log" 2>&1
+  # A script in the tenant's home, not a quoted one-liner through lxc + su: three shells deep, $(…) lands in the wrong one.
+  { printf '#!/usr/bin/env bash\nexport HATCHABOT_YES=1 HATCHABOT_CHANNEL=%q HATCHABOT_SETUP_SIGNIN=accounts HATCHABOT_SETUP_PORT=%q\nexport HATCHABOT_SETUP_ENV=%q\n' "$CHANNEL" "${PORT[$u]}" "$ENV_LINES"
+    printf 'bash -c "$(curl -fsSL %q)"\n' "$INSTALLER_URL"; } >"$OUT/$u-install-run.sh"
+  L file push "$OUT/$u-install-run.sh" "$VM/home/$u/install-run.sh" --uid "${UIDOF[$u]}" --gid "${UIDOF[$u]}" --mode 0700 >/dev/null
+  tenant "$u" '~/install-run.sh' >"$OUT/$u-install.log" 2>&1
   # Older releases' setup did not record a non-8080 port for the CLI.
   tenant "$u" "mkdir -p ~/.config/hatchabot; grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null || echo HATCHABOT_URL=http://127.0.0.1:${PORT[$u]} >> ~/.config/hatchabot/env; chmod 600 ~/.config/hatchabot/env" >/dev/null 2>&1
   if tenant "$u" 'systemctl --user is-active hatchabot' 2>/dev/null | grep -q '^active'; then
@@ -170,10 +174,16 @@ fi
 
 for i in $(seq 1 "$TENANTS"); do
   u="t$i"; B="http://127.0.0.1:${PORT[$u]}"
-  ACC=$(tenanti "$u" "hbt accounts create owner --host-owner --cli-token --json" 2>/dev/null | grep '^{' | tail -1)
-  TOKEN[$u]=$(printf %s "$ACC" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).cliToken||'')}catch{console.log('')}})")
-  [ -n "${TOKEN[$u]}" ] && ok "$u: owner account + CLI token without a browser" || { bad "$u: hbt accounts create — ${ACC:-no output}"; continue; }
-  tenanti "$u" "hatchabot login --token ${TOKEN[$u]} --url $B" >/dev/null 2>&1
+  # A kept VM already has the owner: its saved CLI token serves again.
+  TOKEN[$u]=$(tenant "$u" "sed -n 's/^HATCHABOT_TOKEN=//p' ~/.config/hatchabot/env 2>/dev/null" | tr -d '\r' | tail -1)
+  if [ -n "${TOKEN[$u]}" ] && [ "$(tenant "$u" "curl -s -o /dev/null -w '%{http_code}' -H 'authorization: Bearer ${TOKEN[$u]}' $B/v1/agents" | tr -d '\r')" = 200 ]; then
+    ok "$u: owner account already there (kept VM) — its CLI token still works"
+  else
+    ACC=$(tenanti "$u" "hbt accounts create owner --host-owner --cli-token --json" 2>/dev/null | grep '^{' | tail -1)
+    TOKEN[$u]=$(printf %s "$ACC" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).cliToken||'')}catch{console.log('')}})")
+    [ -n "${TOKEN[$u]}" ] && ok "$u: owner account + CLI token without a browser" || { bad "$u: hbt accounts create — ${ACC:-no output}"; continue; }
+    tenanti "$u" "hatchabot login --token ${TOKEN[$u]} --url $B" >/dev/null 2>&1
+  fi
 
   tenanti "$u" 'hatchabot doctor --json' >"$OUT/$u-doctor.json" 2>/dev/null
   DOC=$(node -e "const v=JSON.parse(require('fs').readFileSync('$OUT/$u-doctor.json','utf8'));const l=v.lines||v.report||[];const bad=l.filter(x=>x.level==='fail').map(x=>x.text);const d=l.find(x=>/^Docker /.test(x.text));console.log((bad.length?'FAIL '+bad.join(' · '):'OK')+'|'+(d&&/rootless/.test(d.text)?'rootless':'no-rootless-line'))" 2>/dev/null || echo "FAIL unreadable|?")
@@ -184,10 +194,10 @@ for i in $(seq 1 "$TENANTS"); do
     cat >"$OUT/$u-agents.sh" <<EOF
 #!/usr/bin/env bash
 B=$B; H="authorization: Bearer ${TOKEN[$u]}"
-node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{setupToken:c}:{apiKey:c})))' >/tmp/body.json
+node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' >/tmp/body.json
 curl -s -H "\$H" -H 'content-type: application/json' --data @/tmp/body.json \$B/v1/ai-profiles >/dev/null; rm -f /tmp/body.json ~/.cred
 PID=\$(curl -s -H "\$H" \$B/v1/ai-profiles | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].id))")
-hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; }
+hbt list --json 2>/dev/null | grep -q '"name":"Helper"' || hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; }
 curl -s -o /dev/null -H "\$H" -H 'content-type: application/json' -d "{\"aiProfileId\":\"\$PID\"}" \$B/v1/ops-agent
 for _ in \$(seq 1 150); do
   R=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).filter(x=>x.name!=='Hatchabot');console.log(a.filter(x=>x.state==='RUNNING').length+'/'+a.length)})" 2>/dev/null)
@@ -208,7 +218,8 @@ EOF
     grep -qE '^MANAGER.*\b(2|two)\b' "$OUT/$u-agents.log" && ok "$u: the Hatchabot agent answered through its door (doorman → 10.0.2.2:${OPS[$u]})" \
       || bad "$u: the Hatchabot agent did not answer — $(grep '^MANAGER' "$OUT/$u-agents.log" | cut -c1-160)"
     # The memory cap reached the container: cgroup delegation works under the user slice.
-    CAP=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker inspect \$(docker ps -q --filter label=hatchabot.role=agent | head -1) --format '{{.HostConfig.Memory}}' 2>/dev/null" | tr -d '\r')
+    # Agent containers carry no role label (the doorman, manager jail and service containers do).
+    CAP=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker inspect \$(docker ps --format '{{.Names}} {{.Label \"hatchabot.role\"}}' | awk '\$2==\"\" && \$1 ~ /^$u-/ {print \$1}' | head -1) --format '{{.HostConfig.Memory}}' 2>/dev/null" | tr -d '\r')
     [ -n "$CAP" ] && [ "$CAP" != 0 ] && ok "$u: the agent's memory cap is enforced ($((CAP / 1048576)) MiB)" || bad "$u: no memory cap on the agent container (cgroup delegation?)"
   fi
 done

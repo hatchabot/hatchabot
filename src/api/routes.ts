@@ -1784,7 +1784,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Only a service the machine owner turned on: an agent owner switching
       // their agent must not start a machine-level container by the back door
       // (27th audit). The health loop, not this, brings an enabled one back up.
-      if (!embedder.enabled) throw new Error('the memory search service is not turned on (Settings → Hosts)');
+      // The exception is the machine owner's OWN agent on a service nobody has
+      // touched: since 2026.9.6 every image is engine-free, and a fresh
+      // install's first agent died with "not turned on" until the owner found
+      // Settings → Hosts (the shared-host bed, 2026-09-25). Stopped on purpose
+      // stays stopped for everyone.
+      if (!embedder.enabled) {
+        const agent = store.getAgent(agentId);
+        const local = store.localHostId();
+        const ownersOwn = !!agent && !!local && store.getHost(local)?.ownerId === agent.ownerId;
+        if (ownersOwn && !embedder.stoppedByOwner) {
+          trace(agentId)('embed.auto_started', { by: 'the machine owner\'s agent' });
+          await embedder.start();
+        } else {
+          throw new Error(embedder.stoppedByOwner
+            ? 'the memory search service was stopped by the machine\'s owner (Settings → Hosts)'
+            : 'the memory search service is not turned on (Settings → Hosts)');
+        }
+      }
       let v = await embedder.status();
       if (!(v.embedder === 'running' && v.door === 'running')) v = await embedder.start();
       if (!v.doorAddress) throw new Error('the embedding service has no address');

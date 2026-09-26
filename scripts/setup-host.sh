@@ -170,7 +170,7 @@ chmod 600 ~/.config/hatchabot/env
 
 say "Done. Next steps:"
 cat <<'EOF'
-  1. Open http://localhost:8080 on THIS machine. With family accounts you
+  1. Open http://localhost:${HATCHABOT_SETUP_PORT:-8080} on THIS machine. With family accounts you
      create your own account there (you become its owner); with a shared
      password you unlock with it.
   2. Connect an AI source (⚙ AI). Three options:
