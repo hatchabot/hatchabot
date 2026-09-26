@@ -72,7 +72,7 @@ fi
 # "Could not create the agent volume" and nothing says why (clean-VM install,
 # 2026-09-23). Restarting the manager fixes it; a login session is not touched.
 DOCKER_GID="$(getent group docker 2>/dev/null | cut -d: -f3)"
-MANAGER="$(pgrep -u "$USER" -x systemd 2>/dev/null | head -1)"
+MANAGER="$(pgrep -u "$USER" -x systemd 2>/dev/null | sed -n 1p)"
 if [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | grep -qx docker \
    && ! grep '^Groups:' "/proc/$MANAGER/status" 2>/dev/null | tr ' \t' '\n\n' | grep -qx "$DOCKER_GID"; then
   echo

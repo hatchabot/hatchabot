@@ -84,7 +84,7 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
   # newer OpenClaw once pulled it, got the old version, and was tagged as the
   # new one (2026-09-18). So: release tag only on a version match, and every
   # pulled image must prove its version by its label before it is accepted.
-  DEFAULT_VERSION="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | head -1)"
+  DEFAULT_VERSION="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
   [ "${OPENCLAW_VERSION}" = "${DEFAULT_VERSION}" ] || RELEASE_TAG=""
   PULLED=""
   for cand in ${RELEASE_TAG:+"${PUBLISHED}:${RELEASE_TAG}"} "${PUBLISHED}:${OPENCLAW_VERSION}"; do
@@ -110,7 +110,7 @@ if [ "${BUILD_LOCAL:-0}" != "1" ] && [ "${IMAGE_TAG}" = "${OPENCLAW_VERSION}" ] 
   fi
   echo "Not published (or offline) — building locally instead."
 fi
-DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | head -1)"
+DEFAULT_OPENCLAW="$(sed -n 's/^ARG OPENCLAW_VERSION=//p' docker/Dockerfile.runtime | sed -n 1p)"
 
 # The embedding plugin is published in step with OpenClaw and declares it as a
 # peer, so a newer OpenClaw needs a newer plugin. Given explicitly, use that;
@@ -209,7 +209,7 @@ docker build \
   docker/
 
 # Trust, but verify: the image must actually run the version it is named for.
-RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TAG}" --version 2>/dev/null | head -1 || true)"
+RUNS="$(docker run --rm --network none --entrypoint openclaw "${REPO}:${IMAGE_TAG}" --version 2>/dev/null | sed -n 1p || true)"
 case "$RUNS" in
   *"${OPENCLAW_VERSION}"*) ;;
   *) echo "✗ ${REPO}:${IMAGE_TAG} runs '${RUNS:-nothing}', not OpenClaw ${OPENCLAW_VERSION}. Removing it." >&2

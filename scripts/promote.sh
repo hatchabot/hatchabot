@@ -21,7 +21,7 @@ git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "No tag $TAG — ta
 [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ] || die "Promote from main."
 [ -z "$(git status --porcelain channels.json)" ] || die "channels.json has uncommitted changes."
 
-CURRENT="$(sed -nE "s/.*\"$CH\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" channels.json | head -1)"
+CURRENT="$(sed -nE "s/.*\"$CH\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" channels.json | sed -n 1p)"
 if [ "$CURRENT" = "$TAG" ]; then echo "$CH already points at $TAG."; exit 0; fi
 # Going backwards is allowed (a bad release gets rolled back this way) but it
 # should never happen by accident.

@@ -6,9 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 git fetch -q --tags --force origin main 2>/dev/null || echo "(offline — showing what this clone already knows)"
 
-chan() { git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | head -1; }
+chan() { git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p; }
 STABLE="$(chan stable)"; BETA="$(chan beta)"
-LATEST="$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1)"
+LATEST="$(git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p)"
 PROD_DIR="${HATCHABOT_PROD_DIR:-$HOME/hatchabot-prod}"
 HERE=""; [ -d "$PROD_DIR/.git" ] && HERE="$(git -C "$PROD_DIR" describe --tags --exact-match 2>/dev/null || true)"
 

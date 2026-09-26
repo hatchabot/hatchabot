@@ -35,7 +35,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 UNIT="$HOME/.config/systemd/user/hatchabot.service"
 INSTALLED_DIR=""
 if [ -f "$UNIT" ]; then
-  INSTALLED_DIR="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -1)"
+  INSTALLED_DIR="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED_DIR="${INSTALLED_DIR/#\%h/$HOME}"
 elif [ "$(uname -s)" = "Darwin" ]; then
   # launchd has no WorkingDirectory here: setup-host.sh bakes `cd "<repo>"`
@@ -43,7 +43,7 @@ elif [ "$(uname -s)" = "Darwin" ]; then
   for p in com.hatchabot.control-plane com.agentclaw.control-plane; do
     PL="$HOME/Library/LaunchAgents/$p.plist"
     [ -f "$PL" ] || continue
-    INSTALLED_DIR="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$PL" | head -1)"
+    INSTALLED_DIR="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$PL" | sed -n 1p)"
     [ -n "$INSTALLED_DIR" ] && break
   done
 fi

@@ -46,12 +46,12 @@ rm -rf node_modules.prev
 systemctl --user restart "$SVC" || { rollback; exit 1; }
 WANT="$(node -e 'console.log(require("./package.json").version)')"
 # Health URL from the production .env, not the caller's shell: PORT and native TLS.
-envval() { sed -n "s/^$1=//p" .env 2>/dev/null | head -1 | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//"; }
+envval() { sed -n "s/^$1=//p" .env 2>/dev/null | sed -n 1p | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//"; }
 P="$(envval PORT)"; P="${P:-8080}"
 SCHEME=http; [ -n "$(envval HATCHABOT_TLS_CERT)" ] && SCHEME=https
 URL="${HATCHABOT_HEALTH_URL:-$SCHEME://127.0.0.1:$P/}"
 for i in $(seq 1 45); do
-  GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | head -1 | cut -d'"' -f2 || true)"
+  GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"
   [ "$GOT" = "$WANT" ] && { echo "Serving $GOT."; exit 0; }
   sleep 2
 done

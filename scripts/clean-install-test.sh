@@ -111,9 +111,9 @@ QS=$(sed 's/\r//g' "$OUT"/install-*.log | grep -c '\[y/N\] y')
 # ---- 2. what a new owner does first ----------------------------------------------
 vmi 'hatchabot doctor' >"$OUT/doctor.log"
 grep -q "^All good" "$OUT/doctor.log" && ok "hatchabot doctor: $(grep '^All good' "$OUT/doctor.log")" || bad "hatchabot doctor — $(grep '^✗' "$OUT/doctor.log" | head -2 | tr '\n' ' ')"
-vmi 'hbt help | head -1' | grep -q 'hbt is the same command' && ok "hatchabot and hbt are on the PATH" || bad "hbt is not on the PATH"
+vmi 'hbt help | sed -n 1p' | grep -q 'hbt is the same command' && ok "hatchabot and hbt are on the PATH" || bad "hbt is not on the PATH"
 # doctor says "Release vX", or "Running vX, but vY is available locally".
-ver() { grep -oE '(Release|Running) v[0-9.]+' | head -1 | grep -oE 'v[0-9.]+'; }
+ver() { grep -oE '(Release|Running) v[0-9.]+' | sed -n 1p | grep -oE 'v[0-9.]+'; }
 REL=$(ver <"$OUT/doctor.log")
 
 cat >"$OUT/firstrun.sh" <<'EOF'

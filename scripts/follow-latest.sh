@@ -66,7 +66,7 @@ trap 'rm -f "$FOLLOW_LATEST_COPY"' EXIT
 [ -d "$PROD/.git" ] || { echo "No production checkout at $PROD."; exit 1; }
 mkdir -p "$STATE"
 git -C "$PROD" fetch --tags --force --quiet origin
-NEWEST="$(git -C "$PROD" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1)"
+NEWEST="$(git -C "$PROD" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p)"
 [ -n "$NEWEST" ] || exit 0
 CUR="$(git -C "$PROD" describe --tags --exact-match 2>/dev/null || true)"
 [ "$CUR" = "$NEWEST" ] && exit 0

@@ -70,10 +70,10 @@ valid "$CHANNEL" || { echo "Usage: $0 stable|beta|latest   (or --install <channe
 # What the channel names now — the same resolution as upgrade.sh, needed here
 # only to remember a failure and not retry it every ten minutes.
 git fetch --tags --force --quiet origin
-newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
+newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p; }
 case "$CHANNEL" in
   latest) TARGET="$(newest)" ;;
-  *) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | head -1)"
+  *) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
      [ -n "$TARGET" ] || TARGET="$(newest)" ;;
 esac
 [ -n "$TARGET" ] || exit 0

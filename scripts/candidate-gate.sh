@@ -54,7 +54,7 @@ ENGINE="$(docker image inspect "$TAG" --format '{{ index .Config.Labels "org.hat
 [ -n "$VERSION" ] && ok || { bad "no such image, or no openclaw-version label"; exit 1; }
 [ "$ENGINE" = none ] || ENGINE=baked
 # Memory search keys moved under memory.search in 2026.8 (configWriter.ts memoryKeyPrefix).
-if [ "$(printf '%s\n%s\n' "2026.8.0" "$VERSION" | sed 's/-/~/' | sort -V | head -1)" = "2026.8.0" ]; then MEMKEY="memory.search"; else MEMKEY="agents.defaults.memorySearch"; fi
+if [ "$(printf '%s\n%s\n' "2026.8.0" "$VERSION" | sed 's/-/~/' | sort -V | sed -n 1p)" = "2026.8.0" ]; then MEMKEY="memory.search"; else MEMKEY="agents.defaults.memorySearch"; fi
 echo "  OpenClaw $VERSION · engine $ENGINE · memory keys under $MEMKEY"
 
 if [ "$ENGINE" = none ]; then
@@ -82,12 +82,12 @@ if echo "$out" | grep -q "rebuilding"; then
 else
   bad "$(echo "$out" | tail -1)"
 fi
-CONTAINER="$(docker ps --format '{{.Names}}' | grep -E "^(hatchabot|agentclaw)-${SLUG}-" | head -1)"
+CONTAINER="$(docker ps --format '{{.Names}}' | grep -E "^(hatchabot|agentclaw)-${SLUG}-" | sed -n 1p)"
 [ -n "$CONTAINER" ] || { echo "no running container for $SLUG"; exit 1; }
 
 step "the container runs the candidate image, and openclaw --version agrees"
 img="$(docker inspect "$CONTAINER" --format '{{.Config.Image}}')"
-runs="$(inagent 'openclaw --version 2>/dev/null | head -1')"
+runs="$(inagent 'openclaw --version 2>/dev/null | sed -n 1p')"
 [ "$img" = "$TAG" ] && echo "$runs" | grep -q "$VERSION" && ok || bad "image $img, runs '$runs'"
 
 step "openclaw doctor accepts the config Hatchabot wrote (no errors; no post-upgrade findings)"

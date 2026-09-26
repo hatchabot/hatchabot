@@ -29,7 +29,7 @@ OLD="${4:-}"; [ "${3:-}" = "--old" ] || OLD=""
 [ -n "$OLD" ] && [ -f "$OLD/.env" ] || { echo "Can't find the AgentClaw checkout (no agentclaw.service, no ~/agentclaw-prod/.env, no ~/agentclaw/.env). Pass --old <dir>."; exit 1; }
 REPO="${HATCHABOT_REPO:-https://github.com/hatchabot/hatchabot.git}"
 NEW="$HOME/hatchabot-prod"; UNITS="$HOME/.config/systemd/user"; DATA="$HOME/hatchabot-data"
-envval() { sed -n "s/^$2=//p" "$1" | head -1 | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//"; }
+envval() { sed -n "s/^$2=//p" "$1" | sed -n 1p | sed -e 's/[[:space:]]*#.*$//' -e "s/^['\"]//" -e "s/['\"]$//"; }
 say() { printf '\n== %s\n' "$*"; }
 echo "Old checkout: $OLD"
 
@@ -98,7 +98,7 @@ PORT="$(envval "$NEW/.env" PORT)"; PORT="${PORT:-8080}"
 URL="${HATCHABOT_HEALTH_URL:-http://127.0.0.1:$PORT/}"
 WANT="$(node -e 'console.log(require(process.argv[1]).version)' "$NEW/package.json")"
 for i in $(seq 1 30); do
-  GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | head -1 | cut -d'"' -f2 || true)"
+  GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"
   [ "$GOT" = "$WANT" ] && { echo "   serving Hatchabot $GOT at $URL"; echo; echo "Done. Old checkout kept at $OLD; remove it once you're happy: rm -rf $OLD $UNITS/agentclaw*"; exit 0; }
   sleep 2
 done

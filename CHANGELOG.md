@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.6] — 2026-09-25
+
+### Fixed
+- **`hbt channels`, `follow-latest.sh` and `follow-channel.sh` died silently** the same way the installer had (v2.79.2): the release-tag listing ran through `| head -1`, which closes the pipe after one line, and under `pipefail` the script exited 141 with no output. Every `| head -1` in the shell scripts is `sed -n 1p` now, and the guard test covers all of them.
+
 ## [2.80.5] — 2026-09-25
 
 ### Fixed

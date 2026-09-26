@@ -153,7 +153,7 @@ HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
   # Older releases' setup did not record a non-8080 port for the CLI.
   tenant "$u" "mkdir -p ~/.config/hatchabot; grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null || echo HATCHABOT_URL=http://127.0.0.1:${PORT[$u]} >> ~/.config/hatchabot/env; chmod 600 ~/.config/hatchabot/env" >/dev/null 2>&1
   if tenant "$u" 'systemctl --user is-active hatchabot' 2>/dev/null | grep -q '^active'; then
-    ok "$u: installed from $INSTALLER_URL on port ${PORT[$u]} ($(sed -n 's/.*channel [a-z0-9.]* → release \(v[0-9.]*\).*/\1/p' "$OUT/$u-install.log" | head -1))"
+    ok "$u: installed from $INSTALLER_URL on port ${PORT[$u]} ($(sed -n 's/.*channel [a-z0-9.]* → release \(v[0-9.]*\).*/\1/p' "$OUT/$u-install.log" | sed -n 1p))"
   else
     bad "$u: install — $(sed 's/\r//g' "$OUT/$u-install.log" | grep -E '✗|ERR!|rror' | tail -3 | tr '\n' ' ')"; exit 1
   fi
@@ -216,7 +216,7 @@ case "\$OS" in
   FAILED) hbt retry Hatchabot >/dev/null 2>&1 ;;
   RUNNING)
     # A cap changed in .env applies at the next build: a kept VM's manager may still carry the old one.
-    MC=\$(docker ps --format '{{.Names}}' | grep -E "^$u-hatchabot-" | head -1)
+    MC=\$(docker ps --format '{{.Names}}' | grep -E "^$u-hatchabot-" | sed -n 1p)
     [ -n "\$MC" ] && [ "\$(docker inspect "\$MC" --format '{{.HostConfig.Memory}}')" != 3221225472 ] && hbt rebuild Hatchabot >/dev/null 2>&1 ;;
 esac
 for _ in \$(seq 1 150); do
@@ -240,7 +240,7 @@ EOF
       || bad "$u: the Hatchabot agent did not answer — $(grep '^MANAGER' "$OUT/$u-agents.log" | cut -c1-160)"
     # The memory cap reached the container: cgroup delegation works under the user slice.
     # Agent containers carry no role label (the doorman, manager jail and service containers do).
-    CAP=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker inspect \$(docker ps --format '{{.Names}} {{.Label \"hatchabot.role\"}}' | awk '\$2==\"\" && \$1 ~ /^$u-/ {print \$1}' | head -1) --format '{{.HostConfig.Memory}}' 2>/dev/null" | tr -d '\r')
+    CAP=$(tenant "$u" "export DOCKER_HOST=unix://\$XDG_RUNTIME_DIR/docker.sock; docker inspect \$(docker ps --format '{{.Names}} {{.Label \"hatchabot.role\"}}' | awk '\$2==\"\" && \$1 ~ /^$u-/ {print \$1}' | sed -n 1p) --format '{{.HostConfig.Memory}}' 2>/dev/null" | tr -d '\r')
     [ -n "$CAP" ] && [ "$CAP" != 0 ] && ok "$u: the agent's memory cap is enforced ($((CAP / 1048576)) MiB)" || bad "$u: no memory cap on the agent container (cgroup delegation?)"
   fi
 done
@@ -261,7 +261,7 @@ if [ "$TENANTS" -ge 2 ]; then
   [ "$x" = 200 ] && [ "$y" = 200 ] && ok "the router user reaches both (${PORT[$a]}, ${PORT[$b]})" || bad "the router user cannot reach both ($x, $y)"
   x=$(L exec "$VM" -- sh -c "curl -s -o /dev/null -m 4 -w '%{http_code}' http://127.0.0.1:${PORT[$b]}/v1/config"); [ "$x" = 200 ] && ok "root reaches a tenant's port (the provisioner's smoke test)" || bad "root cannot reach ${PORT[$b]} ($x)"
   # The other tenant's Docker socket and home are closed.
-  x=$(L exec "$VM" -- su - $a -s /bin/bash -c "ls /run/user/${UIDOF[$b]}/docker.sock /home/$b 2>&1 | head -1" | tr -d '\r')
+  x=$(L exec "$VM" -- su - $a -s /bin/bash -c "ls /run/user/${UIDOF[$b]}/docker.sock /home/$b 2>&1 | sed -n 1p" | tr -d '\r')
   echo "$x" | grep -qi "permission denied\|No such" && ok "$a cannot see $b's Docker socket or home" || bad "$a can see $b's files: $x"
 fi
 

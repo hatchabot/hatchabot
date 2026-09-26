@@ -105,7 +105,7 @@ for _ in 1 2 3; do  # a gateway that has just restarted can miss one read; a los
   out=$($HB tasks "$NAME" 2>&1); line=$(echo "$out" | grep heartbeat) && break
   sleep 5
 done
-echo "$line" | grep -q " off " && ok || bad "listing: ${line:-$(echo "$out" | head -1)}"
+echo "$line" | grep -q " off " && ok || bad "listing: ${line:-$(echo "$out" | sed -n 1p)}"
 
 step "after the restart: it still remembers the codeword"
 r=""
