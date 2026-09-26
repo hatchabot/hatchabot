@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.85.0] — 2026-09-26
+
+### Changed
+- **The hub's numbers row is gone.** Awake, tokens per hour, memory, last backup and spare bots were never acted on from the hub; all of them live under Status (Health, Usage, Resources) and Settings → Telegram, and what needs you shows below the hub and under View by → Needs you. The hub is the Hatchabot agent and the four buttons.
+
 ## [2.84.3] — 2026-09-26
 
 ### Changed

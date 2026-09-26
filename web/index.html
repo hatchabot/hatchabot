@@ -11894,10 +11894,19 @@ function v2Spark(hourly) {
     <polyline points="${d}" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".42"/></svg>`;
 }
 
+/** The hub's numbers row: off. Kept behind a flag for one release in case it is missed. */
+const HUB_NUMBERS = false;
 function renderV2Stats() {
   const box = $('v2Stats');
   if (!box) return;
   const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED');
+  // The numbers row is gone (Chris, 2026-09-26: never acted on; a clean hub is
+  // worth more). Everything it showed lives under Status, and what needs you
+  // shows below the hub and under View by → Needs you. Only the Bulk actions
+  // button's visibility is still decided here.
+  box.hidden = true;
+  if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
+  if (!HUB_NUMBERS) return;
   if (!agentsLoaded || !mine.length) { box.hidden = true; return; }
   const awake = mine.filter(a => a.state === 'RUNNING').length;
   const unread = mine.filter(v2Unread).length;

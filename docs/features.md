@@ -43,20 +43,13 @@ The header holds:
 - The account menu: who you're signed in as, light or dark appearance,
   install as an app, help, the classic look, the version, and sign out.
 
-- **The manager's dashboard.** One row of equal tiles, drawn like the agent
-  icons: the Hatchabot agent's own tile first, then the fleet's numbers, then
-  the actions (Status, Bulk actions, Settings), left-justified and wrapping
-  onto as many lines as the width needs, with **New** always last and at the
-  right. Nothing is dropped or divided when the row is narrow (Chris,
-  2026-09-24). The numbers: **awake** (11/13), **tokens / hr** (spent across
-  every AI source in the last hour; Status → Usage has the day and the week),
-  **memory in use** (every container's live memory, opening Status →
-  Resources; it turns amber and counts the containers when any has been
-  running into its memory cap), **last backup** (amber past
-  36h), **spare bots** (Telegram and Discord bots parked and ready, wearing the same
-  app badges the agent icons do), and — only when they are not zero — **to read**, **to
-  confirm**, **knocking** and **to rebuild**. Each tile opens the screen that
-  acts on it.
+- **The hub.** The Hatchabot agent's own tile on the left, and the actions
+  (Status, Bulk actions, Settings, **New**) as buttons on the right. The
+  numbers that used to sit between them (awake, tokens per hour, memory,
+  last backup, spare bots) live under **Status** — Health, Usage, Resources —
+  and under Settings → Telegram; they were never acted on from the hub, and a
+  clean hub is worth more (Chris, 2026-09-26). What needs you shows below the
+  hub (**Waiting for you**) and under View by → **Needs you**.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
   keeps going with the four steps that decide whether the house is actually set
@@ -66,9 +59,8 @@ The header holds:
   handing out a command — and **check a backup has run**. Every
   step is ticked from live state, never from "you have seen this", so it is
   still honest a month later. **Setup** sits in the top bar next to Settings,
-  with a badge counting what is left; there is also a **set up** tile on the
-  dashboard (`3/6`), an entry in the account menu, and a button in the classic
-  look's toolbar.
+  with a badge counting what is left; there is also an entry in the account
+  menu, and a button in the classic look's toolbar.
 - **Waiting for you** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — an *expected* join request (strangers

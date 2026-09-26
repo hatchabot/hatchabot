@@ -168,7 +168,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | id | Use case | Surfaces | Coverage |
 |---|---|---|---|
 | J1 | Status panel: health, usage by period, resources, activity, tools | U A M | auto (usagePeriods, resources) |
-| J2 | Dashboard tiles | U | none (UI only; screenshots.mjs renders it) |
+| J2 | The hub (manager tile + actions; the numbers moved to Status, 2026-09-26) | U | none (UI only; screenshots.mjs renders it) |
 | J3 | View by group / machine / source / model / image / class / status / activity / rebuilt / needs you | U | none (UI only) |
 | J4 | Sort | U | none (UI only) |
 | J5 | Drag: reorder, regroup, archive, new group, bin | U A | auto (agentGrouping for the API; UI none) |
