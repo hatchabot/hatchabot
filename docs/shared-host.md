@@ -38,15 +38,21 @@ systemctl daemon-reload
 modprobe br_netfilter && echo br_netfilter > /etc/modules-load.d/br_netfilter.conf
 ```
 
-Give each agent at least 2 GiB (`HATCHABOT_AGENT_MEMORY=2g`): an OpenClaw
-2026.9 gateway idles around 700 MiB and a 1 GiB cap thrashed at its ceiling
-and restarted after every question (measured 2026-09-25).
+Keep the product's 3 GiB agent cap: an OpenClaw 2026.9 gateway idles around
+700 MiB, the Hatchabot agent peaked at 1.45 GiB answering one question, and
+a 1 GiB cap thrashed at its ceiling and restarted after every question
+(measured 2026-09-25). Size the tenant's slice for what runs in it: the
+control plane (~120 MiB), the memory search service (~500 MiB, capped at
+2 GiB), the Hatchabot agent and each agent — about 3 GiB resident for one
+agent, and a `MemoryHigh` below that throttles the whole slice into
+uninterruptible sleep (load 42 on 6 CPUs). 7 GiB high / 8 GiB max is a
+working floor for a one-agent tenant.
 
 Per tenant (`t1`, on port 8101; give each tenant its own port set):
 
 ```
 useradd -m -s /bin/bash t1 && loginctl enable-linger t1
-systemctl set-property user-$(id -u t1).slice MemoryHigh=3G MemoryMax=4G
+systemctl set-property user-$(id -u t1).slice MemoryHigh=7G MemoryMax=8G
 su - t1
   mkdir -p ~/.config/systemd/user/docker.service.d
   printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false\n' > ~/.config/systemd/user/docker.service.d/loopback.conf
@@ -58,7 +64,6 @@ HATCHABOT_EMBED_PORT=8091
 HATCHABOT_GATEWAY_PORT_BASE=19100
 HATCHABOT_PREFIX=t1
 HATCHABOT_MAX_AGENTS_TOTAL=10
-HATCHABOT_AGENT_MEMORY=2g
 HATCHABOT_PUBLIC_URL=https://t1.example.com" \
   bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"
   hbt accounts create owner --host-owner --cli-token --json

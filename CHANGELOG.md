@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.6] — 2026-09-25
+
+### Fixed
+- **Agents find the memory search door under rootless Docker.** The door is published on loopback there and agents are pointed at it as `host.docker.internal`, a name only the doorman container had been given; every agent's memory index failed with "getaddrinfo ENOTFOUND host.docker.internal". Agent containers get the alias now (`host-gateway` on root Docker, `10.0.2.2` under rootless). The shared-host bed keeps the product's 3 GiB agent cap and gives a tenant's slice 7/8 GiB: measured, the Hatchabot agent peaks at 1.45 GiB on one question, and a slice ceiling below what its processes hold throttled the tenant into uninterruptible sleep. docs/shared-host.md carries the numbers.
+
 ## [2.79.5] — 2026-09-25
 
 ### Fixed

@@ -68,6 +68,9 @@ describe('the Docker provider under rootless Docker', () => {
     const seedRun = argv().split('\n').find((l) => l.startsWith('run --rm') && l.includes('seed'));
     expect(seedRun).toContain('tar xz -C /tmp/hatchabot-seed');
     expect(seedRun).not.toContain('/seed:ro');
+    // …and the agent container itself knows this machine by name (memory index failed: ENOTFOUND host.docker.internal).
+    const agentRun = argv().split('\n').find((l) => l.startsWith('create') || (l.startsWith('run') && l.includes('--memory')));
+    expect(agentRun).toContain('--add-host host.docker.internal:10.0.2.2');
     // The service containers read this user's 0600 key files: as container root, which is this user here.
     expect(await provider.containerUserFor(process.getuid!(), process.getgid!())).toBe('0:0');
     expect(await provider.containerUserFor(process.getuid!() + 1, 5)).toBe(`${process.getuid!() + 1}:5`);

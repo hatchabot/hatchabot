@@ -113,7 +113,9 @@ set -e
 id $u >/dev/null 2>&1 || useradd -m -s /bin/bash $u
 loginctl enable-linger $u
 # A memory ceiling on everything the tenant runs: reclaim starts at MemoryHigh, MemoryMax is the wall.
-systemctl set-property user-\$(id -u $u).slice MemoryHigh=3G MemoryMax=4G TasksMax=2048 >/dev/null 2>&1 || true
+# Measured 2026-09-25: control plane ~120 MiB + embedder ~500 MiB + the Hatchabot agent ~1.4 GiB + one agent ~0.8 GiB
+# ≈ 3 GiB resident; at MemoryHigh=3G the slice was throttled into D state (load 42 on 6 CPUs). 7G/8G here.
+systemctl set-property user-\$(id -u $u).slice MemoryHigh=7G MemoryMax=8G TasksMax=2048 >/dev/null 2>&1 || true
 sleep 1; echo "uid \$(id -u $u)"
 EOF
   UIDOF[$u]=$(grep -o 'uid [0-9]*' "$OUT/$u-user.log" | awk '{print $2}')
@@ -139,15 +141,14 @@ HATCHABOT_EMBED_PORT=${EMBED[$u]}
 HATCHABOT_GATEWAY_PORT_BASE=${GWBASE[$u]}
 HATCHABOT_PREFIX=$u
 HATCHABOT_MAX_AGENTS_TOTAL=3
-HATCHABOT_AGENT_MEMORY=2g
 HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
   # A script in the tenant's home, not a quoted one-liner through lxc + su: three shells deep, $(…) lands in the wrong one.
   { printf '#!/usr/bin/env bash\nexport HATCHABOT_YES=1 HATCHABOT_CHANNEL=%q HATCHABOT_SETUP_SIGNIN=accounts HATCHABOT_SETUP_PORT=%q\nexport HATCHABOT_SETUP_ENV=%q\n' "$CHANNEL" "${PORT[$u]}" "$ENV_LINES"
     printf 'bash -c "$(curl -fsSL %q)"\n' "$INSTALLER_URL"; } >"$OUT/$u-install-run.sh"
   L file push "$OUT/$u-install-run.sh" "$VM/home/$u/install-run.sh" --uid "${UIDOF[$u]}" --gid "${UIDOF[$u]}" --mode 0700 >/dev/null
   tenant "$u" '~/install-run.sh' >"$OUT/$u-install.log" 2>&1
-  # A kept VM keeps its .env: bring the memory cap to what this script wants (a 2026.9 gateway idles at ~700 MiB; 1 GiB thrashed).
-  tenant "$u" "grep -q '^HATCHABOT_AGENT_MEMORY=2g' ~/hatchabot/.env || { sed -i 's/^HATCHABOT_AGENT_MEMORY=.*/HATCHABOT_AGENT_MEMORY=2g/' ~/hatchabot/.env; systemctl --user restart hatchabot; }" >/dev/null 2>&1
+  # A kept VM keeps its .env: the product default (3g) is what agents need — the Hatchabot agent peaked at 1.45 GiB under a 2 GiB cap; 1 GiB thrashed.
+  tenant "$u" "grep -q '^HATCHABOT_AGENT_MEMORY=' ~/hatchabot/.env && { sed -i '/^HATCHABOT_AGENT_MEMORY=/d' ~/hatchabot/.env; systemctl --user restart hatchabot; }" >/dev/null 2>&1
   # Older releases' setup did not record a non-8080 port for the CLI.
   tenant "$u" "mkdir -p ~/.config/hatchabot; grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null || echo HATCHABOT_URL=http://127.0.0.1:${PORT[$u]} >> ~/.config/hatchabot/env; chmod 600 ~/.config/hatchabot/env" >/dev/null 2>&1
   if tenant "$u" 'systemctl --user is-active hatchabot' 2>/dev/null | grep -q '^active'; then
@@ -212,6 +213,10 @@ OS=\$(curl -s -H "\$H" \$B/v1/ops-agent | node -e "let s='';process.stdin.on('da
 case "\$OS" in
   "") curl -s -o /dev/null -H "\$H" -H 'content-type: application/json' -d "{\"aiProfileId\":\"\$PID\"}" \$B/v1/ops-agent ;;
   FAILED) hbt retry Hatchabot >/dev/null 2>&1 ;;
+  RUNNING)
+    # A cap changed in .env applies at the next build: a kept VM's manager may still carry the old one.
+    MC=\$(docker ps --format '{{.Names}}' | grep -E "^$u-hatchabot-" | head -1)
+    [ -n "\$MC" ] && [ "\$(docker inspect "\$MC" --format '{{.HostConfig.Memory}}')" != 3221225472 ] && hbt rebuild Hatchabot >/dev/null 2>&1 ;;
 esac
 for _ in \$(seq 1 150); do
   R=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).filter(x=>x.name!=='Hatchabot');console.log(a.filter(x=>x.state==='RUNNING').length+'/'+a.length)})" 2>/dev/null)

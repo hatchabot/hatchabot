@@ -203,6 +203,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       // 2026-09-18). Host services (Hatchabot at 172.17.0.1:8080, Ollama) stay
       // reachable. HATCHABOT_AGENT_NETWORK=bridge restores the old behaviour.
       ...(spec.isolated ? ['--network', this.#opsNetworkName(spec.agentId)] : await this.#agentNetworkArgs()),
+      // This machine, by name, for what the agent reaches on it (the memory
+      // search door published on loopback resolves to this). Docker Desktop
+      // defines it; Linux does not, and under rootless it must be 10.0.2.2.
+      '--add-host', `${HOST_ALIAS}:${await this.hostAliasTarget()}`,
       // A ceiling, not a reservation. Swap is capped at the same figure, so
       // the cap means what it says on a host that has swap. Per agent or
       // class from the store (memoryCap.ts); else the fleet default.
