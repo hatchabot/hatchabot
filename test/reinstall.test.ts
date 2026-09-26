@@ -23,10 +23,11 @@ case "$*" in
   "info --format "*) echo 'Ubuntu 24.04|[name=seccomp]' ;;
   "network inspect bridge"*) echo '172.17.0.1' ;;
   "network inspect "*) exit 0 ;;
-  "run -d --name hatchabot-doorman-"*)
+  "run -d --name hatchabot-doorman-"*) echo newdoorman ;;
+  "network connect bridge hatchabot-doorman-"*)
+    # The jail network is internal: the console port binds only here, so the clash shows up here (Docker Desktop, 2026-09-25).
     n=$(cat ${JSON.stringify(state)} 2>/dev/null || echo 0); echo $((n+1)) > ${JSON.stringify(state)}
-    if [ "$n" = 0 ]; then echo 'docker: Error response from daemon: driver failed programming external connectivity on endpoint hatchabot-doorman-new: Bind for 127.0.0.1:19101 failed: port is already allocated' >&2; exit 125; fi
-    echo newdoorman ;;
+    if [ "$n" = 0 ]; then echo 'Error response from daemon: driver failed programming external connectivity on endpoint hatchabot-doorman-f0733b70e646 (0d2f): Bind for 127.0.0.1:19101 failed: port is already allocated' >&2; exit 1; fi ;;
   "ps -q --filter publish=19101 --filter label=hatchabot.role=doorman") echo 'abc123' ;;
   "inspect abc123 --format "*) echo '/hatchabot-doorman-e082d39db388 e082d39d-old' ;;
   "rm -f hatchabot-embedder") touch ${JSON.stringify(state)}.removed ;;
@@ -51,6 +52,7 @@ describe('a reinstall beside a previous install\'s leftovers', () => {
     expect(r.doorHost).toBe('doorman');
     const lines = argv();
     expect(lines.filter((l) => l.startsWith('run -d --name hatchabot-doorman-')).length).toBe(2);
+    expect(lines.filter((l) => l.startsWith('network connect bridge hatchabot-doorman-')).length).toBe(2);
     expect(lines).toContain('rm -f abc123');
     // and the failed first attempt's own container name was cleared before the retry
     expect(lines.filter((l) => /^rm -f hatchabot-doorman-f0733b70e646$/.test(l)).length).toBeGreaterThanOrEqual(2);

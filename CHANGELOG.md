@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.9] — 2026-09-25
+
+### Fixed
+- **The orphan-doorman fix of v2.80.8 looked in the wrong place.** The doorman's own network is internal, so Docker binds its console port only when the doorman joins the bridge — the "port is already allocated" clash surfaces at that step, not at `run`, and v2.80.8 only watched `run`. Both steps are watched now; the Pro's Hatchabot agent still failed after v2.80.8.
+
 ## [2.80.8] — 2026-09-25
 
 ### Fixed

@@ -937,30 +937,44 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--entrypoint', 'node',
       this.image, '-e', doormanScript(),
     ]);
-    let run = await runDoorman();
-    if (run.code !== 0 && /port is already allocated/i.test(run.stderr)) {
-      // A doorman of a previous install (the uninstall never knew it) still
-      // holds this console port: a MacBook reinstall failed here (2026-09-25).
-      // Only a doorman of THIS prefix that serves another agent is an orphan.
-      await this.#docker(['rm', '-f', name]);
+    // A doorman of a previous install (the uninstall never knew it) may still
+    // hold this console port: a MacBook reinstall failed on it (2026-09-25).
+    // Only a doorman of THIS prefix that serves another agent is an orphan.
+    const evictOrphan = async (): Promise<boolean> => {
       const holder = await this.#docker(['ps', '-q', '--filter', `publish=${opts.consolePort}`, '--filter', 'label=hatchabot.role=doorman']);
-      const ids = holder.stdout.trim().split(/\s+/).filter(Boolean);
-      for (const id of ids) {
+      let evicted = false;
+      for (const id of holder.stdout.trim().split(/\s+/).filter(Boolean)) {
         const who = await this.#docker(['inspect', id, '--format', '{{.Name}} {{ index .Config.Labels "hatchabot.agent" }}']);
         const [cname = '', agent = ''] = who.stdout.trim().split(/\s+/);
-        if (cname.replace(/^\//, '').startsWith(`${this.prefix}-doorman-`) && agent !== opts.agentId) await this.#docker(['rm', '-f', id]);
+        if (cname.replace(/^\//, '').startsWith(`${this.prefix}-doorman-`) && agent !== opts.agentId) {
+          await this.#docker(['rm', '-f', id]);
+          evicted = true;
+        }
       }
-      run = await runDoorman();
-    }
-    if (run.code !== 0) {
-      throw new ProviderError(`doorman failed: ${run.stderr.slice(-500)}`, 'Could not start the management agent’s doorman container.');
-    }
-    // It reaches this machine through an ordinary network; the jail itself has
-    // no route out, so this is the doorman's alone.
-    const connect = await this.#docker(['network', 'connect', 'bridge', name]);
-    if (connect.code !== 0 && !/already exists/i.test(connect.stderr)) {
+      return evicted;
+    };
+    const taken = (r: ExecResult) => r.code !== 0 && /port is already allocated/i.test(r.stderr);
+    // The jail network is internal, so Docker binds the published console port
+    // only when the doorman joins the bridge: the clash shows up at either step.
+    const bringUp = async () => {
+      const run = await runDoorman();
+      if (run.code !== 0) return { step: 'run' as const, res: run };
+      // It reaches this machine through an ordinary network; the jail itself has
+      // no route out, so this is the doorman's alone.
+      const connect = await this.#docker(['network', 'connect', 'bridge', name]);
+      if (connect.code !== 0 && !/already exists/i.test(connect.stderr)) return { step: 'connect' as const, res: connect };
+      return undefined;
+    };
+    let failed = await bringUp();
+    if (failed && taken(failed.res)) {
       await this.#docker(['rm', '-f', name]);
-      throw new ProviderError(`doorman network connect failed: ${connect.stderr.slice(-500)}`, 'Could not connect the management agent’s doorman to this machine.');
+      if (await evictOrphan()) failed = await bringUp();
+    }
+    if (failed) {
+      await this.#docker(['rm', '-f', name]);
+      throw failed.step === 'run'
+        ? new ProviderError(`doorman failed: ${failed.res.stderr.slice(-500)}`, 'Could not start the management agent’s doorman container.')
+        : new ProviderError(`doorman network connect failed: ${failed.res.stderr.slice(-500)}`, 'Could not connect the management agent’s doorman to this machine.');
     }
     return { network, doorHost: DOORMAN_ALIAS, doorPort: DOORMAN_DOOR_PORT };
   }
