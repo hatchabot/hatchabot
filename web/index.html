@@ -10489,6 +10489,7 @@ function v2Status(a) {
   else if (a.pendingAction) st = { cls: 'waiting', glyph: '✋', label: 'Waiting on you' };
   else if (waiting && v2Mine(a)) st = { cls: 'waiting', glyph: '👤', label: 'Someone wants to join' };
   else if (limited) st = { cls: 'blocked', glyph: '⏳', label: 'AI source rate-limited' };
+  else if (a.state === 'STOPPED' && a.hibernatedAt) st = { cls: 'stopped', glyph: '💤', label: 'Asleep — wakes when someone writes to it, or when you open it' };
   else if (a.state === 'STOPPED') st = { cls: 'stopped', glyph: '⏸', label: 'Stopped' };
   else if (why.length && v2Mine(a)) st = { cls: 'note', glyph: '⚑', label: 'Worth a look' };
   else st = { cls: 'ok', glyph: '', label: a.state === 'RUNNING' ? 'Ready' : a.state };

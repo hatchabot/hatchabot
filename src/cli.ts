@@ -159,6 +159,10 @@ Commands:
   start|stop|rebuild <agent> [--wait]
                                Lifecycle controls; --wait returns once it is
                                RUNNING (or STOPPED)
+  hibernate|wake <agent>       Put an idle agent to sleep (stopped, volume kept)
+                               or wake it. HATCHABOT_HIBERNATE_AFTER=6h makes the
+                               machine do this on its own; a Telegram message,
+                               opening its console or "ask" wakes a sleeper.
   rebuild --outdated [--required] [--dry-run]
                                Rebuild every running agent that needs it (says
                                why); a stopped one is rebuilt when started
@@ -1851,7 +1855,7 @@ async function main() {
       const res = await api(ctx, `/v1/agents${all ? '?all=1' : ''}`);
       const list = (await res.json()) as any[];
       if (flags.has('json')) return console.log(JSON.stringify(list.map((a) => ({
-        id: a.id, name: a.name, slug: a.slug, state: a.state, model: a.model ?? null,
+        id: a.id, name: a.name, slug: a.slug, state: a.state, asleep: !!a.hibernatedAt, model: a.model ?? null,
         webOnly: !!a.webOnly, lastActiveAt: a.lastActiveAt ?? null, ...(all ? { ownerId: a.ownerId } : {}),
       })), null, 2));
       if (!list.length) return console.log('no agents');
@@ -1859,7 +1863,7 @@ async function main() {
       for (const a of list) {
         const owner = all ? `  ${String(a.ownerId ?? '-').padEnd(34)}` : '';
         console.log(
-          `${a.name.padEnd(w)}  ${String(a.state).padEnd(12)} ${(a.model ?? '-').padEnd(20)}${owner} active ${ago(a.lastActiveAt)}`,
+          `${a.name.padEnd(w)}  ${String(a.hibernatedAt ? 'ASLEEP' : a.state).padEnd(12)} ${(a.model ?? '-').padEnd(20)}${owner} active ${ago(a.lastActiveAt)}`,
         );
       }
       return;
@@ -1997,6 +2001,8 @@ async function main() {
     }
     case 'start':
     case 'stop':
+    case 'hibernate':
+    case 'wake':
     case 'rebuild': {
       if (cmd === 'rebuild' && flags.has('outdated')) {
         // Every agent the app says needs one — the Rebuild button, in bulk,
@@ -2027,7 +2033,7 @@ async function main() {
         return;
       }
       // --wait: scripts need "stopped" / "running", not "requested" (CLI audit).
-      const want = cmd === 'stop' ? 'STOPPED' : 'RUNNING';
+      const want = cmd === 'stop' || cmd === 'hibernate' ? 'STOPPED' : 'RUNNING';
       const limit = minutesFlag(15);
       const deadline = Date.now() + limit * 60_000;
       await new Promise((r) => setTimeout(r, 2000));

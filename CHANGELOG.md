@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.82.0] — 2026-09-26
+
+### Added
+- **Idle agents sleep.** With `HATCHABOT_HIBERNATE_AFTER` set (`90m`, `6h`, `2d`), an agent quiet that long is stopped with its volume kept and shows 💤 *Asleep*; a Telegram message waiting for it (Telegram queues updates for a day; Hatchabot notices with a `getUpdates` that confirms nothing), its owner opening its console, or `hatchabot ask` wakes it in a few seconds. Never put to sleep: agents on Discord or Slack (nothing queues their messages), agents with their own scheduled tasks, busy agents, and agents set to stay awake (`hibernate: "never"`). By hand: `hatchabot hibernate|wake <agent>`. An OpenClaw gateway holds about 1.2 GiB whether it talks or not, so on a shared host this is the lever on tenants per machine (the cloud's S7).
+
 ## [2.81.4] — 2026-09-26
 
 ### Fixed

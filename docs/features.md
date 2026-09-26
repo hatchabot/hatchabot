@@ -1190,6 +1190,13 @@ Nothing moves mid-conversation. *Move all back* returns every agent to its own
 engine the same way. CLI: `hatchabot embedder default [shared|baked]`,
 `hatchabot embedder move-all shared|baked [--now]`.
 
+**Sleep** (`HATCHABOT_HIBERNATE_AFTER`, off unless set; `hatchabot
+hibernate|wake <agent>`): an agent quiet that long is stopped with its volume
+kept and shows 💤 *Asleep*. Someone writing to it on Telegram, you opening its
+console, or `hatchabot ask` wakes it in a few seconds. Never put to sleep:
+agents on Discord or Slack (nothing queues their messages), agents with their
+own scheduled tasks, and agents set to stay awake (`hibernate: "never"`).
+
 **Memory search service** (⚙ Settings → Hosts → *Memory search service*,
 machine owner; `hatchabot embedder [status|start|stop|restart]`). It turns
 itself on when Hatchabot starts on a machine whose runtime image has no engine

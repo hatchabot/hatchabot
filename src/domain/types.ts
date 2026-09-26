@@ -145,6 +145,10 @@ export interface Agent {
   /** Anyone who finds the bot may knock and wait for approval. Off by
    *  default: only invitees and people the owner already knows get through. */
   allowKnocks?: boolean;
+  /** Asleep since (hibernate.ts): stopped by the idle sweep, started again on a message, a console, an ask. */
+  hibernatedAt?: string;
+  /** `never`: this agent stays awake whatever the machine's idle rule says. */
+  hibernate?: 'never';
   /**
    * Optional per-agent model override, chosen from the profile's model menu.
    * Absent = follow the profile's default. Ignored for local profiles (only

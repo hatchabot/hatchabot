@@ -93,6 +93,16 @@ of its socket-owner rule (the key is the gate there), and give the service
 tenant's slice the engine's 2 GiB. `scripts/shared-host-test.sh
 --shared-embedder` builds this and checks that tenant 2 runs no engine.
 
+## Sleeping tenants
+
+Each OpenClaw gateway holds about 1.2 GiB resident whether it is talking or
+not. `HATCHABOT_HIBERNATE_AFTER=6h` in a tenant's `.env` puts an agent that
+has been quiet that long to sleep (stopped, volume kept); a Telegram message
+waiting for it, its owner opening its console, or an ask wakes it within a
+few seconds. Agents on Discord or Slack (nothing queues their messages) and
+agents with their own scheduled tasks stay up. A one-agent tenant asleep is
+the control plane and the rootless daemon: about 450 MiB.
+
 ## Keeping tenants apart
 
 Host loopback on means a container can dial any `127.0.0.1` port on the

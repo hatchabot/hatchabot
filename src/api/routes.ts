@@ -134,6 +134,7 @@ function clampConcurrency(raw: string | undefined): number {
 import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, statShell, tarArgv, uploadAllowed } from '../orchestrator/agentFiles.js';
 import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
+import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../orchestrator/hibernate.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -610,6 +611,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
        *  as a lie — a move shows STOPPED for a minute — so the app can show
        *  "working" instead of leaving the owner to think nothing is happening. */
       busy: isBusy(agent.id),
+      /** Asleep (hibernate.ts): stopped by the idle rule; a message, its console or an ask wakes it. */
+      hibernatedAt: agent.hibernatedAt,
+      hibernate: agent.hibernate,
       /** The management agent's tool lockdown was loosened: key suspended. */
       opsDrift: agent.ops ? opsDriftOf(agent.id) : undefined,
       ...extra,
@@ -2038,6 +2042,36 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       void embedder.healthTick().then((r) => { if (r === 'restarted') app.log.warn('embedder restarted by the health loop'); })
         .catch((err) => app.log.warn({ err }, 'embedder health tick failed'));
     }, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
+  }
+  // Hibernation: the idle sweep and the Telegram wake poll (hibernate.ts).
+  const hibernateDeps: HibernateDeps = {
+    store, secrets, providerFor,
+    lastActiveFor: (a) => lastActiveFor(a), // defined further down (a const in this scope; called only at sweep time)
+    ownCrons: async (a) => (await listCrons(providerFor(a.hostId), a.runtimeRef!, a.slug)).map((c) => ({ enabled: c.enabled, system: c.system })),
+    isBusy,
+    log: (id) => (event, detail) => trace(id)(event, detail ?? {}),
+    fetchImpl: deps.oauthFetch,
+  };
+  /** Wake a sleeping agent and wait for its gateway (a message, a console, an ask). */
+  const ensureAwake = async (agent: Agent, why: string): Promise<Agent> => {
+    if (!agent.hibernatedAt || agent.state !== 'STOPPED') return agent;
+    const woken = await wakeAgent(hibernateDeps, agent, why);
+    const provider = providerFor(woken.hostId);
+    const deadline = Date.now() + Number(process.env.HATCHABOT_WAKE_TIMEOUT_MS ?? 45_000);
+    while (Date.now() < deadline) {
+      const st = await provider.status(woken.runtimeRef!).catch(() => undefined);
+      if (st?.phase === 'running' && st.healthy) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return store.getAgent(woken.id) ?? woken;
+  };
+  (app as unknown as { hibernateDeps?: HibernateDeps; ensureAwake?: typeof ensureAwake }).hibernateDeps = hibernateDeps;
+  (app as unknown as { ensureAwake?: typeof ensureAwake }).ensureAwake = ensureAwake;
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    setInterval(() => { void hibernateSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'hibernate sweep failed')); },
+      Number(process.env.HATCHABOT_HIBERNATE_SWEEP_MS) || 5 * 60_000).unref();
+    setInterval(() => { void wakeSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'wake sweep failed')); },
+      Number(process.env.HATCHABOT_WAKE_POLL_MS) || 60_000).unref();
   }
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).
@@ -3984,6 +4018,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           iconColor: z.string().refine(validIconColor, { message: 'iconColor must look like #3a8fd0' }).nullable().optional(),
           /** Clear it from Needs you: what was flagged, as the app fingerprints it; it shows again when that changes. `null` shows it again now. */
           attentionAck: z.string().max(4000).nullable().optional(),
+          /** `never` keeps this agent awake whatever HATCHABOT_HIBERNATE_AFTER says; `null` follows the machine. */
+          hibernate: z.enum(['never']).nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -4005,6 +4041,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.embedMode === undefined &&
         parsed.data.memoryCap === undefined &&
         parsed.data.attentionAck === undefined &&
+        parsed.data.hibernate === undefined &&
         parsed.data.icon === undefined &&
         parsed.data.iconColor === undefined
       ) {
@@ -4012,6 +4049,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
 
       if (parsed.data.attentionAck !== undefined) store.setAgentAttentionAck(agent.id, parsed.data.attentionAck);
+      if (parsed.data.hibernate !== undefined) store.setHibernatePolicy(agent.id, parsed.data.hibernate);
       if (parsed.data.icon !== undefined || parsed.data.iconColor !== undefined) {
         store.setAgentIcon(agent.id, parsed.data.icon, parsed.data.iconColor);
       }
@@ -4692,7 +4730,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** Where an agent's gateway answers: its loopback-published port. A jailed
    *  management agent publishes nothing itself — its doorman publishes that
    *  same port and forwards into the jail (src/ops/doorman.ts). */
-  const gatewayAddr = async (agent: Agent): Promise<{ host: string; port: number } | undefined> => {
+  const gatewayAddr = async (agentIn: Agent): Promise<{ host: string; port: number } | undefined> => {
+    // Opening a sleeping agent's console is a reason to wake it (hibernate.ts).
+    const agent = agentIn.hibernatedAt && agentIn.state === 'STOPPED' ? await ensureAwake(agentIn, 'its console was opened') : agentIn;
     if (!agent.gatewayToken || agent.state !== 'RUNNING') return undefined;
     if (agent.gatewayPort) {
       // A runner's agent publishes on the RUNNER's loopback: the provider
@@ -5925,6 +5965,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // conversation the owner has with it in the app. Owner only: a member talks
   // to an agent through its chat app, where the door decides who is heard.
   app.post<{ Params: { id: string }; Body: { text?: string } }>('/v1/agents/:id/ask', async (req, reply) => {
+    { const sleeping = ownedAgent(req, req.params.id); if (sleeping?.hibernatedAt && sleeping.state === 'STOPPED') await ensureAwake(sleeping, 'it was asked something'); }
     const agent = runningAgent(req, req.params.id, reply, 'talk to it');
     if (!agent) return reply;
     const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim();
@@ -9099,7 +9140,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     }
     await providerFor(agent.hostId).start(agent.runtimeRef);
+    store.setHibernated(agent.id, null);
     return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
+  });
+
+  // ---- Hibernation (src/orchestrator/hibernate.ts) ------------------------
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/hibernate', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (busyNow(agent, reply)) return reply;
+    if (agent.state !== 'RUNNING') return reply.code(409).send({ error: `Cannot put it to sleep while ${agent.state}` });
+    // By hand, the idle and scheduled-task rules do not apply — the owner knows; the chat-app rule does.
+    const kinds = store.listChannelsForAgent(agent.id).map((c) => c.kind);
+    if (kinds.some((k) => k !== 'telegram')) return reply.code(409).send({ error: 'An agent on Discord or Slack cannot sleep: nothing queues their messages while it is down.' });
+    return publicAgent(await hibernateAgent(hibernateDeps, agent, 'by hand'));
+  });
+  app.post<{ Params: { id: string } }>('/v1/agents/:id/wake', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (!agent.hibernatedAt) return reply.code(409).send({ error: 'It is not asleep.' });
+    return publicAgent(await wakeAgent(hibernateDeps, agent, 'by hand'));
+  });
+  /** What the idle rule would do with this agent now — for the app's "Asleep" explanations. */
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/hibernate', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    const afterMs = hibernateAfterMs();
+    return { afterMs, asleep: !!agent.hibernatedAt, policy: agent.hibernate ?? null,
+      blocker: afterMs ? await hibernateBlocker(hibernateDeps, agent, Date.now(), afterMs) : 'hibernation is off on this machine (HATCHABOT_HIBERNATE_AFTER)' };
   });
 
   /**

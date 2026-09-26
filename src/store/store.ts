@@ -552,6 +552,9 @@ export class Store {
       // its own high-water mark from when the owner last cleared it.
       `ALTER TABLE agents ADD COLUMN memory_peak_since INTEGER`,
       `ALTER TABLE agents ADD COLUMN memory_peak_cleared_at TEXT`,
+      // Hibernation (hibernate.ts): when the idle sweep put it to sleep, and an agent's opt-out.
+      `ALTER TABLE agents ADD COLUMN hibernated_at TEXT`,
+      `ALTER TABLE agents ADD COLUMN hibernate TEXT`,
       `ALTER TABLE agent_classes ADD COLUMN memory_cap TEXT`,
       // "Clear from Needs you": the fingerprint of what was flagged when the owner cleared it.
       `ALTER TABLE agents ADD COLUMN attention_ack TEXT`,
@@ -3331,6 +3334,12 @@ export class Store {
 
   /** Anyone who finds the bot may knock, instead of invitees and people the
    *  owner already knows. Off by default, per agent. */
+  setHibernated(agentId: string, at: string | null): void {
+    this.db.prepare(`UPDATE agents SET hibernated_at = ? WHERE id = ?`).run(at, agentId);
+  }
+  setHibernatePolicy(agentId: string, policy: 'never' | null): void {
+    this.db.prepare(`UPDATE agents SET hibernate = ? WHERE id = ?`).run(policy, agentId);
+  }
   setAllowKnocks(agentId: string, on: boolean): void {
     this.db.prepare(`UPDATE agents SET allow_knocks = ? WHERE id = ?`).run(on ? 1 : 0, agentId);
   }
@@ -3714,6 +3723,8 @@ function rowToAgent(r: any): Agent {
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,
     memoryPeakSince: r.memory_peak_since ?? undefined,
     memoryPeakClearedAt: r.memory_peak_cleared_at ?? undefined,
+    hibernatedAt: r.hibernated_at ?? undefined,
+    hibernate: r.hibernate === 'never' ? 'never' : undefined,
     embedMode: r.embed_mode === 'shared' ? 'shared' : undefined,
     appliedEmbedMode: r.applied_embed_mode === 'shared' ? 'shared' : r.applied_embed_mode === 'baked' ? 'baked' : undefined,
     embedIndexedAt: r.embed_indexed_at ?? undefined,
