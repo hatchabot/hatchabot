@@ -1218,7 +1218,12 @@ export class LocalDockerProvider implements RuntimeProvider {
         ]);
         // Another provision may have created it a moment ago: fine if it now exists.
         if (made.code !== 0 && (await this.#docker(['network', 'inspect', name])).code !== 0) {
-          throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, 'Could not create the agents network.');
+          // Keeping agents apart on the network needs the br_netfilter kernel
+          // module; root Docker loads it, a rootless daemon cannot (2026-09-25).
+          const why = /bridge-nf-call|inter-container communication/.test(made.stderr)
+            ? 'Could not create the agents network: Docker needs the br_netfilter kernel module. As root: modprobe br_netfilter, and echo br_netfilter > /etc/modules-load.d/br_netfilter.conf to keep it after a reboot.'
+            : 'Could not create the agents network.';
+          throw new ProviderError(`docker network create failed: ${made.stderr.slice(-500)}`, why);
         }
       }
       this.#networkReady = true;

@@ -28,12 +28,19 @@ Hatchabot detects a rootless daemon (`docker info` reports `name=rootless`) and:
 ## One tenant, by hand
 
 As root, once per host: Docker Engine, `uidmap slirp4netns dbus-user-session`,
-Node 22, `build-essential python3 git`, and cgroup delegation:
+Node 22, `build-essential python3 git`, cgroup delegation, and the
+`br_netfilter` module (agents on one daemon are kept apart on the network,
+which needs it; a rootless daemon cannot load it):
 
 ```
 printf '[Service]\nDelegate=cpu cpuset io memory pids\n' > /etc/systemd/system/user@.service.d/delegate.conf
 systemctl daemon-reload
+modprobe br_netfilter && echo br_netfilter > /etc/modules-load.d/br_netfilter.conf
 ```
+
+Give each agent at least 2 GiB (`HATCHABOT_AGENT_MEMORY=2g`): an OpenClaw
+2026.9 gateway idles around 700 MiB and a 1 GiB cap thrashed at its ceiling
+and restarted after every question (measured 2026-09-25).
 
 Per tenant (`t1`, on port 8101; give each tenant its own port set):
 
@@ -51,7 +58,7 @@ HATCHABOT_EMBED_PORT=8091
 HATCHABOT_GATEWAY_PORT_BASE=19100
 HATCHABOT_PREFIX=t1
 HATCHABOT_MAX_AGENTS_TOTAL=10
-HATCHABOT_AGENT_MEMORY=1g
+HATCHABOT_AGENT_MEMORY=2g
 HATCHABOT_PUBLIC_URL=https://t1.example.com" \
   bash -c "$(curl -fsSL https://hatchabot.com/install.sh)"
   hbt accounts create owner --host-owner --cli-token --json

@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.5] — 2026-09-25
+
+### Fixed
+- **A clear word when the agents network cannot be made.** Under rootless Docker, keeping agents apart on the network needs the `br_netfilter` kernel module, which only root can load; the failure now says so and gives the two commands, instead of "Could not create the agents network." docs/shared-host.md and the shared-host bed load it in host prep, and the bed gives agents 2 GiB: a 2026.9 gateway idles near 700 MiB, and under a 1 GiB cap the Hatchabot agent hit its ceiling 204 times and restarted after every question.
+
 ## [2.79.4] — 2026-09-25
 
 ### Fixed

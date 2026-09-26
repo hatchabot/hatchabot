@@ -84,6 +84,8 @@ fi
 # ---- 1. host prep (what the provisioner does to a new host, once) ----------------
 root >"$OUT/hostprep.log" 2>&1 <<'EOF'
 set -e; export DEBIAN_FRONTEND=noninteractive
+# Agents on one daemon are kept apart on the network (enable_icc=false), which needs br_netfilter — root's job, a rootless daemon cannot load it.
+modprobe br_netfilter && echo br_netfilter > /etc/modules-load.d/br_netfilter.conf
 [ -f /var/lib/hb-shared-prepped ] && { echo "already prepped"; exit 0; }
 command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
 apt-get -qq update
@@ -137,13 +139,15 @@ HATCHABOT_EMBED_PORT=${EMBED[$u]}
 HATCHABOT_GATEWAY_PORT_BASE=${GWBASE[$u]}
 HATCHABOT_PREFIX=$u
 HATCHABOT_MAX_AGENTS_TOTAL=3
-HATCHABOT_AGENT_MEMORY=1g
+HATCHABOT_AGENT_MEMORY=2g
 HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
   # A script in the tenant's home, not a quoted one-liner through lxc + su: three shells deep, $(…) lands in the wrong one.
   { printf '#!/usr/bin/env bash\nexport HATCHABOT_YES=1 HATCHABOT_CHANNEL=%q HATCHABOT_SETUP_SIGNIN=accounts HATCHABOT_SETUP_PORT=%q\nexport HATCHABOT_SETUP_ENV=%q\n' "$CHANNEL" "${PORT[$u]}" "$ENV_LINES"
     printf 'bash -c "$(curl -fsSL %q)"\n' "$INSTALLER_URL"; } >"$OUT/$u-install-run.sh"
   L file push "$OUT/$u-install-run.sh" "$VM/home/$u/install-run.sh" --uid "${UIDOF[$u]}" --gid "${UIDOF[$u]}" --mode 0700 >/dev/null
   tenant "$u" '~/install-run.sh' >"$OUT/$u-install.log" 2>&1
+  # A kept VM keeps its .env: bring the memory cap to what this script wants (a 2026.9 gateway idles at ~700 MiB; 1 GiB thrashed).
+  tenant "$u" "grep -q '^HATCHABOT_AGENT_MEMORY=2g' ~/hatchabot/.env || { sed -i 's/^HATCHABOT_AGENT_MEMORY=.*/HATCHABOT_AGENT_MEMORY=2g/' ~/hatchabot/.env; systemctl --user restart hatchabot; }" >/dev/null 2>&1
   # Older releases' setup did not record a non-8080 port for the CLI.
   tenant "$u" "mkdir -p ~/.config/hatchabot; grep -q '^HATCHABOT_URL=' ~/.config/hatchabot/env 2>/dev/null || echo HATCHABOT_URL=http://127.0.0.1:${PORT[$u]} >> ~/.config/hatchabot/env; chmod 600 ~/.config/hatchabot/env" >/dev/null 2>&1
   if tenant "$u" 'systemctl --user is-active hatchabot' 2>/dev/null | grep -q '^active'; then
