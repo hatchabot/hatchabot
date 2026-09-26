@@ -235,7 +235,8 @@ EOF
     grep -q '^STATE ready' "$OUT/$u-agents.log" && ok "$u: an agent and its Hatchabot agent both RUNNING (image pulled into the tenant's own store)" \
       || bad "$u: agents did not reach RUNNING — $(grep -E '^(STATE|FAIL)' "$OUT/$u-agents.log" | tail -1 | tr '\n' ' ')"
     grep -qi '^ASK.*pong' "$OUT/$u-agents.log" && ok "$u: the agent answered" || bad "$u: the agent did not answer — $(grep '^ASK' "$OUT/$u-agents.log" | cut -c1-120)"
-    grep -qE '^MANAGER.*\b(2|two)\b' "$OUT/$u-agents.log" && ok "$u: the Hatchabot agent answered through its door (doorman → 10.0.2.2:${OPS[$u]})" \
+    # Any number is an answer that came through its door (whether it counts itself is the model's call).
+    grep -qE '^MANAGER.*\b([0-9]+|one|two|three)\b' "$OUT/$u-agents.log" && ok "$u: the Hatchabot agent answered through its door (doorman → 10.0.2.2:${OPS[$u]})" \
       || bad "$u: the Hatchabot agent did not answer — $(grep '^MANAGER' "$OUT/$u-agents.log" | cut -c1-160)"
     # The memory cap reached the container: cgroup delegation works under the user slice.
     # Agent containers carry no role label (the doorman, manager jail and service containers do).
