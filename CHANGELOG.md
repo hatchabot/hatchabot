@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.81.1] — 2026-09-26
+
+### Fixed
+- **Editing a scheduled task looked like it did nothing.** Edit loads the task into the form under the list; with a dozen tasks the form was off-screen. The form now scrolls into view with the task's name focused, and a toast says where it went.
+
 ## [2.81.0] — 2026-09-26
 
 ### Added

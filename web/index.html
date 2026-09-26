@@ -8470,6 +8470,11 @@ function editCronJob(id) {
   const note = $('cronEditNote');
   note.style.display = '';
   note.innerHTML = `Editing <b>${esc(c.name || '(unnamed task)')}</b> — <a style="cursor:pointer;text-decoration:underline" onclick="cancelCronEdit()">cancel</a>`;
+  // The form sits under the list: with a dozen tasks it is off-screen, and
+  // Edit looked like it did nothing (Stock Advisor, 2026-09-26). Bring it up.
+  note.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  setTimeout(() => $('cronName').focus(), 250);
+  toast(`"${c.name || 'The task'}" is in the form below — change it and Save.`, 4000);
 }
 async function addCronJob() {
   const name = $('cronName').value.trim(), message = $('cronMsg').value.trim();
