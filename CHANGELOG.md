@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.79.2] — 2026-09-25
+
+### Fixed
+- **Re-running the installer, or `hbt upgrade latest`, could die silently at "4/4".** Both list the release tags through `… | head -1`; head closes the pipe after one line, `git tag` is killed writing the other few hundred, and under `pipefail` the script exits 141 without a word — a tenant of the shared-host bed stayed on the old release with no error. The tag is read with `sed -n 1p` now, and a guard test keeps early-closing pipes out of both scripts.
+
 ## [2.79.1] — 2026-09-25
 
 ### Fixed

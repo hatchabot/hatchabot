@@ -197,7 +197,12 @@ B=$B; H="authorization: Bearer ${TOKEN[$u]}"
 node -e 'const fs=require("fs");const c=fs.readFileSync(process.env.HOME+"/.cred","utf8").trim();const sub="$KIND"==="subscription";process.stdout.write(JSON.stringify(Object.assign({kind:sub?"subscription":"api_key",vendor:"$VENDOR",name:"$AI_SOURCE",model:"$MODEL"},sub?{oauthToken:c}:{apiKey:c})))' >/tmp/body.json
 curl -s -H "\$H" -H 'content-type: application/json' --data @/tmp/body.json \$B/v1/ai-profiles >/dev/null; rm -f /tmp/body.json ~/.cred
 PID=\$(curl -s -H "\$H" \$B/v1/ai-profiles | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s)[0].id))")
-hbt list --json 2>/dev/null | grep -q '"name":"Helper"' || hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; }
+# A kept VM may already have Helper (a failed one from an earlier run is retried).
+HS=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).find(x=>x.name==='Helper');console.log(a?a.state:'')})")
+case "\$HS" in
+  "") hbt create Helper --no-telegram --persona 'You answer in one word.' >/tmp/create.log 2>&1 || { echo "FAIL create: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
+  FAILED) hbt retry Helper >/tmp/create.log 2>&1 || { echo "FAIL retry: \$(tail -1 /tmp/create.log)"; exit 0; } ;;
+esac
 curl -s -o /dev/null -H "\$H" -H 'content-type: application/json' -d "{\"aiProfileId\":\"\$PID\"}" \$B/v1/ops-agent
 for _ in \$(seq 1 150); do
   R=\$(hbt list --json 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const a=JSON.parse(s).filter(x=>x.name!=='Hatchabot');console.log(a.filter(x=>x.state==='RUNNING').length+'/'+a.length)})" 2>/dev/null)

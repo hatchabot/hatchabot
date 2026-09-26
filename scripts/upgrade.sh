@@ -31,10 +31,10 @@ git fetch --tags --force --quiet origin
 # The newer of two versions. `sort -V` alone ranks v2.35.0-beta.1 ABOVE v2.35.0,
 # which stranded a beta tester on the prerelease; "~" sorts below everything.
 vernewer() { printf '%s\n%s\n' "$1" "$2" | sed 's/-/~/' | sort -V | tail -1 | sed 's/~/-/'; }
-newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
+newest() { git tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p; }  # sed, not head: head closes the pipe early and pipefail makes that exit 141
 case "$CHANNEL" in
   latest) TARGET="$(newest)" ;;
-  stable|beta) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | head -1)"
+  stable|beta) TARGET="$(git show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
     [ -n "$TARGET" ] || TARGET="$(newest)" ;;
   v[0-9]*) git rev-parse -q --verify "refs/tags/$CHANNEL" >/dev/null || { echo "There is no release $CHANNEL."; exit 1; }
     TARGET="$CHANNEL" ;;

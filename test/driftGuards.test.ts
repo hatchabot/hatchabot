@@ -299,3 +299,16 @@ describe('every event the code records has plain words', () => {
     expect([...missing].sort()).toEqual([]);
   });
 });
+
+describe('the installer and upgrade never close a pipe early', () => {
+  // `… | head -1` under `set -o pipefail`: head exits after one line, the
+  // writer gets SIGPIPE, the pipeline is 141 and `set -e` kills the script —
+  // silently, on a re-run with a few hundred tags (2026-09-25). sed -n 1p reads to the end.
+  it('no `| head -1` in install.sh or scripts/upgrade.sh', () => {
+    for (const f of ['install.sh', 'scripts/upgrade.sh']) {
+      const src = read(f);
+      expect(src, f).toMatch(/set -[a-z]*e[a-z]* *(-o pipefail)?|set -o pipefail/);
+      expect(src.match(/\|\s*head -1\b/g) ?? [], f).toEqual([]);
+    }
+  });
+});

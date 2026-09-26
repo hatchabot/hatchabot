@@ -111,7 +111,10 @@ if [ -d "$DIR/.git" ]; then
 else
   git clone --quiet "$REPO" "$DIR"
 fi
-newest() { git -C "$DIR" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | head -1; }
+# `sed -n 1p`, not `head -1`: head closes the pipe after one line, git tag gets
+# SIGPIPE writing the other few hundred, and under pipefail this whole script
+# died with exit 141 — silently, at "4/4" — on any re-run (2026-09-25).
+newest() { git -C "$DIR" tag -l 'v[0-9]*' --sort=-v:refname | grep -vE -- '-(rc|beta|alpha)' | sed -n 1p; }
 case "$CHANNEL" in
   latest) LATEST="$(newest)" ;;
   v[0-9]*)
@@ -120,7 +123,7 @@ case "$CHANNEL" in
   stable|beta)
     # Named releases live in channels.json on main, so promoting one is a
     # one-line commit and never a new tag.
-    LATEST="$(git -C "$DIR" show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | head -1)"
+    LATEST="$(git -C "$DIR" show origin/main:channels.json 2>/dev/null | sed -nE "s/.*\"$CHANNEL\"[[:space:]]*:[[:space:]]*\"(v[^\"]+)\".*/\1/p" | sed -n 1p)"
     if [ -z "$LATEST" ]; then
       echo "   (no $CHANNEL release is named yet — using the newest)"
       LATEST="$(newest)"
@@ -139,7 +142,7 @@ fi
 # anything: it used to leave a development clone detached at the stable tag.
 UNIT="$HOME/.config/systemd/user/hatchabot.service"
 if [ -f "$UNIT" ]; then
-  INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | head -1)"
+  INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED="${INSTALLED/#\%h/$HOME}"
   if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$DIR" ]; then
     die "Hatchabot is already installed here, running from:
