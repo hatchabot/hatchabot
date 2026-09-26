@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.84.1] — 2026-09-26
+
+### Changed
+- **The dashboard's pills are stacked**, one per line beside the Hatchabot agent, rather than in a row.
+
 ## [2.84.0] — 2026-09-26
 
 ### Changed
