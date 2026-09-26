@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.83.0] — 2026-09-26
+
+### Changed
+- **The CLI asks before it destroys.** `kick`, `deny`, `unarchive`, `revert`, `env rm`, `folders rm` and `image rm` ask y/N, the way the app does; `--yes` (or `-y`, `-f`, `--force`) skips the question for scripts. `delete` and `archive` keep asking for the typed name.
+- **One rule for switching an agent's AI source.** The switch is recorded and applies at the agent's next rebuild on every surface: the app asks whether to rebuild now, the CLI has `hatchabot ai <agent> <source> --now`, and the chat's `set_source` says so and can call `rebuild_agent`. Before, the chat rebuilt at once, the CLI waited, and the app asked.
+
+### Added
+- **Managed mode** for a hosted Hatchabot: `HATCHABOT_MANAGED_BY` (and `HATCHABOT_SUPPORT_URL`) put "Run by … · Get help" under Settings → You and drop the HTTPS and backup setup steps and the OpenClaw upgrade nudges, which are the provider's chores; `HATCHABOT_NOTICE` shows a banner to everyone (a maintenance window). `/v1/config` carries all three.
+
 ## [2.82.0] — 2026-09-26
 
 ### Added

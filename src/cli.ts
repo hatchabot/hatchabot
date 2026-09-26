@@ -174,7 +174,9 @@ Commands:
   skip-telegram <agent>        An agent parked on "paste a bot token" (the pool
                                is empty): finish it as a web-only agent instead
   rename <agent> <new name>    Change the display name
-  ai [<agent>] [<profileId>]   Show AI sources, or point an agent at one
+  ai [<agent>] [<profileId>] [--now]
+                               Show AI sources, or point an agent at one (applies
+                               at its next rebuild; --now rebuilds it at once)
                                (applies on the agent's next rebuild)
   adopt <workspace-dir> <name> [--reuse-bot] [--profile <id>]
                                Turn an existing OpenClaw agent's workspace
@@ -287,6 +289,8 @@ Commands:
   image unpin <agent>          Return an agent to the fleet default image
 
 Global options:
+  --yes, -y, -f      Skip the y/N question of a destructive command (delete
+                     and archive still want the name typed unless --yes)
   --url <url>        Control plane (env HATCHABOT_URL, default http://localhost:8080)
   --password <pw>    Shared password (env HATCHABOT_PASSWORD)
   --json             Machine-readable output (list, ask, tasks, doctor, accounts create)
@@ -472,6 +476,7 @@ export function parseArgs(argv: string[]) {
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       const name = eq > 0 ? a.slice(2, eq) : a.slice(2);
+      if (name === 'force') { flags.set('yes', '1'); continue; }
       if (BOOL_FLAGS.has(name)) {
         if (eq > 0) throw new Error(`--${name} takes no value`);
         flags.set(name, '1');
@@ -480,7 +485,8 @@ export function parseArgs(argv: string[]) {
       } else {
         throw new Error(`unknown option --${name}`);
       }
-    } else if (a === '-o') flags.set('out', value('o', ++i));
+    } else if (a === '-y' || a === '-f') flags.set('yes', '1');
+    else if (a === '-o') flags.set('out', value('o', ++i));
     else if (a === '-n') flags.set('lines', value('n', ++i));
     else positional.push(a);
   }
@@ -701,6 +707,8 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
  * data source) is real logic that would otherwise fail silently.
  */
 export interface FoldersIo {
+  /** Ask y/N before a removal (absent in tests). */
+  confirm?: (q: string) => Promise<void>;
   resolveAgent: (ref: string) => Promise<any>;
   jsonPost: (path: string, body: unknown, method?: string) => Promise<{ json: () => Promise<any> }>;
   apiDelete: (path: string) => Promise<unknown>;
@@ -717,6 +725,7 @@ export async function runFolders(
   const usage = 'usage: hatchabot folders <agent> [add <path> [--rw] | add-repo <git-url> [--rw | --public] | rm <name>]';
   const a = await io.resolveAgent(rest[0] ?? io.fail(usage));
   const sub = rest[1];
+  const confirm = async (q: string) => { if (io.confirm && !flags.has('yes')) await io.confirm(q); };
 
   // Back-compat: --none still clears the legacy read-only folder list.
   if (flags.has('none')) {
@@ -753,6 +762,7 @@ export async function runFolders(
     const ref = rest[2] ?? io.fail('usage: hatchabot folders <agent> rm <name>');
     const src = (a.dataSources ?? []).find((d: any) => d.mountName === ref || d.id === ref);
     if (!src) io.fail(`no data source named "${ref}" on "${a.name}" — see: hatchabot folders ${JSON.stringify(a.name)}`);
+    await confirm(`Stop sharing /data/${src.mountName} with "${a.name}"?`);
     if (src.legacy) {
       // Legacy folders live in the whole-list sharedPaths; drop just this one.
       const remaining = (a.sharedPaths ?? []).filter((p: string) => p !== src.hostPath);
@@ -1155,6 +1165,12 @@ async function main() {
       body: JSON.stringify(body),
     });
 
+  /** Destructive commands ask y/N unless --yes (-y, -f, --force): the app asks too (Chris, 2026-09-26). */
+  const confirmOr = async (q: string): Promise<void> => {
+    if (flags.has('yes')) return;
+    const ok = await askLine(`${q} [y/N] `);
+    if (!/^y(es)?$/i.test(ok.trim())) fail('nothing done');
+  };
   const askLine = async (promptText: string): Promise<string> => {
     process.stderr.write(promptText);
     const { createInterface } = await import('node:readline');
@@ -1348,7 +1364,14 @@ async function main() {
         return;
       }
       await jsonPost(`/v1/agents/${a.id}`, { aiProfileId: rest[1] }, 'PATCH');
-      console.log(`"${a.name}" will use that AI source after: hatchabot rebuild "${a.name}"`);
+      // One rule on every surface: the switch is recorded and applies at the next
+      // rebuild; each surface offers "now" (the app asks, the chat says so, here --now).
+      if (flags.has('now')) {
+        await jsonPost(`/v1/agents/${a.id}/rebuild`, {});
+        console.log(`"${a.name}" is rebuilding onto that AI source now (memory kept).`);
+      } else {
+        console.log(`"${a.name}" uses that AI source from its next rebuild — now with: hatchabot ai "${a.name}" ${rest[1]} --now`);
+      }
       return;
     }
     case 'adopt': {
@@ -1451,6 +1474,7 @@ async function main() {
     case 'folders': {
       await runFolders(
         {
+          confirm: confirmOr,
           resolveAgent: (ref) => resolveAgent(ctx, ref),
           jsonPost,
           apiDelete: (p) => api(ctx, p, { method: 'DELETE' }),
@@ -1584,6 +1608,7 @@ async function main() {
 
       if (sub === 'rm' || sub === 'delete') {
         const name = rest[1] ?? fail('usage: hatchabot image rm <name>');
+        await confirmOr(`Delete the derived image "${name}"?`);
         await api(ctx, `/v1/images/${encodeURIComponent(name)}`, { method: 'DELETE' });
         console.log(`Removed derived image "${name}".`);
         return;
@@ -1708,6 +1733,7 @@ async function main() {
     case 'deny': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot deny <agent> <code>'));
       const code = rest[1] ?? fail('give the pairing code (see: hatchabot pairing)');
+      await confirmOr(`Turn away request ${code} on "${a.name}"?`);
       await jsonPost(`/v1/agents/${a.id}/pairing/deny`, { code, ...(flags.get('kind') ? { kind: flags.get('kind') } : {}) });
       console.log('turned away — not a ban; they can ask again by messaging the bot');
       return;
@@ -1747,6 +1773,7 @@ async function main() {
       if (sub === 'rm') {
         const name = rest[2] ?? fail(usage);
         const e = (await envOf()).find((v: any) => v.name === name) ?? fail(`no env var "${name}" (see: hatchabot env "${a.name}")`);
+        await confirmOr(`Remove ${name} from "${a.name}"? (its value cannot be shown again)`);
         await api(ctx, `/v1/agents/${a.id}/env/${e.id}`, { method: 'DELETE' });
         console.log(`${name} removed — applies on the next rebuild`);
         return;
@@ -1764,6 +1791,7 @@ async function main() {
     case 'kick': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot kick <agent> <userId>'));
       const userId = rest[1] ?? fail('give the member userId (see: hatchabot members)');
+      await confirmOr(`Revoke ${userId} from "${a.name}"? They lose access at once.`);
       await api(ctx, `/v1/agents/${a.id}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });
       console.log('member revoked');
       return;
@@ -1992,6 +2020,7 @@ async function main() {
     // meaning (and anyone's scripts) alone.
     case 'unarchive': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot unarchive <agent>'));
+      await confirmOr(`Bring "${a.name}" back? It starts running again, on a NEW bot if it had one.`);
       await jsonPost(`/v1/agents/${a.id}/restore`, {});
       console.log(
         `restoring "${a.name}" — watch with: hatchabot list\n` +
@@ -2206,6 +2235,7 @@ async function main() {
     case 'revert': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot revert <agent> <snapshotId>'));
       const snapId = rest[1] ?? fail('give the snapshot id (see: hatchabot snapshots)');
+      await confirmOr(`Roll "${a.name}"'s files back to snapshot ${snapId}? (its current files are snapshotted first)`);
       const res: any = await (await jsonPost(`/v1/agents/${a.id}/snapshots/${snapId}/restore`, {})).json();
       console.log(`reverted ${res.restored.join(', ')}`);
       if (res.safetySnapshotId) console.log(`undo with: hatchabot revert "${a.name}" ${res.safetySnapshotId}`);

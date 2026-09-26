@@ -81,3 +81,13 @@ describe('tasks', () => {
     expect(durationMinutes('soon')).toBeUndefined();
   });
 });
+
+describe('--yes and its short forms', () => {
+  it('-y, -f and --force all mean --yes: the y/N question of a destructive command is skipped', () => {
+    for (const argv of [['kick', 'Tax', 'u1', '--yes'], ['kick', 'Tax', 'u1', '-y'], ['kick', 'Tax', 'u1', '-f'], ['kick', 'Tax', 'u1', '--force']]) {
+      const r = parseArgs(argv);
+      expect(r.flags.get('yes'), argv.join(' ')).toBe('1');
+      expect(r.positional).toEqual(['kick', 'Tax', 'u1']);
+    }
+  });
+});

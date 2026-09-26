@@ -157,8 +157,8 @@ export const REST_TOOLS: RestTool[] = [
     card: ({ agent, input }) => typeof input.group === 'string' && input.group.trim() ? `📁 Move "${agent!.name}" into the group "${input.group.trim()}"` : `📁 Take "${agent!.name}" out of its group`,
   },
   {
-    name: 'set_source', tier: 'mutate', agentArg: true, rebuildAfter: true,
-    description: "Switch which AI source an agent uses (id or name from list_sources). Applies with a rebuild, which this does; the current chat is saved to memory first.",
+    name: 'set_source', tier: 'mutate', agentArg: true,
+    description: "Switch which AI source an agent uses (id or name from list_sources). Recorded now, applied at the agent's next rebuild — the same rule as the app and the CLI; to apply at once, call rebuild_agent afterwards.",
     input_schema: obj({ agent: agentRef, source: str(128, 'AI source id or name') }, ['agent', 'source']),
     call: async ({ agent, input, get }) => {
       const src = pick((await get('/v1/ai-profiles')) as Array<{ id: string; name: string }>, need(input.source, 'source'), 'AI source');

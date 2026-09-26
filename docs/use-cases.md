@@ -282,12 +282,15 @@ the review confirms).
   v2.76.0–v2.77.2 (installs built locally instead). The pin follows OpenClaw's
   line now and the workflow resolves it from npm; a drift guard ties the two.
 
-**Inconsistencies left for Chris (behaviour, not wording)**
-- The CLI does not confirm `kick`, `deny`, `unarchive`, `revert`, `env rm`,
-  `folders rm` or `image rm`; the UI confirms each. `delete`, `archive` and
-  `tasks rm` do confirm. Scripts rely on silent CLIs, so this is a choice.
-- An AI-source switch applies three ways: chat rebuilds now, the CLI waits for
-  the next rebuild, the UI asks. Pick one default.
+**Decided 2026-09-26 (Chris), shipped in v2.83.0**
+- The CLI asks y/N before `kick`, `deny`, `unarchive`, `revert`, `env rm`,
+  `folders rm` and `image rm`, unless `--yes` (`-y`, `-f`, `--force`);
+  `delete` and `archive` keep asking for the typed name.
+- An AI-source switch is recorded and applies at the agent's next rebuild on
+  every surface; each offers "now": the app asks, the CLI has `--now`, the
+  chat says so and can call `rebuild_agent`.
+
+**Inconsistencies left (behaviour, not wording)**
 - UI-only features with no CLI (groups/classes, peers, connections,
   allow-knocks, rooms, Change bot, Sync name, Re-check, drain/hosts,
   backups, proposals) and CLI-only (`users`, `tasks runs`). Undocumented as

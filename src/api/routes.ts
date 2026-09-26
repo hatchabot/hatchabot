@@ -1242,6 +1242,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // authorise anything on its own.
   app.get('/v1/config', async () => ({
     authMode: deps.authMode ?? 'password',
+    // Managed mode (a hosted Hatchabot): who runs it, where to get help, and a
+    // notice to show everyone. The app hides the machine chores that are not
+    // the customer's (HTTPS, backups, OpenClaw upgrades) when `managed` is set.
+    managed: process.env.HATCHABOT_MANAGED_BY?.trim()
+      ? { by: process.env.HATCHABOT_MANAGED_BY.trim(), supportUrl: process.env.HATCHABOT_SUPPORT_URL?.trim() || undefined }
+      : undefined,
+    notice: process.env.HATCHABOT_NOTICE?.trim() || undefined,
     // Accounts mode with an empty roster: the login screen offers to create
     // account #1 instead of asking for credentials nobody has yet.
     needsSetup: deps.authMode === 'accounts' && store.countLocalAccounts() === 0,

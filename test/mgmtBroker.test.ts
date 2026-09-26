@@ -637,12 +637,12 @@ describe('one-call tools (restTools.ts) — resolved at propose time, replayed o
     expect(api.calls).toEqual(['POST /v1/agents/a1/archive {"checkpoint":true}']);
   });
 
-  it('set_source resolves a source NAME to its id, names it on the card, and rebuilds after', async () => {
+  it('set_source resolves a source NAME to its id, names it on the card, and records it for the next rebuild (one rule with the app and the CLI, 2026-09-26)', async () => {
     const { broker, api } = make({ rw: true });
     const r = await broker.handleTool('set_source', { agent: 'a1', source: 'spare key' }, WHO);
     expect((r as any).pending.summary).toMatch(/"Spare Key"/);
     await confirm(broker, r);
-    expect(api.calls).toEqual(['PATCH /v1/agents/a1 {"aiProfileId":"p2"}', 'rebuild:a1']);
+    expect(api.calls).toEqual(['PATCH /v1/agents/a1 {"aiProfileId":"p2"}']); // no rebuild on its own: rebuild_agent is the explicit "now"
   });
 
   it('an unknown source is refused before any card, listing the options', async () => {

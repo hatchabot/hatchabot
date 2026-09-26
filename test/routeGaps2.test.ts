@@ -447,3 +447,19 @@ describe('"anyone can knock"', () => {
     expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/allow-knocks`, headers: as(OTHER), payload: { on: true } })).statusCode).toBe(404);
   });
 });
+
+describe('managed mode (a hosted Hatchabot)', () => {
+  afterEach(() => { delete process.env.HATCHABOT_MANAGED_BY; delete process.env.HATCHABOT_SUPPORT_URL; delete process.env.HATCHABOT_NOTICE; });
+  it('/v1/config names who runs it, where to get help, and the notice; nothing of that on a home box', async () => {
+    const w = await world();
+    let c = (await w.f.inject({ method: 'GET', url: '/v1/config' })).json();
+    expect(c.managed).toBeUndefined();
+    expect(c.notice).toBeUndefined();
+    process.env.HATCHABOT_MANAGED_BY = 'Hatchabot Cloud';
+    process.env.HATCHABOT_SUPPORT_URL = 'https://hatchabot.com/help';
+    process.env.HATCHABOT_NOTICE = 'Maintenance Sunday 03:00 UTC, about ten minutes.';
+    c = (await w.f.inject({ method: 'GET', url: '/v1/config' })).json();
+    expect(c.managed).toEqual({ by: 'Hatchabot Cloud', supportUrl: 'https://hatchabot.com/help' });
+    expect(c.notice).toBe('Maintenance Sunday 03:00 UTC, about ten minutes.');
+  });
+});

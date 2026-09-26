@@ -943,7 +943,8 @@
   </header>
   <div id="setup"></div>
   <div id="limitBanner" hidden></div>
-  <div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
+  <div id="noticeBanner" hidden style="background:color-mix(in srgb, var(--accent) 17%, transparent);border:1px solid var(--accent);border-radius:10px;padding:10px 14px;margin:8px 0"></div>
+<div id="offlineBanner" hidden style="background:var(--bad);color:#fff;border-radius:10px;padding:10px 14px;margin:8px 0;font-weight:600">⚠ Can't reach Hatchabot — what you see may be an old cached copy. If you're away from home, check that <b>Tailscale</b> is connected on this device, then pull to refresh.</div>
   <div class="card" id="activityCard" hidden>
     <div class="row">
       <span class="name grow">Recent activity</span>
@@ -1864,6 +1865,7 @@
   </section>
 
   <section id="paneAccess" role="tabpanel" hidden>
+    <div id="managedBy" class="sub" hidden style="margin-bottom:10px"></div>
     <div id="familyOn" hidden>
       <h4 style="margin:0 0 4px">Family accounts</h4>
       <div class="sub">Right now everybody signs in with one shared password, so everything belongs to one person.
@@ -2686,6 +2688,14 @@ let appConfig = { authMode: 'password' };
 
 async function loadConfig() {
   try { appConfig = await (await fetch('/v1/config')).json(); } catch { /* keep default */ }
+  // A hosted Hatchabot: the provider's notice, and who to ask for help.
+  const nb = $('noticeBanner');
+  if (nb) { nb.hidden = !appConfig.notice; if (appConfig.notice) nb.textContent = appConfig.notice; }
+  const runBy = $('managedBy');
+  if (runBy) {
+    runBy.hidden = !appConfig.managed;
+    if (appConfig.managed) runBy.innerHTML = `Run by <b>${esc(appConfig.managed.by)}</b>: it keeps this Hatchabot upgraded, reachable and backed up.${appConfig.managed.supportUrl ? ` <a href="${esc(appConfig.managed.supportUrl)}" target="_blank" rel="noopener">Get help</a>` : ''}`;
+  }
   const identity = appConfig.authMode === 'identity';
   const accounts = appConfig.authMode === 'accounts';
   const locals = !!appConfig.localAccounts;          // may be true in identity mode too
@@ -3166,6 +3176,7 @@ function setupSteps() {
   ];
   if (!myAccount.hostOwner) return steps;
   const httpsDone = /^https:/i.test(appConfig?.appUrl ?? '');
+  const managed = !!appConfig?.managed; // a hosted Hatchabot: HTTPS and backups are the provider's job
   steps.push(
     { key: 'ops', done: !!ops, title: ops ? 'Your Hatchabot agent is set up' : 'Set up your Hatchabot agent', body: `
       <p class="sub" style="margin:4px 0 6px">The manager: the one you ask for changes — "make me an agent that watches the bins",
@@ -3180,15 +3191,15 @@ function setupSteps() {
         — someone knocking, a card waiting — down the same conversation. Confirming still happens here, in the app.</p>
       ${ops ? `<div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openV2Agent('${jsq(ops.id)}','messaging')">Open its chat apps</button></div>`
             : `<p class="sub" style="margin:0">Set the agent up first — the step above.</p>`}` },
-    { key: 'https', done: httpsDone || !!tailnet?.reachable,
+    ...(managed ? [] : [{ key: 'https', done: httpsDone || !!tailnet?.reachable,
       title: httpsDone || tailnet?.reachable
         ? `Reachable at ${esc(((tailnet?.url || appConfig?.appUrl) ?? '').replace(/^https:\/\//, ''))}`
         : 'Reach it from your phone, over HTTPS',
-      body: tailnetStepBody() },
-    { key: 'backup', done: backupAgeH !== null && backupAgeH < 48, title: backupAgeH !== null && backupAgeH < 48 ? 'Backups are running' : 'Check a backup has actually run', body: `
+      body: tailnetStepBody() }]),
+    ...(managed ? [] : [{ key: 'backup', done: backupAgeH !== null && backupAgeH < 48, title: backupAgeH !== null && backupAgeH < 48 ? 'Backups are running' : 'Check a backup has actually run', body: `
       <p class="sub" style="margin:4px 0 6px">Agents keep everything on a volume — memory, files, members. A nightly backup set is what stands between that and a bad day,
         and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old.`}</p>
-      <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('backups')">Open Backups</button></div>` },
+      <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('backups')">Open Backups</button></div>` }]),
     { key: 'gemini', optional: true, done: fleetKeys.media === true,
       title: fleetKeys.media ? 'Voice notes are transcribed (Gemini key set)' : 'Add a Gemini key so agents understand voice notes',
       body: `<p class="sub" style="margin:4px 0 6px">One Gemini API key lets every agent transcribe the voice notes people send it. Free tier is plenty for a household.
@@ -4203,6 +4214,7 @@ async function loadRuntime() {
     const cur = r.imageVersion ? esc(r.imageVersion) : 'unknown (image not built yet?)';
     let latestLine;
     if (!r.npmLatest) latestLine = `<div class="sub">Couldn't reach npm to check the latest stable.</div>`;
+    else if (r.upgradeAvailable && appConfig?.managed) latestLine = '';
     else if (r.upgradeAvailable) latestLine = `<div style="color:var(--warn)">⬆ OpenClaw <b>${esc(r.npmLatest)}</b> is the latest stable — you're on ${cur}.</div>`;
     else latestLine = `<div style="color:var(--ok)">✓ up to date with the latest stable (${esc(r.npmLatest)}).</div>`;
     const lagging = (agents ?? []).filter(a => a.rebuild).length;
@@ -5104,7 +5116,8 @@ async function loadRuntimeImages() {
     rtData = imgs;
     $('rtDefault').textContent = imgs.default;
     const sharedNote = rt.upgradeNeedsSharedEmbedder ? ` <span class="sub">An image for it carries no memory search engine of its own: its agents use the shared memory search service${rt.upgradeBuildable ? '' : ', which is off — start it first (Settings → Hosts)'}.</span>` : '';
-    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}${sharedNote}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
+    if ($('rtBuild')) $('rtBuild').hidden = !!appConfig?.managed; // trying a newer OpenClaw is the provider's job on a hosted Hatchabot
+    $('rtBase').innerHTML = rt.npmLatest ? (rt.upgradeAvailable && !appConfig?.managed ? `⬆ <b>${esc(rt.npmLatest)}</b> is the latest stable OpenClaw (the default runs ${esc(rt.imageVersion || '?')}). ${UI_V2 ? '' : `<a href="#" onclick="event.preventDefault();$('rtBuild').open=true;$('rtBuild').scrollIntoView({behavior:'smooth'})">Try it safely →</a>`}${sharedNote}` : `✓ The fleet default runs the latest stable OpenClaw (${esc(rt.imageVersion || '?')}).`) : '';
     if (rt.upgradeAvailable && rt.npmLatest && !$('rtBuildVersion').value) $('rtBuildVersion').value = rt.npmLatest;
     if (UI_V2) {
       // Only what asks something of you: agents that still need a Rebuild.
