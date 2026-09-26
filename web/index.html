@@ -732,11 +732,18 @@
   @keyframes v2spin { to { transform:rotate(360deg) } }
   @keyframes v2nudge { 0%,100% { transform:none } 50% { transform:translateY(-3px) } }
   @media (prefers-reduced-motion: reduce) { .v2st-working .v2ic::after, .v2st-waiting .v2ic { animation:none } .v2ic { transition:none } }
-  .v2newgroup { border:1px dashed var(--line); border-radius:12px; padding:14px; text-align:center; color:var(--dim); font-size:13px; margin-bottom:20px }
-  body:not(.v2dragging) .v2newgroup { display:none }
-  .v2dropstrips { display:grid; gap:10px; grid-template-columns:1fr 1fr }
-  body:not(.v2dragging) .v2dropstrips { display:none }
-  @media (max-width:560px) { .v2dropstrips { grid-template-columns:1fr } }
+  .v2newgroup { border:1px dashed var(--line); border-radius:12px; padding:14px; text-align:center; color:var(--dim); font-size:13px }
+  /* The new-group strip is there at rest too — a quiet dashed line, so people
+     know the gesture exists (Chris, 2026-09-25) — and the delete strip only
+     while dragging. While dragging, the strips dock to the bottom of the
+     screen so they are reachable from anywhere in a long list. */
+  .v2dropstrips { display:grid; gap:10px; grid-template-columns:1fr; margin-bottom:20px }
+  body:not(.v2dragging) .v2trash { display:none }
+  body.v2dragging .v2dropstrips { position:fixed; left:16px; right:16px; bottom:calc(16px + env(safe-area-inset-bottom, 0px)); z-index:1000; margin:0;
+    grid-template-columns:1fr 1fr; padding:8px; background:var(--panel); border:1px solid var(--line); border-radius:14px; box-shadow:0 12px 32px rgba(0,0,0,.28) }
+  body.v2dragging .v2newgroup { background:var(--panel-2) }
+  .v2newgroup.drop { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 17%, transparent); color:var(--text) }
+  @media (max-width:560px) { body.v2dragging .v2dropstrips { grid-template-columns:1fr } }
   /* Deleting is the one thing that cannot be undone, so its strip says so in
      its colour as well as its words — and the drop only OPENS the typed
      confirmation, it never deletes on the gesture alone. */
@@ -972,7 +979,7 @@
     </section>
     <div id="v2groups"><div class="hb-loading" aria-live="polite"><span class="hb-spin" aria-hidden="true"></span> Loading your agents… <span class="sub">(a few seconds on a big fleet: every agent is checked)</span></div></div>
     <div class="v2dropstrips">
-      <div class="v2newgroup" id="v2NewGroup">＋ Drop here to start a new group — you name it right there</div>
+      <div class="v2newgroup" id="v2NewGroup">＋ Drag an icon here to start a new group — you name it right there</div>
       <div class="v2newgroup v2trash" id="v2Trash">🗑 Drop here to delete — it asks first</div>
     </div>
   </div>
@@ -10750,14 +10757,43 @@ window.addEventListener('pointermove', (e) => {
     document.body.append(st.ghost, st.caret);
   }
   e.preventDefault();
-  st.ghost.style.left = e.clientX + 'px'; st.ghost.style.top = e.clientY + 'px';
-  st.target = v2DropTarget(e.clientX, e.clientY, st);
+  st.x = e.clientX; st.y = e.clientY;
+  v2DragHover(st);
+  v2AutoScroll(st);
+});
+/** Where the pointer is now: the ghost, the drop target, the caret. Also run after an auto-scroll moved the page under a still pointer. */
+function v2DragHover(st) {
+  st.ghost.style.left = st.x + 'px'; st.ghost.style.top = st.y + 'px';
+  st.target = v2DropTarget(st.x, st.y, st);
   document.querySelectorAll('.v2grid.drop, .v2newgroup.drop').forEach(x => x.classList.remove('drop'));
   if (st.target?.zone) st.target.zone.classList.add('drop');
   const c = st.target?.caret;
   st.caret.hidden = !c;
   if (c) Object.assign(st.caret.style, { left: `${c.x - 1}px`, top: `${c.top}px`, height: `${c.h}px` });
-});
+}
+/** A drag is a pointer, not the browser's drag-and-drop, so the page never
+ *  scrolls on its own: near the top or the bottom edge (above the docked
+ *  strips) it scrolls, faster the closer to the edge (Chris, 2026-09-25). */
+const V2_EDGE = 72;
+function v2AutoScroll(st) {
+  const dock = document.querySelector('.v2dropstrips');
+  const bottom = dock ? dock.getBoundingClientRect().top : window.innerHeight;
+  let v = 0;
+  if (st.y < V2_EDGE) v = -Math.ceil((V2_EDGE - st.y) / 4);
+  else if (st.y > bottom - V2_EDGE) v = Math.ceil((st.y - (bottom - V2_EDGE)) / 4);
+  st.scrollV = v;
+  if (v && !st.scrolling) {
+    st.scrolling = true;
+    const tick = () => {
+      if (!v2drag.active || v2drag.st !== st || !st.scrollV) { st.scrolling = false; return; }
+      const before = window.scrollY;
+      window.scrollBy(0, st.scrollV);
+      if (window.scrollY !== before) v2DragHover(st); // the page moved under the pointer
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+}
 function v2DropTarget(x, y, st) {
   const under = document.elementFromPoint(x, y);
   if (!under) return null;

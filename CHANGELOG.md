@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.80.0] — 2026-09-25
+
+### Changed
+- **Dragging an icon scrolls the page.** The home screen's drag is its own pointer gesture, so the browser never scrolled for it: an icon could not be carried past the edge of the screen. Near the top or bottom edge the page now scrolls, faster the closer to the edge, and the drop target follows the page under a still pointer.
+- **The new-group strip is always there.** It appeared only during a drag, at the bottom of the page, so people did not know the gesture existed. At rest it is a quiet dashed line under the groups ("Drag an icon here to start a new group"); during a drag the new-group and delete strips dock to the bottom of the screen, reachable from anywhere in a long list.
+
 ## [2.79.7] — 2026-09-25
 
 ### Changed
