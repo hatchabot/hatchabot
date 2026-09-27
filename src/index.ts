@@ -1,3 +1,4 @@
+import { whileBusy } from './orchestrator/busy.js';
 import { ensureOpsServer } from './ops/opsServer.js';
 import { APP_VERSION } from './domain/appVersion.js';
 import { defaultDbPath } from './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
@@ -290,8 +291,13 @@ if (store.listOpsAgents().length) {
       try {
         const provider = providers.get(store.getHost(a.hostId)?.provider ?? 'local-docker');
         if (!provider) return;
-        await provider.stop(a.runtimeRef!);
-        await provider.start(a.runtimeRef!);
+        // Under the busy flag: the boot reconcile and a hand-run action must
+        // not look at the container in the gap between the stop and the
+        // start and mark it stopped (30th audit).
+        await whileBusy(a.id, async () => {
+          await provider.stop(a.runtimeRef!);
+          await provider.start(a.runtimeRef!);
+        });
         store.setAppliedAppVersion(a.id, APP_VERSION);
         app.log.info({ agentId: a.id, version: APP_VERSION }, 'ops.restarted_for_tools');
       } catch (err) {

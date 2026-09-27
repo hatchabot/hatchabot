@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -66,15 +66,16 @@ describe('scripts/upgrade.sh', () => {
 
   it('two upgrades of one install at once: the second is refused', async () => {
     const w = world(); mkdirSync(join(w.home, 'tmp'));
-    // Hold the lock the script takes (TMPDIR/hatchabot-upgrade-<cksum of the dir>.lock) as a running upgrade would.
+    // Hold the lock the script takes (TMPDIR/hatchabot-upgrade-<cksum of the dir>.lock.d, a directory: macOS has no flock) as a running upgrade would.
     const sum = execFileSync('bash', ['-c', 'printf %s "$1" | cksum | cut -d" " -f1', '_', w.install], { encoding: 'utf8' }).trim();
-    const lock = join(w.home, 'tmp', `hatchabot-upgrade-${sum}.lock`);
-    const holder = spawn('flock', [lock, 'sleep', '5'], { stdio: 'ignore' });
-    for (let i = 0; i < 50 && !existsSync(lock); i++) await new Promise((r) => setTimeout(r, 50));
-    await new Promise((r) => setTimeout(r, 150));
+    const lock = join(w.home, 'tmp', `hatchabot-upgrade-${sum}.lock.d`);
+    mkdirSync(lock);
     const second = run(w.install, w.home, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
-    holder.kill('SIGKILL');
     expect(second.status, second.stdout + second.stderr).toBe(4);
     expect(second.stdout).toMatch(/Another upgrade/);
+    // A crash's leftover (older than an hour) is not a running upgrade.
+    execFileSync('touch', ['-d', '2 hours ago', lock]);
+    const third = run(w.install, w.home, { HATCHABOT_INSTALL_CMD: 'true' }, ['stable']);
+    expect(third.status, third.stdout + third.stderr).toBe(0);
   }, 20_000);
 });

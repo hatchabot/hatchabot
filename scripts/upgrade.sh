@@ -60,8 +60,13 @@ fi
 # One upgrade at a time: the channel timer and a hand-run upgrade used to race
 # each other's node_modules.prev (30th audit). The lock lives outside the tree
 # (an untracked file here would read as a local change next time).
-LOCK="${TMPDIR:-/tmp}/hatchabot-upgrade-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock"
-exec 9>"$LOCK"; flock -n 9 || { echo "Another upgrade of $DIR is running (lock $LOCK)."; exit 4; }
+# The lock is a directory (mkdir is atomic everywhere; macOS has no flock — the
+# first version of this refused every Mac upgrade, 2026-09-27). A lock older
+# than an hour is a crash's leftover, not a running upgrade.
+LOCK="${TMPDIR:-/tmp}/hatchabot-upgrade-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock.d"
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null || true; fi
+mkdir "$LOCK" 2>/dev/null || { echo "Another upgrade of $DIR is running (lock $LOCK)."; exit 4; }
+trap 'rmdir "$LOCK" 2>/dev/null; rm -f "$HATCHABOT_UPGRADE_COPY"' EXIT
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 INSTALL="${HATCHABOT_INSTALL_CMD:-npm ci --silent}"         # (likewise)
 echo "Upgrading $CUR → $TARGET ($CHANNEL)…"

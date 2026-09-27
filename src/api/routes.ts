@@ -5859,7 +5859,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // call it. Records today's snapshot (upsert by day) as a side effect — so a
   // usage trend accrues from normal use, no dedicated expensive job required.
   const computeFleetUsage = async (ownerId: string) => {
-    const visible = store.listVisibleAgents(ownerId);
+    // The owner's own agents only: usage is what their plan spends (30th audit; the same rule as the periods view).
+    const visible = store.listAgents(ownerId);
     const running = visible.filter((a) => a.state === 'RUNNING' && a.runtimeRef);
     const skipped0 = visible.filter((a) => a.state !== 'RUNNING' || !a.runtimeRef).length;
     const results = await Promise.all(

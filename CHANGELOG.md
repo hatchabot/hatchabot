@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.88.4] — 2026-09-27
+
+### Fixed
+- **`hatchabot upgrade` on a Mac said "another upgrade is running" and did nothing.** The lock added in v2.87.0 used `flock`, which macOS does not have. The lock is a directory now (atomic everywhere; a leftover older than an hour is ignored). A Mac already on v2.87.0–v2.88.3 needs this script once by hand: `curl -fsSL https://raw.githubusercontent.com/hatchabot/hatchabot/main/scripts/upgrade.sh -o /tmp/u.sh && HATCHABOT_UPGRADE_COPY=/tmp/u.sh HATCHABOT_UPGRADE_DIR=$HOME/hatchabot bash /tmp/u.sh latest`.
+
+### Changed
+- **Usage is the owner's own agents everywhere.** The Status → Usage rollup and the periods view counted an agent shared with you as yours; per-agent usage never did. One rule now: an agent's usage is its owner's.
+- The management agent's restart after an upgrade holds the busy flag, so the boot reconcile cannot mark it stopped in the gap.
+
 ## [2.88.3] — 2026-09-27
 
 ### Changed

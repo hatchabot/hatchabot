@@ -51,7 +51,9 @@ function bucketStart(iso: string, bucketMinutes: number): string {
 export function computeUsagePeriod(store: Store, ownerId: string, period: UsagePeriod, now = Date.now()): UsagePeriodView {
   const { ms, bucketMinutes } = SPAN[period];
   const from = new Date(now - ms).toISOString(), to = new Date(now).toISOString();
-  const agents = store.listVisibleAgents(ownerId).filter((a) => a.state !== 'DELETED');
+  // The owner's own agents: usage is what THEIR plan spends. A shared agent's
+  // numbers are its owner's, not a member's (one rule on every usage surface, 30th audit).
+  const agents = store.listAgents(ownerId).filter((a) => a.state !== 'DELETED');
   const ids = new Set(agents.map((a) => a.id));
   const per = new Map<string, { tokens: number; requests: number; limited: number }>();
   const row = (id: string) => { let r = per.get(id); if (!r) { r = { tokens: 0, requests: 0, limited: 0 }; per.set(id, r); } return r; };
