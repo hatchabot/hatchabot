@@ -891,6 +891,17 @@ six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image a
 dropdown of every image with a line saying what each one is, and **Fleet
 default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
 
+## Defaults for this machine
+
+Settings → Hosts → **Defaults for this machine** holds what every agent here
+gets unless it says otherwise: *Put idle agents to sleep after* (36h, 90m,
+2d, or off), *Memory per agent* (the default cap), *Memory for the memory
+search service*, and *Files an agent may send* on Telegram (up to 50 MB),
+Discord (10 MB on a server without boosts, up to 500) and Slack (100 MB, up
+to 1000). The app writes each to `.env` and applies it at once, no rebuild.
+Only the machine's owner sees the box. An agent overrides two of them on its
+Advanced tab: *Sleep when idle* and *Files it may send*.
+
 ## The memory search service
 
 Every runtime image since 2026.9.6 carries no embedding engine of its own:

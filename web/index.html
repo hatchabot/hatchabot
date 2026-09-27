@@ -1640,6 +1640,7 @@
       or a Max setup-token (<code>claude setup-token</code>).</div></details>
     </div>
     <div id="hostList" style="margin-top:10px">Loading…</div>
+    <div id="machineDefaults" hidden style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)"></div>
     <div id="embedBox" style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line)">
       <div><b>🧠 Memory search service</b> <span class="sub" id="embedStatus">…</span></div>
       <div class="sub" style="margin-top:2px">One engine on this machine for every agent's semantic memory search, instead of one inside each agent (about 290 MB each). Nothing uses it until an agent is switched to it.</div>
@@ -3907,7 +3908,28 @@ async function removePoolBot(username) {
 
 // ---- hosts (Cluster mode) ---------------------------------------------------
 
+/** Settings → Hosts: the defaults an owner tunes, written to .env by the app and applied at once. */
+async function loadMachineDefaults() {
+  const box = $('machineDefaults'); if (!box) return;
+  let r; try { r = await api('/v1/machine-defaults'); } catch { box.hidden = true; return; } // not this machine's owner
+  box.hidden = false;
+  box.innerHTML = `<div><b>⚙️ Defaults for this machine</b></div>
+    <div class="sub" style="margin:2px 0 8px">What every agent here gets unless it says otherwise. Saved to this machine's <code>.env</code>, so they survive a restart; each applies as it says, without a rebuild.</div>`
+    + r.defaults.map(d => `<div class="pair" style="align-items:flex-start;padding:6px 0;border-top:1px solid var(--line);flex-wrap:wrap;gap:6px">
+      <label for="md-${d.key}" class="grow" style="margin:0;min-width:220px"><b>${esc(d.label)}</b>
+        <div class="sub">${esc(d.help)}</div><div class="sub">Applies ${esc(d.applies)}.${d.set ? '' : ` Default: ${esc(d.fallback)}.`}</div></label>
+      <span style="display:flex;gap:6px;align-items:center"><input id="md-${d.key}" value="${esc(d.value)}" style="width:7em" autocomplete="off" spellcheck="false"
+        onkeydown="if(event.key==='Enter')saveMachineDefault('${d.key}', this)"><button class="hbtn" onclick="saveMachineDefault('${d.key}', $('md-${d.key}'))">Save</button></span></div>`).join('');
+}
+async function saveMachineDefault(key, input) {
+  try {
+    const r = await api('/v1/machine-defaults', { method: 'PUT', body: { key, value: input.value } });
+    input.value = r.default.value;
+    toast(`Saved${r.applied ? ` — applied to ${r.applied} ${key === 'engineMemory' ? 'service' : `agent${r.applied === 1 ? '' : 's'}`}` : ''}.`);
+  } catch (e) { toast(e.message, 6000); }
+}
 async function loadHosts() {
+  void loadMachineDefaults();
   const el = $('hostList');
   try {
     hosts = await api('/v1/hosts');
@@ -11223,6 +11245,10 @@ function v2Pane(a, tab) {
         <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
         <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>
         <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
+      ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `<label style="margin:0">Sleep when idle <select id="v2Sleep" onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
+          <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>
+        <label style="margin:0">Files it may send <select id="v2Files" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
+          ${['', 5, 10, 25, 50, 100].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">
@@ -11489,6 +11515,11 @@ async function openChanSetup(id, kind) {
   chanDlg.showModal();
   chanDlg.querySelector('input')?.focus();
   if (kind === 'slack') void chanPrefillSlackLink(a.name);
+}
+/** The agent's own sleep and file policy (Advanced tab): saved and applied at once. */
+async function v2SetAgentPolicy(id, body) {
+  try { await api(`/v1/agents/${id}`, { method: 'PATCH', body }); toast('Saved.'); await refresh(false); }
+  catch (e) { toast(e.message, 6000); await refresh(false); }
 }
 /** Slack creates an app from a manifest given in the address: no copy, no paste. */
 async function chanPrefillSlackLink(name) {

@@ -219,6 +219,8 @@ export interface Agent {
   /** Telegram rich-message formatting. Absent = Hatchabot's managed default
    *  (ON — OpenClaw's own unset default is off); false = plain text. */
   richMessages?: boolean;
+  /** Biggest file it may send on any app, in MB; unset = the machine's default per app. */
+  filesMaxMb?: number;
   /** Allow OpenClaw cron TRIGGER SCRIPTS (cron.triggers.enabled): a headless,
    *  zero-token condition script decides whether a scheduled task fires — the
    *  way an inbox poll wakes only when mail exists. Runs inside the agent's own

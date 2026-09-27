@@ -63,6 +63,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'hibernate.failed': (d) => `could not put it to sleep: ${String(d.error ?? '')}`.trim(),
   'hibernate.wake_failed': (d) => `could not wake it: ${String(d.error ?? '')}`.trim(),
   'hibernate.wake_abandoned': (d) => `could not wake it ${String(d.attempts ?? '')} times in a row, so it is just stopped now — press Start to try again: ${String(d.error ?? '')}`.trim(),
+  'machine.default_set': (d) => `set a machine default: ${String(d.key ?? '')} = ${String(d.value ?? '')}${d.applied ? ` (applied to ${String(d.applied)})` : ''}`,
+  'files.cap_failed': (d) => `could not set its ${String(d.kind ?? '')} file limit: ${String(d.error ?? '')}`.trim(),
   'hibernate.token_refused': 'Telegram refused its bot token, so a message cannot wake it — check the bot under Settings',
   'runtime.pins_cleared': (d) => `${Array.isArray(d.sessions) ? d.sessions.length : 'some'} of its conversations were still pinned to the old ${String(d.runtime ?? '')} runtime; now on the configured one`,
   'runtime.pin_failed': (d) => `could not clear a stale runtime pin${d.session ? ` on ${String(d.session)}` : ''}: ${String(d.error ?? '')}`.trim(),

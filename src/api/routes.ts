@@ -1,3 +1,4 @@
+import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
 import { computeUsagePeriod, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
@@ -3749,6 +3750,60 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (prev === undefined || n <= prev) return;
     trace(a.id)('runtime.self_restarted', { count: n, exitCode: running.lastExitCode, startedAt: running.startedAt });
   };
+  /** An agent's file ceiling on each of its apps, set live (OpenClaw hot-reloads it; a stopped agent's volume is edited). */
+  const applyFilesCap = async (a: Agent, only?: ChannelKindForFiles): Promise<number> => {
+    if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return 0;
+    const provider = providerFor(a.hostId);
+    let n = 0;
+    for (const kind of new Set(store.listChannelsForAgent(a.id).map((c) => c.kind))) {
+      if (kind !== 'telegram' && kind !== 'discord' && kind !== 'slack') continue;
+      if (only && kind !== only) continue;
+      const mb = String(filesMb(kind, a.filesMaxMb));
+      const res = a.state === 'RUNNING'
+        ? await provider.exec(a.runtimeRef, ['config', 'set', `channels.${kind}.mediaMaxMb`, mb]).catch(() => undefined)
+        : await provider.execShellOnVolume(a.runtimeRef, `openclaw config set channels.${kind}.mediaMaxMb ${mb} >/dev/null`).catch(() => undefined);
+      if (res?.code === 0) n++;
+      else trace(a.id)('files.cap_failed', { kind, error: String(res?.stderr ?? 'no answer').slice(0, 200) });
+    }
+    return n;
+  };
+
+  // ---- Defaults for this machine (machineDefaults.ts): written to .env, applied at once ----
+  app.get('/v1/machine-defaults', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    return { defaults: readMachineDefaults() };
+  });
+  app.put<{ Body: { key?: string; value?: unknown } }>('/v1/machine-defaults', async (req, reply) => {
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    const spec = defaultSpec(String(req.body?.key ?? ''));
+    if (!spec) return reply.code(400).send({ error: 'Unknown setting.' });
+    const checked = spec.check(String(req.body?.value ?? ''));
+    if (!checked.ok) return reply.code(400).send({ error: checked.error });
+    const envFile = process.env.HATCHABOT_ENV_FILE ?? join(process.cwd(), '.env');
+    const wrote = await writeEnvVar(envFile, spec.env, checked.value, () => true, `Written by Hatchabot: ${spec.label} (Settings → Hosts → Defaults for this machine).`)
+      .catch((err: unknown) => ({ ok: false, error: String(err) }));
+    if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
+    process.env[spec.env] = checked.value;
+    let applied = 0;
+    const local = store.localHostId();
+    const fleet = store.listAllActiveAgents().filter((a) => a.hostId === local && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED'));
+    if (spec.key === 'agentMemory') {
+      for (const a of fleet) {
+        const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
+        if (parseMemoryCap(a.memoryCap) || parseMemoryCap(cls?.memoryCap)) continue; // its own or its class's cap stands
+        const prov = providerFor(a.hostId);
+        try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch { /* the next rebuild applies it */ }
+      }
+    } else if (spec.key === 'engineMemory') {
+      if (embedder.enabled && !embedder.external) { await embedder.restart().catch(() => undefined); applied = 1; }
+    } else if (spec.key.startsWith('files')) {
+      const kind = spec.key.slice(5).toLowerCase() as ChannelKindForFiles;
+      for (const a of fleet) applied += await applyFilesCap(a, kind);
+    }
+    trace()('machine.default_set', { key: spec.key, value: checked.value || 'off', applied });
+    return { default: readMachineDefaults().find((d) => d.key === spec.key), applied };
+  });
+
   const rebuildNeedOf = async (a: Agent) => {
     if (!a.runtimeRef || (a.state !== 'RUNNING' && a.state !== 'STOPPED')) return undefined;
     const provider = providerFor(a.hostId);
@@ -4062,6 +4117,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           attentionAck: z.string().max(4000).nullable().optional(),
           /** `never` keeps this agent awake whatever HATCHABOT_HIBERNATE_AFTER says; `null` follows the machine. */
           hibernate: z.enum(['never']).nullable().optional(),
+          filesMaxMb: z.number().int().min(1).max(1000).nullable().optional(),
         })
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
@@ -4084,6 +4140,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         parsed.data.memoryCap === undefined &&
         parsed.data.attentionAck === undefined &&
         parsed.data.hibernate === undefined &&
+        parsed.data.filesMaxMb === undefined &&
         parsed.data.icon === undefined &&
         parsed.data.iconColor === undefined
       ) {
@@ -4092,6 +4149,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       if (parsed.data.attentionAck !== undefined) store.setAgentAttentionAck(agent.id, parsed.data.attentionAck);
       if (parsed.data.hibernate !== undefined) store.setHibernatePolicy(agent.id, parsed.data.hibernate);
+      if (parsed.data.filesMaxMb !== undefined) {
+        store.setAgentFilesMaxMb(agent.id, parsed.data.filesMaxMb);
+        await applyFilesCap(store.getAgent(agent.id)!);
+      }
       if (parsed.data.icon !== undefined || parsed.data.iconColor !== undefined) {
         store.setAgentIcon(agent.id, parsed.data.icon, parsed.data.iconColor);
       }

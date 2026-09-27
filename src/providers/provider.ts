@@ -72,6 +72,8 @@ export interface WorkspaceSeed {
 
 export interface OpenClawConfigPatch {
   agentId: string;
+  /** The agent's own file ceiling in MB, when it differs from the machine's (each app still caps it at its limit). */
+  filesMaxMb?: number;
   /** The agent's Hatchabot name. OpenClaw otherwise shows the slug, so the
    *  console named every agent something the owner never called it. */
   displayName?: string;

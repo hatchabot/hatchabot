@@ -184,6 +184,30 @@ const SCENARIOS = String.raw`(() => {
       ok('nothing missing now', document.getElementById('chanErr').textContent === '');
       chanDlg.close(); v2Close();
     },
+    machineDefaults: async () => {
+      window.__override['/v1/machine-defaults'] = { defaults: [
+        { key: 'sleepAfter', label: 'Put idle agents to sleep after', help: 'h', applies: 'now', fallback: 'off', value: '36h', set: true },
+        { key: 'filesSlack', label: 'Files an agent may send on Slack', help: 'h', applies: 'now', fallback: '100', value: '100', set: false } ] };
+      await openAiDlg('hosts');
+      const input = await until(() => document.getElementById('md-filesSlack'));
+      ok('the defaults box shows', !document.getElementById('machineDefaults').hidden);
+      input.value = '25';
+      input.nextElementSibling?.click?.() ?? input.parentElement.querySelector('button').click();
+      const put = await until(() => calls('PUT', /\/v1\/machine-defaults$/)[0]);
+      eq('the save', put.body, { key: 'filesSlack', value: '25' });
+      aiDlg.close();
+      // The agent's own policy on its Advanced tab.
+      openV2Agent('a1', 'advanced');
+      const files = await until(() => document.getElementById('v2Files'));
+      files.value = '10'; files.dispatchEvent(new Event('change', { bubbles: true }));
+      const patch = await until(() => calls('PATCH', /\/v1\/agents\/a1$/).find((c) => c.body && 'filesMaxMb' in c.body));
+      eq('the agent file cap', patch.body, { filesMaxMb: 10 });
+      const sleep = document.getElementById('v2Sleep');
+      sleep.value = 'never'; sleep.dispatchEvent(new Event('change', { bubbles: true }));
+      const p2 = await until(() => calls('PATCH', /\/v1\/agents\/a1$/).find((c) => c.body && 'hibernate' in c.body));
+      eq('stay awake', p2.body, { hibernate: 'never' });
+      v2Close();
+    },
     headerDoors: async () => {
       await openAiDlg(); ok('Settings opens', aiDlg.open); aiDlg.close();
       await openFleet(); ok('Status opens', v2FleetDlg.open); v2FleetDlg.close();

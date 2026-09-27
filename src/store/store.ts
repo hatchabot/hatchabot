@@ -548,6 +548,7 @@ export class Store {
       `ALTER TABLE agents ADD COLUMN parent_agent_id TEXT`,
       // Telegram rich formatting: NULL = managed default (on), 0 = opt-out.
       `ALTER TABLE agents ADD COLUMN rich_messages INTEGER`,
+      `ALTER TABLE agents ADD COLUMN files_max_mb INTEGER`,
       `ALTER TABLE agents ADD COLUMN cron_triggers INTEGER`,
       // Memory search engine: baked (NULL) or the machine's shared service.
       `ALTER TABLE agents ADD COLUMN embed_mode TEXT`,
@@ -2896,6 +2897,9 @@ export class Store {
     this.db.prepare(`UPDATE agents SET cron_triggers = ?, updated_at = ? WHERE id = ?`).run(on ? 1 : 0, new Date().toISOString(), id);
   }
 
+  setAgentFilesMaxMb(id: string, mb: number | null): void {
+    this.db.prepare(`UPDATE agents SET files_max_mb = ?, updated_at = ? WHERE id = ?`).run(mb, new Date().toISOString(), id);
+  }
   setAgentRichMessages(id: string, on: boolean | null): void {
     this.db
       .prepare(`UPDATE agents SET rich_messages = ?, updated_at = ? WHERE id = ?`)
@@ -3804,6 +3808,7 @@ function rowToAgent(r: any): Agent {
     paramFiles: r.param_files ? safeJson(r.param_files, undefined) : undefined,
     groupAccess: r.group_access ? safeJson(r.group_access, undefined) : undefined,
     richMessages: r.rich_messages === null || r.rich_messages === undefined ? undefined : !!r.rich_messages,
+    filesMaxMb: r.files_max_mb ?? undefined,
     cronTriggers: !!r.cron_triggers,
     memoryCap: r.memory_cap ?? undefined,
     memoryCapBaseline: r.memory_cap_baseline ?? undefined,

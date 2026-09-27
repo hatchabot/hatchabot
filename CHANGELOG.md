@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.0] — 2026-09-27
+
+### Added
+- **Defaults for this machine, in the app.** Settings → Hosts has a *Defaults for this machine* box for the knobs an owner tunes because of what their agents do: when idle agents go to sleep, the memory each agent gets by default, the memory search service's memory, and the biggest file an agent may send on Telegram, Discord and Slack. Each is saved to this machine's `.env` (so an operator can still edit the file) and applies at once, without a rebuild: file limits are set live on every agent on that app, a new memory default on every agent that uses it, the search service restarts with its new size, the sleep timer is read by the next sweep. Install-level settings (ports, data folder, secrets, managed mode) stay in `.env` only.
+- **An agent's own sleep and file policy.** Its Advanced tab has *Sleep when idle* (as the machine does / never) and *Files it may send* (as the machine does, or 5–100 MB; each app still caps it at its own limit). Both apply at once.
+
 ## [2.88.5] — 2026-09-27
 
 ### Fixed

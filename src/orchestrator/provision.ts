@@ -680,6 +680,7 @@ export async function buildRuntimeSpec(
         ops: ops && { mcpUrl: ops.mcpUrl, token: ops.token },
         setupToken: oauthToken,
         gatewayToken: gateway.token,
+        ...(agent.filesMaxMb ? { filesMaxMb: agent.filesMaxMb } : {}),
         // Web-only agents have no bot: configWriter then writes no Telegram
         // channel at all.
         telegram: channelRow && botToken ? {
