@@ -1,7 +1,7 @@
 # Hatchabot features — a tour
 
 What exists today, in one place. Each section says how to do the thing; where a
-deeper doc exists, it's linked instead of duplicated. Updated 2026-09-23.
+deeper doc exists, it's linked instead of duplicated. Updated 2026-09-27.
 
 **Start here: you don't have to do any of it yourself.** Hatchabot ships with a
 manager — *your Hatchabot agent* — that you talk to in plain words: "which
@@ -36,8 +36,11 @@ remembered in that browser; **✨ New look** in the classic header, or
 The header holds:
 - **New agent**, whose panel also offers *start from a template* and *open a
   .hatchabot file*.
-- **Status** (the 🎛️ tile in the Hatchabot panel; called Fleet until v2.47.2): one panel with tabs for Health, Usage, Resources, Activity, and
+- **Status** (a green pulse; called Fleet until v2.47.2): one panel with tabs for Health, Usage, Resources, Activity, and
   Tools (bulk actions, rebuild all, sort A→Z).
+- **Bulk actions** (a bolt), shown once there are two agents to pick from.
+- The four are symbols only — pulse, bolt, gear, plus — with the name on hover
+  (Chris, 2026-09-27).
 - **Settings**: this machine's settings, opened directly.
 - An inbox button, which appears only when someone has sent you an agent.
 - The account menu: who you're signed in as, light or dark appearance,
@@ -620,6 +623,10 @@ empty screen.
 
 ## Chat apps
 
+Taking a bot or an app off an agent is **Detach** (the agent keeps everything
+it knows; the people who reached it there get a goodbye; the bot goes back to
+your pool or is parked for another agent).
+
 **Chat app** is what Hatchabot calls the places an agent can be talked to:
 Telegram, Discord and Slack. Not "channel" — Slack and Discord both
 use that word for a *room*, so "connect a channel" would mean two things on one
@@ -727,6 +734,16 @@ group-chat changes.
   Slack and Discord are not offered for the Hatchabot agent itself yet.
 
 Design and the verification notes: `docs/channels-slack-discord-design.md`.
+
+## When an agent says "Your model provider needs a new login"
+
+An agent that once ran on a machine login (the Claude Code CLI) and was later
+switched to a setup token can carry, per conversation, a pin to the old CLI
+runtime; OpenClaw then routes its turns through a CLI that is no longer
+logged in. Hatchabot clears such pins after every rebuild, start and wake and
+once at boot for the running fleet (the event trail says "N of its
+conversations were still pinned to the old claude-cli runtime"). If an agent
+still says it, check its trail; a rebuild re-seeds everything.
 
 ## When a container restarts on its own
 
@@ -869,6 +886,35 @@ like, and **Pin & rebuild _n_** pins each and queues the rebuilds (memory kept,
 six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image as a
 dropdown of every image with a line saying what each one is, and **Fleet
 default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
+
+## The memory search service
+
+Every runtime image since 2026.9.6 carries no embedding engine of its own:
+the machine runs **one memory search service** (a llama.cpp embedder behind a
+small door) that every agent uses for its memory index. Each agent gets its
+own key, minted at build time and retired when the agent is archived or
+deleted; a rebuild's new key joins the old one until the build is accepted,
+so a failed rebuild never locks the running container out. The machine's
+owner turns the service on and off under **Settings → Hosts**; a Stop is
+final — the health loop, a restart and any owner's rebuild respect it — and
+the owner's own first agent turns an untouched service on. A deploy of
+Hatchabot does not pause it: the door is kept when its configuration is
+unchanged. A neighbouring Hatchabot on the same machine (a shared host) can
+use it with a **guest key**: `hatchabot embedder guest-add <name>` prints the
+three lines for its `.env`, `guest-rm` revokes the key within seconds.
+
+## Shared hosts (rootless Docker)
+
+Hatchabot runs unchanged under a rootless Docker daemon, one Linux user per
+tenant on one machine: see [docs/shared-host.md](shared-host.md) for the
+recipe (host loopback on, the 10.0.2.2 host alias, the per-user firewall
+rule that keeps tenants apart, memory limits). Two rules follow from every
+container of a rootless daemon reaching Hatchabot from 127.0.0.1: loopback is
+not "this machine" there (the first account needs the setup code, a
+forwarded-for header is not trusted; `HATCHABOT_CONTAINERS_ON_LOOPBACK=1`
+says so explicitly, and it is detected at boot), and the manager's doorman
+opens every connection to the door with its own per-build key, so a
+manager's key alone opens nothing from another container.
 
 ## Fleet operations
 
