@@ -479,31 +479,8 @@
      others (Chris, 2026-09-24: one row of equal tiles, no dividing line). */
   .v2face { width:56px; height:56px; border-radius:17px; background:var(--accent); color:var(--accent-ink); display:grid; place-items:center; font-size:26px; margin-top:0 }
   .v2face.live { background:none; width:auto; height:auto; font-size:inherit; display:block; color:var(--text) }
-  /* The manager's dashboard: the fleet in six tiles, in the same language as
-     the agent icons — a tinted rounded square with an emoji sticker. Each one
-     is a door to the screen that acts on it. */
-  /* The numbers as a compact list of pills (Chris, 2026-09-26): emoji, figure,
-     label in one line each; a pill is a door to the screen that acts on it. */
-  .v2stats { display:grid; grid-auto-flow:column; grid-template-rows:repeat(2, auto); gap:6px 8px; justify-content:start; justify-items:start; min-width:0 } /* two per column, then more columns (Chris, 2026-09-26) */
-  .v2stat { flex:none; display:inline-flex; align-items:center; gap:6px; height:32px; padding:0 11px 0 9px; border-radius:999px; cursor:pointer;
-            font:inherit; color:inherit; --tone:var(--dim);
-            background:color-mix(in srgb, var(--tone) 12%, var(--panel-2)); border:1px solid color-mix(in srgb, var(--tone) 38%, var(--line));
-            transition:transform .12s ease, box-shadow .12s ease }
-  .v2stat:hover, .v2stat:focus-visible { transform:translateY(-1px); box-shadow:0 3px 10px rgba(0,0,0,.14) }
-  .v2stat .tile { display:inline-flex; align-items:center; gap:5px }
-  .v2stat .tile .v2tgs, .v2spark { display:none }
-  .v2stat .em { font-size:15px; line-height:1 }
-  .v2stat .num { font-size:14px; font-weight:800; line-height:1; letter-spacing:-.01em; font-variant-numeric:tabular-nums }
-  .v2stat .num small { font-size:11px; font-weight:700; color:var(--dim) }
-  .v2stat .lab { font-size:12px; line-height:1; color:var(--dim); white-space:nowrap }
-  .v2stat.hot .num, .v2stat.hot .lab { color:var(--tone) }
-  @media (prefers-reduced-motion: reduce) { .v2stat { transition:none } }
-  /* On a phone the tiles get the hub's full width (the manager's icon drops
-     out at 640px), so they WRAP onto a second row. They used to be cut off at
-     four, which silently hid half the dashboard on the device most likely to
-     be glanced at. */
+  /* The set-up hub (no manager yet) on a phone: the action tiles take its full width. */
   @media (max-width:560px) {
-    .v2hubactions .v2btn .lbl { display:none }
     .v2hubactions { margin-left:0; width:100% }
   }
   /* Written as .v2hubrow .v2hubagent: the generic .v2agent rule (padding
@@ -953,7 +930,6 @@
         <div id="v2OpsBox" hidden></div>
         <div class="v2hubrow">
           <div class="v2face" aria-hidden="true">🐣</div>
-          <div class="v2stats" id="v2Stats" hidden></div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
           <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" aria-label="Inbox" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
           <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" aria-label="Status" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 12.5 6.5 12.5 9.5 5 13.5 19.5 16.5 10.5 18.5 12.5 21.5 12.5"/></svg></span><span class="lbl">Status</span></button>
@@ -9983,7 +9959,7 @@ function renderAgents() {
   // Show "Rebuild all" only when there's more than one agent to rebuild.
   $('rebuildAllBtn').hidden = rebuildableAgents().length < 2;
   $('fleetActionsBtn').hidden = agents.filter(a => (a.role ? a.role === 'owner' : true) && a.state !== 'ARCHIVED').length < 2;
-  if ($('v2BulkBtn')) { $('v2BulkBtn').hidden = $('fleetActionsBtn').hidden; v2HubWrapCheck(); }
+  if ($('v2BulkBtn')) { $('v2BulkBtn').hidden = $('fleetActionsBtn').hidden; }
   renderToc(); // keep the jump-to legend in sync with the list
   if (profiles.length && agents.length === 0) {
     el.innerHTML = `<div class="empty">No agents yet.<br>Tap <b>+</b> to create your first one.</div>`;
@@ -10448,7 +10424,7 @@ async function refresh(withMeta) {
     loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
-    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); void loadResourcesTile(); }
+    if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); }
     if (withMeta && tailnet === null) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
@@ -11890,111 +11866,14 @@ function renderV2Joins() {
  * in the icon language of the home screen. Every tile is a button to the screen
  * that does something about it — a number you cannot act on is decoration.
  */
-/** The last 24 hours of fleet requests as a tiny area, drawn behind a tile's
- *  number — the shape of the day without another chart to read. */
-function v2Spark(hourly) {
-  const pts = (hourly ?? []).slice(-24).map(h => (h.ok ?? 0) + (h.limited ?? 0));
-  if (pts.length < 4 || !pts.some(n => n > 0)) return '';
-  const max = Math.max(...pts), W = 56, H = 16;
-  const d = pts.map((n, i) => `${(i / (pts.length - 1) * W).toFixed(1)},${(H - (n / max) * H).toFixed(1)}`).join(' ');
-  return `<svg class="v2spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
-    <polygon points="0,${H} ${d} ${W},${H}" fill="currentColor" opacity=".13"/>
-    <polyline points="${d}" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".42"/></svg>`;
-}
 
-/** The hub's numbers row: off. Kept behind a flag for one release in case it is missed. */
-const HUB_NUMBERS = false;
 function renderV2Stats() {
-  const box = $('v2Stats');
-  if (!box) return;
   const mine = (agents ?? []).filter(a => v2Mine(a) && !a.ops && a.state !== 'ARCHIVED');
   // The numbers row is gone (Chris, 2026-09-26: never acted on; a clean hub is
   // worth more). Everything it showed lives under Status, and what needs you
   // shows below the hub and under View by → Needs you. Only the Bulk actions
   // button's visibility is still decided here.
-  box.hidden = true;
   if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
-  if (!HUB_NUMBERS) return;
-  if (!agentsLoaded || !mine.length) { box.hidden = true; return; }
-  const awake = mine.filter(a => a.state === 'RUNNING').length;
-  const unread = mine.filter(v2Unread).length;
-  const knocking = mine.reduce((n, a) => n + (pairings[a.id]?.length ?? 0), 0);
-  const stale = mine.filter(a => a.rebuild && !attentionCleared(a)).length;
-  const usage = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window5h?.requests ?? 0), 0);
-  const tokens1h = (sourceUsageData?.sources ?? []).reduce((n, s) => n + (s.window1h?.tokens ?? 0), 0);
-  const limited = (sourceUsageData?.sources ?? []).some(s => s.status === 'limited');
-  // The setup guide no longer vanishes after the first agent; while anything
-  // on it is undone, the dashboard says so and opens it.
-  const setup = setupSteps();
-  const setupDone = setup.filter(x => x.done).length, setupTotal = setup.length;
-  const setupLeft = setupTotal - setupDone;
-  const tiles = [
-    { key: 'awake', emoji: '🐣', tone: 'var(--ok)', num: `${awake}<small>/${mine.length}</small>`,
-      lab: 'awake', hot: awake < mine.length, go: () => openFleetHealth(), title: `${awake} of ${mine.length} agents running` },
-    // Setup is its own collapsible section above this panel (Chris, 2026-09-24).
-    // Leads to the Needs-you view, not into the first agent: opening one marked it
-    // read and the tile vanished under the click (Chris, 2026-09-24).
-    unread ? { key: 'unread', emoji: '💬', tone: 'var(--info)', num: unread, lab: 'to read', hot: true,
-      go: () => v2SetView('attention'), title: 'Agents with something new in their console — see them under View by → Needs you' } : null,
-    v2PendingCount ? { key: 'confirm', emoji: '✅', tone: 'var(--accent)', num: v2PendingCount, lab: 'to confirm', hot: true,
-      go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'Changes your manager has prepared' } : null,
-    knocking ? { key: 'knock', emoji: '🔑', tone: 'var(--info)', num: knocking, lab: 'knocking', hot: true,
-      go: () => $('v2Proposals')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), title: 'People waiting to be let in' } : null,
-    stale ? { key: 'stale', emoji: '🔄', tone: 'var(--warn)', num: stale, lab: 'to rebuild', hot: true,
-      go: () => { openFleetActions(); setTimeout(() => faSelect('needs-rebuild'), 50); }, title: 'Agents on an older image' } : null,
-    { key: 'tokens', emoji: '🔢', tone: 'var(--info)', num: fmtN(tokens1h), lab: 'tokens / hr', hot: false,
-      go: () => openFleetUsage(), title: 'Tokens your agents have spent across every AI source in the last hour (Status → Usage has the day and the week)' },
-    // Live CPU and memory (Status → Resources): the machine's in-use memory,
-    // amber when a container has been running into its cap (Chris, 2026-09-24).
-    resourcesTile ? { key: 'resources', emoji: '🧠', tone: resourcesTile.capHits ? 'var(--warn)' : 'var(--info)', num: resourcesTile.num, lab: resourcesTile.capHits ? 'at cap' : 'memory in use', hot: !!resourcesTile.capHits,
-      go: () => openFleet('resources'), title: resourcesTile.capHits ? `${resourcesTile.capHits} container${resourcesTile.capHits === 1 ? ' has' : 's have'} run into ${resourcesTile.capHits === 1 ? 'its' : 'their'} memory cap — open Status → Resources` : `Memory in use across every container (${resourcesTile.cpu}% CPU) — open Status → Resources` } : null,
-    // asks/5h was here; dropped (Chris, 2026-09-24) — Status → Usage has the
-    // full picture. A rate-limited source still shows, as its own tile.
-    limited ? { key: 'usage', emoji: '⛔', tone: 'var(--bad)', num: fmtN(usage), lab: 'rate-limited', hot: true,
-      go: () => openFleetUsage(), title: 'An AI source is rate-limited — open Usage' } : null,
-    backupAgeH !== null ? { key: 'backup', emoji: '🗄', tone: backupAgeH > 36 ? 'var(--warn)' : 'var(--ok)',
-      num: backupAgeH < 1 ? '<small>just now</small>' : backupAgeH < 48 ? `${Math.round(backupAgeH)}<small>h</small>` : `${Math.round(backupAgeH / 24)}<small>d</small>`,
-      lab: 'last backup', hot: backupAgeH > 36, go: () => openAiDlg('backups'),
-      title: backupAgeH > 36 ? 'The nightly backup has not run — open Backups' : 'Age of the newest backup set' } : null,
-    { key: 'bots', emoji: '🤖', tone: poolAvail + discordPoolAvail ? 'var(--ok)' : 'var(--off)', num: poolAvail + discordPoolAvail, lab: 'spare bots', hot: false,
-      // The same app badges the agent icons wear, so "spare" reads as "spare
-      // Telegram and Discord bots" without spelling it out under a 72px tile.
-      art: `<span class="v2tgs" aria-hidden="true">${discordPoolAvail ? `<span class="v2tg v2mk-discord">${V2_MARK_SVG.discord}</span>` : ''}${poolAvail || !discordPoolAvail ? `<span class="v2tg v2mk-telegram">${V2_MARK_SVG.telegram}</span>` : ''}</span>`,
-      go: () => openAiDlg(discordPoolAvail && !poolAvail ? 'discord' : 'pool'), title: `${poolAvail} Telegram and ${discordPoolAvail} Discord bot${poolAvail + discordPoolAvail === 1 ? '' : 's'} parked and ready for a new agent` },
-  ].filter(Boolean).slice(0, 8);
-  // One line, always (Chris, 2026-09-24): when the numbers and the action
-  // tiles do not fit, the least actionable numbers go first — asks/5h, then
-  // tokens/24h, spare bots, last backup — never the ones that ask for a click.
-  const dropOrder = { tokens: 1, bots: 2, backup: 3, resources: 4 };
-  const html = tiles.map(t => `<button class="v2stat${t.hot ? ' hot' : ''}" style="--tone:${t.tone}" title="${esc(t.title)}" data-stat="${t.key}"${dropOrder[t.key] ? ` data-drop="${dropOrder[t.key]}"` : ''}>
-      <span class="tile">${t.art ?? ''}<span class="em" aria-hidden="true">${t.emoji}</span><span class="num">${t.num}</span></span>
-      <span class="lab">${esc(t.lab)}</span>
-    </button>`).join('');
-  if (box.__html !== html) {
-    box.__html = html;
-    box.innerHTML = html;
-    for (const t of tiles) box.querySelector(`[data-stat="${t.key}"]`)?.addEventListener('click', t.go);
-  }
-  box.hidden = false;
-  // The Bulk actions tile: only once there is a selection to make.
-  if ($('v2BulkBtn')) $('v2BulkBtn').hidden = mine.length < 2;
-  v2HubWrapCheck();
-}
-// Figures for the resources tile, refreshed at most once a minute: one
-// docker stats call per machine, not one per home-screen poll.
-let resourcesTile = null, resourcesTileAt = 0;
-async function loadResourcesTile() {
-  if (Date.now() - resourcesTileAt < 60_000) return;
-  resourcesTileAt = Date.now();
-  try {
-    const r = await api('/v1/resources');
-    const rows = r.hosts.flatMap(h => h.containers);
-    const mem = rows.reduce((n, c) => n + c.memBytes, 0);
-    const cpu = Math.round(rows.reduce((n, c) => n + c.cpuPct, 0));
-    const capHits = rows.filter(c => c.memCapHits || c.memOomKills).length;
-    resourcesTile = { num: capHits ? String(capHits) : (mem >= 1073741824 ? `${Math.round(mem / 1073741824)}<small>GB</small>` : `${Math.round(mem / 1048576)}<small>MB</small>`), cpu, capHits };
-    renderV2Stats();
-  } catch { /* the tile simply stays away */ }
 }
 let v2PendingCount = 0;
 let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
@@ -12018,13 +11897,6 @@ async function loadBackupAge() {
   } catch { backupAgeH = null; } // not the host owner, or no backups configured
 }
 
-/** Do the numbers and the action tiles share a line? If not, lay the actions out as their own row. */
-function v2HubWrapCheck() {
-  // The row wraps by itself now (Chris, 2026-09-24): every tile stays, in one
-  // flow, New last at the right. Nothing to measure; nothing dropped.
-  const stats = $('v2Stats'); if (!stats) return;
-  for (const t of stats.querySelectorAll('[data-drop]')) t.hidden = false;
-}
 
 function v2RenderHub() {
   const ops = agents.find(a => a.ops && v2Mine(a) && a.state !== 'ARCHIVED');
