@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.86.1] — 2026-09-27
+
+### Fixed
+- **"Your model provider needs a new login" from an agent that switched to a setup token.** Before setup tokens a subscription agent ran its turns through the Claude Code CLI, and OpenClaw pinned that runtime on each of its conversations. The pin outlived the switch: the rebuild wrote the token profile, but the conversations kept asking for the CLI, which no longer had a login (Girlfriend Advisor and three others on the Spark, silent since 2026-09-11; noticed at a wake). Now a rebuild, a start, a wake and every boot clear any pin to a runtime the agent's settings no longer name, and the event trail says so.
+
 ## [2.86.0] — 2026-09-26
 
 ### Changed

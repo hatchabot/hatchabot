@@ -27,6 +27,8 @@ export interface HibernateDeps {
   /** The agent's own scheduled tasks (OpenClaw's built-in ones excluded). */
   ownCrons: (a: Agent) => Promise<Array<{ enabled: boolean; system?: boolean }>>;
   isBusy: (agentId: string) => boolean;
+  /** After a wake, once the store says RUNNING: e.g. clearing stale runtime pins when the gateway is up. */
+  afterWake?: (a: Agent) => void;
   log: (agentId: string) => (event: string, detail?: Record<string, unknown>) => void;
   fetchImpl?: typeof fetch;
 }
@@ -99,7 +101,9 @@ export async function wakeAgent(deps: HibernateDeps, a: Agent, why: string): Pro
   deps.store.setAgentState(a.id, 'RUNNING');
   deps.store.setHibernated(a.id, null);
   deps.log(a.id)('agent.woken', { why });
-  return deps.store.getAgent(a.id)!;
+  const woken = deps.store.getAgent(a.id)!;
+  deps.afterWake?.(woken);
+  return woken;
 }
 
 /**

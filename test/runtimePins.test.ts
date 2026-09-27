@@ -1,101 +1,89 @@
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error plain .mjs helper shared with the build script
-import { embedEngine, pickPlugin, satisfies } from '../scripts/runtime-pins.mjs';
-import { readFileSync } from 'node:fs';
-import { parseEmbedEngineLabel } from '../src/providers/provider.js';
-import { EMBED_MODEL_SHA256, EMBED_MODEL_URL } from '../src/embedder/embedder.js';
+import { clearStaleRuntimePins, clearStaleRuntimePinsWhenUp, listRuntimePins } from '../src/orchestrator/runtimePins.js';
+import { as, makeWorld, seedRunningAgent } from './support/world.js';
 
-describe('runtime image pins', () => {
-  const R9 = '>=24.16.0 <25 || >=26.1.0';
-  it('reads an npm engines range', () => {
-    expect(satisfies('v22.23.2', R9)).toBe(false);
-    expect(satisfies('v24.15.9', R9)).toBe(false);
-    expect(satisfies('v24.21.0', R9)).toBe(true);
-    expect(satisfies('v25.9.0', R9)).toBe(false);
-    expect(satisfies('26.1.0', R9)).toBe(true);
-    expect(satisfies('v22.23.2', '>=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0')).toBe(true);
-  });
-  it('never claims a fit for a range it cannot read', () => {
-    expect(satisfies('v24.21.0', '^24.16.0')).toBe(false);
-    expect(satisfies('garbage', R9)).toBe(false);
-  });
-  it('picks the newest full plugin release that is not newer than OpenClaw', () => {
-    const list = ['2026.7.1', '2026.7.33', '2026.8.2', '2026.9.1-beta.1', '2026.9.1', '2026.9.4', '2026.9.5'];
-    expect(pickPlugin('2026.9.4', list)).toBe('2026.9.4');
-    expect(pickPlugin('2026.9.0', list)).toBe('2026.8.2');
-    expect(pickPlugin('2026.7.1-2', list)).toBe('2026.7.1');
-    expect(pickPlugin('2026.1.0', list)).toBeUndefined();
-  });
-});
+/**
+ * Stale runtime pins (runtimePins.ts): a conversation pinned to a runtime the
+ * config no longer names (the pre-setup-token claude-cli) is patched back to
+ * configured routing; pins the config still names, implicit ones and locked
+ * sessions are left alone.
+ */
 
-describe('the memory search engine in an image', () => {
-  it('2026.8 and later have nothing to bake; earlier versions bake their own', () => {
-    expect(embedEngine('2026.7.1-2')).toBe('baked');
-    expect(embedEngine('2026.7.33')).toBe('baked');
-    expect(embedEngine('2026.8.0')).toBe('none');
-    expect(embedEngine('2026.9.4')).toBe('none');
-    expect(embedEngine('garbage')).toBe('baked');
-  });
-  it('the plugin-install label is npm only when it says so', async () => {
-    const { parsePluginInstallLabel } = await import('../src/providers/provider.js');
-    expect(parsePluginInstallLabel('npm')).toBe('npm');
-    expect(parsePluginInstallLabel('link')).toBe('link');
-    expect(parsePluginInstallLabel(undefined)).toBe('link');
-  });
-  it('the plugins label lists ids from id=package pairs', async () => {
-    const { parsePluginsLabel } = await import('../src/providers/provider.js');
-    expect(parsePluginsLabel('duckduckgo=@openclaw/duckduckgo-plugin')).toEqual(['duckduckgo']);
-    expect(parsePluginsLabel('')).toEqual([]);
-    expect(parsePluginsLabel(undefined)).toEqual([]);
-    expect(parsePluginsLabel('a=b,Bad Id=x,c')).toEqual(['a', 'c']);
-  });
-  it('only an explicit none label means none: every image built before the label has an engine', () => {
-    expect(parseEmbedEngineLabel('none')).toBe('none');
-    expect(parseEmbedEngineLabel('baked')).toBe('baked');
-    expect(parseEmbedEngineLabel('')).toBe('baked');
-    expect(parseEmbedEngineLabel(undefined)).toBe('baked');
-  });
-  it('the Dockerfile takes the engine as an argument, labels it, and pins the same model the shared service serves', () => {
-    const df = readFileSync('docker/Dockerfile.runtime', 'utf8');
-    expect(df).toMatch(/^ARG EMBED_ENGINE=baked$/m);
-    expect(df).toContain('LABEL org.hatchabot.embed-engine="${EMBED_ENGINE}"');
-    expect(df).toMatch(/^ARG BAKED_PLUGINS=$/m);
-    expect(df).toContain('LABEL org.hatchabot.plugins="${BAKED_PLUGINS}"');
-    expect(df).toMatch(/^ARG PLUGIN_INSTALL=link$/m);
-    expect(df).toContain('LABEL org.hatchabot.plugin-install="${PLUGIN_INSTALL}"');
-    expect(df).toContain('npm_config_cache=/opt/hatchabot/npm-cache');
-    expect(df).toContain(`ARG EMBED_MODEL_URL=${EMBED_MODEL_URL}`);
-    expect(df).toContain(`ARG EMBED_MODEL_SHA256=${EMBED_MODEL_SHA256}`);
-  });
-  it('the build script drops the engine for 2026.8+, tags a deliberate -lite build apart, and refuses a baked 2026.8+', async () => {
-    const { execFileSync } = await import('node:child_process');
-    const run = (env: Record<string, string>) => {
-      try {
-        return execFileSync('bash', ['scripts/build-runtime-image.sh'], { encoding: 'utf8', cwd: process.cwd(), env: { ...process.env, DRYRUN: '1', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
-      } catch (e) { const x = e as { stdout?: string; stderr?: string }; return String(x.stdout ?? '') + String(x.stderr ?? ''); }
-    };
-    // The default is 2026.9.6 since v2.76.0: an engine-free image by rule.
-    expect(run({})).toMatch(/hatchabot-runtime:2026\.9\.6 \(OpenClaw 2026\.9\.6, engine none\)/);
-    expect(run({ OPENCLAW_VERSION: '2026.7.1-2' })).toMatch(/hatchabot-runtime:2026\.7\.1-2 \(OpenClaw 2026\.7\.1-2, engine baked\)/);
-    expect(run({ OPENCLAW_VERSION: '2026.7.1-2', EMBED_ENGINE: 'none' })).toMatch(/hatchabot-runtime:2026\.7\.1-2-lite \(.*engine none\)/);
-    expect(run({ OPENCLAW_VERSION: '2026.9.4' })).toMatch(/hatchabot-runtime:2026\.9\.4 \(OpenClaw 2026\.9\.4, engine none\)/);
-    expect(run({ OPENCLAW_VERSION: '2026.9.4', EMBED_ENGINE: 'baked' })).toMatch(/no embedding engine to bake/);
-    expect(run({ EMBED_ENGINE: 'sideways' })).toMatch(/must be baked or none/);
-  }, 30_000);
-});
+const listing = (sessions: unknown[]) => ({ code: 0, stdout: JSON.stringify({ sessions }), stderr: '' });
+const rt = (id: string, source = 'session-key') => ({ id, source, cloudPlacementSupported: true });
 
-describe('extra packages in a base candidate', () => {
-  it('the build script takes only apt names, and gives such an image its own tag', async () => {
-    const { execFileSync } = await import('node:child_process');
-    const run = (env: Record<string, string>) => {
-      try {
-        // Stop right after the naming decisions: nothing is built here.
-        return execFileSync('bash', ['-c',
-          'set -a; ' + Object.entries(env).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join('; ') +
-          '; set +a; DRYRUN=1 bash -c "source scripts/build-runtime-image.sh" 2>&1 || true'],
-          { encoding: 'utf8', cwd: process.cwd() });
-      } catch (e) { return String((e as { stdout?: string }).stdout ?? e); }
-    };
-    expect(run({ EXTRA_PACKAGES: 'ping; rm -rf /', BUILD_LOCAL: '1' })).toMatch(/space-separated apt package names/);
-  }, 30_000);
+describe('stale runtime pins', () => {
+  it('clears a pin to a runtime the config no longer names; leaves implicit, configured and locked ones', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { slug: 'pinned' });
+    const a = w.store.getAgent(id)!;
+    w.provider.execResponses.set('gateway call sessions.list', listing([
+      { key: 'agent:pinned:main', agentRuntime: rt('claude-cli') },
+      { key: 'agent:pinned:cron:1', agentRuntime: rt('openclaw', 'implicit') },
+      { key: 'agent:pinned:group:9', agentRuntime: rt('codex'), runtimeSelectionLocked: true },
+      { key: 'agent:pinned:x', agentRuntime: rt('openclaw') },
+      { key: 'agent:pinned:legacy', agentRuntime: 'claude-cli' },
+    ]));
+    w.provider.execResponses.set('config get agents.defaults.models', { code: 0, stdout: JSON.stringify({ 'anthropic/claude-opus-4-8': {} }), stderr: '' });
+    w.provider.execResponses.set('gateway call sessions.patch', { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' });
+    expect(await listRuntimePins(w.provider, a.runtimeRef!, 'pinned')).toEqual([
+      { key: 'agent:pinned:main', runtime: 'claude-cli', locked: false },
+      { key: 'agent:pinned:group:9', runtime: 'codex', locked: true },
+      { key: 'agent:pinned:x', runtime: 'openclaw', locked: false },
+      { key: 'agent:pinned:legacy', runtime: 'claude-cli', locked: false },
+    ]);
+    const events: Array<[string, Record<string, unknown>]> = [];
+    const cleared = await clearStaleRuntimePins(w.provider, a.runtimeRef!, 'pinned', (e, d) => events.push([e, d]));
+    expect(cleared).toEqual(['agent:pinned:main', 'agent:pinned:legacy']);
+    const patches = w.provider.execLog.filter((argv) => argv[2] === 'sessions.patch').map((argv) => JSON.parse(argv[5]!));
+    expect(patches).toEqual([
+      { key: 'agent:pinned:main', agentId: 'pinned', agentRuntime: null },
+      { key: 'agent:pinned:legacy', agentId: 'pinned', agentRuntime: null },
+    ]);
+    // The list asks for this agent's sessions only, and nothing is confirmed or deleted.
+    expect(JSON.parse(w.provider.execLog.find((argv) => argv[2] === 'sessions.list')![5]!)).toMatchObject({ agentId: 'pinned' });
+    expect(events).toEqual([['runtime.pins_cleared', { sessions: ['agent:pinned:main', 'agent:pinned:legacy'], runtime: 'claude-cli' }]]);
+  });
+
+  it('a pin the config still names (a machine-login profile rides claude-cli) stays; a refused patch is an event, not a throw', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { slug: 'cli' });
+    const a = w.store.getAgent(id)!;
+    w.provider.execResponses.set('gateway call sessions.list', listing([{ key: 'agent:cli:main', agentRuntime: rt('claude-cli') }]));
+    w.provider.execResponses.set('config get agents.defaults.models', { code: 0, stdout: JSON.stringify({ 'anthropic/claude-opus-4-8': { agentRuntime: { id: 'claude-cli' } } }), stderr: '' });
+    expect(await clearStaleRuntimePins(w.provider, a.runtimeRef!, 'cli')).toEqual([]);
+    expect(w.provider.execLog.some((argv) => argv[2] === 'sessions.patch')).toBe(false);
+    // Now the config drops it and the gateway refuses the patch.
+    w.provider.execResponses.set('config get agents.defaults.models', { code: 0, stdout: '{}', stderr: '' });
+    w.provider.execResponses.set('gateway call sessions.patch', { code: 0, stdout: JSON.stringify({ ok: false, error: { message: 'locked' } }), stderr: '' });
+    const events: string[] = [];
+    expect(await clearStaleRuntimePins(w.provider, a.runtimeRef!, 'cli', (e) => events.push(e))).toEqual([]);
+    expect(events).toEqual(['runtime.pin_failed']);
+    // No sessions at all: nothing is asked of the config.
+    w.provider.execLog.length = 0;
+    w.provider.execResponses.set('gateway call sessions.list', listing([]));
+    expect(await clearStaleRuntimePins(w.provider, a.runtimeRef!, 'cli')).toEqual([]);
+    expect(w.provider.execLog.map((argv) => argv.slice(0, 2).join(' '))).toEqual(['gateway call']);
+  });
+
+  it('after a start or a wake it waits for the gateway, then clears; a start over the API triggers it', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { slug: 'sleepy' });
+    const a = w.store.getAgent(id)!;
+    w.provider.execResponses.set('gateway call sessions.list', listing([{ key: 'agent:sleepy:main', agentRuntime: rt('claude-cli') }]));
+    w.provider.execResponses.set('gateway call sessions.patch', { code: 0, stdout: JSON.stringify({ ok: true }), stderr: '' });
+    // Stopped: nothing to do, and no waiting around for it.
+    await w.provider.stop(a.runtimeRef!);
+    expect(await clearStaleRuntimePinsWhenUp(w.provider, a.runtimeRef!, 'sleepy', () => {}, async () => {}, 3)).toEqual([]);
+    await w.provider.start(a.runtimeRef!);
+    expect(await clearStaleRuntimePinsWhenUp(w.provider, a.runtimeRef!, 'sleepy', () => {}, async () => {}, 3)).toEqual(['agent:sleepy:main']);
+    // Over the API: stop, start — the pin is cleared once the gateway is up, and the trail says so.
+    w.provider.execLog.length = 0;
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/stop`, headers: as() })).statusCode).toBe(200);
+    expect((await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/start`, headers: as() })).statusCode).toBe(200);
+    for (let i = 0; i < 50 && !w.provider.execLog.some((argv) => argv[2] === 'sessions.patch'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(w.provider.execLog.some((argv) => argv[2] === 'sessions.patch')).toBe(true);
+    for (let i = 0; i < 50 && !w.store.listEvents([id]).some((e) => e.event === 'runtime.pins_cleared'); i++) await new Promise((r) => setTimeout(r, 20));
+    expect(w.store.listEvents([id]).some((e) => e.event === 'runtime.pins_cleared')).toBe(true);
+  });
 });

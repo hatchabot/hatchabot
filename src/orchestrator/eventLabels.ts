@@ -62,6 +62,8 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'agent.woken': (d) => `woke up: ${String(d.why ?? '')}`.trim(),
   'hibernate.failed': (d) => `could not put it to sleep: ${String(d.error ?? '')}`.trim(),
   'hibernate.wake_failed': (d) => `could not wake it: ${String(d.error ?? '')}`.trim(),
+  'runtime.pins_cleared': (d) => `${Array.isArray(d.sessions) ? d.sessions.length : 'some'} of its conversations were still pinned to the old ${String(d.runtime ?? '')} runtime; now on the configured one`,
+  'runtime.pin_failed': (d) => `could not clear a stale runtime pin${d.session ? ` on ${String(d.session)}` : ''}: ${String(d.error ?? '')}`.trim(),
   'channel.rooms': (d) => `${String(d.kind ?? 'channel')} group chats: ${d.mode === 'room' ? 'one room' : 'off'}`,
   'channel.skipped': 'a messaging channel was skipped (not on this image)',
   'channel.setup_required': 'waiting for a bot token',

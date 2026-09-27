@@ -135,6 +135,7 @@ import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType
 import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../orchestrator/hibernate.js';
+import { clearStaleRuntimePins, clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
 import { pickAutoRebuilds, REBUILD_POLICIES, rebuildNeed, rebuildPolicy, type RebuildPolicy } from '../orchestrator/rebuildPolicy.js';
 import { migrateAgent, MigrateError, preflight } from '../orchestrator/migrate.js';
 import { moveAgentToHost } from '../orchestrator/moveHost.js';
@@ -2050,9 +2051,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .catch((err) => app.log.warn({ err }, 'embedder health tick failed'));
     }, Number(process.env.HATCHABOT_EMBED_HEALTH_MS) || 5 * 60_000).unref();
   }
+  // A started or woken agent may carry sessions pinned to a runtime its config
+  // no longer names (runtimePins.ts): once its gateway answers, clear them.
+  const clearPinsWhenUp = (a: Agent): void => {
+    if (!a.runtimeRef) return;
+    void clearStaleRuntimePinsWhenUp(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => {});
+  };
   // Hibernation: the idle sweep and the Telegram wake poll (hibernate.ts).
   const hibernateDeps: HibernateDeps = {
     store, secrets, providerFor,
+    afterWake: clearPinsWhenUp,
     lastActiveFor: (a) => lastActiveFor(a), // defined further down (a const in this scope; called only at sweep time)
     ownCrons: async (a) => (await listCrons(providerFor(a.hostId), a.runtimeRef!, a.slug)).map((c) => ({ enabled: c.enabled, system: c.system })),
     isBusy,
@@ -2083,6 +2091,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Every 20 s: a getUpdates per sleeper is one cheap call, and the reply to
       // the first message after a sleep is the poll plus the gateway's start.
       Number(process.env.HATCHABOT_WAKE_POLL_MS) || 20_000).unref();
+    // Once per boot, the running fleet on this machine: sessions pinned to a
+    // runtime the config no longer names (the agents that switched from a
+    // machine login to a setup token kept asking for the CLI; runtimePins.ts).
+    setTimeout(() => {
+      void (async () => {
+        const local = store.localHostId();
+        for (const a of store.listAllActiveAgents()) {
+          if (a.state !== 'RUNNING' || !a.runtimeRef || a.hostId !== local) continue;
+          const cleared = await clearStaleRuntimePins(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => [] as string[]);
+          if (cleared.length) app.log.warn({ agent: a.slug, sessions: cleared }, 'stale runtime pins cleared');
+        }
+      })();
+    }, Number(process.env.HATCHABOT_PINS_BOOT_MS) || 60_000).unref();
   }
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).
@@ -9152,6 +9173,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     await providerFor(agent.hostId).start(agent.runtimeRef);
     store.setHibernated(agent.id, null);
+    clearPinsWhenUp(agent);
     return publicAgent(store.setAgentState(agent.id, 'RUNNING'));
   });
 

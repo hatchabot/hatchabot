@@ -18,6 +18,7 @@ import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
+import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
@@ -308,6 +309,9 @@ async function runProvisionStepsInner(
     // rollback that purged its volume.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.healthy', { agentId, runtimeRef });
+    // Sessions pinned to a runtime this seed no longer names (runtimePins.ts).
+    await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId, ...d }))
+      .catch((err) => log('runtime.pin_failed', { agentId, error: String(err).slice(0, 200) }));
 
     // Step 7.5: clone/refresh git data sources onto the volume, then tell the
     // agent where they landed (AGENTS.md "## Data sources").
@@ -878,6 +882,9 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // been used the most.
     await waitForHealthy(provider, runtimeRef, sleep, 120);
     log('runtime.healthy', { agentId, runtimeRef });
+    // Sessions pinned to a runtime this seed no longer names (runtimePins.ts).
+    await clearStaleRuntimePins(provider, runtimeRef, agent.slug, (e, d) => log(e, { agentId, ...d }))
+      .catch((err) => log('runtime.pin_failed', { agentId, error: String(err).slice(0, 200) }));
     log('runtime.syncing', { agentId });
     await syncGitDataSources(deps, agentId, runtimeRef, log);
     // Step 7.6: attached platform connections (Google via gog) land on the
