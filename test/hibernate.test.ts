@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Agent } from '../src/domain/types.js';
-import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../src/orchestrator/hibernate.js';
+import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, resetHibernateState, wakeAgent, wakeSweep, WAKE_GIVE_UP, type HibernateDeps } from '../src/orchestrator/hibernate.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 
 /**
@@ -84,7 +84,7 @@ describe('waking', () => {
     await hibernateSweep(deps, Date.now(), 6 * HOUR);
     expect(w.store.getAgent(id)!.state).toBe('STOPPED');
     expect(await wakeSweep(deps)).toEqual([]);
-    expect(urls[0]).toBe('https://api.telegram.org/botfake-token-Z/getUpdates?limit=1&timeout=0');
+    expect(urls[0]).toBe('https://api.telegram.org/botfake-token-Z/getUpdates?limit=100&timeout=0');
     mail = true;
     expect(await wakeSweep(deps)).toEqual([id]);
     // Woken: the idle clock restarts at the wake (kept in the store, so a restart cannot forget it).
@@ -105,7 +105,9 @@ describe('waking', () => {
     await hibernateAgent(deps, w.store.getAgent(later)!, 'test');
     expect(w.store.getAgent(later)!.hibernateMark).toBe(41); // the bedtime mark, in the store
     expect(await wakeSweep(deps)).toEqual([]); // update 41 was already there when it slept
-    waiting = 42;
+    // Telegram answers earliest first: the marked update stays in the page and
+    // a newer one behind it is the mail (limit=1 never saw it; 30th audit).
+    deps.fetchImpl = (async (u: string | URL | Request) => new Response(JSON.stringify({ ok: true, result: String(u).includes('fake-token-Y') ? [{ update_id: 41 }, { update_id: 42 }] : [] }))) as typeof fetch;
     expect(await wakeSweep(deps)).toEqual([later]);
     // A stopped agent the owner stopped is not a sleeper: nothing wakes it.
     w.store.setAgentState(id, 'STOPPED');
@@ -144,3 +146,79 @@ describe('waking', () => {
   });
 });
 const OWNER_OTHER = 'user-other';
+
+describe('the 30th audit: sleepers and the rest of the machine', () => {
+  afterEach(() => resetHibernateState());
+  it('a moved-away or busy sleeper is not woken by the poll, the button or a consult; a rebuild that ends RUNNING ends the sleep', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-M' });
+    let busy = false;
+    const deps = depsFor(w, {
+      isBusy: () => busy,
+      fetchImpl: (async () => new Response(JSON.stringify({ ok: true, result: [{ update_id: 9 }] }))) as typeof fetch,
+    });
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    // Busy (a move or rebuild holds it): left asleep, no start.
+    busy = true;
+    expect(await wakeSweep(deps)).toEqual([]);
+    expect((await wakeAgent(deps, w.store.getAgent(id)!, 'x')).state).toBe('STOPPED');
+    busy = false;
+    // Moved to another machine: its copy there polls the bot.
+    w.store.setAgentMigratedTo(id, 'moved to the laptop');
+    expect(await wakeSweep(deps)).toEqual([]);
+    expect(w.provider.runtimes.get(w.store.getAgent(id)!.runtimeRef!)?.phase).toBe('stopped');
+    w.store.setAgentMigratedTo(id, null);
+    // Any path that makes it RUNNING (here: as a rebuild does) clears the mark, so the next sweep leaves it alone.
+    w.store.setAgentState(id, 'RUNNING');
+    const a = w.store.getAgent(id)!;
+    expect(a.hibernatedAt).toBeUndefined();
+    expect(a.wokenAt).toBeTruthy();
+    expect(await hibernateBlocker(deps, a, Date.now(), 6 * HOUR)).toBe('active recently');
+  });
+
+  it('the management agent never sleeps; a start that keeps failing gives up after a few tries and says so', async () => {
+    const w = await makeWorld();
+    const ops = await seedRunningAgent(w, { id: 'ops1', slug: 'manager', accountId: 'mgrbot' });
+    w.store.setAgentOps(ops, true);
+    const deps = depsFor(w);
+    const a = { ...w.store.getAgent(ops)!, ops: true };
+    expect(await hibernateBlocker(deps, a, Date.now(), 6 * HOUR)).toBe('the management agent');
+    const id = await seedRunningAgent(w, { id: 'f1', slug: 'flaky', accountId: 'flakybot', botToken: 'fake-token-F' });
+    let waiting = 5;
+    const d2 = depsFor(w, { fetchImpl: (async () => new Response(JSON.stringify({ ok: true, result: [{ update_id: waiting }] }))) as typeof fetch });
+    await hibernateAgent(d2, w.store.getAgent(id)!, 'test');
+    waiting = 6; // mail
+    (w.provider as unknown as { opts: { failOn?: 'provision' | 'start' } }).opts.failOn = 'start';
+    for (let i = 0; i < WAKE_GIVE_UP; i++) expect(await wakeSweep(d2)).toEqual([]);
+    const after = w.store.getAgent(id)!;
+    expect(after.state).toBe('STOPPED');
+    expect(after.hibernatedAt).toBeUndefined(); // an ordinary stopped agent now: the poll leaves it
+    expect(d2.events.filter(([, e]) => e === 'hibernate.wake_failed')).toHaveLength(WAKE_GIVE_UP);
+    expect(d2.events).toContainEqual([id, 'hibernate.wake_abandoned']);
+    (w.provider as unknown as { opts: { failOn?: 'provision' | 'start' } }).opts.failOn = undefined;
+    expect(await wakeSweep(d2)).toEqual([]);
+  });
+
+  it('a bot token Telegram refuses is said once and not polled again', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-R' });
+    let calls = 0;
+    const deps = depsFor(w, { fetchImpl: (async () => { calls++; return new Response(JSON.stringify({ ok: false, error_code: 401, description: 'Unauthorized' })); }) as typeof fetch });
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test'); // the bedtime poll is the one refusal
+    expect(calls).toBe(1);
+    await wakeSweep(deps); await wakeSweep(deps);
+    expect(calls).toBe(1);
+    expect(deps.events.filter(([, e]) => e === 'hibernate.token_refused')).toHaveLength(1);
+  });
+});
+
+describe('the 30th audit: by hand', () => {
+  it('the management agent cannot be put to sleep, by hand either', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { id: 'ops9', slug: 'mgr', accountId: 'mgr9bot' });
+    w.store.setAgentOps(id, true);
+    const res = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/hibernate`, headers: as() });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toMatch(/management agent/);
+  });
+});

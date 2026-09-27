@@ -1,6 +1,6 @@
 import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
-import { normalizeHandle, type Store } from '../store/store.js';
+import { normalizeHandle, Store } from '../store/store.js';
 import { ID_SHAPE } from './channelIds.js';
 
 /**
@@ -154,25 +154,29 @@ export async function claimFirstContact(
   // who messages the bot before the app gets round to watching, and the
   // request that survived a rebuild, are both normal — refusing them would
   // strand the very person we are waiting for.
+  const kindHere = opts.kind ?? 'telegram';
+  // This window is one seat's: the owner's first contact and an invitee's
+  // run side by side, and closing one must not close the other (30th audit).
+  const seat = Store.pairingSeat(kindHere, opts.forUserId);
   deps.store.openPairingWindow(opts.agentId, new Date(deadline).toISOString(), opts.forUserId, {
-    expect: opts.expect,
+    expect: opts.expect, kind: kindHere,
   });
   const expect = normalizeHandle(opts.expect);
   const excluded = new Set(opts.excludeIds ?? []);
   // The agent rests in `allowlist`, where a stranger's DM is dropped in
   // silence. Somebody we are waiting for is not yet on the list, so the door
   // has to be `pairing` for as long as the window stands — and no longer.
-  const kindHere = opts.kind ?? 'telegram';
   const { setDmPolicy } = await import('./members.js');
   const policyDeps = { store: deps.store, provider: deps.provider, log: deps.log };
   await setDmPolicy(policyDeps, {
     agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind: kindHere,
     accountId: opts.accountId, policy: 'pairing',
   }).catch(() => false);
-  /** Back to silence, unless the owner wants this agent open to anyone. */
+  /** Back to silence, unless the owner wants this agent open to anyone — or another window is still waiting for its person. */
   const restoreDoor = async (): Promise<void> => {
     const agent = deps.store.getAgent(opts.agentId);
     if (!agent || agent.allowKnocks) return;
+    if (deps.store.pairingWindows(opts.agentId).some((w) => w.seat !== seat)) return;
     const admit = deps.store.listAllowedChannelUserIds(opts.agentId, kindHere);
     if (!admit.length) return; // nobody yet: stay reachable
     await setDmPolicy(policyDeps, {
@@ -191,7 +195,7 @@ export async function claimFirstContact(
     const agent = deps.store.getAgent(opts.agentId);
     if (!agent || agent.state === 'DELETING' || agent.state === 'DELETED' || agent.state === 'FAILED') {
       log('claim.window_abandoned', { agentId: opts.agentId, state: agent?.state });
-      deps.store.closePairingWindow(opts.agentId);
+      deps.store.closePairingWindow(opts.agentId, seat);
       await restoreDoor();
       return null;
     }
@@ -201,7 +205,7 @@ export async function claimFirstContact(
     const bound = kind === 'telegram'
       ? deps.store.getMembership(opts.agentId, opts.forUserId)?.channelUserId
       : deps.store.memberIdentities(opts.agentId, opts.forUserId)[kind];
-    if (bound) { deps.store.closePairingWindow(opts.agentId); await restoreDoor(); return bound; }
+    if (bound) { deps.store.closePairingWindow(opts.agentId, seat); await restoreDoor(); return bound; }
 
     if (agent.state === 'RUNNING') {
       const requests = await listPairingRequests(deps.provider, opts.runtimeRef, opts.accountId, kind);
@@ -239,7 +243,7 @@ export async function claimFirstContact(
             channelUserId: first.id,
             username: first.meta?.username,
           });
-          deps.store.closePairingWindow(opts.agentId);
+          deps.store.closePairingWindow(opts.agentId, seat);
           await restoreDoor();
           // Say something. OpenClaw answered their first message with the
           // pairing challenge rather than a reply, so an approval that lands
@@ -265,7 +269,7 @@ export async function claimFirstContact(
     await sleep(pollIntervalMs);
   }
   log('claim.window_closed', { agentId: opts.agentId });
-  deps.store.closePairingWindow(opts.agentId);
+  deps.store.closePairingWindow(opts.agentId, seat);
   await restoreDoor();
   return null;
 }

@@ -681,7 +681,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // frozen per-agent model so the default actually governs.
   cmds.push({
     argv: [],
-    rawShell: `node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;const r=c.agents||{};const list=Array.isArray(r.list)?r.list:(r.entries&&typeof r.entries==="object"?Object.values(r.entries):[]);for(const a of list){if(a&&a.model){delete a.model;n++}}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));'`,
+    rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));let n=0;const r=c.agents||{};const list=Array.isArray(r.list)?r.list:(r.entries&&typeof r.entries==="object"?Object.values(r.entries):[]);for(const a of list){if(a&&a.model){delete a.model;n++}}if(n)fs.writeFileSync(f,JSON.stringify(c,null,2));' || true`,
   });
 
   if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && patch.setupToken) {

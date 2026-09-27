@@ -28,8 +28,8 @@ function volume() {
     CREATE TABLE "channel_pairing_requests" ( channel_key TEXT NOT NULL, account_id TEXT NOT NULL, request_id TEXT NOT NULL, code TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, meta_json TEXT, PRIMARY KEY (channel_key, account_id, request_id) ) STRICT;
     CREATE TABLE "channel_pairing_allow_entries" ( channel_key TEXT NOT NULL, account_id TEXT NOT NULL, entry TEXT NOT NULL, sort_order INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (channel_key, account_id, entry) ) STRICT;
   `);
-  db.prepare(`INSERT INTO channel_pairing_requests VALUES ('discord','hatchabot','1550586313743278091','K9DWSP94','2026-09-25T01:27:37.249Z','2026-09-25T01:27:42.378Z',?)`)
-    .run(JSON.stringify({ tag: 'christopherkrueger0816', name: 'christopherkrueger0816', accountId: 'hatchabot' }));
+  db.prepare(`INSERT INTO channel_pairing_requests VALUES ('discord','hatchabot','100000000000000001','K9DWSP94','2026-09-25T01:27:37.249Z','2026-09-25T01:27:42.378Z',?)`)
+    .run(JSON.stringify({ tag: 'somebody0816', name: 'somebody0816', accountId: 'hatchabot' }));
   db.prepare(`INSERT INTO channel_pairing_requests VALUES ('telegram','fambot','555','CODE1','2026-09-25T01:00:00Z','2026-09-25T01:00:00Z',?)`)
     .run(JSON.stringify({ username: 'gran', firstName: 'Grandma' }));
   db.prepare(`INSERT INTO channel_pairing_allow_entries VALUES ('discord','hatchabot','123456789012345678',0,1)`).run();
@@ -62,8 +62,8 @@ describe('pairing requests on a 2026.9 volume (database, no files)', () => {
       const out = run(v, pairingListShell('discord'));
       const list = parsePairingList(out);
       expect(list).toHaveLength(1);
-      expect(list[0]).toMatchObject({ id: '1550586313743278091', code: 'K9DWSP94' });
-      expect(list[0]!.meta).toMatchObject({ username: 'christopherkrueger0816', firstName: 'christopherkrueger0816' });
+      expect(list[0]).toMatchObject({ id: '100000000000000001', code: 'K9DWSP94' });
+      expect(list[0]!.meta).toMatchObject({ username: 'somebody0816', firstName: 'somebody0816' });
       expect(parsePairingList(run(v, pairingListShell('telegram')))[0]).toMatchObject({ id: '555', code: 'CODE1', meta: { username: 'gran' } });
       expect(parsePairingList(run(v, pairingListShell('slack')))).toEqual([]);
     } finally { v.done(); }

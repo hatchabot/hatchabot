@@ -94,7 +94,9 @@ export async function makeWorld(owner: string = OWNER, availableBots = 0): Promi
   const f = Fastify();
   const channel = channelStub(availableBots);
   const providers = new Map<string, MockProvider>([['mock', provider]]);
-  await registerRoutes(f, { store, secrets, providers, channel });
+  // No test talks to Telegram: the wake poll (hibernate.ts) and getMe get an empty, well-formed answer.
+  const oauthFetch = (async (u: string | URL | Request) => new Response(JSON.stringify(String(u).includes('api.telegram.org') ? { ok: true, result: [] } : { error: 'stubbed' }), { status: String(u).includes('api.telegram.org') ? 200 : 404, headers: { 'content-type': 'application/json' } })) as typeof fetch;
+  await registerRoutes(f, { store, secrets, providers, channel, oauthFetch });
   return { store, secrets, provider, providers, f, owner, channel };
 }
 

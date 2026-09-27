@@ -36,12 +36,16 @@ if [ ! -f .env ]; then
     accounts) SIGNIN=1 ;;
     password) SIGNIN=2 ;;
     "")
+      # Unattended (HATCHABOT_YES=1, or no terminal: `bash -s` with the script
+      # on stdin) takes the recommended answer — a `read` there ate the
+      # caller's next line as the answer (30th audit).
+      if [ "${HATCHABOT_YES:-}" = 1 ] || [ ! -t 0 ]; then SIGNIN=1; else
       echo "How will people sign in?"
       echo "  1) An account for each person — their own agents, and a forgotten"
       echo "     password is a link you send them  (recommended)"
       echo "  2) One shared password"
       read -r -p "Choose [1]: " SIGNIN
-      SIGNIN="${SIGNIN:-1}" ;;
+      SIGNIN="${SIGNIN:-1}"; fi ;;
     *) echo "HATCHABOT_SETUP_SIGNIN must be accounts or password."; exit 1 ;;
   esac
   PW=""
@@ -178,8 +182,8 @@ fi
 chmod 600 ~/.config/hatchabot/env
 
 say "Done. Next steps:"
-cat <<'EOF'
-  1. Open http://localhost:${HATCHABOT_SETUP_PORT:-8080} on THIS machine. With family accounts you
+cat <<EOF | sed "s|__PORT__|${HATCHABOT_SETUP_PORT:-8080}|"
+  1. Open http://localhost:__PORT__ on THIS machine. With family accounts you
      create your own account there (you become its owner); with a shared
      password you unlock with it.
   2. Connect an AI source (⚙ AI). Three options:

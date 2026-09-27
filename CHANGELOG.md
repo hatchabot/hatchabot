@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.87.0] — 2026-09-27
+
+### Fixed (the 30th audit, docs/audit-2026-09-27.md)
+- **A sleeping agent could not see messages behind its bedtime mark.** The wake poll asked Telegram for one update, which is always the oldest waiting one; newer messages behind it never woke the agent until Telegram expired it a day later. The poll reads a page and wakes on anything newer.
+- **Wakes respect "moved away" and "busy"; a rebuild ends a sleep.** A sleeper moved to another machine is no longer polled and started here (two gateways on one bot); a sleeper mid-move is not started under the export; an agent rebuilt while asleep no longer shows ASLEEP and gets put back to sleep minutes later. One wake at a time per agent; a start that fails three times in a row gives up with a reason on the trail; a refused bot token is said once; a consult wakes a sleeping peer; the management agent never sleeps.
+- **Deleting or unsharing an AI source now respects what a container still runs.** A switch without `--now` left the old source's token in the container and the source could be deleted under it; a source another account stopped sharing was still materialised at a later rebuild. Both refused now, with the reason.
+- **The memory service: a Stop is final.** A restart (the memory guard's, or the owner's) and any owner's rebuild landing after a Stop used to bring the service back. Two failed rebuilds in a row no longer lock the running container out of memory search.
+- **Rootless Docker: the daemon probe is not cached when it fails**, usage stats follow the install's prefix, and agent containers — loopback peers under rootless — no longer pass as "this machine" (the first-account bootstrap needs the setup code; forwarded-for is not trusted). `HATCHABOT_CONTAINERS_ON_LOOPBACK=1` says so explicitly.
+- **Two claim windows on one agent no longer shut each other**: the owner's first contact and an invitee's each have their own window, and the door closes when the last one does. "That's me" refuses an id that is another owner's member or another account's link.
+- **Scripts:** the candidate gate could not pass since v2.60.4 (an unbound variable); `shared-host-test.sh --vm` no longer deletes the VM it reused; `install-service.sh` no longer dies of SIGPIPE at its last line (`| head -N` is banned everywhere); unattended installs take the recommended sign-in instead of eating the caller's next line; `uninstall.sh` keeps the user's CLI token and channel pin unless `--purge`, and refuses `--purge` when it cannot read the database; upgrades take a lock and an interrupted one no longer blocks the next.
+
+### Changed
+- The hub's numbers row is deleted for good (the flag with it).
+
 ## [2.86.2] — 2026-09-27
 
 ### Changed

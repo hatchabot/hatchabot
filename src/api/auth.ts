@@ -42,10 +42,17 @@ const failures = new Map<string, { n: number; until: number }>();
  * a remote client cannot forge its way to a different bucket). The account
  * being tried is a second bucket, so hopping addresses does not help either.
  */
+/** Set at boot when the docker daemon is rootless (index.ts), or by an operator: containers share this process's loopback. */
+export function loopbackIsRemote(): boolean {
+  return process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1';
+}
 function throttleKeys(req: FastifyRequest, who?: string): string[] {
   let ip = req.ip || 'unknown';
   const bare = ip.replace(/^::ffff:/, '');
-  if (bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.')) {
+  // Under a rootless daemon every agent container is a loopback peer of this
+  // process (its packets arrive from 127.0.0.1), so loopback is not "local"
+  // there: no forwarded-for trust, no shared bucket with the owner's CLI.
+  if (!loopbackIsRemote() && (bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.'))) {
     const fwd = req.headers['x-forwarded-for'];
     const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
     if (first) ip = `fwd:${first}`;

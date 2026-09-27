@@ -57,6 +57,11 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "$DIR has local changes — an upgrade would overwrite them. Refusing:"; git status --porcelain | sed 's/^/    /'; exit 2
 fi
 
+# One upgrade at a time: the channel timer and a hand-run upgrade used to race
+# each other's node_modules.prev (30th audit). The lock lives outside the tree
+# (an untracked file here would read as a local change next time).
+LOCK="${TMPDIR:-/tmp}/hatchabot-upgrade-$(printf %s "$DIR" | cksum | cut -d' ' -f1).lock"
+exec 9>"$LOCK"; flock -n 9 || { echo "Another upgrade of $DIR is running (lock $LOCK)."; exit 4; }
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
 INSTALL="${HATCHABOT_INSTALL_CMD:-npm ci --silent}"         # (likewise)
 echo "Upgrading $CUR → $TARGET ($CHANNEL)…"

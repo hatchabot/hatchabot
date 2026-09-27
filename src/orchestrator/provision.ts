@@ -414,7 +414,15 @@ export async function buildRuntimeSpec(
   const { store, secrets } = deps;
   const agent = store.getAgent(agentId);
   if (!agent) throw new Error(`No such agent: ${agentId}`);
-  const profile = store.getAIProfile(agent.aiProfileId)!;
+  const profile = store.getAIProfile(agent.aiProfileId);
+  if (!profile) throw new Error('Its AI source is gone — pick another under the agent\'s settings, then rebuild.');
+  // The rule at selection, again at build time: a source another account
+  // stopped sharing after this agent chose it must not land its credential
+  // in this container at a later rebuild (30th audit). An agent already
+  // running on it keeps it until it moves; a build is the moment it moves.
+  if (profile.ownerId !== agent.ownerId && !profile.shared) {
+    throw new Error('Its AI source is no longer shared with you — pick another under the agent\'s settings, then rebuild.');
+  }
   const host = hostOverride ?? store.getHost(agent.hostId)!;
   const channelRow = store.getChannelForAgent(agentId);
   if (!channelRow && !agent.webOnly) throw new Error(`Agent ${agentId} has no channel yet`);

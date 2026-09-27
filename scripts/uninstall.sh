@@ -74,6 +74,12 @@ agent_names() {
       console.log(String(r.runtime_ref).replace(/^docker:\/\//, ""));' "$DB_PATH" 2>/dev/null)
 }
 NAMES="$(agent_names)"
+# A database that is there but cannot be read (no node_modules yet) names no
+# agents: a purge would then delete the only map from agents to volumes and
+# leave every container nameless (30th audit). Refuse, rather than guess.
+if [ "$PURGE" = 1 ] && [ -f "$DB_PATH" ] && [ ! -d "$REPO/node_modules/better-sqlite3" ]; then
+  echo "Cannot read the database at $DB_PATH (dependencies are not installed: run npm ci in $REPO first), so --purge would orphan every agent's volume. Refusing."; exit 2
+fi
 agent_ids() {
   [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] || return 0
   (cd "$REPO" && node -e '
@@ -167,7 +173,12 @@ say "Unlinking the hatchabot CLI…"
 HBT="$(command -v hbt 2>/dev/null || true)"
 if [ -n "$HBT" ] && [ -L "$HBT" ] && readlink -f "$HBT" | grep -qE '/bin/hatchabot(\.mjs)?$|/hatchabot$'; then rm -f "$HBT" && echo "  removed hbt"; fi
 npm unlink -g hatchabot >/dev/null 2>&1 && echo "  unlinked" || echo "  (was not linked)"
-[ -f "$HOME/.config/hatchabot/env" ] && rm -f "$HOME/.config/hatchabot/env" && echo "  removed ~/.config/hatchabot/env"
+# The CLI's token and channel pin belong to the USER, not this install (a
+# production checkout beside a test one shares them): only --purge takes them.
+if [ "$PURGE" = 1 ]; then
+  [ -f "$HOME/.config/hatchabot/env" ] && rm -f "$HOME/.config/hatchabot/env" && echo "  removed ~/.config/hatchabot/env"
+  [ -f "$HOME/.config/hatchabot/channel" ] && rm -f "$HOME/.config/hatchabot/channel" && echo "  removed the channel pin"
+fi
 
 if have docker; then
   # STOPPED, not removed. The control plane only mends states — it never

@@ -136,6 +136,7 @@ step "devices list --json has pending[] and paired[]; the pending store is reada
 # table (the file is gone — reading "absent" as "nobody waiting" left consoles on
 # "Approve this browser"). The app's own shell must find one of them.
 pf="$(inagent 'if [ -f "$HOME/.openclaw/devices/pending.json" ]; then echo file; elif [ -f "$HOME/.openclaw/state/openclaw.sqlite" ]; then node -e "const {DatabaseSync}=require(\"node:sqlite\");new DatabaseSync(process.argv[1],{readOnly:true}).prepare(\"select request_id,ts,refreshed_at_ms from device_pairing_pending\").all()" "$HOME/.openclaw/state/openclaw.sqlite" && echo database; else echo none; fi')"
+d="$(inagent "openclaw devices list --json 2>/dev/null" | json 'v=>Array.isArray(v.pending)&&Array.isArray(v.paired)?"ok":"no"')"
 [ "$d" = ok ] && echo "$pf" | grep -qE '^(file|database)$' && ok || bad "devices: $d · pending store: $pf"
 
 # 2026.9 also moved chat pairing (requests + approvals) into the state database:

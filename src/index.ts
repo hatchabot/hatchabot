@@ -257,6 +257,16 @@ setTimeout(postureSweep, 60_000).unref();
 const postureDaily = setInterval(postureSweep, Number(process.env.HATCHABOT_POSTURE_SWEEP_MS ?? 86_400_000));
 postureDaily.unref();
 
+// Under a rootless daemon every agent container reaches this process from
+// 127.0.0.1: loopback is not "this machine" then (auth.ts, accountsAuth.ts).
+{
+  const localProvider = providers.get('local-docker');
+  const probe = localProvider as { rootless?: () => Promise<boolean> } | undefined;
+  if (!process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK && (await probe?.rootless?.().catch(() => false))) {
+    process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK = '1';
+    app.log.info('rootless docker: loopback peers are not treated as local');
+  }
+}
 await app.listen({ port: PORT, host: bindHost });
 // Management agents reach their tools and their AI provider only through the
 // ops server; bring it up with the control plane whenever one exists.

@@ -283,3 +283,39 @@ describe('the first person into a fresh agent', () => {
     expect(after.json()).toEqual([]);
   });
 });
+
+describe('the 30th audit: two windows on one agent', () => {
+  it('the owner\'s first-contact window and an invitee\'s coexist: the first to bind does not shut the door on the other', async () => {
+    const { claimFirstContact } = await import('../src/orchestrator/claim.js');
+    const s = world();
+    s.insertMembership({ id: 'm0', agentId: 'a1', userId: OWNER, role: 'owner', status: 'active' } as never);
+    s.insertMembership({ id: 'm1', agentId: 'a1', userId: 'user-guest', role: 'user', status: 'active' } as never);
+    const writes: string[] = [];
+    let requests: Array<{ id: string; code: string; meta: Record<string, string> }> = [{ id: '555', code: 'MARIA', meta: { username: 'maria_k' } }];
+    const provider = {
+      execShell: async () => ({ code: 0, stdout: JSON.stringify({ version: 1, requests }), stderr: '' }),
+      execShellOnVolume: async (_ref: string, script: string) => {
+        const m = /"policy":"(allowlist|pairing)"/.exec(script);
+        if (m) writes.push(m[1]!);
+        return { code: 0, stdout: m ? 'set' : '', stderr: '' };
+      },
+      exec: async () => ({ code: 0, stdout: '', stderr: '' }),
+    } as never;
+    const deps = { store: s, provider, sleep: async () => {} };
+    // The owner's window (no expected handle) is open and waiting…
+    const ownerClaim = claimFirstContact(deps, { agentId: 'a1', runtimeRef: 'ref', accountId: 'bot', forUserId: OWNER, timeoutMs: 400, pollIntervalMs: 5,
+      excludeIds: ['555'] });
+    // …when the invitee's window opens and Maria knocks first.
+    const guest = await claimFirstContact(deps, { agentId: 'a1', runtimeRef: 'ref', accountId: 'bot', forUserId: 'user-guest', expect: '@maria_k', timeoutMs: 400, pollIntervalMs: 5 });
+    expect(guest).toBe('555');
+    // Two seats: hers is closed, the owner's is still open, and the door was NOT put back to allowlist.
+    expect(s.pairingWindows('a1').map((w) => w.seat)).toEqual(['telegram:' + OWNER]);
+    expect(writes).not.toContain('allowlist');
+    // Now the owner knocks, binds, and only then does the door close.
+    requests = [{ id: '111', code: 'OWNER', meta: { username: 'chris' } }];
+    expect(await ownerClaim).toBe('111');
+    expect(s.pairingWindows('a1')).toEqual([]);
+    expect(writes[writes.length - 1]).toBe('allowlist');
+  });
+});
+

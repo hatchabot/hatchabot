@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
+import { loopbackIsRemote } from './auth.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
 import type { Principal } from './principal.js';
@@ -116,6 +117,9 @@ function isLoopback(ip: string | undefined): boolean {
  * says so with forwarding headers. Those requests are remote.
  */
 function onThisMachine(req: FastifyRequest): boolean {
+  // A rootless daemon's containers are loopback peers too: then nobody is
+  // "on this machine" and the setup code is asked of everyone (30th audit).
+  if (loopbackIsRemote()) return false;
   if (!isLoopback(req.ip)) return false;
   const h = req.headers;
   return !h['x-forwarded-for'] && !h['forwarded'] && !h['x-forwarded-host'] && !h['tailscale-user-login'];

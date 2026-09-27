@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Fastify from 'fastify';
 import Database from 'better-sqlite3';
 import { _resetLoginThrottle, authIsEnabled, authModeFromEnv, bindHostFor, registerAuth } from '../src/api/auth.js';
@@ -646,5 +646,19 @@ describe('recovery codes (beta blocker #3: the host owner with no Telegram)', ()
     const r = await recover(f, { username: 'chris', code: 'AAAAA-BBBBB-CCCCC-DDDDD', password: 'long-enough-fake' });
     expect(r.statusCode).toBe(401);
     expect(r.json().error).toMatch(/recovery code do not match/); // the route answered, not the sign-in hook
+  });
+});
+
+describe('the 30th audit: containers on loopback', () => {
+  afterEach(() => { delete process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK; });
+  it('under a rootless daemon a loopback bootstrap needs the setup code like anyone else', async () => {
+    process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK = '1';
+    const { f } = await app();
+    const res = await bootstrap(f);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toMatch(/setup code/);
+    const { setupCode } = await import('../src/api/accountsAuth.js');
+    const ok = await f.inject({ method: 'POST', url: '/v1/local-accounts/bootstrap', payload: { username: 'chris', password: 'correct-horse', setupCode: setupCode() } });
+    expect(ok.statusCode).toBe(201);
   });
 });

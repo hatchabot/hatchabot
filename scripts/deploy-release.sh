@@ -31,6 +31,8 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "       git -C $PROD checkout -- <file>   (your .env and data/ are untouched)"
   exit 2
 fi
+LOCK="${TMPDIR:-/tmp}/hatchabot-upgrade-$(printf %s "$PROD" | cksum | cut -d' ' -f1).lock"
+exec 9>"$LOCK"; flock -n 9 || { echo "Another deploy of $PROD is running (lock $LOCK)."; exit 4; }
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
 # `npm ci` wipes node_modules first: keep the working one aside until the new

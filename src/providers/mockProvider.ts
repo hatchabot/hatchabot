@@ -212,7 +212,12 @@ export class MockProvider implements RuntimeProvider {
     return this.embedder;
   }
   async embedderStatus() { return this.embedder; }
-  async stopEmbedder() { this.embedder = { embedder: 'absent', door: 'absent' }; }
+  /** Tests: a Stop docker refuses (a hung daemon). */
+  failStopEmbedder = false;
+  async stopEmbedder() {
+    if (this.failStopEmbedder) throw new Error('mock: docker would not stop the service');
+    this.embedder = { embedder: 'absent', door: 'absent' };
+  }
   /** What docker stats would say about the engine (tests set it). */
   embedderStatsRow: import('./provider.js').ContainerStats | undefined = undefined;
   async embedderStats() { return this.embedderStatsRow; }

@@ -286,3 +286,43 @@ describe('over the API', () => {
     expect((await f.inject({ method: 'DELETE', url: '/v1/embedder/guests/t2', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(404);
   });
 });
+
+describe('the 30th audit: a Stop is final, and a failed build keeps the running key', () => {
+  it('a restart or a builder\'s start after a Stop does not bring the service back', async () => {
+    const w = world();
+    const sha = await withModel(w, 'data');
+    const svc = new EmbedderService({
+      provider: () => w.provider, secrets: w.secrets, store: w.store, dataDir: w.dataDir, runtimeImage: 'x:1',
+      doorScript: 'noop', doorBind: async () => '127.0.0.1', modelSha256: sha, log: (e, d) => w.events.push([e, d]),
+    });
+    await svc.start();
+    expect(w.provider.embedder.embedder).toBe('running');
+    await svc.stop();
+    // The health loop's memory restart, or the owner's Restart, landing after the Stop:
+    expect((await svc.restart()).enabled).toBe(false);
+    expect(w.provider.embedder.embedder).not.toBe('running');
+    // …and a build's "bring an enabled one back" (start with onlyIfEnabled) leaves it too.
+    expect((await svc.start({ onlyIfEnabled: true })).enabled).toBe(false);
+    expect(w.provider.embedder.embedder).not.toBe('running');
+    // A plain start (the owner) does.
+    expect((await svc.start()).enabled).toBe(true);
+    // A Stop that docker refuses keeps the record honest: still enabled.
+    w.provider.failStopEmbedder = true;
+    await expect(svc.stop()).rejects.toThrow();
+    expect(svc.enabled).toBe(true);
+    w.provider.failStopEmbedder = false;
+  });
+
+  it('two failed rebuilds in a row keep the ACCEPTED key valid, not the first failed build\'s', () => {
+    const w = world();
+    w.store.insertAgent({ id: 'k1', ownerId: 'o1', name: 'K', slug: 'k', state: 'RUNNING', aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+    const hashes = () => w.store.listEmbedTokens().filter((t) => t.agentId === 'k1').map((t) => t.tokenHash).sort();
+    w.store.setEmbedToken('k1', 'K0'); w.store.commitEmbedToken('k1');
+    w.store.setEmbedToken('k1', 'K1'); // build 1, fails
+    expect(hashes()).toEqual(['K0', 'K1']);
+    w.store.setEmbedToken('k1', 'K2'); // build 2, fails too
+    expect(hashes()).toEqual(['K0', 'K2']); // the running container's K0 is still in
+    w.store.setEmbedToken('k1', 'K3'); w.store.commitEmbedToken('k1'); // accepted
+    expect(hashes()).toEqual(['K3']);
+  });
+});

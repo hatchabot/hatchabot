@@ -2663,7 +2663,7 @@ async function loadConfig() {
   const runBy = $('managedBy');
   if (runBy) {
     runBy.hidden = !appConfig.managed;
-    if (appConfig.managed) runBy.innerHTML = `Run by <b>${esc(appConfig.managed.by)}</b>: it keeps this Hatchabot upgraded, reachable and backed up.${appConfig.managed.supportUrl ? ` <a href="${esc(appConfig.managed.supportUrl)}" target="_blank" rel="noopener">Get help</a>` : ''}`;
+    if (appConfig.managed) runBy.innerHTML = `Run by <b>${esc(appConfig.managed.by)}</b>: it keeps this Hatchabot upgraded, reachable and backed up.${/^https?:\/\//i.test(appConfig.managed.supportUrl || '') ? ` <a href="${esc(appConfig.managed.supportUrl)}" target="_blank" rel="noopener">Get help</a>` : ''}`;
   }
   const identity = appConfig.authMode === 'identity';
   const accounts = appConfig.authMode === 'accounts';

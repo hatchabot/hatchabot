@@ -110,7 +110,7 @@ QS=$(sed 's/\r//g' "$OUT"/install-*.log | grep -c '\[y/N\] y')
 
 # ---- 2. what a new owner does first ----------------------------------------------
 vmi 'hatchabot doctor' >"$OUT/doctor.log"
-grep -q "^All good" "$OUT/doctor.log" && ok "hatchabot doctor: $(grep '^All good' "$OUT/doctor.log")" || bad "hatchabot doctor — $(grep '^✗' "$OUT/doctor.log" | head -2 | tr '\n' ' ')"
+grep -q "^All good" "$OUT/doctor.log" && ok "hatchabot doctor: $(grep '^All good' "$OUT/doctor.log")" || bad "hatchabot doctor — $(grep '^✗' "$OUT/doctor.log" | sed -n 1,2p | tr '\n' ' ')"
 vmi 'hbt help | sed -n 1p' | grep -q 'hbt is the same command' && ok "hatchabot and hbt are on the PATH" || bad "hbt is not on the PATH"
 # doctor says "Release vX", or "Running vX, but vY is available locally".
 ver() { grep -oE '(Release|Running) v[0-9.]+' | sed -n 1p | grep -oE 'v[0-9.]+'; }
@@ -176,7 +176,7 @@ EOF
     vmi 'HATCHABOT_CLI=hbt ~/hatchabot/scripts/regress-autonomous.sh' >"$OUT/regression.log"
     SUM=$(grep -E '^── [0-9]+ passed' "$OUT/regression.log")
     grep -qE '^── [0-9]+ passed, 0 failed' "$OUT/regression.log" && ok "autonomous-agent regression: ${SUM//─/}" \
-      || { bad "autonomous-agent regression: ${SUM:-did not finish} — $(grep -E '^(✗|▸.*FAILED)' "$OUT/regression.log" | head -2 | tr '\n' ' ')"
+      || { bad "autonomous-agent regression: ${SUM:-did not finish} — $(grep -E '^(✗|▸.*FAILED)' "$OUT/regression.log" | sed -n 1,2p | tr '\n' ' ')"
            vm 'journalctl --user -u hatchabot -n 200 --no-pager' >"$OUT/service.log" 2>&1; }
   fi
 fi

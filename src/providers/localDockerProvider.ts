@@ -734,7 +734,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       let j: { Name?: string; ID?: string; CPUPerc?: string; MemUsage?: string; PIDs?: string };
       try { j = JSON.parse(line); } catch { continue; }
       const name = j.Name ?? '';
-      if (!/^(hatchabot|agentclaw)-/.test(name)) continue;
+      // This install's containers — by ITS prefix (a shared-host tenant runs
+      // as t1-…; the fixed name left its usage view and the engine's memory
+      // guard blind, 30th audit) — and the old spelling's.
+      if (!name.startsWith(`${this.prefix}-`) && !name.startsWith('agentclaw-')) continue;
       const [used, limit] = (j.MemUsage ?? '').split('/');
       out.push({
         name,
@@ -837,6 +840,10 @@ export class LocalDockerProvider implements RuntimeProvider {
           'chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]));
       let stderr = '';
+      // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      timer.unref();
+      child.on('close', () => clearTimeout(timer));
       child.stderr.on('data', (c) => (stderr += c));
       child.on('error', reject);
       child.on('close', (code) => {
@@ -873,6 +880,10 @@ export class LocalDockerProvider implements RuntimeProvider {
           `chown -R 1000:1000 /vol/.openclaw && chmod -R a-s /vol/.openclaw`,
       ]));
       let stderr = '';
+      // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
+      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      timer.unref();
+      child.on('close', () => clearTimeout(timer));
       child.stderr.on('data', (c) => (stderr += c));
       child.on('error', reject);
       child.on('close', (code) =>
@@ -1011,12 +1022,19 @@ export class LocalDockerProvider implements RuntimeProvider {
    *  (macOS, Windows), whose bridge lives inside its VM so no bridge address
    *  can be bound on this machine. */
   #daemonKind(): Promise<{ rootless: boolean; desktop: boolean }> {
+    // Only a daemon that ANSWERED is remembered: asked before dockerd is up
+    // (a tenant's reboot, a Mac's login), a failed probe read as "root docker"
+    // for the life of the process — bind-mounted seeds, the wrong host alias,
+    // a door on an address that does not exist (30th audit).
     this.#daemon ??= this.#docker(['info', '--format', '{{.OperatingSystem}}|{{.SecurityOptions}}']).then(
-      (r) => ({
-        rootless: r.code === 0 && /\bname=rootless\b/.test(r.stdout),
-        desktop: r.code === 0 && /docker desktop/i.test(r.stdout),
-      }),
-      () => ({ rootless: false, desktop: false }),
+      (r) => {
+        if (r.code !== 0) { this.#daemon = undefined; return { rootless: false, desktop: false }; }
+        return {
+          rootless: /\bname=rootless\b/.test(r.stdout),
+          desktop: /docker desktop/i.test(r.stdout),
+        };
+      },
+      () => { this.#daemon = undefined; return { rootless: false, desktop: false }; },
     );
     return this.#daemon;
   }

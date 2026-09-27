@@ -285,7 +285,7 @@ the review confirms).
 **Decided 2026-09-26 (Chris), shipped in v2.83.0**
 - The CLI asks y/N before `kick`, `deny`, `unarchive`, `revert`, `env rm`,
   `folders rm` and `image rm`, unless `--yes` (`-y`, `-f`, `--force`);
-  `delete` and `archive` keep asking for the typed name.
+  `delete` keeps asking for the typed name (`archive` is reversible: y/N).
 - An AI-source switch is recorded and applies at the agent's next rebuild on
   every surface; each offers "now": the app asks, the CLI has `--now`, the
   chat says so and can call `rebuild_agent`.

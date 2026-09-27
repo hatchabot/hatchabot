@@ -46,8 +46,9 @@ export function slotOf(iso: string): string {
 
 const DAY = 86_400_000;
 export /** How many agents to sample at once, and how long one whole pass may take. */
-const PASS_CONCURRENCY = Number(process.env.HATCHABOT_USAGE_CONCURRENCY ?? 6);
-const PASS_BUDGET_MS = Number(process.env.HATCHABOT_USAGE_PASS_MS ?? 5 * 60_000);
+// A blank or non-numeric knob is the default, not zero workers and no budget (30th audit).
+const PASS_CONCURRENCY = Math.max(1, Number(process.env.HATCHABOT_USAGE_CONCURRENCY) || 6);
+const PASS_BUDGET_MS = Math.max(10_000, Number(process.env.HATCHABOT_USAGE_PASS_MS) || 5 * 60_000);
 const RETAIN_MS = 8 * DAY;
 
 export interface SampleDeps {

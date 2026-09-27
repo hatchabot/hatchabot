@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
     --ai-source) AI_SOURCE="$2"; shift 2 ;;
     --tenants) TENANTS="$2"; shift 2 ;;
     --shared-embedder) SHARED=1; shift ;;
-    --vm) VM="$2"; shift 2 ;;                 # reuse a VM this script kept (host prep is skipped if done)
+    --vm) VM="$2"; KEEP=1; shift 2 ;;         # reuse a VM this script kept — and keep it again (host prep is skipped if done)
     --installer-url) INSTALLER_URL="$2"; shift 2 ;;
     -h|--help) sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option $1 (see --help)"; exit 2 ;;
@@ -107,10 +107,11 @@ EOF
 grep -q "prepped" "$OUT/hostprep.log" && ok "host prepared: $(grep -o 'prepped.*' "$OUT/hostprep.log" | tail -1)" || { bad "host prep — $(tail -3 "$OUT/hostprep.log" | tr '\n' ' ')"; exit 1; }
 
 # ---- 2. tenants -----------------------------------------------------------------
-# Tenant i owns: PORT 810i, ops door 819i, memory-search door 809i, gateway ports 19i00–19i99.
+# Tenant i owns: PORT 8100+i, ops door 8300+i, memory-search door 8500+i, gateway ports 19i00–19i99
+# (the same three ranges bin/hc uses; 8090+i and 8190+i met other slots' ports from slot 11).
 declare -A PORT OPS EMBED GWBASE UIDOF TOKEN
 for i in $(seq 1 "$TENANTS"); do
-  u="t$i"; PORT[$u]=$((8100 + i)); OPS[$u]=$((8190 + i)); EMBED[$u]=$((8090 + i)); GWBASE[$u]=$((19000 + i * 100))
+  u="t$i"; PORT[$u]=$((8100 + i)); OPS[$u]=$((8300 + i)); EMBED[$u]=$((8500 + i)); GWBASE[$u]=$((19000 + i * 100))
   root >"$OUT/$u-user.log" 2>&1 <<EOF
 set -e
 id $u >/dev/null 2>&1 || useradd -m -s /bin/bash $u
@@ -164,7 +165,10 @@ HATCHABOT_PUBLIC_URL=http://127.0.0.1:${PORT[$u]}"
   # Its ports answer only its own user, the router, and root — never another tenant or another tenant's containers.
   # With one engine per host, tenant 1's memory search door stays open to every tenant: the guest key is its gate.
   EMBED_RULE="${EMBED[$u]}, "; [ "$SHARED" = 1 ] && [ "$i" = 1 ] && EMBED_RULE=""
+  # Once per tenant, not once per run (a kept VM used to stack a copy each time). The real host persists
+  # these through bin/hc's /etc/hatchabot-cloud/hb.nft; the bed's rules live until the VM reboots.
   root >"$OUT/$u-nft.log" 2>&1 <<EOF
+nft list chain inet hb out 2>/dev/null | grep -q "dport { ${PORT[$u]}," || \
 nft add rule inet hb out oif lo tcp dport { ${PORT[$u]}, ${OPS[$u]}, ${EMBED_RULE}${GWBASE[$u]}-$((GWBASE[$u] + 99)) } meta skuid != { ${UIDOF[$u]}, \$(id -u caddy), 0 } reject with tcp reset
 EOF
 done

@@ -304,10 +304,10 @@ describe('the installer and upgrade never close a pipe early', () => {
   // `… | head -1` under `set -o pipefail`: head exits after one line, the
   // writer gets SIGPIPE, the pipeline is 141 and `set -e` kills the script —
   // silently, on a re-run with a few hundred tags (2026-09-25). sed -n 1p reads to the end.
-  it('no `| head -1` in any shell script (hbt channels died the same way, 2026-09-25)', () => {
+  it('no `| head -N` in any shell script (hbt channels died the same way, 2026-09-25; `head -c` reads the whole small answer and is fine)', () => {
     const files = ['install.sh', ...readdirSync('scripts').filter((f) => f.endsWith('.sh')).map((f) => `scripts/${f}`)];
     for (const f of files) {
-      expect(read(f).match(/\|\s*head -n?1\b/g) ?? [], f).toEqual([]);
+      expect(read(f).match(/\|\s*head\s+(-n\s*)?-?\d+\b/g) ?? [], f).toEqual([]);
     }
   });
   // An upgrade brings the release's default runtime image along; before

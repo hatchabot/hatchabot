@@ -336,6 +336,14 @@ export class Store {
         -- claimed, so an open window is not "whoever messages first wins".
         expect TEXT
       );
+      -- One window per PERSON and channel (the seat: "<kind>:<userId>"), not
+      -- one per agent: the owner's first-contact window and an invitee's ran
+      -- at once, and whichever bound first shut the door on the other (30th
+      -- audit). pairing_window above is kept empty for its ALTER migration.
+      CREATE TABLE IF NOT EXISTS pairing_windows (
+        agent_id TEXT NOT NULL, seat TEXT NOT NULL, until TEXT NOT NULL, opened_for TEXT, expect TEXT,
+        PRIMARY KEY (agent_id, seat)
+      );
       -- Verbatim workspace files a template import wants seeded at first provision
       -- (its trained SOUL.md / AGENTS.md). Read by buildRuntimeSpec; the seed
       -- script only writes files that don't already exist, so it's a one-time seed.
@@ -482,6 +490,16 @@ export class Store {
         dismissed_at TEXT
       );
     `);
+    // Windows that were open when this version arrived move to the per-seat
+    // table once; the old table is then left empty (its ALTER below still runs).
+    try {
+      const old = this.db.prepare(`SELECT agent_id, until, opened_for, expect FROM pairing_window`).all() as Array<{ agent_id: string; until: string; opened_for: string | null; expect: string | null }>;
+      for (const r of old) {
+        this.db.prepare(`INSERT OR IGNORE INTO pairing_windows (agent_id, seat, until, opened_for, expect) VALUES (?, ?, ?, ?, ?)`)
+          .run(r.agent_id, `telegram:${r.opened_for ?? 'owner'}`, r.until, r.opened_for, r.expect);
+      }
+      if (old.length) this.db.prepare(`DELETE FROM pairing_window`).run();
+    } catch { /* a database from before the expect column: the ALTER below adds it and the next boot moves the rows */ }
     // Additive dev migrations for databases created before these columns
     // existed. Harmless when the column is already there.
     for (const alter of [
@@ -1238,6 +1256,10 @@ export class Store {
     this.db
       .prepare(`UPDATE agents SET state = ?, state_reason = ?, updated_at = ? WHERE id = ?`)
       .run(next, reason ?? null, new Date().toISOString(), id);
+    // Running is awake, whichever path got it there (a rebuild, a reconcile,
+    // a start): a sleeper's mark left on a RUNNING agent showed it ASLEEP and
+    // sent the next sweep to stop it again (30th audit).
+    if (next === 'RUNNING' && agent.hibernatedAt) this.setHibernated(id, null);
     // A management agent that is put away or removed has no key any more.
     if (agent.ops && (next === 'ARCHIVED' || next === 'DELETING' || next === 'DELETED')) this.deleteOpsToken(id);
     // Its embed key dies with its state too (the door's file carries only live agents).
@@ -1833,13 +1855,16 @@ export class Store {
   // ---- embed keys: one per agent, for the embedding service's door ----------
   /**
    * A new key for the agent (minted on every build). The old one stays valid
-   * beside it until commitEmbedToken: the container still running keeps its
+   * beside it until commitEmbedToken — through as many failed builds as it
+   * takes (the previous hash is the last ACCEPTED key, never a failed build's;
+   * two failed rebuilds in a row used to lock the running container out, 30th
+   * audit): the container still running keeps its
    * recall through the build, and keeps it if the build fails (27th audit).
    */
   setEmbedToken(agentId: string, tokenHash: string): void {
     this.db
       .prepare(`INSERT INTO embed_tokens (agent_id, token_hash, created_at, prev_token_hash) VALUES (?, ?, ?, NULL)
-                ON CONFLICT(agent_id) DO UPDATE SET prev_token_hash = embed_tokens.token_hash, token_hash = excluded.token_hash, created_at = excluded.created_at`)
+                ON CONFLICT(agent_id) DO UPDATE SET prev_token_hash = COALESCE(embed_tokens.prev_token_hash, embed_tokens.token_hash), token_hash = excluded.token_hash, created_at = excluded.created_at`)
       .run(agentId, tokenHash, new Date().toISOString());
   }
   /** The build was accepted: only the new key from here. */
@@ -3350,44 +3375,55 @@ export class Store {
     this.db.prepare(`UPDATE agents SET allow_knocks = ? WHERE id = ?`).run(on ? 1 : 0, agentId);
   }
 
-  /** Open the door on this agent until `until` — a claim window is running. */
+  /** The seat a window is for: one per person and channel, so two claims on one agent do not share a row. */
+  static pairingSeat(kind: string | undefined, openedFor: string | undefined): string {
+    return `${kind ?? 'telegram'}:${openedFor ?? 'owner'}`;
+  }
+
+  /** Open the door on this agent until `until` — a claim window is running for this seat. */
   openPairingWindow(
     agentId: string,
     until: string,
     openedFor?: string,
-    opts?: { expect?: string },
+    opts?: { expect?: string; kind?: string },
   ): void {
     this.db
       .prepare(
-        `INSERT INTO pairing_window (agent_id, until, opened_for, expect)
-         VALUES (?, ?, ?, ?)
-           ON CONFLICT(agent_id) DO UPDATE SET until = excluded.until,
+        `INSERT INTO pairing_windows (agent_id, seat, until, opened_for, expect)
+         VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, seat) DO UPDATE SET until = excluded.until,
              opened_for = excluded.opened_for, expect = excluded.expect`,
       )
-      .run(agentId, until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null);
+      .run(agentId, Store.pairingSeat(opts?.kind, openedFor), until, openedFor ?? null, normalizeHandle(opts?.expect) ?? null);
   }
 
-  /** The open window's terms, or undefined when the door is shut. */
+  /** Every window still open on this agent. */
+  pairingWindows(agentId: string, now = new Date()): Array<{ seat: string; until: string; openedFor?: string; expect?: string }> {
+    const rows = this.db
+      .prepare(`SELECT seat, until, opened_for, expect FROM pairing_windows WHERE agent_id = ? ORDER BY until DESC`)
+      .all(agentId) as Array<{ seat: string; until: string; opened_for: string | null; expect: string | null }>;
+    return rows
+      .filter((r) => Date.parse(r.until) > now.getTime())
+      .map((r) => ({ seat: r.seat, until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined }));
+  }
+
+  /** The longest-open window's terms, or undefined when the door is shut. */
   pairingWindow(agentId: string, now = new Date()):
     | { until: string; openedFor?: string; expect?: string }
     | undefined {
-    const r = this.db
-      .prepare(`SELECT until, opened_for, expect FROM pairing_window WHERE agent_id = ?`)
-      .get(agentId) as { until: string; opened_for: string | null; expect: string | null } | undefined;
-    if (!r || Date.parse(r.until) <= now.getTime()) return undefined;
-    return { until: r.until, openedFor: r.opened_for ?? undefined, expect: r.expect ?? undefined };
+    return this.pairingWindows(agentId, now)[0];
   }
 
-  closePairingWindow(agentId: string): void {
-    this.db.prepare(`DELETE FROM pairing_window WHERE agent_id = ?`).run(agentId);
+  /** Close one seat's window, or every window on the agent when no seat is named. */
+  closePairingWindow(agentId: string, seat?: string): void {
+    if (seat) this.db.prepare(`DELETE FROM pairing_windows WHERE agent_id = ? AND seat = ?`).run(agentId, seat);
+    else this.db.prepare(`DELETE FROM pairing_windows WHERE agent_id = ?`).run(agentId);
   }
 
   pairingWindowOpen(agentId: string, now = new Date()): boolean {
-    const r = this.db
-      .prepare(`SELECT until FROM pairing_window WHERE agent_id = ?`)
-      .get(agentId) as { until: string } | undefined;
-    return !!r && Date.parse(r.until) > now.getTime();
+    return this.pairingWindows(agentId, now).length > 0;
   }
+
 
   /**
    * Is this channel identity somebody the owner already knows — their own
@@ -3563,6 +3599,11 @@ export class Store {
    * claim refuses such an id: a known person's knock is never "the owner's
    * first message".
    */
+  /** Is this Telegram id somebody OTHER than this owner's: a member on another owner's agent, or another account's link? */
+  telegramBoundOutside(channelUserId: string, ownerId: string): boolean {
+    if (this.db.prepare(`SELECT 1 FROM memberships m JOIN agents a ON a.id = m.agent_id WHERE m.channel_user_id = ? AND a.owner_id != ? LIMIT 1`).get(channelUserId, ownerId)) return true;
+    return !!this.db.prepare(`SELECT 1 FROM accounts WHERE telegram_user_id = ? AND owner_id != ? LIMIT 1`).get(channelUserId, ownerId);
+  }
   channelUserBoundAnywhere(kind: ChannelKind, channelUserId: string): boolean {
     if (kind === 'telegram') {
       if (this.db.prepare(`SELECT 1 FROM memberships WHERE channel_user_id = ? LIMIT 1`).get(channelUserId)) return true;

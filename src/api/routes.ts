@@ -1815,7 +1815,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
       }
       let v = await embedder.status();
-      if (!(v.embedder === 'running' && v.door === 'running')) v = await embedder.start();
+      // An enabled service that fell over comes back for this build — but only
+      // if it is still enabled once the turn is ours: a Stop that landed in
+      // between wins, and this build fails rather than undoing it (30th audit).
+      if (!(v.embedder === 'running' && v.door === 'running')) v = await embedder.start({ onlyIfEnabled: true });
+      if (!(v.embedder === 'running' && v.door === 'running')) throw new Error('the memory search service was stopped by the machine\'s owner (Settings → Hosts)');
       if (!v.doorAddress) throw new Error('the embedding service has no address');
       // Docker Desktop publishes on loopback, which a container reaches as host.docker.internal.
       const doorAddress = v.doorAddress.replace(/^(127\.[\d.]+|localhost)(?=:)/, 'host.docker.internal');
@@ -2005,7 +2009,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
   app.post<{ Body: { name?: string } }>('/v1/embedder/guests', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
-    const name = (req.body as { name?: string } | null)?.name?.trim() ?? '';
+    const raw = (req.body as { name?: unknown } | null)?.name;
+    const name = typeof raw === 'string' ? raw.trim() : '';
     let key: string;
     try { key = embedder.addGuest(name); } catch (err) { return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) }); }
     app.log.warn({ guest: name, ownerId: ownerIdOf(req) }, 'embed.guest_key_issued');
@@ -2063,14 +2068,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     afterWake: clearPinsWhenUp,
     lastActiveFor: (a) => lastActiveFor(a), // defined further down (a const in this scope; called only at sweep time)
     ownCrons: async (a) => (await listCrons(providerFor(a.hostId), a.runtimeRef!, a.slug)).map((c) => ({ enabled: c.enabled, system: c.system })),
-    isBusy,
+    // Busy is the flag AND a turn in flight: an ask or a consult is not on the
+    // flag, and the idle sweep stopped a container mid-answer (30th audit).
+    isBusy: (id) => isBusy(id) || a2aInFlight.has(id),
     log: (id) => (event, detail) => trace(id)(event, detail ?? {}),
     fetchImpl: deps.oauthFetch,
   };
   /** Wake a sleeping agent and wait for its gateway (a message, a console, an ask). */
   const ensureAwake = async (agent: Agent, why: string): Promise<Agent> => {
     if (!agent.hibernatedAt || agent.state !== 'STOPPED') return agent;
+    // Moved away or busy: not ours to start (two gateways on one bot token; a
+    // start under a move). The caller's "not running" answer stands.
+    if (agent.migratedTo || hibernateDeps.isBusy(agent.id)) return agent;
     const woken = await wakeAgent(hibernateDeps, agent, why);
+    if (woken.state !== 'RUNNING') return woken;
     const provider = providerFor(woken.hostId);
     // A 2026.9 gateway takes 20–60 s to answer on a loaded box: the first console
     // open after a sleep timed out at 45 s (Meeting Scheduler, 2026-09-26).
@@ -2094,14 +2105,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Once per boot, the running fleet on this machine: sessions pinned to a
     // runtime the config no longer names (the agents that switched from a
     // machine login to a setup token kept asking for the CLI; runtimePins.ts).
+    // Each agent is waited for (a host reboot brings 45 gateways up slowly),
+    // three at a time, and a failure is on its trail rather than swallowed.
     setTimeout(() => {
       void (async () => {
         const local = store.localHostId();
-        for (const a of store.listAllActiveAgents()) {
-          if (a.state !== 'RUNNING' || !a.runtimeRef || a.hostId !== local) continue;
-          const cleared = await clearStaleRuntimePins(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => [] as string[]);
-          if (cleared.length) app.log.warn({ agent: a.slug, sessions: cleared }, 'stale runtime pins cleared');
-        }
+        const queue = store.listAllActiveAgents().filter((a) => a.state === 'RUNNING' && !!a.runtimeRef && a.hostId === local);
+        const worker = async () => {
+          for (let a = queue.shift(); a; a = queue.shift()) {
+            const cleared = await clearStaleRuntimePinsWhenUp(providerFor(a.hostId), a.runtimeRef!, a.slug, (e, d) => trace(a.id)(e, d));
+            if (cleared.length) app.log.warn({ agent: a.slug, sessions: cleared }, 'stale runtime pins cleared');
+          }
+        };
+        await Promise.all([worker(), worker(), worker()]);
       })();
     }, Number(process.env.HATCHABOT_PINS_BOOT_MS) || 60_000).unref();
   }
@@ -3317,7 +3333,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     // In-use check must span all owners (a shared profile may power another
     // account's agent), but the message must not name THEIR agents to you.
-    const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id);
+    // "In use" is what an agent WILL use and what its container runs NOW: a
+    // switch that has not been applied yet leaves the old source's token in
+    // the container until the rebuild (30th audit).
+    const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id || a.appliedProfileId === profile.id);
     if (using.length > 0) {
       const mine = using.filter((a) => a.ownerId === ownerIdOf(req));
       const others = using.length - mine.length;
@@ -5756,9 +5775,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (target.ownerId !== caller.ownerId || !store.agentMayCall(caller.agentId, target.id)) {
       return reply.code(403).send({ error: 'Not allowed to consult that agent.' });
     }
-    if (target.state !== 'RUNNING' || !target.runtimeRef) {
+    // A sleeping peer is woken for the consult, as it is for an ask (30th audit).
+    const awake = await ensureAwake(target, 'a consult from another agent');
+    if (awake.state !== 'RUNNING' || !awake.runtimeRef) {
       return reply.code(409).send({ error: 'That agent is not running.' });
     }
+    const targetRef: string = awake.runtimeRef;
     if (isBusy(target.id)) return reply.code(409).send({ error: 'That agent is busy (rebuilding or moving) — try again shortly.' });
     const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim().slice(0, 8000);
     if (!text) return reply.code(400).send({ error: 'Empty message.' });
@@ -5803,7 +5825,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // if the owner had nothing unread there, keep it that way afterwards.
       sessionsCache.delete(target.id);
       const hadUnread = await unreadFor(target, target.ownerId);
-      const res = await providerFor(target.hostId).exec(target.runtimeRef, ['agent', '--agent', target.slug, '-m', framed], { timeoutMs: A2A_TIMEOUT_MS });
+      const res = await providerFor(target.hostId).exec(targetRef, ['agent', '--agent', target.slug, '-m', framed], { timeoutMs: A2A_TIMEOUT_MS });
       sessionsCache.delete(target.id);
       if (!hadUnread) store.setAgentSeen(target.ownerId, target.id, Date.now());
       trace(target.id)('a2a.consulted', { from: caller.agentId, ok: res.code === 0 && !res.timedOut, timedOut: !!res.timedOut });
@@ -8704,12 +8726,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // them away. Once one person is admitted the agent goes to `allowlist` and
     // a stranger cannot knock at all.
     if (!store.listAllowedChannelUserIds(agent.id, r.kind).length) return true;
-    const win = store.pairingWindow(agent.id);
-    if (!win) return false;
-    // A window opened FOR somebody admits only them: an open door is not an
-    // open invitation to whoever knocks first.
-    if (!win.expect) return true;
-    return normalizeHandle(r.id) === win.expect || normalizeHandle(r.meta?.username) === win.expect;
+    // Every open window counts (the owner's and an invitee's may both be
+    // waiting). A window opened FOR somebody admits only them: an open door
+    // is not an open invitation to whoever knocks first.
+    return store.pairingWindows(agent.id).some((win) =>
+      !win.expect || normalizeHandle(r.id) === win.expect || normalizeHandle(r.meta?.username) === win.expect);
   };
 
   const pairingRequestsFor = async (agent: Agent, includeStrangers = false) => {
@@ -8787,8 +8808,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       for (const r of reqs) {
         if (!expectedKnock(agent, r)) {
           // A stranger. Turn it away here rather than leaving it on the volume
-          // to be re-read every sweep — and never mention it to anyone.
-          void denyPairing(
+          // to be re-read every sweep — and never mention it to anyone. One
+          // at a time per agent: a public bot collects dozens of knocks, and
+          // each deny is a docker exec (30th audit).
+          await denyPairing(
             { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
             { agentId: agent.id, runtimeRef: agent.runtimeRef!, code: r.code, kind: r.kind },
           ).then(
@@ -9181,16 +9204,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/hibernate', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
     if (busyNow(agent, reply)) return reply;
     if (agent.state !== 'RUNNING') return reply.code(409).send({ error: `Cannot put it to sleep while ${agent.state}` });
-    // By hand, the idle and scheduled-task rules do not apply — the owner knows; the chat-app rule does.
+    if (agent.ops) return reply.code(409).send({ error: 'The management agent stays up: it carries your notifications.' });
+    // By hand, the idle rule does not apply — the owner knows. The chat-app and
+    // scheduled-task rules do: a sleeper misses what only a running one gets.
     const kinds = store.listChannelsForAgent(agent.id).map((c) => c.kind);
     if (kinds.some((k) => k !== 'telegram')) return reply.code(409).send({ error: 'An agent on Discord or Slack cannot sleep: nothing queues their messages while it is down.' });
+    const crons = await hibernateDeps.ownCrons(agent).catch(() => undefined);
+    if (crons?.some((c) => c.enabled && !c.system)) return reply.code(409).send({ error: 'It has scheduled tasks of its own: they would not run while it sleeps. Pause them first.' });
     return publicAgent(await hibernateAgent(hibernateDeps, agent, 'by hand'));
   });
   app.post<{ Params: { id: string } }>('/v1/agents/:id/wake', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (movedAway(agent, reply)) return reply;
+    if (busyNow(agent, reply)) return reply;
     if (!agent.hibernatedAt) return reply.code(409).send({ error: 'It is not asleep.' });
     return publicAgent(await wakeAgent(hibernateDeps, agent, 'by hand'));
   });

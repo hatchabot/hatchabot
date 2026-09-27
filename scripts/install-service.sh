@@ -95,4 +95,6 @@ if [ -n "$DOCKER_GID" ] && [ -n "$MANAGER" ] && id -nG "$USER" | tr ' ' '\n' | g
   fi
 fi
 
-systemctl --user status hatchabot --no-pager | head -5
+# sed, not head: head closes the pipe early and status dies of SIGPIPE under
+# pipefail (the install then ended before the CLI was linked, 30th audit).
+systemctl --user status hatchabot --no-pager 2>&1 | sed -n 1,5p || true

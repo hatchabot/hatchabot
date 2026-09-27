@@ -78,13 +78,13 @@ export async function clearStaleRuntimePins(provider: RuntimeProvider, runtimeRe
 
 /** The same, after a start or a wake: wait for the gateway first (up to ~2 min), then clear. Never throws. */
 export async function clearStaleRuntimePinsWhenUp(provider: RuntimeProvider, runtimeRef: string, slug: string, log: Log = () => {},
-  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)), attempts = 120): Promise<string[]> {
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)), attempts = 24): Promise<string[]> {
   try {
     for (let i = 0; i < attempts; i++) {
       const st = await provider.status(runtimeRef).catch(() => undefined);
       if (st?.phase === 'running' && st.healthy) return await clearStaleRuntimePins(provider, runtimeRef, slug, log);
       if (st?.phase === 'stopped' || st?.phase === 'error') return [];
-      await sleep(1000);
+      await sleep(5000); // a fleet start is many of these at once: not one docker inspect a second each
     }
   } catch (err) {
     log('runtime.pin_failed', { error: String(err).slice(0, 200) });

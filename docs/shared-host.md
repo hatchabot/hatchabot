@@ -60,8 +60,8 @@ su - t1
   dockerd-rootless-setuptool.sh install
   HATCHABOT_YES=1 HATCHABOT_SETUP_SIGNIN=accounts HATCHABOT_SETUP_PORT=8101 \
   HATCHABOT_SETUP_ENV="DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
-HATCHABOT_OPS_PORT=8191
-HATCHABOT_EMBED_PORT=8091
+HATCHABOT_OPS_PORT=8301
+HATCHABOT_EMBED_PORT=8501
 HATCHABOT_GATEWAY_PORT_BASE=19100
 HATCHABOT_PREFIX=t1
 HATCHABOT_MAX_AGENTS_TOTAL=10
@@ -81,7 +81,7 @@ Hatchabot points its agents at that door instead of starting an engine.
 # on the tenant that runs the service (t1)
 hbt embedder guest-add t2          # prints the key once, with the three lines below
 # in t2's .env, then restart t2's Hatchabot
-HATCHABOT_EMBED_URL=http://10.0.2.2:8091/v1
+HATCHABOT_EMBED_URL=http://10.0.2.2:8501/v1
 HATCHABOT_EMBED_KEY=<the key>
 HATCHABOT_EMBED_MODEL=embeddinggemma
 ```
@@ -114,9 +114,20 @@ containers alike, while the router (Caddy) and root still get through:
 ```
 nft add table inet hb
 nft add chain inet hb out '{ type filter hook output priority 0; }'
-nft add rule inet hb out oif lo tcp dport { 8101, 8191, 8091, 19100-19199 } \
+nft add rule inet hb out oif lo tcp dport { 8101, 8301, 8501, 19100-19199 } \
     meta skuid != { $(id -u t1), $(id -u caddy), 0 } reject with tcp reset
 ```
+
+Two things the rule does not do by itself. It lives in the running kernel
+only: a host reboot empties the table, so it has to be written to a file
+that `nftables.service` loads at boot (`bin/hc` in the cloud repository keeps
+`/etc/hatchabot-cloud/hb.nft` and regenerates it from the tenant registry).
+And it keeps OTHER tenants out, not the tenant's own containers: to its own
+Hatchabot those arrive from 127.0.0.1, so Hatchabot stops treating loopback
+as "this machine" under a rootless daemon (no setup-code bypass for the first
+account, no trust in a forwarded-for header) — set
+`HATCHABOT_CONTAINERS_ON_LOOPBACK=1` in the tenant's `.env` to say so
+explicitly; it is detected at boot otherwise.
 
 The other tenant's Docker socket (`/run/user/<uid>/docker.sock`) and home are
 theirs alone by ordinary permissions. Tenants share a kernel; the Dedicated

@@ -134,3 +134,24 @@ describe('what depends on the host address', () => {
     expect(w.provider.lastSpec?.env.HATCHABOT_INTERNAL_URL).toBe('http://10.0.2.2:8102');
   });
 });
+
+describe('the 30th audit: the daemon probe and the prefix', () => {
+  it('a docker info that fails is asked again once the daemon is up, and stats find THIS install\'s prefix', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-probe-'));
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/usr/bin/env bash
+case "$1 $2" in
+  "info --format") [ -f ${JSON.stringify(join(dir, 'up'))} ] || exit 1; echo 'Ubuntu 24.04|[name=seccomp,profile=builtin name=rootless name=cgroupns]' ;;
+  "stats --no-stream") printf '%s\\n' '{"Name":"t1-embedder","CPUPerc":"1.00%","MemUsage":"100MiB / 2GiB","PIDs":"3"}' '{"Name":"hatchabot-other","CPUPerc":"1.00%","MemUsage":"100MiB / 2GiB","PIDs":"3"}' ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const provider = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', prefix: 't1' });
+    expect(await provider.rootless()).toBe(false); // dockerd not up yet: the answer for now…
+    writeFileSync(join(dir, 'up'), '');
+    expect(await provider.rootless()).toBe(true);  // …not for the life of the process
+    const rows = await provider.stats();
+    expect(rows.map((r) => r.name)).toEqual(['t1-embedder']);
+  });
+});

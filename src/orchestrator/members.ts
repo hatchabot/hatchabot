@@ -98,6 +98,12 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   // twice. If this telegram id is the owner's own (known from any of their
   // agents), bind the owner seat instead.
   const agent = store.getAgent(opts.agentId);
+  if (agent && opts.asSelf && store.telegramBoundOutside(req.id, agent.ownerId)) {
+    // "That's me" on an id this machine already knows as SOMEBODY ELSE — a
+    // member of an agent, another account's link — would hand that person
+    // the owner's seat everywhere and their recovery links (30th audit).
+    throw new Error('That Telegram account already belongs to someone on this machine (a member or another account), so it cannot be linked as you.');
+  }
   if (agent && (opts.asSelf || store.knownChannelUserId(agent.ownerId) === req.id)) {
     store.bindMembershipChannelUser(opts.agentId, agent.ownerId, req.id);
     if (opts.asSelf) {

@@ -438,3 +438,36 @@ describe('POST /v1/agents/preflight', () => {
     expect(answer.reasons.join(' ')).toContain('/definitely/not/a/real/folder');
   });
 });
+
+describe('the 30th audit: an AI source is in use where its token RUNS, and a build re-checks sharing', () => {
+  it('deleting a source still applied in a container is refused until the rebuild moves it', async () => {
+    const { f, store } = await world();
+    store.insertAIProfile({ id: 'p2', ownerId: OWNER, name: 'Next', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });
+    // The agent WILL use p2, but its container still runs on p1 (a switch without --now).
+    store['db'].prepare('UPDATE agents SET ai_profile_id = ? WHERE id = ?').run('p2', 'a1');
+    store.setAgentApplied('a1', 'p1', 'claude-opus-4-8');
+    let del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
+    expect(del.statusCode).toBe(400);
+    expect(del.json().error).toMatch(/Still in use by Kitchen/);
+    // Rebuilt onto p2: p1 is free.
+    store.setAgentApplied('a1', 'p2', 'claude-opus-4-8');
+    del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
+    expect(del.statusCode).toBe(200);
+  });
+
+  it('a build refuses a source another account stopped sharing after this agent chose it', async () => {
+    const { store } = await world();
+    const { MemSecrets } = await import('./support/world.js');
+    const secrets = new MemSecrets();
+    const { buildRuntimeSpec } = await import('../src/orchestrator/provision.js');
+    store.insertAIProfile({ id: 'p9', ownerId: 'user-other', name: 'Theirs', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p9', shared: true, createdAt: 'now' });
+    await secrets.put('ai/p9', 'sk-theirs');
+    store['db'].prepare('UPDATE agents SET ai_profile_id = ? WHERE id = ?').run('p9', 'a1');
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'chan/c1', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
+    await secrets.put('chan/c1', 'fake-token-K');
+    const deps = { store, secrets } as never;
+    await expect(buildRuntimeSpec(deps, 'a1')).resolves.toBeTruthy();
+    store['db'].prepare('UPDATE ai_profiles SET shared = 0 WHERE id = ?').run('p9');
+    await expect(buildRuntimeSpec(deps, 'a1')).rejects.toThrow(/no longer shared/);
+  });
+});

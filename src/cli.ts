@@ -177,7 +177,6 @@ Commands:
   ai [<agent>] [<profileId>] [--now]
                                Show AI sources, or point an agent at one (applies
                                at its next rebuild; --now rebuilds it at once)
-                               (applies on the agent's next rebuild)
   adopt <workspace-dir> <name> [--reuse-bot] [--profile <id>]
                                Turn an existing OpenClaw agent's workspace
                                into a managed Hatchabot agent (copies the
@@ -290,7 +289,7 @@ Commands:
 
 Global options:
   --yes, -y, -f      Skip the y/N question of a destructive command (delete
-                     and archive still want the name typed unless --yes)
+                     still wants the name typed unless --yes)
   --url <url>        Control plane (env HATCHABOT_URL, default http://localhost:8080)
   --password <pw>    Shared password (env HATCHABOT_PASSWORD)
   --json             Machine-readable output (list, ask, tasks, doctor, accounts create)
@@ -1168,7 +1167,7 @@ async function main() {
   /** Destructive commands ask y/N unless --yes (-y, -f, --force): the app asks too (Chris, 2026-09-26). */
   const confirmOr = async (q: string): Promise<void> => {
     if (flags.has('yes')) return;
-    const ok = await askLine(`${q} [y/N] `);
+    const ok = await askLine(`${q} [y/N] `).catch(() => fail('not a terminal — pass --yes to skip the question'));
     if (!/^y(es)?$/i.test(ok.trim())) fail('nothing done');
   };
   const askLine = async (promptText: string): Promise<string> => {
@@ -1367,8 +1366,13 @@ async function main() {
       // One rule on every surface: the switch is recorded and applies at the next
       // rebuild; each surface offers "now" (the app asks, the chat says so, here --now).
       if (flags.has('now')) {
-        await jsonPost(`/v1/agents/${a.id}/rebuild`, {});
-        console.log(`"${a.name}" is rebuilding onto that AI source now (memory kept).`);
+        // The switch is already recorded: a refused rebuild (busy, mid-checkpoint) must say so, not read as "nothing happened".
+        try {
+          await jsonPost(`/v1/agents/${a.id}/rebuild`, {});
+          console.log(`"${a.name}" is rebuilding onto that AI source now (memory kept).`);
+        } catch (err) {
+          console.log(`The switch is recorded, but the rebuild could not start (${err instanceof Error ? err.message : String(err)}). Later: hatchabot rebuild "${a.name}"`);
+        }
       } else {
         console.log(`"${a.name}" uses that AI source from its next rebuild — now with: hatchabot ai "${a.name}" ${rest[1]} --now`);
       }
@@ -2174,8 +2178,9 @@ async function main() {
       }
       if (sub === 'guest-rm') {
         const name = rest[1] ?? fail('usage: hatchabot embedder guest-rm <name>');
+        await confirmOr(`Remove guest "${name}"? Its Hatchabot loses memory search until it gets a new key.`);
         await api(ctx, `/v1/embedder/guests/${encodeURIComponent(name)}`, { method: 'DELETE' });
-        console.log(`Guest "${name}" removed — its key stops working at the door now.`);
+        console.log(`Guest "${name}" removed — its key stops working at the door within seconds.`);
         return;
       }
       if (sub === 'move-all') {

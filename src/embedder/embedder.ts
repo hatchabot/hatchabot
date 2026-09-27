@@ -140,7 +140,7 @@ export class EmbedderService {
   }
   removeGuest(name: string): boolean {
     const g = this.#guests();
-    if (!(name in g)) return false;
+    if (!Object.hasOwn(g, name)) return false;
     delete g[name];
     this.#writeGuests(g);
     this.syncKeys();
@@ -242,7 +242,11 @@ export class EmbedderService {
    * up. `onlyIfEnabled` (the health loop): a Stop that landed meanwhile wins.
    */
   start(opts: { onlyIfEnabled?: boolean } = {}): Promise<EmbedderView> {
-    return this.#serial(async () => {
+    return this.#serial(() => this.#startLocked(opts));
+  }
+  /** The start itself, for a caller that already holds the turn. */
+  async #startLocked(opts: { onlyIfEnabled?: boolean } = {}): Promise<EmbedderView> {
+    {
       if (opts.onlyIfEnabled && !this.enabled) return this.status();
       if (this.external) throw new Error(`An external embedding server is configured (HATCHABOT_EMBED_URL=${this.external}); nothing to start here.`);
       const provider = this.#o.provider();
@@ -263,23 +267,28 @@ export class EmbedderService {
       rmSync(this.stoppedFile, { force: true });
       this.#o.log?.('embedder.started', { door: s.doorAddress });
       return this.status();
-    });
+    }
   }
 
+  /** Stop, and remember it: the containers first, the record only once they are down (a hung daemon leaves the record honest). */
   stop(): Promise<EmbedderView> {
     return this.#serial(async () => {
+      await this.#o.provider().stopEmbedder?.();
       rmSync(this.enabledFile, { force: true });
       mkdirSync(this.dir, { recursive: true });
       writeFileSync(this.stoppedFile, `${new Date().toISOString()}\n`);
-      await this.#o.provider().stopEmbedder?.();
       this.#o.log?.('embedder.stopped', {});
       return this.status();
     });
   }
 
-  async restart(): Promise<EmbedderView> {
-    await this.#serial(async () => { await this.#o.provider().stopEmbedder?.(); });
-    return this.start();
+  /** Stop and start as ONE turn: a Stop that lands meanwhile is not undone by the start half (30th audit). */
+  restart(): Promise<EmbedderView> {
+    return this.#serial(async () => {
+      await this.#o.provider().stopEmbedder?.();
+      if (!this.enabled) return this.status();
+      return this.#startLocked({ onlyIfEnabled: true });
+    });
   }
 
   /** The health loop: an enabled service that fell over comes back. */
