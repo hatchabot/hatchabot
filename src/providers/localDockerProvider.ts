@@ -197,6 +197,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Which way of making containers this one came from, so a release that
       // changes it can tell which agents still need a rebuild (rebuildPolicy.ts).
       '--label', `hatchabot.gen=${CONTAINER_GEN}`,
+      // The isolated manager publishes nothing itself; its doorman publishes
+      // the console on this port, which is how its health is probed from here
+      // under rootless or Desktop instead of `openclaw health` in the container
+      // every reconcile (30th audit).
+      ...(spec.isolated && spec.ports?.[0] ? ['--label', `hatchabot.console-port=${spec.ports[0].host}`] : []),
       // Agents live on their own network with inter-container traffic off. On
       // docker's default bridge every agent could open a connection to every
       // other agent's gateway, bypassing the owner-only proxy (audit
@@ -449,7 +454,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { container } = this.#names(runtimeRef);
     // State, the container's addresses, and the host port its gateway is
     // published on (empty when nothing is published).
-    const res = await this.#docker(['inspect', '-f', `{{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{with index .NetworkSettings.Ports "${GATEWAY_PORT}/tcp"}}{{(index . 0).HostPort}}{{end}}`, container]);
+    const res = await this.#docker(['inspect', '-f', `{{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{with index .NetworkSettings.Ports "${GATEWAY_PORT}/tcp"}}{{(index . 0).HostPort}}{{end}}|{{ index .Config.Labels "hatchabot.console-port" }}`, container]);
     if (res.code !== 0) {
       // A daemon that is down is NOT a container that is gone. Conflating them
       // let a boot-order race mark every healthy agent FAILED — and the owner's
@@ -475,7 +480,8 @@ export class LocalDockerProvider implements RuntimeProvider {
       // vanished runtime gets flagged for Retry.
       return { phase: 'absent' };
     }
-    const [addrs = '', published = ''] = res.stdout.trim().split('|');
+    const [addrs = '', publishedSelf = '', viaDoorman = ''] = res.stdout.trim().split('|');
+    const published = publishedSelf.trim() || viaDoorman.trim();
     const [state = '', ip] = addrs.trim().split(/\s+/);
     if (state === 'exited' || state === 'created' || state === 'paused') {
       return { phase: 'stopped' };

@@ -11,6 +11,9 @@ After=docker.service
 
 [Service]
 WorkingDirectory=__HATCHABOT_DIR__
+# Under a memory wall (a shared-host tenant slice) the kernel picks the biggest
+# task: an agent container should go before the control plane (30th audit).
+OOMScoreAdjust=-500
 # Holds HATCHABOT_SECRET_KEY (and PORT). Never committed — see .gitignore.
 EnvironmentFile=__HATCHABOT_DIR__/.env
 # systemd user managers start with a minimal PATH; node (nvm) and docker can

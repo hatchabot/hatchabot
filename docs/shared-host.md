@@ -48,7 +48,7 @@ control plane (~120 MiB), the memory search service (~500 MiB, capped at
 2 GiB), the Hatchabot agent and each agent — about 3 GiB resident for one
 agent, and a `MemoryHigh` below that throttles the whole slice into
 uninterruptible sleep (load 42 on 6 CPUs). For now: no `MemoryHigh` at all
-and `MemoryMax=8G` — a wall, never a throttle — with the 3 GiB cap per agent
+and `MemoryMax=8G` — a wall, never a throttle, and below the sum of the caps on purpose (three agents at 3 GiB, the manager, the engine): when the wall is hit the kernel kills the largest task, which is why the control plane and the rootless daemon carry `OOMScoreAdjust=-500` — an agent container goes first, not everything at once — with the 3 GiB cap per agent
 inside it.
 
 Per tenant (`t1`, on port 8101; give each tenant its own port set):
@@ -58,7 +58,7 @@ useradd -m -s /bin/bash t1 && loginctl enable-linger t1
 systemctl set-property user-$(id -u t1).slice MemoryHigh=infinity MemoryMax=8G
 su - t1
   mkdir -p ~/.config/systemd/user/docker.service.d
-  printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false\n' > ~/.config/systemd/user/docker.service.d/loopback.conf
+  printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false\nOOMScoreAdjust=-500\n' > ~/.config/systemd/user/docker.service.d/loopback.conf
   dockerd-rootless-setuptool.sh install
   HATCHABOT_YES=1 HATCHABOT_SETUP_SIGNIN=accounts HATCHABOT_SETUP_PORT=8101 \
   HATCHABOT_SETUP_ENV="DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock
@@ -88,7 +88,7 @@ HATCHABOT_EMBED_KEY=<the key>
 HATCHABOT_EMBED_MODEL=embeddinggemma
 ```
 
-The door treats a guest like an agent: its own key, its own rate limit
+The door treats a guest like an agent: its own key, its own rate limit (eight times an agent's — the key stands for the guest's whole fleet; `EMBED_GUEST_FACTOR` on the host tunes it)
 (`HATCHABOT_EMBED_PER_MIN`), its own log line — never a body. `hbt embedder
 guest-rm t2` stops the key at once. Leave the service tenant's door port out
 of its socket-owner rule (the key is the gate there), and give the service

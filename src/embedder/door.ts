@@ -9,8 +9,10 @@
  * - accepts `POST /v1/embeddings` with `Authorization: Bearer <an agent's
  *   embed key>`; the keys are a file Hatchabot writes (sha256 → agent id),
  *   re-read when it changes, so a rebuild re-mints without a restart;
- * - rate-limits per agent (a token bucket, EMBED_PER_MIN a minute), caps the
- *   body at 2 MB and the inputs at 256, times out at 60 s;
+ * - rate-limits per key (a token bucket, EMBED_PER_MIN a minute; a guest
+ *   tenant's key stands for its whole fleet, so it gets EMBED_GUEST_FACTOR
+ *   times that, 8 by default, and as many in flight), caps the body at 2 MB
+ *   and the inputs at 256, times out at 60 s;
  * - forwards the body unchanged to the server with the server's own key and
  *   returns the answer as it came;
  * - `GET /health` answers for the server behind it.
@@ -26,7 +28,8 @@ export function doorScript(): string {
     'const MAX_INFLIGHT_AGENT=Number(process.env.EMBED_MAX_INFLIGHT_AGENT||4),MAX_INFLIGHT=Number(process.env.EMBED_MAX_INFLIGHT||32);',
     'let inflight=0;const inflightBy=new Map();',
     'const KEYS=process.env.EMBED_KEYS_FILE||"/keys/embed-keys.json";',
-    'const PER_MIN=Number(process.env.EMBED_PER_MIN||600);',
+    'const PER_MIN=Number(process.env.EMBED_PER_MIN||600),GUEST_X=Math.max(1,Number(process.env.EMBED_GUEST_FACTOR)||8);',
+    'const isGuest=(a)=>String(a).startsWith("guest:");const perMin=(a)=>isGuest(a)?PER_MIN*GUEST_X:PER_MIN;const maxInflight=(a)=>isGuest(a)?MAX_INFLIGHT_AGENT*GUEST_X:MAX_INFLIGHT_AGENT;',
     'const KEYS_TTL=Number(process.env.EMBED_KEYS_TTL_MS||2000);',
     'const MAX_BODY=2*1024*1024,MAX_INPUTS=256,TIMEOUT=60000;',
     'let keys={},keysMtime=-1,keysAt=0;',
@@ -34,8 +37,8 @@ export function doorScript(): string {
     ' try{const st=fs.statSync(KEYS);if(st.mtimeMs===keysMtime)return;keysMtime=st.mtimeMs;',
     '  const j=JSON.parse(fs.readFileSync(KEYS,"utf8"));keys=(j&&typeof j==="object")?j:{};}catch(e){keys={};}}',
     'const buckets=new Map();',
-    'function allow(agent){const now=Date.now();let b=buckets.get(agent);if(!b){b={t:PER_MIN,at:now};buckets.set(agent,b);}',
-    ' b.t=Math.min(PER_MIN,b.t+(now-b.at)*PER_MIN/60000);b.at=now;if(b.t<1)return false;b.t-=1;return true;}',
+    'function allow(agent){const now=Date.now(),cap=perMin(agent);let b=buckets.get(agent);if(!b){b={t:cap,at:now};buckets.set(agent,b);}',
+    ' b.t=Math.min(cap,b.t+(now-b.at)*cap/60000);b.at=now;if(b.t<1)return false;b.t-=1;return true;}',
     'function send(res,code,obj){res.writeHead(code,{"content-type":"application/json"});res.end(JSON.stringify(obj));}',
     'const server=http.createServer((req,res)=>{',
     ' if(req.method==="GET"&&req.url==="/health"){',
@@ -46,7 +49,7 @@ export function doorScript(): string {
     ' const agent=tok?keys[crypto.createHash("sha256").update(tok).digest("hex")]:undefined;',
     ' if(!agent){send(res,401,{error:"unauthorized"});req.resume();return;}',
     ' if(!allow(agent)){send(res,429,{error:"rate limited"});req.resume();return;}',
-    ' if(inflight>=MAX_INFLIGHT||(inflightBy.get(agent)||0)>=MAX_INFLIGHT_AGENT){send(res,429,{error:"busy"});req.resume();return;}',
+    ' if(inflight>=MAX_INFLIGHT||(inflightBy.get(agent)||0)>=maxInflight(agent)){send(res,429,{error:"busy"});req.resume();return;}',
     ' inflight++;inflightBy.set(agent,(inflightBy.get(agent)||0)+1);let released=false;',
     ' const release=()=>{if(released)return;released=true;inflight--;inflightBy.set(agent,Math.max(0,(inflightBy.get(agent)||1)-1));};',
     ' res.on("close",release);',

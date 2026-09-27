@@ -6645,26 +6645,41 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     catch (err) { if (err instanceof ConnectorError) return reply.code(400).send({ error: `The spare bot: ${err.userMessage}` }); throw err; }
     const clash = store.findAgentUsingAccount(verified.accountId, kind);
     if (clash) return reply.code(409).send({ error: 'That bot is already connected to an agent.' });
-    // Say goodbye where people still are, then park the old bot.
+    // The new row FIRST (one transaction; a spare taken meanwhile is a 409 and
+    // nothing has moved), then the goodbye, then the old bot is parked. The
+    // old order parked the bot before the insert, so a lost race left the
+    // agent with no row and its bot already gone (30th audit). Busy for the
+    // whole of it: a second swap or a rebuild waits.
     const newName = String((verified.settings as Record<string, unknown>).botName ?? 'its new bot');
-    const told = await dmChannelPeople(agent, kind, old.secretRef, `📮 ${agent.name} is moving to the bot “${newName}”. Message that one from now on — this chat will stop answering. Everything it knows comes with it.`);
-    let parked = false;
-    try { await parkDiscordBot({ store, secrets }, agent.ownerId, old); parked = true; }
-    catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); await secrets.delete(old.secretRef).catch(() => {}); }
     const secretRef = `channel/${agent.id}/${kind}`;
-    await secrets.put(secretRef, token);
-    store.replaceChannelRow(agent.id, kind, {
-      id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
-      deepLink: verified.deepLink, createdAt: new Date().toISOString(),
-      settings: {
-        ...verified.settings, displayName: verified.displayName,
-        ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
-        warnings: verified.warnings, rooms: (old.settings?.rooms as unknown) ?? { mode: 'off' },
-        ...(wanted.ownerId === null ? { pooledShared: true } : {}),
-      },
+    let told = 0;
+    let parked = false;
+    const swapped = await whileBusy(agent.id, async () => {
+      await secrets.put(secretRef, token);
+      try {
+        store.replaceChannelRow(agent.id, kind, {
+          id: randomUUID(), agentId: agent.id, kind, accountId: verified.accountId, secretRef,
+          deepLink: verified.deepLink, createdAt: new Date().toISOString(),
+          settings: {
+            ...verified.settings, displayName: verified.displayName,
+            ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
+            warnings: verified.warnings, rooms: (old.settings?.rooms as unknown) ?? { mode: 'off' },
+            ...(wanted.ownerId === null ? { pooledShared: true } : {}),
+          },
+        });
+      } catch (err) {
+        if (secretRef !== old.secretRef) await secrets.delete(secretRef).catch(() => {});
+        if (err instanceof ChannelTakenError) return false;
+        throw err;
+      }
+      told = await dmChannelPeople(agent, kind, old.secretRef, `📮 ${agent.name} is moving to the bot “${newName}”. Message that one from now on — this chat will stop answering. Everything it knows comes with it.`);
+      try { await parkDiscordBot({ store, secrets }, agent.ownerId, old); parked = true; }
+      catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); if (old.secretRef !== secretRef) await secrets.delete(old.secretRef).catch(() => {}); }
+      store.deleteDiscordBot(wanted.applicationId);
+      if (wanted.secretRef !== secretRef) await secrets.delete(wanted.secretRef).catch(() => {});
+      return true;
     });
-    store.deleteDiscordBot(wanted.applicationId);
-    if (wanted.secretRef !== secretRef) await secrets.delete(wanted.secretRef).catch(() => {});
+    if (!swapped) return reply.code(409).send({ error: 'That spare bot was just taken by another agent — pick another one.' });
     trace(agent.id)('channel.swapped', { kind, from: old.accountId, to: verified.accountId, told, parked });
     const fresh = store.getChannelForAgent(agent.id, kind)!;
     if (conn.rename) await renameChannelBot(agent, fresh, agent.name);

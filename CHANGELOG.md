@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.88.1] — 2026-09-27
+
+### Changed
+- **A guest tenant's memory search is not throttled as one agent.** Its key stands for its whole fleet, so at the door it gets `EMBED_GUEST_FACTOR` (8) times an agent's per-minute bucket and in-flight slots.
+- **The management agent's health is probed through its doorman** under rootless Docker and Docker Desktop, instead of running `openclaw health` inside its container every two minutes.
+- **At a memory wall, an agent goes before the control plane.** The control plane's unit and a tenant's rootless Docker daemon carry `OOMScoreAdjust=-500`; the shared-host doc says how the slice is sized.
+- **Changing an agent's Discord or Slack bot is atomic.** The new row is written first in one transaction, under the busy flag; a spare bot taken by another agent meanwhile is refused with nothing moved. The old order parked the bot before the write.
+
 ## [2.88.0] — 2026-09-27
 
 ### Changed

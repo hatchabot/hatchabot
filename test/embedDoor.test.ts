@@ -36,7 +36,7 @@ beforeAll(async () => {
   });
   await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
   upstreamPort = (upstream.address() as { port: number }).port;
-  writeFileSync(keysFile, JSON.stringify({ [embedKeyHash(KEY_A)]: 'agent-a', [embedKeyHash(KEY_R)]: 'agent-r' }));
+  writeFileSync(keysFile, JSON.stringify({ [embedKeyHash(KEY_A)]: 'agent-a', [embedKeyHash(KEY_R)]: 'agent-r', [embedKeyHash('guest-key-t2')]: 'guest:t2' }));
   writeFileSync(join(keysFile, '..', 'server-key'), 'server-secret\n');
   door = spawn(process.execPath, ['-e', doorScript()], {
     env: {
@@ -45,6 +45,7 @@ beforeAll(async () => {
       EMBED_SERVER_KEY_FILE: join(keysFile, '..', 'server-key'),
       EMBED_KEYS_FILE: keysFile,
       EMBED_PER_MIN: '3',
+      EMBED_GUEST_FACTOR: '4',
       EMBED_KEYS_TTL_MS: '0',
       EMBED_DOOR_PORT: '0',
     },
@@ -93,6 +94,10 @@ describe('the embed door', () => {
     const codes: number[] = [];
     for (let i = 0; i < 5; i++) codes.push((await call(KEY_R, { input: 'x' })).status);
     expect(codes).toEqual([200, 200, 200, 429, 429]);
+    // A guest tenant's key stands for its whole fleet: four times an agent's share here (30th audit).
+    const guest: number[] = [];
+    for (let i = 0; i < 13; i++) guest.push((await call('guest-key-t2', { input: 'x' })).status);
+    expect(guest).toEqual([...Array(12).fill(200), 429]);
   });
 
   it('picks up a re-minted key from the file without a restart', async () => {

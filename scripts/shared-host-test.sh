@@ -131,7 +131,7 @@ set -e
 if [ ! -S "$XDG_RUNTIME_DIR/docker.sock" ]; then
   mkdir -p ~/.config/systemd/user/docker.service.d
   # Containers may reach this machine's loopback (10.0.2.2): that is how agents reach their Hatchabot.
-  printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false\n' > ~/.config/systemd/user/docker.service.d/loopback.conf
+  printf '[Service]\nEnvironment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false\nOOMScoreAdjust=-500\n' > ~/.config/systemd/user/docker.service.d/loopback.conf
   dockerd-rootless-setuptool.sh install
 fi
 export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock

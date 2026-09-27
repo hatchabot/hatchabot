@@ -3379,8 +3379,12 @@ export class Store {
 
   /** Put another bot on the same channel: the row changes, the people bound there stay (a swap, not a removal). */
   replaceChannelRow(agentId: string, kind: ChannelKind, next: Channel): void {
-    this.db.prepare(`DELETE FROM channels WHERE agent_id = ? AND kind = ?`).run(agentId, kind);
-    this.insertChannel(next);
+    // One transaction: a spare taken by another agent between the check and
+    // the insert used to leave the agent with NO row (30th audit).
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM channels WHERE agent_id = ? AND kind = ?`).run(agentId, kind);
+      this.insertChannel(next);
+    })();
   }
 
   /** The @handle the invite this person redeemed named, if it named one — so

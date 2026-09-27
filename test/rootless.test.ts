@@ -155,3 +155,26 @@ exit 0
     expect(rows.map((r) => r.name)).toEqual(['t1-embedder']);
   });
 });
+
+describe('the 30th audit: the isolated manager is probed through its doorman', () => {
+  it('with no published port of its own, the console port on its label is the way in — no CLI exec', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-mgr-'));
+    const log = join(dir, 'argv.log');
+    const stub = join(dir, 'docker');
+    writeFileSync(stub, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+case "$1 $2" in
+  "info --format") echo 'Ubuntu 24.04|[name=seccomp,profile=builtin name=rootless name=cgroupns]' ;;
+  "inspect -f") echo 'running 172.20.0.2 ||19150' ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const calls: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request) => { calls.push(String(url)); return new Response('ok', { status: 200 }); }) as typeof fetch;
+    const provider = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', fetchImpl });
+    expect(await provider.status('mock://manager')).toEqual({ phase: 'running', healthy: true });
+    expect(calls).toEqual(['http://127.0.0.1:19150/health']);
+    expect(readFileSync(log, 'utf8')).not.toMatch(/^exec .* health$/m);
+  });
+});
