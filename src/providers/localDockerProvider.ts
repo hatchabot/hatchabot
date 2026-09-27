@@ -911,7 +911,7 @@ export class LocalDockerProvider implements RuntimeProvider {
   #opsNetworkName(agentId: string): string { return `${this.prefix}-ops-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
   #doormanName(agentId: string): string { return `${this.prefix}-doorman-${agentId.replace(/[^A-Za-z0-9]/g, '').slice(0, 12)}`; }
 
-  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsPort: number; consolePort: number; embedPort?: number }): Promise<{ network: string; doorHost: string; doorPort: number }> {
+  async ensureOpsJail(opts: { agentId: string; slug: string; runtimeRef?: string; opsPort: number; consolePort: number; embedPort?: number; doormanKey?: string }): Promise<{ network: string; doorHost: string; doorPort: number }> {
     const agentContainer = opts.runtimeRef
       ? this.#names(opts.runtimeRef).container
       : this.#namesFor({ agentId: opts.agentId, slug: opts.slug }).container;
@@ -945,6 +945,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--memory', '128m', '--pids-limit', '64', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges',
       '-e', `DOORMAN_ROUTES=${routes}`,
+      ...(opts.doormanKey ? ['-e', `DOORMAN_KEY=${opts.doormanKey}`] : []),
       '--entrypoint', 'node',
       this.image, '-e', doormanScript(),
     ]);
@@ -1205,20 +1206,37 @@ export class LocalDockerProvider implements RuntimeProvider {
     } else if ((await this.#containerState(embedder)) === 'stopped') {
       await this.#must(['start', embedder], 'Could not start the embedding service.');
     }
-    // The door: replaced on every start so a changed port, bind or key takes effect.
+    // The door: kept when it is up and wears the same configuration (bind,
+    // port, limits, key files, image, script, user), replaced when any of that
+    // changed. It used to be replaced on every start, so every deploy of the
+    // control plane paused memory search for every agent for the seconds the
+    // new door took (30th audit); the door is the separate process precisely
+    // so that a control-plane restart does not.
     const door = this.#embedDoorName();
-    await this.#docker(['rm', '-f', door]);
+    const doorUser = await this.containerUserFor(spec.uid, spec.gid);
+    const doorHash = createHash('sha256').update(JSON.stringify([
+      spec.doorBind, spec.doorPort, spec.perMin, dirname(spec.keysFile), EMBED_MODEL_BASENAME(spec.keysFile), EMBED_MODEL_BASENAME(spec.serverKeyFile),
+      spec.doorImage, createHash('sha256').update(spec.doorScript).digest('hex'), doorUser,
+    ])).digest('hex').slice(0, 16);
+    const doorState = await this.#containerState(door);
+    let keepDoor = false;
+    if (doorState !== 'absent') {
+      const worn = await this.#docker(['inspect', door, '--format', '{{ index .Config.Labels "hatchabot.embed-door" }}']);
+      keepDoor = worn.code === 0 && worn.stdout.trim() === doorHash;
+      if (!keepDoor) await this.#docker(['rm', '-f', door]);
+      else if (doorState === 'stopped') await this.#must(['start', door], "Could not start the embedding service's door.");
+    }
     // Docker publishes no port for a container whose only network is
     // internal: the door starts on the bridge (where its port is published,
     // on the one address asked for) and is then connected to the internal
     // network, where the server is — as the doorman does with its jail.
-    const run = await this.#docker([
+    const run = keepDoor ? { code: 0, stdout: '', stderr: '' } : await this.#docker([
       'run', '-d', '--name', door, '--network', 'bridge',
-      '--restart', 'unless-stopped', '--label', 'hatchabot.role=embed-door',
+      '--restart', 'unless-stopped', '--label', 'hatchabot.role=embed-door', '--label', `hatchabot.embed-door=${doorHash}`,
       '-p', `${spec.doorBind}:${spec.doorPort}:8093`,
       '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
       '--memory', '128m', '--pids-limit', '64',
-      '--user', await this.containerUserFor(spec.uid, spec.gid),
+      '--user', doorUser,
       // The DIRECTORY, not the file: Hatchabot replaces the file by rename,
       // and a bind-mounted file would keep the old inode — a re-minted key
       // would never be seen until the door restarted.
@@ -1228,12 +1246,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--entrypoint', 'node', spec.doorImage, '-e', spec.doorScript,
     ]);
     if (run.code !== 0) throw new ProviderError(`embed door failed: ${run.stderr.slice(-500)}`, "Could not start the embedding service's door.");
-    const joined = await this.#docker(['network', 'connect', net, door]);
+    const joined = keepDoor ? { code: 0, stdout: '', stderr: '' } : await this.#docker(['network', 'connect', net, door]);
     if (joined.code !== 0) throw new ProviderError(`embed door network connect failed: ${joined.stderr.slice(-500)}`, "Could not connect the embedding service's door to its server.");
     // Loading the model takes a few seconds; the door's /health answers for the server.
     const deadline = Date.now() + 90_000;
     while (Date.now() < deadline) {
-      const ok = await fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
+      const ok = await this.#fetch(`http://${spec.doorBind}:${spec.doorPort}/health`, { signal: AbortSignal.timeout(3000) }).then((r) => r.ok, () => false);
       if (ok) return this.embedderStatus();
       await new Promise((r) => setTimeout(r, 1500));
     }

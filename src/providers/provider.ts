@@ -279,6 +279,8 @@ export interface RuntimeProvider {
     opsPort: number;
     /** Host port the console is published on (the agent's usual gateway port). */
     consolePort: number; embedPort?: number;
+    /** What the doorman says first on every connection to the door (opsServer.ts): minted per build, kept in the store. */
+    doormanKey?: string;
   }): Promise<{ network: string; doorHost: string; doorPort: number }>;
   /** Take a management agent's jail down: the doorman and the network. */
   removeOpsJail?(agentId: string): Promise<void>;

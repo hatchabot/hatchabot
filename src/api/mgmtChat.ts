@@ -268,7 +268,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     if (store.getChannelForAgent(agent.id, 'discord')) hosts.push('discord.com', 'gateway.discord.gg', 'cdn.discordapp.com', 'media.discordapp.net');
     return hosts;
   };
-  setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, peerOk: deps.opsPeerOk, log: (event, detail) => app.log.info(detail, event) });
+  // A doorman's key, compared in constant time against every live doorman's.
+  const doormanKeyOk = (key: string): boolean => {
+    const kb = Buffer.from(key);
+    return store.listDoormanKeys().some((x) => { const xb = Buffer.from(x); return xb.length === kb.length && timingSafeEqual(xb, kb); });
+  };
+  setOpsHandlers({ mcp: opsMcp, allowedHosts: opsAllowedHosts, peerOk: deps.opsPeerOk, doormanKeyOk, log: (event, detail) => app.log.info(detail, event) });
 
   /** The home screen's list: what is waiting for you, and what happened to
    *  the last day's. */

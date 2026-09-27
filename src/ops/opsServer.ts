@@ -28,9 +28,55 @@ export interface OpsHandlers {
   /** How the tunnel reaches the far side. Tests pass a socket that never answers. */
   dial?: (host: string, port: number, onReady: () => void) => net.Socket;
   log?(event: string, detail: Record<string, unknown>): void;
+  /** Is this a doorman's key (the preamble)? A signed connection needs no address check. */
+  doormanKeyOk?(key: string): boolean;
 }
 
 export class OpsAuthError extends Error {}
+
+/**
+ * The doorman's first line on a connection to the door: "HBDM <key>\n". Where
+ * a peer's address says nothing — the door on loopback, every container of a
+ * rootless daemon arriving as 127.0.0.1 (30th audit) — this is what proves the
+ * connection came through a doorman and not from any other container that
+ * got hold of a manager's key. The key is minted per build, lives in the
+ * doorman's environment and in Hatchabot's store, never on the manager's
+ * volume. A connection with no preamble (a doorman from before this rule) is
+ * handed on unsigned and judged by its address, as before.
+ */
+export const DOORMAN_PREAMBLE = 'HBDM ';
+type SignedSocket = net.Socket & { hbSigned?: boolean };
+export function withDoormanPreamble(httpServer: http.Server, keyOk: (key: string) => boolean): net.Server {
+  return net.createServer((sock: SignedSocket) => {
+    let buf = Buffer.alloc(0);
+    let decided = false;
+    const timer = setTimeout(() => { if (!decided) { decided = true; sock.destroy(); } }, 5000);
+    timer.unref();
+    const hand = (rest: Buffer, signed: boolean) => {
+      decided = true; clearTimeout(timer);
+      sock.removeListener('data', onData);
+      sock.hbSigned = signed;
+      sock.pause();
+      if (rest.length) sock.unshift(rest);
+      httpServer.emit('connection', sock);
+      sock.resume();
+    };
+    const onData = (c: Buffer) => {
+      if (decided) return;
+      buf = Buffer.concat([buf, c]);
+      const head = buf.subarray(0, DOORMAN_PREAMBLE.length).toString('latin1');
+      if (buf.length < DOORMAN_PREAMBLE.length) { if (!DOORMAN_PREAMBLE.startsWith(head)) hand(buf, false); return; }
+      if (head !== DOORMAN_PREAMBLE) return hand(buf, false);
+      const nl = buf.indexOf(10);
+      if (nl < 0) { if (buf.length > 200) { decided = true; sock.destroy(); } return; }
+      const key = buf.subarray(DOORMAN_PREAMBLE.length, nl).toString('utf8').trim();
+      if (!keyOk(key)) { decided = true; sock.destroy(); return; }
+      hand(buf.subarray(nl + 1), true);
+    };
+    sock.on('data', onData);
+    sock.on('error', () => {});
+  });
+}
 
 /** ::ffff:172.20.0.2 and 172.20.0.2 are the same peer. */
 export const normalizeIp = (ip: string | undefined): string => String(ip ?? '').replace(/^::ffff:/, '');
@@ -58,7 +104,8 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
       // on this machine is turned away before its key is looked at
       // (docs/ops-agent-design.md).
       const peer = normalizeIp(req.socket.remoteAddress);
-      if (handlers.peerOk && !(await handlers.peerOk(peer).catch(() => false))) {
+      const signed = (req.socket as SignedSocket).hbSigned === true;
+      if (!signed && handlers.peerOk && !(await handlers.peerOk(peer).catch(() => false))) {
         log('ops.peer_refused', { peer, path: 'mcp' });
         return send(403, { error: 'Not your door.' });
       }
@@ -139,8 +186,9 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
     };
 
     // Only a management agent's own doorman may use the door — checked before
-    // anything is dialled (docs/ops-agent-design.md).
-    if (!handlers.peerOk) return openTunnel();
+    // anything is dialled (docs/ops-agent-design.md). A signed connection
+    // already proved it.
+    if (!handlers.peerOk || (sock as SignedSocket).hbSigned === true) return openTunnel();
     void handlers.peerOk(peer)
       .then((ok) => {
         if (!ok) { log('ops.peer_refused', { peer, path: 'connect' }); return deny('403 Forbidden'); }
@@ -176,6 +224,9 @@ export const opsBoundHost = (): string => boundHost;
  * Docker address, this returns false, and the doorman check is unchanged.
  */
 export const loopbackDoorman = (ip: string): boolean =>
+  // Under a rootless daemon every container is a loopback peer: there the
+  // doorman's preamble is the proof, and a bare loopback peer is nobody.
+  process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK !== '1' &&
   boundHost === '127.0.0.1' && (normalizeIp(ip) === '127.0.0.1' || ip === '::1');
 export function setOpsHandlers(h: OpsHandlers): void { handlersRef = h; }
 /** The registered handlers (tests drive the door through these). */
@@ -221,14 +272,18 @@ export function ensureOpsServer(candidates: Array<string | undefined> = []): Pro
       ? [process.env.HATCHABOT_OPS_BIND]
       : [...candidates.filter((x): x is string => !!x), '127.0.0.1'];
     const server = createOpsServer(handlersRef);
+    // The listener reads the doorman's preamble first, then hands the
+    // connection to the HTTP server (signed or not).
+    const handlers = handlersRef;
+    const raw = withDoormanPreamble(server, (key) => handlers.doormanKeyOk?.(key) ?? false);
     let host = '';
     let last: Error | undefined;
     for (const candidate of wanted) {
       try {
         await new Promise<void>((resolve, reject) => {
           const onError = (err: NodeJS.ErrnoException) => reject(opsListenError(err, candidate, port));
-          server.once('error', onError);
-          server.listen(port, candidate, () => { server.off('error', onError); resolve(); });
+          raw.once('error', onError);
+          raw.listen(port, candidate, () => { raw.off('error', onError); resolve(); });
         });
         host = candidate;
         break;
@@ -239,9 +294,9 @@ export function ensureOpsServer(candidates: Array<string | undefined> = []): Pro
     if (!host) throw last ?? new Error('ops server could not bind');
     boundHost = host;
     // With port 0 the kernel picked one: report what it actually bound.
-    const bound = server.address();
+    const bound = raw.address();
     const actualPort = typeof bound === 'object' && bound ? bound.port : port;
-    server.unref();
+    raw.unref(); server.unref();
     return { host, port: actualPort };
   })().catch((e) => { started = undefined; throw e; });
   return started;

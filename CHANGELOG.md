@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.88.0] — 2026-09-27
+
+### Changed
+- **A deploy no longer pauses memory search.** The memory service's door used to be torn down and recreated on every start of the control plane, so every deploy cost every agent its memory search for the seconds the new door took. A running door whose configuration is unchanged is kept; one whose bind, port, limits, keys, image, script or user changed is replaced.
+- **The doorman announces itself to the door.** Its first bytes on every connection are `HBDM <key>`, a key minted per build that lives in the doorman's environment and in Hatchabot's store, never on the manager's volume. Where a peer's address proves nothing — the door on loopback, or a rootless Docker daemon where every container arrives as 127.0.0.1 — the preamble does. A manager's key alone, leaked from its volume, no longer opens the door from another container. Managers built before this release keep working (their doorman is judged by its address, as before) and get the key at their next rebuild.
+
 ## [2.87.3] — 2026-09-27
 
 ### Added

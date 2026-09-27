@@ -603,6 +603,8 @@ export class Store {
       // added to one after it shipped needs this line or every read of it
       // throws on an upgraded install (it did: v2.14.0, caught 2026-09-21).
       `ALTER TABLE pairing_window ADD COLUMN expect TEXT`,
+      // The doorman's own key, beside the manager's (30th audit).
+      `ALTER TABLE ops_tokens ADD COLUMN doorman_key TEXT`,
       // A parked Discord bot: whom it last wrote to (told "this bot is now X"
       // when reused), and which archived agent it is kept for (restore takes
       // it back if nobody else did).
@@ -2795,11 +2797,15 @@ export class Store {
   listOpsAgents(): Agent[] {
     return (this.db.prepare(`SELECT * FROM agents WHERE ops = 1 AND state != 'DELETED'`).all() as any[]).map(rowToAgent);
   }
-  setOpsToken(agentId: string, ownerId: string, token: string): void {
+  setOpsToken(agentId: string, ownerId: string, token: string, doormanKey?: string): void {
     this.db.prepare(
-      `INSERT INTO ops_tokens (agent_id, owner_id, token_hash, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at`,
-    ).run(agentId, ownerId, hashToken(token), new Date().toISOString());
+      `INSERT INTO ops_tokens (agent_id, owner_id, token_hash, created_at, doorman_key) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(agent_id) DO UPDATE SET token_hash = excluded.token_hash, created_at = excluded.created_at, doorman_key = excluded.doorman_key`,
+    ).run(agentId, ownerId, hashToken(token), new Date().toISOString(), doormanKey ?? null);
+  }
+  /** Every live doorman's key (the door's preamble check, opsServer.ts). */
+  listDoormanKeys(): string[] {
+    return (this.db.prepare(`SELECT doorman_key FROM ops_tokens WHERE doorman_key IS NOT NULL`).all() as Array<{ doorman_key: string }>).map((r) => r.doorman_key);
   }
   deleteOpsToken(agentId: string): void {
     this.db.prepare(`DELETE FROM ops_tokens WHERE agent_id = ?`).run(agentId);

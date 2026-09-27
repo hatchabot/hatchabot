@@ -26,6 +26,8 @@ export interface DoormanRoute {
   /** Where it forwards to (a container name, or host.docker.internal). */
   host: string;
   port: number;
+  /** Hatchabot's door: the doorman announces itself first ("HBDM <key>", opsServer.ts). */
+  signed?: boolean;
 }
 
 /** Inside the jail, the agent reaches Hatchabot's door here. */
@@ -53,7 +55,7 @@ export function doormanScript(): string {
     'net.createServer((c)=>{',
     'if(open>=MAX){c.destroy();return;}',
     'open++;let done=false;const bye=()=>{if(!done){done=true;open--;}u.destroy();c.destroy();};',
-    'const u=net.connect(r.port,r.host,()=>{u.pipe(c);c.pipe(u);});',
+    'const u=net.connect(r.port,r.host,()=>{if(r.signed&&process.env.DOORMAN_KEY)u.write("HBDM "+process.env.DOORMAN_KEY+"\\n");u.pipe(c);c.pipe(u);});',
     'u.on("error",bye);c.on("error",bye);u.on("close",bye);c.on("close",bye);',
     '}).listen(r.listen,"0.0.0.0");',
     '}',
@@ -70,7 +72,7 @@ export function doormanScript(): string {
  */
 export function doormanRoutes(opts: { opsPort: number; agentContainer: string; embedPort?: number }): DoormanRoute[] {
   return [
-    { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: opts.opsPort },
+    { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: opts.opsPort, signed: true },
     { listen: DOORMAN_CONSOLE_PORT, host: opts.agentContainer, port: 18789 },
     // The shared memory search service's door binds this machine's Docker
     // address, which the jail cannot route to: the doorman carries it, like

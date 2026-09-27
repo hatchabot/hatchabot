@@ -21,7 +21,9 @@ Hatchabot detects a rootless daemon (`docker info` reports `name=rootless`) and:
 - probes an agent's health on its published loopback port instead of its address;
 - points every doorman's `host.docker.internal` at `10.0.2.2` (`HATCHABOT_HOST_ALIAS_IP` overrides);
 - binds the management agent's door and the memory-search door on loopback
-  (there is no bridge address to bind), which the doorman reaches through 10.0.2.2;
+  (there is no bridge address to bind), which the doorman reaches through 10.0.2.2 —
+  and, since every container is a loopback peer there, the door admits only a
+  connection that opens with the doorman's own key (`HBDM <key>`, minted per build);
 - tells an agent with peers to reach Hatchabot at `http://10.0.2.2:<PORT>`;
 - says so in `hatchabot doctor`.
 

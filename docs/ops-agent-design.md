@@ -146,6 +146,15 @@ management agent (`src/ops/doorman.ts`):
   every platform maps to this machine. The door binds whatever that alias
   points at — the bridge gateway on Linux, loopback on Docker Desktop — trying
   them in that order, so one code path covers both.
+- **The doorman announces itself.** Its first bytes on every connection to
+  the door are `HBDM <key>` — a key minted per build, kept in the doorman's
+  environment and in Hatchabot's store, never on the manager's volume. Where
+  a peer's address proves nothing (the door on loopback; every container of a
+  rootless daemon arriving as 127.0.0.1) the preamble does: a signed
+  connection needs no address check, an unsigned one is judged by its address
+  as before, and under a rootless daemon a bare loopback peer is nobody
+  (30th audit). A manager's key alone, leaked from its volume, no longer
+  opens the door from another container.
 - **Only a doorman may use the door.** Any address on this machine is
   reachable from any container (checked live: an ordinary agent could reach the
   old jail-gateway door too), so the door now refuses every peer that is not a

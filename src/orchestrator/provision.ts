@@ -593,7 +593,11 @@ export async function buildRuntimeSpec(
   let ops: { mcpUrl: string; token: string; proxyUrl: string; host: string } | undefined;
   if (agent.ops) {
     const token = randomBytes(32).toString('base64url');
-    store.setOpsToken(agentId, agent.ownerId, token);
+    // The doorman's own key: what it says first on every connection to the
+    // door, so the door knows a doorman from any other container on a host
+    // where addresses cannot tell (opsServer.ts). Not on the manager's volume.
+    const doormanKey = randomBytes(24).toString('base64url');
+    store.setOpsToken(agentId, agent.ownerId, token, doormanKey);
     clearOpsDrift(agentId); // this build re-asserts the lockdown
     // Its tools come from Hatchabot, and OpenClaw reads that list once at
     // start-up: remember which version it was built against so an upgrade can
@@ -611,7 +615,7 @@ export async function buildRuntimeSpec(
     const jail = deps.provider.ensureOpsJail
       ? await deps.provider.ensureOpsJail({
         agentId, slug: agent.slug, runtimeRef: agent.runtimeRef,
-        opsPort: at.port, consolePort: gateway.port, embedPort,
+        opsPort: at.port, consolePort: gateway.port, embedPort, doormanKey,
       })
       : { doorHost: at.host, doorPort: at.port }; // providers without networks (mock)
     if (embed && embedUrl && deps.provider.ensureOpsJail) embed = { ...embed, baseUrl: `http://${jail.doorHost}:${DOORMAN_EMBED_PORT}${embedUrl.pathname === '/' ? '' : embedUrl.pathname}` };

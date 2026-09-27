@@ -76,3 +76,54 @@ describe('a reinstall beside a previous install\'s leftovers', () => {
     expect(run).not.toContain('oldkeyhash0000');
   });
 });
+
+describe('the 30th audit: the memory door survives a start that changes nothing', () => {
+  function statefulStub() {
+    const dir = mkdtempSync(join(tmpdir(), 'hb-door-'));
+    const log = join(dir, 'argv.log');
+    const stub = join(dir, 'docker');
+    // Remembers what it ran: a later inspect answers with the labels the run wore.
+    writeFileSync(stub, `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+d=${JSON.stringify(dir)}
+case "$*" in
+  "network inspect "*) exit 0 ;;
+  "inspect --format {{.State.Running}} hatchabot-embedder") [ -f "$d/embedder" ] && echo true || exit 1 ;;
+  "inspect --format {{.State.Running}} hatchabot-embed-door") [ -f "$d/door" ] && echo true || exit 1 ;;
+  "inspect hatchabot-embedder --format "*) cat "$d/embedder" ;;
+  "inspect hatchabot-embed-door --format "*) cat "$d/door" ;;
+  "run -d --name hatchabot-embedder "*) echo "$*" | grep -oE 'hatchabot\\.embed-key=[0-9a-f]+' | cut -d= -f2 > "$d/embedder"; echo embedderid ;;
+  "run -d --name hatchabot-embed-door "*) echo "$*" | grep -oE 'hatchabot\\.embed-door=[0-9a-f]+' | cut -d= -f2 > "$d/door"; echo doorid ;;
+  "rm -f hatchabot-embed-door") rm -f "$d/door" ;;
+  "port "*) echo "8093/tcp -> 127.0.0.1:8093" ;;
+esac
+exit 0
+`, { mode: 0o755 });
+    chmodSync(stub, 0o755);
+    const provider = new LocalDockerProvider({ docker: stub, image: 'test-image:latest', fetchImpl: (async () => new Response('{"ok":true}', { status: 200 })) as typeof fetch });
+    return { provider, dir, argv: () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n') : []) };
+  }
+  it('a second start keeps a running door with the same configuration; a changed limit replaces it', async () => {
+    const { provider, dir, argv } = statefulStub();
+    const keyFile = join(dir, 'server-key');
+    writeFileSync(keyFile, 'the-key\n');
+    const spec = {
+      image: 'test-image:latest', modelPath: join(dir, 'model.gguf'), modelAlias: 'embeddinggemma', key: 'the-key',
+      doorImage: 'test-image:latest', doorScript: 'noop', doorPort: 8093, doorBind: '127.0.0.1',
+      keysFile: join(dir, 'keys.json'), serverKeyFile: keyFile, uid: process.getuid!(), gid: process.getgid!(), perMin: 600,
+    };
+    await provider.ensureEmbedder(spec as never);
+    const doorRuns = () => argv().filter((l) => l.startsWith('run -d --name hatchabot-embed-door')).length;
+    const doorRms = () => argv().filter((l) => l === 'rm -f hatchabot-embed-door').length;
+    expect(doorRuns()).toBe(1);
+    expect(argv().find((l) => l.startsWith('run -d --name hatchabot-embed-door'))).toMatch(/--label hatchabot\.embed-door=[0-9a-f]{16}\b/);
+    // The same again (a control-plane restart): the door is left alone.
+    await provider.ensureEmbedder(spec as never);
+    expect(doorRuns()).toBe(1);
+    expect(doorRms()).toBe(0);
+    // A changed per-minute limit is a new door.
+    await provider.ensureEmbedder({ ...spec, perMin: 900 } as never);
+    expect(doorRuns()).toBe(2);
+    expect(doorRms()).toBe(1);
+  });
+});
