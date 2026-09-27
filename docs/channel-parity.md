@@ -21,12 +21,12 @@ Both tabs draw one card per app with the same rows, in the same order:
 | Open in the app | ✓ | ✓ | ✓ |
 | Add to a server | — | ✓ | — (invite it to a channel with /invite) |
 | 🔁 Change bot… (a spare from the pool) | ✓ | ✓ | ✓ (Settings → Slack) |
-| Remove… (parks the bot) | ✓ (back to the pool) | ✓ (parked under Settings → Discord) | ✓ (parked with both tokens under Settings → Slack) |
+| Detach… (parks the bot) | ✓ (back to the pool) | ✓ (parked under Settings → Discord) | ✓ (parked with both tokens under Settings → Slack) |
 | People on the app + knocks (Not now / That's me / Let them in) | ✓ | ✓ | ✓ |
 | Group chats | any group (members, @mention) · off · one group (members, @mention) | every server it is in (members, @mention) · off · one server | every channel it is in (members, @mention) · off · one channel |
 | Who can reach it (invite only / anyone can knock) | one setting for every app | same | same |
 | Rich messages | on / off | — (always rendered) | — |
-| Files it sends (an agent's reply carrying a file) | up to 50 MB (Bot API) | up to 10 MB (a server without boosts) | up to 100 MB (held there on purpose) |
+| Files it sends (an agent's reply carrying a file) | default 50 MB, at most 50 (Bot API) | default 10 MB (a server without boosts), at most 500 | default 100 MB, at most 1000 |
 
 Removing an app forgets everyone it had admitted on the agent's volume;
 removing a member (Sharing) takes them off every app. Members, invites and
@@ -85,9 +85,14 @@ exists because BotFather caps an account at about 20 bots; Discord has no cap.
   stay manual, and Re-check tells you what is still missing.
 - **Pending-knock pushes to your phone** go through the manager's Telegram
   bot; there is no Discord manager bot yet.
-- **File sizes** follow each app's own ceiling (the seed sets OpenClaw's
-  `mediaMaxMb` per channel; its default is 5 MB everywhere, which dropped a
-  5.2 MB PDF from a reply in silence on Slack and Discord, 2026-09-27).
+- **File sizes** are the machine's setting (Settings → Hosts → Defaults for
+  this machine) or the agent's own (Advanced), capped by each app's limit,
+  and shown on each app's card; the seed and a live `config set` write
+  OpenClaw's `mediaMaxMb` per channel (its own 5 MB default once dropped a
+  5.2 MB PDF from a reply in silence, 2026-09-27).
+- **"Every server / channel it is in"** answers where the bot was at the
+  agent's last rebuild: after inviting it somewhere new, Re-check shows the
+  new place and a Rebuild makes it answer there.
 
 ## Slack, specifically
 

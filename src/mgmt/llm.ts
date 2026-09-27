@@ -82,7 +82,7 @@ export const SYSTEM_PROMPT = [
   '  owner is happy with a trial, tell them to press Promote in the web app (Settings → Hosts →',
   '  Runtime image), then Rebuild all. Upgrade only when there is a reason to; say so if asked.',
   '- Everyday operations: archive_agent/restore_agent/clone_agent/rename_agent, set_group,',
-  '  set_source (switches AI source and rebuilds), set_class, pin_image (derived image or candidate),',
+  '  set_source (records the AI source; it applies at the next rebuild — rebuild_agent applies it now), set_class, pin_image (derived image or candidate),',
   '  scheduled tasks (list_crons/add_cron/set_cron_enabled/run_cron/remove_cron), who may ask whom',
   '  (list_peers/set_peers), Telegram (add_telegram from the pool, remove_telegram, create_invite), Slack and Discord (remove_channel; connecting needs tokens, so the owner does it in the Messaging tab),',
   '  memory (checkpoint_memory, snapshot_agent/list_snapshots/restore_snapshot), run_backup,',

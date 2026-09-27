@@ -2797,6 +2797,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       secretRef = `ai-profile/${id}`;
       await secrets.put(secretRef, body.apiKey);
+    } else if (body.oauthToken && !/^sk-ant-oat/i.test(body.oauthToken.trim())) {
+      return reply.code(400).send({
+        error: /^sk-ant-api/i.test(body.oauthToken.trim())
+          ? 'That is an API key, not a setup token — create this source as "API key" instead. (A setup token looks like sk-ant-oat…, from `claude setup-token`.)'
+          : 'That does not look like a setup token (they start sk-ant-oat…, from `claude setup-token`).',
+      });
     } else if (body.oauthToken) {
       // Subscription via a `claude setup-token` token — for hosts (macOS)
       // where the login lives in the Keychain and can't be file-mounted.
@@ -4214,7 +4220,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
       if (group !== undefined) store.setAgentGroup(agent.id, group ? group : null);
 
-      if (runsHere) store.setAgentMigratedTo(agent.id, null);
+      if (runsHere) {
+        // A rehost took a pool bot's token away with it: "runs here" with no
+        // token would fail every rebuild (use-case audit, 2026-09-27).
+        const ch = store.getChannelForAgent(agent.id, 'telegram');
+        if (ch && !(await secrets.get(ch.secretRef).then(() => true, () => false))) {
+          return reply.code(409).send({ error: 'Its Telegram bot went with it to the other Hatchabot, so it cannot run here on that bot. Detach Telegram first (it keeps everything it knows), then give it another bot.' });
+        }
+        store.setAgentMigratedTo(agent.id, null);
+      }
 
       let sameImage: boolean | undefined;
       if (parsed.data.image !== undefined) {
@@ -5632,7 +5646,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // The checkpoint IS an agent turn, so it needs the AI source to run. If the
     // source is out of credits / expired / unreachable, the turn fails and
     // NOTHING is written — report that honestly instead of a false "Saved".
-    const r = await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id));
+    // A turn in flight, as an ask is: the idle sweep and a second ask wait.
+    if (a2aInFlight.has(agent.id)) return reply.code(429).send({ error: 'It is already answering something — try again when that finishes.' });
+    a2aInFlight.add(agent.id);
+    let r: Awaited<ReturnType<typeof checkpointMemory>>;
+    try { r = await checkpointMemory(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, trace(agent.id)); }
+    finally { a2aInFlight.delete(agent.id); }
     if (!r.ok) {
       return reply.code(200).send({
         ok: false, saved: false,
@@ -5813,7 +5832,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ? [...new Set([...current, ...members.filter((m) => m.id !== a.id).map((m) => m.id)])]
         : current.filter((p) => !inSet.has(p));
       if (next.length === current.length && next.every((p) => current.includes(p))) continue;
-      store.setAgentPeers(a.id, next);
+      // Keep the "may ask it to act" grants to peers that stay (they were wiped).
+      store.setAgentPeers(a.id, next, store.listAgentActionPeers(a.id).filter((p) => next.includes(p)));
       changed++;
       if (next.length && !store.hasAgentCallToken(a.id)) {
         await secrets.put(`agent-call-token/${a.id}`, store.createAgentCallToken(a.id, ownerIdOf(req)));
@@ -5962,7 +5982,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const byBilling = { included: 0, api: 0, local: 0 } as Record<string, number>;
     for (const a of agentsUsage) byBilling[a.billing] = (byBilling[a.billing] ?? 0) + a.totalTokens;
     // Persist today's snapshot (only when we actually measured something, so a
-    // transient all-unreachable read can't zero the day). Best-effort.
+    // transient all-unreachable read can't zero the day). Best-effort. Totals
+    // are cumulative, so a day's point only ever rises (the store keeps the
+    // larger): this view counts running agents only, the sampler every agent,
+    // and the smaller one used to pull the day down (use-case audit, 2026-09-27).
     if (agentsUsage.length) {
       try {
         store.upsertUsageSnapshot(ownerId, {
@@ -6426,6 +6449,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       team: typeof st.team === 'string' ? st.team : undefined,
       checkedAt: typeof st.checkedAt === 'string' ? st.checkedAt : undefined,
       createdAt: c.createdAt,
+      /** The biggest file it sends on this app now, in MB: the machine's setting, the agent's own, the app's limit. */
+      filesMb: c.kind === 'telegram' || c.kind === 'discord' || c.kind === 'slack' ? filesMb(c.kind, store.getAgent(c.agentId)?.filesMaxMb) : undefined,
     };
   };
   /**
@@ -7367,8 +7392,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!names.has(req.query.agentId)) return [];
       ids = [req.query.agentId];
     }
+    // Another owner's agent shared with you: what happened, not its details
+    // (an event can carry an address or an error text; use-case audit, 2026-09-27).
+    const mine = new Set(visible.filter((a) => a.ownerId === ownerIdOf(req)).map((a) => a.id));
     return store.listEvents(ids, limit).map((e) => ({
       ...e,
+      ...(mine.has(e.agentId) ? {} : { detail: undefined }),
       agentName: names.get(e.agentId),
     }));
   });
@@ -8026,7 +8055,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // up front instead of silently swallowing the agent (audit 2026-09-02).
       if (deps.authMode !== 'identity') {
         return reply.code(400).send({
-          error: 'In-app sending needs accounts (identity mode) — use Share to a file instead.',
+          error: 'Sending an agent to someone in the app needs Google sign-in (HATCHABOT_AUTH=identity) — use Share to a file instead.',
         });
       }
       const me = principalOf(req);
@@ -8198,6 +8227,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: 'The management agent is not a template: its files name tools only it has.' });
       if (busyNow(agent, reply)) return reply;
       const deps = { store, provider: providerFor(agent.hostId), log: trace() };
       try {
@@ -8856,7 +8886,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    */
   const kindForCode = async (agent: Agent, given: unknown, code: string | undefined): Promise<Channel['kind'] | undefined> => {
     if (given !== undefined) return pairingKind(given);
-    if (!code || !agent.runtimeRef || agent.state !== 'RUNNING' || store.listChannelsForAgent(agent.id).length < 2) return 'telegram';
+    // One app: that one (a Discord-only agent answered "Not found" to a plain approve).
+    const kinds = store.listChannelsForAgent(agent.id).map((c) => c.kind);
+    if (kinds.length === 1) return kinds[0];
+    if (!code || !agent.runtimeRef || agent.state !== 'RUNNING' || kinds.length < 2) return 'telegram';
     try { return (await pairingRequestsFor(agent)).find((r) => r.code === code)?.kind ?? 'telegram'; }
     catch { return 'telegram'; }
   };

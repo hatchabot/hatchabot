@@ -165,7 +165,7 @@ export const REST_TOOLS: RestTool[] = [
       input.__sourceName = src.name;
       return { method: 'PATCH', path: `/v1/agents/${agent!.id}`, body: { aiProfileId: src.id } };
     },
-    card: ({ agent, input }) => `🔌 Switch "${agent!.name}" to the AI source "${String(input.__sourceName)}", then rebuild it (memory kept; the chat thread starts fresh).`,
+    card: ({ agent, input }) => `🔌 Switch "${agent!.name}" to the AI source "${String(input.__sourceName)}" — it applies at its next rebuild (rebuild_agent applies it now; memory kept).`,
   },
   {
     name: 'set_class', tier: 'mutate', agentArg: true,
@@ -206,10 +206,10 @@ export const REST_TOOLS: RestTool[] = [
   },
   {
     name: 'restore_snapshot', tier: 'mutate', agentArg: true,
-    description: "Put an agent's definition files back to a snapshot from list_snapshots (the current files are snapshotted first).",
+    description: "Put an agent's SOUL.md, AGENTS.md AND MEMORY.md back to a snapshot from list_snapshots — its learned memory rolls back too. The current files are snapshotted first; if they cannot be, nothing changes.",
     input_schema: obj({ agent: agentRef, snapshot: str(128, 'snapshot id') }, ['agent', 'snapshot']),
     call: ({ agent, input }) => ({ method: 'POST', path: `/v1/agents/${agent!.id}/snapshots/${enc(need(input.snapshot, 'snapshot id'))}/restore`, body: {} }),
-    card: ({ agent, input }) => `↩ Restore "${agent!.name}"'s definition files to snapshot ${String(input.snapshot)} (current files are snapshotted first)`,
+    card: ({ agent, input }) => `↩ Restore "${agent!.name}"'s SOUL.md, AGENTS.md and MEMORY.md to snapshot ${String(input.snapshot)} — what it learned since then is rolled back (the current files are snapshotted first)`,
   },
 
   // ---- scheduled tasks -----------------------------------------------------

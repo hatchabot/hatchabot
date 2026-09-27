@@ -279,5 +279,6 @@ export async function restoreAgentFromBackup(
 
   log('agent.restored', { agentId, date });
   await restartIfWasRunning();
-  return { date, running: wasRunning };
+  // What it IS now, not what it was: a failed restart used to report "restarting".
+  return { date, running: deps.store.getAgent(agentId)?.state === 'RUNNING' };
 }

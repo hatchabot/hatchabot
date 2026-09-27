@@ -390,7 +390,7 @@ describe('sending an agent to someone\'s inbox', () => {
     expect(noAddr.json().error).toMatch(/recipient email/);
     const pw = await w.f.inject({ method: 'POST', url: `/v1/agents/${id}/send`, headers: as(), payload: { toEmail: 'bob@example.com' } });
     expect(pw.statusCode).toBe(400);
-    expect(pw.json().error).toMatch(/identity mode/);
+    expect(pw.json().error).toMatch(/identity/);
     expect(w.store.listInbox(OTHER, 'bob@example.com')).toHaveLength(0);
   });
   it('in identity mode it lands in the recipient\'s inbox as a secret-free template, and dismiss hides it', async () => {

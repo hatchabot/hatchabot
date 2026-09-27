@@ -1187,8 +1187,10 @@ export class Store {
   }
 
   moveGroup(ownerId: string, groupName: string, dir: 'up' | 'down'): boolean {
+    // The groups on the owner's home screen: their own live agents (archived
+    // or shared ones made the arrows swap with groups nobody could see).
     const groups = [
-      ...new Set(this.listVisibleAgents(ownerId).map((a) => a.group).filter((g): g is string => !!g)),
+      ...new Set(this.listAgents(ownerId).filter((a) => a.state !== 'ARCHIVED' && a.state !== 'DELETED').map((a) => a.group).filter((g): g is string => !!g)),
     ];
     const i = groups.indexOf(groupName);
     const j = dir === 'up' ? i - 1 : i + 1;
@@ -1526,7 +1528,8 @@ export class Store {
   }
 
   setLocalAccountPassword(id: string, pwHash: string, pwSalt: string): void {
-    this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ? WHERE id = ?`).run(pwHash, pwSalt, id);
+    // A new password makes any pending reset link moot (it outlived the change).
+    this.db.prepare(`UPDATE local_accounts SET pw_hash = ?, pw_salt = ?, claim_code = NULL, claim_expires = NULL WHERE id = ?`).run(pwHash, pwSalt, id);
   }
 
   /** Replace (or, with null, remove) an account's recovery code hash. */
@@ -2390,7 +2393,8 @@ export class Store {
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(owner_id, day) DO UPDATE SET
            total_tokens = excluded.total_tokens, by_billing = excluded.by_billing,
-           cost_low = excluded.cost_low, cost_high = excluded.cost_high, captured_at = excluded.captured_at`,
+           cost_low = excluded.cost_low, cost_high = excluded.cost_high, captured_at = excluded.captured_at
+         WHERE excluded.total_tokens >= usage_snapshots.total_tokens`,
       )
       .run(ownerId, s.day, Math.round(s.totalTokens), JSON.stringify(s.byBilling),
         s.costLow ?? null, s.costHigh ?? null, new Date().toISOString());

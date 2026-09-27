@@ -44,6 +44,11 @@ esac
 # A channel asked for by name is remembered, so the next plain upgrade follows it
 # — even when there is nothing to install today.
 case "$ARG" in stable|beta|latest) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$ARG" > "$CHANNEL_FILE" ;; esac
+# A version named by hand is a pin: the channel timer leaves this machine
+# alone until a channel is named again (a rollback used to be undone within
+# ten minutes; use-case audit, 2026-09-27).
+case "$ARG" in v[0-9]*) mkdir -p "$(dirname "$CHANNEL_FILE")"; echo "$ARG" > "$CHANNEL_FILE"
+  echo "Pinned to $ARG — automatic upgrades pause here. Follow a channel again with: hatchabot upgrade stable" ;; esac
 
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 if [ "$CUR" = "$TARGET" ]; then echo "Already on $TARGET ($CHANNEL)."; exit 0; fi

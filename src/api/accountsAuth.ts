@@ -456,6 +456,7 @@ export function registerAccountRoutes(
       const password = req.body?.password ?? '';
       const problem = passwordProblem(password);
       if (problem) return reply.code(400).send({ error: problem });
+      if (self && guard.throttled(req, me.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
       if (self && !(await verifyPassword(req.body?.current ?? '', target.pwHash, target.pwSalt))) {
         guard.noteFailure(req);
         return reply.code(401).send({ error: 'Current password is wrong.' });

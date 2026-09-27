@@ -2,6 +2,22 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.3] — 2026-09-27
+
+### Fixed (the use-case walk-through, third batch — docs/audit-2026-09-27-use-cases.md)
+- Approving a knock on a Discord- or Slack-only agent without naming the app answered "Not found"; the one app it has is used.
+- Connecting a selection of agents to each other wiped their "may ask to act" grants.
+- A setup-token source accepted an API key (every turn then failed); it is refused with the right pointer.
+- A password change now cancels a pending reset link, and changing your own password is throttled like signing in.
+- A day's usage point dipped each time the usage view was opened (it counted running agents only); a day's point only rises now.
+- A member saw the owner's event details (an address, an error text) for agents shared with them; they see what happened, not the details.
+- The group arrows could swap with an archived agent's group nobody sees.
+- A memory checkpoint is a turn in flight (the idle sweep and an ask wait for it); the CLI reports a failed checkpoint instead of "requested".
+- The manager can no longer be cloned or offered as a template; "Runs here again" after a move to another Hatchabot refuses when its bot went with it; a backup restore reports the real state after its restart.
+- `hatchabot upgrade vX.Y.Z` pins the machine: the channel timer no longer undoes a rollback ten minutes later (`hatchabot upgrade stable` follows the channel again).
+- Stopping the memory search service asks first; opening the console on a sleeping agent stops waiting with the reason when the wake is refused.
+- The Discord/Slack/Telegram card shows the real file limit (the machine's setting, the agent's own, the app's cap) and says Detach; the Slack group-chat toast says channel; the manager's source-switch and snapshot-restore cards say what really happens; the send-to-someone refusal names the right sign-in mode.
+
 ## [2.89.2] — 2026-09-27
 
 ### Fixed (the use-case walk-through, second batch)

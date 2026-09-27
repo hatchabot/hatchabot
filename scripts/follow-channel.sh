@@ -77,6 +77,8 @@ case "$CHANNEL" in
      [ -n "$TARGET" ] || TARGET="$(newest)" ;;
 esac
 [ -n "$TARGET" ] || exit 0
+# Pinned by hand to a version (hatchabot upgrade vX.Y.Z): leave it there.
+case "$(tr -d '[:space:]' < "$HOME/.config/hatchabot/channel" 2>/dev/null)" in v[0-9]*) exit 0 ;; esac
 CUR="$(git describe --tags --exact-match 2>/dev/null || true)"
 [ "$CUR" = "$TARGET" ] && exit 0
 mkdir -p "$STATE"

@@ -3973,6 +3973,7 @@ async function loadEmbedder() {
   } catch (e) { st.textContent = `· ${e.message}`; }
 }
 async function embedderAction(action) {
+  if (action === 'stop' && !confirm('Stop the memory search service?\n\nEvery agent that uses it loses memory search until it is started again, and their rebuilds wait for it. It stays stopped — for everyone — until you start it.')) return;
   const st = $('embedStatus'); if (st) st.textContent = action === 'stop' ? '· stopping…' : '· starting (the first start fetches the model)…';
   $('embedActions').innerHTML = '';
   try { await api(`/v1/embedder/${action}`, { method: 'POST', body: {} }); toast(action === 'stop' ? 'Embedding service stopped' : 'Embedding service running'); }
@@ -8805,11 +8806,13 @@ async function openGateway(id, slug) {
       $('consoleCover').hidden = false; $('consoleCover').lastElementChild.textContent = 'Waking it up — about a minute…';
       $('consoleFrame').src = 'about:blank';
       $('consoleDlg').showModal();
-      await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }).catch(() => {});
+      try { await api(`/v1/agents/${id}/wake`, { method: 'POST', body: {} }); }
+      catch (e) { $('consoleCover').lastElementChild.textContent = `Could not wake it: ${e.message}`; return; }
       for (let i = 0; i < 150; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         if (!$('consoleDlg').open) return;
-        try { const h = await api(`/v1/agents/${id}/health`); if (h.healthy || h.ok) break; } catch { /* not yet */ }
+        // "reachable" is the gateway answering at all; its own ok can be false with a plugin warning.
+        try { const h = await api(`/v1/agents/${id}/health`); if (h.reachable || h.healthy || h.ok) break; } catch { /* not yet */ }
       }
       $('consoleCover').lastElementChild.textContent = 'Connecting this browser…';
       await refresh(false);
@@ -9164,7 +9167,7 @@ function renderGallery() {
   // Your own live agents are the catalog (clone requires ownership). Children
   // and members' chat-only cards aren't useful starting points.
   const mine = (agents ?? []).filter(a =>
-    (a.role ? a.role === 'owner' : true) &&
+    (a.role ? a.role === 'owner' : true) && !a.ops &&
     a.state !== 'DELETED' && a.state !== 'ARCHIVED' && !a.parentAgentId);
   if (!mine.length) { $('galleryBody').innerHTML = '<div class="sub">No agents yet to start from — create a blank one first.</div>'; return; }
   $('galleryBody').innerHTML = mine.map(a => {
@@ -11261,7 +11264,8 @@ function v2Pane(a, tab) {
       ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `<label style="margin:0">Sleep when idle <select id="v2Sleep" onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
           <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>
         <label style="margin:0">Files it may send <select id="v2FilesCap" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
-          ${['', 5, 10, 25, 50, 100].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>`) : ''}
+          ${[...new Set(['', 5, 10, 25, 50, 100, ...(a.filesMaxMb ? [a.filesMaxMb] : [])])].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>
+        <div class="sub" style="flex-basis:100%">Each app still caps it at its own limit: Telegram 50 MB, a Discord server without boosts 10 MB.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">
@@ -11380,14 +11384,14 @@ async function v2LoadChans(id) {
       <div class="sub">${linked}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}${pending?.retryAt ? ` <span style="color:var(--warn)" title="${label} allows a bot only a few name changes an hour">Rename to “${esc(pending.name || agentName)}” queued.</span>` : ''}</div>
       ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${kind === 'discord' ? `<div class="sub">${servers.length ? `In ${servers.length === 1 ? 'one server' : `${servers.length} servers`}: ${servers.map(g => `<b>${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any server yet.'} People can only message it once they share a server with it.</div>` : ''}
-      <div class="sub">Files it sends here: up to ${{ telegram: 50, discord: 10, slack: 100 }[kind] ?? 5} MB${kind === 'discord' ? ' (a server without boosts)' : ''}.</div>
+      <div class="sub">Files it sends here: up to ${c.filesMb ?? { telegram: 50, discord: 10, slack: 100 }[kind] ?? 5} MB${kind === 'discord' && (c.filesMb ?? 10) > 10 ? ' (a server without boosts takes 10)' : ''} — set under Settings → Hosts, or on its Advanced tab.</div>
       ${kind === 'slack' ? `<div class="sub">${c.team ? `In the <b>${esc(c.team)}</b> workspace. ` : ''}${servers.length ? `In ${servers.length === 1 ? 'one channel' : `${servers.length} channels`}: ${servers.map(g => `<b>#${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any channel yet: invite it with /invite in a channel.'}</div>` : ''}
       ${kind === 'telegram' ? `<div class="sub">Its @handle is fixed for life; its display name follows the agent's name.${c.pooled ? ' A pool bot: deleting or archiving the agent parks it for the next one.' : ' Your own bot: it stays yours.'}</div>` : ''}
       <div class="v2chan-h">
         ${c.deepLink ? `<a class="btn" href="${esc(c.deepLink)}" target="_blank" rel="noopener">Open in ${label}</a>` : ''}
         ${c.addToServerUrl ? `<a class="btn" href="${esc(c.addToServerUrl)}" target="_blank" rel="noopener">Add to a server</a>` : ''}
         ${canChange && spares > 0 ? `<button onclick="chanSwap('${jsq(id)}','${kind}')" title="Move it onto a spare bot from your pool: members and memory come with it; the old bot is parked, and everyone on it is told where to find it">🔁 Change bot…</button>` : ''}
-        ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Remove…</button>` : ''}
+        ${canChange ? `<button onclick="chanRemove('${jsq(id)}','${kind}')">Detach…</button>` : ''}
       </div>
       <div class="v2chan-people">
         <b>People on ${label}</b>
@@ -11639,7 +11643,7 @@ async function chanSaveRooms(id, kind, btn) {
     } else {
       if (!confirmRebuild(id, 'Changing its group chats')) { btn.disabled = false; return; }
       await api(`/v1/agents/${id}/channels/${kind}`, { method: 'PATCH', body: { rooms: mode === 'room' ? { mode, roomId } : { mode } } });
-      toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : mode === 'members' ? 'Saved: every server it is in, for people you admitted. It restarts to apply this.' : 'Saved: direct messages only. It restarts to apply this.', 6000);
+      toast(mode === 'room' ? `Saved. It restarts to join that ${kind === 'slack' ? 'channel' : 'server'}.` : mode === 'members' ? `Saved: every ${kind === 'slack' ? 'channel' : 'server'} it is in, for people you admitted. It restarts to apply this.` : 'Saved: direct messages only. It restarts to apply this.', 6000);
     }
     await refresh(false);
     v2LoadChans(id);
@@ -11655,7 +11659,7 @@ async function chanRemove(id, kind) {
     : !confirm(`Detach ${label} from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
-    toast(r.parked ? `${label} removed — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} removed.`, 5000);
+    toast(r.parked ? `${label} detached — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} detached.`, 5000);
     await refresh(false);
   } catch (e) { toast(e.message, 8000); }
 }

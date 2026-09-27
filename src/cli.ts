@@ -1744,8 +1744,9 @@ async function main() {
     }
     case 'checkpoint': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot checkpoint <agent>'));
-      await jsonPost(`/v1/agents/${a.id}/checkpoint`, {});
-      console.log("checkpoint requested — the agent is writing the conversation's key facts to MEMORY.md (~20s)");
+      const r = (await (await jsonPost(`/v1/agents/${a.id}/checkpoint`, {})).json().catch(() => undefined)) as { saved?: boolean; error?: string } | undefined;
+      if (r && r.saved === false) fail(r.error ?? 'nothing was saved');
+      console.log("saved — the conversation's key facts are in its memory");
       return;
     }
     case 'env': {
