@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.87.3] — 2026-09-27
+
+### Added
+- **Click-through tests of the real app** (`npm run test:ui`, scripts/ui-clickthrough.mjs): headless Chrome opens web/index.html on the stubbed fleet and does what a person does — the home screen and header, View by, dragging an icon into another group (with the new-group strip offered), the group arrows and their boundary toast, the bulk bolt pre-ticking its group, Wake and Sleep on the sheet, editing a scheduled task, the rebuild confirmation, and the Status, Settings and New doors — asserting what the page shows and what it asks the server for. A release gate from here on; three of last week's five UI reports were in paths no test touched.
+
 ## [2.87.2] — 2026-09-27
 
 ### Changed

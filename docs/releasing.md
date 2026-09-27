@@ -110,7 +110,7 @@ management agent stays pinned and moves last.
 
 ## Cutting a release
 
-1. `npm test && npm run typecheck` green on `main`, and
+1. `npm test && npm run typecheck && npm run test:ui` green on `main` (the last one drives the real page in headless Chrome, in docker: scripts/ui-clickthrough.mjs), and
    **`./scripts/upgrade-check.sh`** — it builds a database with each of a few
    past releases' own code and opens it with this build, which is the only way
    to catch a column added to an existing table with no `ALTER` (every unit
