@@ -33,7 +33,9 @@ function world() {
 }
 const run = (w: ReturnType<typeof world>, args: string[]) =>
   spawnSync('bash', [join(w.repo, 'scripts', 'uninstall.sh'), ...args], {
-    encoding: 'utf8', env: { ...process.env, HOME: w.home, PATH: `${w.bin}:${process.env.PATH}` },
+    // A minimal PATH: the script removes the `hbt` shim it finds on PATH, and with the
+    // user's PATH it removed the machine's real one (2026-09-27). Only the shims and the system dirs.
+    encoding: 'utf8', env: { ...process.env, HOME: w.home, PATH: `${w.bin}:/usr/bin:/bin` },
   });
 
 describe('scripts/uninstall.sh', () => {
