@@ -1758,7 +1758,7 @@
     </label>
     <div class="err" id="dpoolErr"></div>
     <div class="actions" style="justify-content:flex-start">
-      <button class="primary" id="dpoolAddBtn" onclick="addPoolBot('discord')">Add to pool</button>
+      <button class="primary" id="dpoolAddBtn" onclick="addChannelPoolBot('discord')">Add to pool</button>
     </div>
 
     <h4 style="margin:18px 0 6px">Bot pool</h4>
@@ -1788,7 +1788,7 @@
     </label>
     <div class="err" id="spoolErr"></div>
     <div class="actions" style="justify-content:flex-start">
-      <button class="primary" id="spoolAddBtn" onclick="addPoolBot('slack')">Add to pool</button>
+      <button class="primary" id="spoolAddBtn" onclick="addChannelPoolBot('slack')">Add to pool</button>
     </div>
 
     <h4 style="margin:18px 0 6px">App pool</h4>
@@ -2910,7 +2910,7 @@ async function loadAccounts() {
       <b>${esc(a.username)}</b>${a.hostOwner ? ' <span class="chip">host owner</span>' : ''}
       ${a.pending ? '<span class="chip">invitation not accepted yet</span>' : `<span class="sub">${a.agents} agent${a.agents === 1 ? '' : 's'}</span>`}
       <span style="margin-left:auto;display:flex;gap:6px">
-        ${a.pending ? `<button onclick="copyInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>`
+        ${a.pending ? `<button onclick="copyAccountInvite('${jsq(a.claimPath ?? '')}')">Copy invitation</button>`
           : a.hostOwner ? '' : `<button onclick="sendResetLink('${jsq(a.id)}','${jsq(a.username)}')" title="They choose a new password themselves; you never see it">Send a reset link</button>`}
         ${a.hostOwner ? '' : `<button class="danger" onclick="removeAccount('${jsq(a.id)}','${jsq(a.username)}')">Remove</button>`}
       </span></div>`).join('');
@@ -2966,7 +2966,7 @@ async function addAccount(btn) {
   finally { btn.disabled = false; }
 }
 
-async function copyInvite(path) {
+async function copyAccountInvite(path) {
   const url = (appConfig?.appUrl || location.origin).replace(/\/$/, '') + path;
   try { await navigator.clipboard.writeText(url); toast('Invitation copied — it expires 48 hours after it was made.', 7000); }
   catch { toast(url, 12000); }
@@ -3814,7 +3814,7 @@ async function loadPoolPane(kind) {
       : `<div class="sub">Empty — add a spare above, or park one when removing ${U.label} from an agent.</div>`;
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
-async function addPoolBot(kind) {
+async function addChannelPoolBot(kind) {
   const U = POOL_UI[kind];
   const body = kind === 'slack'
     ? { botToken: $('spoolBot').value.trim(), appToken: $('spoolApp').value.trim(), shared: $('spoolShared').checked }
@@ -9483,9 +9483,9 @@ async function openProposals(id, name) {
   $('proposalsAgent').textContent = name;
   $('proposalsList').innerHTML = 'Loading…';
   proposalsDlg.showModal();
-  await loadProposals();
+  await loadMasterProposals();
 }
-async function loadProposals() {
+async function loadMasterProposals() {
   try {
     const { proposals } = await api(`/v1/agents/${proposalsMasterId}/proposals`);
     $('proposalsList').innerHTML = proposals.length ? proposals.map(p => `
@@ -9509,7 +9509,7 @@ async function resolveProposal(pid, action, push) {
   try {
     const r = await api(`/v1/agents/${proposalsMasterId}/proposals/${encodeURIComponent(pid)}/resolve`, { method: 'POST', body: { action, push } });
     toast(action === 'dismiss' ? 'Dismissed.' : `Merged into the master's AGENTS.md${push ? ` — pushed to ${r.pushed} child(ren)` : ''}.`, 8000);
-    await loadProposals();
+    await loadMasterProposals();
   } catch (e) { toast(e.message, 10000); }
 }
 

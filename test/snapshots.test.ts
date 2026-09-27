@@ -104,6 +104,14 @@ describe('captureSnapshot', () => {
 });
 
 describe('restoreSnapshot', () => {
+  it('refuses to restore when the current files cannot be snapshotted first (use-case audit, 2026-09-27)', async () => {
+    const w = fileWorld({ 'SOUL.md': 'soul', 'AGENTS.md': 'agents', 'MEMORY.md': 'short memory' });
+    const snap = await captureSnapshot(w.deps, 'a1', { reason: 'manual', label: 'early' });
+    w.files['MEMORY.md'] = 'x'.repeat(MAX_FILE_BYTES + 1); // grew past what a snapshot holds
+    await expect(restoreSnapshot(w.deps, 'a1', snap.id)).rejects.toThrow(/nothing was changed/);
+    expect(w.files['MEMORY.md']!.length).toBe(MAX_FILE_BYTES + 1); // untouched
+  });
+
   it('puts the old files back and snapshots the current state first', async () => {
     const w = fileWorld(SEED);
     const good = await captureSnapshot(w.deps, 'a1', { label: 'before the mess' });

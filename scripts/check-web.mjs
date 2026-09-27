@@ -27,6 +27,14 @@ function checkHandlers(file, html, js) {
     ...[...js.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g)].map((m) => m[1]),
     ...[...html.matchAll(/\bid="([A-Za-z_$][\w$]*)"/g)].map((m) => m[1]),
   ]);
+  // A second top-level function of the same name silently replaces the first
+  // in one script: Discord/Slack "Add to pool", the roster's "Copy invitation"
+  // and the master's Proposals all ran someone else's function (2026-09-27).
+  const decl = [...js.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+  for (const name of new Set(decl.filter((n, i) => decl.indexOf(n) !== i))) {
+    failed = true;
+    console.error(`✗ web/${file}: function "${name}" is declared twice — the second replaces the first`);
+  }
   for (const h of handlers) {
     // `this`/`event`, window built-ins, and statement keywords (inline
     // `onkeydown="if (...)"`) used directly in handlers.

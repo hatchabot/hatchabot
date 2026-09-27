@@ -1201,11 +1201,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
     const code = randomBytes(16).toString('base64url');
     store.setLocalAccountClaim(account.id, code, new Date(Date.now() + RECOVERY_TTL_MS).toISOString());
-    const base = appUrlFor() || `${req.protocol}://${req.headers.host}`;
+    // Never from the request's Host header: this route is unauthenticated, and
+    // a stranger's Host would have put THEIR address, with the real code, in
+    // the owner's own chat (use-case audit, 2026-09-27). With no known address
+    // the link is only the path, to be opened where Hatchabot usually is.
+    const base = appUrlFor();
     const text = [
       `🔑 Hatchabot password reset for ${account.username}.`,
-      `Open this within 15 minutes to choose a new password:`,
-      `${base}/?claim=${code}`,
+      base ? `Open this within 15 minutes to choose a new password:` : `Within 15 minutes, open Hatchabot at the address you always use and add this to it:`,
+      base ? `${base}/?claim=${code}` : `/?claim=${code}`,
       `If you did not ask for this, ignore it — nothing changes unless the link is used.`,
     ].join('\n\n');
     if (token) {
@@ -6712,7 +6716,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // agent with no row and its bot already gone (30th audit). Busy for the
     // whole of it: a second swap or a rebuild waits.
     const newName = String((verified.settings as Record<string, unknown>).botName ?? 'its new bot');
-    const secretRef = `channel/${agent.id}/${kind}`;
+    // The new bot's token under a key of its own: the old bot's token sits under
+    // `channel/<agent>/<kind>` (or an earlier swap's key), and writing the new one
+    // there overwrote it — the old bot was parked holding the NEW token and its
+    // secret then deleted, cutting the agent off both (use-case audit, 2026-09-27).
+    const secretRef = `channel/${agent.id}/${kind}/${verified.accountId}`;
     let told = 0;
     let parked = false;
     const swapped = await whileBusy(agent.id, async () => {
@@ -7734,6 +7742,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // The agent is busy for the build: a Rebuild or Delete landing in
           // those minutes used to proceed underneath it.
           trace(agent.id)('image.ensure', { image: agent.image, on: host.id });
+          // Not over another operation's flag: clearBusy below would have
+          // cleared a running rebuild's or move's (use-case audit, 2026-09-27).
+          if (busyNow(agent, reply)) return reply;
           markBusy(agent.id);
           let got: Awaited<ReturnType<typeof ensureImageOn>>;
           try {

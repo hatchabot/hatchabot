@@ -178,6 +178,10 @@ export async function restoreSnapshot(
     ).id;
   } catch (err) {
     log('snapshot.safety_failed', { agentId, error: String(err) });
+    // No copy, no restore: the app promises "this is undoable", and a file too
+    // big for a snapshot (MEMORY.md past 256 KB) would have been overwritten
+    // with nothing to go back to (use-case audit, 2026-09-27).
+    throw new SnapshotError('Its current files could not be snapshotted first, so the restore would not be undoable — nothing was changed. Download a copy of the agent first (Advanced → Download copy), or trim its largest file.');
   }
 
   const restored: string[] = [];

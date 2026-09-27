@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.1] — 2026-09-27
+
+### Fixed (the use-case walk-through, first batch)
+- **Changing a Discord or Slack bot destroyed the old bot's token and cut the agent off the new one.** Both tokens lived under one key; the new token overwrote the old, the old bot was parked holding the new token, and parking then deleted the key the agent's new row pointed at. The swapped-in bot now gets its own key. (Introduced in v2.88.1's reordering; a round-trip swap test now covers it.)
+- **A password reset link sent over Telegram or Discord could carry a stranger's address.** With no public URL configured, the link was built from the request's Host header on an unauthenticated route. It never is now: without a known address the message gives the path to open on the usual address.
+- **Revert could overwrite a large MEMORY.md with no way back.** The "this is undoable" safety snapshot fails for a file past 256 KB, and the restore went ahead anyway. It refuses now, and nothing changes.
+- **Three buttons ran someone else's function.** Two top-level functions of the same name in the page meant Discord and Slack *Add to pool* ran Telegram's, *Copy invitation* on a pending account copied an agent's invite link, and a master's *Proposals* dialog never loaded. Renamed, and the page check now refuses a function declared twice.
+- Moving a pinned agent to another machine no longer runs over (and clears) the busy flag of a rebuild or move already under way.
+
 ## [2.89.0] — 2026-09-27
 
 ### Added

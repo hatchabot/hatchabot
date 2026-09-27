@@ -18,7 +18,7 @@ class MemSecrets {
   async delete(r: string) { this.map.delete(r); }
 }
 
-function fakeConnector(kind: 'slack' | 'discord', accountId = kind === 'slack' ? 'U0BOT' : '1234567890123456789'): ChannelConnector {
+function fakeConnector(kind: 'slack' | 'discord', firstAccount = kind === 'slack' ? 'U0BOT' : '1234567890123456789'): ChannelConnector {
   return {
     kind, label: kind === 'slack' ? 'Slack' : 'Discord',
     fields: [{ key: 'token', label: 'Token', pattern: /^ok-/, help: 'starts with ok-' }],
@@ -31,7 +31,10 @@ function fakeConnector(kind: 'slack' | 'discord', accountId = kind === 'slack' ?
       return { ok: true, name };
     },
     async verify(c) {
-      if (c.token !== 'ok-good') throw new ConnectorError('The platform refused it.');
+      let accountId = firstAccount;
+      if (c.token !== 'ok-good' && c.token !== 'ok-spare') throw new ConnectorError('The platform refused it.');
+      // A second bot of the same app: its own account id (a swap onto it has to work).
+      if (c.token === 'ok-spare') accountId = kind === 'slack' ? 'U0SPARE' : '1999999999999999999';
       verifyCalls.push(kind);
       // The second look finds the bot in a server and the intent turned on.
       const later = verifyCalls.filter((k) => k === kind).length > 1;
@@ -406,6 +409,36 @@ describe('the bot is named for the agent (2026-09-25)', () => {
     expect(store.getChannelForAgent(other, 'discord')?.settings?.botName).toBe('Taco');
     expect(store.listEvents([other]).some((e) => e.event === 'channel.renamed' && (e.detail as any).ok === false && String((e.detail as any).note).includes('few name changes'))).toBe(true);
     expect((await inject('POST', `/v1/agents/${other}/bot-name/sync`, { kind: 'slack' })).statusCode).toBe(409); // it has no Slack
+  });
+});
+
+describe('a successful swap keeps BOTH tokens (use-case audit, 2026-09-27)', () => {
+  it('the agent runs on the spare\'s token, the old bot is parked with its own token, nothing points at a deleted secret', async () => {
+    const { store, secrets, add, inject } = await setup();
+    const id = add();
+    await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
+    // The attach kicks a rebuild the mock world cannot finish; the swap wants a settled agent.
+    const settle = async () => { await new Promise((r) => setTimeout(r, 30)); store['db'].prepare(`UPDATE agents SET state = 'RUNNING' WHERE id = ?`).run(id); };
+    await settle();
+    await secrets.put('discord-pool/1999999999999999999', 'ok-spare');
+    store.upsertDiscordBot({ applicationId: '1999999999999999999', botName: 'Spare', secretRef: 'discord-pool/1999999999999999999', ownerId: OWNER, servers: [], warnings: [], addedAt: 'now', kind: 'discord' });
+    const r = await inject('POST', `/v1/agents/${id}/channels/discord/swap`, {});
+    expect(r.statusCode, r.body).toBe(200);
+    const row = store.getChannelForAgent(id, 'discord')!;
+    expect(row.accountId).toBe('1999999999999999999');
+    expect(await secrets.get(row.secretRef)).toBe('ok-spare');           // the agent's new bot, readable
+    const parked = store.getDiscordBot('1234567890123456789')!;
+    expect(parked).toMatchObject({ kind: 'discord', ownerId: OWNER });
+    expect(await secrets.get(parked.secretRef)).toBe('ok-good');         // the old bot, parked with ITS token
+    expect(store.getDiscordBot('1999999999999999999')).toBeUndefined();  // the spare left the pool
+    // And back again: the old bot is a spare now, and swapping onto it works the same way.
+    await settle();
+    const back = await inject('POST', `/v1/agents/${id}/channels/discord/swap`, {});
+    expect(back.statusCode, back.body).toBe(200);
+    const row2 = store.getChannelForAgent(id, 'discord')!;
+    expect(row2.accountId).toBe('1234567890123456789');
+    expect(await secrets.get(row2.secretRef)).toBe('ok-good');
+    expect(await secrets.get(store.getDiscordBot('1999999999999999999')!.secretRef)).toBe('ok-spare');
   });
 });
 

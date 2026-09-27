@@ -54,6 +54,13 @@ describe('forgot password, over Telegram', () => {
     expect(w.sent[0]!.chat).toBe('424242');
     expect(w.sent[0]!.text).toMatch(/\/\?claim=[A-Za-z0-9_-]{20,}/);
     expect(w.sent[0]!.text).toMatch(/15 minutes/);
+    // A stranger's Host header never becomes the link (use-case audit, 2026-09-27).
+    const w2 = await world();
+    const evil = await w2.f.inject({ method: 'POST', url: '/v1/local-accounts/recover', headers: { host: 'evil.example' }, payload: { username: 'chris' } });
+    expect(evil.statusCode).toBe(200);
+    expect(w2.sent).toHaveLength(1);
+    expect(w2.sent[0]!.text).not.toContain('evil.example');
+    expect(w2.sent[0]!.text).toMatch(/^\/\?claim=[A-Za-z0-9_-]{20,}$/m);
     // The old password is untouched until the link is used.
     expect(w.store.localAccountByUsername('chris')!.pwHash).not.toBe('');
   }, 10_000);
