@@ -465,6 +465,11 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     // The door rule travels: a Discord with members admitted rests in allowlist (Telegram's rule, 2026-09-25).
     const closed = buildConfigCommands({ ...base, channelPlugins: ['discord'], pluginInstall: 'npm', discord: { token: 't', applicationId: 'a', dmPolicy: 'allowlist', allowFrom: ['123456789012345678'], rooms: { mode: 'off' } } });
     expect(JSON.parse(argFor(closed, 'channels.discord.accounts')!).hatchabot.dmPolicy).toBe('allowlist');
+    // Each app's file ceiling (OpenClaw's own 5 MB dropped a 5.2 MB PDF in silence, 2026-09-27).
+    expect(argFor(cmds, 'channels.slack.mediaMaxMb')).toBe('100');
+    expect(argFor(cmds, 'channels.discord.mediaMaxMb')).toBe('10');
+    const tg = buildConfigCommands({ ...base, telegram: { accountId: 'tacobot', botToken: 'fake-token-T', dmPolicy: 'pairing', allowFrom: [] } } as never);
+    expect(argFor(tg, 'channels.telegram.mediaMaxMb')).toBe('50');
     expect(JSON.parse(argFor(cmds, 'channels.discord.accounts')!).hatchabot.dmPolicy).toBe('pairing'); // absent = pairing, as before
     const raw = cmds.map((c) => c.rawShell ?? '').join('\n');
     expect(raw).toContain('cp -r /opt/hatchabot/npm-cache /tmp/hb-npm-cache');

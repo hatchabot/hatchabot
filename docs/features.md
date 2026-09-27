@@ -658,12 +658,16 @@ platforms keep different, and why, is the ledger in `docs/channel-parity.md`.
 
 > **Discord (v2.66.0) and Slack (v2.75.1) are offered to everyone.** Slack
 > was built and tested against a fake Slack and made public on the owner's
-> call before a real-app trial; connecting one takes about ten minutes: under
-> an agent's Slack tab, *Set up…* → *Copy app manifest* → create the app from
-> the manifest at api.slack.com → install it → paste the two tokens; then DM
+> call, and connected to a real workspace on 2026-09-27; connecting one takes
+> five minutes: under an agent's Slack tab, *Set up…* → *Open Slack with the
+> manifest* (the app is filled in; press Create) → *Install to Workspace* and
+> copy the bot token → *Basic Information → App-Level Tokens*, generate one
+> with `connections:write` and copy it → paste both into the one box; then DM
 > the app in Slack, approve your knock with *That's me*, and say hi. If it
 > does not answer: the card's warnings, the Setup log, and
-> `hatchabot logs <agent>` say why.
+> `hatchabot logs <agent>` say why. A file an agent sends is capped per app
+> (Telegram 50 MB, Discord 10 MB, Slack 100 MB): OpenClaw's own 5 MB cap once
+> dropped a 5.2 MB PDF from a reply without a word.
 
 An agent can also be reached on Discord (and Slack), beside or instead of
 Telegram. Both connect outward from this machine, so nothing here has to be

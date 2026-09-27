@@ -11341,6 +11341,7 @@ async function v2LoadChans(id) {
       <div class="sub">${linked}${c.checkedAt ? ` <span title="Last checked with ${label}">Checked ${esc(ago(c.checkedAt))}.</span>` : ''}${pending?.retryAt ? ` <span style="color:var(--warn)" title="${label} allows a bot only a few name changes an hour">Rename to “${esc(pending.name || agentName)}” queued.</span>` : ''}</div>
       ${c.warnings?.length ? `<ul class="v2chan-warn">${c.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
       ${kind === 'discord' ? `<div class="sub">${servers.length ? `In ${servers.length === 1 ? 'one server' : `${servers.length} servers`}: ${servers.map(g => `<b>${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any server yet.'} People can only message it once they share a server with it.</div>` : ''}
+      <div class="sub">Files it sends here: up to ${{ telegram: 50, discord: 10, slack: 100 }[kind] ?? 5} MB${kind === 'discord' ? ' (a server without boosts)' : ''}.</div>
       ${kind === 'slack' ? `<div class="sub">${c.team ? `In the <b>${esc(c.team)}</b> workspace. ` : ''}${servers.length ? `In ${servers.length === 1 ? 'one channel' : `${servers.length} channels`}: ${servers.map(g => `<b>#${esc(g.name || g.id)}</b>`).join(', ')}.` : 'Not in any channel yet: invite it with /invite in a channel.'}</div>` : ''}
       ${kind === 'telegram' ? `<div class="sub">Its @handle is fixed for life; its display name follows the agent's name.${c.pooled ? ' A pool bot: deleting or archiving the agent parks it for the next one.' : ' Your own bot: it stays yours.'}</div>` : ''}
       <div class="v2chan-h">
@@ -11452,8 +11453,8 @@ async function openChanSetup(id, kind) {
   const steps = kind === 'slack' ? `
     <ol class="v2steps">
       <li><b>Create the app.</b> <button type="button" onclick="chanCopyManifest(this)">Copy app manifest</button>
-        <a class="btn" href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noopener">Open Slack</a><br>
-        Choose <i>From a manifest</i>, pick your workspace, paste, then <i>Create</i>.</li>
+        <a class="btn" id="chanSlackNew" href="https://api.slack.com/apps?new_app=1" target="_blank" rel="noopener">Open Slack with the manifest</a><br>
+        The manifest is filled in for you: pick your workspace and press <i>Create</i>. (If the page arrives empty, choose <i>From a manifest</i> and paste it.)</li>
       <li><b>Install it.</b> On <i>Install App</i>, press <i>Install to Workspace</i> and allow it. Copy the <i>Bot User OAuth Token</i> (starts with <code>xoxb-</code>).</li>
       <li><b>Make its connection token.</b> On <i>Basic Information</i> → <i>App-Level Tokens</i>, press <i>Generate Token and Scopes</i>, add <code>connections:write</code>, and copy it (starts with <code>xapp-</code>).</li>
     </ol>` : `
@@ -11476,7 +11477,10 @@ async function openChanSetup(id, kind) {
           ${pool.map(b => `<option value="${esc(b.applicationId)}">${esc(b.botName || b.applicationId)}${b.servers?.length ? ` — in ${esc(b.servers.map(g => g.name || g.id).join(', '))}` : ' — not in any server yet'}</option>`).join('')}</select>
       </div><div class="sub" style="margin-top:4px">Parked when ${V2_CHAN_LABEL[kind]} was removed from an agent, or parked ahead under Settings → ${V2_CHAN_LABEL[kind]}. It keeps its name and ${kind === 'slack' ? 'channels' : 'servers'}.</div></div>`;
   }
-  $('chanBody').innerHTML = parkedHtml + steps + fields.map(f => `
+  // Slack: one box takes both tokens at once, pasted from either page; the two boxes below fill themselves.
+  const pasteBox = kind === 'slack' ? `<label for="chanPaste">Paste both tokens here — or fill the two boxes below</label>
+    <textarea id="chanPaste" rows="2" autocomplete="off" spellcheck="false" placeholder="xoxb-… and xapp-…, in any order, with anything else around them" oninput="chanPasteTokens(this)"></textarea>` : '';
+  $('chanBody').innerHTML = parkedHtml + steps + pasteBox + fields.map(f => `
     <label for="chanF-${esc(f.key)}">${esc(f.label)}</label>
     <input type="password" id="chanF-${esc(f.key)}" data-key="${esc(f.key)}" data-pattern="${esc(f.pattern)}" autocomplete="off" spellcheck="false"
       oninput="chanCheckField(this)">
@@ -11484,6 +11488,26 @@ async function openChanSetup(id, kind) {
     `<div class="sub" style="margin-top:10px">The tokens are stored with this agent's other secrets and never shown to an AI. Connecting restarts the agent; it keeps its memory.</div>`;
   chanDlg.showModal();
   chanDlg.querySelector('input')?.focus();
+  if (kind === 'slack') void chanPrefillSlackLink(a.name);
+}
+/** Slack creates an app from a manifest given in the address: no copy, no paste. */
+async function chanPrefillSlackLink(name) {
+  try {
+    const m = await api(`/v1/channels/slack/manifest?name=${encodeURIComponent(name)}`);
+    const link = $('chanSlackNew');
+    if (link) link.href = `https://api.slack.com/apps?new_app=1&manifest_json=${encodeURIComponent(JSON.stringify(m))}`;
+  } catch { /* the plain link and Copy app manifest still work */ }
+}
+/** Both Slack tokens from one paste: whichever the person copied, in any order. */
+function chanPasteTokens(el) {
+  const text = el.value;
+  const bot = /xoxb-[A-Za-z0-9-]{20,}/.exec(text)?.[0], app = /xapp-[A-Za-z0-9-]{20,}/.exec(text)?.[0];
+  for (const [key, val] of [['botToken', bot], ['appToken', app]]) {
+    const box = $(`chanF-${key}`);
+    if (box && val) { box.value = val; chanCheckField(box); }
+  }
+  const missing = [!bot && 'the bot token (xoxb-)', !app && 'the app-level token (xapp-)'].filter(Boolean);
+  $('chanErr').textContent = text.trim() && missing.length ? `Still missing ${missing.join(' and ')}.` : '';
 }
 function chanCheckField(el) {
   const ok = !el.value.trim() || new RegExp(el.dataset.pattern).test(el.value.trim());

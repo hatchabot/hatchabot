@@ -6754,8 +6754,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (isBusy(agent.id)) return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
     const r = req.body?.rooms;
     const mode = r?.mode;
-    if (mode !== 'off' && mode !== 'room' && !(mode === 'members' && conn.kind === 'discord')) {
-      return reply.code(400).send({ error: conn.kind === 'discord' ? 'Choose off, every server it is in, or one server by its ID.' : 'Choose off, or one room by its ID.' });
+    // "Every server/channel it is in" exists for Discord AND Slack (the seed
+    // writes both; the sheet offered it for Slack and this refused it — 2026-09-27).
+    if (mode !== 'off' && mode !== 'room' && !(mode === 'members' && (conn.kind === 'discord' || conn.kind === 'slack'))) {
+      return reply.code(400).send({ error: conn.kind === 'discord' ? 'Choose off, every server it is in, or one server by its ID.'
+        : conn.kind === 'slack' ? 'Choose off, every channel it is in, or one channel by its ID.' : 'Choose off, or one room by its ID.' });
     }
     const roomId = typeof r?.roomId === 'string' ? r.roomId.trim() : '';
     if (mode === 'room' && !ROOM_ID[conn.kind].test(roomId)) {

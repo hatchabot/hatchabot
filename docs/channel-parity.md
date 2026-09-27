@@ -26,6 +26,7 @@ Both tabs draw one card per app with the same rows, in the same order:
 | Group chats | any group (members, @mention) · off · one group (members, @mention) | every server it is in (members, @mention) · off · one server | every channel it is in (members, @mention) · off · one channel |
 | Who can reach it (invite only / anyone can knock) | one setting for every app | same | same |
 | Rich messages | on / off | — (always rendered) | — |
+| Files it sends (an agent's reply carrying a file) | up to 50 MB (Bot API) | up to 10 MB (a server without boosts) | up to 100 MB (held there on purpose) |
 
 Removing an app forgets everyone it had admitted on the agent's volume;
 removing a member (Sharing) takes them off every app. Members, invites and
@@ -84,6 +85,9 @@ exists because BotFather caps an account at about 20 bots; Discord has no cap.
   stay manual, and Re-check tells you what is still missing.
 - **Pending-knock pushes to your phone** go through the manager's Telegram
   bot; there is no Discord manager bot yet.
+- **File sizes** follow each app's own ceiling (the seed sets OpenClaw's
+  `mediaMaxMb` per channel; its default is 5 MB everywhere, which dropped a
+  5.2 MB PDF from a reply in silence on Slack and Discord, 2026-09-27).
 
 ## Slack, specifically
 

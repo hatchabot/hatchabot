@@ -557,6 +557,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     const admitted = (allowFrom?.length ?? 0) > 0;
     const policy = groupAccess?.mode === 'off' || (groupAccess?.mode === 'room' && !admitted) ? 'disabled' : 'allowlist';
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groupPolicy', policy] });
+    cmds.push({ argv: ['config', 'set', 'channels.telegram.mediaMaxMb', String(OUTBOUND_MEDIA_MB.telegram)] });
     const groups =
       groupAccess?.mode === 'room' && groupAccess.roomId && admitted
         ? { [groupAccess.roomId]: { groupPolicy: 'allowlist', requireMention: true } }
@@ -588,6 +589,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push({ argv: ['plugins', 'enable', 'slack'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.mode', 'socket'] });
+      cmds.push({ argv: ['config', 'set', 'channels.slack.mediaMaxMb', String(OUTBOUND_MEDIA_MB.slack)] });
       // A room with nobody admitted yet is written CLOSED: OpenClaw reads a
       // room entry without `users` as "everyone in it", so the whole
       // workspace could have driven the agent until its owner linked
@@ -618,6 +620,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       cmds.push(channelPlugin('discord'));
       cmds.push({ argv: ['plugins', 'enable', 'discord'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
+      cmds.push({ argv: ['config', 'set', 'channels.discord.mediaMaxMb', String(OUTBOUND_MEDIA_MB.discord)] });
       // The rooms it answers in, each for admitted people only (see the Slack
       // note above): one by id, or every server it is in ('members' — the
       // same answer Telegram's default gives, which on Discord has to be
@@ -733,4 +736,13 @@ export function describeConfigCommands(cmds: ConfigCommand[]): string[] {
 }
 
 export const OPS_TOOLS_ALLOW = ['bundle-mcp', 'group:memory', 'read', 'write', 'edit'];
+/**
+ * The biggest file an agent may send on each app, in MB. OpenClaw's own cap is
+ * 5 MB on every channel and a 5.2 MB PDF was dropped from a reply, in silence,
+ * on Slack and on Discord (Taco Agent, 2026-09-27). Each app's real ceiling:
+ * Telegram's Bot API takes 50 MB, a Discord server without boosts 10 MB, Slack
+ * far more (1 GB) — held to 100 here so a runaway agent cannot push gigabytes.
+ */
+export const OUTBOUND_MEDIA_MB = { telegram: 50, discord: 10, slack: 100 } as const;
+
 export const OPS_TOOLS_DENY = ['group:runtime', 'group:web', 'group:ui', 'group:nodes', 'group:automation', 'group:sessions', 'gateway'];

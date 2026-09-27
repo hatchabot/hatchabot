@@ -162,6 +162,28 @@ const SCENARIOS = String.raw`(() => {
       await rebuild('a1');
       ok('agreed: sent', calls('POST', /\/rebuild$/).length === before + 1);
     },
+    slackSetup: async () => {
+      // The Slack sheet: the Open Slack link carries the manifest, and one paste fills both token boxes.
+      window.__override['/v1/channels/connectors'] = [{ kind: 'slack', label: 'Slack', fields: [
+        { key: 'botToken', label: 'Bot token', pattern: '^xoxb-[A-Za-z0-9-]{20,}$', help: 'xoxb' },
+        { key: 'appToken', label: 'App-level token', pattern: '^xapp-[A-Za-z0-9-]{20,}$', help: 'xapp' } ] }];
+      window.__override['/v1/channels/slack/manifest'] = { display_information: { name: 'Homework Helper' }, settings: { socket_mode_enabled: true } };
+      chanFields = undefined; // the sheet caches the connectors; make it ask again
+      await openChanSetup('a1', 'slack');
+      await until(() => chanDlg.open);
+      const link = await until(() => { const l = document.getElementById('chanSlackNew'); return l && l.href.includes('manifest_json=') ? l : null; });
+      ok('the manifest rides in the link', decodeURIComponent(link.href).includes('"socket_mode_enabled":true'));
+      const paste = document.getElementById('chanPaste'); ok('a paste box', !!paste);
+      // Made-up tokens, assembled here so no token-shaped string sits in this file (the PII hook refuses those).
+      const fakeBot = ['xox', 'b-fake-not-a-real-token-abcdefghij'].join(''), fakeApp = ['xap', 'p-fake-AFAKEAPPID-not-a-real-token-abcdefgh'].join('');
+      paste.value = 'Bot User OAuth Token ' + fakeBot + ' copied'; paste.dispatchEvent(new Event('input', { bubbles: true }));
+      ok('the bot token box filled', document.getElementById('chanF-botToken').value.startsWith('xoxb-'));
+      ok('it says what is still missing', document.getElementById('chanErr').textContent.includes('app-level token'));
+      paste.value += ' ' + fakeApp; paste.dispatchEvent(new Event('input', { bubbles: true }));
+      ok('the app token box filled', document.getElementById('chanF-appToken').value.startsWith('xapp-'));
+      ok('nothing missing now', document.getElementById('chanErr').textContent === '');
+      chanDlg.close(); v2Close();
+    },
     headerDoors: async () => {
       await openAiDlg(); ok('Settings opens', aiDlg.open); aiDlg.close();
       await openFleet(); ok('Status opens', v2FleetDlg.open); v2FleetDlg.close();

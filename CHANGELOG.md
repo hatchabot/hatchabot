@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.88.5] — 2026-09-27
+
+### Fixed
+- **A file over 5 MB was dropped from an agent's reply, in silence, on Slack and Discord.** OpenClaw caps outbound media at 5 MB on every app; a 5.2 MB PDF went missing (Taco Agent, the first real Slack trial). The seed now sets each app's own ceiling: Telegram 50 MB, Discord 10 MB (a server without boosts), Slack 100 MB. The agent's Telegram, Discord and Slack tabs say the limit. An existing agent gets it at its next rebuild.
+- **Slack's "every channel it is in" group mode was offered and then refused.** The sheet listed it, the server rejected it; the seed had supported it all along.
+
+### Changed
+- **Connecting Slack is shorter.** *Open Slack with the manifest* carries the manifest in the link, so the app is filled in and you press Create (Copy app manifest stays as a fallback); one box takes both tokens in one paste, in any order, and says which one is still missing. The steps went from six to four.
+
 ## [2.88.4] — 2026-09-27
 
 ### Fixed
