@@ -49,7 +49,7 @@ The header holds:
   numbers the old dashboard showed (awake, tokens per hour, memory, last
   backup, spare bots) live under Status — Health, Usage, Resources — and under
   Settings → Telegram (Chris, 2026-09-26). What needs you shows at the top
-  (**Waiting for you**) and under View by → **Needs you**. A fresh install with
+  (**Needs you**) and under View by → **Needs you**. A fresh install with
   no manager yet shows the set-up box in the hub's place.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
@@ -62,7 +62,7 @@ The header holds:
   still honest a month later. **Setup** sits in the top bar next to Settings,
   with a badge counting what is left; there is also an entry in the account
   menu, and a button in the classic look's toolbar.
-- **Waiting for you** collects what needs you: changes your manager prepared
+- **Needs you** collects what needs you: changes your manager prepared
   (Confirm / Cancel), the ones that were confirmed and then *failed*, with the
   reason, and **people knocking** — an *expected* join request (strangers
   never get this far; see *Members & invites*) with **Let them in**,
@@ -146,7 +146,7 @@ Telegram bot added later. **💬 Open** talks to it.
 It can look at everything about your agents (health, logs, usage, their files
 and memory) and it can *prepare* changes: archive, rebuild, switch AI source,
 scheduled tasks, images and the rest. It cannot carry any of them out. What it
-prepares appears under **Waiting for you**, on the home screen and above the
+prepares appears under **Needs you**, on the home screen and above the
 conversation, and happens only when you press **Confirm**, with your own
 sign-in. Replying "yes" in its chat approves nothing, on purpose.
 
@@ -367,7 +367,7 @@ Five distinct verbs, for five intents:
   the target host, and it starts there. Same agent record, same bot, same
   members; any failure rolls it back where it was. While it moves the card
   shows a pulsing **WORKING…** chip.
-- **Move to another cluster** (card ⋯ menu) — send the agent to a different
+- **Move to another Hatchabot** (card ⋯ menu) — send the agent to a different
   Hatchabot server entirely (registered under ⚙ Settings → Hosts → Other Hatchabot servers,
   with a token made on that server under Security → **Token for moving agents
   here** — it lets the other server move agents there, and nothing else).
@@ -735,7 +735,7 @@ leaves no trace where anyone looks: the container log stops, and the agent
 simply comes back. Hatchabot notices the restart count going up, writes a
 line in the agent's **Setup log** with the exit code ("quit cleanly (exit 0)
 without saying why", "killed for memory (exit 137)") and when, and lists the
-agent under Needs attention with "its process quit and was started again".
+agent under Needs you with "its process quit and was started again".
 Restarts that happened while Hatchabot itself was not running are not
 noticed; the count on the card still is.
 
@@ -755,7 +755,7 @@ a **class** can carry a cap for its agents (Settings → Classes), and an
 rebuild, and sticks across rebuilds. A member may go up to the machine's
 per-agent maximum (`HATCHABOT_AGENT_MEMORY_MAX`, 8g); the machine's owner
 beyond it. An agent that hits its cap or has processes killed for memory
-shows under Needs attention with a **Give it 1 GB more** button on its sheet.
+shows under Needs you with a **Give it 1 GB more** button on its sheet.
 
 The agent is told its budget: `HATCHABOT_MEMORY_CAP` in its environment and a
 "Memory budget" section in its AGENTS.md, refreshed when the cap changes, so
@@ -771,7 +771,7 @@ is showing (an image, a status, a Needs-you bin, an activity age…) — has a
 ticked, and a **⧉** that copies their names (one per line, in the order
 shown). Inside Bulk actions, the current View by's sections are also filter
 chips ("Image: 2026.9.6 (4)"), next to the usual ones (all, running, stopped,
-needs rebuild, needs attention, each source, group, class and machine).
+needs rebuild, needs you, each source, group, class and machine).
 
 ## Groups on the home screen: drag to make one, rename in place
 
@@ -873,7 +873,7 @@ default** at the top to put it back. **Pin & rebuild** does both at once — the
 ## Fleet operations
 
 **Status → Health** is the fleet dashboard: counts (running / stopped /
-failed / working), a "needs attention" list (failed agents with their reason,
+failed / working), a "needs you" list (failed agents with their reason,
 agents waiting for a bot, running agents idle over 14 days), and a per-agent
 line with state, model, and last activity. The host owner also sees **backup
 health** (latest set and its age) and **runtime** (image version, upgrade
@@ -923,7 +923,7 @@ service), then Move the stragglers off and **Remove** it.
 Two multi-machine shapes exist and compose: a **Cluster** is one control
 plane placing agents across runner hosts (one dashboard, Move between
 runners); a **Mesh** is independent Hatchabot servers peered as **Cluster
-servers**, with "Move to another cluster" carrying agents between them. See
+servers**, with "Move to another Hatchabot" carrying agents between them. See
 [topologies.md](topologies.md), and [deploy-gce.md](deploy-gce.md) for
 running a node on a cloud VM.
 
@@ -1134,7 +1134,7 @@ a pinned base image, or each derived image by name), **Class**, **Status**,
 week, this month, longer ago, never) or **Rebuilt** (the same bins, by when
 its container was last built),
 read-only, remembered per device. **Needs you** bins by what wants you:
-Knocking, To read, To rebuild, Needs attention, Fine — and **Cleared**: an
+Knocking, To read, To rebuild, Needs you, Fine — and **Cleared**: an
 agent you have taken out of the way with 🔕 (on the section's header for
 everyone in it, or on the agent's own sheet under its notices). Clearing
 remembers what was flagged, so the agent comes back the moment something
@@ -1233,7 +1233,7 @@ machine, for its own CPU, in minutes.
   among that machine's images, so it can travel on from there; one of the same
   name with different lines is never replaced. CLI: `hatchabot restore <file>`
   asks the same question, or takes `--build-image` / `--drop-pin`.
-- **Rehost to another server**: rebuilt there if the server token you
+- **Move to another Hatchabot** (CLI: `rehost`): rebuilt there if the server token you
   registered belongs to that server's owner; otherwise refused with the source
   left as it was. `--drop-pin` runs that server's default image instead.
 - Messaging-app plugins (Slack, Discord) come only from the base, so a runner

@@ -320,7 +320,7 @@ describe('the management agent\'s remove_channel tool', () => {
     const t = REST_TOOLS.find((x: { name: string }) => x.name === 'remove_channel')!;
     const ctx = (channel: unknown) => ({ agent: { id: 'a1', name: 'Tax' }, input: { channel }, resolve: async () => ({ id: '', name: '' }), get: async () => ({}) });
     expect(await t.call(ctx('discord'))).toEqual({ method: 'DELETE', path: '/v1/agents/a1/channels/discord' });
-    expect(t.card!(ctx('slack'))).toMatch(/off Slack/);
+    expect(t.card!(ctx('slack'))).toMatch(/from Slack/);
     await expect(async () => t.call(ctx('telegram'))).rejects.toThrow(/slack" or "discord/);
     expect(riskOf('remove_channel')).toBe('disruptive');
   });

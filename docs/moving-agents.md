@@ -104,7 +104,7 @@ On the **destination**: ⚙ Settings → Security → **New token**, and copy it
 On the **source**: ⚙ Settings → Hosts → Other Hatchabot servers → add its name, URL and that token.
 Hatchabot checks the token works before saving it.
 
-Then use **Rehost** on the agent card, or:
+Then use **Move to another Hatchabot** on the agent card, or:
 
 ```sh
 hatchabot servers                      # list registered servers

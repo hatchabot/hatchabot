@@ -2103,7 +2103,7 @@ async function main() {
       const a = await resolveAgent(ctx, rest[1] ?? fail('usage: hatchabot telegram remove <agent> [--yes]'));
       if (!a.botUsername) fail(`"${a.name}" has no Telegram bot.`);
       if (!flags.has('yes')) {
-        const typed = await askLine(`Take @${a.botUsername} off "${a.name}"?\nIt keeps everything it knows and becomes web-only; people who reach it on Telegram lose access and get a goodbye. The bot goes back to your pool.\nType y to confirm: `);
+        const typed = await askLine(`Detach @${a.botUsername} from "${a.name}"?\nIt keeps everything it knows and becomes web-only; people who reach it on Telegram lose access and get a goodbye. The bot goes back to your pool.\nType y to confirm: `);
         if (!/^y(es)?$/i.test(typed.trim())) fail('not confirmed — nothing changed');
       }
       const r: any = await (await api(ctx, `/v1/agents/${a.id}/telegram`, { method: 'DELETE' })).json();
@@ -2131,7 +2131,7 @@ async function main() {
         return;
       }
       if (!flags.has('yes')) {
-        const typed = await askLine(`Take "${a.name}" off ${Label}?\nIt keeps everything it knows; people who reach it on ${Label} lose access. Its bot is parked under Settings → ${Label} for another agent. It restarts to apply this. [y/N] `);
+        const typed = await askLine(`Detach ${Label} from "${a.name}"?\nIt keeps everything it knows; people who reach it on ${Label} lose access. Its bot is parked under Settings → ${Label} for another agent. It restarts to apply this. [y/N] `);
         if (!/^y(es)?$/i.test(typed.trim())) fail('not confirmed — nothing changed');
       }
       const r: any = await (await api(ctx, `/v1/agents/${a.id}/channels/${app_}`, { method: 'DELETE' })).json();

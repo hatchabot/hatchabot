@@ -96,7 +96,7 @@ adopting, backing up, and operating a fleet of agents.
   timeline (`list_events`).
 - **Shared or private memory.** A family agent's memory is common to everyone
   in it — and everyone is told so. A personal agent's isn't.
-- **Portability.** **Rehost** an agent to another Hatchabot server in one step —
+- **Portability.** **Move** an agent to another Hatchabot server in one step (`hatchabot rehost`) —
   it is preflight-checked, transferred with its memory, members and Telegram
   identity, verified on arrival, and rolled back if anything fails. Or **Download** a copy
   to a single file and **Restore** it wherever you like.

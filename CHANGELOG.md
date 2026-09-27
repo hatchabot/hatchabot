@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.87.2] — 2026-09-27
+
+### Changed
+- **One name each (Chris, 2026-09-27).** What wants something from you is **Needs you** everywhere (the filter, the section under the hub, the status view, the manager's notes; it was also "Needs attention" and "Waiting for you"). Taking a bot or an app off an agent is **Detach** (was "Take … off"). Sending an agent to a different Hatchabot server is **Move to another Hatchabot** in the app (was "Move to another cluster" / "Rehost"); the CLI verb `rehost` and the API are unchanged. No behaviour changes.
+
 ## [2.87.1] — 2026-09-27
 
 ### Fixed

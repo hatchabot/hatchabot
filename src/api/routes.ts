@@ -8830,7 +8830,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     for (const key of unannounced(announcedPairings, [...found.keys()])) {
       const f = found.get(key)!;
-      void opsPush.waiting(f.ownerId, f.headline, 'Let them in — or turn them away — under "Waiting for you".');
+      void opsPush.waiting(f.ownerId, f.headline, 'Let them in — or turn them away — under "Needs you".');
     }
     // Agents built before the door rested shut are still in `pairing`, where a
     // stranger's DM is answered with a code. Their config is on the volume and

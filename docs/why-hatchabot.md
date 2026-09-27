@@ -119,7 +119,7 @@ when there are several, they matter, and other people talk to them.
 | **Schedule and react** | Cron tasks, event-triggered tasks (a zero-cost check decides whether to wake the model), run-now tests. |
 | **Agents that consult each other** | Grant an investing agent access to your tax and legal agents; it asks them mid-task. |
 | **Master → child lineage** | A "master" agent's improvements distil into proposals that push to its children. |
-| **Move, copy, share, back up** | Rehost to another server in one step; download to a file; share as a template with no secrets; scheduled backups. |
+| **Move, copy, share, back up** | Move to another Hatchabot server in one step; download to a file; share as a template with no secrets; scheduled backups. |
 | **Rebuild without fear** | Rebuilds keep memory; only a change of AI *source* resets a thread — and that offers to save memory first. |
 | **Multiple machines** | Add runners (a laptop, a second box) and place agents where they fit. |
 | **See what's going on** | Fleet health, usage per agent per day, audit timeline, security posture with daily diffs. |

@@ -44,7 +44,7 @@ describe('creating the management agent', () => {
     expect(r.statusCode).toBe(202);
     const a = store.getOpsAgent(OWNER)!;
     expect(a).toMatchObject({ ops: true, webOnly: true, name: 'Hatchabot', icon: '🐣', aiProfileId: `p-${OWNER}` });
-    expect(store.getAgentSeed(a.id)['SOUL.md']).toMatch(/never change it|Waiting for you/);
+    expect(store.getAgentSeed(a.id)['SOUL.md']).toMatch(/never change it|Needs you/);
     expect((await f.inject({ method: 'POST', url: '/v1/ops-agent', headers: H, payload: {} })).statusCode).toBe(409);
     expect((await f.inject({ method: 'GET', url: '/v1/ops-agent', headers: H })).json().agent.id).toBe(a.id);
     expect((await f.inject({ method: 'GET', url: '/v1/ops-agent', headers: { 'x-hatchabot-owner': 'owner-b' } })).json().agent).toBeNull();

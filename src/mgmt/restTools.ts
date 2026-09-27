@@ -265,10 +265,10 @@ export const REST_TOOLS: RestTool[] = [
   },
   {
     name: 'remove_telegram', tier: 'mutate', agentArg: true,
-    description: "Take an agent off Telegram: its bot goes back to the pool, its Telegram contacts get a goodbye, and the owner keeps talking to it in the app.",
+    description: "Detach an agent from Telegram: its bot goes back to the pool, its Telegram contacts get a goodbye, and the owner keeps talking to it in the app.",
     input_schema: obj({ agent: agentRef }, ['agent']),
     call: ({ agent }) => ({ method: 'DELETE', path: `/v1/agents/${agent!.id}/telegram` }),
-    card: ({ agent }) => `✈ Take "${agent!.name}" off Telegram. Its bot returns to your pool, and its Telegram contacts lose access and get a goodbye.`,
+    card: ({ agent }) => `✈ Detach "${agent!.name}" from Telegram. Its bot returns to your pool, and its Telegram contacts lose access and get a goodbye.`,
   },
   {
     name: 'list_discord_bots', tier: 'read',
@@ -300,13 +300,13 @@ export const REST_TOOLS: RestTool[] = [
   },
   {
     name: 'remove_channel', tier: 'mutate', agentArg: true,
-    description: "Take an agent off Slack or Discord. It keeps its memory; the people it talked to there get a goodbye and stop reaching it; the bot or app is parked under Settings → Discord/Slack for another agent. (Connecting one needs tokens, so that is done in the app, never here.)",
+    description: "Detach an agent from Slack or Discord. It keeps its memory; the people it talked to there get a goodbye and stop reaching it; the bot or app is parked under Settings → Discord/Slack for another agent. (Connecting one needs tokens, so that is done in the app, never here.)",
     input_schema: obj({ agent: agentRef, channel: { type: 'string', enum: ['slack', 'discord'] } }, ['agent', 'channel']),
     call: ({ agent, input }) => {
       if (input.channel !== 'slack' && input.channel !== 'discord') throw new Error('channel must be "slack" or "discord".');
       return { method: 'DELETE', path: `/v1/agents/${agent!.id}/channels/${input.channel}` };
     },
-    card: ({ agent, input }) => `✂ Take "${agent!.name}" off ${input.channel === 'discord' ? 'Discord' : 'Slack'}. People stop reaching it there; it restarts and keeps its memory.`,
+    card: ({ agent, input }) => `✂ Detach "${agent!.name}" from ${input.channel === 'discord' ? 'Discord' : 'Slack'}. People stop reaching it there; it restarts and keeps its memory.`,
   },
   {
     name: 'create_invite', tier: 'mutate', agentArg: true,

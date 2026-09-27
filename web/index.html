@@ -941,7 +941,7 @@
       </div>
     </section>
     <section id="v2Proposals" hidden aria-labelledby="v2PropTitle">
-      <div class="v2ghead"><h3 id="v2PropTitle">Waiting for you</h3><span class="n" id="v2PropCount"></span></div>
+      <div class="v2ghead"><h3 id="v2PropTitle">Needs you</h3><span class="n" id="v2PropCount"></span></div>
       <div id="v2JoinList" style="display:grid;gap:8px;margin-bottom:8px"></div>
       <div id="v2PropList"></div>
     </section>
@@ -1634,7 +1634,7 @@
       <details style="margin-top:4px"><summary style="cursor:pointer">Runner or cluster?</summary>
       <div style="margin-top:4px">A <b>runner</b> is another machine under <i>this</i> Hatchabot: same dashboard,
       same agent list, and <b>Move</b> on an agent's card shifts it between runners. A <b>cluster</b> is a
-      separate Hatchabot server with its own dashboard — <b>Move to another cluster</b> (the card's ⋯ menu)
+      separate Hatchabot server with its own dashboard — <b>Move to another Hatchabot</b> (the card's ⋯ menu)
       hands an agent over to one, and you manage it there afterwards. One caveat for runners: the desktop
       <b>Claude Max</b> machine login only works on this machine, so a runner agent needs an API-key source
       or a Max setup-token (<code>claude setup-token</code>).</div></details>
@@ -1797,7 +1797,7 @@
   <section id="paneServers" role="tabpanel" hidden>
     <div class="sub">
       Another Hatchabot server, with its own login and dashboard. Register one
-      and <b>Move to another cluster</b> (the agent card's ⋯ menu) hands an agent
+      and <b>Move to another Hatchabot</b> (the agent card's ⋯ menu) hands an agent
       over in one step. Paste an access token minted on <i>that</i> server
       (its Settings → Security). Most setups never need this.
     </div>
@@ -5361,7 +5361,7 @@ async function openFleetActions(preset) {
   const needs = list.filter(needsRebuild).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
   const attn = list.filter(a => agentAttention(a).length).length;
-  if (attn) chips.push(['attention', `Needs attention (${attn})`]);
+  if (attn) chips.push(['attention', `Needs you (${attn})`]);
   // The home screen's current View by, as chips: one per section it shows
   // (image, status, needs-you, activity…), so a set you can see is a set you
   // can act on. Groups, sources, classes and machines already have theirs.
@@ -5867,7 +5867,7 @@ async function newCliToken(scope) {
   try {
     // scope 'rehost': for another server that will move agents here — that,
     // and nothing else. The old advice pasted a full token there.
-    const t = await api('/v1/cli-tokens', { method: 'POST', body: scope ? { label: 'Rehost from another server', scope } : { label: 'CLI' } });
+    const t = await api('/v1/cli-tokens', { method: 'POST', body: scope ? { label: 'Moving agents from another Hatchabot', scope } : { label: 'CLI' } });
     const out = $('cliTokenOut');
     out.style.display = '';
     out.textContent = t.token;
@@ -6576,7 +6576,7 @@ function cardMenu(a) {
   // cluster, Move on the card is the everyday path).
   if ((a.state === 'RUNNING' || a.state === 'STOPPED') && a.runtimeRef) {
     items.push(`<button onclick="downloadAgent('${a.id}', '${jsq(a.name)}')" title="Download a complete private copy (bot token, members, memory) — for your own keeping, don't share it">Download copy</button>`);
-    items.push(`<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to a different Hatchabot server — its own cluster, login, and dashboard">Move to another cluster</button>`);
+    items.push(`<button onclick="rehostAgent('${a.id}', '${jsq(a.name)}')" title="Move this agent to a different Hatchabot server — its own cluster, login, and dashboard">Move to another Hatchabot</button>`);
   }
   if (!items.length) return '';
   return `<details class="menu"><summary>⋯</summary><div class="menu-items" onclick="this.parentElement.open=false">${items.join('')}</div></details>`;
@@ -7986,7 +7986,7 @@ function renderFleet() {
 
   $('fleetAttention').innerHTML = attention.length
     ? `<div style="border:1px solid var(--warn);border-radius:8px;padding:10px;margin-top:6px">
-        <b>Needs attention</b>
+        <b>Needs you</b>
         ${attention.map(a => {
           const why = a.state === 'FAILED' ? `failed — ${esc(a.stateReason || 'unknown')}`
             : a.pendingAction?.type === 'bot_token' ? 'waiting for a Telegram bot'
@@ -8212,7 +8212,7 @@ function renderAllowKnocks(a) {
   const sel = $('tgAllowKnocks'); if (!sel) return;
   sel.value = a?.allowKnocks ? 'on' : 'off';
   $('tgAllowKnocksHelp').innerHTML = a?.allowKnocks
-    ? 'Anyone who finds the bot can ask, and waits under <b>Waiting for you</b> — how it worked before v2.13.'
+    ? 'Anyone who finds the bot can ask, and waits under <b>Needs you</b> — how it worked before v2.13.'
     : 'Only people you invite, or already know from another agent. Strangers are turned away silently.';
 }
 
@@ -10052,7 +10052,7 @@ function tocDotColor(a) {
 /**
  * Every status on an agent that wants the owner's attention, as {icon, why} —
  * one entry per KIND (same-kind reasons merged), in priority order. The single
- * source for the Jump legend's icons (and the Bulk "Needs attention" filter),
+ * source for the Jump legend's icons (and the Bulk "Needs you" filter),
  * so a new card warning only has to be added here to surface everywhere.
  */
 /**
@@ -10652,9 +10652,9 @@ function v2ViewKey(a, view = v2View) {
       if ((pairings[a.id]?.length ?? 0) > 0) return ['n:2', '🔑 Knocking'];
       if (v2Unread(a)) return ['n:3', '💬 To read'];
       if (attentionCleared(a)) return ['n:8', '🔕 Cleared'];
-      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs attention'];
+      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs you'];
       if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
-      if (agentAttention(a).length) return ['n:5', '⚠ Needs attention'];
+      if (agentAttention(a).length) return ['n:5', '⚠ Needs you'];
       return ['n:9', 'Fine'];
     }
     default: return null;
@@ -11217,7 +11217,7 @@ function v2Pane(a, tab) {
     case 'advanced': return `
       ${row('Machine', `<span>${esc(host ? (host.kind === 'local' ? (host.hostname || host.name) : host.name) : '—')}</span>
         ${(run || a.state === 'STOPPED') && built && hosts.length > 1 ? B('Move…', `moveHostAgent('${id}','${n}')`) : ''}
-        ${(run || a.state === 'STOPPED') && built ? B('Move to another cluster', `rehostAgent('${id}','${n}')`) : ''}`)}
+        ${(run || a.state === 'STOPPED') && built ? B('Move to another Hatchabot', `rehostAgent('${id}','${n}')`) : ''}`)}
       ${built ? row('Runtime', `${run || a.state === 'STOPPED' ? B('Rebuild', `rebuild('${id}')`, 'title="New container, memory kept"') : ''}
         ${run && a.hasGateway ? B('OpenClaw console', `v2Close();openGateway('${id}','${jsq(a.slug)}')`) : ''}
         <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
@@ -11250,7 +11250,7 @@ async function v2AddTelegram(id, withToken) {
   }
 }
 async function v2RemoveTelegram(id, name, bot) {
-  if (!confirm(`Take @${bot} off "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
+  if (!confirm(`Detach @${bot} from "${name}"?\n\nIt keeps everything it knows, and you keep talking to it here. People who reach it on Telegram lose access and get a goodbye message. The bot goes back to your pool for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
   try {
     await api(`/v1/agents/${id}/telegram`, { method: 'DELETE' });
     toast(`@${bot} is back in your pool.`, 6000);
@@ -11373,7 +11373,7 @@ async function v2LoadChans(id) {
           <option value="off"${r.allowKnocks ? '' : ' selected'}>Invite only (default)</option>
           <option value="on"${r.allowKnocks ? ' selected' : ''}>Anyone can knock</option>
         </select>
-        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Waiting for you.' : 'Only people you invite, or already know from another agent; strangers are turned away silently.'} One setting for every app this agent is on.</span>
+        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Needs you.' : 'Only people you invite, or already know from another agent; strangers are turned away silently.'} One setting for every app this agent is on.</span>
       </div>
       ${kind === 'telegram' ? `<div class="v2chan-rooms">
         <label for="chanRich-telegram" style="margin:0">Rich messages</label>
@@ -11583,8 +11583,8 @@ async function chanRemove(id, kind) {
   const a = v2Find(id); const label = V2_CHAN_LABEL[kind];
   if (kind === 'telegram') return v2RemoveTelegram(id, a?.name || '', a?.botUsername || '');
   if (kind !== 'slack'
-    ? !confirm(`Take Discord off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. It rebuilds now — anything it is doing stops.`)
-    : !confirm(`Take ${label} off "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
+    ? !confirm(`Detach Discord from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on Discord and get a goodbye message. The bot is parked under Settings → Discord, with its name and servers, ready for another agent. It rebuilds now — anything it is doing stops.`)
+    : !confirm(`Detach ${label} from "${a?.name}"?\n\nIt keeps everything it knows. People stop reaching it on ${label} and get a goodbye message. The app is parked under Settings → Slack, with its workspace and channels, ready for another agent. It rebuilds now — anything it is doing stops. It restarts to apply this.`)) return;
   try {
     const r = await api(`/v1/agents/${id}/channels/${kind}`, { method: 'DELETE' });
     toast(r.parked ? `${label} removed — ${kind === 'slack' ? 'the app' : 'the bot'} is parked for another agent.` : `${label} removed.`, 5000);
@@ -11828,7 +11828,7 @@ function v2InlineHealth(id, name) {
 
 /**
  * The hub: this account's management agent. An OpenClaw agent that runs on
- * any AI source; it prepares changes and they wait in "Waiting for you".
+ * any AI source; it prepares changes and they wait in "Needs you".
  * Until one is set up, the older built-in chat (Claude-only) stays as a stopgap
  * where it can work at all.
  */
