@@ -223,7 +223,7 @@ const MAX_RAW_STATE_BYTES = Math.floor((MAX_STATE_BYTES - 8192) * 0.75);
 export async function exportAgent(
   deps: ProvisionDeps,
   agentId: string,
-): Promise<{ filename: string; data: Buffer }> {
+): Promise<{ filename: string; data: Buffer; dropped: string[] }> {
   const { store, secrets, provider } = deps;
   const log = deps.log ?? (() => {});
 
@@ -234,6 +234,10 @@ export async function exportAgent(
   }
   const channel = store.getChannelForAgent(agentId);
   if (!channel && !agent.webOnly) throw new TransferError('This agent has no messaging channel to export.');
+  // What the archive does NOT carry, said rather than lost in silence (30th
+  // audit): a Discord or Slack bot and the people linked there stay behind
+  // (their tokens are this machine's pool; a bot cannot be in two places).
+  const dropped = store.listChannelsForAgent(agentId).filter((c) => c.kind !== 'telegram').map((c) => c.kind);
   const profile = store.getAIProfile(agent.aiProfileId);
 
   // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
@@ -336,10 +340,11 @@ export async function exportAgent(
     image,
     state: state.toString('base64'),
   };
-  log('agent.exported', { agentId, bytes: state.length });
+  log('agent.exported', { agentId, bytes: state.length, ...(dropped.length ? { dropped } : {}) });
   return {
     filename: `${agent.slug}.hatchabot`,
     data: gzipSync(Buffer.from(JSON.stringify(manifest), 'utf8')),
+    dropped,
   };
 }
 

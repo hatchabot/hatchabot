@@ -107,7 +107,26 @@ volumes() {
   [ -n "$NAMES" ] || return 0
   for n in $NAMES; do docker volume ls -q --filter "name=^$n-vol$" 2>/dev/null; done
 }
-images() { docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -E '^hatchabot-runtime:'; }
+# The runtime images to delete with --purge: the ones this install's agents and
+# classes name, plus the default tag — but never one that ANY container still
+# on the daemon uses (a production checkout beside a test one shares
+# hatchabot-runtime:latest; purging the test used to untag production's, 30th
+# audit). Run after this install's containers are gone.
+images() {
+  local named
+  named="$( [ -f "$DB_PATH" ] && [ -d "$REPO/node_modules/better-sqlite3" ] && (cd "$REPO" && node -e '
+    const db = require("better-sqlite3")(process.argv[1], { readonly: true });
+    const out = new Set();
+    for (const t of ["agents", "agent_classes"]) { try { for (const r of db.prepare(`SELECT DISTINCT image FROM ${t} WHERE image IS NOT NULL`).all()) out.add(r.image); } catch {} }
+    console.log([...out].join("\n"));' "$DB_PATH" 2>/dev/null) )"
+  local inuse; inuse="$(docker ps -a --format '{{.Image}}' 2>/dev/null | sort -u)"
+  { printf '%s\n' "${HATCHABOT_IMAGE:-hatchabot-runtime:latest}"; [ -n "$named" ] && printf '%s\n' "$named"; } \
+    | grep -E '^hatchabot-runtime:' | sort -u | while read -r img; do
+      [ -n "$img" ] || continue
+      grep -qxF "$img" <<<"$inuse" && { echo "  keeping $img — another container on this machine still uses it" >&2; continue; }
+      echo "$img"
+    done
+}
 
 say "This install"
 echo "  repo:      $REPO"

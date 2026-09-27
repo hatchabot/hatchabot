@@ -4905,6 +4905,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const isDocument = isControlUiDocument(path);
     const forwarded: Record<string, string | string[] | undefined> = { ...stripSessionCookie(req.headers), host: `127.0.0.1:${target.port}`, connection: 'close' };
     if (isDocument) delete forwarded['accept-encoding'];
+    // The body as it will be sent, and a content-length that matches it: a
+    // parsed JSON body re-serialised can be shorter than the client's declared
+    // length, and the gateway then waits for bytes that never come (30th audit).
+    const outBody: Buffer | undefined = req.body === undefined || req.body === null ? undefined
+      : Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+    delete forwarded['content-length'];
+    if (outBody) forwarded['content-length'] = String(outBody.length);
     const upstream = await new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }>(
       (resolve, reject) => {
         const r = httpRequest(
@@ -4916,6 +4923,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             // Drop hop-by-hop and our own host header; keep auth/content ones.
             // The owner's session cookie is stripped — the gateway must not see it.
             headers: forwarded,
+            // A gateway that accepts and never answers must not park the request for ever.
+            timeout: Number(process.env.HATCHABOT_CONSOLE_TIMEOUT_MS) || 60_000,
           },
           (res) => {
             const chunks: Buffer[] = [];
@@ -4926,9 +4935,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           },
         );
         r.on('error', reject);
-        if (req.body !== undefined && req.body !== null) {
-          r.end(typeof req.body === 'string' || Buffer.isBuffer(req.body) ? req.body : JSON.stringify(req.body));
-        } else r.end();
+        r.on('timeout', () => r.destroy(new Error('the gateway did not answer in time')));
+        if (outBody) r.end(outBody); else r.end();
       },
     ).catch(() => undefined as never);
     if (!upstream) return reply.code(502).send({ error: "The agent's gateway did not answer." });
@@ -7779,13 +7787,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // quiesces then tars the volume (minutes on a large agent), and without
       // the flag a concurrent Start passed its guards and booted the container
       // to write the volume mid-`tar`, silently tearing the archive.
-      const { filename, data } = await whileBusy(agent.id, () =>
+      const { filename, data, dropped } = await whileBusy(agent.id, () =>
         exportAgent(
           { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel,
             log: trace(agent.id) },
           agent.id,
         ),
       );
+      // The channels the archive leaves behind, for a client that can read headers (the CLI).
+      if (dropped.length) reply.header('x-hatchabot-dropped', dropped.join(','));
       return reply
         .type('application/octet-stream')
         .header('content-disposition', `attachment; filename="${filename}"`)

@@ -2,6 +2,13 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.88.3] — 2026-09-27
+
+### Changed
+- **A download says what it leaves behind.** A Discord or Slack bot and the people linked there do not travel in a `.hatchabot` file (the bot's token is this machine's pool); the CLI now asks before the export and notes it after, and the API says it in a header. The app's confirmation already did.
+- **The embedded console has a timeout** on the gateway (60 s, `HATCHABOT_CONSOLE_TIMEOUT_MS`), and forwards a parsed body with its own length rather than the browser's declared one.
+- **`uninstall.sh --purge` deletes only this install's runtime images** — the ones its agents and classes name plus the default tag — and never one that another container on the machine still uses (a production checkout beside a test one used to lose its images).
+
 ## [2.88.2] — 2026-09-27
 
 ### Added

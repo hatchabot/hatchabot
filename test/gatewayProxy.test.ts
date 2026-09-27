@@ -213,6 +213,17 @@ describe('what the gateway is told about the caller', () => {
     for (const k of ['x-forwarded-for', 'x-forwarded-proto', 'forwarded', 'x-real-ip', 'via', 'tailscale-user-login', 'tailscale-funnel-request']) expect(lastGatewayHeaders[k]).toBeUndefined();
     expect(lastGatewayHeaders['x-custom']).toBe('kept');
   });
+
+  it('a parsed JSON body is forwarded with ITS length, not the browser\'s declared one (30th audit)', async () => {
+    const { port } = await world({ ownerId: OWNER, via: 'identity' });
+    const prev = process.env.HATCHABOT_ALLOW_OWNER_HEADER;
+    process.env.HATCHABOT_ALLOW_OWNER_HEADER = '1';
+    // Ten bytes on the wire from the client; seven once re-serialised.
+    const res = await fetch(`http://127.0.0.1:${port}/v1/agents/a1/ui/api`, { method: 'POST', headers: { 'x-hatchabot-owner': OWNER, 'content-type': 'application/json' }, body: '{"a": 1  }' })
+      .finally(() => { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; });
+    expect(res.status).toBe(200);
+    expect(lastGatewayHeaders['content-length']).toBe('7');
+  });
 });
 
 describe('approving the console for a new browser', () => {

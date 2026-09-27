@@ -378,3 +378,14 @@ describe('web-only agents (no Telegram bot)', () => {
     await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/no messaging channel/);
   });
 });
+
+describe('the 30th audit: an export says what it leaves behind', () => {
+  it('a Discord bot beside the Telegram one is reported as dropped; a Telegram-only agent drops nothing', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    expect((await exportAgent(src.deps, 'a1')).dropped).toEqual([]);
+    src.store.insertChannel({ id: 'c-d', agentId: 'a1', kind: 'discord', accountId: '100000000000000002', secretRef: 'chan/d', deepLink: 'https://discord.example/y', createdAt: 'now' });
+    await src.provider.start(src.store.getAgent('a1')!.runtimeRef!); src.store.setAgentState('a1', 'RUNNING');
+    expect((await exportAgent(src.deps, 'a1')).dropped).toEqual(['discord']);
+  });
+});

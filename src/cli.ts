@@ -1903,7 +1903,12 @@ async function main() {
     case 'download':
     case 'backup': { // 'backup' kept as an alias
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot download <agent> [-o file]'));
+      // A Discord or Slack bot does not travel (its token is this machine's
+      // pool): say so BEFORE the export stops the agent, and ask.
+      const leftBehind = ((a as { otherChannels?: Array<{ kind: string }> }).otherChannels ?? []).map((c) => c.kind);
+      if (leftBehind.length) await confirmOr(`The file will not carry its ${leftBehind.join(' and ')} bot or the people linked there — they stay on this machine. Continue?`);
       const res = await api(ctx, `/v1/agents/${a.id}/backup`);
+      const droppedHeader = res.headers.get('x-hatchabot-dropped');
       const out = userPath(flags.get('out') ?? `${a.slug}.hatchabot`);
       // 0600: this archive embeds the live bot token, so it must not be
       // readable by other accounts on the machine (the note below says as much).
@@ -1912,6 +1917,7 @@ async function main() {
       // world-readable file kept its old mode. Set it explicitly (CLI audit).
       await chmod(out, 0o600);
       console.log(`backed up to ${out}`);
+      if (droppedHeader) console.log(`note: NOT in the file — its ${droppedHeader.split(',').join(' and ')} bot and the people linked there (they stay on this machine).`);
       console.log('note: the file is a complete private copy — it contains the bot token, treat it like a password.');
       console.log(`note: "${a.name}" is now STOPPED here; keep it stopped once restored elsewhere.`);
       return;
