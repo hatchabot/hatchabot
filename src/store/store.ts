@@ -3339,7 +3339,36 @@ export class Store {
       const p = people.get(i.user_id);
       if (p) p.identities[i.kind] = i.channel_user_id;
     }
-    return [...people.values()].filter((p) => !already.has(p.userId) && Object.keys(p.identities).length > 0);
+    // One PERSON, not one row per agent: before account links every approval
+    // minted its own member id, so the same Telegram id sat under three ids
+    // and the list said "Julieta, Julieta, Julieta" (Chris, 2026-09-27). Two
+    // people who share an identity on any channel are one; the one with a
+    // real name keeps it, the identities are the union, the other ids ride
+    // along so "already on this agent" still sees them.
+    const byIdentity = new Map<string, { userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>>; ids: string[] }>();
+    const merged: Array<{ userId: string; name: string; channelUserId?: string; identities: Partial<Record<ChannelKind, string>>; ids: string[] }> = [];
+    for (const p of people.values()) {
+      if (!Object.keys(p.identities).length) continue;
+      const keys = Object.entries(p.identities).map(([k, v]) => `${k}:${v}`);
+      let home = keys.map((k) => byIdentity.get(k)).find(Boolean);
+      if (!home) { home = { ...p, ids: [p.userId] }; merged.push(home); }
+      else {
+        home.ids.push(p.userId);
+        if (home.name === 'Member' && p.name !== 'Member') { home.name = p.name; home.userId = p.userId; }
+        for (const [k, v] of Object.entries(p.identities)) home.identities[k as ChannelKind] ??= v;
+        home.channelUserId ??= p.channelUserId;
+      }
+      for (const k of keys) byIdentity.set(k, home);
+    }
+    // Already on the target agent under ANY of their ids or their Telegram id.
+    const alreadyTg = new Set(
+      exceptAgentId
+        ? (this.db.prepare(`SELECT channel_user_id FROM memberships WHERE agent_id = ? AND status = 'active' AND channel_user_id IS NOT NULL`).all(exceptAgentId) as Array<{ channel_user_id: string }>).map((r) => r.channel_user_id)
+        : [],
+    );
+    return merged
+      .filter((p) => !p.ids.some((id) => already.has(id)) && !(p.identities.telegram && alreadyTg.has(p.identities.telegram)))
+      .map(({ ids: _ids, ...p }) => p);
   }
 
   /** Put another bot on the same channel: the row changes, the people bound there stay (a swap, not a removal). */

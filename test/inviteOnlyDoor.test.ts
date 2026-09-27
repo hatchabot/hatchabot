@@ -137,6 +137,12 @@ describe('adding someone you already know', () => {
     } as never);
     const H = { 'x-hatchabot-owner': OWNER };
 
+    // The same Telegram id under two more member ids (one approval per agent
+    // before account links; one of them nameless) is still ONE Maria.
+    s.insertMembership({ id: 'm1b', agentId: 'a2', userId: 'member-maria-2', role: 'user', status: 'active', displayName: 'Maria' } as never);
+    s.bindMembershipChannelUser('a2', 'member-maria-2', '555');
+    s.insertMembership({ id: 'm1c', agentId: 'a2', userId: 'telegram:555', role: 'user', status: 'active' } as never);
+    s.bindMembershipChannelUser('a2', 'telegram:555', '555');
     const list = await f.inject({ method: 'GET', url: '/v1/agents/a1/known-people', headers: H });
     expect(list.json()).toEqual([{ userId: 'user-maria', name: 'Maria', on: ['telegram'] }]);
 

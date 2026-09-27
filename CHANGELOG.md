@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.87.1] — 2026-09-27
+
+### Fixed
+- **Sharing listed the same person once per agent.** "Already uses another of your agents" showed Julieta three times: before account links, every approval minted its own member id, so one Telegram identity sat under several ids. People who share an identity on any channel are one entry now, and one who is already on the agent under any of those ids is not offered.
+
 ## [2.87.0] — 2026-09-27
 
 ### Fixed (the 30th audit, docs/audit-2026-09-27.md)
