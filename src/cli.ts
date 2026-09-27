@@ -2076,9 +2076,14 @@ async function main() {
       const limit = minutesFlag(15);
       const deadline = Date.now() + limit * 60_000;
       await new Promise((r) => setTimeout(r, 2000));
+      // A rebuild of a running agent stays RUNNING while it waits its turn and
+      // takes its checkpoint: "RUNNING" is the answer only once it has been
+      // seen leaving (use-case audit, 2026-09-27).
+      let left = cmd !== 'rebuild';
       for (;;) {
         const now = (await (await api(ctx, `/v1/agents/${a.id}`)).json()) as any;
-        if (now.state === want) { console.log(`"${a.name}" is ${want}.`); return; }
+        if (!left && (now.state !== 'RUNNING' || now.busy)) left = true;
+        if (left && now.state === want && !now.busy) { console.log(`"${a.name}" is ${want}.`); return; }
         if (now.state === 'FAILED') fail(`"${a.name}" failed: ${now.stateReason ?? 'unknown'}`);
         if (Date.now() > deadline) fail(`"${a.name}" is still ${now.state} after ${limit} min`);
         await new Promise((r) => setTimeout(r, 3000));

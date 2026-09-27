@@ -129,7 +129,8 @@ export class HttpApiClient implements ApiClient {
     await this.#req('POST', `/v1/agents/${id}/rebuild`, {});
   }
   async setModel(id: string, model: string): Promise<void> {
-    await this.#req('PATCH', `/v1/agents/${id}`, { model });
+    // The live route: OpenClaw reads the model per turn, so it applies now (PATCH only recorded it).
+    await this.#req('POST', `/v1/agents/${id}/model`, { model });
   }
   async approvePairing(id: string, code: string): Promise<void> {
     await this.#req('POST', `/v1/agents/${id}/pairing/approve`, { code });

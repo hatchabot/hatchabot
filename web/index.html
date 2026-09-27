@@ -1062,7 +1062,7 @@
     <input type="text" id="setupUser" autocomplete="username" placeholder="chris">
     <label>Password <span style="color:var(--dim)">(8 characters or more)</span></label>
     <input type="password" id="setupPw" autocomplete="new-password">
-    <details style="margin-top:8px"><summary class="sub">Setting this up from another machine?</summary>
+    <details id="setupCodeBox" style="margin-top:8px"><summary class="sub">Setting this up from another machine?</summary>
       <div class="sub" style="margin:6px 0">Creating the first account needs no credential, so from anywhere but this machine it needs the setup code the server printed when it started — look for “first-run setup code” in the log (<code>data/server.log</code>, or <code>journalctl --user -u hatchabot</code>).</div>
       <input type="text" id="setupCode" placeholder="Setup code" autocomplete="off">
     </details>
@@ -2675,6 +2675,11 @@ async function loadConfig() {
   $('idLogin').style.display = identity ? '' : 'none';
   $('acctLogin').style.display = locals && !setup && !claim ? '' : 'none';
   $('acctSetup').style.display = setup && !claim ? '' : 'none';
+  // Under rootless Docker the code is needed here too: show the box open, and say so.
+  if (setup && appConfig.setupCodeRequired && $('setupCodeBox')) {
+    $('setupCodeBox').open = true;
+    $('setupCodeBox').querySelector('summary').textContent = 'The setup code (needed on this machine too)';
+  }
   $('acctClaim').style.display = claim ? '' : 'none';
   // With both, Google is the owner's door and the form is everyone else's.
   $('acctLoginNote').textContent = identity
@@ -8514,7 +8519,12 @@ async function addCronJob() {
   if (!name || !message || (every ? !(everyMinutes >= 0.25) : !cron)) { $('cronErr').textContent = every ? 'Name, an interval (≥ 0.25 min), and message are all needed.' : 'Name, cron expression, and message are all needed.'; return; }
   $('cronAddBtn').disabled = true; $('cronErr').textContent = '';
   try {
-    await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message } : { name, cron, message, tz: tz || undefined } });
+    const made = await api(`/v1/agents/${cronAgentId}/crons`, { method: 'POST', body: every ? { name, everyMinutes, message } : { name, cron, message, tz: tz || undefined } });
+    // A paused task stays paused when edited (the replace used to switch it back on).
+    const was = cronEditingId && cronCache.find(x => x.id === cronEditingId);
+    if (was && was.enabled === false && made?.id) {
+      await api(`/v1/agents/${cronAgentId}/crons/${encodeURIComponent(made.id)}`, { method: 'PATCH', body: { enabled: false } }).catch(() => toast('Saved, but it could not be paused again — pause it from the list.', 6000));
+    }
     // Editing = replace: the new task exists before the old one is removed,
     // so a failed create can never lose the original.
     if (cronEditingId) {
@@ -9328,10 +9338,13 @@ async function setRebuildPolicy(policy) {
 }
 
 function rebuildableAgents() {
+  // Running ones only: a rebuild ends RUNNING, so a stopped or sleeping agent
+  // would be started behind the owner's back (the CLI leaves them alone too;
+  // they are rebuilt when they next start).
   return agents.filter(a =>
     (a.role ? a.role === 'owner' : true) &&
     a.runtimeRef && !a.migratedTo &&
-    (a.state === 'RUNNING' || a.state === 'STOPPED'));
+    a.state === 'RUNNING');
 }
 
 /**
@@ -11247,7 +11260,7 @@ function v2Pane(a, tab) {
         <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
       ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `<label style="margin:0">Sleep when idle <select id="v2Sleep" onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
           <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>
-        <label style="margin:0">Files it may send <select id="v2Files" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
+        <label style="margin:0">Files it may send <select id="v2FilesCap" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
           ${['', 5, 10, 25, 50, 100].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}

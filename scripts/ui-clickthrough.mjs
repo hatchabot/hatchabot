@@ -198,7 +198,7 @@ const SCENARIOS = String.raw`(() => {
       aiDlg.close();
       // The agent's own policy on its Advanced tab.
       openV2Agent('a1', 'advanced');
-      const files = await until(() => document.getElementById('v2Files'));
+      const files = await until(() => document.getElementById('v2FilesCap'));
       files.value = '10'; files.dispatchEvent(new Event('change', { bubbles: true }));
       const patch = await until(() => calls('PATCH', /\/v1\/agents\/a1$/).find((c) => c.body && 'filesMaxMb' in c.body));
       eq('the agent file cap', patch.body, { filesMaxMb: 10 });

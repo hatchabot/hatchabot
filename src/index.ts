@@ -267,6 +267,12 @@ postureDaily.unref();
     process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK = '1';
     app.log.info('rootless docker: loopback peers are not treated as local');
   }
+  // With no sign-in every request is the owner, and loopback-only binding does
+  // not keep agents out here: they reach this process from 127.0.0.1.
+  if (process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1' && !authIsEnabled(authModeFromEnv(), process.env.HATCHABOT_PASSWORD)) {
+    app.log.error('Refusing to start: sign-in is off, and under rootless Docker every agent can reach this process as if it were on the machine. Set HATCHABOT_AUTH=accounts (or a HATCHABOT_PASSWORD) in .env.');
+    process.exit(1);
+  }
 }
 await app.listen({ port: PORT, host: bindHost });
 // Management agents reach their tools and their AI provider only through the

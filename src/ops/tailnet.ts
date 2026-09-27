@@ -150,19 +150,24 @@ export async function writeEnvVar(
   catch { return { ok: false, error: `No .env at ${envPath}` }; }
   const line = `${key}=${value}`;
   const re = new RegExp(`^\\s*#?\\s*${key}\\s*=\\s*(.*)$`);
-  const lines = body.split('\n');
+  let lines = body.split('\n');
   let replaced = false;
-  for (let i = 0; i < lines.length; i++) {
-    const m = re.exec(lines[i] ?? '');
-    if (!m) continue;
-    const current = (m[1] ?? '').trim().replace(/^['"]|['"]$/g, '');
-    const commented = /^\s*#/.test(lines[i] ?? '');
+  // The line that is in force is the LAST uncommented one (systemd and the
+  // shell both take the last): write there, and drop earlier live duplicates.
+  // Writing the first match changed a commented example while a live line
+  // further down kept the old value after a restart (use-case audit, 2026-09-27).
+  const live = lines.map((l, i) => (re.test(l) && !/^\s*#/.test(l) ? i : -1)).filter((i) => i >= 0);
+  const target = live.length ? live[live.length - 1]! : lines.findIndex((l) => re.test(l));
+  if (target >= 0) {
+    const current = (re.exec(lines[target] ?? '')?.[1] ?? '').trim().replace(/^['"]|['"]$/g, '');
+    const commented = /^\s*#/.test(lines[target] ?? '');
     if (!commented && current && current !== value && !replaceable(current)) {
       return { ok: false, error: `.env already sets ${key}=${current} — change it there if you meant to.` };
     }
-    lines[i] = line;
+    lines[target] = line;
     replaced = true;
-    break;
+    const drop = new Set(live.filter((i) => i !== target));
+    lines = lines.filter((_, i) => !drop.has(i));
   }
   if (!replaced) {
     if (lines.length && lines[lines.length - 1] !== '') lines.push('');

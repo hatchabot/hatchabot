@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.2] — 2026-09-27
+
+### Fixed (the use-case walk-through, second batch)
+- **Change bot on your own (hand-made) Telegram bot deleted its token.** It is parked in the pool first now, as Detach does; the swap also writes the new row in one step.
+- **Anyone leasing a shared house bot could read its token** under the agent's Telegram tab, and keep it after the bot moved on. Only the machine's owner sees a house bot's token now.
+- **An archived agent kept an AI source from ever being deleted** (its last-applied source counted as "in use" though it is never rebuilt).
+- **The manager's "set model" only recorded the model**; it applies it live now, as the app does.
+- **Rootless Docker:** the first account's setup code is asked for openly on the sign-up form (the page used to say it was needed only from another machine), the refusal and the installer say how to get it; proxied people get their own sign-in throttle again (one agent's misses no longer lock everyone out); and Hatchabot refuses to start with sign-in off, since agents reach it as if they were on the machine.
+- **`hatchabot rebuild <agent> --wait`** said "RUNNING" before the rebuild had begun; it waits to see the rebuild start first.
+- **A saved setting could be undone at the next restart** when `.env` also had a commented example of it: the app now writes the line that is in force.
+- **Editing a paused scheduled task switched it back on**; it stays paused.
+- **Rebuild all started every stopped and sleeping agent**; it rebuilds running ones, as the CLI does.
+- The agent's new "Files it may send" select shared its element id with the Files tab.
+
 ## [2.89.1] — 2026-09-27
 
 ### Fixed (the use-case walk-through, first batch)

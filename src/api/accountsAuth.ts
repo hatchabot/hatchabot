@@ -209,7 +209,9 @@ export function registerAccountRoutes(
         return reply.code(403).send({
           error:
             'Creating the first account from another machine needs the setup code this server printed when it started. ' +
-            'Find it in the server log ("first-run setup code"), or create the account on the machine itself.',
+            (loopbackIsRemote()
+              ? 'Find it in the server log ("first-run setup code"), or run on this machine: hatchabot accounts create <you> --host-owner'
+              : 'Find it in the server log ("first-run setup code"), or create the account on the machine itself.'),
         });
       }
       const username = (req.body?.username ?? '').trim();

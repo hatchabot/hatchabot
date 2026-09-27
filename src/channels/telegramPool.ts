@@ -148,6 +148,11 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    *  Case-insensitive: Telegram @handles are, and an adopt-sourced accountId
    *  differing only in case must not create a second row for the same bot
    *  (two rows → two leases → two pollers). */
+  /** Whose pool bot this is: an account id, null for a shared house bot, undefined when it is not a pool bot. */
+  ownerOf(username: string): string | null | undefined {
+    const r = this.db.prepare(`SELECT owner_id FROM telegram_pool WHERE username = ? COLLATE NOCASE`).get(username) as { owner_id: string | null } | undefined;
+    return r ? r.owner_id : undefined;
+  }
   owns(username: string): boolean {
     return !!this.db
       .prepare(`SELECT 1 FROM telegram_pool WHERE username = ? COLLATE NOCASE`)

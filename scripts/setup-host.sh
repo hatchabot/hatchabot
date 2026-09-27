@@ -182,6 +182,11 @@ fi
 chmod 600 ~/.config/hatchabot/env
 
 say "Done. Next steps:"
+if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; then
+  echo "  (Rootless Docker: the first account needs the setup code even here —"
+  echo "   find \"first-run setup code\" in: journalctl --user -u hatchabot | tail -50,"
+  echo "   or create it from the command line: hatchabot accounts create <you> --host-owner)"
+fi
 cat <<EOF | sed "s|__PORT__|${HATCHABOT_SETUP_PORT:-8080}|"
   1. Open http://localhost:__PORT__ on THIS machine. With family accounts you
      create your own account there (you become its owner); with a shared

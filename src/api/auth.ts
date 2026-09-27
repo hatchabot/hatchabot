@@ -52,7 +52,12 @@ function throttleKeys(req: FastifyRequest, who?: string): string[] {
   // Under a rootless daemon every agent container is a loopback peer of this
   // process (its packets arrive from 127.0.0.1), so loopback is not "local"
   // there: no forwarded-for trust, no shared bucket with the owner's CLI.
-  if (!loopbackIsRemote() && (bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.'))) {
+  // Under a rootless daemon containers are loopback peers too; forwarded-for is
+  // still how proxied people get their own bucket — a container that forges
+  // it only escapes into a bucket of its own, and the per-account bucket still
+  // caps guessing. Without it, one agent's ten misses locked out everyone
+  // behind the proxy (use-case audit, 2026-09-27).
+  if (bare === '127.0.0.1' || bare === '::1' || bare.startsWith('127.')) {
     const fwd = req.headers['x-forwarded-for'];
     const first = (Array.isArray(fwd) ? fwd[0] : fwd)?.split(',')[0]?.trim();
     if (first) ip = `fwd:${first}`;

@@ -15,7 +15,7 @@ const OWNER = 'user-owner';
 const H = { 'x-hatchabot-owner': OWNER };
 
 let n = 0;
-async function world(opts: { spare?: boolean } = {}) {
+async function world(opts: { spare?: boolean; ownedBot?: boolean; poolOwner?: string | null } = {}) {
   const id = `a${++n}`;
   const store = new Store(new Database(':memory:'));
   const provider = new MockProvider();
@@ -34,13 +34,19 @@ async function world(opts: { spare?: boolean } = {}) {
 
   const told: string[] = [];
   const released: string[] = [];
+  const parked: Array<[string, string, string | null]> = [];
   const f = Fastify();
   await registerRoutes(f, {
     store, secrets: { put: async () => {}, get: async () => 'tok', delete: async () => {} } as never,
     providers: new Map([['mock', provider]]),
     channel: {
       kind: 'telegram',
-      pool: { owns: () => true, availableCount: () => (opts.spare === false ? 0 : 2), list: () => [] },
+      pool: {
+        owns: (u: string) => !(opts.ownedBot && u === 'oldbot'),
+        ownerOf: (u: string) => (opts.ownedBot && u === 'oldbot' ? undefined : opts.poolOwner === undefined ? OWNER : opts.poolOwner),
+        availableCount: () => (opts.spare === false ? 0 : 2), list: () => [],
+        addToPool: async (u: string, t: string, o?: string | null) => { parked.push([u, t, o ?? null]); },
+      },
       provision: async () => ({ accountId: 'newbot', secretRef: 'pool/newbot', deepLink: 'https://t.me/newbot' }),
       release: async (id: string) => { released.push(id); },
     } as never,
@@ -50,7 +56,7 @@ async function world(opts: { spare?: boolean } = {}) {
     if (argv[0] === 'message') told.push(argv.join(' '));
     return origExec(ref, argv);
   }) as never;
-  return { store, f, told, released, id };
+  return { store, f, told, released, parked, id };
 }
 
 describe('changing an agent’s bot', () => {
@@ -88,3 +94,28 @@ describe('changing an agent’s bot', () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe('use-case walk-through (2026-09-27)', () => {
+  it('changing an owner\'s own bot parks it in the pool first, instead of throwing its token away', async () => {
+    const { f, parked, released, id } = await world({ ownedBot: true });
+    const res = await f.inject({ method: 'POST', url: `/v1/agents/${id}/channel/swap`, headers: H, payload: {} });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(parked).toEqual([['oldbot', 'tok', OWNER]]);
+    expect(released).toContain('oldbot');
+  });
+
+  it('a shared house bot\'s token is not shown to the agent\'s owner, only to the machine\'s', async () => {
+    const shared = await world({ poolOwner: null });
+    // H is the machine owner here: allowed.
+    expect((await shared.f.inject({ method: 'GET', url: `/v1/agents/${shared.id}/bot-token`, headers: H })).statusCode).toBe(200);
+    // Another account's agent on a house bot: refused.
+    shared.store['db'].prepare(`UPDATE agents SET owner_id = 'user-member' WHERE id = ?`).run(shared.id);
+    const r = await shared.f.inject({ method: 'GET', url: `/v1/agents/${shared.id}/bot-token`, headers: { 'x-hatchabot-owner': 'user-member' } });
+    expect(r.statusCode).toBe(403);
+    // Their own pool bot, or a hand-made one: theirs to see.
+    const own = await world({ poolOwner: 'user-member' });
+    own.store['db'].prepare(`UPDATE agents SET owner_id = 'user-member' WHERE id = ?`).run(own.id);
+    expect((await own.f.inject({ method: 'GET', url: `/v1/agents/${own.id}/bot-token`, headers: { 'x-hatchabot-owner': 'user-member' } })).statusCode).toBe(200);
+  });
+});
+

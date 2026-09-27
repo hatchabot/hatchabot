@@ -1261,6 +1261,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Google sign-in and local accounts can run together: the login screen
     // needs to know whether to offer both.
     localAccounts: deps.authMode === 'accounts' || (deps.authMode === 'identity' && process.env.HATCHABOT_LOCAL_ACCOUNTS === '1'),
+    // Under a rootless daemon nobody is "on this machine" (agents share its
+    // loopback): the first account needs the setup code even at localhost.
+    setupCodeRequired: process.env.HATCHABOT_CONTAINERS_ON_LOOPBACK === '1',
     // Surfaced so the UI can show "N of M agents" instead of only revealing the
     // ceiling as a 429 at create time. 0 = no limit. Archived agents don't count.
     maxAgentsPerAccount: Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0),
@@ -3332,7 +3335,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // "In use" is what an agent WILL use and what its container runs NOW: a
     // switch that has not been applied yet leaves the old source's token in
     // the container until the rebuild (30th audit).
-    const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id || a.appliedProfileId === profile.id);
+    const using = store.listAllActiveAgents().filter((a) => a.aiProfileId === profile.id
+      || (a.appliedProfileId === profile.id && a.state !== 'ARCHIVED' && !!a.runtimeRef));
     if (using.length > 0) {
       const mine = using.filter((a) => a.ownerId === ownerIdOf(req));
       const others = using.length - mine.length;
@@ -7332,6 +7336,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     const channel = agent && store.getChannelForAgent(agent.id);
     if (!agent || !channel) return reply.code(404).send({ error: 'Not found' });
+    // A house bot (shared pool) or another person's pool bot is only leased:
+    // its token outlives this agent's lease, so only the machine's owner may
+    // see it (use-case audit, 2026-09-27; the inventory's rule).
+    const poolOwner = (deps.channel.pool as { ownerOf?: (u: string) => string | null | undefined }).ownerOf?.(channel.accountId);
+    if (poolOwner !== undefined && poolOwner !== agent.ownerId && !ownsLocalHost(req)) {
+      return reply.code(403).send({ error: 'This is a shared house bot, lent to this agent: only the machine\'s owner can see its token.' });
+    }
     app.log.warn({ agentId: agent.id, username: channel.accountId, ownerId: ownerIdOf(req) }, 'telegram.bot_token_revealed');
     return {
       accountId: channel.accountId,
@@ -9207,10 +9218,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       },
     ).catch(() => 0);
 
+    // An owner's own bot (not from the pool) goes INTO the pool first, as
+    // Detach does: release alone deleted its token (use-case audit, 2026-09-27).
+    const tgPool = (deps.channel as { pool?: { owns(u: string): boolean; addToPool(u: string, t: string, o?: string | null): Promise<void> } }).pool;
+    if (tgPool && !tgPool.owns(old.accountId)) {
+      try { await tgPool.addToPool(old.accountId, await secrets.get(old.secretRef), agent.ownerId); }
+      catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
+    }
     await deps.channel.release(old.accountId).catch((err: unknown) =>
       app.log.warn({ agentId: agent.id, err: String(err) }, 'old bot release failed'));
-    store.deleteChannelForAgent(agent.id, 'telegram');
-    store.insertChannel({
+    store.replaceChannelRow(agent.id, 'telegram', {
       id: randomUUID(), agentId: agent.id, kind: 'telegram',
       accountId: fresh.accountId, secretRef: fresh.secretRef, deepLink: fresh.deepLink,
       createdAt: new Date().toISOString(),

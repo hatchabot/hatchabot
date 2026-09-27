@@ -449,10 +449,9 @@ describe('the 30th audit: an AI source is in use where its token RUNS, and a bui
     let del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
     expect(del.statusCode).toBe(400);
     expect(del.json().error).toMatch(/Still in use by Kitchen/);
-    // Rebuilt onto p2: p1 is free.
-    store.setAgentApplied('a1', 'p2', 'claude-opus-4-8');
-    del = await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as });
-    expect(del.statusCode).toBe(200);
+    // An ARCHIVED agent is never rebuilt: its applied source does not hold p1 hostage.
+    store['db'].prepare(`UPDATE agents SET state = 'ARCHIVED' WHERE id = 'a1'`).run();
+    expect((await f.inject({ method: 'DELETE', url: '/v1/ai-profiles/p1', headers: as })).statusCode).toBe(200);
   });
 
   it('a build refuses a source another account stopped sharing after this agent chose it', async () => {
