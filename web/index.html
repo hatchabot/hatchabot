@@ -540,7 +540,8 @@
   .v2hubactions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-left:auto }
   .v2top .v2hubactions { margin-left:0; flex-wrap:nowrap }
   .v2top .v2hubactions .v2btn .v2glyph { color:var(--tone) }
-  .v2hubactions .v2btn { --tone:var(--dim) }
+  /* Symbol only (Chris, 2026-09-27): a square tile per action, the tooltip and aria-label carry the name. */
+  .v2hubactions .v2btn { --tone:var(--dim); width:38px; padding:0; justify-content:center }
   .v2hubactions .v2btn .v2glyph { display:grid; place-items:center; font-size:18px; line-height:1; width:22px; height:22px; color:var(--tone) }
   .v2hubactions .v2btn .v2glyph svg { width:20px; height:20px; display:block }
   /* New: a big plus in an outlined tile — no fill, ink-coloured (black on the
@@ -555,7 +556,7 @@
   #v2FleetBtn .v2glyph { color:var(--ok) }
   #v2FleetBtn .v2glyph svg { display:block }
   /* Spare bots: both apps' marks in the corner, Discord tucked behind Telegram. */
-  .v2hubactions .v2btn .lbl { font-size:13px; line-height:1; color:var(--text) }
+  .v2hubactions .v2btn .lbl { display:none }
   .v2hubactions .v2btn .v2count { position:absolute; right:2px; top:-6px }
   .hub-unknown .v2hubactions { display:none }
   #v2HubTools { display:flex; align-items:center; gap:8px }
@@ -954,11 +955,11 @@
           <div class="v2face" aria-hidden="true">🐣</div>
           <div class="v2stats" id="v2Stats" hidden></div>
         <div class="v2hubactions" id="v2HubActions" aria-label="Fleet actions">
-          <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
-          <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 12.5 6.5 12.5 9.5 5 13.5 19.5 16.5 10.5 18.5 12.5 21.5 12.5"/></svg></span><span class="lbl">Status</span></button>
-          <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
-          <button class="v2btn" onclick="openAiDlg()" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
-          <button class="v2btn v2new" onclick="$('fabBtn').click()" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
+          <button class="v2btn" id="v2InboxBtn" hidden onclick="openInbox()" aria-label="Inbox" title="Agents people have sent you"><span class="v2glyph em" aria-hidden="true">📥</span><span class="lbl">Inbox</span><span class="v2count" id="v2InboxCount"></span></button>
+          <button class="v2btn" id="v2FleetBtn" onclick="openFleet()" aria-label="Status" title="Status — health, usage, resources and activity across all your agents"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="2.5 12.5 6.5 12.5 9.5 5 13.5 19.5 16.5 10.5 18.5 12.5 21.5 12.5"/></svg></span><span class="lbl">Status</span></button>
+          <button class="v2btn" id="v2BulkBtn" hidden onclick="openFleetActions()" aria-label="Bulk actions" title="Bulk actions — switch model, rebuild, stop or start a selection of agents, picked by AI source, group, machine or state"><span class="v2glyph em" aria-hidden="true">⚡</span><span class="lbl">Bulk actions</span></button>
+          <button class="v2btn" onclick="openAiDlg()" aria-label="Settings" title="Settings — AI sources, people, Telegram bots, machines, backups, security"><span class="v2glyph em" aria-hidden="true">⚙️</span><span class="lbl">Settings</span></button>
+          <button class="v2btn v2new" onclick="$('fabBtn').click()" aria-label="New agent" title="Create a new agent"><span class="v2glyph em" aria-hidden="true"><svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16"/></svg></span><span class="lbl">New</span></button>
         </div>
         </div>
       </div>

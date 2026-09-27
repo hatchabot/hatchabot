@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.86.2] — 2026-09-27
+
+### Changed
+- **Header buttons are symbols only.** Status, Bulk actions, Settings and New are square tiles with just their icon; the tooltip (and the screen-reader name) still says which is which.
+
 ## [2.86.1] — 2026-09-27
 
 ### Fixed
