@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.86.0] — 2026-09-26
+
+### Changed
+- **The hub is gone.** The Hatchabot agent is the first tile of the Default group, fixed in place, and Status, Bulk actions, Settings and New are buttons in the header beside your account. A fresh install without a manager still gets the set-up box.
+
 ## [2.85.0] — 2026-09-26
 
 ### Changed

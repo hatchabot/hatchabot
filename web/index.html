@@ -538,6 +538,8 @@
   .v2hubrow { display:flex; flex-wrap:wrap; align-items:flex-start; gap:10px 14px; margin:4px 0 2px }
   /* The actions: ordinary buttons, right-justified, New last (Chris, 2026-09-26). */
   .v2hubactions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-left:auto }
+  .v2top .v2hubactions { margin-left:0; flex-wrap:nowrap }
+  .v2top .v2hubactions .v2btn .v2glyph { color:var(--tone) }
   .v2hubactions .v2btn { --tone:var(--dim) }
   .v2hubactions .v2btn .v2glyph { display:grid; place-items:center; font-size:18px; line-height:1; width:22px; height:22px; color:var(--tone) }
   .v2hubactions .v2btn .v2glyph svg { width:20px; height:20px; display:block }
@@ -3017,6 +3019,9 @@ async function removeAccount(id, username) {
 /** Shown once, with no way to see it again — so it asks to be saved, and
  *  Escape does not dismiss it before that. */
 document.addEventListener('DOMContentLoaded', () => {
+  // Status, Bulk actions, Settings and New live in the header (Chris, 2026-09-26).
+  const acts = $('v2HubActions'), acct = document.querySelector('#v2Header .v2acct');
+  if (acts && acct) acct.parentNode.insertBefore(acts, acct);
   $('recoveryDlg')?.addEventListener('cancel', (e) => { if (!$('recoverySaved').checked) e.preventDefault(); });
 });
 function showRecoveryCode(code, lede) {
@@ -10696,7 +10701,9 @@ function renderV2() {
   renderV2Joins(); // people knocking: refreshed with the pairing poll, not only with proposals
   v2RenderWho();
   v2RefreshSheet();
-  const live = liveAgents().filter(a => !(a.ops && v2Mine(a))); // the manager lives in the hub, not the grid
+  // The manager is the first tile of the Default group, fixed in place — the
+  // hub that used to hold it is gone (Chris, 2026-09-26).
+  const live = liveAgents().sort((x, y) => (y.ops && v2Mine(y) ? 1 : 0) - (x.ops && v2Mine(x) ? 1 : 0));
   const liveIds = new Set(live.map(x => x.id));
   const sections = [], byKey = new Map();
   const section = (key, label, drop) => {
@@ -10730,7 +10737,7 @@ function renderV2() {
   // Time bins keep their own order (recent → old); other views go alphabetical. Shared and Archived last.
   const timeView = v2View === 'activity' || v2View === 'rebuilt';
   if (v2View !== 'group') sections.sort((x, y) => (x.key === 'shared' || x.key === 'archived') - (y.key === 'shared' || y.key === 'archived') || (timeView ? x.key.localeCompare(y.key) : x.label.localeCompare(y.label)));
-  for (const s of sections) s.items.sort((p, q) => v2BinCmp(p.a, q.a));
+  for (const s of sections) s.items.sort((p, q) => ((q.a.ops ? 1 : 0) - (p.a.ops ? 1 : 0)) || v2BinCmp(p.a, q.a)); // the manager stays first
   const sortBar = `<span class="v2binsort">${[['age', 'Age'], ['name', 'Name'], ['activity', 'Activity']].map(([k, l]) => {
     const on = v2SortKey() === k;
     const title = k === 'age' ? 'Newest agent first; again for oldest first' : k === 'name' ? 'A→Z; again for Z→A' : 'Most recently active first; again for quietest first';
@@ -10752,7 +10759,7 @@ function renderV2() {
       <div class="v2grid"${s.drop !== null ? ` data-v2drop="${esc(s.drop)}"` : ''}>
         ${s.items.map(({ a, child }) => {
           const st = v2Status(a);
-          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) ? ' data-v2fixed="1"' : ''}
+          return `<button class="v2agent v2st-${st.cls}${child ? ' v2child' : ''}" data-v2id="${esc(a.id)}"${child || !v2Mine(a) || a.ops ? ' data-v2fixed="1"' : ''}
             aria-label="${esc(a.name)} — ${esc(st.label)}${v2Unread(a) ? ', new messages' : ''}">${v2IconHTML(a, st)}<span class="v2name">${esc(a.name)}</span></button>`;
         }).join('') || (s.key === 'archived' ? '<span class="sub" style="grid-column:1/-1">Drag an agent here to archive it — its memory is kept.</span>' : '')}
       </div>
@@ -12023,6 +12030,7 @@ function v2RenderHub() {
   const hub = document.querySelector('.v2hub');
   hub.classList.toggle('hub-ops', !!ops);
   hub.classList.toggle('hub-unknown', !ops && !agentsLoaded);
+  hub.hidden = !!ops || !agentsLoaded; // with a manager, the grid holds it and the header holds the buttons
   const box = $('v2OpsBox');
   // Before the first agent list arrives there is nothing to say: offering to
   // set up an agent that already exists, then replacing it a moment later,

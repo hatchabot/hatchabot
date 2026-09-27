@@ -43,13 +43,14 @@ The header holds:
 - The account menu: who you're signed in as, light or dark appearance,
   install as an app, help, the classic look, the version, and sign out.
 
-- **The hub.** The Hatchabot agent's own tile on the left, and the actions
-  (Status, Bulk actions, Settings, **New**) as buttons on the right. The
-  numbers that used to sit between them (awake, tokens per hour, memory,
-  last backup, spare bots) live under **Status** — Health, Usage, Resources —
-  and under Settings → Telegram; they were never acted on from the hub, and a
-  clean hub is worth more (Chris, 2026-09-26). What needs you shows below the
-  hub (**Waiting for you**) and under View by → **Needs you**.
+- **No hub.** The Hatchabot agent is the first tile of the **Default** group,
+  fixed in place (it cannot be dragged), and **Status**, **Bulk actions**,
+  **Settings** and **New** are buttons in the header beside your account. The
+  numbers the old dashboard showed (awake, tokens per hour, memory, last
+  backup, spare bots) live under Status — Health, Usage, Resources — and under
+  Settings → Telegram (Chris, 2026-09-26). What needs you shows at the top
+  (**Waiting for you**) and under View by → **Needs you**. A fresh install with
+  no manager yet shows the set-up box in the hub's place.
 - **The setup guide doesn't disappear.** Until the first agent exists it shows
   itself — connect the AI, make a Telegram bot, create the agent. After that it
   keeps going with the four steps that decide whether the house is actually set
