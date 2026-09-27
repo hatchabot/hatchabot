@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.88.2] — 2026-09-27
+
+### Added
+- **Tests for the paths the 30th audit found untested:** the memory service's boot auto-start (an untouched service starts when the image has no engine; a Stop is final at boot too), `scripts/upgrade.sh` against a throwaway git origin (a failed install rolls back with its dependencies; a leftover `node_modules.prev` no longer blocks the next run; a second upgrade at once is refused), and `scripts/uninstall.sh` in a sandbox (`--purge` refuses when the database cannot be read; a plain uninstall keeps the user's CLI token and channel pin).
+
 ## [2.88.1] — 2026-09-27
 
 ### Changed

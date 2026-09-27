@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { EmbedderService, embedKeyHash, fileMode, sha256File, EMBED_MODEL_FILE } from '../src/embedder/embedder.js';
+import { bootStartEmbedder, EmbedderService, embedKeyHash, fileMode, sha256File, EMBED_MODEL_FILE } from '../src/embedder/embedder.js';
 
 /**
  * The machine's embedding service: model file, keys file, start/stop, and
@@ -326,3 +326,31 @@ describe('the 30th audit: a Stop is final, and a failed build keeps the running 
     expect(hashes()).toEqual(['K3']);
   });
 });
+
+describe('the 30th audit: the boot auto-start', () => {
+  it('starts an untouched service when the image has no engine; leaves a stopped one, an external one, an engine-carrying image; restarts an enabled one', async () => {
+    const w = world();
+    const sha = await withModel(w, 'data');
+    const svc = new EmbedderService({
+      provider: () => w.provider, secrets: w.secrets, store: w.store, dataDir: w.dataDir, runtimeImage: 'x:1',
+      doorScript: 'noop', doorBind: async () => '127.0.0.1', modelSha256: sha, log: (e, d) => w.events.push([e, d]),
+    });
+    const boot = (engine: string | undefined, host: string | null = 'h1') =>
+      bootStartEmbedder({ embedder: svc, localHostId: () => host ?? undefined, imageInfo: async () => ({ embedEngine: engine }), log: (e, d) => w.events.push([e, d]) });
+    expect(await boot('llama-cpp')).toBe('image-has-engine');
+    expect(svc.enabled).toBe(false);
+    expect(await boot('none', null)).toBe('no-host');
+    expect(await boot('none')).toBe('started');
+    expect(svc.enabled).toBe(true);
+    expect(w.events.some((e) => e[0] === 'embed.auto_started')).toBe(true);
+    // Enabled and fell over: the boot brings it back.
+    w.provider.embedder = { embedder: 'stopped', door: 'stopped' };
+    expect(await boot('none')).toBe('started');
+    expect(w.provider.embedder.embedder).toBe('running');
+    // The owner's Stop is final, at boot too.
+    await svc.stop();
+    expect(await boot('none')).toBe('stopped-by-owner');
+    expect(w.provider.embedder.embedder).not.toBe('running');
+  });
+});
+

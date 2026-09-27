@@ -132,7 +132,7 @@ function clampConcurrency(raw: string | undefined): number {
   return Number.isFinite(n) && n >= 1 ? Math.min(MAX_REBUILD_CONCURRENCY, n) : 6;
 }
 import { catArgv, cleanFileName, cleanRelPath, downloadName, duShell, inlineType, listShell, parseListing, putArgv, statShell, tarArgv, uploadAllowed } from '../orchestrator/agentFiles.js';
-import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash } from '../embedder/embedder.js';
+import { EMBED_MODEL_ALIAS, EmbedderService, embedDefault, embedKeyHash, bootStartEmbedder } from '../embedder/embedder.js';
 import { doorScript as embedDoorScript } from '../embedder/door.js';
 import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, wakeAgent, wakeSweep, type HibernateDeps } from '../orchestrator/hibernate.js';
 import { clearStaleRuntimePins, clearStaleRuntimePinsWhenUp } from '../orchestrator/runtimePins.js';
@@ -2035,20 +2035,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // trip over it (Chris, 2026-09-25: the tool comes up by itself). A service
     // the owner stopped stays stopped; an external server needs no start.
     setTimeout(() => {
-      void (async () => {
-        if (embedder.stoppedByOwner || embedder.external) return;
-        // An enabled service is started again too: start is idempotent, and it
-        // is what replaces an embedder left over from a previous install that
-        // still wears the old key (a MacBook reinstall, 2026-09-25).
-        if (!embedder.enabled) {
-          const local = store.localHostId();
-          if (!local) return;
-          const info = await providerFor(local).currentImageInfo().catch(() => undefined);
-          if (info?.embedEngine !== 'none') return;
-          trace()('embed.auto_started', { by: 'boot: the runtime image has no engine of its own' });
-        }
-        await embedder.start();
-      })().catch((err) => app.log.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
+      void bootStartEmbedder({
+        embedder, localHostId: () => store.localHostId(),
+        imageInfo: (host) => providerFor(host).currentImageInfo(),
+        log: (e, d) => trace()(e, d),
+      }).catch((err) => app.log.warn({ err: String(err) }, 'embedder auto-start at boot failed'));
     }, Number(process.env.HATCHABOT_EMBED_BOOT_MS) || 15_000).unref();
     // An enabled service that fell over comes back; a fleet event says so.
     setInterval(() => {

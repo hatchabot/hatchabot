@@ -317,6 +317,34 @@ export class EmbedderService {
   }
 }
 
+/**
+ * At boot: a machine whose runtime image carries no engine (every image since
+ * 2026.9.6) needs the service for every agent, so an untouched service comes
+ * up with Hatchabot instead of waiting for a rebuild to trip over it (Chris,
+ * 2026-09-25: the tool comes up by itself). A service the owner stopped stays
+ * stopped; an external server needs no start; an enabled one is started again
+ * (idempotent: a door with the same configuration is kept, an engine wearing
+ * an old key is replaced).
+ */
+export async function bootStartEmbedder(o: {
+  embedder: EmbedderService;
+  localHostId: () => string | undefined;
+  imageInfo: (hostId: string) => Promise<{ embedEngine?: string } | undefined>;
+  log?: (event: string, detail: Record<string, unknown>) => void;
+}): Promise<'started' | 'stopped-by-owner' | 'external' | 'no-host' | 'image-has-engine'> {
+  if (o.embedder.stoppedByOwner) return 'stopped-by-owner';
+  if (o.embedder.external) return 'external';
+  if (!o.embedder.enabled) {
+    const local = o.localHostId();
+    if (!local) return 'no-host';
+    const info = await o.imageInfo(local).catch(() => undefined);
+    if (info?.embedEngine !== 'none') return 'image-has-engine';
+    o.log?.('embed.auto_started', { by: 'boot: the runtime image has no engine of its own' });
+  }
+  await o.embedder.start();
+  return 'started';
+}
+
 /** Which engine a NEW agent gets: the fleet default (HATCHABOT_EMBED_DEFAULT), baked unless the owner flipped it. */
 export function embedDefault(env: NodeJS.ProcessEnv = process.env): 'baked' | 'shared' {
   return env.HATCHABOT_EMBED_DEFAULT?.trim() === 'shared' ? 'shared' : 'baked';
