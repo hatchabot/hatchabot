@@ -86,7 +86,7 @@ describe('Discord', () => {
   const ok: Route = (url) => {
     if (url.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'taxbot', bot: true } };
     if (url.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Tax Advisor', flags: 1 << 19 } };
-    if (url.endsWith('/users/@me/guilds')) return { body: [{ id: '42', name: 'Krueger Home' }] };
+    if (url.includes('/users/@me/guilds')) return { body: [{ id: '42', name: 'Krueger Home' }] };
     return { status: 404, body: {} };
   };
 
@@ -102,7 +102,7 @@ describe('Discord', () => {
   it('warns when Message Content is off or the bot is in no server', async () => {
     const { f } = fakeFetch((u, i) => {
       if (u.endsWith('/applications/@me')) return { body: { id: '1', flags: 0 } };
-      if (u.endsWith('/users/@me/guilds')) return { body: [] };
+      if (u.includes('/users/@me/guilds')) return { body: [] };
       return ok(u, i);
     });
     const v = await discordConnector(f as never).verify({ token: DTOKEN });
@@ -126,8 +126,27 @@ describe('Slack: the channels it is in, and a DM from the host (2026-09-25)', ()
     const v = await slackConnector(fakeFetch(withChans).f as never).verify({ botToken: BOT, appToken: APP });
     expect(v.settings.servers).toEqual([{ id: 'C0GENERAL', name: 'general' }, { id: 'G0PRIV', name: 'family' }]);
     expect(v.settings.checkedAt).toBeTruthy();
-    const none = await slackConnector(fakeFetch(slackOk).f as never).verify({ botToken: BOT, appToken: APP });
+    // A refused listing is "unknown" (the channels it had are kept), not "none";
+    // an app without channels:read lists none (night review, 2026-09-28).
+    const unknown = await slackConnector(fakeFetch(slackOk).f as never).verify({ botToken: BOT, appToken: APP });
+    expect(unknown.settings.servers).toBeUndefined();
+    const noScope: Route = (u, i) => (u.includes('/users.conversations') ? { body: { ok: false, error: 'missing_scope' } } : slackOk(u, i));
+    const none = await slackConnector(fakeFetch(noScope).f as never).verify({ botToken: BOT, appToken: APP });
     expect(none.settings.servers).toEqual([]);
+  });
+
+  it('a Discord server listing that fails keeps the old list instead of emptying it; a busy Discord is not a refused token', async () => {
+    const rateLimited: Route = (u) => {
+      if (u.endsWith('/users/@me')) return { body: { id: '999000999000999000', username: 'taxbot', bot: true } };
+      if (u.endsWith('/applications/@me')) return { body: { id: '123456789012345678', name: 'Tax Advisor', flags: 1 << 19 } };
+      if (u.includes('/users/@me/guilds')) return { status: 429, body: { message: 'You are being rate limited.', retry_after: 2 } };
+      return { status: 404, body: {} };
+    };
+    const v = await discordConnector(fakeFetch(rateLimited).f as never).verify({ token: DTOKEN });
+    expect(v.settings.servers).toBeUndefined();
+    expect(v.warnings.join(' ')).not.toMatch(/not in any server/);
+    const busy = discordConnector(fakeFetch(() => ({ status: 503, body: {} })).f as never).verify({ token: DTOKEN });
+    await expect(busy).rejects.toMatchObject({ busy: true });
   });
   it('dm opens the conversation with the bot token and posts; a refusal is false, never thrown', async () => {
     const posted: Array<{ url: string; body: any; auth?: string }> = [];

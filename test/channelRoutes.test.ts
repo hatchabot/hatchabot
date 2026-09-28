@@ -497,3 +497,19 @@ describe('use-case walk-through: every server it is in (2026-09-27)', () => {
   });
 });
 
+
+describe('two attaches at once (night review, 2026-09-28)', () => {
+  it('one wins, the other is refused, and the winner keeps its token', async () => {
+    const { store, secrets, add, inject } = await setup();
+    const id = add();
+    const [a, b] = await Promise.all([
+      inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' }),
+      inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' }),
+    ]);
+    const codes = [a.statusCode, b.statusCode].sort();
+    expect(codes[1]).toBe(409);
+    expect(codes[0]).toBeLessThan(300);
+    const row = store.getChannelForAgent(id, 'discord')!;
+    expect(await secrets.get(row.secretRef)).toBe('ok-good');
+  });
+});

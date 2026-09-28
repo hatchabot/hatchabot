@@ -592,6 +592,17 @@ export async function revokeMember(
       const acc = cfg && cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
         && cfg.channels[t.channel].accounts[t.acct];
       if (acc && Array.isArray(acc.allowFrom)) { acc.allowFrom = drop(acc.allowFrom); cfgChanged = true; }
+      // And every room: Slack channels and Discord servers carry their own
+      // users list, and a removed member could still @mention the bot there
+      // until some later rebuild (night review, 2026-09-28).
+      const chCfg = cfg && cfg.channels && cfg.channels[t.channel];
+      if (chCfg && t.channel !== "telegram") {
+        for (const key of ["channels", "guilds"]) {
+          const rooms = chCfg[key];
+          if (!rooms || typeof rooms !== "object") continue;
+          for (const r of Object.values(rooms)) if (r && Array.isArray(r.users)) { r.users = drop(r.users); cfgChanged = true; }
+        }
+      }
     }
     if (cfgChanged) writeAtomic(cfgPath, cfg);'`;
   const res = await provider.execShellOnVolume(agent.runtimeRef, script);

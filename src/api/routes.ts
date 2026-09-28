@@ -294,7 +294,7 @@ const HOST_PATH_DENIED =
   'Ask them to share the folder with your agent, or import an exported agent instead.';
 
 const CreateAgent = z.object({
-  name: z.string().min(1).max(64),
+  name: z.string().trim().min(1).max(64),
   persona: z.string().max(4000).optional(),
   aiProfileId: z.string().min(1),
   hostId: z.string().min(1),
@@ -507,7 +507,9 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Discord's quota: remembered, and the sweep below applies it later —
       // the same promise a Telegram pool bot's pending rename carries.
       store.setChannelSettings(agent.id, chan.kind, { ...(chan.settings ?? {}), pendingName: { name, retryAt: new Date(Date.now() + 40 * 60_000).toISOString() } });
-    } else if (res.ok && (chan.settings as Record<string, unknown> | undefined)?.pendingName) {
+    } else if ((chan.settings as Record<string, unknown> | undefined)?.pendingName) {
+      // Done, or refused for good (a reset token, a refused name): either way
+      // no longer pending — it was retried every ten minutes for ever (night review).
       const st = { ...(store.getChannelForAgent(agent.id, chan.kind)?.settings ?? {}) } as Record<string, unknown>;
       delete st.pendingName; store.setChannelSettings(agent.id, chan.kind, st);
     }
@@ -629,7 +631,8 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // A member of someone else's agent gets what it can DO, never where the
       // owner's files live, their env var names, or its gateway port (26th audit).
       ...((extra.role !== undefined && extra.role !== 'owner') || extra.foreign === true
-        ? { dataSources: dataSourcesFor(agent).map((d) => ({ ...d, hostPath: undefined })), envVars: [], gatewayPort: undefined, sharedPaths: undefined }
+        // A legacy folder's id IS its path: renamed for them too (night review).
+        ? { dataSources: dataSourcesFor(agent).map((d) => ({ ...d, hostPath: undefined, ...(d.legacy ? { id: `legacy:${d.mountName}` } : {}) })), envVars: [], gatewayPort: undefined, sharedPaths: undefined }
         : {}),
     };
   };
@@ -900,6 +903,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (inflight.has(agentId)) return false;
     const agent = store.getAgent(agentId);
     if (!agent?.runtimeRef) return false;
+    // A copy that moved to another Hatchabot is never rebuilt here: started,
+    // it polls the same bot as the copy there (bulk source switches and the
+    // channel routes reached it; night review, 2026-09-28).
+    if (agent.migratedTo) return false;
     const startedAt = Date.now();
     const task = (async () => {
       rebuildQueued.add(agentId);
@@ -1491,6 +1498,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const switching = !!cls.aiProfileId && cls.aiProfileId !== agent.aiProfileId;
     const target = store.getAIProfile(switching ? cls.aiProfileId! : agent.aiProfileId);
     if (!target) return { rebuild: false, error: switching ? 'class source unavailable' : 'agent has no AI source' };
+    if (switching && agent.ops && target.vendor === 'local') return { rebuild: false, error: "the Hatchabot agent can't use a local model" };
     if (switching) {
       if (target.ownerId !== agent.ownerId && !target.shared) return { rebuild: false, error: 'class source unavailable' };
       // Same layered guard as create/switch: a machine-login Max source is never
@@ -1643,8 +1651,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           catch (err) { skipped.push(`${a.name}: ${err instanceof ProviderError ? err.userMessage : 'memory cap not applied'}`); }
         }
         // Image cleared: members the class had pinned go back to the fleet default (needs a rebuild).
-        if (!image && cls.image && a.image === cls.image) { store.setAgentImage(a.id, null); applied++; needRebuild++; continue; }
-        const r = await applyClassToAgent(a, { model, aiProfileId, image });
+        // The class image cleared: its pin goes, and the rest of the edit
+        // (model, source) still applies — it was skipped (night review).
+        const unpinned = !image && !!cls.image && a.image === cls.image;
+        if (unpinned) store.setAgentImage(a.id, null);
+        const r = await applyClassToAgent(unpinned ? store.getAgent(a.id)! : a, { model, aiProfileId, image });
+        if (unpinned && !r.error) { applied++; needRebuild++; continue; }
         if (r.error) skipped.push(`${a.name}: ${r.error}`);
         else { applied++; if (r.rebuild) needRebuild++; }
       }
@@ -2217,6 +2229,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // In-process guard against two concurrent builds of the same name (the store's
   // BUILDING status is the cross-request signal; this stops a double-submit).
   const buildingImages = new Set<string>();
+  // A build this process never finished (a restart mid-build) is FAILED,
+  // not BUILDING for ever with Rebuild and Delete greyed out (night review).
+  store.failInterruptedImageBuilds();
   const IMAGE_TAG_RE = /^[a-z0-9][a-z0-9._\/-]*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
   let baseBuild: { running: boolean; version?: string; candidate: boolean; startedAt?: string; ok?: boolean; error?: string } = { running: false, candidate: true };
   /** Default base build: the same script an operator runs by hand, output to a log file. */
@@ -2342,6 +2357,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Every account's classes: a member's class on this image loses its image too.
     const cls = store.listAllAgentClasses().filter((c) => c.image === tag);
     if (cls.length) return reply.code(409).send({ error: `Class ${cls.map((c) => c.name).join(', ')} uses it — change the class image first.` });
+    // A derived image built FROM it needs it for its next Rebuild (night review).
+    const built = store.listDerivedImages().filter((d) => d.base === tag);
+    if (built.length) return reply.code(409).send({ error: `The derived image ${built.map((d) => d.name).join(', ')} is built on it — rebuild ${built.length === 1 ? 'it' : 'them'} on another base first.` });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
     if (!localHost) return reply.code(400).send({ error: 'No local host.' });
     try { await providerFor(localHost.id).removeImageTag(tag); }
@@ -2361,9 +2379,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const provider = providerFor(localHost.id);
     const tags = await provider.listImageTags();
     if (!tags.some((t) => t.tag === tag)) return reply.code(404).send({ error: `${tag} is not built on this machine.` });
-    await provider.tagImage(tag, DEFAULT_BASE);
     // Promote retags the LOCAL daemon only; agents on runners keep their runner's :latest.
     const followers = store.listAllActiveAgents().filter((a) => a.state !== 'ARCHIVED' && !a.image && a.hostId === localHost.id);
+    // The checks PATCH image makes, for everyone who follows the default
+    // (night review, 2026-09-28): no way back across the 2026.8 line (a
+    // migrated volume cannot be read by 2026.7), and no engine-free image
+    // while the shared memory service is off (no follower could be built).
+    const target = await provider.currentImageInfo(tag).catch(() => ({} as { openclawVersion?: string; embedEngine?: string }));
+    if (target.embedEngine === 'none' && !embedder.enabled && !embedder.external) {
+      return reply.code(409).send({ error: `${tag} has no memory search engine of its own and the shared service is off, so no agent could be built on it. Turn the service on first (Settings → Hosts).` });
+    }
+    if (needsPortHeal(target.openclawVersion)) {
+      const stuck: string[] = [];
+      for (const a of followers) {
+        if (!a.runtimeRef) continue;
+        const running = await provider.info(a.runtimeRef).catch(() => ({} as { openclawVersion?: string }));
+        if (running.openclawVersion && !needsPortHeal(running.openclawVersion)) stuck.push(a.name);
+      }
+      if (stuck.length) {
+        return reply.code(409).send({ error: `${tag} runs OpenClaw ${target.openclawVersion}, which cannot read the data of agents already on 2026.8 or newer (${stuck.slice(0, 5).join(', ')}${stuck.length > 5 ? ` and ${stuck.length - 5} more` : ''}). Pin those agents to their current image first, or keep the newer default.` });
+      }
+    }
+    await provider.tagImage(tag, DEFAULT_BASE);
     return { promoted: tag, now: DEFAULT_BASE, followers: followers.map((a) => ({ id: a.id, name: a.name, mine: a.ownerId === ownerIdOf(req) })) };
   });
 
@@ -2464,6 +2501,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (buildingImages.has(name)) {
         return reply.code(409).send({ error: 'That image is already building.' });
       }
+      // Creating is not editing: a name that exists was silently replaced,
+      // changing what its pinned agents get at their next rebuild (night review).
+      if (store.getDerivedImage(name)) {
+        return reply.code(409).send({ error: `An image called ${name} already exists. Change it with Rebuild (it keeps its agents informed), or pick another name.` });
+      }
 
       store.upsertDerivedImage({ name, tag: deriveTag(name), base, dockerfile, createdBy: ownerIdOf(req) });
       kickImageBuild(name);
@@ -2508,6 +2550,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         error: `In use by ${pinned.length} agent(s): ${pinned.map((a) => a.name).join(', ')}. Unpin them first.`,
       });
     }
+    // A class naming it would pin its next member to a missing image (night review).
+    const classes = store.listAllAgentClasses().filter((c) => c.image === rec.tag);
+    if (classes.length) return reply.code(409).send({ error: `The class ${classes.map((c) => `"${c.name}"`).join(', ')} uses it. Change the class's image first.` });
     // Take the image away FIRST, and only forget the row if that worked.
     // `docker rmi` resolves {ok:false} rather than throwing, and this ignored
     // it: a failed removal (a stopped container still referencing the image is
@@ -3100,6 +3145,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const host = store.getHost(a.hostId);
     if (target.vendor !== 'local' && target.kind === 'subscription' && host?.kind !== 'local' && !target.secretRef) {
       tally.skipped.push({ name: a.name, reason: "machine-login Max can't run on a runner — use a setup-token source" });
+      return;
+    }
+    // The rules create and PATCH keep, per agent (night review, 2026-09-28):
+    // the manager cannot reach a local model; a machine-login Max source is
+    // its owner's ~/.claude and never runs another account's agent.
+    if (a.ops && target.vendor === 'local') {
+      tally.skipped.push({ name: a.name, reason: "the Hatchabot agent can't use a local model" });
+      return;
+    }
+    if (target.kind === 'subscription' && !target.secretRef && target.ownerId !== a.ownerId) {
+      tally.skipped.push({ name: a.name, reason: "a machine-login Max source can't run another account's agent" });
       return;
     }
     store.setAgentAIProfile(a.id, target.id);
@@ -4441,6 +4497,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               agent.runtimeRef!,
               `cat ${JSON.stringify(path)} 2>/dev/null || true`,
             );
+            // A failed read is not an empty AGENTS.md: rewriting it then left
+            // only the policy section (night review, 2026-09-28).
+            if (read.code !== 0) return read;
             const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared!));
             const b64 = Buffer.from(next, 'utf8').toString('base64');
             return writeFileInAgent(provider, agent.runtimeRef!, path, b64);
@@ -5990,17 +6049,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (target.ownerId !== caller.ownerId || !store.agentMayCall(caller.agentId, target.id)) {
       return reply.code(403).send({ error: 'Not allowed to consult that agent.' });
     }
-    // A sleeping peer is woken for the consult, as it is for an ask (30th audit).
-    const awake = await ensureAwake(target, 'a consult from another agent');
-    if (awake.state !== 'RUNNING' || !awake.runtimeRef) {
-      return reply.code(409).send({ error: 'That agent is not running.' });
-    }
-    const targetRef: string = awake.runtimeRef;
-    if (isBusy(target.id)) return reply.code(409).send({ error: 'That agent is busy (rebuilding or moving) — try again shortly.' });
+    // The manager's conversation is the owner's: no peer may put words in it (night review).
+    if (target.ops) return reply.code(403).send({ error: 'The Hatchabot agent cannot be consulted by other agents.' });
+    // Every refusal before the wake: an agent over its limit, or sending
+    // nothing, used to start a sleeping peer each time for free (night review).
     const text = String((req.body as { text?: string } | undefined)?.text ?? '').trim().slice(0, 8000);
     if (!text) return reply.code(400).send({ error: 'Empty message.' });
     if (a2aInFlight.has(target.id)) {
-      return reply.code(429).send({ error: 'That agent is already answering a consult — refusing (this also breaks consult loops).' });
+      return reply.code(429).send({ error: 'That agent is already answering a consult, or waiting on one of its own — refusing (this also breaks consult loops).' });
     }
     if ((a2aOwnerLive.get(caller.ownerId) ?? 0) >= A2A_MAX_CONCURRENT) {
       return reply.code(429).send({ error: 'Too many consults in flight for this account — try again shortly.' });
@@ -6008,7 +6064,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!a2aRateOk(caller.agentId)) {
       return reply.code(429).send({ error: `This agent has hit its consult limit (${A2A_PER_HOUR}/hour).` });
     }
+    // A sleeping peer is woken for the consult, as it is for an ask (30th audit).
+    const awake = await ensureAwake(target, 'a consult from another agent');
+    if (awake.state !== 'RUNNING' || !awake.runtimeRef) {
+      return reply.code(409).send({ error: 'That agent is not running.' });
+    }
+    const targetRef: string = awake.runtimeRef;
+    if (isBusy(target.id)) return reply.code(409).send({ error: 'That agent is busy (rebuilding or moving) — try again shortly.' });
+    if (a2aInFlight.has(target.id)) {
+      return reply.code(429).send({ error: 'That agent is already answering a consult — refusing (this also breaks consult loops).' });
+    }
     a2aInFlight.add(target.id);
+    // The caller too, while it waits: B consulting A back while A waits on B
+    // was admitted (only targets were held), an A→B→A loop (night review).
+    const holdCaller = !a2aInFlight.has(caller.agentId);
+    if (holdCaller) a2aInFlight.add(caller.agentId);
     a2aOwnerLive.set(caller.ownerId, (a2aOwnerLive.get(caller.ownerId) ?? 0) + 1);
     try {
       const fromName = store.getAgent(caller.agentId)?.name ?? 'another agent';
@@ -6055,6 +6125,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(502).send({ error: `Consult failed: ${String((err as Error).message ?? err).slice(0, 200)}` });
     } finally {
       a2aInFlight.delete(target.id);
+      if (holdCaller) a2aInFlight.delete(caller.agentId);
       const n = (a2aOwnerLive.get(caller.ownerId) ?? 1) - 1;
       if (n <= 0) a2aOwnerLive.delete(caller.ownerId); else a2aOwnerLive.set(caller.ownerId, n);
     }
@@ -6696,7 +6767,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     try { verified = await conn.verify(conn.credsFromSecret(secret)); }
     catch (err) { if (err instanceof ConnectorError) return reply.code(400).send({ error: err.userMessage }); throw err; }
     const st = verified.settings as Record<string, unknown>;
-    const next: DiscordBotRow = { ...b, botName: typeof st.botName === 'string' ? st.botName : b.botName, servers: Array.isArray(st.servers) ? (st.servers as DiscordBotRow['servers']) : [], warnings: verified.warnings, addToServerUrl: verified.addToServerUrl ?? b.addToServerUrl, checkedAt: new Date().toISOString() };
+    const next: DiscordBotRow = { ...b, botName: typeof st.botName === 'string' ? st.botName : b.botName, servers: Array.isArray(st.servers) ? (st.servers as DiscordBotRow['servers']) : b.servers, warnings: verified.warnings, addToServerUrl: verified.addToServerUrl ?? b.addToServerUrl, checkedAt: new Date().toISOString() };
     store.upsertDiscordBot(next);
     return { bot: publicDiscordBot(next, ownerIdOf(req)) };
   };
@@ -6778,7 +6849,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       secretValue = conn.secretValue(body);
     } catch (err) {
       if (err instanceof ConnectorError) {
-        if (!pooled) noteFailure(req, ownerIdOf(req));
+        // A busy platform (429/5xx) is not a refused token (night review).
+        if (!pooled && !err.busy) noteFailure(req, ownerIdOf(req));
         return reply.code(400).send({ error: err.userMessage });
       }
       throw err;
@@ -6791,6 +6863,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(409).send({ error: `That ${conn.label} app is already connected${where}. Each agent needs its own app.` });
     }
     const secretRef = `channel/${agent.id}/${kind}`;
+    // Written under the agent's busy flag, with "already has one" asked again
+    // inside it: two attaches at once (a double-click; the app and the
+    // manager) both passed the check above, and the loser deleted the
+    // winner's token, which lives under the same key (night review).
+    let outcome: 'ok' | 'has-one' | 'taken';
+    try {
+      outcome = await whileBusy(agent.id, async () => {
+    if (store.getChannelForAgent(agent.id, kind)) return 'has-one' as const;
     await secrets.put(secretRef, secretValue);
     try {
       store.insertChannel({
@@ -6808,15 +6888,32 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       });
     } catch (err) {
       if (err instanceof ChannelTakenError) {
-        // Two attaches raced past the check above (each waiting on the platform).
+        // Another AGENT took this app meanwhile. The key is this agent's own
+        // (and the flag keeps its other attaches out), so this deletes nobody's.
         await secrets.delete(secretRef).catch(() => {});
-        return reply.code(409).send({ error: `That ${conn.label} app was just connected to another agent. Each agent needs its own app.` });
+        return 'taken' as const;
       }
       throw err;
     }
+    return 'ok' as const;
+      });
+    } catch (err) {
+      if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
+      throw err;
+    }
+    if (outcome === 'has-one') return reply.code(409).send({ error: `It already has ${conn.label}. Remove it first to connect a different app.` });
+    if (outcome === 'taken') return reply.code(409).send({ error: `That ${conn.label} app was just connected to another agent. Each agent needs its own app.` });
     if (pooled) {
       store.deleteDiscordBot(pooled.applicationId);
       if (pooled.secretRef !== secretRef) await secrets.delete(pooled.secretRef).catch(() => {});
+    } else {
+      // A pasted bot that was also parked as a spare: its pool row goes, or
+      // "take a spare" and Change bot kept picking it and failing (night review).
+      const parked = store.getDiscordBot(verified.accountId);
+      if (parked && (parked.kind ?? 'discord') === kind) {
+        store.deleteDiscordBot(parked.applicationId);
+        if (parked.secretRef !== secretRef) await secrets.delete(parked.secretRef).catch(() => {});
+      }
     }
     // The owner's identity on this channel: known from any agent they are on,
     // it is bound here now and the rebuild admits it — no first message to
@@ -6991,13 +7088,19 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // say when the places changed, so the app can offer the rebuild that makes
     // it answer there (use-case walk-through, 2026-09-27).
     const ids = (v: unknown) => (Array.isArray(v) ? (v as Array<{ id?: unknown }>).map((g) => String(g?.id ?? '')).filter(Boolean).sort().join(',') : '');
-    const placesChanged = (st.rooms as { mode?: string } | undefined)?.mode === 'members'
-      && ids(st.servers) !== ids((verified.settings as Record<string, unknown>).servers);
+    // Judged against the row as it is NOW: a rooms change made while the
+    // platform was being asked must not be written back over (night review).
+    const nowRow = store.getChannelForAgent(agent.id, conn.kind);
+    if (!nowRow || nowRow.accountId !== row.accountId) return reply.code(409).send({ error: `Its ${conn.label} changed meanwhile — look again.` });
+    const cur = (nowRow.settings ?? {}) as Record<string, unknown>;
+    const listed = (verified.settings as Record<string, unknown>).servers;
+    const placesChanged = listed !== undefined && (cur.rooms as { mode?: string } | undefined)?.mode === 'members'
+      && ids(cur.servers) !== ids(listed);
     store.setChannelSettings(agent.id, conn.kind, {
-      ...st, ...verified.settings, displayName: verified.displayName,
+      ...cur, ...verified.settings, displayName: verified.displayName,
       ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
       warnings: verified.warnings, checkedAt: new Date().toISOString(),
-      rooms: st.rooms ?? { mode: 'off' },
+      rooms: cur.rooms ?? { mode: 'off' },
     });
     trace(agent.id)('channel.rechecked', { kind: conn.kind, warnings: verified.warnings.length });
     return { ...publicChannel(store.getChannelForAgent(agent.id, conn.kind)!), placesChanged };
@@ -7052,11 +7155,27 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // farewell): people who reached it here lose it.
     const told = await dmChannelPeople(agent, conn.kind, row.secretRef, `👋 ${agent.name} no longer answers on ${conn.label}. Its owner took it off ${conn.label}; it is not gone. Reach it another way, or ask its owner.`);
     let parked = false;
-    const stopped = await whileBusy(agent.id, () => stopForBotHandover(agent)).catch(() => false);
-    try { if (!stopped) throw new Error('the agent would not stop, so its bot is not handed on'); await parkDiscordBot({ store, secrets }, agent.ownerId, row); parked = true; }
-    catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
-    if (!parked) await secrets.delete(row.secretRef).catch(() => {});
-    store.deleteChannelForAgent(agent.id, conn.kind);
+    // Stop, park and delete under the busy flag, and only the bot this
+    // request was about: a swap from another tab during the farewells used to
+    // have its NEW bot's row deleted here, losing both bots (night review).
+    let outcome: 'done' | 'changed' | 'busy';
+    try {
+      outcome = await whileBusy(agent.id, async () => {
+        const now = store.getChannelForAgent(agent.id, conn.kind);
+        if (!now || now.accountId !== row.accountId) return 'changed' as const;
+        const stopped = await stopForBotHandover(agent);
+        try { if (!stopped) throw new Error('the agent would not stop, so its bot is not handed on'); await parkDiscordBot({ store, secrets }, agent.ownerId, now); parked = true; }
+        catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
+        if (!parked) await secrets.delete(now.secretRef).catch(() => {});
+        store.deleteChannelForAgent(agent.id, conn.kind);
+        return 'done' as const;
+      });
+    } catch (err) {
+      if (!(err instanceof AgentBusyError)) throw err;
+      outcome = 'busy';
+    }
+    if (outcome === 'busy') return reply.code(409).send({ error: 'It is busy with another change — try again in a moment.' });
+    if (outcome === 'changed') return reply.code(409).send({ error: `Its ${conn.label} bot changed meanwhile — look again before removing it.` });
     trace(agent.id)('channel.detached', { kind: conn.kind, accountId: row.accountId, parked, told });
     if (agent.runtimeRef && (agent.state === 'RUNNING' || agent.state === 'STOPPED')) {
       // OpenClaw's own approval store outlives the config: scrubbed, or the
@@ -8624,7 +8743,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const child = runningAgent(req, req.params.id, reply, 'distill its learnings');
       if (!child) return reply;
-      if (!child.parentAgentId || !store.getAgent(child.parentAgentId)) {
+      if (!child.parentAgentId || !store.getAgent(child.parentAgentId) || store.getAgent(child.parentAgentId)!.state === 'DELETED') {
         return reply.code(400).send({ error: 'This agent has no master to propose to.' });
       }
       // The master may belong to a DIFFERENT owner (cross-household shares
@@ -9781,6 +9900,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (kept.secretRef !== secretRef) await secrets.delete(kept.secretRef).catch(() => {});
         trace(agent.id)('channel.attached', { kind, accountId: verified.accountId, fromPool: true, restored: true });
       } catch (err) {
+        // The token stored for a row that never came: not left behind (night review).
+        if (!store.getChannelForAgent(agent.id, kind)) await secrets.delete(`channel/${agent.id}/${kind}`).catch(() => {});
         app.log.warn({ agentId: agent.id, kind, err: String(err) }, 'parked bot not restored');
       }
     }

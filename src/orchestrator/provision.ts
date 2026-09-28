@@ -17,7 +17,7 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
-import { autoSnapshot } from './snapshots.js';
+import { autoSnapshot, writeFileInAgent } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
@@ -1094,7 +1094,9 @@ export function prefixedModelRef(
   agent: { model?: string },
   profile: { vendor: string; model: string; models?: string[] },
 ): string {
-  const provider = profile.vendor === 'local' ? 'ollama' : profile.vendor === 'google' ? 'google' : 'anthropic';
+  // The same mapping the build uses: OpenAI was missing, so a live model
+  // change on an OpenAI source set `anthropic/gpt-…` (night review, 2026-09-28).
+  const provider = profile.vendor === 'local' ? 'ollama' : profile.vendor === 'google' ? 'google' : profile.vendor === 'openai' ? 'openai' : 'anthropic';
   return `${provider}/${effectiveModel(agent, profile)}`;
 }
 
@@ -1225,10 +1227,9 @@ export async function syncDataSourceDocs(
     if (next === read.stdout) return; // already current: never churn the user's file
     const b64 = Buffer.from(next, 'utf8').toString('base64');
     // tmp+mv so a failure can't leave AGENTS.md truncated.
-    const res = await provider.execShell(
-      runtimeRef,
-      `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`,
-    );
+    // Through the helper: above ~96 KB it goes on stdin (one shell argument
+    // caps at 128 KiB; a big AGENTS.md never synced again — night review).
+    const res = await writeFileInAgent(provider, runtimeRef, path, b64);
     if (res.code !== 0) log('agentsmd.sync_failed', { agentId, stderr: res.stderr.slice(0, 300) });
     else log('agentsmd.synced', { agentId, sources: sources.length });
   } catch (e) {
@@ -1258,15 +1259,17 @@ async function syncInstallDocs(
   const q = JSON.stringify(path);
   try {
     const read = await provider.execShell(runtimeRef, `cat ${q} 2>/dev/null || true`);
-    const current = read.code === 0 ? read.stdout : '';
+    // A read that failed (a timeout, a restarting container) is not an empty
+    // file: writing then replaced the agent's notes with the section alone.
+    if (read.code !== 0) { log('installdocs.failed', { agentId, stderr: read.stderr.slice(0, 300) }); return; }
+    const current = read.stdout;
     const base = current.trim() ? current : '# TOOLS.md - Local Notes\n';
     const next = replaceSection(base, INSTALL_HEADING, installConventionsSection());
     if (next === current) return; // already current: never churn the agent's file
     const b64 = Buffer.from(next, 'utf8').toString('base64');
-    const res = await provider.execShell(
-      runtimeRef,
-      `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`,
-    );
+    // Through the helper: above ~96 KB it goes on stdin (one shell argument
+    // caps at 128 KiB; a big AGENTS.md never synced again — night review).
+    const res = await writeFileInAgent(provider, runtimeRef, path, b64);
     if (res.code !== 0) log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) });
     else log('installdocs.synced', { agentId });
   } catch (e) {

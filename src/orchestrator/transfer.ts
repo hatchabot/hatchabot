@@ -491,7 +491,7 @@ async function importAgentInner(
     );
   }
 
-  if (store.listAllActiveAgents().some((a) => a.slug === manifest.agent.slug)) {
+  if (store.listAllActiveAgents().some((a) => a.ownerId === opts.ownerId && a.slug === manifest.agent.slug)) {
     throw new TransferError(`An agent with slug "${manifest.agent.slug}" already lives here.`);
   }
   // A previously deleted agent's tombstone may still hold the slug.

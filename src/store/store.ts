@@ -3120,6 +3120,11 @@ export class Store {
     return r ? this.#mapDerivedImage(r) : undefined;
   }
 
+  /** At service start: a build that was running when the process ended never finishes. */
+  failInterruptedImageBuilds(): number {
+    return this.db.prepare(`UPDATE derived_images SET status = 'FAILED', error = 'interrupted by a restart — press Rebuild' WHERE status = 'BUILDING'`).run().changes;
+  }
+
   listDerivedImages(): DerivedImage[] {
     return this.db
       .prepare(`SELECT * FROM derived_images ORDER BY name`)

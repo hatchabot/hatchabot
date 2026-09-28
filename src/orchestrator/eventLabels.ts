@@ -64,6 +64,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'hibernate.wake_failed': (d) => `could not wake it: ${String(d.error ?? '')}`.trim(),
   'image.repinned': (d) => `the move did not happen, so it keeps its image ${String(d.image ?? '')}`.trim(),
   'channel.stop_failed': (d) => `could not stop it before handing its bot on, so the bot was not put back in the pool: ${String(d.error ?? '')}`,
+  'claim.seat_gone': () => 'the invitation was withdrawn before they wrote, so the door closed again',
   'rebuild.skipped': (d) => `a queued rebuild was called off: ${String(d.why ?? '')}`,
   'hibernate.wake_abandoned': (d) => `could not wake it ${String(d.attempts ?? '')} times in a row, so it is just stopped now — press Start to try again: ${String(d.error ?? '')}`.trim(),
   'datasource.key_left': (d) => `could not remove the deploy key of ${String(d.name ?? 'a git source')} from its volume — a rebuild does`,

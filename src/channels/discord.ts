@@ -98,6 +98,7 @@ export function discordConnector(f: FetchLike = fetch): ChannelConnector {
       const token = cleanField(creds, FIELDS[0]!);
       const me = await get('/users/@me', token);
       if (me.status === 401) throw new ConnectorError('Discord refused the bot token. Press Reset Token on the application\'s "Bot" page and paste the new one.');
+      if (me.status === 429 || me.status >= 500) throw new ConnectorError(`Discord is busy right now (${me.status}) — try again in a minute.`, true);
       if (me.status !== 200 || !me.body?.id) throw new ConnectorError(`Discord refused the bot token (${me.status}).`);
       if (!me.body.bot) throw new ConnectorError('That is not a bot token. Take it from the application\'s "Bot" page.');
 
@@ -108,18 +109,28 @@ export function discordConnector(f: FetchLike = fetch): ChannelConnector {
       if (!((Number(app.body.flags) || 0) & MESSAGE_CONTENT)) {
         warnings.push('Message Content Intent is off, so the agent would see empty messages. Turn it on under the application\'s "Bot" page → Privileged Gateway Intents.');
       }
-      const guilds = await get('/users/@me/guilds', token);
-      const servers = Array.isArray(guilds.body) ? guilds.body.slice(0, 20).map((g: any) => ({ id: String(g.id), name: String(g.name ?? '') })) : [];
-      if (!servers.length) warnings.push('The bot is not in any server yet. Add it to one of yours, or nobody can message it.');
+      // Every server, page by page; a listing that fails is "unknown", never
+      // "none": an empty list written over the old one closed every room at
+      // the next rebuild (a 429 on Re-check did it; night review, 2026-09-28).
+      let servers: Array<{ id: string; name: string }> | undefined = [];
+      for (let after = '', page = 0; page < 10; page++) {
+        const g = await get(`/users/@me/guilds?limit=200${after ? `&after=${encodeURIComponent(after)}` : ''}`, token);
+        if (g.status !== 200 || !Array.isArray(g.body)) { servers = undefined; break; }
+        servers.push(...g.body.map((x: any) => ({ id: String(x.id), name: String(x.name ?? '') })));
+        if (g.body.length < 200) break;
+        after = String(g.body[g.body.length - 1]?.id ?? '');
+      }
+      if (servers && !servers.length) warnings.push('The bot is not in any server yet. Add it to one of yours, or nobody can message it.');
+      if (!servers) warnings.push("Discord did not list the bot's servers just now; the ones it had are kept. Re-check in a minute.");
 
       const applicationId = String(app.body.id);
       const botName = String(me.body.global_name ?? me.body.username ?? 'the bot');
       return {
         accountId: applicationId,
-        displayName: servers.length ? `@${botName} in ${servers.map((g: { name: string }) => g.name).join(', ')}` : `@${botName}`,
+        displayName: servers?.length ? `@${botName} in ${servers.slice(0, 20).map((g: { name: string }) => g.name).join(', ')}${servers.length > 20 ? ` and ${servers.length - 20} more` : ''}` : `@${botName}`,
         deepLink: `https://discord.com/users/${encodeURIComponent(String(me.body.id))}`,
         addToServerUrl: discordAddToServerUrl(applicationId),
-        settings: { botUserId: String(me.body.id), botName, servers, applicationName: String(app.body.name ?? ''), checkedAt: new Date().toISOString() },
+        settings: { botUserId: String(me.body.id), botName, ...(servers ? { servers } : {}), applicationName: String(app.body.name ?? ''), checkedAt: new Date().toISOString() },
         warnings,
       };
     },

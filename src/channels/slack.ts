@@ -104,6 +104,9 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       if (botApp && botApp !== appId) {
         throw new ConnectorError('The two tokens are from different Slack apps. Take both from the same app.');
       }
+      // Unanswered (no users:read), the check could not be made: said, not
+      // silently passed (night review, 2026-09-28).
+      const unchecked = !botApp;
 
       const conn = await api('apps.connections.open', appToken);
       if (!conn.body?.ok) {
@@ -115,6 +118,7 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       }
 
       const warnings: string[] = [];
+      if (unchecked) warnings.push("Slack would not say which app the bot token belongs to (the app lacks users:read), so Hatchabot could not check both tokens are from the same app. Make sure they are.");
       const scopes = (auth.headers.get('x-oauth-scopes') ?? '').split(',').map((x) => x.trim()).filter(Boolean);
       if (scopes.length) {
         const missing = NEEDED_SCOPES.filter((sc) => !scopes.includes(sc));
@@ -127,20 +131,29 @@ export function slackConnector(f: FetchLike = fetch): ChannelConnector {
       // The channels the app has been invited to: the rooms of "every
       // channel it is in", and the picker for one. Best effort — an app
       // without channels:read simply lists none.
-      let servers: Array<{ id: string; name: string }> = [];
+      // Every page (the cursor); a listing that fails is "unknown", never
+      // "none", so a Re-check keeps the channels it had (night review).
+      let servers: Array<{ id: string; name: string }> | undefined = [];
       try {
-        const chans = await callJson(f, 'Slack', 'https://slack.com/api/users.conversations?types=public_channel%2Cprivate_channel&exclude_archived=true&limit=100', {
-          method: 'GET', headers: { Authorization: `Bearer ${botToken}` },
-        });
-        if (chans.body?.ok && Array.isArray(chans.body.channels)) {
-          servers = chans.body.channels.slice(0, 50).map((c: any) => ({ id: String(c.id), name: String(c.name ?? c.id) }));
+        for (let cursor = '', page = 0; page < 20; page++) {
+          const chans = await callJson(f, 'Slack', `https://slack.com/api/users.conversations?types=public_channel%2Cprivate_channel&exclude_archived=true&limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, {
+            method: 'GET', headers: { Authorization: `Bearer ${botToken}` },
+          });
+          if (!chans.body?.ok || !Array.isArray(chans.body.channels)) {
+            // An app without channels:read simply lists none; anything else is unknown.
+            if (chans.body?.error !== 'missing_scope') servers = undefined;
+            break;
+          }
+          servers.push(...chans.body.channels.map((c: any) => ({ id: String(c.id), name: String(c.name ?? c.id) })));
+          cursor = String(chans.body.response_metadata?.next_cursor ?? '');
+          if (!cursor) break;
         }
-      } catch { /* listing is decoration */ }
+      } catch { servers = undefined; }
       return {
         accountId: String(auth.body.user_id),
         displayName: `@${botName} in ${team}`,
         deepLink: `https://slack.com/app_redirect?app=${encodeURIComponent(appId)}${teamId ? `&team=${encodeURIComponent(teamId)}` : ''}`,
-        settings: { team, teamId, appId, botName, servers, checkedAt: new Date().toISOString() },
+        settings: { team, teamId, appId, botName, ...(servers ? { servers } : {}), checkedAt: new Date().toISOString() },
         warnings,
       };
     },

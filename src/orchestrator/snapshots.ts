@@ -82,7 +82,9 @@ export async function readCoreFiles(
  */
 export async function writeFileInAgent(provider: RuntimeProvider, runtimeRef: string, path: string, b64: string): Promise<ExecResult> {
   if (b64.length <= ARGV_SAFE_B64) {
-    return provider.execShell(runtimeRef, `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`);
+    // tmp + mv, so a failure never leaves the file truncated.
+    const q = JSON.stringify(path);
+    return provider.execShell(runtimeRef, `set -e; echo ${JSON.stringify(b64)} | base64 -d > ${q}.tmp && mv ${q}.tmp ${q}`);
   }
   if (!provider.writeToVolume) return { code: 1, stdout: '', stderr: 'this machine cannot write a file that large into the agent' };
   return provider.writeToVolume(runtimeRef, ['sh', '-c', 'cat > "$1.part-$$" && mv -f "$1.part-$$" "$1"', 'sh', path], Buffer.from(b64, 'base64'));

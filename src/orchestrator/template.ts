@@ -4,7 +4,21 @@ import { z } from 'zod';
 import type { Agent, TemplateParam } from '../domain/types.js';
 import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
-import { CORE_FILES, workspacePath } from './snapshots.js';
+import { CORE_FILES, MAX_FILE_BYTES, workspacePath } from './snapshots.js';
+import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection } from '../openclaw/workspace.js';
+
+/**
+ * The sections Hatchabot writes into AGENTS.md for THIS machine and owner:
+ * who the operator is, their folders and repos, their other agents, the
+ * memory rules and budget, the install notes. None of it may travel in a
+ * template — it reached another owner's agent and was written back by its
+ * setup values (night review, 2026-09-28). The importer's own build adds
+ * its own.
+ */
+const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Memory policy', '## Memory budget'];
+export function stripManagedSections(agentsMd: string): string {
+  return MANAGED_HEADINGS.reduce((s, h) => removeSection(s, h), agentsMd);
+}
 import { listCrons } from './crons.js';
 import { createAgentRecord } from './provision.js';
 import { TransferError } from './transfer.js';
@@ -119,7 +133,7 @@ const TemplateSchema = z.object({
     iconColor: z.string().max(7).optional().catch(undefined),
   }),
   files: z
-    .record(z.string().max(200), z.string().max(200_000))
+    .record(z.string().max(200), z.string().max(MAX_FILE_BYTES))
     .refine((r) => Object.keys(r).length <= 200, { message: 'too many files in template' }),
   ai: z.object({ vendor: z.string().max(32) }),
   dataNeeds: z
@@ -182,7 +196,10 @@ export async function exportTemplate(
       agent.runtimeRef,
       `cat ${JSON.stringify(workspacePath(agent.slug, name))} 2>/dev/null || true`,
     );
-    files[name] = res.stdout;
+    files[name] = name === 'AGENTS.md' ? stripManagedSections(res.stdout) : res.stdout;
+    if (Buffer.byteLength(files[name]!, 'utf8') > MAX_FILE_BYTES) {
+      throw new TransferError(`Its ${name} is over ${MAX_FILE_BYTES / 1024} KB, too big for a template. Trim it first.`);
+    }
   }
 
   const manifest: TemplateManifest = {

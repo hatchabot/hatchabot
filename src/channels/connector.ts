@@ -67,7 +67,8 @@ export interface RenameOutcome {
 
 /** A refusal the owner can act on. The message never contains a credential. */
 export class ConnectorError extends Error {
-  constructor(readonly userMessage: string) {
+  /** `busy`: the platform is rate-limiting or down — not a refused token, and not counted against the token-check throttle. */
+  constructor(readonly userMessage: string, readonly busy = false) {
     super(userMessage);
     this.name = 'ConnectorError';
   }

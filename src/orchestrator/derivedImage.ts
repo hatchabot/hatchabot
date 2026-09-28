@@ -71,12 +71,21 @@ export function dockerfileProblem(snippet: string): string | null {
   // comment lines and joins `\`-continued lines first, so `RUN --network\` +
   // `=host …` is one instruction with `--network=host` (found by the 26th
   // audit; the split hid it from the preview too).
-  const logical = snippet
+  // A parser directive (`# escape=`, `# syntax=`) changes how everything
+  // below is read — the escape character itself — so none is allowed.
+  if (/^\s*#\s*(escape|syntax|check)\s*=/im.test(snippet)) return 'Parser directives (# escape=, # syntax=) are not allowed in a derived image.';
+  const unjoined = snippet
     .replace(/\r\n?/g, '\n')
     .split('\n')
     .filter((l) => !/^\s*#/.test(l))
-    .join('\n')
-    .replace(/\\[ \t]*\n/g, ' ');
+    .join('\n');
+  // BuildKit joins a continued line with NOTHING: `RUN --net\` + `work=host`
+  // is `--network=host`, and `FR\` + `OM x` is FROM. Joined with a space,
+  // those passed (night review, 2026-09-28). Judge both joinings, and blank
+  // lines inside a continuation vanish as BuildKit drops them.
+  const joinedTight = unjoined.replace(/\\[ \t]*\n(?:[ \t]*\n)*/g, '');
+  const joinedSpaced = unjoined.replace(/\\[ \t]*\n(?:[ \t]*\n)*/g, ' ');
+  const logical = `${joinedTight}\n${joinedSpaced}`;
   for (const raw of logical.split('\n')) {
     const line = raw.trim();
     if (/^FROM\b/i.test(line)) return 'A derived image cannot contain its own FROM — the base field sets it.';

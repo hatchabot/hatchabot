@@ -2,6 +2,25 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.94.0] — 2026-09-28
+
+The night review's third wave: agent families and consults, the config written into each agent, Discord and Slack, runtime images, and bulk actions.
+
+### Security
+- **Removing a member now also takes them out of the agent's Slack channels and Discord servers**, not only its direct messages: they could keep @mentioning the bot there until a rebuild.
+- **A derived image's lines are judged the way Docker reads them**: a keyword split across a line continuation (`RUN --net\` + `work=host`, `FR\` + `OM`) got past the guard, and parser directives (`# escape=`) are refused.
+- **Templates no longer carry the sender's managed AGENTS.md sections** (their operator profile, folder paths, repos and other agents' names) to whoever imports them.
+- The Hatchabot agent cannot be consulted by other agents, and a consult's limits are checked before a sleeping peer is woken. A consult loop (A asks B, B asks A back) is refused.
+- A member no longer sees the owner's folder path inside a legacy folder's id.
+
+### Fixed
+- **Telegram is routed to the agent on every build**: after Change bot, or a bot added to a web-only agent, its chats could go to OpenClaw's default agent instead.
+- **Two Discord/Slack attaches at once no longer delete the winner's token**; removing a bot while a swap runs no longer removes the new one. A Discord or Slack listing that fails (a rate limit) keeps the servers and channels it had instead of closing every room at the next rebuild, and listings follow every page. A busy Discord is not reported as a refused token. A pasted bot that was also parked leaves the pool.
+- The manager cannot be put on a local model by a bulk source switch or a class; a machine-login Max source is never switched onto another account's agent; a copy moved to another Hatchabot is never rebuilt here.
+- Promoting an image refuses a way back across the 2026.8 line for agents already on it, and an engine-free image while the memory service is off. A derived image name that exists is not silently replaced; images in use by classes or derived builds cannot be deleted; a build interrupted by a restart is marked failed.
+- A live model change on an OpenAI source uses `openai/`. A failed read of AGENTS.md or TOOLS.md no longer overwrites the file; large AGENTS.md files sync again. A claim window closes when its invitee was removed.
+- A class edit that clears its image still applies its model and source; restore is refused only for your own agent with the same name; a blank agent name is refused; proposals to a deleted master are refused.
+
 ## [2.93.0] — 2026-09-28
 
 The rest of the night review's second wave.

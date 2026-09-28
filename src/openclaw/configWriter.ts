@@ -663,6 +663,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (patch.telegram) add.push('--bind', `telegram:${patch.telegram.accountId}`);
 
   cmds.push({ argv: add });
+  // Telegram too: a bot changed or added after the first build had no route
+  // (only `agents add` carried --bind), so its chats went to OpenClaw's
+  // default "main" agent (night review, 2026-09-28). Optional: a verb that
+  // refuses an existing binding must not fail every rebuild.
+  if (patch.telegram) {
+    cmds.push({ argv: ['agents', 'bind', '--agent', patch.agentId, '--bind', `telegram:${patch.telegram.accountId}`], optional: true });
+  }
   // Route Slack and Discord to this agent on EVERY build: `agents add` runs
   // only on a fresh volume, so a channel added later would otherwise have no
   // binding. Both verbs are idempotent (checked on 2026.7.1-2).

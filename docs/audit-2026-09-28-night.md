@@ -26,6 +26,12 @@ Six read-only reviewers, one area each, against a shared brief: report only new,
 
 Criticals: agent secrets on the docker command line (readable by every local user); a reset link delivered through another member's bot; the Google consent callback not bound to the starting browser; tenant output closing a heredoc in hc and running as root.
 
+## Third wave
+
+Agent families and consults, the config writer, Discord and Slack, runtime images, creation and bulk actions: fixed in v2.94.0. One critical (a removed member stayed in Slack/Discord room lists).
+
+Still open from the third wave: a setup token pasted into an agent's OpenClaw auth store is not removed when the agent moves to another source; a rebuild during an open claim window writes the door as allowlist; live settings on a stopped agent run the default image's CLI; caps can be raced by parallel clone/derive/import; the auto-rebuild sweep can repeat on an agent that always falls back to its own engine; two concurrent "Set up Hatchabot agent"; move-host to a runner and file import have no OpenClaw downgrade check; a candidate build can retag a version tag an agent pins; class assignment does not apply the class memory cap live; the set_class card does not name the source/model/image it changes.
+
 ## The first wave's two criticals
 
 1. **Change bot on a pool bot gave the agent its own bot back.** Pool leasing is idempotent per agent, so the "fresh" bot was the old one, which the swap then released: the next new agent took it too. Fixed in v2.90.0: the swap excludes the current bot, refuses if nothing else is free, and releases quietly.

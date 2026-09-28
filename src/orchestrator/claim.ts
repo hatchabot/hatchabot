@@ -231,6 +231,15 @@ export async function claimFirstContact(
           : !deps.store.getMemberByIdentity(opts.agentId, kind, r.id);
       });
       const first = claimable[0];
+      // The seat must still be there to bind: approving first let a knock in
+      // after the invitee was removed, with no member row to remove them by
+      // (night review, 2026-09-28). The window closes instead.
+      if (first && !deps.store.listMemberships(opts.agentId).some((m) => m.userId === opts.forUserId && m.status === 'active')) {
+        log('claim.seat_gone', { agentId: opts.agentId, kind });
+        deps.store.closePairingWindow(opts.agentId, seat);
+        await restoreDoor();
+        return null;
+      }
       if (first) {
         const ok = await approvePairing(deps.provider, opts.runtimeRef, opts.accountId, first.code, kind);
         const didBind = ok && (kind === 'telegram'

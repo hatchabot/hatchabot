@@ -109,3 +109,52 @@ describe('git URLs (night review)', () => {
     expect(normalizeGitUrl('ssh://git@gitea.example.com/me/notes.git')?.repoName).toBe('notes');
   });
 });
+
+describe('removing a member clears their room access too (night review)', () => {
+  it('the revoke script drops them from Discord server and Slack channel user lists', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const { mkdtempSync, writeFileSync, readFileSync, mkdirSync } = await import('node:fs');
+    const { execFileSync } = await import('node:child_process');
+    const { tmpdir } = await import('node:os');
+    const { Store } = await import('../src/store/store.js');
+    const { revokeMember } = await import('../src/orchestrator/members.js');
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'b', settings: {}, createdAt: 'now' } as never);
+    store.insertAgent({ id: 'a1', ownerId: 'o', name: 'A', slug: 'a', state: 'STOPPED', aiProfileId: 'p', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now', runtimeRef: 'r1' } as never);
+    store.insertMembership({ id: 'm1', agentId: 'a1', userId: 'u2', role: 'user', status: 'active' } as never);
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'discord', accountId: 'app1', secretRef: 's', deepLink: 'x', createdAt: 'now' } as never);
+    store.bindMemberIdentity('a1', 'u2', 'discord', '123456789012345678');
+    let script = '';
+    const provider = { execShellOnVolume: async (_r: string, s: string) => { script = s; return { code: 0, stdout: '', stderr: '' }; } };
+    await revokeMember({ store, provider, log: () => {} } as never, 'a1', 'u2');
+    const dir = mkdtempSync(join(tmpdir(), 'rv-'));
+    mkdirSync(join(dir, 'credentials'), { recursive: true });
+    writeFileSync(join(dir, 'openclaw.json'), JSON.stringify({ channels: { discord: { accounts: { hatchabot: { allowFrom: ['123456789012345678', '999'] } }, guilds: { g1: { users: ['123456789012345678', '999'] } } } } }));
+    const js = script.replace(/^node -e '/, '').replace(/'\s*$/, '').replaceAll('/home/node/.openclaw', dir);
+    execFileSync(process.execPath, ['-e', js]);
+    const out = JSON.parse(readFileSync(join(dir, 'openclaw.json'), 'utf8'));
+    expect(out.channels.discord.guilds.g1.users).toEqual(['999']);
+    expect(out.channels.discord.accounts.hatchabot.allowFrom).toEqual(['999']);
+  });
+});
+
+describe('live model refs (night review)', () => {
+  it('an OpenAI source gets openai/, as the build writes it', async () => {
+    const { prefixedModelRef } = await import('../src/orchestrator/provision.js');
+    expect(prefixedModelRef({}, { vendor: 'openai', model: 'gpt-5' })).toBe('openai/gpt-5');
+    expect(prefixedModelRef({}, { vendor: 'anthropic', model: 'claude-opus-4-8' })).toBe('anthropic/claude-opus-4-8');
+  });
+});
+
+describe('derived image lines (night review)', () => {
+  it('a keyword split across a line continuation is still refused, as BuildKit joins it', async () => {
+    const { dockerfileProblem } = await import('../src/orchestrator/derivedImage.js');
+    expect(dockerfileProblem('RUN --net\\\nwork=host curl http://127.0.0.1:11434/')).toMatch(/--network/);
+    expect(dockerfileProblem('FR\\\nOM alpine')).toMatch(/FROM/);
+    expect(dockerfileProblem('RUN --mo\\\nunt=type=bind,source=/,target=/h cat /h/x')).toMatch(/--mount/);
+    expect(dockerfileProblem('US\\\nER root')).toMatch(/USER/);
+    expect(dockerfileProblem('RUN --net\\\n\nwork=host true')).toMatch(/--network/);
+    expect(dockerfileProblem('# escape=`\nRUN true')).toMatch(/directive/);
+    expect(dockerfileProblem('RUN apt-get update && \\\n    apt-get install -y ffmpeg')).toBeNull();
+  });
+});
