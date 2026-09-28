@@ -50,21 +50,21 @@ refuses that.
 
 | # | Area | Item |
 |---|---|---|
-| 1 | F | "Every server/channel it is in" answers where the bot was at the last rebuild; Re-check does not reconfigure it (documented now). Apply the room list live, or offer a rebuild when it changed. |
-| 2 | F | The machine owner's Discord/Slack picker offers other people's private parked bots, which cannot be taken. |
-| 3 | D | Renaming an agent bypasses the Telegram pool's rename queue (a queued older name can come back). |
-| 4 | D | Assigning a class can put a runner agent on the machine-login source (PATCH refuses, class assignment does not). |
-| 5 | E | Settings counts a source "in use" by desired source only; delete also counts applied. |
-| 6 | C | The manager's `create_agent` with an empty pool waits 150 s and misstates why. |
-| 7 | B | Switching to family accounts gives the host owner no recovery code. |
-| 8 | I | Pinning a stopped agent says "when it next starts"; Start does not rebuild for a pin. |
-| 9 | G | Move all back to the baked engine rebuilds engine-free agents that switch straight back. |
-| 10 | G | Removing a git data source leaves its deploy key and clone config on the volume. |
-| 11 | J | Sort a group / Sort every group does nothing on the icon home screen. |
-| 12 | J | "Needs you" is counted three ways (home, Status → Health, Bulk). |
-| 13 | I | Machine default memory changes do not refresh each agent's stated memory budget. |
-| 14 | K | A download the server refuses replaces the app with raw JSON. |
-| 15 | H/I | Sleepers are told to "Start"; sleep controls shown where they can never apply; bulk Put to sleep counts refusals as failures. |
+| 1 | F | ~~"Every server/channel it is in" answers where the bot was at the last rebuild; Re-check does not reconfigure it (documented now). Apply the room list live, or offer a rebuild when it changed.~~ done in v2.89.4: Re-check reports when the places changed and the app offers the rebuild that makes it answer there. |
+| 2 | F | ~~The machine owner's Discord/Slack picker offers other people's private parked bots, which cannot be taken.~~ done in v2.89.4: the picker offers only your own and shared parked bots. |
+| 3 | D | ~~Renaming an agent bypasses the Telegram pool's rename queue (a queued older name can come back).~~ done in v2.89.4: a rename updates the pool's queued name too. |
+| 4 | D | ~~Assigning a class can put a runner agent on the machine-login source (PATCH refuses, class assignment does not).~~ done in v2.89.4: class assignment refuses a machine-login source for a runner agent. |
+| 5 | E | ~~Settings counts a source "in use" by desired source only; delete also counts applied.~~ done in v2.89.4: Settings counts applied sources too. |
+| 6 | C | ~~The manager's `create_agent` with an empty pool waits 150 s and misstates why.~~ done in v2.89.4: the manager says it is waiting for a bot token. |
+| 7 | B | ~~Switching to family accounts gives the host owner no recovery code.~~ done in v2.89.4: the host owner gets a recovery code. |
+| 8 | I | ~~Pinning a stopped agent says "when it next starts"; Start does not rebuild for a pin.~~ done in v2.89.4: the toast says "at its next rebuild". |
+| 9 | G | ~~Move all back to the baked engine rebuilds engine-free agents that switch straight back.~~ done in v2.89.4: engine-free agents are skipped (and counted). |
+| 10 | G | ~~Removing a git data source leaves its deploy key and clone config on the volume.~~ done in v2.89.4: the key file and the clone's ssh config are removed from the volume. |
+| 11 | J | ~~Sort a group / Sort every group does nothing on the icon home screen.~~ done in v2.89.4: the no-op Order row is gone from the icon home screen. |
+| 12 | J | ~~"Needs you" is counted three ways (home, Status → Health, Bulk).~~ done in v2.89.4: the Bulk chip and filter use the home screen's rule; the failed bin is labelled apart. |
+| 13 | I | ~~Machine default memory changes do not refresh each agent's stated memory budget.~~ done in v2.89.4: each agent's stated budget is refreshed. |
+| 14 | K | ~~A download the server refuses replaces the app with raw JSON.~~ done in v2.89.4: the download is fetched; a refusal is a toast. |
+| 15 | H/I | ~~Sleepers are told to "Start"; sleep controls shown where they can never apply; bulk Put to sleep counts refusals as failures.~~ done in v2.89.4: sleepers are told to wake; sleep controls only where sleep applies; refusals count as skipped. |
 
 Low: CLI `members` ignores Discord/Slack links; the agent PATCH writes before its last checks; rename allows a duplicate name; the source order comment; `list_sources`' description; template import's name check; image/backup routes' "host folders" refusal text; image tag delete checks only the caller's classes; `list --all` strips fields only when a role is set; the legacy folder removal re-checks the rest; event-trigger "applies immediately" unchecked; CLI `memory` prints a field the server does not return; docs naming test files that do not exist; drain's coverage-ledger wording; use-cases.md not yet mentioning the click-through gate.
 

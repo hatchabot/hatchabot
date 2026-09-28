@@ -2933,6 +2933,10 @@ async function turnOnFamilyAccounts(btn) {
   btn.disabled = true; btn.textContent = 'Switching…';
   try {
     const r = await api('/v1/auth/family-accounts', { method: 'POST', body: { username, password } });
+    // The recovery code first, shown once — the restart below reloads the page.
+    if (r.recoveryCode) {
+      await new Promise(res => { recoveryDlg.addEventListener('close', res, { once: true }); showRecoveryCode(r.recoveryCode, 'Your recovery code. You own this machine, so nobody can send you a reset link: this code is how you get back in if you forget your password. Save it somewhere safe — it is shown only now.'); });
+    }
     if (!r.restarting) {
       $('famErr').innerHTML = 'Done — now restart Hatchabot (<code>./scripts/restart.sh</code>) and sign in as <b>' + esc(username) + '</b>.';
       return;
@@ -5388,7 +5392,8 @@ async function openFleetActions(preset) {
   const needsRebuild = (a) => !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
   const needs = list.filter(needsRebuild).length;
   if (needs) chips.push(['needs-rebuild', `Needs rebuild (${needs})`]);
-  const attn = list.filter(a => agentAttention(a).length).length;
+  // The same rule as the home screen's Needs you: an agent the owner cleared is not counted.
+  const attn = list.filter(a => agentAttention(a).length && !attentionCleared(a)).length;
   if (attn) chips.push(['attention', `Needs you (${attn})`]);
   // The home screen's current View by, as chips: one per section it shows
   // (image, status, needs-you, activity…), so a set you can see is a set you
@@ -5441,7 +5446,7 @@ function faSelect(key) {
         const a = agents.find(x => x.id === cb.dataset.id);
         return !!a && !isRechecking(a) && ((a.pendingModel && a.pendingModel !== a.model) || a.rebuild || a.peersPending);
       }
-    : key === 'attention' ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && agentAttention(a).length > 0; }
+    : key === 'attention' ? (cb) => { const a = agents.find(x => x.id === cb.dataset.id); return !!a && agentAttention(a).length > 0 && !attentionCleared(a); }
     : key.startsWith('src:') ? (cb) => cb.dataset.src === key.slice(4)
     : key.startsWith('grp:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.group || '') === key.slice(4)
     : key.startsWith('host:') ? (cb) => (agents.find(x => x.id === cb.dataset.id)?.hostId) === key.slice(5)
@@ -5626,7 +5631,8 @@ async function faApply() {
       } else if (action === 'sleep') {
         if (a?.state !== 'RUNNING') { skipped++; continue; }
         try { await api(`/v1/agents/${id}/hibernate`, { method: 'POST', body: {} }); }
-        catch (e) { if (/Discord or Slack/.test(e.message)) { skipped++; continue; } throw e; }
+        // The rules that keep an agent awake are not failures: they are "not applicable".
+        catch (e) { if (/Discord or Slack|scheduled tasks|management agent|busy|Cannot put it to sleep/i.test(e.message)) { skipped++; continue; } throw e; }
       }
       ok++;
     } catch (e) { failed++; if (reasons.length < 3) reasons.push(`${a?.name || id}: ${e.message}`); }
@@ -6580,7 +6586,8 @@ function cardMenu(a) {
   // its place on the card.
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="act('${a.id}','stop')" title="Pause it. Keeps its Telegram bot — use Archive to hand that back.">Stop</button>`);
-    items.push(`<button onclick="act('${a.id}','hibernate')" title="Stop it with its volume kept; a Telegram message, its console or an ask wakes it">💤 Sleep</button>`);
+    // Only where it can sleep: not the manager, not an agent on Discord or Slack (nothing queues their messages).
+    if (!a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram')) items.push(`<button onclick="act('${a.id}','hibernate')" title="Stop it with its volume kept; a Telegram message, its console or an ask wakes it">💤 Sleep</button>`);
   }
   if (a.state === 'RUNNING') {
     items.push(`<button onclick="openUsage('${a.id}', '${jsq(a.name)}')">📊 Usage</button>`);
@@ -8932,9 +8939,21 @@ function closeConsole() {
 
 async function downloadAgent(id, name) {
   if (!confirm(`Download "${name}"?${channelsLostOnExport(id)}\n\nIt's a complete private copy — it includes the agent's bot token and members, so treat the file like a password (don't share it). The agent is STOPPED here afterwards, so the copy you Restore elsewhere is the only one talking to Telegram.`)) return;
-  // Same-origin navigation carries the session cookie; the browser downloads.
-  window.location.href = `/v1/agents/${id}/backup`;
-  setTimeout(() => refresh(false), 2500);
+  // Fetched, not navigated to: a refusal (busy, not exportable) is a message,
+  // not a page of raw JSON in place of the app.
+  toast('Preparing the copy…', 20000);
+  try {
+    const res = await fetch(`/v1/agents/${id}/backup`);
+    if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
+    const blob = await res.blob();
+    const file = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || 'agent.hatchabot';
+    const url = URL.createObjectURL(blob);
+    const link = Object.assign(document.createElement('a'), { href: url, download: file });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    toast(`Saved ${file}. "${name}" is stopped here now — keep it stopped once it runs elsewhere.`, 8000);
+  } catch (e) { toast(e.message, 8000); }
+  finally { setTimeout(() => refresh(false), 500); }
 }
 
 // ---- setup-value form (template parameters) — importer side ----------------
@@ -9632,7 +9651,7 @@ async function saveImagePin() {
       await api(`/v1/agents/${editAgentId}/rebuild`, { method: 'POST', body: {} });
       toast(v ? `Pinned to ${v} — rebuilding onto it now, memory kept (about a minute).` : 'Back on the fleet default — rebuilding, memory kept.');
     } else {
-      toast(v ? `Pinned to ${v} — it moves onto it when it next starts or rebuilds.` : 'Back on the fleet default image — applies when it next starts or rebuilds.');
+      toast(v ? `Pinned to ${v} — it moves onto it at its next rebuild.` : 'Back on the fleet default image — applies at its next rebuild.');
     }
     await refresh(false);
   } catch (e) { toast(e.message); }
@@ -10690,7 +10709,7 @@ function v2ViewKey(a, view = v2View) {
       if ((pairings[a.id]?.length ?? 0) > 0) return ['n:2', '🔑 Knocking'];
       if (v2Unread(a)) return ['n:3', '💬 To read'];
       if (attentionCleared(a)) return ['n:8', '🔕 Cleared'];
-      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '⚠ Needs you'];
+      if (a.state === 'FAILED' || a.opsDrift) return ['n:1', '❌ Failed or changed by hand'];
       if (a.rebuild) return ['n:4', a.rebuild.level === 'required' ? '🔄 To rebuild (required)' : '🔄 To rebuild'];
       if (agentAttention(a).length) return ['n:5', '⚠ Needs you'];
       return ['n:9', 'Fine'];
@@ -11081,7 +11100,7 @@ function v2RenderSheetBar() {
     <span class="v2pill ${v2PillCls(st)}"${st.why.length ? ` title="${esc(st.why.join(' · '))}"` : ''}>${st.glyph || '●'} ${esc(st.label)}</span>
     ${a.state === 'STOPPED' && a.hibernatedAt ? `<button class="primary" onclick="act('${jsq(a.id)}','wake')" title="Start it now — a Telegram message, opening its console or an ask would too">💤 Wake</button>` : ''}
     ${a.state === 'STOPPED' && !a.hibernatedAt ? `<button onclick="act('${jsq(a.id)}','start')">Start</button>` : ''}
-    ${a.state === 'RUNNING' && v2Mine(a) && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤 Sleep</button>` : ''}
+    ${a.state === 'RUNNING' && v2Mine(a) && !a.ops && !v2ChannelKinds(a).some(k => k !== 'telegram') ? `<button onclick="act('${jsq(a.id)}','hibernate')" title="Stop it with its volume kept; it wakes on a Telegram message, its console or an ask">💤 Sleep</button>` : ''}
     ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
     ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')">📤 Restore</button><button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button>` : ''}
     ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
@@ -11249,7 +11268,7 @@ function v2Pane(a, tab) {
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
       ${slot('paneEditPeers')}`;
     }
-    case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', '<span>Start it to see its tasks.</span>');
+    case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${a.hibernatedAt ? 'It is asleep — wake it to see its tasks.' : 'Start it to see its tasks.'}</span>`);
     case 'files': return built ? `<div id="v2Files" data-agent="${id}"><div class="sub">Loading…</div></div>`
       : row('Files', '<span>Nothing is built yet.</span>');
     case 'advanced': return `
@@ -11261,8 +11280,8 @@ function v2Pane(a, tab) {
         <div data-v2slot="imagePinRow" style="flex-basis:100%"></div>
         <div data-v2slot="embedModeRow" style="flex-basis:100%"></div>
         <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
-      ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `<label style="margin:0">Sleep when idle <select id="v2Sleep" onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
-          <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>
+      ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `${a.ops || v2ChannelKinds(a).some(k => k !== 'telegram') ? `<span class="sub">${a.ops ? 'The manager never sleeps.' : 'On Discord or Slack it never sleeps (nothing queues their messages).'}</span>` : `<label style="margin:0">Sleep when idle <select id="v2Sleep" onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
+          <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>`}
         <label style="margin:0">Files it may send <select id="v2FilesCap" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
           ${[...new Set(['', 5, 10, 25, 50, 100, ...(a.filesMaxMb ? [a.filesMaxMb] : [])])].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>
         <div class="sub" style="flex-basis:100%">Each app still caps it at its own limit: Telegram 50 MB, a Discord server without boosts 10 MB.</div>`) : ''}
@@ -11514,6 +11533,9 @@ async function openChanSetup(id, kind) {
     let pool = [];
     try { pool = (await api(POOL_UI[kind].path)).bots ?? []; } catch { pool = []; }
     if (kind === 'discord') discordPool = pool; else slackPool = pool;
+    // Only what this person can take: their own and the shared ones (the
+    // machine's owner also sees other people's in Settings, not here).
+    pool = pool.filter(b => b.mine || b.shared);
     if (pool.length) parkedHtml = `<div class="v2chan" style="margin-bottom:10px"><b>Use a parked ${kind === 'slack' ? 'app' : 'bot'}</b>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
         <select id="chanPooled" style="flex:1;min-width:200px"><option value="">— make a new ${kind === 'slack' ? 'app' : 'bot'} instead (steps below) —</option>
@@ -11627,6 +11649,9 @@ async function chanRecheck(id, kind, btn) {
   btn.disabled = true; const was = btn.textContent; btn.textContent = 'Checking…';
   try {
     const c = await api(`/v1/agents/${id}/channels/${kind}/recheck`, { method: 'POST', body: {} });
+    if (c.placesChanged && confirmRebuild(id, `Answering in its new ${kind === 'slack' ? 'channels' : 'servers'}`)) {
+      await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} }).then(() => toast('Rebuilding — it answers in the new places when it is back.')).catch(e => toast(e.message, 8000));
+    }
     toast(c.warnings?.length ? `${V2_CHAN_LABEL[kind]}: ${c.warnings.length} thing${c.warnings.length === 1 ? '' : 's'} still to fix.` : `${V2_CHAN_LABEL[kind]}: all good.`);
     if ($('v2Chans')) void v2LoadChans(id);
   } catch (e) { toast(e.message, 8000); btn.disabled = false; btn.textContent = was; }
@@ -11874,11 +11899,9 @@ async function openFleet(tab = v2FleetTab, arg) {
       <div class="v2row"><div class="v2k">Bulk actions</div><div class="v2v"><button onclick="openFleetActions()">⚡ Choose agents…</button>
         <span class="sub">Switch model, rebuild, stop or start a selection — by AI source, group, machine or state.</span></div></div>
       <div class="v2row"><div class="v2k">Rebuild everything</div><div class="v2v"><button onclick="rebuildAll()">Rebuild all</button>
-        <span class="sub">New container for every agent, memory kept. Picks up a new runtime image or network.</span></div></div>
+        <span class="sub">New container for every running agent, memory kept. Picks up a new runtime image or network. Stopped and sleeping agents are rebuilt when they next start.</span></div></div>
       <div class="v2row" id="embedFleetRow" hidden><div class="v2k">Memory search</div><div class="v2v" id="embedFleetBody"></div></div>
-      <div class="v2row"><div class="v2k">Order</div><div class="v2v"><button onclick="sortAllGroups('name')">Sort every group A→Z</button>
-        <button onclick="sortAllGroups('activity', true)">⏳ Most recently active first</button>
-        <span class="sub">A one-off tidy. On a group's own header, pressing the same button again reverses it.</span></div></div>`;
+`;
     void loadEmbedFleet();
     return;
   }

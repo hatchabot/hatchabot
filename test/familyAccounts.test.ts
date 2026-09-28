@@ -45,6 +45,9 @@ describe('turning on family accounts', () => {
       expect(r.json()).toMatchObject({ ok: true, username: 'chris' });
       const acct = w.store.localAccountByUsername('chris')!;
       expect(acct.hostOwner).toBe(true);
+      // A recovery code, shown once: nobody can send the host owner a reset link.
+      expect(typeof r.json().recoveryCode).toBe('string');
+      expect(acct.recoveryHash).toBeTruthy();
       expect(w.store.getAgent('a1')!.ownerId).toBe(acct.id);   // adopted
       expect(w.env()).toContain('HATCHABOT_AUTH=accounts');
       expect(w.env()).toContain('HATCHABOT_SECRET_KEY=x');       // the rest untouched

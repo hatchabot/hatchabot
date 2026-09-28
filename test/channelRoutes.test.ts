@@ -149,6 +149,7 @@ describe('checking again, and who it answers', () => {
     expect(first.servers).toEqual([{ id: '100', name: 'Home' }]);
     const again = await inject('POST', `/v1/agents/${id}/channels/discord/recheck`);
     expect(again.statusCode).toBe(200);
+    expect(again.json().placesChanged).toBe(false); // group chats are off: new servers change nothing
     expect(again.json().warnings).toEqual([]);
     expect(again.json().servers).toEqual([{ id: '100', name: 'Home' }, { id: '200', name: 'Work' }]);
     expect(again.json().displayName).toBe('@Bot in Home, Work');
@@ -475,6 +476,22 @@ describe('a spare of the same app: swap, archive and restore (2026-09-25)', () =
     expect(store.getChannelForAgent(id, 'discord')).toMatchObject({ accountId: '1234567890123456789' });
     expect(store.getDiscordBot('U0BOT')).toBeUndefined();
     expect(secrets.map.get(`channel/${id}/slack`)).toBe('ok-good');
+  });
+});
+
+describe('use-case walk-through: every server it is in (2026-09-27)', () => {
+  it('a re-check that finds the bot in new servers says so when the agent answers in every server', async () => {
+    const { inject, add, store } = await setup();
+    const id = add();
+    verifyCalls.length = 0;
+    await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
+    store.bindMemberIdentity(id, OWNER, 'discord', '111111111111111111');
+    await inject('PATCH', `/v1/agents/${id}/channels/discord`, { rooms: { mode: 'members' } });
+    const r = (await inject('POST', `/v1/agents/${id}/channels/discord/recheck`)).json();
+    expect(r.servers.map((g: any) => g.id)).toEqual(['100', '200']);
+    expect(r.placesChanged).toBe(true);
+    // The same places again: nothing to rebuild for.
+    expect((await inject('POST', `/v1/agents/${id}/channels/discord/recheck`)).json().placesChanged).toBe(false);
   });
 });
 

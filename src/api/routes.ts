@@ -22,7 +22,7 @@ import { ConnectorError, type ChannelConnector, type ConnectorKind } from '../ch
 import { ensureOpsServer, loopbackDoorman } from '../ops/opsServer.js';
 import { enableServe, tailnetInfo, writeEnvVar, writePublicUrl } from '../ops/tailnet.js';
 import { randomBytes } from 'node:crypto';
-import { hashPassword, passwordProblem, usernameProblem } from './accountsAuth.js';
+import { hashPassword, newRecoveryCode, normalizeRecoveryCode, passwordProblem, usernameProblem } from './accountsAuth.js';
 import { noteFailure, throttled } from './auth.js';
 import { isControlUiDocument, rebaseControlUi } from './controlUiRebase.js';
 import { defaultMemoryCap, effectiveMemoryCap, formatMemoryCap, memberMemoryMax, MEMORY_CAP_CEILING_BYTES, parseMemoryCap } from '../orchestrator/memoryCap.js';
@@ -1118,13 +1118,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     });
     const adopted = store.adoptLocalOwnerData(id);
     store.recordAccount(id, username.includes('@') ? username : undefined);
+    // The host owner is the one person nobody can send a reset link to: a
+    // recovery code, shown once, as the first-run bootstrap gives one.
+    const recoveryCode = newRecoveryCode();
+    { const rc = await hashPassword(normalizeRecoveryCode(recoveryCode)); store.setLocalAccountRecovery(id, rc.hash, rc.salt); }
     trace()('auth.family_accounts_on', { adopted });
 
     // Only a supervised process may exit to restart: under `npm run dev`
     // nothing would bring it back, so say so instead.
     const supervised = !!(process.env.INVOCATION_ID || process.env.XPC_SERVICE_NAME);
     if (supervised && !process.env.VITEST) setTimeout(() => process.exit(0), 1200).unref();
-    return { ok: true, username, adopted, restarting: supervised };
+    return { ok: true, username, adopted, restarting: supervised, recoveryCode };
   });
 
   /**
@@ -1442,6 +1446,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (target.kind === 'subscription' && !target.secretRef && target.ownerId !== agent.ownerId) {
         return { rebuild: false, error: "a machine-login Max source can't run another account's agent" };
       }
+      // A runner cannot use this machine's login, as PATCH and the source switch refuse.
+      if (target.vendor !== 'local' && target.kind === 'subscription' && !target.secretRef && store.getHost(agent.hostId)?.kind !== 'local') {
+        return { rebuild: false, error: "the class's machine-login Max source can't reach an agent on a runner — use a setup-token source" };
+      }
     }
     if (cls.model) {
       const prob = modelOverrideProblem(target, cls.model);
@@ -1672,7 +1680,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const active = store.listAllActiveAgents();
     return store.listAIProfiles(ownerIdOf(req)).map(({ secretRef, ownerId, baseUrl, ...safe }) => {
       const mine = ownerId === ownerIdOf(req);
-      const on = active.filter((a) => a.aiProfileId === safe.id);
+      // What agents will use AND what a container still runs (a switch waiting
+      // for its rebuild): the same rule delete applies.
+      const on = active.filter((a) => a.aiProfileId === safe.id || (a.appliedProfileId === safe.id && a.state !== 'ARCHIVED' && !!a.runtimeRef));
       const inUse = { mine: on.filter((a) => a.ownerId === ownerIdOf(req)).length, others: mine ? on.filter((a) => a.ownerId !== ownerIdOf(req)).length : undefined };
       return {
         inUse,
@@ -1880,8 +1890,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(400).send({ error: 'Turn the memory search service on first (Settings → Hosts).' });
     }
     const local = store.localHostId();
-    const agents = store.listAllActiveAgents().filter((a) =>
+    let agents = store.listAllActiveAgents().filter((a) =>
       a.hostId === local && !a.ops && !a.migratedTo && (a.state === 'RUNNING' || a.state === 'STOPPED') && (a.embedMode ?? 'baked') !== mode);
+    // Back to "their own engine" is only for images that carry one: an
+    // engine-free image is switched straight back to the service at its build,
+    // so rebuilding it changed nothing (use-case walk-through, 2026-09-27).
+    let engineFree = 0;
+    if (mode === 'baked' && local) {
+      const keep: Agent[] = [];
+      for (const a of agents) {
+        const info = await providerFor(local).currentImageInfo(a.image ?? undefined).catch(() => undefined);
+        if (info?.embedEngine === 'none') engineFree++; else keep.push(a);
+      }
+      agents = keep;
+    }
     let queued = 0;
     for (const a of agents) {
       store.setAgentEmbedMode(a.id, mode);
@@ -1897,8 +1919,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (kickRebuild(a.id)) queued++;
       }
     }
-    trace()('embed.move_all', { mode, when, switched: agents.length, queued });
-    return { ...embedFleetView(), switched: agents.length, queued, deferred: agents.length - queued };
+    trace()('embed.move_all', { mode, when, switched: agents.length, queued, engineFree });
+    return { ...embedFleetView(), switched: agents.length, queued, deferred: agents.length - queued, engineFree };
   });
 
   app.get('/v1/embedder', async (req) => {
@@ -3807,6 +3829,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (parseMemoryCap(a.memoryCap) || parseMemoryCap(cls?.memoryCap)) continue; // its own or its class's cap stands
         const prov = providerFor(a.hostId);
         try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch { /* the next rebuild applies it */ }
+        // And tell the agent its new budget (AGENTS.md), as a per-agent change does.
+        if (a.state === 'RUNNING') void syncDataSourceDocs({ store, secrets, provider: prov, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)).catch(() => {});
       }
     } else if (spec.key === 'engineMemory') {
       if (embedder.enabled && !embedder.external) { await embedder.restart().catch(() => undefined); applied = 1; }
@@ -4420,6 +4444,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // at whatever BotFather was told). Fire-and-forget — cosmetic, and
         // Telegram rate-limits setMyName.
         const chan = store.getChannelForAgent(agent.id);
+        botNameCache.delete(agent.id);
+        // A pool bot's queued name (a rename Telegram refused earlier) must be
+        // this one now, or the sweep would put the old name back later.
+        if (chan?.kind === 'telegram') void deps.channel.syncDisplayName?.(chan.accountId, name).catch(() => {});
         if (chan?.kind === 'telegram') {
           void secrets
             .get(chan.secretRef)
@@ -5248,9 +5276,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const src = store.getDataSource(agent.id, req.params.dsId);
       if (!src) return reply.code(404).send({ error: 'No such data source.' });
       store.deleteDataSource(agent.id, req.params.dsId);
-      // Drop the deploy key's private half too. The on-volume clone/key linger
-      // until the next rebuild — harmless, and the portable secret is gone.
+      // Drop the deploy key's private half too — in the store AND on the
+      // volume: the key file and the clone's ssh config let the agent keep
+      // pulling and pushing after "stop sharing" (use-case walk-through,
+      // 2026-09-27). The clone's files stay, as a folder it has.
       if (src.secretRef) await secrets.delete(src.secretRef).catch(() => {});
+      if (src.kind === 'git' && src.mountName && agent.runtimeRef && /^[A-Za-z0-9._-]+$/.test(src.mountName)) {
+        const base = '/home/node/.openclaw';
+        const script = `rm -f ${base}/.ssh/${src.mountName}_deploy; [ -d ${base}/${src.mountName}/.git ] && git -C ${base}/${src.mountName} config --unset core.sshCommand; true`;
+        const prov = providerFor(agent.hostId);
+        const res = agent.state === 'RUNNING'
+          ? await prov.execShell(agent.runtimeRef, script).catch(() => undefined)
+          : await prov.execShellOnVolume(agent.runtimeRef, script).catch(() => undefined);
+        if (res?.code !== 0) trace(agent.id)('datasource.key_left', { name: src.mountName });
+      }
       return publicAgent(store.getAgent(agent.id)!);
     },
   );
@@ -5468,7 +5507,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return undefined;
     }
     if (agent.state !== 'RUNNING' || !agent.runtimeRef) {
-      reply.code(409).send({ error: `Start the agent to ${action}.` });
+      reply.code(409).send({ error: agent.hibernatedAt ? `It is asleep — wake it to ${action}.` : `Start the agent to ${action}.` });
       return undefined;
     }
     return agent;
@@ -6832,6 +6871,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       throw err;
     }
     const st = (row.settings ?? {}) as Record<string, unknown>;
+    // "Every server/channel it is in" is written into its config at a rebuild:
+    // say when the places changed, so the app can offer the rebuild that makes
+    // it answer there (use-case walk-through, 2026-09-27).
+    const ids = (v: unknown) => (Array.isArray(v) ? (v as Array<{ id?: unknown }>).map((g) => String(g?.id ?? '')).filter(Boolean).sort().join(',') : '');
+    const placesChanged = (st.rooms as { mode?: string } | undefined)?.mode === 'members'
+      && ids(st.servers) !== ids((verified.settings as Record<string, unknown>).servers);
     store.setChannelSettings(agent.id, conn.kind, {
       ...st, ...verified.settings, displayName: verified.displayName,
       ...(verified.addToServerUrl ? { addToServerUrl: verified.addToServerUrl } : {}),
@@ -6839,7 +6884,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       rooms: st.rooms ?? { mode: 'off' },
     });
     trace(agent.id)('channel.rechecked', { kind: conn.kind, warnings: verified.warnings.length });
-    return publicChannel(store.getChannelForAgent(agent.id, conn.kind)!);
+    return { ...publicChannel(store.getChannelForAgent(agent.id, conn.kind)!), placesChanged };
   });
 
   app.patch<{ Params: { id: string; kind: string }; Body: { rooms?: { mode?: string; roomId?: string } } }>('/v1/agents/:id/channels/:kind', async (req, reply) => {

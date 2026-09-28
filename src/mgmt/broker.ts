@@ -711,6 +711,11 @@ export class Broker {
         const deadline = this.#now() + this.#pollTimeoutMs;
         let cur = created;
         while (cur.state !== 'RUNNING') {
+          // Parked for a person: no spare bot in the pool, so it waits for a
+          // BotFather token (or to be made web-only) — that is not "provisioning".
+          if ((cur as { pendingAction?: { type?: string } }).pendingAction?.type === 'bot_token') {
+            throw new Error('created, but there was no spare Telegram bot: it is waiting for a bot token (or for "Web only" in the web app). Once it is RUNNING, propose update_definition to apply the definition');
+          }
           if (cur.state === 'FAILED') {
             throw new Error(`created, but provisioning failed${cur.stateReason ? `: ${cur.stateReason}` : ''} — fix it in the web app, then propose update_definition`);
           }

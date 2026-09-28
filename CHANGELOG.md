@@ -2,6 +2,25 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.4] — 2026-09-27
+
+### Fixed (the use-case walk-through's backlog)
+- **An agent set to answer "in every server / channel it is in" now gets offered the rebuild** that makes it answer somewhere new: Re-check says when the places changed.
+- The Discord/Slack set-up sheet offers only parked bots you can take (your own and shared ones).
+- Renaming an agent keeps a pool bot's queued name in step, so an older name no longer comes back later.
+- Assigning a class refuses a machine-login source for an agent on a runner, as every other path does.
+- Settings counts an AI source as in use while a container still runs on it, as Delete does.
+- The manager's "create an agent" says it is waiting for a bot token when the pool is empty, instead of waiting 150 s and calling it provisioning.
+- Turning on family accounts gives the host owner a recovery code, shown once.
+- Pinning an image says it applies at the next rebuild (it never did at a start).
+- "Move all back to their own engine" skips agents whose image has no engine (they were rebuilt onto the service again).
+- Removing a git data source removes its deploy key and ssh config from the agent's volume, so it can no longer pull or push.
+- The icon home screen's Status → Tools no longer offers "Sort every group", which did nothing there; Rebuild all says it rebuilds running agents.
+- Bulk actions' "Needs you" counts what the home screen counts; failed agents have their own section label.
+- A new machine memory default updates what each agent is told its budget is.
+- Download copy no longer replaces the app with an error page when the server refuses; it says why.
+- A sleeping agent's owner is told to wake it, not start it; the Sleep button and "Sleep when idle" appear only where sleep can apply; Bulk "Put to sleep" counts the agents that may not sleep as skipped, not failed.
+
 ## [2.89.3] — 2026-09-27
 
 ### Fixed (the use-case walk-through, third batch — docs/audit-2026-09-27-use-cases.md)
