@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.6] — 2026-09-27
+
+### Added
+- **Seven more click-through scenarios** in the release gate (`npm run test:ui`, now 18): reverting a snapshot (the refusal when the current files cannot be kept, then the revert), a refused download staying a message, moving to another machine (including the pinned-image question and the retry on the runner's default), moving to another Hatchabot, restoring a backup (a wrong typed name does nothing; no "restarting" for a stopped agent), draining a runner, and the manager's proposal cards (risk and author shown, its reason marked as its words, Confirm and Cancel). Each was proven to fail against a deliberately broken page.
+- The shared-host test bed checks that, under rootless Docker, creating the first account from the machine itself without the setup code is refused.
+
 ## [2.89.5] — 2026-09-27
 
 ### Fixed (the walk-through's low-severity list)

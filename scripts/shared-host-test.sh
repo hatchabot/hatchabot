@@ -194,6 +194,10 @@ for i in $(seq 1 "$TENANTS"); do
   if [ -n "${TOKEN[$u]}" ] && [ "$(tenant "$u" "curl -s -o /dev/null -w '%{http_code}' -H 'authorization: Bearer ${TOKEN[$u]}' $B/v1/agents" | tr -d '\r')" = 200 ]; then
     ok "$u: owner account already there (kept VM) — its CLI token still works"
   else
+    # Rootless: the machine's own loopback is every container's too, so even
+    # here the first account needs the setup code (v2.89.2). No code, no account.
+    BOOT=$(tenant "$u" "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{\"username\":\"nobody\",\"password\":\"a-long-password\"}' $B/v1/local-accounts/bootstrap" | tr -d '\r')
+    [ "$BOOT" = 403 ] && ok "$u: first account from localhost without the setup code is refused (rootless)" || bad "$u: bootstrap without a code answered $BOOT, want 403"
     ACC=$(tenanti "$u" "hbt accounts create owner --host-owner --cli-token --json" 2>/dev/null | grep '^{' | tail -1)
     TOKEN[$u]=$(printf %s "$ACC" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).cliToken||'')}catch{console.log('')}})")
     [ -n "${TOKEN[$u]}" ] && ok "$u: owner account + CLI token without a browser" || { bad "$u: hbt accounts create — ${ACC:-no output}"; continue; }

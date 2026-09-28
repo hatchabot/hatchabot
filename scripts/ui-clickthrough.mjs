@@ -39,6 +39,9 @@ const RECORDER = `(() => {
     let body; try { body = init.body ? JSON.parse(init.body) : undefined; } catch { body = init.body; }
     window.__calls.push({ method, path, body });
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
+    // Scripted answers: window.__answer['POST /v1/x'] = [{ status, body }, …], taken in order.
+    const q = (window.__answer || {})[method + ' ' + path];
+    if (q && q.length) { const a = q.shift(); return json(a.body ?? {}, a.status ?? 200); }
     if (method === 'GET') {
       if (path in window.__override) return json(window.__override[path]);
       if (/\\/crons$/.test(path)) return json({ crons: window.__crons || [] });
@@ -207,6 +210,100 @@ const SCENARIOS = String.raw`(() => {
       const p2 = await until(() => calls('PATCH', /\/v1\/agents\/a1$/).find((c) => c.body && 'hibernate' in c.body));
       eq('stay awake', p2.body, { hibernate: 'never' });
       v2Close();
+    },
+    revertSnapshot: async () => {
+      window.__override['/v1/agents/a1/snapshots'] = [{ id: 's1', label: 'before the edit', createdAt: new Date().toISOString(), files: ['SOUL.md', 'AGENTS.md', 'MEMORY.md'], reason: 'manual' }];
+      window.__answer = { 'POST /v1/agents/a1/snapshots/s1/restore': [
+        { status: 409, body: { error: 'Its current files could not be snapshotted first, so the restore would not be undoable — nothing was changed.' } },
+        { status: 200, body: { restored: ['SOUL.md', 'AGENTS.md', 'MEMORY.md'] } } ] };
+      editAgentId = 'a1';
+      await loadSnapshots();
+      const btn = await until(() => [...document.querySelectorAll('#snapList button')].find((b) => b.textContent === 'Revert'));
+      const asked = window.__confirms.length;
+      btn.click();
+      await until(() => document.getElementById('editErr').textContent.includes('nothing was changed'));
+      ok('it asked first, and says MEMORY goes back too', window.__confirms.length === asked + 1 && /MEMORY/.test(window.__confirms.at(-1)));
+      btn.click();
+      await until(() => document.getElementById('toast').textContent.includes('Reverted SOUL.md'));
+      eq('two restore calls', calls('POST', /\/snapshots\/s1\/restore$/).length, 2);
+      window.__answer = {};
+    },
+    downloadRefused: async () => {
+      window.__answer = { 'GET /v1/agents/a1/backup': [{ status: 409, body: { error: 'Another operation is already running on this agent.' } }] };
+      await downloadAgent('a1', 'Homework Helper');
+      await until(() => document.getElementById('toast').textContent.includes('Another operation'));
+      ok('the app is still here', !!document.getElementById('v2groups'));
+      window.__answer = {};
+    },
+    moveToRunner: async () => {
+      const before = hosts;
+      hosts = [{ id: 'h1', name: 'This machine', kind: 'local' }, { id: 'h2', name: 'Laptop', kind: 'docker' }];
+      window.__promptAnswer = '1';
+      window.__answer = { 'POST /v1/agents/a1/move-host': [
+        { status: 409, body: { error: 'pinned', code: 'pinned_image_missing', image: 'hatchabot-runtime:derived-x' } },
+        { status: 200, body: { ok: true } } ] };
+      await moveHostAgent('a1', 'Homework Helper');
+      const posts = calls('POST', /\/v1\/agents\/a1\/move-host$/);
+      eq('first the plain move, then on the runner\'s default image', posts.map((c) => c.body), [{ hostId: 'h2' }, { hostId: 'h2', dropPin: true }]);
+      ok('it asked about the pin', /pinned to the image/.test(window.__confirms.at(-1)));
+      hosts = before; window.__promptAnswer = null; window.__answer = {};
+    },
+    moveToAnotherHatchabot: async () => {
+      window.__override['/v1/peers'] = [{ id: 'p1', name: 'Laptop Hatchabot', url: 'https://laptop.example' }];
+      window.__promptAnswer = '1';
+      window.__answer = { 'POST /v1/agents/a1/rehost': [{ status: 200, body: { movedTo: 'Laptop Hatchabot', sourceState: 'STOPPED' } }] };
+      await rehostAgent('a1', 'Homework Helper');
+      eq('the rehost call', calls('POST', /\/v1\/agents\/a1\/rehost$/)[0].body, { peerId: 'p1' });
+      ok('it says where it went', document.getElementById('toast').textContent.includes('Moved to Laptop Hatchabot'));
+      window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/peers'];
+    },
+    backupRestore: async () => {
+      window.__override['/v1/backups'] = { dir: '/backups', keepDays: 7, run: { status: 'idle' }, backups: [
+        { date: '2026-09-26', sizeBytes: 1024, hasDb: true, hasKey: true, volumes: [{ name: 'Homework Helper', agentId: 'a1', sizeBytes: 1024 }] }] };
+      await openAiDlg('backups');
+      const restore = await until(() => [...document.querySelectorAll('#bkList button')].find((b) => b.textContent === 'Restore'));
+      window.__promptAnswer = 'Homework';           // the wrong name: nothing happens
+      restore.click();
+      await until(() => document.getElementById('toast').textContent.includes('did not match'));
+      eq('no restore on a wrong name', calls('POST', /\/v1\/backups\/restore$/).length, 0);
+      window.__promptAnswer = 'Homework Helper';
+      window.__answer = { 'POST /v1/backups/restore': [{ status: 200, body: { date: '2026-09-26', running: false } }] };
+      restore.click();
+      const post = await until(() => calls('POST', /\/v1\/backups\/restore$/)[0]);
+      eq('the restore', post.body, { agentId: 'a1', date: '2026-09-26' });
+      await until(() => document.getElementById('toast').textContent.includes('Restored'));
+      ok('no "restarting" when it is not running', !document.getElementById('toast').textContent.includes('restarting'));
+      aiDlg.close(); window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/backups'];
+    },
+    hostsDrain: async () => {
+      window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', hostname: 'home', kind: 'local', online: true, status: 'online', agentCount: 13 },
+        { id: 'h2', name: 'Laptop', kind: 'docker', settings: { dockerHost: 'ssh://laptop' }, online: true, status: 'online', agentCount: 2 }];
+      window.__answer = { 'POST /v1/hosts/h2/drain': [{ status: 200, body: { stopped: 2, skipped: [] } }] };
+      await openAiDlg('hosts');
+      const drain = await until(() => [...document.querySelectorAll('#hostList button')].find((b) => b.textContent === 'Drain'));
+      drain.click();
+      await until(() => calls('POST', /\/v1\/hosts\/h2\/drain$/)[0]);
+      ok('it asked first', /Drain "Laptop"/.test(window.__confirms.at(-1)));
+      await until(() => document.getElementById('toast').textContent.includes('Stopped 2 agents'));
+      aiDlg.close(); window.__answer = {}; delete window.__override['/v1/hosts'];
+    },
+    proposalCards: async () => {
+      window.__override['/v1/proposals'] = { pending: [
+        { confirmId: 'c1', summary: '🔌 Switch "Homework Helper" to the AI source "Key" — it applies at its next rebuild.', risk: 'careful', source: 'agent', note: 'cheaper for homework' },
+        { confirmId: 'c2', summary: '📸 Snapshot "Piano Practice"', risk: 'routine' } ], recent: [] };
+      window.__answer = { 'POST /v1/proposals/c1/confirm': [{ status: 200, body: { text: '✅ Done.' } }], 'POST /v1/proposals/c2/cancel': [{ status: 200, body: { text: 'Cancelled.' } }] };
+      v2PropSig = '';
+      await loadProposals();
+      const cards = await until(() => { const l = [...document.querySelectorAll('#v2PropList > div')]; return l.length === 2 ? l : null; });
+      ok('the section shows', !document.getElementById('v2Proposals').hidden);
+      ok('a careful change says so, and who prepared it', cards[0].textContent.includes('Read carefully') && cards[0].textContent.includes('Prepared by your Hatchabot agent'));
+      ok('its reason is marked as its words', cards[0].textContent.includes('Its reason: “cheaper for homework”'));
+      [...cards[0].querySelectorAll('button')].find((b) => b.textContent.includes('Confirm')).click();
+      await until(() => cards[0].textContent.includes('✅ Done.'));
+      [...cards[1].querySelectorAll('button')].find((b) => b.textContent.includes('Cancel')).click();
+      await until(() => cards[1].textContent.includes('Cancelled.'));
+      eq('confirm and cancel sent', [calls('POST', /\/c1\/confirm$/).length, calls('POST', /\/c2\/cancel$/).length], [1, 1]);
+      window.__answer = {}; delete window.__override['/v1/proposals'];
     },
     headerDoors: async () => {
       await openAiDlg(); ok('Settings opens', aiDlg.open); aiDlg.close();

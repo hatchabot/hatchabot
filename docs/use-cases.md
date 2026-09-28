@@ -234,8 +234,9 @@ regression or the candidate gate); **manual** = only a person has exercised it;
   a release gate since v2.87.3: the home screen and header, View by, drag to a
   group, the group arrows, the bulk bolt, Wake and Sleep, editing a task, the
   rebuild confirmation, the Slack set-up sheet, the machine defaults, the
-  header's doors): every row still marked "UI only" above, and snapshot
-  revert, download, move and rehost, backups, hosts, proposal cards.
+  header's doors, and since v2.89.6 snapshot revert, a refused download, move
+  and rehost, a backup restore, draining a runner, the manager's proposal
+  cards): every row still marked "UI only" above.
 
 ## Coverage script
 `node scripts/use-case-coverage.mjs` reads this file and the test titles, and
