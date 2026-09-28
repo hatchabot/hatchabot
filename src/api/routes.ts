@@ -739,7 +739,17 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // place until it answers, or parallel requests all passed it (night review).
   const capHeld = new Map<string, number>();
   const capHolds = new Map<string, string>(); // request id → owner
+  // One request at a time for a key (an agent's un-archive, an owner's
+  // manager setup): a double-click ran both, and each made its own (night review).
+  const onceHeld = new Map<string, string>(); // key → request id
+  const holdOnce = (req: FastifyRequest, key: string): boolean => {
+    const holder = onceHeld.get(key);
+    if (holder !== undefined && holder !== req.id) return false;
+    onceHeld.set(key, req.id);
+    return true;
+  };
   app.addHook('onResponse', async (req) => {
+    for (const [k, id] of onceHeld) if (id === req.id) onceHeld.delete(k);
     const owner = capHolds.get(req.id);
     if (owner === undefined) return;
     capHolds.delete(req.id);
@@ -1697,12 +1707,22 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const classId = (req.body as { classId?: string | null } | undefined)?.classId ?? null;
-    if (classId === null) { store.setAgentClass(agent.id, null); return { classId: null, rebuild: false }; }
+    // The class's memory cap governs an agent with none of its own: applied
+    // to the container now, as a class edit does, not at some later rebuild
+    // (night review, 2026-09-28).
+    const applyCap = async (): Promise<void> => {
+      const now = store.getAgent(agent.id);
+      if (!now?.runtimeRef || now.memoryCap || (now.state !== 'RUNNING' && now.state !== 'STOPPED')) return;
+      const eff = effectiveMemoryCap(now, now.classId ? store.getAgentClass(now.classId) : undefined);
+      await providerFor(now.hostId).updateMemory?.(now.runtimeRef, eff).catch(() => {});
+    };
+    if (classId === null) { store.setAgentClass(agent.id, null); await applyCap(); return { classId: null, rebuild: false }; }
     const cls = store.getAgentClass(classId);
     if (!cls || cls.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'No such class.' });
     const r = await applyClassToAgent(agent, cls);
     if (r.error) return reply.code(400).send({ error: r.error });
     store.setAgentClass(agent.id, cls.id);
+    await applyCap();
     return { classId: cls.id, rebuild: r.rebuild };
   });
 
@@ -2270,8 +2290,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout.pipe(out, { end: false }); child.stderr.pipe(out, { end: false });
-      child.on('error', (err) => { out.end(); resolve({ ok: false, error: err.message }); });
+      // A ceiling: a hung pull or npm call held "a build is already running"
+      // until the service restarted (night review, 2026-09-28).
+      const ceiling = setTimeout(() => { child.kill('SIGKILL'); }, Number(process.env.HATCHABOT_BASE_BUILD_TIMEOUT_MS ?? 90 * 60_000));
+      ceiling.unref();
+      child.on('error', (err) => { clearTimeout(ceiling); out.end(); resolve({ ok: false, error: err.message }); });
       child.on('close', (code) => {
+        clearTimeout(ceiling);
         out.end(() => {
           if (code === 0) return resolve({ ok: true });
           let log = '';
@@ -2448,6 +2473,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // the shared service (docs/embedder-and-openclaw-port-design.md, step 4).
     // Only with that service on: an image nobody can run is no candidate.
     if (b.engine !== undefined && b.engine !== 'baked' && b.engine !== 'none') return reply.code(400).send({ error: "engine must be 'baked' or 'none'" });
+    // A build is tagged <repo>:<version>: rebuilding a version an agent or
+    // class pins (the Hatchabot agent pins its own) changed what they run —
+    // and a failed build removed the tag (night review, 2026-09-28).
+    if (version) {
+      const tag = `${RUNTIME_REPO}:${version}`;
+      const pinnedBy = [...store.listAllActiveAgents().filter((a) => a.image === tag).map((a) => a.name), ...store.listAllAgentClasses().filter((c) => c.image === tag).map((c) => `class ${c.name}`)];
+      if (pinnedBy.length) return reply.code(409).send({ error: `${tag} is pinned by ${pinnedBy.slice(0, 5).join(', ')}${pinnedBy.length > 5 ? ` and ${pinnedBy.length - 5} more` : ''}; rebuilding it would change what they run. Unpin them first, or build another version.` });
+    }
     const engine = b.engine === 'none' || needsSharedEmbedder(version) ? 'none' as const : undefined;
     if (engine && !embedder.enabled && !embedder.external) {
       return reply.code(400).send({ error: (needsSharedEmbedder(version) ? `OpenClaw ${version} has no memory search engine of its own to bake, so its agents need` : 'An image without its own memory search engine needs') + ' the shared memory search service: start it first (Settings → Hosts).' });
@@ -2504,7 +2537,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .object({
           name: z.string().trim().min(1).max(40),
           // The owner's Dockerfile lines, appended verbatim after the FROM.
-          dockerfile: z.string().min(1).max(20000),
+          // The size a Download can carry (its recipe is capped at 8000), or the
+          // agent could never be moved or imported (night review).
+          dockerfile: z.string().min(1).max(8000),
           // Defaults to the fleet base; must be a hatchabot-runtime:* tag.
           base: z.string().trim().min(1).max(160).optional(),
         })
@@ -4137,7 +4172,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
           // A pin to the tag that IS the fleet default's image (the candidate just
           // promoted) is no trial: nothing to discard, nothing to flag (Chris, 2026-09-24).
-          imageTrial: !a.ops && !!a.image && !(await defaultAliasesFor(a.hostId)).has(a.image) && (!a.classId || classes.get(a.classId)?.image !== a.image),
+          imageTrial: !a.ops && !!a.image && !(await defaultAliasesFor(a.hostId)).has(a.image) && (!a.classId || (classes.get(a.classId) ?? store.getAgentClass(a.classId))?.image !== a.image),
           /** What the viewer may do — drives which controls the app renders. */
           role,
           // The owner's applied setup ANSWERS are theirs — a member (or the
@@ -5971,7 +6006,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const mayAct = new Set(store.listAgentActionPeers(agent.id));
     const candidates = store
       .listAgents(ownerIdOf(req))
-      .filter((a) => a.id !== agent.id && a.state !== 'ARCHIVED')
+      // Not the manager (its conversation is the owner's), nor a copy that
+      // moved away or is gone (night review, 2026-09-28).
+      .filter((a) => a.id !== agent.id && a.state !== 'ARCHIVED' && a.state !== 'DELETED' && !a.ops && !a.migratedTo)
       .map((a) => ({ id: a.id, name: a.name, granted: granted.has(a.id), allowActions: mayAct.has(a.id) }));
     return { peers: candidates.filter((c) => c.granted), candidates };
   });
@@ -5986,7 +6023,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // Every peer must be the CALLER's own agent — never a cross-owner grant.
       const valid = wanted.filter((pid) => {
         const p = store.getAgent(pid);
-        return p && p.ownerId === ownerIdOf(req) && p.id !== agent.id && p.state !== 'DELETED';
+        return p && p.ownerId === ownerIdOf(req) && p.id !== agent.id && p.state !== 'DELETED' && p.state !== 'ARCHIVED' && !p.ops && !p.migratedTo;
       });
       // "May request actions" only applies to peers actually granted, and only
       // between two agents the SAME person owns (already enforced above).
@@ -6032,6 +6069,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const a = ownedAgent(req, id);
       if (!a) return reply.code(404).send({ error: 'One of those agents was not found.' });
       if (a.state === 'ARCHIVED') { skipped.push({ name: a.name, reason: 'archived' }); continue; }
+      if (a.state === 'DELETED' || a.migratedTo) { skipped.push({ name: a.name, reason: 'moved away or deleted' }); continue; }
+      if (a.ops) { skipped.push({ name: a.name, reason: 'the Hatchabot agent is not consulted by other agents' }); continue; }
       members.push(a);
     }
     if (members.length < 2) return reply.code(400).send({ error: 'At least two of the selected agents must be active.' });
@@ -6470,6 +6509,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
   app.post<{ Body: { aiProfileId?: string } }>('/v1/ops-agent', async (req, reply) => {
     const ownerId = ownerIdOf(req);
+    if (!holdOnce(req, `ops-create:${ownerId}`)) return reply.code(409).send({ error: 'Your Hatchabot agent is already being set up.' });
     if (store.getOpsAgent(ownerId)) return reply.code(409).send({ error: 'You already have a Hatchabot agent.' });
     const capErr = capProblem(req);
     if (capErr) return reply.code(429).send({ error: capErr });
@@ -9913,6 +9953,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (agent.state !== 'ARCHIVED') {
       return reply.code(409).send({ error: 'That agent is not archived.' });
     }
+    if (!holdOnce(req, `restore:${agent.id}`)) return reply.code(409).send({ error: 'It is already being brought back.' });
     // The bots it left in the pool come back to it, if still there. Their
     // identity is checked with the platform again (a Slack deep link needs the
     // app id; a Discord one the bot user) so the row is whole.

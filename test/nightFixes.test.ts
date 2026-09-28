@@ -158,3 +158,13 @@ describe('derived image lines (night review)', () => {
     expect(dockerfileProblem('RUN apt-get update && \\\n    apt-get install -y ffmpeg')).toBeNull();
   });
 });
+
+describe('image recipes (night review)', () => {
+  it('a derived image whose edit has not built gives no recipe (its lines are not what the agent runs)', async () => {
+    const { recipeFor } = await import('../src/orchestrator/imageRecipe.js');
+    const source = { listImageTags: async () => [] } as never;
+    const rec = (status: string) => ({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: 'hatchabot-runtime:2026.9.6', dockerfile: 'RUN true', status }) as never;
+    expect(await recipeFor(source, 'hatchabot-runtime:derived-media', () => rec('FAILED'))).toMatchObject({ problem: expect.stringMatching(/has not built/) });
+    expect(await recipeFor(source, 'hatchabot-runtime:derived-media', () => rec('READY'))).toMatchObject({ base: 'hatchabot-runtime:2026.9.6', lines: 'RUN true' });
+  });
+});

@@ -51,6 +51,7 @@ async function exported(image: string, setup: (src: Awaited<ReturnType<typeof in
 const derivedFile = () =>
   exported('hatchabot-runtime:derived-media', (src) => {
     src.store.upsertDerivedImage({ name: 'media', tag: 'hatchabot-runtime:derived-media', base: BASE, dockerfile: 'RUN apt-get update && apt-get install -y ffmpeg', createdBy: 'o' });
+    src.store.setDerivedImageStatus('media', 'READY');
   });
 
 /** Rewrite the file's image section, as a hostile sender could. */

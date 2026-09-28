@@ -30,7 +30,7 @@ Criticals: agent secrets on the docker command line (readable by every local use
 
 Agent families and consults, the config writer, Discord and Slack, runtime images, creation and bulk actions: fixed in v2.94.0. One critical (a removed member stayed in Slack/Discord room lists).
 
-Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep loop, the cap race, and the downgrade checks for move and import. Still open: live settings on a stopped agent run the default image's CLI; two concurrent "Set up Hatchabot agent"; a candidate build can retag a version tag an agent pins; class assignment does not apply the class memory cap live; the set_class card does not name the source, model and image it changes; smaller image-recipe edges (a recipe from a failed derived build, `-lite` tags, 8000-character lines, base build timeout).
+Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep loop, the cap race, and the downgrade checks for move and import. v2.96.0 closed the concurrent setup/un-archive, peer grants, class memory cap, candidate retag, recipe status, lines cap and build ceiling. Still open: live settings on a stopped agent run the default image's CLI; the set_class card does not name the source, model and image it changes; a `-lite` or revision tag's recipe is rebuilt from the plain version; push-definition replaces a child's own Peers section until its next rebuild.
 
 ## The first wave's two criticals
 

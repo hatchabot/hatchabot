@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.96.0] — 2026-09-28
+
+### Fixed
+- A double-click on "Set up Hatchabot agent" or on Restore (un-archive) runs once.
+- Peer grants leave out the Hatchabot agent, and deleted, archived or moved-away agents; the mesh says why it skipped them.
+- Assigning or clearing a class applies its memory cap to the running container at once.
+- Images: a candidate build of a version tag that an agent or class pins is refused (it changed what they run); a derived image's recipe travels only once it has built; derived lines are capped at what a Download can carry; a base build has a time ceiling; ending a "trial" never unpins the Hatchabot agent's own image; members no longer see a trial badge on the owner's class agents.
+
 ## [2.95.0] — 2026-09-28
 
 ### Fixed

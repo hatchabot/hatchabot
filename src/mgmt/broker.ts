@@ -613,6 +613,8 @@ export class Broker {
       const agent = await this.#resolve(args.agent);
       const imgs = await this.#need(this.api.listBaseImages).call(this.api);
       if (name === 'end_base_trial') {
+        // The manager's own pin is deliberate (it never follows a promote), not a trial (night review).
+        if ((agent as { ops?: boolean }).ops) throw new BrokerError('INVALID_INPUT', 'The Hatchabot agent keeps its own image on purpose; it is not trying a candidate.');
         const onCandidate = imgs.tags.find((t) => t.pinned.some((p) => p.id === agent.id) && !t.derived && !t.isDefault);
         if (!onCandidate) throw new BrokerError('INVALID_INPUT', `"${agent.name}" isn't trying a candidate image.`);
         return { agentId: agent.id, agentName: agent.name, spec: { tag: onCandidate.tag } };

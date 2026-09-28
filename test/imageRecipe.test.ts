@@ -4,7 +4,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 
 describe('image recipes', () => {
   it('a derived image is its base plus its own lines, root for the lines, node after', async () => {
-    const derived = { name: 'with-pdf', tag: 'hatchabot-runtime:derived-with-pdf', base: 'hatchabot-runtime:2026.7.1-2', dockerfile: 'RUN apt-get update && apt-get install -y poppler-utils' } as any;
+    const derived = { name: 'with-pdf', tag: 'hatchabot-runtime:derived-with-pdf', base: 'hatchabot-runtime:2026.7.1-2', dockerfile: 'RUN apt-get update && apt-get install -y poppler-utils', status: 'READY' } as any;
     const r = await recipeFor(new MockProvider(), derived.tag, (t) => (t === derived.tag ? derived : undefined));
     expect(r).toMatchObject({ base: 'hatchabot-runtime:2026.7.1-2', packages: [] });
     const df = recipeDockerfile(r as any);

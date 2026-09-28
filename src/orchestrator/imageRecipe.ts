@@ -50,6 +50,9 @@ export async function recipeFor(
   const repo = tag.replace(/:[^:]*$/, '');
   const d = derived(tag);
   if (d) {
+    // Only a derived image that built: a failed or running edit's lines are
+    // not what the agent actually runs (night review, 2026-09-28).
+    if (d.status !== 'READY') return { problem: `${tag}'s recipe was changed and has not built (${String(d.status).toLowerCase()}), so it is not what the agent runs` };
     // A derived image is FROM a plain base plus the owner's lines.
     return { tag, base: d.base, packages: [], lines: d.dockerfile, channels: [] };
   }
