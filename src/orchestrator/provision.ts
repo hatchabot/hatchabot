@@ -559,19 +559,22 @@ export async function buildRuntimeSpec(
   // admitted, pairing only while nobody is or the owner allows knocks. Discord
   // was hardwired to pairing, so anyone sharing a server could always knock
   // (2026-09-25).
-  const doorFor = (allowFrom: string[]): 'pairing' | 'allowlist' => !allowFrom.length || agent.allowKnocks ? 'pairing' : 'allowlist';
+  // An open claim window keeps its door open through a rebuild: written as
+  // allowlist, the invitee's first message was dropped (night review).
+  const windowOpen = (kind: string) => store.pairingWindows(agent.id).some((w) => w.seat.startsWith(`${kind}:`));
+  const doorFor = (allowFrom: string[], kind: string): 'pairing' | 'allowlist' => !allowFrom.length || agent.allowKnocks || windowOpen(kind) ? 'pairing' : 'allowlist';
   let slack: OpenClawConfigPatch['slack'];
   if (slackRow && channelPlugins.includes('slack')) {
     const t = JSON.parse(await secrets.get(slackRow.secretRef)) as { botToken: string; appToken: string };
     const allowFrom = store.listAllowedChannelUserIds(agentId, 'slack');
-    slack = { botToken: t.botToken, appToken: t.appToken, dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(slackRow), servers: serversOf(slackRow) };
+    slack = { botToken: t.botToken, appToken: t.appToken, dmPolicy: doorFor(allowFrom, 'slack'), allowFrom, rooms: roomsOf(slackRow), servers: serversOf(slackRow) };
   }
   let discord: OpenClawConfigPatch['discord'];
   if (discordRow && channelPlugins.includes('discord')) {
     const allowFrom = store.listAllowedChannelUserIds(agentId, 'discord');
     discord = {
       token: await secrets.get(discordRow.secretRef), applicationId: discordRow.accountId,
-      dmPolicy: doorFor(allowFrom), allowFrom, rooms: roomsOf(discordRow), servers: serversOf(discordRow),
+      dmPolicy: doorFor(allowFrom, 'discord'), allowFrom, rooms: roomsOf(discordRow), servers: serversOf(discordRow),
     };
   }
   // Debug door: each agent's Control UI published on a stable host port
@@ -713,7 +716,7 @@ export async function buildRuntimeSpec(
           // would otherwise be unreachable), or when the owner deliberately
           // opened the agent to anyone who finds it. A claim window flips it
           // to pairing for its 30 minutes and back again (see claim.ts).
-          dmPolicy: !allowFrom.length || agent.allowKnocks ? 'pairing' : 'allowlist',
+          dmPolicy: !allowFrom.length || agent.allowKnocks || windowOpen('telegram') ? 'pairing' : 'allowlist',
           allowFrom,
           groupAccess: agent.groupAccess,
           richMessages: agent.richMessages !== false,

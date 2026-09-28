@@ -734,15 +734,36 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
    * template, un-archive). ARCHIVED agents don't count — they hold no bot,
    * container or port. Unset caps = no limit.
    */
+  // Agents being made right now (a clone's export, an import's checks run for
+  // seconds before the row exists): each request that passed the cap holds a
+  // place until it answers, or parallel requests all passed it (night review).
+  const capHeld = new Map<string, number>();
+  const capHolds = new Map<string, string>(); // request id → owner
+  app.addHook('onResponse', async (req) => {
+    const owner = capHolds.get(req.id);
+    if (owner === undefined) return;
+    capHolds.delete(req.id);
+    const n = (capHeld.get(owner) ?? 1) - 1;
+    if (n > 0) capHeld.set(owner, n); else capHeld.delete(owner);
+  });
   const capProblem = (req: FastifyRequest): string | undefined => {
+    const problem = capProblemNow(req);
+    if (!problem && !capHolds.has(req.id)) {
+      const owner = ownerIdOf(req);
+      capHolds.set(req.id, owner);
+      capHeld.set(owner, (capHeld.get(owner) ?? 0) + 1);
+    }
+    return problem;
+  };
+  const capProblemNow = (req: FastifyRequest): string | undefined => {
     const ownerId = ownerIdOf(req);
-    const liveCount = store.listAgents(ownerId).filter((a) => a.state !== 'ARCHIVED').length;
+    const liveCount = store.listAgents(ownerId).filter((a) => a.state !== 'ARCHIVED').length + (capHeld.get(ownerId) ?? 0);
     const maxPerAccount = Number(process.env.HATCHABOT_MAX_AGENTS_PER_ACCOUNT ?? 0);
     if (maxPerAccount > 0 && liveCount >= maxPerAccount) return `You've reached the limit of ${maxPerAccount} agents on this server. Delete one first.`;
     const maxPerMember = Number(process.env.HATCHABOT_MAX_AGENTS_PER_MEMBER ?? 0);
     if (maxPerMember > 0 && !ownsLocalHost(req) && liveCount >= maxPerMember) return `Members may run up to ${maxPerMember} agents on this server. Delete one first, or ask the host owner.`;
     const maxTotal = Number(process.env.HATCHABOT_MAX_AGENTS_TOTAL ?? 0);
-    if (maxTotal > 0 && store.countLiveAgents() >= maxTotal) return `This server is at its capacity of ${maxTotal} agents. Ask the host owner to free one up.`;
+    if (maxTotal > 0 && store.countLiveAgents() + [...capHeld.values()].reduce((s, n) => s + n, 0) >= maxTotal) return `This server is at its capacity of ${maxTotal} agents. Ask the host owner to free one up.`;
     return undefined;
   };
 
@@ -3895,7 +3916,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
   /** The owner switched its memory search engine and the rebuild is still owed. */
   const switchPendingFor = (a: Agent): boolean =>
-    a.hostId === store.localHostId() && !a.ops && (a.embedMode ?? 'baked') !== (a.appliedEmbedMode ?? 'baked');
+    a.hostId === store.localHostId() && !a.ops && (a.embedMode ?? 'baked') !== (a.appliedEmbedMode ?? 'baked')
+    // Wanting the shared service while it is off: a rebuild falls back to the
+    // agent's own engine again, so it is never "done" — the quiet-hours sweep
+    // rebuilt such an agent every five minutes (night review, 2026-09-28).
+    && !((a.embedMode ?? 'baked') === 'shared' && !embedder.enabled && !embedder.external);
   /**
    * A container whose process quit on its own and was started again by
    * Docker's restart policy (RestartCount went up; a rebuild makes a new
@@ -8110,6 +8135,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             "This agent's Claude Max source uses this machine's login, which can't reach a runner. " +
             'Switch it to a setup-token Max source or an API key first, then move it.',
         });
+      }
+      // No way back across the 2026.8 line on the other machine either: a
+      // runner's own :latest may still be 2026.7, which cannot read a volume
+      // migrated here (night review, 2026-09-28). Unknown versions pass.
+      if (agent.runtimeRef) {
+        const running = await providerFor(agent.hostId).info(agent.runtimeRef).catch(() => ({} as { openclawVersion?: string }));
+        const there = await providerFor(host.id).currentImageInfo(dropPin ? undefined : (agent.image ?? undefined)).catch(() => ({} as { openclawVersion?: string }));
+        if (running.openclawVersion && there.openclawVersion && !needsPortHeal(running.openclawVersion) && needsPortHeal(there.openclawVersion)) {
+          return reply.code(409).send({ error: `This agent runs OpenClaw ${running.openclawVersion}; ${host.name} would run ${there.openclawVersion}, which cannot read its data. Update that machine's image first (hatchabot upgrade-image there).` });
+        }
       }
       if (dropPin) {
         // Every check has passed; a busy agent is the one refusal left, and it is checked here.

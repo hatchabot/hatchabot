@@ -712,6 +712,21 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       stdin: patch.setupToken,
       sensitive: true,
     });
+  } else {
+    // Not on a setup-token source (any more): the token a previous build
+    // pasted stays in the agent's auth store — readable from its shell,
+    // carried by downloads, and possibly still preferred over the new key —
+    // after a switch to an API key or an un-shared source (night review,
+    // 2026-09-28). Logged out for the agent and "main", and dropped from
+    // auth.profiles. Optional: an older CLI without `logout`, or nothing to
+    // remove, must not fail a build.
+    for (const agent of [patch.agentId, 'main']) {
+      cmds.push({ argv: ['models', 'auth', '--agent', agent, 'logout', 'anthropic:manual', '--yes'], optional: true });
+    }
+    cmds.push({
+      argv: [],
+      rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));const p=c.auth&&c.auth.profiles;if(p&&p["anthropic:manual"]){delete p["anthropic:manual"];fs.writeFileSync(f,JSON.stringify(c,null,2));}' || true`,
+    });
   }
 
   return cmds;

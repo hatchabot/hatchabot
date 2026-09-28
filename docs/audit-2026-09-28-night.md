@@ -30,7 +30,7 @@ Criticals: agent secrets on the docker command line (readable by every local use
 
 Agent families and consults, the config writer, Discord and Slack, runtime images, creation and bulk actions: fixed in v2.94.0. One critical (a removed member stayed in Slack/Discord room lists).
 
-Still open from the third wave: a setup token pasted into an agent's OpenClaw auth store is not removed when the agent moves to another source; a rebuild during an open claim window writes the door as allowlist; live settings on a stopped agent run the default image's CLI; caps can be raced by parallel clone/derive/import; the auto-rebuild sweep can repeat on an agent that always falls back to its own engine; two concurrent "Set up Hatchabot agent"; move-host to a runner and file import have no OpenClaw downgrade check; a candidate build can retag a version tag an agent pins; class assignment does not apply the class memory cap live; the set_class card does not name the source/model/image it changes.
+Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep loop, the cap race, and the downgrade checks for move and import. Still open: live settings on a stopped agent run the default image's CLI; two concurrent "Set up Hatchabot agent"; a candidate build can retag a version tag an agent pins; class assignment does not apply the class memory cap live; the set_class card does not name the source, model and image it changes; smaller image-recipe edges (a recipe from a failed derived build, `-lite` tags, 8000-character lines, base build timeout).
 
 ## The first wave's two criticals
 

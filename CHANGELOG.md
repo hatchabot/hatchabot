@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.95.0] — 2026-09-28
+
+### Fixed
+- **A Claude setup token no longer stays in an agent's credentials after it moves to another source** (an API key, or a source un-shared from it): the next build logs it out, for the agent and for OpenClaw's default agent.
+- Moving an agent to a runner, and importing a downloaded copy, refuse a machine whose OpenClaw is older than 2026.8 when the agent's data was already written by 2026.8 or newer (it could not be read). A Download now records which OpenClaw wrote its data.
+- A rebuild while an invitation is waiting keeps the door open for the invitee, instead of dropping their first message.
+- The quiet-hours sweep no longer rebuilds, every five minutes, an agent that wants the shared memory service while it is off.
+- Agent limits hold against several clone, template, import or restore requests at once.
+
 ## [2.94.0] — 2026-09-28
 
 The night review's third wave: agent families and consults, the config written into each agent, Discord and Slack, runtime images, and bulk actions.

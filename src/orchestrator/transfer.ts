@@ -1,3 +1,4 @@
+import { needsPortHeal } from '../openclaw/configWriter.js';
 import { validIcon, validIconColor } from './agentIcons.js';
 import { randomUUID } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -52,6 +53,7 @@ export function peekFormat(data: Buffer): string | undefined {
 }
 
 export interface ExportManifest {
+  openclawVersion?: string;
   format: typeof EXPORT_FORMAT;
   version: number;
   exportedAt: string;
@@ -143,6 +145,8 @@ const ManifestSchema = z.object({
   format: z.enum([EXPORT_FORMAT, LEGACY_EXPORT_FORMAT]),
   version: z.literal(EXPORT_VERSION),
   exportedAt: z.string().max(64),
+  /** The OpenClaw version its data was last written by (night review, 2026-09-28): an import onto an older line refuses. */
+  openclawVersion: z.string().max(40).optional(),
   agent: z.object({
     name: z.string().min(1).max(64),
     slug: z.string().regex(SLUG_RE),
@@ -310,6 +314,7 @@ export async function exportAgent(
   }
   // Read BEFORE the manifest is assembled: a lookup failure only costs the
   // recipe (noted in the file), never the export.
+  const dataVersion = await provider.info(agent.runtimeRef).then((i) => i.openclawVersion, () => undefined);
   let image: ExportManifest['image'];
   if (agent.image) {
     const r = await recipeFor(provider, agent.image, derivedByTag((n) => store.getDerivedImage(n))).catch(
@@ -323,6 +328,7 @@ export async function exportAgent(
     format: EXPORT_FORMAT,
     version: EXPORT_VERSION,
     exportedAt: new Date().toISOString(),
+    ...(dataVersion ? { openclawVersion: dataVersion } : {}),
     agent: {
       name: agent.name,
       slug: agent.slug,
@@ -527,6 +533,14 @@ async function importAgentInner(
   if (!host) throw new TransferError('No host available to import onto.');
   // Before anything is created: the decision may be the caller's to make.
   const image = manifest.image ? await settleImage(deps, manifest.image, opts, host.kind === 'local' ? 'this machine' : host.name) : {};
+  // Data written by 2026.8+ cannot be read by 2026.7: refused before anything
+  // is made, not discovered when the agent fails to start (night review).
+  if (manifest.openclawVersion && !needsPortHeal(manifest.openclawVersion)) {
+    const here = await deps.provider.currentImageInfo(image.pin).catch(() => ({} as { openclawVersion?: string }));
+    if (here.openclawVersion && needsPortHeal(here.openclawVersion)) {
+      throw new TransferError(`This copy was saved by OpenClaw ${manifest.openclawVersion}; this machine would run it on ${here.openclawVersion}, which cannot read it. Update this machine's image first.`);
+    }
+  }
 
   const now = new Date().toISOString();
   const agent: Agent = {
