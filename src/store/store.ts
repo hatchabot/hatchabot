@@ -78,6 +78,17 @@ export class ChannelTakenError extends Error {
  * nothing about use: counting the new total, as this once did, counted every
  * other session's lifetime again as fresh use (night review, 2026-09-27).
  */
+/**
+ * A zero right after a real reading is a read that caught the container
+ * stopping, not every session erased: kept as the baseline, the next reading
+ * counted the agent's whole history as new use (Cooking Teacher, 72K tokens
+ * "used" on a day it did nothing, 2026-09-28). A new agent's first zero is
+ * real and stays.
+ */
+function zeroAfterReading(prev: { agent_id: string; total: number } | undefined, r: { agent_id: string; total: number }): boolean {
+  return r.total === 0 && !!prev && prev.agent_id === r.agent_id && prev.total > 0;
+}
+
 export function tokenRise(prev: number, next: number): number {
   return next > prev ? next - prev : 0;
 }
@@ -2572,12 +2583,13 @@ export class Store {
     if (!agentIds.size) return [];
     const rows = this.db.prepare(
       `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
-         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ?), ?)
+         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0), ?)
        ORDER BY agent_id, at`,
     ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
     const out: Array<{ agentId: string; at: string; delta: number }> = [];
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
+      if (zeroAfterReading(prev, r)) continue;
       if (prev && prev.agent_id === r.agent_id && r.at >= fromIso) {
         const d = tokenRise(prev.total, r.total);
         if (d > 0) out.push({ agentId: r.agent_id, at: r.at, delta: d });
@@ -2612,11 +2624,12 @@ export class Store {
     if (!agentIds.size) return out;
     const rows = this.db.prepare(
       `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
-         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ?), ?)
+         AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0), ?)
        ORDER BY agent_id, at`,
     ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
+      if (zeroAfterReading(prev, r)) continue;
       if (prev && prev.agent_id === r.agent_id && r.profile_id === profileId && prev.profile_id === profileId && r.at >= fromIso) {
         out.set(r.agent_id, (out.get(r.agent_id) ?? 0) + tokenRise(prev.total, r.total));
       }

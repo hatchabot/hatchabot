@@ -85,3 +85,22 @@ describe('the posture sweep', () => {
     expect(logged.length).toBe(first);
   });
 });
+
+describe('a zero reading between two real ones (2026-09-28)', () => {
+  it('does not turn the agent\'s whole history into new use', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const { Store } = await import('../src/store/store.js');
+    const store = new Store(new Database(':memory:'));
+    store.addTokenSample('a1', 'p1', '2026-09-27T02:48:00.000Z', 72391);
+    store.addTokenSample('a1', 'p1', '2026-09-27T02:58:00.000Z', 0);      // caught mid-stop
+    store.addTokenSample('a1', 'p1', '2026-09-28T13:32:00.000Z', 72391);  // woke, same total
+    store.addTokenSample('a1', 'p1', '2026-09-28T14:00:00.000Z', 72891);  // 500 real
+    const ids = new Set(['a1']);
+    expect(store.tokenDeltas(ids, '2026-09-28T00:00:00.000Z').reduce((s, d) => s + d.delta, 0)).toBe(500);
+    expect(store.tokenIncreasesByAgent('p1', '2026-09-28T00:00:00.000Z', ids).get('a1') ?? 0).toBe(500);
+    // A new agent's real start from zero still counts.
+    store.addTokenSample('b1', 'p1', '2026-09-28T10:00:00.000Z', 0);
+    store.addTokenSample('b1', 'p1', '2026-09-28T11:00:00.000Z', 1200);
+    expect(store.tokenIncreasesByAgent('p1', '2026-09-28T00:00:00.000Z', new Set(['b1'])).get('b1')).toBe(1200);
+  });
+});

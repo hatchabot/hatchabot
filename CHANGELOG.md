@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.99.1] — 2026-09-28
+
+### Fixed
+- **Usage no longer counts an agent's whole history as new use after a zero reading.** A read that caught a container while it stopped (going to sleep) recorded a total of 0; the next reading then counted everything since the agent was made (Cooking Teacher showed 72K tokens on a day it did nothing). A zero right after a real reading is ignored, and a window never starts from one.
+
 ## [2.99.0] — 2026-09-28
 
 ### Faster
