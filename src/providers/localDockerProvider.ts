@@ -1186,7 +1186,11 @@ export class LocalDockerProvider implements RuntimeProvider {
     // 2026-09-25). The key's hash rides on the container as a label, and a
     // container wearing another key is replaced.
     const embedder = this.#embedderName();
-    const keyHash = (() => { try { return createHash('sha256').update(readFileSync(spec.serverKeyFile)).digest('hex').slice(0, 16); } catch { return ''; } })();
+    // The label also carries what the engine runs (image, model): a new
+    // engine image (a llama.cpp fix, HATCHABOT_EMBEDDER_IMAGE) never reached
+    // a running engine otherwise (night review, 2026-09-28).
+    const keyOnly = (() => { try { return createHash('sha256').update(readFileSync(spec.serverKeyFile)).digest('hex').slice(0, 16); } catch { return ''; } })();
+    const keyHash = keyOnly && `${keyOnly}.${createHash('sha256').update(JSON.stringify([spec.image, spec.modelPath, spec.modelAlias])).digest('hex').slice(0, 12)}`;
     if ((await this.#containerState(embedder)) !== 'absent' && keyHash) {
       const worn = await this.#docker(['inspect', embedder, '--format', '{{ index .Config.Labels "hatchabot.embed-key" }}']);
       if (worn.code === 0 && worn.stdout.trim() !== keyHash) await this.#docker(['rm', '-f', embedder]);
@@ -1281,8 +1285,14 @@ export class LocalDockerProvider implements RuntimeProvider {
   }
 
   async stopEmbedder(): Promise<void> {
-    await this.#docker(['rm', '-f', this.#embedDoorName()]);
-    await this.#docker(['rm', '-f', this.#embedderName()]);
+    // A removal Docker refused (a timeout on a slow daemon) is a failed Stop:
+    // the record said "stopped" while the door kept serving, unmanaged (night review).
+    for (const name of [this.#embedDoorName(), this.#embedderName()]) {
+      const r = await this.#docker(['rm', '-f', name]);
+      if (r.code !== 0 && !/no such container/i.test(r.stderr)) {
+        throw new ProviderError(`docker rm ${name}: ${r.stderr.slice(-300)}`, "Couldn't stop the memory search service. Try again in a moment.");
+      }
+    }
   }
 
   async ensureBaseImage(tag: string): Promise<boolean> {

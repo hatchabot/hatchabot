@@ -100,3 +100,12 @@ describe('night review: route refusals', () => {
     expect(store.getAgentClass(id)!.aiProfileId ?? null).toBeNull();
   });
 });
+
+describe('git URLs (night review)', () => {
+  it('an ssh:// URL on another port than 22 is not accepted (it used to be cloned from 22)', async () => {
+    const { normalizeGitUrl } = await import('../src/orchestrator/gitSource.js');
+    expect(normalizeGitUrl('ssh://git@gitea.example.com:2222/me/notes.git')).toBeNull();
+    expect(normalizeGitUrl('ssh://git@gitea.example.com:22/me/notes.git')?.sshUrl).toBe('git@gitea.example.com:me/notes.git');
+    expect(normalizeGitUrl('ssh://git@gitea.example.com/me/notes.git')?.repoName).toBe('notes');
+  });
+});

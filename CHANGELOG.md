@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.93.0] — 2026-09-28
+
+The rest of the night review's second wave.
+
+### Fixed
+- **Google accounts attached or detached while an agent was stopped or asleep now take effect when it starts or wakes**, not at its next rebuild; a detached account used to stay usable after Start. A connection deleted while its agent was down is taken off at its next start, wake or rebuild.
+- Deleting a Google connection no longer revokes the grant when another account on this machine holds the same Google account (they share one grant); whether the revoke was confirmed is on the trail.
+- The memory search door holds a request's slot until the engine answers, and a caller that hangs up cancels its call: abandoned calls used to pile up past the limits. The engine is replaced when its image or model changes. A Stop that Docker did not carry out is reported as failed.
+- A git data source at `ssh://…:<port>` other than 22 is refused (it was silently cloned from port 22).
+
 ## [2.92.0] — 2026-09-28
 
 The night review's second wave: sign-in, the Docker provider and memory service, the CLI and scripts, connections and files, and usage (see docs/audit-2026-09-28-night.md).

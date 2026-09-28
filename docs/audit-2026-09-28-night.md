@@ -33,7 +33,7 @@ Criticals: agent secrets on the docker command line (readable by every local use
 
 ## Left open, on purpose
 
-- **Second wave, still open:** detaching a Google account from a stopped agent takes effect only at its next rebuild (Start and wake do not re-sync connections); deleting a connection revokes a grant another account may share; a failed revoke leaves a stopped agent's token; `ssh://` URLs with a port lose it; the memory door frees a slot when the client disconnects; the engine is not replaced when its image changes; a Stop of the memory service trusts `docker rm`. Password mode still honours X-Forwarded-For from loopback (fixed buckets now cap it).
+- **Second wave, still open:** password mode still honours X-Forwarded-For from loopback (fixed per-account buckets now cap guessing; dropping it would bring back the shared-bucket bug behind a proxy). Everything else in the second wave was fixed in v2.92.0 and v2.93.0.
 
 - **Doorman listens on every interface.** It also answers on Docker's default bridge. Only an agent still on that bridge could reach it, and on the Spark nothing but Hatchabot's own doorman and memory door is there (checked 2026-09-28). Binding only the jail address would break the published console port, so this needs a live test before it changes.
 - **Checkpointing rebuilds hold a rebuild slot while they wait for the checkpoint gate.** A throughput issue during a source switch of many agents, not a correctness one.

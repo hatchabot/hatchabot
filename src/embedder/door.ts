@@ -52,7 +52,11 @@ export function doorScript(): string {
     ' if(inflight>=MAX_INFLIGHT||(inflightBy.get(agent)||0)>=maxInflight(agent)){send(res,429,{error:"busy"});req.resume();return;}',
     ' inflight++;inflightBy.set(agent,(inflightBy.get(agent)||0)+1);let released=false;',
     ' const release=()=>{if(released)return;released=true;inflight--;inflightBy.set(agent,Math.max(0,(inflightBy.get(agent)||1)-1));};',
-    ' res.on("close",release);',
+    // The slot is held until the upstream call settles, and a caller that
+    // hangs up aborts that call: releasing on close alone let abandoned
+    // embedding calls pile past the caps (night review, 2026-09-28).
+    ' const ac=new AbortController();let upstream=false;',
+    ' res.on("close",()=>{if(upstream){if(!res.writableEnded)ac.abort();}else release();});',
     ' const chunks=[];let size=0,over=false;',
     ' req.on("data",c=>{if(over)return;size+=c.length;if(size>MAX_BODY){over=true;send(res,413,{error:"body too large"});req.destroy();}else chunks.push(c);});',
     ' req.on("error",()=>{});',
@@ -60,12 +64,13 @@ export function doorScript(): string {
     '  try{const j=JSON.parse(raw.toString("utf8"));if(Array.isArray(j.input))n=j.input.length;}catch(e){send(res,400,{error:"bad json"});return;}',
     '  if(n>MAX_INPUTS){send(res,413,{error:"too many inputs"});return;}',
     '  try{const h={"content-type":"application/json"};const k=upkey();if(k)h.authorization="Bearer "+k;',
-    '   const r=await fetch(UP+"/v1/embeddings",{method:"POST",headers:h,body:raw,signal:AbortSignal.timeout(TIMEOUT)});',
+    '   upstream=true;const r=await fetch(UP+"/v1/embeddings",{method:"POST",headers:h,body:raw,signal:AbortSignal.any([ac.signal,AbortSignal.timeout(TIMEOUT)])});',
     '   const body=Buffer.from(await r.arrayBuffer());',
     '   res.writeHead(r.status,{"content-type":r.headers.get("content-type")||"application/json"});res.end(body);',
     '   console.log(JSON.stringify({agent,n,bytes:raw.length,ms:Date.now()-started,status:r.status}));}',
     '  catch(e){send(res,502,{error:"embedder unavailable"});',
     '   console.log(JSON.stringify({agent,n,bytes:raw.length,ms:Date.now()-started,error:String((e&&e.name)||e)}));}',
+    '  finally{release();}',
     ' });',
     '});',
     'server.listen(Number(process.env.EMBED_DOOR_PORT||8093),"0.0.0.0",()=>{console.log(JSON.stringify({listening:server.address().port}));});',

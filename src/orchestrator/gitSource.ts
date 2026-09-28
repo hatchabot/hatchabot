@@ -38,7 +38,9 @@ export function normalizeGitUrl(input: string): NormalizedGit | null {
   // would reach in-container ssh/ssh-keyscan as an option, not a hostname.
   let m =
     /^git@([a-z0-9][a-z0-9.-]*):([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
-    /^ssh:\/\/git@([a-z0-9][a-z0-9.-]*)(?::\d+)?\/([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
+    // Port 22 only: another port was accepted and silently dropped, so the
+    // clone went to 22 and failed as "couldn't reach" (night review).
+    /^ssh:\/\/git@([a-z0-9][a-z0-9.-]*)(?::22)?\/([^\s]+?)(?:\.git)?\/?$/i.exec(s) ||
     /^https?:\/\/([a-z0-9][a-z0-9.-]*)\/([^\s]+?)(?:\.git)?\/?$/i.exec(s);
   if (m) {
     host = m[1];

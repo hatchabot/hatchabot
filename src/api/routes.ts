@@ -112,7 +112,7 @@ import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAc
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
-  dematerializeConnection, exchangeGoogleCode, googleAuthUrl, materializeConnection,
+  dematerializeConnection, exchangeGoogleCode, googleAuthUrl, materializeConnection, syncConnections,
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
@@ -2147,6 +2147,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   const clearPinsWhenUp = (a: Agent): void => {
     if (!a.runtimeRef) return;
     void clearStaleRuntimePinsWhenUp(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => {});
+    // Google accounts attached or detached while it was stopped or asleep take
+    // effect now, not at its next rebuild: a detached account used to stay
+    // usable after Start (night review, 2026-09-28). Only for owners who have any.
+    if (store.listConnections(a.ownerId).length || store.connectionRemovals(a.id).length) {
+      const ref = a.runtimeRef;
+      void syncConnections(connSyncDeps(a.hostId), a.id, ref).catch((err: unknown) => trace(a.id)('connection.sync_failed', { error: String(err).slice(0, 200) }));
+    }
   };
   // Hibernation: the idle sweep and the Telegram wake poll (hibernate.ts).
   const hibernateDeps: HibernateDeps = {
@@ -7430,13 +7437,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const a = store.getAgent(aid);
       if (a?.state === 'RUNNING' && a.runtimeRef) {
         await dematerializeConnection(connSyncDeps(a.hostId), { id: a.id, runtimeRef: a.runtimeRef }, conn.email);
+      } else if (a) {
+        // Down now: its next start, wake or rebuild takes the account off.
+        store.addConnectionRemoval(a.id, conn.email);
       }
     }
+    // Not revoked while another account holds the same Google account: both
+    // share one grant for this install's client, and revoking ends it for
+    // them too (night review, 2026-09-28).
+    const shared = store.connectionEmailHeldElsewhere(conn.kind, conn.email, conn.ownerId);
     const token = await secrets.get(conn.secretRef).catch(() => null);
-    if (token) await revokeGoogleToken(token, oauthFetch);
+    const revoked = token && !shared ? await revokeGoogleToken(token, oauthFetch) : false;
     await secrets.delete(conn.secretRef).catch(() => {});
     store.deleteConnection(conn.id);
-    trace()('connection.unlinked', { email: conn.email });
+    trace()('connection.unlinked', { email: conn.email, revoked, keptForOtherAccount: shared });
     return { removed: true };
   });
 

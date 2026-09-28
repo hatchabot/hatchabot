@@ -202,6 +202,11 @@ export class Store {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS connections_owner_email
         ON connections (owner_id, kind, email);
+      -- A deleted connection still materialized on a stopped agent: the next
+      -- sync (start, wake, rebuild) removes it (night review, 2026-09-28).
+      CREATE TABLE IF NOT EXISTS connection_removals (
+        agent_id TEXT NOT NULL, email TEXT NOT NULL, PRIMARY KEY (agent_id, email)
+      );
       CREATE TABLE IF NOT EXISTS agent_connections (
         agent_id TEXT NOT NULL, connection_id TEXT NOT NULL,
         gmail_no_send INTEGER NOT NULL DEFAULT 0,
@@ -819,7 +824,7 @@ export class Store {
     // kept counting a deleted agent for days), claim windows (they carry an
     // invitee's @handle) and the lost-context note. Tables that may not exist
     // yet on an old database are skipped.
-    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset'] as const) {
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset', 'connection_removals'] as const) {
       try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
       catch (err) { if (!/no such table/.test(String(err))) throw err; }
     }
@@ -2734,6 +2739,20 @@ export class Store {
     return (this.db.prepare(`SELECT * FROM connections WHERE owner_id = ? ORDER BY email`).all(ownerId) as any[]).map((r) => ({
       id: r.id, kind: r.kind, email: r.email, services: JSON.parse(r.services ?? '[]'), createdAt: r.created_at,
     }));
+  }
+
+  /** Does another account hold this Google account too? They share one grant for the install's client: revoking it would cut them off. */
+  connectionEmailHeldElsewhere(kind: string, email: string, ownerId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM connections WHERE kind = ? AND email = ? COLLATE NOCASE AND owner_id != ? LIMIT 1`).get(kind, email, ownerId);
+  }
+  addConnectionRemoval(agentId: string, email: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO connection_removals (agent_id, email) VALUES (?, ?)`).run(agentId, email);
+  }
+  connectionRemovals(agentId: string): string[] {
+    return (this.db.prepare(`SELECT email FROM connection_removals WHERE agent_id = ?`).all(agentId) as Array<{ email: string }>).map((r) => r.email);
+  }
+  clearConnectionRemoval(agentId: string, email: string): void {
+    this.db.prepare(`DELETE FROM connection_removals WHERE agent_id = ? AND email = ?`).run(agentId, email);
   }
 
   deleteConnection(id: string): void {

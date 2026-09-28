@@ -224,6 +224,33 @@ describe('attach / detach / remove', () => {
     ).toBe(true);
   });
 
+  it('a detach while the agent was stopped takes effect at Start, not at the next rebuild (night review)', async () => {
+    const w = await connectedWorld();
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    await w.provider.stop(ref);
+    w.store.setAgentState('a1', 'STOPPED');
+    w.provider.execResponses.set('sh', { code: 0, stdout: JSON.stringify({ accounts: [{ email: 'chris@example.com' }] }), stderr: '' });
+    const start = await w.f.inject({ method: 'POST', url: '/v1/agents/a1/start', headers: H });
+    expect(start.statusCode, start.body).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(w.provider.execLog.some((c) => c[0] === 'sh' && String(c[1] ?? '').includes('gog auth remove --force -- "chris@example.com"'))).toBe(true);
+  });
+
+  it('a connection deleted while its agent was stopped comes off at Start (night review)', async () => {
+    const w = await connectedWorld();
+    const conn = w.store.listConnections(OWNER)[0]!;
+    w.store.attachConnection('a1', conn.id, false);
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    await w.provider.stop(ref);
+    w.store.setAgentState('a1', 'STOPPED');
+    expect((await w.f.inject({ method: 'DELETE', url: `/v1/connections/${conn.id}`, headers: H })).statusCode).toBe(200);
+    expect(w.store.connectionRemovals('a1')).toEqual([conn.email]);
+    expect((await w.f.inject({ method: 'POST', url: '/v1/agents/a1/start', headers: H })).statusCode).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(w.provider.execLog.some((c) => c[0] === 'sh' && String(c[1] ?? '').includes(`gog auth remove --force -- "${conn.email}"`))).toBe(true);
+    expect(w.store.connectionRemovals('a1')).toEqual([]);
+  });
+
   it('syncConnections leaves a SELF-connected account (not in the vault) alone', async () => {
     const { provider, store, secrets } = await connectedWorld();
     // An account the agent connected itself in chat — not an owner vault entry.

@@ -112,13 +112,14 @@ export async function exchangeGoogleCode(
 }
 
 /** Best-effort revoke at Google when a connection is removed from the vault. */
-export async function revokeGoogleToken(refreshToken: string, fetchImpl: typeof fetch = fetch): Promise<void> {
-  await fetchImpl('https://oauth2.googleapis.com/revoke', {
+export async function revokeGoogleToken(refreshToken: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  const r = await fetchImpl('https://oauth2.googleapis.com/revoke', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ token: refreshToken }).toString(),
     signal: AbortSignal.timeout(10_000),
-  }).catch(() => {});
+  }).catch(() => undefined);
+  return !!r?.ok;
 }
 
 /**
@@ -283,6 +284,12 @@ export async function syncConnections(
   // otherwise outlive the attachment across a rebuild. Scope strictly to the
   // owner's own vault emails, so an account the AGENT self-connected in chat
   // (not a platform connection) is never touched (audit 2026-09-08).
+  // Connections deleted while this agent was down: gone from the vault, so
+  // the vault check below no longer knows them (night review, 2026-09-28).
+  for (const email of deps.store.connectionRemovals(agentId)) {
+    if (!attachedEmails.has(email)) await dematerializeConnection(deps, { id: agentId, runtimeRef }, email);
+    deps.store.clearConnectionRemoval(agentId, email);
+  }
   try {
     const vaultEmails = new Set(deps.store.listConnections(agent.ownerId).map((c) => c.email));
     const res = await deps.provider.execShell(runtimeRef, 'gog auth list --json 2>/dev/null || true');
