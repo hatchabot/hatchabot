@@ -470,3 +470,37 @@ describe('an on-demand rename answers honestly', () => {
     expect(pool.pendingName('bot')).toBeUndefined();
   });
 });
+
+describe('Change bot and moves: the pool (night review, 2026-09-27)', () => {
+  it('a swap never gets its own leased bot back, and a swapped or moved release sends no "removed" notice', async () => {
+    const sent: string[] = [];
+    const recorder = (async (url: any, init: any) => {
+      if (String(url).includes('/sendMessage')) sent.push(String(init?.body ?? ''));
+      return new Response('{"ok":true}');
+    }) as unknown as typeof fetch;
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE memberships (agent_id TEXT, channel_user_id TEXT, status TEXT)`);
+    db.prepare(`INSERT INTO memberships VALUES ('a1', '4242', 'active')`).run();
+    const pool = new TelegramPoolProvisioner(db, new MemSecrets(), { fetchImpl: recorder });
+    await pool.addToPool('bota', 'tok-a');
+    await pool.addToPool('botb', 'tok-b');
+    const first = await pool.provision(REQ);
+    expect(first.accountId).toBe('bota');
+    // The idempotent lease would hand bota back; the exclusion takes the other.
+    const fresh = await pool.provision({ ...REQ, exclude: ['BotA'] });
+    expect(fresh.accountId).toBe('botb');
+    sent.length = 0;
+    await pool.release('bota', { reason: 'swapped', agentId: 'a1' });
+    expect(sent.filter((b) => b.includes('removed'))).toEqual([]);
+    // Nothing else to swap to: exhausted, never the excluded bot.
+    await expect(pool.provision({ agentId: 'a2', agentName: 'X', slug: 'x', exclude: ['bota'] })).rejects.toBeInstanceOf(PoolExhaustedError);
+    // A moved bot: no farewell either.
+    sent.length = 0;
+    await pool.release('botb', { reason: 'moved' });
+    expect(sent).toEqual([]);
+    // An ordinary delete still says goodbye.
+    const again = await pool.provision(REQ);
+    await pool.release(again.accountId, { agentId: 'a1' });
+    expect(sent.some((b) => b.includes('removed'))).toBe(true);
+  });
+});

@@ -247,6 +247,10 @@ export async function exportAgent(
     await provider.stop(agent.runtimeRef);
     store.setAgentState(agentId, 'STOPPED');
   }
+  // A sleeping agent stays down as an ordinary stopped one: asleep, the wake
+  // poll here kept reading its bot and started it the moment a message came,
+  // next to the copy that now answers it elsewhere (night review, 2026-09-27).
+  if (agent.hibernatedAt) store.setHibernated(agentId, null);
 
   // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
   // which owns its own undo) would strand a running agent silently STOPPED —
@@ -480,6 +484,12 @@ async function importAgentInner(
   if (manifest.channel && store.findAgentUsingAccount(manifest.channel.accountId)) {
     throw new TransferError(
       `Bot @${manifest.channel.accountId} is already wired to an agent here.`,
+    );
+  }
+  if (manifest.channel && store.telegramPoolHas(manifest.channel.accountId)) {
+    throw new TransferError(
+      `Bot @${manifest.channel.accountId} is a spare bot in this machine's pool, where the next new agent could take it. ` +
+        'Remove it from the pool first (⚙ Settings → Telegram), then import again.',
     );
   }
 

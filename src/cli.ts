@@ -328,14 +328,6 @@ function configPath(): string {
   return join(homedir(), '.config', 'hatchabot', 'env');
 }
 
-/** Read side: prefer the new path, fall back to the pre-rename ~/.config/agentclaw/env. */
-function existingConfigPath(): string {
-  const modern = configPath();
-  if (existsSync(modern)) return modern;
-  const legacy = join(homedir(), '.config', 'agentclaw', 'env');
-  return existsSync(legacy) ? legacy : modern;
-}
-
 function writeConfigValue(key: string, value: string): void {
   const path = configPath();
   let lines: string[] = [];
@@ -407,42 +399,6 @@ function fail(msg: string): never {
 /** <repo> root, from this file's location (<repo>/src/cli.ts). */
 function repoDir(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..');
-}
-
-/** Run `systemctl --user …`, never throwing — returns exit code + output. */
-function systemctlUser(args: string[]): { code: number; out: string } {
-  try {
-    const out = execFileSync('systemctl', ['--user', ...args], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    return { code: 0, out: out.trim() };
-  } catch (e) {
-    const err = e as { status?: number; stdout?: string; stderr?: string };
-    return { code: err.status ?? 1, out: (err.stdout || err.stderr || '').toString().trim() };
-  }
-}
-
-/** Template deploy/<unit> into ~/.config/systemd/user and enable it now. */
-function installUserUnit(unitName: string): boolean {
-  try {
-    const tmpl = readFileSync(join(repoDir(), 'deploy', unitName), 'utf8');
-    const unit = tmpl
-      .replace(/__HATCHABOT_DIR__/g, repoDir())
-      .replace(/__HATCHABOT_PATH__/g, process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin');
-    const dest = join(homedir(), '.config', 'systemd', 'user', unitName);
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, unit);
-    systemctlUser(['daemon-reload']);
-    return systemctlUser(['enable', '--now', unitName]).code === 0;
-  } catch {
-    return false;
-  }
-}
-
-/** Single-quote for a systemd EnvironmentFile / shell .env line. */
-function envQuote(v: string): string {
-  return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
 // Every flag the CLI knows. An unknown one is an error, not a guess: the old

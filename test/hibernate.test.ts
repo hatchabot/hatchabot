@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import type { Agent } from '../src/domain/types.js';
 import { hibernateAfterMs, hibernateAgent, hibernateBlocker, hibernateSweep, resetHibernateState, wakeAgent, wakeSweep, WAKE_GIVE_UP, type HibernateDeps } from '../src/orchestrator/hibernate.js';
 import { as, makeWorld, seedRunningAgent, type World } from './support/world.js';
 

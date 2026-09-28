@@ -1,4 +1,4 @@
-import { ensureOpsServer, opsPort } from '../ops/opsServer.js';
+import { ensureOpsServer } from '../ops/opsServer.js';
 import { clearOpsDrift } from '../ops/opsDrift.js';
 import { randomBytes } from 'node:crypto';
 import { createHash, randomUUID } from 'node:crypto';

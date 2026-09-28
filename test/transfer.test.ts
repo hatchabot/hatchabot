@@ -389,3 +389,26 @@ describe('the 30th audit: an export says what it leaves behind', () => {
     expect((await exportAgent(src.deps, 'a1')).dropped).toEqual(['discord']);
   });
 });
+
+describe('night review, 2026-09-27', () => {
+  it('a downloaded sleeping agent stays down as a plain stopped one (the wake poll would start it beside its copy)', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    await src.provider.stop(ref);
+    src.store.setAgentState('a1', 'STOPPED');
+    src.store.setHibernated('a1', new Date().toISOString(), 5);
+    await exportAgent(src.deps, 'a1');
+    expect(src.store.getAgent('a1')!.hibernatedAt ?? null).toBeNull();
+  });
+  it('an import naming a bot that is a spare in this machine\'s pool is refused', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const dst = await installation('importer');
+    const { TelegramPoolProvisioner } = await import('../src/channels/telegramPool.js');
+    const pool = new TelegramPoolProvisioner((dst.store as any).db, dst.secrets, { fetchImpl: (async () => new Response('{"ok":true}')) as any });
+    await pool.addToPool('KitchenBot', 'tok-k');
+    await expect(importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => 'kitchenbot' })).rejects.toThrow(/spare bot in this machine's pool/);
+    expect(dst.store.listAllActiveAgents()).toHaveLength(0);
+  });
+});

@@ -2,6 +2,31 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.90.0] — 2026-09-28
+
+A night review in six areas (provisioning, moves, the database, chat apps, the manager's tools, the web page). This release fixes what it found in the chat apps, moves, the manager's tools and the page; the rest follows.
+
+### Fixed
+- **Change bot on a pool bot gave the agent its own bot back**, then freed it while the agent still used it: the next new agent could take it, and two agents answered one bot. The swap now always takes a different spare, and says nothing about "removed" to the members it has just told where to go.
+- **Importing a Download could wire a bot that is a spare in this machine's pool**, so the next new agent took it too. The import and the move-here check refuse it and say to remove it from the pool first. The database's one-agent-per-bot rule now ignores letter case, as Telegram does.
+- **Moving a pool-bot agent to another Hatchabot told its members "This agent has been removed"** through the bot now answering on the other machine. It is retired here quietly.
+- **The bot census (`hatchabot bots --live`) and workspace inspect deleted Telegram messages** queued for stopped or sleeping agents: the probe asked with a negative offset, which tells Telegram to forget them. It now confirms nothing.
+- A refused "That's me" had already let the person in, with no member row to remove them by. Every check now comes before the approval, on Telegram, Discord and Slack.
+- Removing a member while their agent is archived now also clears their Discord/Slack approval, so restoring the agent does not let them back in.
+- Removed Slack/Discord members no longer count as "known" (their knocks reached the owner). A person who joined someone else's agent under their own account can say "That's me" on their own agent.
+- Switching from password mode to family accounts now carries the owner's Slack/Discord links, parked Discord/Slack bots, the manager's pending cards and the Telegram link to the new account.
+- Downloading a sleeping agent leaves it an ordinary stopped one: asleep, it could wake here beside its copy.
+- Deleting an agent records who chatted with its bot and says goodbye to them (a pasted bot had neither); deleting the left-behind copy of a moved agent no longer keeps its live bot token.
+- A rebuild waiting its turn now checks again when its turn comes: it is skipped if the agent moved, was deleted or archived, or was stopped or put to sleep meanwhile. Delete and Archive call off a queued rebuild instead of waiting for it.
+- Agent settings: every refusal now comes before the first change (a valid icon sent with an image you may not pin used to keep the icon and answer 403).
+- **The manager's web reader** could be pointed at this machine or its network through an IPv4 address written as IPv6 (`[::ffff:7f00:1]`), a DNS answer that changed between check and fetch, or an endless page. Each address it dials is checked, and pages are cut at 1 MB while streaming.
+- **The manager's cards**: a scheduled task's card shows its whole message (it showed 300 characters of up to 4000); a card's names come only from what the tool resolved, never from the model's own arguments; ids of `.` or `..` are refused; set_peers shows only the grants the server keeps; approving a member names who it admits; deleting a base image with images built on it is refused before a card; confirm and cancel notes quote the card's text.
+- The manager cannot be set up on (or switched to) a local model, which its locked-down network cannot reach.
+- The manager's door counts connection tunnels per agent and closes idle ones after ten minutes; old proposals are swept.
+- A knock already pushed to the owner is not pushed again after one failed read.
+- **The page**: the file editor cannot save over a file it failed to load, or into another agent after a quick switch; bulk Rebuild skips stopped and sleeping agents, as it says; the bot-token form shows once; the "may act" warning names the right agent; Clear peaks no longer reports an error after it worked; Share a copy shows a refusal as a message; "No Telegram" resets each time New agent opens; several tabs no longer show the previous agent's data after a quick switch; the Resources cap warning shows its colour; Move all says how many agents it left on the shared service; the classic look keeps a half-typed plan.
+- Dead code removed from the page (the old Telegram panel's handlers) and from the server.
+
 ## [2.89.6] — 2026-09-27
 
 ### Added

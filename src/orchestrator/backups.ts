@@ -8,7 +8,6 @@
  */
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';

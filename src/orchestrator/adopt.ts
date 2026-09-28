@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
 import { existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import type { Store } from '../store/store.js';
@@ -312,8 +311,10 @@ export function findExistingBot(
  * one token is not a clean failure, it is messages vanishing at random into
  * whichever copy won the race.
  *
- * offset=-1 peeks at the newest update without acknowledging it, so a live
- * conversation loses nothing.
+ * No offset: that returns the waiting updates and confirms none of them. A
+ * negative offset — what this used to send — tells Telegram to FORGET every
+ * update before it, so a census or an inspect of a stopped or sleeping
+ * agent's bot deleted the messages queued for it (night review, 2026-09-27).
  */
 export type PollState = 'busy' | 'quiet' | 'unknown';
 
@@ -331,7 +332,7 @@ export async function botPollState(
 ): Promise<PollState> {
   try {
     const res = await fetchImpl(
-      `https://api.telegram.org/bot${botToken}/getUpdates?offset=-1&limit=1&timeout=0`,
+      `https://api.telegram.org/bot${botToken}/getUpdates?limit=1&timeout=0`,
       { signal: AbortSignal.timeout(5000) },
     );
     if (res.status === 409) return 'busy';

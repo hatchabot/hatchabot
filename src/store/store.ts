@@ -700,9 +700,19 @@ export class Store {
     // check (each waiting on the platform's verify) both inserted, and two
     // containers then polled one token (2026-09-25). The database is the
     // last check; insertChannel turns the refusal into ChannelTakenError.
+    // A deleted agent keeps no bot: remnants from before delete scrubbed its
+    // channel rows would otherwise block the index below for ever.
+    this.db.exec(`DELETE FROM channels WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED')`);
     try {
       this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS channels_kind_account ON channels (kind, account_id)`);
     } catch { /* duplicate rows: leave the index off rather than refuse to start */ }
+    // Telegram names are case-insensitive: @KitchenBot and @kitchenbot are one
+    // bot, and the pool stores names lower-case (night review, 2026-09-27).
+    try {
+      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS channels_kind_account_ci ON channels (kind, account_id COLLATE NOCASE)`);
+    } catch (err) {
+      console.warn(`[store] one-agent-per-bot index (any case) not created: ${String((err as Error)?.message ?? err)}`);
+    }
     // The vault health view looks up attachments by connection_id (not the PK's
     // leading agent_id column), so give that its own index.
     this.db.exec(`CREATE INDEX IF NOT EXISTS agent_connections_conn ON agent_connections (connection_id)`);
@@ -1374,6 +1384,19 @@ export class Store {
    * against wiring one bot token into two agents — Telegram delivers each
    * message to exactly one poller, so a double-use flip-flops between them.
    */
+  /**
+   * Is this Telegram bot a row in this machine's pool (spare or leased)? An
+   * import or rehost that wires it too would give two agents one token: the
+   * pool hands it out again at the next create (night review, 2026-09-27).
+   */
+  telegramPoolHas(username: string): boolean {
+    try {
+      return !!this.db.prepare(`SELECT 1 FROM telegram_pool WHERE username = ? COLLATE NOCASE`).get(username);
+    } catch {
+      return false; // no pool table in an isolated harness
+    }
+  }
+
   findAgentUsingAccount(accountId: string, kind: ChannelKind = 'telegram'): Agent | undefined {
     const row = this.db
       .prepare(
@@ -1711,6 +1734,15 @@ export class Store {
         `UPDATE agent_shares SET to_owner = ? WHERE to_owner = ?`,
         `UPDATE mgmt_heartbeat SET owner_id = ? WHERE owner_id = ?`,
         `UPDATE derived_images SET created_by = ? WHERE created_by = ?`,
+        // Night review, 2026-09-27: the owner's Slack/Discord links (else the
+        // next rebuild leaves them out of their own agents' allowlists), parked
+        // Discord/Slack bots, the manager's pending cards, home-screen "seen"
+        // marks, and the manager's door token.
+        `UPDATE OR IGNORE member_identities SET user_id = ? WHERE user_id = ?`,
+        `UPDATE discord_bots SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE mgmt_proposals SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE OR IGNORE agent_seen SET owner_id = ? WHERE owner_id = ?`,
+        `UPDATE ops_tokens SET owner_id = ? WHERE owner_id = ?`,
       ]) {
         try {
           rows += this.db.prepare(sql).run(owner, localOwner).changes;
@@ -1720,6 +1752,15 @@ export class Store {
           if (!/no such table/.test(String(err))) throw err;
         }
       }
+      // The account-level Telegram link: onto the new row if it has none, or
+      // the row itself moves; the old id keeps no link (else "That's me" on
+      // the owner's own Telegram reads as somebody else's).
+      this.db
+        .prepare(`UPDATE accounts SET telegram_user_id = (SELECT a2.telegram_user_id FROM accounts a2 WHERE a2.owner_id = ?)
+                   WHERE owner_id = ? AND telegram_user_id IS NULL`)
+        .run(localOwner, owner);
+      rows += this.db.prepare(`UPDATE OR IGNORE accounts SET owner_id = ? WHERE owner_id = ?`).run(owner, localOwner).changes;
+      this.db.prepare(`UPDATE accounts SET telegram_user_id = NULL WHERE owner_id = ?`).run(localOwner);
       return rows;
     });
     return adopt(newOwnerId);
@@ -3494,7 +3535,10 @@ export class Store {
     }
     const r = this.db
       .prepare(
+        // Only people still let in: a removed member's identity row stays,
+        // and it made their knocks "known" (night review, 2026-09-27).
         `SELECT 1 FROM member_identities i JOIN agents a ON a.id = i.agent_id
+           JOIN memberships m ON m.agent_id = i.agent_id AND m.user_id = i.user_id AND m.status = 'active'
           WHERE a.owner_id = ? AND i.kind = ? AND i.channel_user_id = ? LIMIT 1`,
       )
       .get(ownerId, kind, channelUserId);
@@ -3627,6 +3671,17 @@ export class Store {
    * Telegram binding: never overwrite a different identity already bound to
    * this member, never take one that belongs to another active member.
    */
+  /** Would bindMemberIdentity succeed? Asked before anything is approved, so a refusal changes nothing. */
+  canBindMemberIdentity(agentId: string, userId: string, kind: Exclude<ChannelKind, 'telegram'>, channelUserId: string): boolean {
+    const holder = this.getMemberByIdentity(agentId, kind, channelUserId);
+    if (holder && holder.userId !== userId) return false;
+    if (!this.db.prepare(`SELECT 1 FROM memberships WHERE agent_id = ? AND user_id = ? AND status = 'active'`).get(agentId, userId)) return false;
+    const mine = this.db
+      .prepare(`SELECT channel_user_id FROM member_identities WHERE agent_id = ? AND user_id = ? AND kind = ?`)
+      .get(agentId, userId, kind) as { channel_user_id: string } | undefined;
+    return !mine || mine.channel_user_id === channelUserId;
+  }
+
   bindMemberIdentity(agentId: string, userId: string, kind: Exclude<ChannelKind, 'telegram'>, channelUserId: string): boolean {
     const holder = this.getMemberByIdentity(agentId, kind, channelUserId);
     if (holder && holder.userId !== userId) return false;
@@ -3652,7 +3707,9 @@ export class Store {
    */
   /** Is this Telegram id somebody OTHER than this owner's: a member on another owner's agent, or another account's link? */
   telegramBoundOutside(channelUserId: string, ownerId: string): boolean {
-    if (this.db.prepare(`SELECT 1 FROM memberships m JOIN agents a ON a.id = m.agent_id WHERE m.channel_user_id = ? AND a.owner_id != ? LIMIT 1`).get(channelUserId, ownerId)) return true;
+    // A seat on someone else's agent held by THIS account (they joined it
+    // signed in) is still them, not somebody else (night review, 2026-09-27).
+    if (this.db.prepare(`SELECT 1 FROM memberships m JOIN agents a ON a.id = m.agent_id WHERE m.channel_user_id = ? AND a.owner_id != ? AND m.user_id != ? LIMIT 1`).get(channelUserId, ownerId, ownerId)) return true;
     return !!this.db.prepare(`SELECT 1 FROM accounts WHERE telegram_user_id = ? AND owner_id != ? LIMIT 1`).get(channelUserId, ownerId);
   }
   channelUserBoundAnywhere(kind: ChannelKind, channelUserId: string): boolean {

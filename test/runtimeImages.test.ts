@@ -240,3 +240,27 @@ describe('no way back across the 2026.8 line', () => {
     expect(same.statusCode).toBe(200);
   });
 });
+
+describe('agent settings: every refusal before the first write', () => {
+  it('a refused image pin or memory cap leaves the icon, name and files cap that came with it unchanged', async () => {
+    const { f, store, provider } = await world();
+    const OTHER = 'user-other';
+    const { runtimeRef } = await provider.provision({ agentId: 'a3', slug: 'shed', workspace: { files: {}, configPatch: { agentId: 'a3', authMode: 'api-key' } }, env: {} });
+    store.insertAIProfile({ id: 'p2', ownerId: OTHER, name: 'Mine', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p2', createdAt: 'now' });
+    store.insertAgent({ id: 'a3', ownerId: OTHER, name: 'Shed', slug: 'shed', state: 'PROVISIONING', aiProfileId: 'p2', hostId: 'h1', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
+    store.setAgentRuntimeRef('a3', runtimeRef); store.setAgentState('a3', 'RUNNING'); store.setAgentState('a3', 'STOPPED');
+    const before = store.getAgent('a3')!;
+    const pin = await f.inject({ method: 'PATCH', url: '/v1/agents/a3', headers: { 'x-hatchabot-owner': OTHER }, payload: { icon: '🐱', name: 'Barn', filesMaxMb: 20, image: 'hatchabot-runtime:2026.9.4' } });
+    expect(pin.statusCode).toBe(403);
+    const cap = await f.inject({ method: 'PATCH', url: '/v1/agents/a3', headers: { 'x-hatchabot-owner': OTHER }, payload: { icon: '🐱', memoryCap: '64g' } });
+    expect(cap.statusCode).toBe(403);
+    const after = store.getAgent('a3')!;
+    expect(after.icon ?? null).toBe(before.icon ?? null);
+    expect(after.name).toBe('Shed');
+    expect(after.filesMaxMb ?? null).toBe(before.filesMaxMb ?? null);
+    expect(after.memoryCap ?? null).toBe(before.memoryCap ?? null);
+    // The same icon alone goes through.
+    expect((await f.inject({ method: 'PATCH', url: '/v1/agents/a3', headers: { 'x-hatchabot-owner': OTHER }, payload: { icon: '🐱' } })).statusCode).toBe(200);
+    expect(store.getAgent('a3')!.icon).toBe('🐱');
+  });
+});

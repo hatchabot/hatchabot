@@ -150,14 +150,21 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
   // The allowlisting proxy. Anything not CONNECT host:443 to a listed host is
   // refused; plain-HTTP proxying is never offered. A bounded number of tunnels
   // at a time: a confused agent must not be able to hold the box's sockets open.
+  //
+  // The cap is per manager (per proxy key), not per door: one account's
+  // manager holding every tunnel used to leave every other account's manager
+  // with 429 on its AI and Telegram (night review, 2026-09-27). A tunnel with
+  // no traffic either way for OPS_TUNNEL_IDLE_MS is closed.
   const MAX_TUNNELS = Number(process.env.HATCHABOT_OPS_MAX_TUNNELS) || 24;
-  let tunnels = 0;
+  const TUNNEL_IDLE_MS = Number(process.env.HATCHABOT_OPS_TUNNEL_IDLE_MS) || 10 * 60_000;
+  const tunnelsBy = new Map<string, number>();
   server.on('connect', (req, client, head) => {
     const sock = client as net.Socket;
     const deny = (code: string) => { sock.end(`HTTP/1.1 ${code}\r\n\r\n`); };
     sock.on('error', () => {});
     const peer = normalizeIp(sock.remoteAddress);
-    const allowed = handlers.allowedHosts(proxyToken(req.headers['proxy-authorization']));
+    const key = proxyToken(req.headers['proxy-authorization']);
+    const allowed = handlers.allowedHosts(key);
     if (!allowed) return deny('407 Proxy Authentication Required');
     const m = /^([A-Za-z0-9.-]+):(\d+)$/.exec(req.url ?? '');
     if (!m || m[2] !== '443' || !allowed.includes(m[1]!.toLowerCase())) {
@@ -165,21 +172,31 @@ export function createOpsServer(handlers: OpsHandlers): http.Server {
       return deny('403 Forbidden');
     }
     const host = m[1]!;
-    if (tunnels >= MAX_TUNNELS) {
-      log('ops.proxy_busy', { tunnels });
+    const who = key ?? '';
+    if ((tunnelsBy.get(who) ?? 0) >= MAX_TUNNELS) {
+      log('ops.proxy_busy', { tunnels: tunnelsBy.get(who) });
       return deny('429 Too Many Requests');
     }
 
     const openTunnel = () => {
-      tunnels++;
+      // Counted again at open: the peer check is async and several may pass it together.
+      if ((tunnelsBy.get(who) ?? 0) >= MAX_TUNNELS) return deny('429 Too Many Requests');
+      tunnelsBy.set(who, (tunnelsBy.get(who) ?? 0) + 1);
       let closed = false;
-      const done = () => { if (!closed) { closed = true; tunnels--; } };
+      const done = () => {
+        if (closed) return;
+        closed = true;
+        const n = (tunnelsBy.get(who) ?? 1) - 1;
+        if (n > 0) tunnelsBy.set(who, n); else tunnelsBy.delete(who);
+      };
+      sock.setTimeout(TUNNEL_IDLE_MS, () => { sock.destroy(); up.destroy(); done(); });
       const ready = () => {
         sock.write('HTTP/1.1 200 Connection Established\r\n\r\n');
         if (head?.length) up.write(head);
         up.pipe(sock); sock.pipe(up);
       };
       const up = handlers.dial ? handlers.dial(host, 443, ready) : net.connect(443, host, ready);
+      up.setTimeout(TUNNEL_IDLE_MS, () => { up.destroy(); sock.destroy(); done(); });
       up.on('error', () => { deny('502 Bad Gateway'); done(); });
       sock.on('close', () => { up.destroy(); done(); });
       up.on('close', () => { sock.destroy(); done(); });

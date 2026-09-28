@@ -86,6 +86,16 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   const req = requests.find((r) => r.code === opts.code);
   if (!req) throw new AdmitError('That request is no longer pending. Ask them to message again.');
 
+  // Every refusal before the approval: approving first let a refused "That's
+  // me" in anyway, with no member row to remove them by (night review).
+  const owner = store.getAgent(opts.agentId);
+  if (owner && opts.asSelf && store.telegramBoundOutside(req.id, owner.ownerId)) {
+    // "That's me" on an id this machine already knows as SOMEBODY ELSE — a
+    // member of an agent, another account's link — would hand that person
+    // the owner's seat everywhere and their recovery links (30th audit).
+    throw new AdmitError('That Telegram account already belongs to someone on this machine (a member or another account), so it cannot be linked as you.');
+  }
+
   if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code))) {
     throw new AdmitError("Couldn't approve the request — try again.");
   }
@@ -98,12 +108,6 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
   // twice. If this telegram id is the owner's own (known from any of their
   // agents), bind the owner seat instead.
   const agent = store.getAgent(opts.agentId);
-  if (agent && opts.asSelf && store.telegramBoundOutside(req.id, agent.ownerId)) {
-    // "That's me" on an id this machine already knows as SOMEBODY ELSE — a
-    // member of an agent, another account's link — would hand that person
-    // the owner's seat everywhere and their recovery links (30th audit).
-    throw new Error('That Telegram account already belongs to someone on this machine (a member or another account), so it cannot be linked as you.');
-  }
   if (agent && (opts.asSelf || store.knownChannelUserId(agent.ownerId) === req.id)) {
     store.bindMembershipChannelUser(opts.agentId, agent.ownerId, req.id);
     if (opts.asSelf) {
@@ -193,6 +197,10 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
   const requests = await listPairingRequests(provider, opts.runtimeRef, opts.accountId, kind);
   const req = requests.find((r) => r.code === opts.code);
   if (!req) throw new AdmitError('That request is no longer pending. Ask them to message again.');
+  const owner = store.getAgent(opts.agentId);
+  if (owner && opts.asSelf && !store.canBindMemberIdentity(opts.agentId, owner.ownerId, kind, req.id)) {
+    throw new AdmitError('You are already linked to a different account on this channel.');
+  }
   if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code, kind))) {
     throw new AdmitError("Couldn't approve the request — try again.");
   }
@@ -537,8 +545,12 @@ export async function revokeMember(
   for (const kind of Object.keys(ids) as ChannelKind[]) {
     const id = ids[kind]!;
     const channel = store.getChannelForAgent(agentId, kind);
-    if (!channel) continue; // that channel is gone; its config was rewritten without them
-    const acct = kind === 'telegram' ? channel.accountId : CHANNEL_ACCOUNT;
+    // A Telegram bot that is gone takes its account key with it (a restore
+    // gets a different bot). Discord and Slack always use one account key, and
+    // an archived agent gets the same bot back on restore with the volume's
+    // approvals intact — so scrub those even with no channel row (night review).
+    if (!channel && kind === 'telegram') continue;
+    const acct = kind === 'telegram' ? channel!.accountId : CHANNEL_ACCOUNT;
     // Identities and account names only ever reach the script if they are the
     // plain shapes the platforms issue.
     if (!ID_SHAPE[kind].test(id) || !/^[A-Za-z0-9_]{1,64}$/.test(acct)) {

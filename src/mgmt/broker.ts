@@ -389,7 +389,10 @@ export class Broker {
     const agent = rt.agentArg ? await this.#resolve(args.agent) : undefined;
     return {
       agent: agent && { id: agent.id, name: agent.name },
-      input: { ...args },
+      // The model's own `__` keys are dropped: those are the tools' scratch
+      // (names resolved at propose time for the card), and a model that set
+      // __className got a card promising a class the call never assigns.
+      input: Object.fromEntries(Object.entries(args).filter(([k]) => !k.startsWith('__'))),
       resolve: async (ref) => { const a = await this.#resolve(ref); return { id: a.id, name: a.name }; },
       get: (path) => raw.call(this.api, 'GET', path),
     };
@@ -408,19 +411,7 @@ export class Broker {
   async #execRead(name: string, args: Record<string, unknown>): Promise<unknown> {
     const rt = REST_BY_NAME.get(name);
     if (rt) {
-      // A derived image is deleted from its own row, not as a base tag — the
-      // route refuses it, which used to happen only after the owner pressed
-      // Confirm (2026-09-19). Say so while the card is being written, and name
-      // the tool that works. A derived-looking tag with NO row is a leftover
-      // image and stays deletable here.
-      if (name === 'delete_base_image' && typeof args.tag === 'string' && args.tag.includes(':derived-')) {
-        const imgName = args.tag.split(':derived-')[1] ?? '';
-        const { images } = await this.api.listImages();
-        if (images.some((i) => i.name === imgName)) {
-          throw new BrokerError('INVALID_INPUT',
-            `"${args.tag}" is a derived image. Use remove_image with name "${imgName}" — that deletes the image AND forgets its Dockerfile.`);
-        }
-      }
+      await this.#derivedImageGuard(name, args);
       const ctx = await this.#restCtx(rt, args);
       const c = await this.#restCall(rt, ctx);
       return this.#need(this.api.raw).call(this.api, c.method, c.path, c.body);
@@ -516,9 +507,30 @@ export class Broker {
 
   /** Build the concrete Resolved for a mutate, validating inputs up front so a
    *  bad model or code fails BEFORE a confirmation is ever shown. */
+  /**
+   * A derived image is deleted from its own row, not as a base tag — the
+   * route refuses it, which used to happen only after the owner pressed
+   * Confirm (2026-09-19). Say so while the card is being written, and name
+   * the tool that works. A derived-looking tag with NO row is a leftover
+   * image and stays deletable here. delete_base_image is a mutate tool, so
+   * this must run when its card is resolved (it sat on the read path only,
+   * where it never ran — night review, 2026-09-27).
+   */
+  async #derivedImageGuard(name: string, args: Record<string, unknown>): Promise<void> {
+    if (name === 'delete_base_image' && typeof args.tag === 'string' && args.tag.includes(':derived-')) {
+      const imgName = args.tag.split(':derived-')[1] ?? '';
+      const { images } = await this.api.listImages();
+      if (images.some((i) => i.name === imgName)) {
+        throw new BrokerError('INVALID_INPUT',
+          `"${args.tag}" is a derived image. Use remove_image with name "${imgName}" — that deletes the image AND forgets its Dockerfile.`);
+      }
+    }
+  }
+
   async #resolveMutate(name: string, args: Record<string, unknown>): Promise<Resolved> {
     const rt = REST_BY_NAME.get(name);
     if (rt) {
+      await this.#derivedImageGuard(name, args);
       const ctx = await this.#restCtx(rt, args);
       const call = await this.#restCall(rt, ctx);
       return {
@@ -638,7 +650,14 @@ export class Broker {
         if (typeof code !== 'string' || !/^[A-Za-z0-9]{4,16}$/.test(code)) {
           throw new BrokerError('INVALID_INPUT', 'Invalid pairing code.');
         }
-        return { ...base, code };
+        // The card names WHO the code admits: a code alone let a steered
+        // manager file an admit for a stranger the owner could not recognise.
+        const waiting = await this.api.listPairing(base.agentId);
+        const req = waiting.find((p) => p.code.toUpperCase() === code.toUpperCase());
+        if (!req) throw new BrokerError('INVALID_INPUT', `No one is waiting with pairing code ${code} on this agent. list_pending shows who is.`);
+        const m = req.meta ?? {};
+        const who = [[m.firstName, m.lastName].filter(Boolean).join(' '), m.username ? `@${m.username}` : ''].filter(Boolean).join(' ') || 'someone with no name set';
+        return { ...base, code, who };
       }
       case 'remove_member': {
         const userId = args.userId;
@@ -848,7 +867,7 @@ export function summarize(tool: string, r: Resolved): string {
     case 'set_model':
       return `Set "${r.agentName}" model → ${r.model}`;
     case 'approve_member':
-      return `✅ Admit pairing code ${r.code} to "${r.agentName}"`;
+      return `✅ Admit ${r.who ?? 'the person with pairing code ' + r.code} (code ${r.code}) to "${r.agentName}"`;
     case 'remove_member':
       return `Remove member ${r.userId} from "${r.agentName}"`;
     default:

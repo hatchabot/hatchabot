@@ -20,6 +20,8 @@ export interface ChannelProvisionRequest {
   /** Owner opted out of a pool bot for this agent — go straight to the manual
    *  (BotFather walkthrough) path even when the pool has bots. */
   skipPool?: boolean;
+  /** Bots not to hand out, even as this agent's existing lease: Change bot must get a different one. */
+  exclude?: string[];
 }
 
 export interface ProvisionedChannel {
@@ -48,7 +50,13 @@ export class ChannelSetupRequired extends Error {
 
 /** Why an identity is being given up, and on whose behalf. */
 export interface ReleaseOptions {
-  reason?: 'deleted' | 'archived' | 'detached';
+  /**
+   * Why it goes. `swapped` and `moved` send no farewell: a swap has already
+   * told its members where to go, and a moved bot is live elsewhere (the
+   * "removed" notice went out through a bot answering on the peer). `moved`
+   * also leaves the idle name alone — the bot still serves the agent there.
+   */
+  reason?: 'deleted' | 'archived' | 'detached' | 'swapped' | 'moved';
   agentId?: string;
 }
 

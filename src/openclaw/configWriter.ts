@@ -1,5 +1,5 @@
 import { filesMb, FILES_MB_DEFAULT } from '../orchestrator/machineDefaults.js';
-import type { ChannelRooms, OpenClawConfigPatch } from '../providers/provider.js';
+import type { OpenClawConfigPatch } from '../providers/provider.js';
 
 /**
  * openclaw.json is volatile — its schema moves between releases, and a

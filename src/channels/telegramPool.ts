@@ -206,8 +206,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // Idempotent: a retry after a partial failure finds the existing lease.
     const existing = this.db
       .prepare(`SELECT username, secret_ref FROM telegram_pool WHERE leased_to = ?`)
-      .get(req.agentId) as { username: string; secret_ref: string } | undefined;
-    if (existing) return this.#toChannel(existing.username, existing.secret_ref);
+      .all(req.agentId) as Array<{ username: string; secret_ref: string }>;
+    const excluded = new Set((req.exclude ?? []).map((u) => u.toLowerCase()));
+    const kept = existing.find((r) => !excluded.has(r.username.toLowerCase()));
+    if (kept) return this.#toChannel(kept.username, kept.secret_ref);
 
     // Ownership scoping: a user leases only their OWN bots plus shared house
     // bots (owner_id NULL). Another person's token is never touched — its
@@ -218,16 +220,16 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // agent's name — and a bot serving "Tax Advisor" while Telegram still calls
     // it "Condo Adviser" is worse than a bot with a plain name. When every free
     // bot is rate-limited this changes nothing; there is simply no better pick.
-    const free = this.db
-      .prepare(
-        `SELECT username, secret_ref FROM telegram_pool
-         WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)
-         ORDER BY (rename_after IS NOT NULL AND rename_after > ?) ASC,
-                  (owner_id IS NULL) ASC, username LIMIT 1`,
-      )
-      .get(req.ownerId ?? '', new Date().toISOString()) as
-      | { username: string; secret_ref: string }
-      | undefined;
+    const free = (
+      this.db
+        .prepare(
+          `SELECT username, secret_ref FROM telegram_pool
+           WHERE leased_to IS NULL AND (owner_id IS NULL OR owner_id = ?)
+           ORDER BY (rename_after IS NOT NULL AND rename_after > ?) ASC,
+                    (owner_id IS NULL) ASC, username`,
+        )
+        .all(req.ownerId ?? '', new Date().toISOString()) as Array<{ username: string; secret_ref: string }>
+    ).find((r) => !excluded.has(r.username.toLowerCase()));
     if (!free) {
       throw new PoolExhaustedError();
     }
@@ -509,7 +511,10 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // so the honest thing is to mark the end of the conversation: anything above
     // belongs to an agent that no longer has this bot, and if it comes back as
     // something else, that history is not its own.
-    if (departing) await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
+    // A moved bot is live on the other machine under the same agent: no
+    // farewell, and no idle name queued for it (the caller retires the row).
+    if (opts.reason === 'moved') return;
+    if (departing && opts.reason !== 'swapped') await this.#farewell(row.secret_ref, departing, opts.reason ?? 'deleted');
     // The idle name is PARKED, not applied now. Renames are the scarce thing
     // here — Telegram grants roughly one per bot every few hours — and an
     // archive followed by a restore used to spend two of them: one to
@@ -533,7 +538,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
   async #farewell(
     secretRef: string,
     agentId: string,
-    reason: 'deleted' | 'archived' | 'detached',
+    reason: 'deleted' | 'archived' | 'detached' | 'swapped',
   ): Promise<void> {
     try {
       const token = await this.secrets.get(secretRef);

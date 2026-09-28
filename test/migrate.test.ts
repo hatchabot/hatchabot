@@ -94,6 +94,16 @@ describe('preflight', () => {
     expect(a.reasons.join(' ')).toMatch(/already wired/);
   });
 
+  it('refuses a bot that is a spare in this machine\'s pool (any case): two agents would share it', async () => {
+    const w = await world();
+    const { TelegramPoolProvisioner } = await import('../src/channels/telegramPool.js');
+    const pool = new TelegramPoolProvisioner((w.store as any).db, new MemSecrets(), { fetchImpl: (async () => new Response('{"ok":true}')) as any });
+    await pool.addToPool('sparebot', 'tok-s');
+    const a = preflight(w.store, 'o', { slug: 'fresh', accountId: 'SpareBot', vendor: 'anthropic' });
+    expect(a.ok).toBe(false);
+    expect(a.reasons.join(' ')).toMatch(/spare bot in this machine's pool/);
+  });
+
   it('refuses a local-model agent when the destination has no local source', async () => {
     const w = await world(); // only an anthropic profile exists here
     const a = preflight(w.store, 'o', { slug: 'fresh', accountId: 'freshbot', vendor: 'local' });
@@ -261,5 +271,15 @@ describe('migrateAgent', () => {
     const w = await world();
     w.store.setAgentState('a1', 'REBUILDING');
     await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/while it is REBUILDING/);
+  });
+});
+
+describe('one agent per bot, any case (night review, 2026-09-27)', () => {
+  it('a second agent cannot take @KitchenBot as @kitchenbot', async () => {
+    const { ChannelTakenError } = await import('../src/store/store.js');
+    const w = await world();
+    const existing = w.store.listChannelsForAgent('a1')[0]!;
+    w.store.insertAgent({ id: 'a9', ownerId: 'o', name: 'Other', slug: 'other', state: 'STOPPED', aiProfileId: w.store.getAgent('a1')!.aiProfileId, hostId: w.store.getAgent('a1')!.hostId, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    expect(() => w.store.insertChannel({ id: 'c9', agentId: 'a9', kind: 'telegram', accountId: existing.accountId.toUpperCase(), secretRef: 'x', deepLink: 'https://t.me/x', createdAt: 'now' } as any)).toThrow(ChannelTakenError);
   });
 });

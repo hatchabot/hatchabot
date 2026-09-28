@@ -1,12 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z } from 'zod';
 import type { Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
+import { quoteOutput } from '../ops/notify.js';
 import { Broker } from '../mgmt/broker.js';
 import { PendingStore, type PendingConfirm } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
 import { MANIFEST, toolDef } from '../mgmt/tools.js';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { internalHeaders, ownerIdOf } from './principal.js';
 import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
 import { makeOpsWeb, OPS_WEB_TOOLS, type OpsWebDeps } from '../ops/opsWeb.js';
@@ -62,6 +62,11 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       sweep: (now) => store.sweepMgmtProposals(now),
     },
   });
+  // Nothing called sweep(): cards were kept for ever and overdue ones never
+  // marked expired (night review, 2026-09-27). Hourly, off the event loop's books.
+  const proposalSweep = setInterval(() => { try { pendingStore.sweep(); } catch { /* next hour */ } }, 3600_000);
+  proposalSweep.unref?.();
+  app.addHook('onClose', async () => { clearInterval(proposalSweep); });
 
   /**
    * One broker per owner, for CONFIRMING cards. Not a conversation: it holds
@@ -164,10 +169,12 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
     // had happened (2026-09-19). Only its own cards, so a change the owner made
     // elsewhere does not wake it.
     if (rec?.source === 'agent') {
-      const headline = rec.summary.split('\n')[0] ?? rec.tool;
+      // Quoted: the card's words can come from content the agent read, and
+      // raw they could close the note's brackets and speak as Hatchabot.
+      const headline = quoteOutput(rec.summary.split('\n')[0] ?? rec.tool, 300);
       deps.notifyOps?.(ownerId, verb === 'cancel'
         ? `Your owner cancelled the change you filed: "${headline}". It will not happen.`
-        : `Your owner confirmed the change you filed: "${headline}". Hatchabot reports: ${out.text.slice(0, 600)}`);
+        : `Your owner confirmed the change you filed: "${headline}". Hatchabot reports: ${quoteOutput(out.text, 600)}`);
     }
     return { done: out.done, text: out.text };
   };

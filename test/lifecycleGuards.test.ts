@@ -213,7 +213,7 @@ describe('live model change (no rebuild)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json().live).toBe(true);
     // it ran `openclaw models set <provider>/<model>` and no rebuild/provision
-    expect(provider.execLog.some((c) => Array.isArray(c) && c[0] === 'models' && c[1] === 'set')).toBe(true);
+    expect(provider.execLog.slice(before).some((c) => Array.isArray(c) && c[0] === 'models' && c[1] === 'set')).toBe(true);
     expect(store.getAgent('a1')!.appliedModel).toBeTruthy(); // card reflects it now
   });
 });

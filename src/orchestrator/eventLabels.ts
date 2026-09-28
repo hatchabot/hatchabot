@@ -62,6 +62,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'agent.woken': (d) => `woke up: ${String(d.why ?? '')}`.trim(),
   'hibernate.failed': (d) => `could not put it to sleep: ${String(d.error ?? '')}`.trim(),
   'hibernate.wake_failed': (d) => `could not wake it: ${String(d.error ?? '')}`.trim(),
+  'rebuild.skipped': (d) => `a queued rebuild was called off: ${String(d.why ?? '')}`,
   'hibernate.wake_abandoned': (d) => `could not wake it ${String(d.attempts ?? '')} times in a row, so it is just stopped now — press Start to try again: ${String(d.error ?? '')}`.trim(),
   'datasource.key_left': (d) => `could not remove the deploy key of ${String(d.name ?? 'a git source')} from its volume — a rebuild does`,
   'machine.default_set': (d) => `set a machine default: ${String(d.key ?? '')} = ${String(d.value ?? '')}${d.applied ? ` (applied to ${String(d.applied)})` : ''}`,

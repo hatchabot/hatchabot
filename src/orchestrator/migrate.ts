@@ -110,6 +110,8 @@ export function preflight(
   }
   if (store.findAgentUsingAccount(req.accountId)) {
     reasons.push(`Bot @${req.accountId} is already wired to an agent here.`);
+  } else if (store.telegramPoolHas(req.accountId)) {
+    reasons.push(`Bot @${req.accountId} is a spare bot in this machine's pool; remove it from the pool first.`);
   }
 
   const hosts = store.listHosts(ownerId);
@@ -386,10 +388,12 @@ async function migrateAgentInner(
   // leak) NOR be freed for re-lease (which would hand the same token to a new
   // local agent — two pollers). Removing scrubs the local copy and frees the
   // count. Best-effort: the migrate already succeeded; never fail it over this.
-  const pool = (deps.channel as { pool?: { owns(u: string): boolean; release(u: string): Promise<void>; removeFromPool(u: string): Promise<void> } }).pool;
+  const pool = (deps.channel as { pool?: { owns(u: string): boolean; release(u: string, o?: { reason?: 'moved' }): Promise<void>; removeFromPool(u: string): Promise<void> } }).pool;
   if (pool?.owns(channel.accountId)) {
     try {
-      await pool.release(channel.accountId); // clear the lease so remove is allowed
+      // Clear the lease so remove is allowed — quietly: `moved` sends no
+      // "this agent has been removed" through a bot now answering on the peer.
+      await pool.release(channel.accountId, { reason: 'moved' });
       await pool.removeFromPool(channel.accountId);
     } catch (err) {
       log('migrate.pool_retire_failed', { agentId, accountId: channel.accountId, error: String(err) });

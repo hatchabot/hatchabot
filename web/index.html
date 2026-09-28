@@ -3308,7 +3308,6 @@ function openSetupGuide() {
   renderSetup();
   $('setup').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-function closeSetupGuide() { setupOpen = false; renderSetup(); }
 
 function renderSetup() {
   const el = $('setup');
@@ -3771,7 +3770,6 @@ const POOL_UI = {
   slack: { path: '/v1/slack-apps', pfx: 'spool', label: 'Slack', room: 'channel', rooms: 'channels', mark: 'slack', bg: '#4a154b' },
 };
 let discordPool = [], slackPool = [];
-async function loadDiscordPool() { return loadPoolPane('discord'); }
 async function loadPoolPane(kind) {
   const U = POOL_UI[kind]; if (!U) return;
   const el = $(`${U.pfx}List`); if (!el) return;
@@ -3858,16 +3856,6 @@ async function recheckPoolBot(username, btn) {
     toast(r.alive ? `@${username} answers${r.botName ? ` as “${r.botName}”` : ''}.${r.warnings?.length ? ` ⚠ ${r.warnings.join(' ')}` : ''}` : `⚠ ${r.warnings?.[0] || `@${username} does not answer.`}`, 9000);
   } catch (e) { toast(e.message, 8000); }
   finally { btn.disabled = false; }
-}
-async function recheckDiscordPoolBot(id, btn) {
-  btn.disabled = true;
-  try { await api(`/v1/discord-bots/${encodeURIComponent(id)}/recheck`, { method: 'POST', body: {} }); await loadDiscordPool(); }
-  catch (e) { toast(e.message, 8000); btn.disabled = false; }
-}
-async function removeDiscordPoolBot(id, name) {
-  if (!confirm(`Delete ${name} from the pool?\n\nHatchabot discards its stored token. The bot itself still exists — remove it for good in the Discord developer portal.`)) return;
-  try { await api(`/v1/discord-bots/${encodeURIComponent(id)}`, { method: 'DELETE' }); await loadDiscordPool(); }
-  catch (e) { toast(e.message, 10000); }
 }
 
 /**
@@ -5576,7 +5564,9 @@ async function faApply() {
       const bits = [connect ? `${r.agents} agents can now consult each other (${r.grants} grants)` : `grants between ${r.agents} agents removed`];
       if (r.skipped?.length) bits.push(`skipped ${r.skipped.map(x => `${x.name} (${x.reason})`).join(', ')}`);
       let rebuilt = 0;
-      const todo = (r.needRebuild || []).filter(a => a.state === 'RUNNING' || a.state === 'STOPPED');
+      // Only running agents are rebuilt now; a stopped or sleeping one picks
+      // the change up when it next starts (a rebuild would start it).
+      const todo = (r.needRebuild || []).filter(a => a.state === 'RUNNING');
       if ($('faPeersRebuild').checked) {
         for (const a of todo) {
           try { await api(`/v1/agents/${a.id}/rebuild`, { method: 'POST', body: {} }); rebuilt++; }
@@ -5613,7 +5603,9 @@ async function faApply() {
         const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST', body: {} });
         if (!r.saved) { notSaved++; continue; } // soft fail (e.g. AI source out of credits)
       } else if (action === 'rebuild') {
-        if (a?.state !== 'RUNNING' && a?.state !== 'STOPPED') { skipped++; continue; }
+        // Running ones only, as the note says: a rebuild ends RUNNING, so a
+        // stopped or sleeping agent would be started behind its owner's back.
+        if (a?.state !== 'RUNNING') { skipped++; continue; }
         await api(`/v1/agents/${id}/rebuild`, { method: 'POST', body: {} });
       } else if (action === 'image') {
         if ((a?.image ?? null) === image) { skipped++; continue; } // already there
@@ -6005,7 +5997,11 @@ $('fabBtn').onclick = () => {
   // token nobody had (2026-09-23). Say so, and start it web-only unless a
   // token is coming; a bot can be attached later.
   $('agentPoolEmptyNote').hidden = poolAvail > 0;
-  if (poolAvail === 0 && !$('agentNoTelegram').checked) { $('agentNoTelegram').checked = true; $('agentPoolRow').hidden = true; }
+  // Decided afresh on every open: an empty pool once (then Cancel) used to
+  // leave "No Telegram" ticked after a bot was parked, so the next agent was
+  // made web-only with a spare bot ready.
+  $('agentNoTelegram').checked = poolAvail === 0;
+  $('agentPoolRow').hidden = poolAvail === 0;
   createDlg.showModal();
   if (pendingTodoName) { $('agentName').value = pendingTodoName; pendingTodoName = null; }
   $('agentName').focus();
@@ -6553,7 +6549,7 @@ function agentNotices(a, opts = {}) {
           <span class="grow">⚠ <b>${esc(d.mountName)}</b> didn't sync — <span class="sub">${esc(d.syncError)}</span></span>
           ${d.pubKey ? `<button onclick="openEdit('${a.id}','${jsq(a.name)}','data');showDeployKey('${jsq(d.id)}')" title="Show the deploy key to add to this repo">🔑 Deploy key</button>` : ''}
         </div>`).join('')}
-      ${pending ? tokenForm(a) : ''}
+      ${pending && !opts.skipTokenForm ? tokenForm(a) : ''}
       ${pairs.map(p => {
         const kind = p.kind || 'telegram', tg = kind === 'telegram';
         // Slack and Discord have no account-level link, so "That's me" is always offered there.
@@ -6715,9 +6711,9 @@ async function savePeers() {
   const ids = [...document.querySelectorAll('.peerCb:checked')].map(cb => cb.dataset.id);
   const acts = [...document.querySelectorAll('.peerAct:checked')].map(cb => cb.dataset.id).filter(id => ids.includes(id));
   if (acts.length && !confirm(
-    `${acts.length} peer${acts.length > 1 ? 's' : ''} will be allowed to ask this agent to ACT — send mail, change files, ` +
-    `run its tools — not just answer questions.\n\nOnly do this for agents you drive on purpose. Anything that can steer ` +
-    `the other agent (an injected email, a message from someone in its chat) can then reach in here.\n\nContinue?`)) return;
+    `This agent will be allowed to ask ${acts.length} peer${acts.length > 1 ? 's' : ''} to ACT — send mail, change files, ` +
+    `run their tools — not just answer questions.\n\nOnly do this for agents you drive on purpose. Anything that can steer ` +
+    `THIS agent (an injected email, a message from someone in its chat) can then reach into ${acts.length > 1 ? 'them' : 'it'}.\n\nContinue?`)) return;
   $('peerSaveBtn').disabled = true;
   try {
     await api(`/v1/agents/${editAgentId}/peers`, { method: 'PUT', body: { peerIds: ids, allowActions: acts } });
@@ -6972,8 +6968,10 @@ function prepareEdit(id, name, tab = 'def') {
 
 async function loadSnapshots() {
   const el = $('snapList');
+  const forId = editAgentId; // a slower answer for the agent opened before must not land here
   try {
-    const snaps = await api(`/v1/agents/${editAgentId}/snapshots`);
+    const snaps = await api(`/v1/agents/${forId}/snapshots`);
+    if (editAgentId !== forId) return;
     el.innerHTML = snaps.length
       ? snaps.map(s => `
         <div class="pair">
@@ -6984,7 +6982,7 @@ async function loadSnapshots() {
           <button class="danger" title="Delete this restore point" onclick="deleteSnapshot('${s.id}', '${jsq(s.label)}')">×</button>
         </div>`).join('')
       : '<div class="sub">No snapshots yet — one is taken automatically before your next edit.</div>';
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  } catch (e) { if (editAgentId === forId) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
 async function takeSnapshot() {
@@ -7618,10 +7616,11 @@ async function openUsage(id, name) {
 }
 async function loadUsage() {
   if (!usageAgentId) return;
+  const forId = usageAgentId;
   try {
-    const u = await api(`/v1/agents/${usageAgentId}/usage`);
-    renderUsage(u);
-  } catch (e) { $('usageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+    const u = await api(`/v1/agents/${forId}/usage`);
+    if (usageAgentId === forId) renderUsage(u);
+  } catch (e) { if (usageAgentId === forId) $('usageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 function renderUsage(u) {
   if (!u.sessions) { $('usageBody').innerHTML = '<div class="sub">No sessions yet — nothing used.</div>'; return; }
@@ -7710,7 +7709,6 @@ function renderFleetUsage(f) {
   $('fleetUsageBody').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <span class="su-periods" style="margin:0">${btn('hour', 'Hour')}${btn('day', 'Day')}${btn('week', 'Week')}</span>
-      <span class="sub">${f.sampledAt ? `updated ${esc(ago(f.sampledAt))}` : ''}</span>
     </div>
     <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
     ${partial}
@@ -7860,7 +7858,8 @@ async function embedMoveAll(mode, when) {
   if (!confirm(`Move every agent on this machine to ${what}?\n\n${when === 'now' ? 'Idle ones rebuild now, as many at once as Rebuild-at-once allows; any mid-conversation wait for the quiet hours.' : 'They rebuild in the quiet hours, never mid-conversation.'} Memory is kept; each re-indexes its memory search afterwards.`)) return;
   try {
     const r = await api('/v1/embed/move-all', { method: 'POST', body: { mode, when } });
-    toast(`${r.switched} switched — ${r.queued} rebuilding now, ${r.deferred} in the quiet hours.`, 12000);
+    toast(`${r.switched} switched — ${r.queued} rebuilding now, ${r.deferred} in the quiet hours.`
+      + (r.engineFree > 0 ? ` ${r.engineFree} left on the shared service: their image has no engine of its own.` : ''), 12000);
   } catch (e) { toast(e.message, 12000); }
   loadEmbedFleet();
 }
@@ -7899,7 +7898,7 @@ function fleetResDraw(r) {
           <td style="text-align:right;font-variant-numeric:tabular-nums">${mb(c.memBytes)}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub">${c.memLimitBytes ? Math.round(100 * c.memBytes / c.memLimitBytes) + '% of ' + mb(c.memLimitBytes) : '—'}</td>
           <td style="text-align:right;font-variant-numeric:tabular-nums" class="sub"${c.clearedAt ? ` title="Since you cleared it ${esc(ago(c.clearedAt))} ago"` : ''}>${c.memPeakBytes ? mb(c.memPeakBytes) : '—'}${c.agentId && c.mine !== false ? ` <button class="hbtn" style="padding:0 4px;font-size:11px" onclick="fleetResClear('${jsq(c.agentId)}')" title="Forget this agent's peak and cap hits; they count from now">×</button>` : ''}</td>
-          <td style="text-align:right;font-variant-numeric:tabular-nums"${c.memCapHits || c.memOomKills ? ' style="text-align:right;font-variant-numeric:tabular-nums;color:var(--warn);font-weight:600"' : ' class="sub"'}>${c.memCapHits === undefined ? '—' : `${c.memCapHits}${c.memOomKills ? ` · killed ${c.memOomKills}×` : ''}`}</td></tr>`).join('')}
+          <td style="text-align:right;font-variant-numeric:tabular-nums${c.memCapHits || c.memOomKills ? ';color:var(--warn);font-weight:600"' : '" class="sub"'}>${c.memCapHits === undefined ? '—' : `${c.memCapHits}${c.memOomKills ? ` · killed ${c.memOomKills}×` : ''}`}</td></tr>`).join('')}
       </tbody></table>${h.totals?.machineMemBytes && h.totals.memPeakBytes > 0.8 * h.totals.machineMemBytes ? `<div class="sub" style="margin-top:6px;color:var(--warn)">⚠ If every container hit its peak at once they would want ${mb(h.totals.memPeakBytes)} of this machine's ${mb(h.totals.machineMemBytes)}. Caps are ceilings, not reservations — but this is close: lower some caps or move agents.</div>` : ''}${rows.some(c => c.memCapHits) ? `<div class="sub" style="margin-top:6px">⚠ ${rows.filter(c => c.memCapHits).length === 1 ? 'One container has' : `${rows.filter(c => c.memCapHits).length} containers have`} run into the memory cap. An OpenClaw 2026.9 gateway idles near 1 GB, and an agent's own jobs sit on top of that: give that agent more (its sheet → Runtime → Memory cap, applied right away) or ask it to run smaller jobs.</div>` : ''}` : ''}</div>`;
   }).join('') || '<div class="sub">Nothing running.</div>';
 }
@@ -7907,8 +7906,10 @@ async function fleetResClear(agentId) {
   try {
     const r = await api(agentId ? `/v1/agents/${agentId}/resources/clear` : '/v1/resources/clear', { method: 'POST', body: {} });
     toast(agentId ? 'Peak and cap hits cleared — they count from now.' : `Peaks cleared on ${r.cleared} agent${r.cleared === 1 ? '' : 's'} — they count from now.`);
-    fleetResLast = null; await loadFleetResources?.();
-  } catch (e) { toast(e.message, 8000); }
+  } catch (e) { toast(e.message, 8000); return; }
+  // Redraw now rather than on the next 5 s tick. (It used to call a function
+  // that does not exist, so a successful clear always ended in an error toast.)
+  try { fleetResLast = await api('/v1/resources'); fleetResDraw(fleetResLast); } catch { /* the next tick redraws */ }
 }
 async function openFleetResources() {
   fleetResDlg.showModal();
@@ -8146,8 +8147,10 @@ function renderHealth(h) {
 async function renderEditMembers() {
   const el = $('tgMemberList');
   if (!el) return;
+  const forId = editAgentId;
   try {
-    const ms = (members[editAgentId] = await api(`/v1/agents/${editAgentId}/members`));
+    const ms = (members[forId] = await api(`/v1/agents/${forId}/members`));
+    if (editAgentId !== forId) return;
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
       const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
       // Someone who redeemed an invite and never messaged: their window has
@@ -8162,7 +8165,7 @@ async function renderEditMembers() {
         `<button class="danger" onclick="kick('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || m.userId)}').then(renderEditMembers)">Remove</button>`;
       return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${kickBtn}</div>`;
     }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
-  } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
+  } catch (e) { if (editAgentId === forId) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
   void renderKnownPeople();
 }
 
@@ -8251,98 +8254,11 @@ function renderAllowKnocks(a) {
     : 'Only people you invite, or already know from another agent. Strangers are turned away silently.';
 }
 
-async function saveAllowKnocks() {
-  const on = $('tgAllowKnocks').value === 'on';
-  try {
-    await api(`/v1/agents/${editAgentId}/allow-knocks`, { method: 'POST', body: { on } });
-    const a = agents.find(x => x.id === editAgentId); if (a) a.allowKnocks = on;
-    renderAllowKnocks(a);
-    toast(on ? 'Anyone can knock — you approve each one.' : 'Invite only — strangers are turned away.');
-  } catch (e) { toast(e.message); }
-}
 
-async function saveRichMessages() {
-  const off = $('tgRichMessages').value === 'off';
-  try {
-    // null = clear back to the managed default (on) instead of pinning true.
-    await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { richMessages: off ? false : null } });
-    toast(off ? 'Plain text — applies on the next Rebuild.' : 'Rich messages on (default) — applies on the next Rebuild.');
-    await refresh(false);
-  } catch (e) { toast(e.message, 10000); }
-}
 
-async function findGroupRooms() {
-  const btn = $('tgGroupFindBtn');
-  btn.disabled = true;
-  try {
-    const { rooms } = await api(`/v1/agents/${editAgentId}/group-chats`);
-    if (!rooms.length) {
-      toast('No group chats seen yet — add the bot to the group (privacy OFF), say anything in it, then try again.');
-      return;
-    }
-    const cur = $('tgGroupRoom').value;
-    $('tgGroupRoom').innerHTML = rooms
-      .map(r => `<option value="${esc(r.id)}"${r.id === cur ? ' selected' : ''}>room ${esc(r.id)}</option>`).join('');
-  } catch (e) { toast(e.message); }
-  finally { btn.disabled = false; }
-}
 
-async function saveGroupAccess() {
-  const mode = $('tgGroupMode').value;
-  const roomId = $('tgGroupRoom').value;
-  if (mode === 'room' && !roomId) { toast('Pick the room first (Find rooms).'); return; }
-  try {
-    // Always store the explicit mode — 'members' included. A cleared setting
-    // would skip the config write on rebuild and let a stale open-room entry
-    // survive on the volume.
-    await api(`/v1/agents/${editAgentId}`, {
-      method: 'PATCH',
-      body: { groupAccess: { mode, ...(mode === 'room' ? { roomId } : {}) } },
-    });
-    toast('Saved — applies on the next Rebuild.');
-    await refresh(false);
-  } catch (e) { toast(e.message); }
-}
 
-async function checkGroupReadiness() {
-  const btn = $('tgGroupBtn'), out = $('tgGroupResult'), st = $('tgGroupStatus');
-  btn.disabled = true; st.textContent = 'asking Telegram…'; out.innerHTML = '';
-  try {
-    const r = await api(`/v1/agents/${editAgentId}/group-readiness`);
-    st.textContent = `@${r.username}`;
-    const row = (ok, okText, badText) =>
-      `<div class="pair"><span class="grow">${ok ? '✅ ' + okText : '⚠ ' + badText}</span></div>`;
-    out.innerHTML =
-      row(r.canJoinGroups, 'Can be added to groups', 'Groups are OFF — @BotFather → /setjoingroups → Enable') +
-      row(r.canReadAllGroupMessages,
-        'Privacy mode off — it sees every group message',
-        'Privacy mode is ON — @BotFather → /setprivacy → Disable (then remove & re-add the bot to existing groups)');
-  } catch (e) { st.textContent = ''; out.innerHTML = `<div class="sub">⚠ ${esc(e.message)}</div>`; }
-  finally { btn.disabled = false; }
-}
 
-/**
- * Move this agent to a different bot. Everything that matters survives —
- * memory and files are on the volume, members are keyed to each person's
- * Telegram id — but the conversation cannot: scrollback belongs to the bot,
- * and a bot cannot message someone who has never started a chat with it. So
- * the old bot carries the farewell, and everyone has to open the new one.
- */
-async function swapBot() {
-  const a = agents.find(x => x.id === editAgentId);
-  const people = (members[editAgentId] ?? []).filter(m => m.status !== 'revoked').length;
-  if (!confirm(`Move "${a?.name ?? 'this agent'}" to a different bot?\n\n`
-    + `• It keeps its memory, files, settings and members — nobody has to pair again.\n`
-    + `• Everyone (${people === 1 ? 'just you' : `${people} people`}) must open the NEW bot and say hi. Telegram will not move the old chat.\n`
-    + `• The old bot goes back to the pool, and its chat stops answering.\n\n`
-    + `The agent rebuilds afterwards — about a minute; anything it is doing stops.`)) return;
-  try {
-    const r = await api(`/v1/agents/${editAgentId}/channel/swap`, { method: 'POST', body: {} });
-    toast(`Moved to @${r.to}${r.told ? ` — told ${r.told} ${r.told === 1 ? 'person' : 'people'} on the old bot` : ''}. Rebuilding…`, 10000);
-    await refresh(true);
-    v2Close();
-  } catch (e) { toast(e.message, 9000); }
-}
 
 async function showBotToken() {
   const btn = $('botTokenBtn'), input = $('editBotToken');
@@ -8382,25 +8298,48 @@ async function saveDescription() {
   finally { $('descBtn').disabled = false; }
 }
 
+/**
+ * Which agent and file the editor's text really is. Save stays off until the
+ * current agent's current file has loaded: a failed load (a MEMORY.md over
+ * the size limit) used to leave an empty editor whose Save wrote over the
+ * file, and a slow answer for the agent opened before could land in the next
+ * one's editor and be saved into it (night review, 2026-09-27).
+ */
+let editLoaded = null;
 async function loadEditFile() {
   if (!editAgentId) return;
+  const forId = editAgentId, file = $('editFile').value;
+  editLoaded = null;
+  $('editSaveBtn').disabled = true;
   $('editContent').value = 'Loading…';
   try {
-    const f = await api(`/v1/agents/${editAgentId}/files/${$('editFile').value}`);
+    const f = await api(`/v1/agents/${forId}/files/${file}`);
+    if (editAgentId !== forId || $('editFile').value !== file) return;
     $('editContent').value = f.content;
-  } catch (e) { $('editContent').value = ''; $('editErr').textContent = e.message; }
+    editLoaded = { agentId: forId, file };
+    $('editSaveBtn').disabled = false;
+  } catch (e) {
+    if (editAgentId !== forId || $('editFile').value !== file) return;
+    $('editContent').value = '';
+    $('editErr').textContent = `${e.message} — nothing to save until it loads.`;
+  }
 }
 
 async function saveEditFile() {
+  const file = $('editFile').value;
+  if (!editLoaded || editLoaded.agentId !== editAgentId || editLoaded.file !== file) {
+    $('editErr').textContent = 'This file has not loaded, so there is nothing to save.';
+    return;
+  }
   $('editSaveBtn').disabled = true;
   try {
-    await api(`/v1/agents/${editAgentId}/files/${$('editFile').value}`, {
+    await api(`/v1/agents/${editAgentId}/files/${file}`, {
       method: 'PUT', body: { content: $('editContent').value },
     });
-    toast(`${$('editFile').value} saved`);
+    toast(`${file} saved`);
     editDlg.close();
   } catch (e) { $('editErr').textContent = e.message; }
-  finally { $('editSaveBtn').disabled = false; }
+  finally { $('editSaveBtn').disabled = !editLoaded; }
 }
 
 async function openLogs(id, name) {
@@ -8472,11 +8411,13 @@ function cancelCronEdit() {
 async function loadCrons() {
   if (!cronAgentId) return;
   $('cronErr').textContent = '';
+  const forId = cronAgentId; // an Edit + Save on another agent's list would create its task here
   try {
-    const { crons } = await api(`/v1/agents/${cronAgentId}/crons`);
+    const { crons } = await api(`/v1/agents/${forId}/crons`);
+    if (cronAgentId !== forId) return;
     cronCache = crons;
     renderCrons(crons);
-  } catch (e) { $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
+  } catch (e) { if (cronAgentId !== forId) return; $('cronList').innerHTML = ''; $('cronErr').textContent = e.message; }
 }
 let cronEditingId = null, cronCache = [];
 async function saveCronTriggers(on) {
@@ -9172,7 +9113,25 @@ function shareTemplate(id) {
     "OK — a faithful copy (its learned knowledge; note memory may contain personal facts).\n" +
     'Cancel — persona & instructions only.',
   );
-  window.location.href = `/v1/agents/${id}/export${inclMem ? '' : '?excludeMemory=1'}`;
+  return saveFromServer(`/v1/agents/${id}/export${inclMem ? '' : '?excludeMemory=1'}`, 'agent-template.json');
+}
+
+/**
+ * Fetch a download and save it, instead of navigating to it: a refusal (busy,
+ * not exportable) is then a message, not a page of raw JSON in place of the app.
+ */
+async function saveFromServer(url, fallbackName) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
+    const blob = await res.blob();
+    const file = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || fallbackName;
+    const href = URL.createObjectURL(blob);
+    const link = Object.assign(document.createElement('a'), { href, download: file });
+    document.body.append(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 30000);
+    toast(`Saved ${file}.`);
+  } catch (e) { toast(e.message, 8000); }
 }
 
 // Clone = a faithful local copy (memory included — you own both), with its own
@@ -9554,7 +9513,7 @@ async function pushDefinition(id, masterName) {
     `Push "${masterName}"'s current SOUL.md/AGENTS.md to ${kids.length} child agent${kids.length === 1 ? '' : 's'}?\n\n` +
     `${kids.join(', ')}\n\n` +
     `Each child keeps its own setup values (they re-render into the new files) and its own MEMORY.md. ` +
-    `A snapshot is taken per child first, so this is undoable.`
+    `A snapshot is taken per child first where one can be (a child whose files are too large to snapshot has no undo point).`
   )) return;
   try {
     const r = await api(`/v1/agents/${id}/push-definition`, { method: 'POST', body: {} });
@@ -10277,7 +10236,14 @@ function renderToc() {
   planned += `<div class="toc-item" style="cursor:default;gap:4px">
     <input id="todoNew" placeholder="Plan an agent…" maxlength="64" style="flex:1;min-width:0;font-size:12px;padding:2px 6px" onkeydown="if (event.key === 'Enter') addTodo()">
     <button class="hbtn" style="padding:1px 7px" title="Add to the plan" onclick="addTodo()">+</button></div>`;
+  // Every poll rebuilds this list; keep what was being typed in "Plan an
+  // agent…" (and the focus) instead of wiping it every few seconds.
+  const typing = $('todoNew'), draft = typing?.value ?? '', focused = !!typing && document.activeElement === typing;
+  const caret = focused ? typing.selectionStart : null;
   $('tocList').innerHTML = planned + html; // launchpad sits at the TOP of the stack
+  const box = $('todoNew');
+  if (box && draft) box.value = draft;
+  if (box && focused) { box.focus(); if (caret !== null) box.setSelectionRange(caret, caret); }
 }
 
 let agentTodos = null, pendingTodoName = null;
@@ -10294,8 +10260,11 @@ async function loadTodos() {
 async function addTodo() {
   const name = ($('todoNew')?.value || '').trim();
   if (!name) return;
-  try { await api('/v1/agent-todos', { method: 'POST', body: { name } }); await loadTodos(); }
-  catch (e) { toast(e.message); }
+  try {
+    await api('/v1/agent-todos', { method: 'POST', body: { name } });
+    if ($('todoNew')) $('todoNew').value = ''; // the list keeps a draft across redraws; an added one is done
+    await loadTodos();
+  } catch (e) { toast(e.message); }
 }
 async function removeTodo(id, name) {
   if (!confirm(`Remove "${name}" from the plan?`)) return;
@@ -11214,7 +11183,7 @@ function v2Pane(a, tab) {
   const groups = [...new Set(agents.filter(x => v2Mine(x) && x.group).map(x => x.group))].sort();
   switch (tab) {
     case 'overview': return `
-      <div class="v2notices">${agentNotices(a, { skipFailure: true }).trim()}</div>
+      <div class="v2notices">${agentNotices(a, { skipFailure: true, skipTokenForm: true }).trim()}</div>
       ${a.pendingAction?.type === 'bot_token' ? row('Telegram bot', `<div class="grow"><span class="sub">The bot pool is empty, so this agent is waiting for a bot of its own — or it can go on without one.</span>${tokenForm(a)}</div>`) : ''}
       ${a.state === 'FAILED' && a.stateReason ? `<p class="sub" style="margin:0 0 8px">${esc(a.stateReason)}</p>` : ''}
       ${(a.state === 'REBUILDING' || a.state === 'PROVISIONING') ? row('Working on', `<span>${esc(a.progress?.step || (a.state === 'REBUILDING' ? 'rebuilding' : 'setting up'))}${a.progress?.at ? ` <span class="sub">· ${esc(ago(a.progress.at))}</span>` : ''}</span>${B('Setup log', `openSetupLog('${id}','${n}')`)}

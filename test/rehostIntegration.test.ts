@@ -5,7 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { registerAuth } from '../src/api/auth.js';
-import { migrateAgent, MigrateError, versionBehind } from '../src/orchestrator/migrate.js';
+import { migrateAgent, versionBehind } from '../src/orchestrator/migrate.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import type { ChannelProvisioner } from '../src/channels/channel.js';
 

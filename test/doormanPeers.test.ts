@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import Fastify from 'fastify';
 import { MockProvider } from '../src/providers/mockProvider.js';

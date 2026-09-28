@@ -1,7 +1,6 @@
 import { execFile } from 'node:child_process';
 import { defaultDbPath } from '../envCompat.js';
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { MgmtChatRequest, MgmtChatResponse } from './mgmtLlm.js';

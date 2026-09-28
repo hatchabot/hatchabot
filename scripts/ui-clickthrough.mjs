@@ -312,6 +312,51 @@ const SCENARIOS = String.raw`(() => {
       document.querySelector('#v2Header .v2hubactions button[aria-label="Settings"]').click();
       await until(() => aiDlg.open); aiDlg.close();
     },
+    editorSaveGuard: async () => {
+      // A file that will not load leaves nothing to save: an empty editor's Save used to write over MEMORY.md (night review).
+      window.__answer = { 'GET /v1/agents/a1/files/MEMORY.md': [{ status: 413, body: { error: 'MEMORY.md is too large to edit here' } }] };
+      editAgentId = 'a1';
+      document.getElementById('editFile').value = 'MEMORY.md';
+      await loadEditFile();
+      ok('Save is off after a failed load', document.getElementById('editSaveBtn').disabled);
+      document.getElementById('editContent').value = 'one new line';
+      const puts = calls('PUT', /\/files\//).length;
+      await saveEditFile();
+      eq('nothing written', calls('PUT', /\/files\//).length, puts);
+      window.__answer = { 'GET /v1/agents/a1/files/SOUL.md': [{ status: 200, body: { content: 'You are helpful.' } }] };
+      document.getElementById('editFile').value = 'SOUL.md';
+      await loadEditFile();
+      ok('Save is on once the file loaded', !document.getElementById('editSaveBtn').disabled);
+      eq('the loaded text', document.getElementById('editContent').value, 'You are helpful.');
+      window.__answer = {};
+    },
+    bulkRebuildSkipsStopped: async () => {
+      // "Stopped agents are skipped": a rebuild ends RUNNING, so the bulk Rebuild must leave a stopped one alone.
+      const tax = agents.find((a) => a.name === 'Tax Filing');
+      ok('a stopped agent in the stub', tax && tax.state === 'STOPPED');
+      await openFleetActions();
+      await until(() => document.querySelectorAll('.faCb').length);
+      document.querySelectorAll('.faCb').forEach((cb) => { cb.checked = cb.dataset.id === 'a1' || cb.dataset.id === tax.id; });
+      document.getElementById('faAction').value = 'rebuild'; faRenderAction();
+      window.__confirmAnswer = true;
+      await faApply();
+      await until(() => !document.getElementById('faApplyBtn').disabled);
+      ok('the running one rebuilt', calls('POST', /\/v1\/agents\/a1\/rebuild$/).length >= 1);
+      eq('the stopped one left alone', calls('POST', new RegExp('/v1/agents/' + tax.id + '/rebuild$')).length, 0);
+      fleetActionsDlg.close();
+    },
+    oneTokenForm: async () => {
+      // An agent waiting for a bot shows ONE token box: two with the same id sent the empty one.
+      const list = await (await fetch('/v1/agents')).json();
+      window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, pendingAction: { type: 'bot_token', instructions: 'Make a bot with BotFather' } } : a);
+      await refresh(false);
+      openV2Agent('a1', 'overview');
+      await until(() => document.getElementById('tok-a1'));
+      eq('token boxes', document.querySelectorAll('[id="tok-a1"]').length, 1);
+      v2Close();
+      delete window.__override['/v1/agents'];
+      await refresh(false);
+    },
   };
   (async () => {
     for (const [name, run] of Object.entries(T)) {

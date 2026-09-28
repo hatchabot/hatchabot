@@ -42,6 +42,7 @@ export interface Resolved {
   rest?: { call: { method: string; path: string; body?: unknown }; card: string; rebuild?: boolean };
   /** set_model */ model?: string;
   /** approve_member */ code?: string;
+  /** approve_member: the waiting person's name and @handle, for the card */ who?: string;
   /** remove_member */ userId?: string;
   /** create_agent / update_definition */ spec?: AuthorSpec;
 }

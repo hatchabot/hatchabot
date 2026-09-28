@@ -18,8 +18,9 @@ class FakeApi implements ApiClient {
   async listMembers() {
     return [];
   }
+  pairing: Array<{ code: string; meta?: { firstName?: string; username?: string } }> = [];
   async listPairing() {
-    return [];
+    return this.pairing;
   }
   async listAllPending() {
     return [];
@@ -159,6 +160,7 @@ class FakeApi implements ApiClient {
     if (method === 'GET') {
       if (path === '/v1/ai-profiles') return [{ id: 'p1', name: 'Claude Max' }, { id: 'p2', name: 'Spare Key' }];
       if (path === '/v1/agent-classes') return { classes: [{ id: 'k1', name: 'Heavy' }] };
+      if (/^\/v1\/agents\/[^/]+\/peers$/.test(path)) return { candidates: AGENTS.filter((a) => !path.includes(`/${a.id}/`) && a.id !== 'a3x').map((a) => ({ id: a.id })) };
       return { path };
     }
     this.calls.push(`${method} ${path} ${body === undefined ? '' : JSON.stringify(body)}`.trim());
@@ -694,5 +696,50 @@ describe('a base candidate with extra packages', () => {
     const text = JSON.stringify(ok);
     expect(text).toMatch(/iputils-ping, dnsutils/);   // the card says what it adds
     expect(text).toMatch(/CANDIDATE/);                 // and that nothing changes yet
+  });
+});
+
+describe('night review, 2026-09-27: what a card shows is what runs', () => {
+  const confirm = (broker: Broker, r: any) => broker.confirm(r.pending.confirmId, 'confirm', { fromUserId: 555, chatId: 100 });
+
+  it('add_cron shows the whole message, not its first 300 characters', async () => {
+    const { broker } = make({ rw: true });
+    const long = 'harmless start. ' + 'x'.repeat(400) + ' THE HIDDEN TAIL';
+    const r = await broker.handleTool('add_cron', { agent: 'a1', name: 'daily', message: long, cron: '0 8 * * *' }, WHO);
+    expect((r as any).pending.summary).toContain('THE HIDDEN TAIL');
+  });
+
+  it("set_class ignores a __className the model supplied: clearing says it clears", async () => {
+    const { broker } = make({ rw: true });
+    const r = await broker.handleTool('set_class', { agent: 'a1', class: '', __className: 'Premium' }, WHO);
+    expect((r as any).pending.summary).toMatch(/Remove "Tech Advisor" from its class/);
+    expect((r as any).pending.summary).not.toMatch(/Premium/);
+  });
+
+  it('restore_snapshot refuses a dot-segment id before any card', async () => {
+    const { broker, api } = make({ rw: true });
+    for (const snapshot of ['..', '.']) {
+      const r = await broker.handleTool('restore_snapshot', { agent: 'a1', snapshot }, WHO);
+      expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    }
+    expect(api.calls).toEqual([]);
+  });
+
+  it('delete_base_image of a derived image with a row is refused when the card is written', async () => {
+    const { broker } = make({ rw: true });
+    const r = await broker.handleTool('delete_base_image', { tag: 'hatchabot-runtime:derived-ml-tools' }, WHO);
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(JSON.stringify(r)).toMatch(/remove_image/);
+  });
+
+  it('approve_member names who it admits, and refuses a code nobody is waiting with', async () => {
+    const { broker, api } = make({ rw: true });
+    api.pairing = [{ code: 'ABCD1234', meta: { firstName: 'Sam', username: 'sam_example' } }];
+    const r = await broker.handleTool('approve_member', { agent: 'a1', code: 'ABCD1234' }, WHO);
+    expect((r as any).pending.summary).toMatch(/Admit Sam @sam_example \(code ABCD1234\)/);
+    const bad = await broker.handleTool('approve_member', { agent: 'a1', code: 'ZZZZ9999' }, WHO);
+    expect(bad).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    await confirm(broker, r);
+    expect(api.calls).toEqual(['approve:a1:ABCD1234']);
   });
 });

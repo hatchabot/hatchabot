@@ -49,7 +49,15 @@ const agentRef = { type: 'string', minLength: 1, maxLength: 128, description: 'a
 const obj = (properties: Record<string, unknown>, required: string[] = []) =>
   ({ type: 'object' as const, additionalProperties: false as const, properties, required });
 const str = (max = 200, description?: string) => ({ type: 'string', minLength: 1, maxLength: max, ...(description ? { description } : {}) });
-const enc = encodeURIComponent;
+/**
+ * One path segment. encodeURIComponent leaves '.' and '..' alone and the
+ * router resolves dot-segments, so snapshot ".." turned a restore card into
+ * "restore this agent from the archive" (night review, 2026-09-27).
+ */
+const enc = (s: string): string => {
+  if (/^\.+$/.test(s)) throw new Error(`"${s}" is not an id.`);
+  return encodeURIComponent(s);
+};
 const need = (v: unknown, what: string): string => {
   if (typeof v !== 'string' || !v.trim()) throw new Error(`Missing ${what}.`);
   return v.trim();
@@ -230,7 +238,10 @@ export const REST_TOOLS: RestTool[] = [
         tz: typeof input.tz === 'string' ? input.tz : undefined,
       } };
     },
-    card: ({ agent, input }) => `⏰ Add a task to "${agent!.name}": “${String(input.name)}” ${input.cron ? `on cron ${String(input.cron)}` : `every ${String(input.every_minutes)} min`}${input.tz ? ` (${String(input.tz)})` : ''}\nMessage: ${String(input.message).slice(0, 300)}`,
+    // The WHOLE message: it runs as a turn with the agent's full tools, so a
+    // card showing only its first 300 characters let 3,700 unseen ones ride
+    // on one Confirm (night review, 2026-09-27; the clipped-card class).
+    card: ({ agent, input }) => `⏰ Add a task to "${agent!.name}": “${String(input.name)}” ${input.cron ? `on cron ${String(input.cron)}` : `every ${String(input.every_minutes)} min`}${input.tz ? ` (${String(input.tz)})` : ''}\nMessage (all of it):\n${String(input.message)}`,
   },
   {
     name: 'set_cron_enabled', tier: 'mutate', agentArg: true,
@@ -327,9 +338,17 @@ export const REST_TOOLS: RestTool[] = [
       peers: { type: 'array', maxItems: 32, items: agentRef },
       allow_actions: { type: 'array', maxItems: 32, items: agentRef, description: 'subset of peers it may ask to act' },
     }, ['agent', 'peers']),
-    call: async ({ agent, input, resolve }) => {
-      const peers = await Promise.all(((input.peers as unknown[]) ?? []).map(resolve));
-      const acts = await Promise.all(((input.allow_actions as unknown[]) ?? []).map(resolve));
+    call: async ({ agent, input, resolve, get }) => {
+      // The route's own rule, applied here so the card says what will stick:
+      // only the owner's own agents (its candidates), and "may act" only for
+      // agents also granted. The card used to list grants the server dropped.
+      const { candidates } = (await get(`/v1/agents/${agent!.id}/peers`)) as { candidates?: Array<{ id: string }> };
+      const grantable = new Set((candidates ?? []).map((c) => c.id));
+      const all = await Promise.all(((input.peers as unknown[]) ?? []).map(resolve));
+      const refused = all.filter((p) => !grantable.has(p.id));
+      if (refused.length) throw new Error(`Only your own agents can be peers: ${refused.map((p) => p.name).join(', ')} cannot.`);
+      const peers = all;
+      const acts = (await Promise.all(((input.allow_actions as unknown[]) ?? []).map(resolve))).filter((a) => peers.some((p) => p.id === a.id));
       input.__peerNames = peers.map((p) => p.name);
       input.__actNames = acts.map((p) => p.name);
       return { method: 'PUT', path: `/v1/agents/${agent!.id}/peers`, body: { peerIds: peers.map((p) => p.id), allowActions: acts.map((p) => p.id) } };
