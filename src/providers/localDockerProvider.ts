@@ -358,11 +358,26 @@ export class LocalDockerProvider implements RuntimeProvider {
       );
       const cmds = batchConfigCommands(buildConfigCommands(spec.workspace.configPatch));
       const labels = describeConfigCommands(cmds);
+      // "Already so?" for a step's skipIf: the expression runs against the
+      // parsed openclaw.json in ~20 ms, where the openclaw step it spares
+      // costs 4–8 s on 2026.9 (2026-09-28). Any doubt (no file, a throw)
+      // answers no, and the step runs.
+      script.push(`hb_already() { node -e 'let c={};try{c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"))}catch{}let ok=false;try{ok=!!new Function("c","require","return ("+process.argv[1]+")")(c,require)}catch{}process.exit(ok?0:1)' "$1"; }`);
       for (const [i, cmd] of cmds.entries()) {
         script.push(`__hb_step=${shq(seedStepLabel(labels[i]!))}`);
         const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
         const base = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
-        const line = cmd.optional ? `${base} || true` : base;
+        let line = cmd.optional ? `${base} || true` : base;
+        if (cmd.marker) {
+          const f = shq(cmd.marker.file), v = shq(cmd.marker.value);
+          // Written only after the step worked; a non-optional failure still
+          // ends the seed (set -e applies inside the then-block).
+          // A marker that cannot be written only means the step runs again next time.
+          const mark = `{ printf %s ${v} > ${f}; } 2>/dev/null || true`;
+          const run = cmd.optional ? `if ${base}; then ${mark}; fi` : `${base}; ${mark}`;
+          line = `if [ "$(cat ${f} 2>/dev/null)" != ${v} ]; then ${run}; fi`;
+        }
+        if (cmd.skipIf) line = `if hb_already ${shq(cmd.skipIf)}; then :; else ${line}; fi`;
         script.push(
           cmd.argv[0] === 'agents' && cmd.argv[1] === 'add'
             ? `if [ ! -d ${shq(workspaceDir)} ]; then ${line}; fi`

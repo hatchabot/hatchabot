@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.99.0] — 2026-09-28
+
+### Faster
+- **Rebuilds skip seed steps that are already done.** On OpenClaw 2026.9 each `openclaw` command costs 4–8 seconds (it loads its plugins), and the seed re-did about ten of them every rebuild: about 50 of a typical 85 seconds. Now `doctor --fix` runs once per OpenClaw version, the old memory-plugin cleanup once per volume, the setup token is pasted once per token, and plugin links, plugin enables, route bindings and the display name are skipped when `openclaw.json` already says so (a 20 ms check). A new agent, an image change or a new token still runs everything.
+
 ## [2.98.0] — 2026-09-28
 
 ### Fixed

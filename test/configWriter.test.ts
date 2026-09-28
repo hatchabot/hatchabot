@@ -409,10 +409,11 @@ describe('the 2026.9 port (OpenClaw 2026.8 and later)', () => {
   });
   it('a shared-engine agent also drops the stale llama-cpp install record (optional, after doctor)', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6', embed: { baseUrl: 'http://d/v1', token: 't', model: 'e' } });
-    const un = cmds.findIndex((c) => c.argv.join(' ') === 'plugins uninstall llama-cpp --force');
+    // Once per volume, and never fatal (`|| true`), after doctor.
+    const un = cmds.findIndex((c) => (c.rawShell ?? '').includes('plugins uninstall llama-cpp --force'));
     expect(un).toBeGreaterThan(cmds.findIndex((c) => c.argv[0] === 'doctor'));
-    expect(cmds[un]!.optional).toBe(true);
-    expect(buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' }).some((c) => c.argv[1] === 'uninstall')).toBe(false);
+    expect(cmds[un]!.rawShell).toContain("|| true; touch /home/node/.openclaw/.hb-llama-unlinked");
+    expect(buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2' }).some((c) => (c.rawShell ?? '').includes('uninstall'))).toBe(false);
   });
   it('a shared-engine agent moving to 2026.9 has its llama-cpp link removed before doctor looks', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.9.6', embed: { baseUrl: 'http://d/v1', token: 't', model: 'e' } });

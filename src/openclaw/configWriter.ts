@@ -1,5 +1,10 @@
 import { filesMb, FILES_MB_DEFAULT } from '../orchestrator/machineDefaults.js';
 import type { OpenClawConfigPatch } from '../providers/provider.js';
+import { createHash } from 'node:crypto';
+
+/** A skipIf test: is there a route binding of this agent to channel:account? */
+const hasBinding = (agentId: string, channel: string, accountId: string): string =>
+  `(c.bindings || []).some((b) => b && b.agentId === ${JSON.stringify(agentId)} && b.match && b.match.channel === ${JSON.stringify(channel)} && String(b.match.accountId || "").toLowerCase() === ${JSON.stringify(accountId.toLowerCase())})`;
 
 /**
  * openclaw.json is volatile — its schema moves between releases, and a
@@ -48,6 +53,20 @@ export interface ConfigCommand {
    * rebuild and cost the owner their agent over a label.
    */
   optional?: boolean;
+  /**
+   * Skip the command when this JavaScript expression, run against the
+   * parsed openclaw.json as `c`, is true: the thing is already so. On 2026.9
+   * each `openclaw` start costs 4–8 s (plugin loading), and most seed steps
+   * re-do what an existing volume already has — a rebuild spent ~50 s on
+   * them (2026-09-28). Static text only, like rawShell.
+   */
+  skipIf?: string;
+  /**
+   * Run once per value: skipped when the file holds `value`, and `value` is
+   * written there after the command succeeds (the token paste, keyed by the
+   * token's hash, so a new token is always pasted).
+   */
+  marker?: { file: string; value: string };
 }
 
 export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent';
@@ -220,19 +239,34 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // shared-auth-store step ("resolve the reported migration failure before
   // retrying") and the second pass then migrated everything (agent database
   // v1 → v23, shared auth, audit log, workspace state). Idempotent.
-  if (port) for (let i = 0; i < 2; i++) cmds.push({ argv: ['doctor', '--fix', '--non-interactive'], optional: true });
+  // Its migrations belong to a version: run when the volume has not been
+  // doctored by THIS OpenClaw yet (a new volume, an image change), then
+  // remembered — two 8-second runs on every rebuild before (2026-09-28).
+  const ver = (patch.openclawVersion ?? 'unknown').replace(/[^A-Za-z0-9._-]/g, '');
+  if (port) {
+    for (let i = 0; i < 2; i++) {
+      cmds.push({ argv: ['doctor', '--fix', '--non-interactive'], optional: true, ...(i === 1 ? { marker: { file: '/home/node/.openclaw/.hb-doctor', value: ver } } : { skipIf: `(() => { try { return require("fs").readFileSync("/home/node/.openclaw/.hb-doctor", "utf8") === ${JSON.stringify(ver)}; } catch { return false; } })()` }) });
+    }
+  }
   if (patch.embed) {
-    cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true });
+    // Once per volume, after the unlink: nothing of the plugin comes back.
+    cmds.push({ argv: ['plugins', 'registry', '--refresh'], optional: true, skipIf: `require("fs").existsSync("/home/node/.openclaw/.hb-llama-unlinked")` });
     // The install record outlives the link and the registry refresh: on
     // 2026.9 `plugins list` then errors "install incomplete" for a plugin
     // that is not there (To Do Agent, 2026-09-24). Uninstall removes just
     // that record; nothing of the plugin is on the volume.
-    cmds.push({ argv: ['plugins', 'uninstall', 'llama-cpp', '--force'], optional: true });
+    // Done either way: "not installed" is a refusal, and the record is gone.
+    cmds.push({ argv: [], rawShell: `if [ ! -f /home/node/.openclaw/.hb-llama-unlinked ]; then openclaw plugins uninstall llama-cpp --force >/dev/null 2>&1 || true; touch /home/node/.openclaw/.hb-llama-unlinked 2>/dev/null || true; fi` });
   }
   // `plugins install --link` on 2026.8+ refuses a local path until its three
   // "I mean it" options are given (2026.7 asked nothing for a link); the
   // Dockerfile reads them from `--help`, the writer knows them by version.
-  const link = (dir: string): ConfigCommand => ({ argv: ['plugins', 'install', '--link', dir, ...(port ? ['--force', '--accept-capabilities', '--acknowledge-install-policy-warning'] : [])] });
+  const link = (dir: string): ConfigCommand => ({
+    argv: ['plugins', 'install', '--link', dir, ...(port ? ['--force', '--accept-capabilities', '--acknowledge-install-policy-warning'] : [])],
+    skipIf: `((c.plugins && c.plugins.load && c.plugins.load.paths) || []).includes(${JSON.stringify(dir)}) || Object.values((c.plugins && c.plugins.installs) || {}).some((i) => i && i.sourcePath === ${JSON.stringify(dir)})`,
+  });
+  /** `plugins enable <id>`, skipped when it is already enabled. */
+  const enable = (id: string): ConfigCommand => ({ argv: ['plugins', 'enable', id], skipIf: `!!(c.plugins && c.plugins.entries && c.plugins.entries[${JSON.stringify(id)}] && c.plugins.entries[${JSON.stringify(id)}].enabled === true)` });
   // 2026.8+ (image label plugin-install=npm): a channel plugin is installed
   // into the volume as the official npm package, offline from the cache the
   // image carries, so OpenClaw's trust model accepts it ("trusted-official";
@@ -279,7 +313,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // 2026.8+ images bake the DuckDuckGo plugin (no longer bundled with
   // OpenClaw); link it like a channel plugin, then enable as always.
   if (baked.has('duckduckgo')) cmds.push(link(DUCKDUCKGO_PLUGIN_DIR));
-  cmds.push({ argv: ['plugins', 'enable', 'duckduckgo'] });
+  cmds.push(enable('duckduckgo'));
 
   // Local memory embeddings from the image-baked GGUF provider. `--link` points
   // the agent's registry at the plugin in the IMAGE (no 71MB volume copy); the
@@ -290,7 +324,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // `config set`, so they break the batch run — harmless, they just run alone.
   if (!patch.embed) {
     cmds.push(link(EMBED_PLUGIN_DIR));
-    cmds.push({ argv: ['plugins', 'enable', 'llama-cpp'] });
+    cmds.push(enable('llama-cpp'));
   }
 
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
@@ -587,7 +621,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     if (patch.slack) {
       const sl = patch.slack;
       cmds.push(channelPlugin('slack'));
-      cmds.push({ argv: ['plugins', 'enable', 'slack'] });
+      cmds.push(enable('slack'));
       cmds.push({ argv: ['config', 'set', 'channels.slack.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.mode', 'socket'] });
       cmds.push({ argv: ['config', 'set', 'channels.slack.mediaMaxMb', String(filesMb('slack', patch.filesMaxMb))] });
@@ -619,7 +653,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     if (patch.discord) {
       const dc = patch.discord;
       cmds.push(channelPlugin('discord'));
-      cmds.push({ argv: ['plugins', 'enable', 'discord'] });
+      cmds.push(enable('discord'));
       cmds.push({ argv: ['config', 'set', 'channels.discord.enabled', 'true'] });
       cmds.push({ argv: ['config', 'set', 'channels.discord.mediaMaxMb', String(filesMb('discord', patch.filesMaxMb))] });
       // The rooms it answers in, each for admitted people only (see the Slack
@@ -668,7 +702,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // default "main" agent (night review, 2026-09-28). Optional: a verb that
   // refuses an existing binding must not fail every rebuild.
   if (patch.telegram) {
-    cmds.push({ argv: ['agents', 'bind', '--agent', patch.agentId, '--bind', `telegram:${patch.telegram.accountId}`], optional: true });
+    cmds.push({ argv: ['agents', 'bind', '--agent', patch.agentId, '--bind', `telegram:${patch.telegram.accountId}`], optional: true, skipIf: hasBinding(patch.agentId, 'telegram', patch.telegram.accountId) });
   }
   // Route Slack and Discord to this agent on EVERY build: `agents add` runs
   // only on a fresh volume, so a channel added later would otherwise have no
@@ -679,13 +713,18 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     cmds.push({
       argv: ['agents', present ? 'bind' : 'unbind', '--agent', patch.agentId, '--bind', `${kind}:${CHANNEL_ACCOUNT}`],
       optional: !present,
+      // Already bound (or already not): nothing to do.
+      skipIf: present ? hasBinding(patch.agentId, kind, CHANNEL_ACCOUNT) : `!(${hasBinding(patch.agentId, kind, CHANNEL_ACCOUNT)})`,
     });
   }
   // Name it what the owner calls it. `agents add` takes only the id (the
   // slug), so the Control UI labelled every agent "stock-advisor" rather than
   // "Stock Advisor". Cosmetic, so a failure here must not fail a provision.
   if (patch.displayName) {
-    cmds.push({ argv: ['agents', 'set-identity', '--agent', patch.agentId, '--name', patch.displayName], optional: true });
+    cmds.push({
+      argv: ['agents', 'set-identity', '--agent', patch.agentId, '--name', patch.displayName], optional: true,
+      skipIf: `(() => { const e = (c.agents && c.agents.entries && c.agents.entries[${JSON.stringify(patch.agentId)}]) || ((c.agents && Array.isArray(c.agents.list)) ? c.agents.list.find((a) => a && a.id === ${JSON.stringify(patch.agentId)}) : undefined); return !!(e && e.identity && e.identity.name === ${JSON.stringify(patch.displayName)}); })()`,
+    });
   }
 
   // Heal volumes seeded before this rule (and imported ones): strip any
@@ -696,6 +735,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   });
 
   if (provider === 'anthropic' && patch.authMode === 'oauth-claude-cli' && patch.setupToken) {
+    // Pasted once per token (and again each half-year, well inside its
+    // 365-day expiry): two 5-second pastes on every rebuild before. The
+    // marker holds a hash, never the token (2026-09-28).
+    const now = new Date();
+    cmds.push({ argv: [], rawShell: 'rm -f /home/node/.openclaw/.hb-no-token' });
+    const tokenMark = `${createHash('sha256').update(patch.setupToken).digest('hex').slice(0, 32)}:${now.getUTCFullYear()}${now.getUTCMonth() < 6 ? 'a' : 'b'}`;
     cmds.push({
       argv: [
         'models', 'auth', '--agent', patch.agentId,
@@ -703,6 +748,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       ],
       stdin: patch.setupToken,
       sensitive: true,
+      marker: { file: `/home/node/.openclaw/.hb-tok-${patch.agentId.replace(/[^A-Za-z0-9._-]/g, '')}`, value: tokenMark },
     });
     // Also into the default agent "main"'s store — the Control UI lands
     // there, and auth stores are per-agent. 2026.9 refuses to guess the
@@ -711,6 +757,7 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
       argv: ['models', 'auth', ...(port ? ['--agent', 'main'] : []), 'paste-token', '--provider', 'anthropic', '--expires-in', '365d'],
       stdin: patch.setupToken,
       sensitive: true,
+      marker: { file: '/home/node/.openclaw/.hb-tok-main', value: tokenMark },
     });
   } else {
     // Not on a setup-token source (any more): the token a previous build
@@ -720,12 +767,16 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     // 2026-09-28). Logged out for the agent and "main", and dropped from
     // auth.profiles. Optional: an older CLI without `logout`, or nothing to
     // remove, must not fail a build.
-    for (const agent of [patch.agentId, 'main']) {
-      cmds.push({ argv: ['models', 'auth', '--agent', agent, 'logout', 'anthropic:manual', '--yes'], optional: true });
-    }
+    // Once: skipped while nothing names the token (a marker, and no profile
+    // in the config) — two 5-second logouts on every rebuild otherwise.
+    const slug = patch.agentId.replace(/[^A-Za-z0-9._-]/g, '');
     cmds.push({
       argv: [],
-      rawShell: `[ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));const p=c.auth&&c.auth.profiles;if(p&&p["anthropic:manual"]){delete p["anthropic:manual"];fs.writeFileSync(f,JSON.stringify(c,null,2));}' || true`,
+      rawShell: `if [ ! -f /home/node/.openclaw/.hb-no-token ] || grep -qs '"anthropic:manual"' /home/node/.openclaw/openclaw.json; then openclaw models auth --agent ${slug} logout anthropic:manual --yes >/dev/null 2>&1 || true; openclaw models auth --agent main logout anthropic:manual --yes >/dev/null 2>&1 || true; touch /home/node/.openclaw/.hb-no-token 2>/dev/null || true; fi`,
+    });
+    cmds.push({
+      argv: [],
+      rawShell: `rm -f /home/node/.openclaw/.hb-tok-*; [ -f /home/node/.openclaw/openclaw.json ] && node -e 'const fs=require("fs");const f="/home/node/.openclaw/openclaw.json";const c=JSON.parse(fs.readFileSync(f,"utf8"));const p=c.auth&&c.auth.profiles;if(p&&p["anthropic:manual"]){delete p["anthropic:manual"];fs.writeFileSync(f,JSON.stringify(c,null,2));}' || true`,
     });
   }
 
