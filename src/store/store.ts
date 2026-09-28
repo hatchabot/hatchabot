@@ -900,7 +900,8 @@ export class Store {
    * Move a source one place up or down in the owner's list by swapping
    * sort_order with the neighbour they can actually see — own profiles plus
    * shared ones — so the arrows move what the list shows, not what the table
-   * happens to hold. Returns false at the ends.
+   * happens to hold. Returns false at the ends. The order is one for the
+   * installation: moving past a shared neighbour moves it for its owner too.
    */
   moveAIProfile(ownerId: string, id: string, dir: 'up' | 'down'): boolean {
     return this.db.transaction(() => {
@@ -961,6 +962,9 @@ export class Store {
     model: r.model ?? undefined, aiProfileId: r.ai_profile_id ?? undefined,
     image: r.image ?? undefined, memoryCap: r.memory_cap ?? undefined, createdAt: r.created_at,
   });
+  listAllAgentClasses(): AgentClass[] {
+    return (this.db.prepare(`SELECT * FROM agent_classes ORDER BY name`).all() as any[]).map(this.#rowToClass);
+  }
   listAgentClasses(ownerId: string): AgentClass[] {
     return (this.db.prepare(`SELECT * FROM agent_classes WHERE owner_id = ? ORDER BY name`).all(ownerId) as any[]).map(this.#rowToClass);
   }

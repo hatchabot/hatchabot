@@ -38,13 +38,13 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | B10 | Remove an account | U | auto |
 | B11 | Link or unlink my Telegram / Discord identity | U A | auto (members, channelRoutes) |
 | B12 | CLI tokens: mint, list, revoke, `login` | U C A | auto (accountsCreateCli.test.ts, audit2026-09-23.test.ts) |
-| B13 | Operator profile ("about you"), apply to all | U A | auto (operator.test.ts) |
+| B13 | Operator profile ("about you"), apply to all | U A | auto (operatorProfile.test.ts) |
 | B14 | Sign out | U | auto |
 
 ## C. Creating agents
 | id | Use case | Surfaces | Coverage |
 |---|---|---|---|
-| C1 | Create an agent (name, persona, source, host, private memory, no Telegram) | U C A M | auto (userFlows, cli) |
+| C1 | Create an agent (name, persona, source, host, private memory, no Telegram) | U C A M | auto (userFlows, cliArgs) |
 | C2 | Paste a BotFather token when the pool is empty | U C | auto (poolFlows, botToken tests) |
 | C3 | Finish a stuck agent as web-only | U C | auto (skipTelegram) |
 | C4 | Ask Hatchabot what agent I'm missing | U M | auto (opsSuggest.test.ts) |
@@ -141,7 +141,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 ## H. Scheduling
 | id | Use case | Surfaces | Coverage |
 |---|---|---|---|
-| H1–H5 | Tasks: list, add, edit, pause, run now, delete | U C M | auto (crons, cronsInterval, cronImport) |
+| H1–H5 | Tasks: list, add, edit (in the app), pause, run now, delete | U C M | auto (crons, cronsInterval, cronImport; ui-clickthrough: scheduleEdit) |
 | H6 | Built-in OpenClaw tasks shown as such | U | auto (crons.test.ts) |
 | H7 | The manager's morning check | U | auto (opsAgent) |
 
@@ -168,12 +168,12 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | id | Use case | Surfaces | Coverage |
 |---|---|---|---|
 | J1 | Status panel: health, usage by period, resources, activity, tools | U A M | auto (usagePeriods, resources) |
-| J2 | The hub (manager tile + actions; the numbers moved to Status, 2026-09-26) | U | none (UI only; screenshots.mjs renders it) |
-| J3 | View by group / machine / source / model / image / class / status / activity / rebuilt / needs you | U | none (UI only) |
-| J4 | Sort | U | none (UI only) |
-| J5 | Drag: reorder, regroup, archive, new group, bin | U A | auto (agentGrouping for the API; UI none) |
-| J6 | Rename a group in place; move a group | U A | auto (groupsMove) |
-| J7 | Bulk actions; copy names | U | auto (agentModel.test.ts) for the per-agent routes; the selection UI itself is untested |
+| J2 | The home screen: the manager as the first tile of Default, Status / Bulk actions / Settings / New as symbols in the header (no hub since v2.86.0) | U | auto (ui-clickthrough: home, headerDoors) |
+| J3 | View by group / machine / source / model / image / pinned / class / status / activity / rebuilt / needs you | U | auto (ui-clickthrough: viewBy) |
+| J4 | Sort (Age · Name · Activity, in the header) | U | none (UI only) |
+| J5 | Drag: regroup, archive, new group, bin | U A | auto (agentGrouping for the API; ui-clickthrough: dragToGroup) |
+| J6 | Rename a group in place; move a group | U A | auto (groupsMove; ui-clickthrough: groupArrows) |
+| J7 | Bulk actions; copy names | U | auto (agentModel.test.ts) for the per-agent routes; ui-clickthrough: bulkBolt |
 | J8 | Audit log | U A | auto (events) |
 | J9 | Unread dot | U A | auto (unread) |
 | J10 | Badges and marks | U | none (UI only) |
@@ -230,8 +230,12 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 - Real OpenClaw containers end to end: the candidate gate and
   `scripts/regress-autonomous.sh` do this on a throwaway agent with a real AI
   source; the LXD clean install (A1–A3) starts from nothing.
-- The web UI's behaviour beyond syntax (`npm run check:web`) and rendered
-  screenshots: every "UI only" row above.
+- The web UI beyond what `npm run test:ui` drives (scripts/ui-clickthrough.mjs,
+  a release gate since v2.87.3: the home screen and header, View by, drag to a
+  group, the group arrows, the bulk bolt, Wake and Sleep, editing a task, the
+  rebuild confirmation, the Slack set-up sheet, the machine defaults, the
+  header's doors): every row still marked "UI only" above, and snapshot
+  revert, download, move and rehost, backups, hosts, proposal cards.
 
 ## Coverage script
 `node scripts/use-case-coverage.mjs` reads this file and the test titles, and

@@ -59,7 +59,7 @@ export const REST_TOOLS: RestTool[] = [
   // ---- reads ---------------------------------------------------------------
   {
     name: 'list_sources', tier: 'read',
-    description: "The owner's AI sources (subscriptions, API keys, local models): name, vendor, default model, which agents use each, and current usage / rate-limit status.",
+    description: "The owner's AI sources and how they are doing: name, how many agents use each, requests and tokens in the last 5 hours and 7 days, and whether it is rate-limited now.",
     input_schema: obj({}),
     call: () => ({ method: 'GET', path: '/v1/ai-profiles/usage' }),
   },

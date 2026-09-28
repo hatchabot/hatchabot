@@ -621,7 +621,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       ...extra,
       // A member of someone else's agent gets what it can DO, never where the
       // owner's files live, their env var names, or its gateway port (26th audit).
-      ...(extra.role !== undefined && extra.role !== 'owner'
+      ...((extra.role !== undefined && extra.role !== 'owner') || extra.foreign === true
         ? { dataSources: dataSourcesFor(agent).map((d) => ({ ...d, hostPath: undefined })), envVars: [], gatewayPort: undefined, sharedPaths: undefined }
         : {}),
     };
@@ -1539,7 +1539,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const image = (b as { image?: string }).image?.trim() || undefined;
     if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
-    if (image && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (image && !ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const capIn = (b as { memoryCap?: string }).memoryCap?.trim() || undefined;
     const capCheck = capIn ? classCapProblem(req, capIn) : undefined;
     if (capCheck) return reply.code(capCheck.status).send({ error: capCheck.error });
@@ -1564,7 +1564,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       const image = b.image !== undefined ? (b.image?.trim() || undefined) : cls.image;
       if (image && !IMAGE_TAG_RE.test(image)) return reply.code(400).send({ error: 'That image tag is not valid.' });
-      if (image && image !== cls.image && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      if (image && image !== cls.image && !ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
       const clash = store.agentClassByName(cls.ownerId, name);
       if (clash && clash.id !== cls.id) return reply.code(400).send({ error: `There's already a class called "${name}".` });
       const model = b.model !== undefined ? (b.model.trim() || undefined) : cls.model;
@@ -2267,7 +2267,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const pinned = store.listAllActiveAgents().filter((a) => a.image === tag); // archived pins count too: un-archiving would need the image
     if (pinned.length) return reply.code(409).send({ error: `${pinned.length} agent${pinned.length === 1 ? ' is' : 's are'} pinned to it: ${pinned.map((a) => a.name).join(', ')}. Discard those trials first.` });
-    const cls = store.listAgentClasses(ownerIdOf(req)).filter((c) => c.image === tag);
+    // Every account's classes: a member's class on this image loses its image too.
+    const cls = store.listAllAgentClasses().filter((c) => c.image === tag);
     if (cls.length) return reply.code(409).send({ error: `Class ${cls.map((c) => c.name).join(', ')} uses it — change the class image first.` });
     const localHost = store.listHosts(ownerIdOf(req)).find((h) => h.kind === 'local');
     if (!localHost) return reply.code(400).send({ error: 'No local host.' });
@@ -2278,7 +2279,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   /** Promote a built tag to the fleet default (:latest). Agents without a pin follow it on their next rebuild. */
   app.post<{ Body: { tag?: string } }>('/v1/runtime/images/promote', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const tag = String((req.body as { tag?: string } | null)?.tag ?? '').trim();
     if (!IMAGE_TAG_RE.test(tag)) return reply.code(400).send({ error: 'That image tag is not valid.' });
     if (tag === DEFAULT_BASE) return reply.code(400).send({ error: 'That is already the fleet default.' });
@@ -2307,7 +2308,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
 
   app.post<{ Body: { version?: string; candidate?: boolean; packages?: unknown; engine?: unknown } }>('/v1/runtime/build', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     if (baseBuild.running) return reply.code(409).send({ error: 'A base image build is already running.' });
     const b = (req.body ?? {}) as { version?: string; candidate?: boolean; engine?: unknown };
     const version = b.version?.trim() || undefined;
@@ -2349,14 +2350,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.get('/v1/runtime/build', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     let log = '';
     try { const full = readFileSync(buildLogPath('_base', buildDataDir), 'utf8'); log = full.slice(-16_000); } catch { /* no build yet */ }
     return { ...baseBuild, log };
   });
 
   app.get('/v1/images', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     // Annotate each with how many agents pin it, so the UI can gate delete.
     const images = store.listDerivedImages().map((img) => ({
       ...img,
@@ -2368,7 +2369,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Body: { name?: string; dockerfile?: string; base?: string } }>(
     '/v1/images',
     async (req, reply) => {
-      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
       const parsed = z
         .object({
           name: z.string().trim().min(1).max(40),
@@ -2401,7 +2402,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { name: string }; Body: { base?: string } }>(
     '/v1/images/:name/rebuild',
     async (req, reply) => {
-      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
       const rec = store.getDerivedImage(req.params.name);
       if (!rec) return reply.code(404).send({ error: 'Not found' });
       if (buildingImages.has(rec.name)) {
@@ -2421,7 +2422,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   );
 
   app.delete<{ Params: { name: string } }>('/v1/images/:name', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const rec = store.getDerivedImage(req.params.name);
     if (!rec) return reply.code(404).send({ error: 'Not found' });
     if (buildingImages.has(rec.name)) {
@@ -2453,7 +2454,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // Tail the build log so the CLI/web can show progress and diagnose a failure.
   app.get<{ Params: { name: string } }>('/v1/images/:name/log', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const rec = store.getDerivedImage(req.params.name);
     if (!rec) return reply.code(404).send({ error: 'Not found' });
     const path = buildLogPath(rec.name, buildDataDir);
@@ -2466,7 +2467,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // control plane places agents on. Host-owner only — it adds fleet capacity.
   // The endpoint is reachability-checked best-effort so a typo fails here.
   app.post<{ Body: { name?: string; dockerHost?: string } }>('/v1/hosts', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const parsed = z
       .object({
         name: z.string().trim().min(1).max(64),
@@ -2513,7 +2514,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // Drain a host: stop every running agent on it (take it out of service before
   // decommissioning). Best-effort per agent; a busy one is skipped and reported.
   app.post<{ Params: { id: string } }>('/v1/hosts/:id/drain', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const host = store.getHost(req.params.id);
     if (!host) return reply.code(404).send({ error: 'Not found' });
     const running = store
@@ -2540,7 +2541,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.delete<{ Params: { id: string } }>('/v1/hosts/:id', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const host = store.getHost(req.params.id);
     if (!host) return reply.code(404).send({ error: 'Not found' });
     if (host.kind === 'local') {
@@ -2614,13 +2615,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // agents at provision — the Environment tab reserves GEMINI_* on purpose,
   // so this is the managed path. Write-only, like every credential.
   app.get('/v1/media-key', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const set = await secrets.get(MEDIA_KEY_REF).then(() => true, () => false);
     return { set };
   });
 
   app.put<{ Body: { key?: string } }>('/v1/media-key', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const parsed = z.object({ key: z.string().min(1).max(400) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: 'Paste a Gemini API key.' });
     const key = parsed.data.key.trim();
@@ -2634,14 +2635,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * presses as a bot token (Show, then Copy). Each reveal is logged.
    */
   app.get('/v1/media-key/reveal', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const key = await secrets.get(MEDIA_KEY_REF).catch(() => undefined);
     if (!key) return reply.code(404).send({ error: 'No Gemini key is set.' });
     app.log.warn({ ownerId: ownerIdOf(req) }, 'media.key_revealed');
     return { key };
   });
   app.get('/v1/search-key/reveal', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const key = await secrets.get(SEARCH_KEY_REF).catch(() => undefined);
     if (!key) return reply.code(404).send({ error: 'No Brave key is set.' });
     app.log.warn({ ownerId: ownerIdOf(req) }, 'search.key_revealed');
@@ -2649,7 +2650,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.delete('/v1/media-key', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     await secrets.delete(MEDIA_KEY_REF).catch(() => {});
     return { set: false };
   });
@@ -2659,13 +2660,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // DuckDuckGo baseline (search itself is always on). Same shape as the media
   // key: write-only, injected at provision, per-agent BRAVE_API_KEY overrides.
   app.get('/v1/search-key', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const set = await secrets.get(SEARCH_KEY_REF).then(() => true, () => false);
     return { set };
   });
 
   app.put<{ Body: { key?: string } }>('/v1/search-key', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const parsed = z.object({ key: z.string().min(1).max(400) }).safeParse(req.body ?? {});
     if (!parsed.success || !parsed.data.key.trim()) {
       return reply.code(400).send({ error: 'Paste a Brave Search API key.' });
@@ -2675,7 +2676,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.delete('/v1/search-key', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     await secrets.delete(SEARCH_KEY_REF).catch(() => {});
     return { set: false };
   });
@@ -3069,7 +3070,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Params: { id: string }; Body: { toProfileId?: string; rebuild?: boolean; checkpoint?: boolean; recoverAfter?: boolean } }>(
     '/v1/ai-profiles/:id/migrate-agents',
     async (req, reply) => {
-      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
       const from = store.getAIProfile(req.params.id);
       if (!from || from.ownerId !== ownerIdOf(req)) return reply.code(404).send({ error: 'Not found' });
       const b = (req.body ?? {}) as { toProfileId?: string; rebuild?: boolean; checkpoint?: boolean; recoverAfter?: boolean };
@@ -3938,7 +3939,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // are findable and cleanable. Listing metadata only: memory, files, and
     // conversations stay behind the per-agent ownership checks as always.
     const all = req.query.all === '1';
-    if (all && !ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (all && !ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const agents = all ? store.listAllActiveAgents() : store.listVisibleAgents(ownerIdOf(req));
     // Fleet-wide lookups once per request (publicAgent's per-agent versions are
     // for single-agent responses; on a 45-agent list they were 3 queries each).
@@ -3968,6 +3969,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const chan = store.getChannelForAgent(a.id);
         const role = store.accessRole(a.id, ownerIdOf(req));
         return publicAgent(a, {
+          // The machine owner's --all view of someone else's agent: metadata, not where their files live.
+          foreign: a.ownerId !== ownerIdOf(req) && !role,
           selfRestarts: rebuild?.running.restartCount || undefined,
           // Its memory: the cap it has (its own / class / default), what the
           // container actually runs with, and how it has fared against it.
@@ -4160,6 +4163,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         .safeParse(req.body ?? {});
       if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
       const { name, persona, sharedMemory: shared, aiProfileId, model, runsHere, group } = parsed.data;
+      // Two of your agents with one name: the CLI's "matches more than one" follows (create refuses it too).
+      if (name !== undefined && name.trim().toLowerCase() !== agent.name.trim().toLowerCase()) {
+        const same = store.listAgents(agent.ownerId).find((x) => x.id !== agent.id && x.state !== 'DELETED' && x.name.trim().toLowerCase() === name.trim().toLowerCase());
+        if (same) return reply.code(409).send({ error: `You already have an agent called "${same.name}". Pick another name.` });
+      }
       if (
         name === undefined &&
         persona === undefined &&
@@ -4223,10 +4231,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         store.setAgentCronTriggers(agent.id, parsed.data.cronTriggers);
         // OpenClaw applies this key without a gateway restart — set it live so
         // the agent can wire a trigger script right away; rebuilds re-assert it.
+        let live = false;
         if (agent.state === 'RUNNING' && agent.runtimeRef) {
-          await providerFor(agent.hostId).exec(agent.runtimeRef, ['config', 'set', 'cron.triggers.enabled', parsed.data.cronTriggers ? 'true' : 'false']).catch(() => {});
+          const res = await providerFor(agent.hostId).exec(agent.runtimeRef, ['config', 'set', 'cron.triggers.enabled', parsed.data.cronTriggers ? 'true' : 'false']).catch(() => undefined);
+          live = res?.code === 0;
         }
-        trace(agent.id)('cron.triggers', { enabled: parsed.data.cronTriggers });
+        trace(agent.id)('cron.triggers', { enabled: parsed.data.cronTriggers, live });
       }
 
       if (persona !== undefined) {
@@ -4260,7 +4270,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // paths: any local image is runnable by name, including ones that have
         // nothing to do with Hatchabot. Agent ownership is not enough.
         if (!ownsLocalHost(req)) {
-          return reply.code(403).send({ error: HOST_PATH_DENIED });
+          return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
         }
         // Deliberately NOT validated against `docker images`: the point of a
         // pin is often an image that is about to exist (candidate being built).
@@ -4299,7 +4309,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // blocklist below is owner-blind, so on a shared box a second account
         // could otherwise read another user's files through their own agent.
         if (paths.length && !ownsLocalHost(req)) {
-          return reply.code(403).send({ error: HOST_PATH_DENIED });
+          return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
         }
         for (const p of paths) {
           // Refuse the dangerous ones by name, and require the folder to
@@ -5167,7 +5177,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (kind === 'folder') {
       const p = (parsed.data.path ?? '').trim();
       if (!p) return reply.code(400).send({ error: 'A folder path is required.' });
-      if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+      if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
       const problem = sharePathProblem(p);
       if (problem) return reply.code(400).send({ error: problem });
       if (!existsSync(p)) return reply.code(400).send({ error: `No such folder on this machine: ${p}` });
@@ -5616,7 +5626,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // --all (host owner only): every user's agents, for the machine-wide view.
     const wantAll = req.query.all === '1';
     if (wantAll && !ownsLocalHost(req)) {
-      return reply.code(403).send({ error: HOST_PATH_DENIED });
+      return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     }
     const agents = wantAll
       ? store.listAllActiveAgents()
@@ -6224,7 +6234,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (!token && body.fromWorkspace) {
         // Reading an OpenClaw config off an arbitrary host path is the same
         // host-path privilege as inspect/adopt — machine owner only.
-        if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+        if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
         const existing = findExistingBot(body.fromWorkspace);
         if (!existing) {
           return reply.code(400).send({
@@ -7141,7 +7151,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * deliberately no "reveal all".
    */
   app.get<{ Params: { username: string } }>('/v1/bots/:username/token', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const username = req.params.username.replace(/^@/, '').toLowerCase();
     const row = botSecretRefs().get(username);
     if (!row) return reply.code(404).send({ error: `This server holds no token for @${username}.` });
@@ -7155,7 +7165,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.get('/v1/bot-inventory', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const botFetch = deps.oauthFetch ?? fetch;
     const rows = botSecretRefs();
     const out: Array<Record<string, unknown>> = [];
@@ -7198,7 +7208,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // The client is an installation resource, like the runtime image — only
   // the machine owner sets or clears it.
   app.put<{ Body: { clientId?: string; clientSecret?: string } }>('/v1/google-oauth/client', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const parsed = z
       .object({ clientId: z.string().trim().min(10).max(200), clientSecret: z.string().trim().min(10).max(200) })
       .safeParse(req.body ?? {});
@@ -7208,7 +7218,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.delete('/v1/google-oauth/client', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     await secrets.delete(GOOGLE_CLIENT_REF).catch(() => {});
     return { configured: false };
   });
@@ -7458,7 +7468,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // tag), so the Settings list can't drift from reality. Host-owner only:
   // it spins a one-shot container on first ask.
   app.get('/v1/runtime/capabilities', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     try {
       return await probeImageCapabilities(process.env.HATCHABOT_IMAGE ?? 'hatchabot-runtime:latest');
     } catch (err) {
@@ -7499,7 +7509,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // clear, so every route is gated to the machine's owner and returns only
   // metadata — never the backup files themselves.
   app.get('/v1/backups', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     // Match each backed-up volume to a live agent so the panel can offer a
     // per-agent Restore (and show its real name). Backups are machine-level (the
     // nightly script captures EVERY volume, across all owners) and this route is
@@ -7519,12 +7529,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   });
 
   app.post('/v1/backups/run', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     return { run: startBackup(Date.now()) };
   });
 
   app.delete<{ Params: { date: string } }>('/v1/backups/:date', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     try {
       const removed = pruneBackup(req.params.date);
       if (!removed) return reply.code(404).send({ error: 'No backup for that date.' });
@@ -7538,7 +7548,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // owner-only; it overwrites live memory, so it holds the busy guard for the
   // stop → import → start swap the same way a snapshot restore does.
   app.post<{ Body: { agentId?: string; date?: string } }>('/v1/backups/restore', async (req, reply) => {
-    if (!ownsLocalHost(req)) return reply.code(403).send({ error: HOST_PATH_DENIED });
+    if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
     const { agentId, date } = (req.body as { agentId?: string; date?: string } | null) ?? {};
     if (!agentId || !date) return reply.code(400).send({ error: 'agentId and date are required.' });
     // Machine-level, like the panel above: the host owner can restore any agent
@@ -8708,7 +8718,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/members', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
-    return store.listMemberships(agent.id).filter((m) => m.status === 'active');
+    // With each person's identities on Discord and Slack too (Telegram's is the seat's own id).
+    return store.listMemberships(agent.id).filter((m) => m.status === 'active')
+      .map((m) => ({ ...m, identities: store.memberIdentities(agent.id, m.userId) }));
   });
 
   app.delete<{ Params: { id: string; userId: string } }>(

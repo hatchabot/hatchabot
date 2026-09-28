@@ -2109,7 +2109,7 @@
   </div>
   <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-weight:400;margin:10px 0 0">
     <input type="checkbox" id="cronTriggers" onchange="saveCronTriggers(this.checked)" style="width:auto;margin-top:3px;flex:none">
-    <span><b>Allow event-triggered tasks</b> <span class="sub">— lets the agent attach a headless, zero-token condition script to a task (e.g. "fire only when unread mail exists"), so a frequent poll costs nothing while idle. The script runs inside this agent's own container with its normal tool access. Applies immediately.</span></span></label>
+    <span><b>Allow event-triggered tasks</b> <span class="sub">— lets the agent attach a headless, zero-token condition script to a task (e.g. "fire only when unread mail exists"), so a frequent poll costs nothing while idle. The script runs inside this agent's own container with its normal tool access. Applies right away on a running agent; a stopped one gets it when it starts.</span></span></label>
   <div id="cronList" style="margin-top:12px"></div>
   <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">
     <label>New task</label>

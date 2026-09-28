@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.89.5] — 2026-09-27
+
+### Fixed (the walk-through's low-severity list)
+- `hatchabot members` shows people linked on Discord or Slack as linked, and on which apps.
+- Renaming an agent to a name another of your agents has is refused, as creating one is.
+- `hatchabot list --all` no longer shows the machine's owner where other people's agents keep their files or their env var names.
+- Deleting a runtime image tag checks every account's classes, not only yours.
+- Refusals on image, backup, host, bot and key routes say they are for the machine's owner, instead of talking about host folders.
+- Importing a template checks the name as creating an agent does (1–64 characters).
+- `hatchabot memory <agent> <cap>` reports the cap the container really runs with.
+- Event-triggered tasks: the setting says it applies right away only on a running agent, and records whether it did.
+- Descriptions corrected: the manager's `list_sources`, the drain entry in the coverage ledger, the source-order note, and the use-case inventory (test file names, the click-through gate's coverage).
+
 ## [2.89.4] — 2026-09-27
 
 ### Fixed (the use-case walk-through's backlog)

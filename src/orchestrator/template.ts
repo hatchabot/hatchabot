@@ -451,6 +451,8 @@ export function importTemplate(
   if (!host) throw new TransferError('No host available to import onto.');
 
   const name = (opts.name ?? manifest.agent.name).trim();
+  // The same rule as creating one: a name of 1–64 characters.
+  if (!name || name.length > 64) throw new TransferError('Give the agent a name of 1 to 64 characters.');
   let agent: Agent;
   try {
     // Fresh identity: importer owns it, provisions their own bot, invites their

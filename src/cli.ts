@@ -1789,7 +1789,8 @@ async function main() {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot members <agent>'));
       const ms: any[] = await (await api(ctx, `/v1/agents/${a.id}/members`)).json() as any[];
       for (const m of ms) {
-        console.log(`${(m.displayName ?? m.userId).padEnd(24)} ${m.role.padEnd(6)} ${m.channelUserId ? 'linked' : 'not linked'}  ${m.userId}`);
+        const apps = [...(m.channelUserId ? ['telegram'] : []), ...Object.keys(m.identities ?? {})];
+        console.log(`${(m.displayName ?? m.userId).padEnd(24)} ${m.role.padEnd(6)} ${apps.length ? `linked on ${apps.join(', ')}` : 'not linked'}  ${m.userId}`);
       }
       return;
     }
@@ -2292,6 +2293,8 @@ async function main() {
         const cap = rest[1] === 'default' ? null : rest[1];
         const res = await api(ctx, `/v1/agents/${a.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ memoryCap: cap }) });
         const r: any = await res.json();
+        // The PATCH answer does not carry the effective cap; the list does.
+        r.memoryCapEffective = ((await agents(ctx)).find((x: any) => x.id === a.id) as any)?.memoryCapEffective;
         console.log(`${a.name}: memory cap ${cap ? `set to ${cap}` : 'back to the default'} → its container runs with ${r.memoryCapEffective ?? cap ?? 'the default'}${r.state === 'RUNNING' ? ' (applied live)' : ''}`);
         return;
       }

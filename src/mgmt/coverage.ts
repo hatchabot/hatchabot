@@ -158,7 +158,7 @@ export const COVERAGE: Record<string, string> = {
   // ---- machines & servers ----
   'POST /v1/hosts': 'app: secret — a runner address and SSH setup',
   'DELETE /v1/hosts/:id': 'app: fleet-wide/irreversible — removing a runner',
-  'POST /v1/hosts/:id/drain': 'app: fleet-wide/irreversible — moves every agent off a runner',
+  'POST /v1/hosts/:id/drain': 'app: fleet-wide/irreversible — stops every running agent on a runner, to take it out of service',
   'POST /v1/peers': 'app: secret — another server’s access token',
   'DELETE /v1/peers/:id': 'app: later — forget another server',
   'POST /v1/workspaces/inspect': 'app: browser — reading host paths for adoption',
