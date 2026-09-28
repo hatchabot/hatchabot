@@ -2,6 +2,19 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.98.0] — 2026-09-28
+
+### Fixed
+- **Google sign-in keeps you signed in for 14 days** (`HATCHABOT_SESSION_DAYS`). A session used to end with Google's own token, about an hour after signing in, so the app asked again every hour. The allowed-emails list is still checked on every request.
+- An invite made for @alice lets an already-known Alice in at once again: her Telegram handle is asked of a bot that already talks to her.
+- The management agent's doorman answers the door and the memory service only on its own network, not on Docker's default bridge (the console keeps its published port).
+- A master's pushed update no longer replaces each child's own Peers, data sources and memory rules until the child's next rebuild.
+- An engine-free `-lite` image is not rebuilt from a recipe as a different image under the same name.
+- Orphaned channel tokens are swept at start, like orphaned bot tokens.
+
+### Docs
+- What's new, sign-in lengths and lockouts, Google Connect from the public address; the website's security answer.
+
 ## [2.97.1] — 2026-09-28
 
 A regression review of tonight's own changes (v2.90.0–v2.97.0), and its fixes.

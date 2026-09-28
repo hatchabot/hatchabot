@@ -59,6 +59,13 @@ export async function recipeFor(
   const info = (await source.listImageTags().catch(() => [])).find((t) => t.tag === tag);
   if (!info) return { problem: `${tag} is not on this machine either, so there is nothing to rebuild it from` };
   if (!info.openclawVersion) return { problem: `${tag} does not say which OpenClaw it runs` };
+  // A recipe is "that version, its channels and packages". An engine-free
+  // (-lite) build is none of those: rebuilt from the version it would come
+  // back with its own memory engine under the same name (2026-09-28).
+  const name = tag.slice(repo.length + 1);
+  if (/-lite(\b|$)/.test(name)) {
+    return { problem: `${tag} is an engine-free image with its own build, so it cannot be rebuilt from a recipe` };
+  }
   const packages = (info.extraPackages ?? []).filter((p) => PKG.test(p));
   return { tag, base: `${repo}:${info.openclawVersion}`, packages, channels: info.channels ?? [] };
 }

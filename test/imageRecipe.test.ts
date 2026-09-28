@@ -12,8 +12,16 @@ describe('image recipes', () => {
   });
   it('only valid package names reach the build line', async () => {
     const p = new MockProvider();
-    p.tags.push({ tag: 'hatchabot-runtime:x-plus', imageId: 'i', openclawVersion: '2026.7.1-2', extraPackages: ['jq', 'evil; rm -rf /', 'curl'] } as any);
-    const r = await recipeFor(p, 'hatchabot-runtime:x-plus', () => undefined);
+    p.tags.push({ tag: 'hatchabot-runtime:2026.7.1-2-plus-jq-curl', imageId: 'i', openclawVersion: '2026.7.1-2', extraPackages: ['jq', 'evil; rm -rf /', 'curl'] } as any);
+    const r = await recipeFor(p, 'hatchabot-runtime:2026.7.1-2-plus-jq-curl', () => undefined);
     expect((r as any).packages).toEqual(['jq', 'curl']);
+  });
+});
+
+describe('images with their own build (2026-09-28)', () => {
+  it('a -lite image gives no recipe: rebuilt from the version it would be a different image', async () => {
+    const p = new MockProvider();
+    p.tags.push({ tag: 'hatchabot-runtime:2026.7.1-2-lite', imageId: 'i', openclawVersion: '2026.7.1-2' } as any);
+    expect(await recipeFor(p, 'hatchabot-runtime:2026.7.1-2-lite', () => undefined)).toMatchObject({ problem: expect.stringMatching(/own build/) });
   });
 });

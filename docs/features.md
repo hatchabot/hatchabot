@@ -487,6 +487,20 @@ sources and invites — rather than one shared password (`setup-host.sh`
 recommends it; an install that started with a shared password can switch in
 **⚙ Settings → You → Turn on family accounts**, which is one way).
 
+**How long a sign-in lasts.** Family accounts and the shared password keep
+you signed in for 30 days on that browser; Google sign-in for 14 days
+(`HATCHABOT_SESSION_DAYS`), and removing someone from
+`HATCHABOT_ALLOWED_EMAILS` signs them out at once. Each address you open
+Hatchabot at (its LAN IP, `localhost`, the public name) is its own browser
+site with its own sign-in, so switching between them asks again. Before
+v2.98.0 a Google sign-in ended with Google's own token, about an hour.
+
+Ten wrong passwords in 15 minutes pause sign-in for that browser, and (with
+family accounts) for that account; a hundred,
+from anywhere, pause the shared password (or the first-run setup code) for
+everyone, so guessing cannot be spread across many addresses. A correct
+recovery code works even while an account is paused.
+
 **Forgotten passwords, without a terminal:**
 
 - **Someone in the family** — the host owner presses **Send a reset link** next
@@ -1009,6 +1023,15 @@ never include them. Recommend a **purpose-bound Google account** (scoped to
 the agent's job) and minimal services: everyone who can message the agent
 can act as the connected account. Design and phases:
 [connections-design.md](connections-design.md).
+
+**Connecting from the app** (⚙ Settings → Connections): the consent must come
+back to the same browser that pressed Connect, so a link forwarded to someone
+else cannot put their account in your vault. With `HATCHABOT_PUBLIC_URL` set,
+Google returns you to that address: open Hatchabot there to connect (the app
+says so if you are on another). A connection attached or detached while its
+agent is stopped or asleep takes effect when it starts or wakes; deleting one
+revokes it at Google unless another account here holds the same Google
+account.
 
 ## Backups & recovery
 

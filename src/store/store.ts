@@ -860,11 +860,25 @@ export class Store {
              AND ref NOT IN (SELECT secret_ref FROM peers)`,
         )
         .all() as Array<{ ref: string }>;
-      if (rows.length) {
+      // Channel tokens too (Discord, Slack, an imported Telegram bot): a
+      // deleted agent's rows purged at boot left theirs behind (2026-09-28).
+      let channelRows: Array<{ ref: string }> = [];
+      try {
+        channelRows = this.db
+          .prepare(
+            `SELECT ref FROM secrets
+             WHERE ref LIKE 'channel/%'
+               AND ref NOT IN (SELECT secret_ref FROM channels)
+               AND ref NOT IN (SELECT secret_ref FROM discord_bots)`,
+          )
+          .all() as Array<{ ref: string }>;
+      } catch { /* no discord_bots yet */ }
+      const all = [...rows, ...channelRows];
+      if (all.length) {
         const del = this.db.prepare(`DELETE FROM secrets WHERE ref = ?`);
-        for (const { ref } of rows) del.run(ref);
+        for (const { ref } of all) del.run(ref);
       }
-      return rows.map((r) => r.ref);
+      return all.map((r) => r.ref);
     } catch {
       return []; // a table doesn't exist yet (fresh install mid-boot) — skip
     }

@@ -140,3 +140,23 @@ describe('Google sign-in with local accounts beside it', () => {
     expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: bearer(tok) })).statusCode).toBe(403);
   });
 });
+
+describe('Google sign-in sessions (2026-09-28)', () => {
+  it('last beyond the hour-long Google token, and still answer to the allowed-emails list', async () => {
+    const store = new Store(new Database(':memory:'));
+    const verifier = { verify: async () => ({ sub: 'g-owner', email: 'owner@example.com', expMs: Date.now() + 3_600_000 }) };
+    const f = Fastify();
+    await registerAuth(f, { secret: SECRET, mode: 'identity', store, verifier: verifier as never, cliTokenOwner: () => undefined });
+    f.get('/v1/whoami', async (req) => principalOf(req));
+    const s = await f.inject({ method: 'POST', url: '/v1/session', payload: { idToken: 'x' } });
+    const setCookie = String(s.headers['set-cookie']);
+    const maxAge = Number(/Max-Age=(\d+)/i.exec(setCookie)?.[1]);
+    expect(maxAge).toBeGreaterThan(13 * 24 * 3600);
+    const cookie = cookieOf(s);
+    expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie } })).statusCode).toBe(200);
+    process.env.HATCHABOT_ALLOWED_EMAILS = 'someone-else@example.com';
+    try {
+      expect((await f.inject({ method: 'GET', url: '/v1/whoami', headers: { cookie } })).statusCode).toBe(401);
+    } finally { delete process.env.HATCHABOT_ALLOWED_EMAILS; }
+  });
+});

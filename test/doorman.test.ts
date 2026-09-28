@@ -13,11 +13,11 @@ describe('what the doorman forwards', () => {
     expect(routes).toEqual([
       // Docker's host alias points at this machine on every platform; the door
       // binds whatever address that is (see ensureOpsServer).
-      { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: 8091, signed: true },
+      { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: 8091, signed: true, jailOnly: true },
       { listen: DOORMAN_CONSOLE_PORT, host: 'hatchabot-manager-abc12345', port: 18789 },
     ]);
     // With the shared memory search service in use, its door rides along (2026-09-25).
-    expect(doormanRoutes({ opsPort: 8091, agentContainer: 'x', embedPort: 8093 })).toContainEqual({ listen: 8093, host: HOST_ALIAS, port: 8093 });
+    expect(doormanRoutes({ opsPort: 8091, agentContainer: 'x', embedPort: 8093 })).toContainEqual({ listen: 8093, host: HOST_ALIAS, port: 8093, jailOnly: true });
   });
 });
 

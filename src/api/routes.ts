@@ -8843,6 +8843,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         // child's values panel can ask for any newly-added field.
         store.setAgentParamState(child.id, values, layer);
         if (master.parameters?.length) store.setAgentParameters(child.id, master.parameters);
+        // Its OWN managed sections back (its peers, data sources, operator,
+        // memory rules): the master's came along in the pushed file and stood
+        // until the child's next rebuild (2026-09-28). Best-effort, off the reply.
+        if (child.runtimeRef && child.state === 'RUNNING') {
+          void syncDataSourceDocs({ store, secrets, provider: providerFor(child.hostId), channel: deps.channel, log: trace(child.id) }, child.id, child.runtimeRef, trace(child.id)).catch(() => {});
+        }
         trace(child.id)('definition.pushed', { from: master.id });
         results.push({ id: child.id, name: child.name, ok: true });
       } catch (err) {
@@ -9198,7 +9204,24 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const knownIdRaw = !accountId ? undefined
         : joinKind === 'telegram' ? store.knownChannelUserId(accountId)
         : store.identityOfUserAnywhere(accountId, joinKind);
-      const knownId = expected && knownIdRaw !== expected ? undefined : knownIdRaw;
+      // The handle behind a known Telegram id, asked of a bot of the owner's
+      // that already talks to them: a known Alice invited "for @alice" is let
+      // in at once again, and only she is (2026-09-28).
+      const handleOf = async (id: string): Promise<string | undefined> => {
+        for (const a of store.listAgents(agent.ownerId)) {
+          const ch = store.getChannelForAgent(a.id, 'telegram');
+          if (!ch || !store.listAllowedChannelUserIds(a.id).includes(id)) continue;
+          const tok = await secrets.get(ch.secretRef).catch(() => undefined);
+          if (!tok) continue;
+          const r = await (deps.oauthFetch ?? fetch)(`https://api.telegram.org/bot${tok}/getChat?chat_id=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(5000) })
+            .then((x) => x.json() as Promise<{ ok?: boolean; result?: { username?: string } }>).catch(() => undefined);
+          if (r?.ok) return r.result?.username;
+        }
+        return undefined;
+      };
+      const matchesExpected = !expected || knownIdRaw === expected
+        || (!!knownIdRaw && joinKind === 'telegram' && (await handleOf(knownIdRaw))?.toLowerCase() === expected.toLowerCase());
+      const knownId = matchesExpected ? knownIdRaw : undefined;
       if (knownId && agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
         try {
           await grantChannelAccess(

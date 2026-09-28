@@ -30,7 +30,7 @@ Criticals: agent secrets on the docker command line (readable by every local use
 
 Agent families and consults, the config writer, Discord and Slack, runtime images, creation and bulk actions: fixed in v2.94.0. One critical (a removed member stayed in Slack/Discord room lists).
 
-Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep loop, the cap race, and the downgrade checks for move and import. v2.96.0 closed the concurrent setup/un-archive, peer grants, class memory cap, candidate retag, recipe status, lines cap and build ceiling. v2.97.0 closed the stopped-agent CLI image and the set_class card. Still open: a `-lite` or revision tag's recipe is rebuilt from the plain version; push-definition replaces a child's own Peers section until its next rebuild.
+Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep loop, the cap race, and the downgrade checks for move and import. v2.96.0 closed the concurrent setup/un-archive, peer grants, class memory cap, candidate retag, recipe status, lines cap and build ceiling. v2.97.0 closed the stopped-agent CLI image and the set_class card; v2.98.0 the `-lite` recipe (now refused) and push-definition (each child's own sections are re-synced after a push).
 
 ## The first wave's two criticals
 
@@ -39,15 +39,13 @@ Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep 
 
 ## Regression review
 
-Three reviewers read the diff v2.89.6..v2.97.0 for mistakes in tonight's own fixes. They found 4 majors (an emptied room list opening the room, multi-line env values failing rebuilds, docker-missing crashing boot, password-mode lockout) and ~20 smaller ones, fixed in v2.97.1. Left as they were: uninstall still refuses (both kinds) when it cannot read the database; an invite "for @alice" asks a known Alice to message first (her id cannot be matched to the handle); the boot purge of tombstone channel rows does not delete their secrets.
+Three reviewers read the diff v2.89.6..v2.97.0 for mistakes in tonight's own fixes. They found 4 majors (an emptied room list opening the room, multi-line env values failing rebuilds, docker-missing crashing boot, password-mode lockout) and ~20 smaller ones, fixed in v2.97.1. Left as they were: uninstall still refuses (both kinds) when it cannot read the database — the safer rule. Closed in v2.98.0: a known invitee is matched to the invite's @handle through a bot that already talks to them; the boot sweep also removes orphaned channel tokens.
 
 ## Left open, on purpose
 
 - **Second wave, still open:** password mode still honours X-Forwarded-For from loopback (fixed per-account buckets now cap guessing; dropping it would bring back the shared-bucket bug behind a proxy). Everything else in the second wave was fixed in v2.92.0 and v2.93.0.
 
-- **Doorman listens on every interface.** It also answers on Docker's default bridge. Only an agent still on that bridge could reach it, and on the Spark nothing but Hatchabot's own doorman and memory door is there (checked 2026-09-28). Binding only the jail address would break the published console port, so this needs a live test before it changes.
-- **Checkpointing rebuilds hold a rebuild slot while they wait for the checkpoint gate.** A throughput issue during a source switch of many agents, not a correctness one.
-- **The schema-upgrade test does not seed the old pairing-window shape.** The move itself runs on every live box already; the test gap stays noted here.
+- *(Closed later: the doorman's door and memory routes answer only on the manager's own network since v2.98.0, tested live with throwaway containers; checkpoint slots are freed after the checkpoint turn and the schema-upgrade test seeds the old shapes since v2.93.0.)*
 - **A restore of an agent whose volume is over about 1 GB compressed is now refused** (its safety copy cannot be buffered). Before, it went ahead with no way back.
 
 ## Lessons

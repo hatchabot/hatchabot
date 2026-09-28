@@ -28,6 +28,13 @@ export interface DoormanRoute {
   port: number;
   /** Hatchabot's door: the doorman announces itself first ("HBDM <key>", opsServer.ts). */
   signed?: boolean;
+  /**
+   * Answer only on the manager's own network: the doorman also joins Docker's
+   * default bridge (for the console's published port), and any container left
+   * on that bridge could otherwise reach the door or the memory service
+   * through it (night review, 2026-09-28).
+   */
+  jailOnly?: boolean;
 }
 
 /** Inside the jail, the agent reaches Hatchabot's door here. */
@@ -51,9 +58,13 @@ export function doormanScript(): string {
     'const routes=JSON.parse(process.env.DOORMAN_ROUTES||"[]");',
     'const MAX=Number(process.env.DOORMAN_MAX||64);',
     'let open=0;',
+    // The addresses it has when it starts are the jail's (the bridge is
+    // connected after): a jail-only route refuses a connection on any other.
+    'const home=new Set([].concat(...Object.values(require("os").networkInterfaces())).filter(Boolean).map((a)=>a.address));',
     'for(const r of routes){',
     'net.createServer((c)=>{',
     'if(open>=MAX){c.destroy();return;}',
+    'if(r.jailOnly&&!home.has(String(c.localAddress||"").replace(/^::ffff:/,""))){c.destroy();return;}',
     'open++;let done=false;const bye=()=>{if(!done){done=true;open--;}u.destroy();c.destroy();};',
     'const u=net.connect(r.port,r.host,()=>{if(r.signed&&process.env.DOORMAN_KEY)u.write("HBDM "+process.env.DOORMAN_KEY+"\\n");u.pipe(c);c.pipe(u);});',
     'u.on("error",bye);c.on("error",bye);u.on("close",bye);c.on("close",bye);',
@@ -72,13 +83,13 @@ export function doormanScript(): string {
  */
 export function doormanRoutes(opts: { opsPort: number; agentContainer: string; embedPort?: number }): DoormanRoute[] {
   return [
-    { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: opts.opsPort, signed: true },
+    { listen: DOORMAN_DOOR_PORT, host: HOST_ALIAS, port: opts.opsPort, signed: true, jailOnly: true },
     { listen: DOORMAN_CONSOLE_PORT, host: opts.agentContainer, port: 18789 },
     // The shared memory search service's door binds this machine's Docker
     // address, which the jail cannot route to: the doorman carries it, like
     // the console. On an engine-free image (2026.8+) the manager has no
     // engine of its own, so without this its memory index never builds
     // (found on the manager's move to 2026.9, 2026-09-25).
-    ...(opts.embedPort ? [{ listen: DOORMAN_EMBED_PORT, host: HOST_ALIAS, port: opts.embedPort }] : []),
+    ...(opts.embedPort ? [{ listen: DOORMAN_EMBED_PORT, host: HOST_ALIAS, port: opts.embedPort, jailOnly: true }] : []),
   ];
 }

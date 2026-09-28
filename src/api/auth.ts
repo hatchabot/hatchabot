@@ -121,8 +121,13 @@ function requestIsHttps(req: FastifyRequest): boolean {
   return (proto ?? req.protocol) === 'https';
 }
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
-/** Identity-mode browser sessions are shorter: the token behind them is too. */
-const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+/**
+ * Identity-mode browser sessions: ours once Google's token is verified. They
+ * used to end with that token (Google's last about an hour), so the owner
+ * signed in again every hour (Chris, 2026-09-28). The allowed-emails list is
+ * still enforced on every request: the email rides in the signed cookie.
+ */
+const SESSION_TTL_MS = Number(process.env.HATCHABOT_SESSION_DAYS ?? 14) * 24 * 60 * 60 * 1000;
 
 export interface AuthOptions {
   /** Shared password (HATCHABOT_PASSWORD). Unset = auth disabled, loudly. */
@@ -460,8 +465,8 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   const sign = (payload: string): string =>
     createHmac('sha256', opts.secret).update(payload).digest('hex');
 
-  const mintSession = (sub: string, expMs: number): string => {
-    const payload = `${sub}:${expMs}`;
+  const mintSession = (sub: string, expMs: number, email?: string): string => {
+    const payload = email ? `${sub}:${expMs}:${email}` : `${sub}:${expMs}`;
     return `${Buffer.from(payload).toString('base64url')}.${sign(payload)}`;
   };
 
@@ -473,11 +478,16 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     const expected = sign(payload);
     if (sig.length !== expected.length) return undefined;
     if (!timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8'))) return undefined;
-    const [sub, expStr] = payload.split(':');
+    const [sub, expStr, ...rest] = payload.split(':');
     // NaN never compares true, so a missing exp would fail OPEN — guard it
     // the same way password-mode's validSession does.
     const exp = Number(expStr);
     if (!sub || !Number.isFinite(exp) || exp < Date.now()) return undefined;
+    // A long session still answers to the allowed-emails list, checked now.
+    // (Sessions from before the email rode along were an hour long; they
+    // are refused once a list is set.)
+    const email = rest.length ? rest.join(':') : undefined;
+    if (process.env.HATCHABOT_ALLOWED_EMAILS?.trim() && allowedEmailProblem(email)) return undefined;
     return { sub };
   };
 
@@ -489,9 +499,8 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
       const token = await verifier.verify(idToken);
       const denied = allowedEmailProblem(token.email);
       if (denied) return reply.code(403).send({ error: denied });
-      // Sessions never outlive the token that created them by much.
-      const exp = Math.min(token.expMs, Date.now() + SESSION_TTL_MS);
-      reply.setCookie(COOKIE, mintSession(token.sub, exp), {
+      const exp = Date.now() + SESSION_TTL_MS;
+      reply.setCookie(COOKIE, mintSession(token.sub, exp, token.email), {
         httpOnly: true,
         sameSite: 'strict',
         secure: requestIsHttps(req),
