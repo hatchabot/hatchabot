@@ -171,10 +171,16 @@ function setSessionCookie(reply: FastifyReply, req: FastifyRequest, value: strin
  * Routes for accounts mode. `guard` is the shared throttle from auth.ts so a
  * brute-force attempt is counted the same way in every mode.
  */
+/** The throttle bucket for the first-run setup code: one for the code, whoever asks. */
+const SETUP_BUCKET = '*first-run-setup*';
+/** Compared against when there is no usable account, so every login pays for one scrypt. */
+const DUMMY_HASH = '00'.repeat(32);
+const DUMMY_SALT = 'no-account';
+
 export function registerAccountRoutes(
   app: FastifyInstance,
   deps: AccountsAuthDeps,
-  guard: { throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void },
+  guard: { throttled: (req: FastifyRequest, who?: string) => boolean; noteFailure: (req: FastifyRequest, who?: string) => void; clearFailures?: (who: string) => void },
   opts: { bootstrap?: boolean } = {},
 ): void {
   const { store, secret } = deps;
@@ -185,6 +191,35 @@ export function registerAccountRoutes(
     const { hash, salt } = await hashPassword(normalizeRecoveryCode(code));
     store.setLocalAccountRecovery(id, hash, salt);
     return code;
+  };
+
+  /**
+   * A password changed or recovered takes the account's command-line tokens
+   * with it: a 90-day token minted from a borrowed session outlived every
+   * reset (night review, 2026-09-27). Agent call tokens are infrastructure
+   * and stay; a peer's rehost-scoped token opens only the move routes and
+   * stays too (re-pairing every peer after a password change is not wanted).
+   */
+  const revokeCliTokensOf = (id: string): number => {
+    let n = 0;
+    for (const t of store.listCliTokens(id)) {
+      if (t.scope === 'rehost') continue;
+      if (store.revokeCliToken(id, t.id)) n++;
+    }
+    if (n) app.log.warn({ account: id, revoked: n }, 'account.cli_tokens_revoked');
+    return n;
+  };
+  /**
+   * Who may manage accounts: the host owner's local account or, with Google
+   * sign-in plus local accounts, the Google account that owns this machine
+   * (it has no local row, so every account route answered 403; night review).
+   */
+  const manager = (req: FastifyRequest): { id: string } | undefined => {
+    const pid = req.principal?.ownerId ?? '';
+    const me = store.localAccount(pid);
+    if (me) return me.hostOwner && !me.disabled ? me : undefined;
+    if (opts.bootstrap === false && pid && store.listHosts(pid).some((h) => h.kind === 'local' && h.ownerId === pid)) return { id: pid };
+    return undefined;
   };
 
   /**
@@ -204,8 +239,10 @@ export function registerAccountRoutes(
         return reply.code(403).send({ error: 'This installation already has accounts — sign in instead.' });
       }
       if (!onThisMachine(req) && (req.body?.setupCode ?? '').trim() !== SETUP_CODE) {
-        if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
-        guard.noteFailure(req);
+        // One bucket for the code itself as well as the client's: a forged
+        // forwarded-for only escapes the client's (night review).
+        if (guard.throttled(req, SETUP_BUCKET)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+        guard.noteFailure(req, SETUP_BUCKET);
         return reply.code(403).send({
           error:
             'Creating the first account from another machine needs the setup code this server printed when it started. ' +
@@ -260,7 +297,13 @@ export function registerAccountRoutes(
       return reply.code(404).send({ error: 'That invitation has been used already, or it has expired. Ask for a new one.' });
     }
     const { hash, salt } = await hashPassword(password);
+    // Checked again after the await, and claimed in the same synchronous step:
+    // two people opening one link at once both got in (night review).
+    if (store.localAccountByClaim(code)?.id !== account.id) {
+      return reply.code(404).send({ error: 'That invitation has been used already, or it has expired. Ask for a new one.' });
+    }
     store.claimLocalAccount(account.id, hash, salt);
+    if (account.pwHash !== '') revokeCliTokensOf(account.id); // a reset, not a first claim
     // An owner made from the command line (`hatchabot accounts create`) meets the app here, for the first
     // time: the one person nobody can send a reset link gets a recovery code
     // now, as account #1 does at bootstrap.
@@ -290,8 +333,8 @@ export function registerAccountRoutes(
    * password keeps working until they use the link.
    */
   app.post<{ Params: { id: string } }>('/v1/local-accounts/:id/reset-link', async (req, reply) => {
-    const me = store.localAccount(req.principal?.ownerId ?? '');
-    if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner can send a reset link.' });
+    const me = manager(req);
+    if (!me) return reply.code(403).send({ error: 'Only the host owner can send a reset link.' });
     const target = store.localAccount(req.params.id);
     if (!target) return reply.code(404).send({ error: 'Not found' });
     if (target.id === me.id) {
@@ -311,7 +354,11 @@ export function registerAccountRoutes(
     const account = username ? store.localAccountByUsername(username) : undefined;
     // One message for every failure: a different answer for "no such user"
     // would turn this endpoint into a username oracle.
-    const ok = account && !account.disabled && account.pwHash !== '' && (await verifyPassword(password, account.pwHash, account.pwSalt));
+    // …and one scrypt whatever the account: skipping it for a missing,
+    // disabled or pending one made the answer ~20 ms faster (night review).
+    const usable = !!account && !account.disabled && account.pwHash !== '';
+    const verified = await verifyPassword(password, usable ? account!.pwHash : DUMMY_HASH, usable ? account!.pwSalt : DUMMY_SALT);
+    const ok = usable && verified;
     if (!account || !ok) {
       guard.noteFailure(req, username || undefined);
       await new Promise((r) => setTimeout(r, 400));
@@ -340,9 +387,9 @@ export function registerAccountRoutes(
   app.post<{ Body: { current?: string } }>('/v1/local-accounts/me/recovery-code', async (req, reply) => {
     const me = store.localAccount(req.principal?.ownerId ?? '');
     if (!me) return reply.code(401).send({ error: 'Sign in first.' });
-    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    if (guard.throttled(req, me.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     if (!(await verifyPassword(req.body?.current ?? '', me.pwHash, me.pwSalt))) {
-      guard.noteFailure(req);
+      guard.noteFailure(req, me.username);
       return reply.code(401).send({ error: 'Current password is wrong.' });
     }
     const recoveryCode = await issueRecoveryCode(me.id);
@@ -358,7 +405,11 @@ export function registerAccountRoutes(
    */
   app.post<{ Body: { username?: string; code?: string; password?: string } }>('/v1/local-accounts/recover-with-code', async (req, reply) => {
     const username = String(req.body?.username ?? '').trim();
-    if (guard.throttled(req, username || undefined)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    // The client's bucket only: anyone could fill the ACCOUNT's bucket with
+    // bad passwords and so lock its owner out of recovery too (night review).
+    // A code is 20 characters of randomness, so guessing it is not the risk
+    // the account bucket exists for.
+    if (guard.throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const started = Date.now();
     const code = normalizeRecoveryCode(String(req.body?.code ?? ''));
     const password = String(req.body?.password ?? '');
@@ -371,7 +422,7 @@ export function registerAccountRoutes(
     const salt = account?.recoverySalt ?? 'no-account';
     const match = (await verifyPassword(code, hash, salt)) && !!account?.recoveryHash && !account.disabled && code.length === 20;
     if (!account || !match) {
-      guard.noteFailure(req, username || undefined);
+      guard.noteFailure(req);
       const left = 900 - (Date.now() - started);
       if (left > 0) await new Promise((r) => setTimeout(r, left));
       return reply.code(401).send({ error: 'That username and recovery code do not match.' });
@@ -382,6 +433,9 @@ export function registerAccountRoutes(
       store.setLocalAccountClaim(account.id, null, null); // a pending reset link is moot now
     });
     const recoveryCode = await issueRecoveryCode(account.id);
+    revokeCliTokensOf(account.id);
+    // Recovered: the lock-out someone may have run up on this account ends.
+    guard.clearFailures?.(account.username);
     app.log.warn({ account: account.id }, 'account.recovered_with_code');
     // The new hash signs out every other session; this browser gets a fresh one.
     setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS));
@@ -392,8 +446,7 @@ export function registerAccountRoutes(
   /** The roster. Host owner only: who else can reach this installation is not
    *  ordinary-user business, and the list is a map of the household. */
   app.get('/v1/local-accounts', async (req, reply) => {
-    const me = store.localAccount(req.principal?.ownerId ?? '');
-    if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner manages accounts.' });
+    if (!manager(req)) return reply.code(403).send({ error: 'Only the host owner manages accounts.' });
     return store.listLocalAccounts().map((a) => ({
       id: a.id,
       username: a.username,
@@ -410,8 +463,7 @@ export function registerAccountRoutes(
   app.post<{ Body: { username?: string; password?: string; displayName?: string } }>(
     '/v1/local-accounts',
     async (req, reply) => {
-      const me = store.localAccount(req.principal?.ownerId ?? '');
-      if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner adds accounts.' });
+      if (!manager(req)) return reply.code(403).send({ error: 'Only the host owner adds accounts.' });
       const username = (req.body?.username ?? '').trim();
       const password = req.body?.password ?? '';
       // No password given = the good path: the person sets their own through a
@@ -448,21 +500,25 @@ export function registerAccountRoutes(
     '/v1/local-accounts/:id/password',
     async (req, reply) => {
       const me = store.localAccount(req.principal?.ownerId ?? '');
-      if (!me) return reply.code(401).send({ error: 'Sign in first.' });
+      const boss = manager(req);
+      if (!me && !boss) return reply.code(401).send({ error: 'Sign in first.' });
       const target = req.params.id === 'me' ? me : store.localAccount(req.params.id);
       if (!target) return reply.code(404).send({ error: 'Not found' });
-      const self = target.id === me.id;
-      if (!self && !me.hostOwner) return reply.code(403).send({ error: "You can only change your own password." });
+      const self = !!me && target.id === me.id;
+      if (!self && !boss) return reply.code(403).send({ error: "You can only change your own password." });
       const password = req.body?.password ?? '';
       const problem = passwordProblem(password);
       if (problem) return reply.code(400).send({ error: problem });
-      if (self && guard.throttled(req, me.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+      if (self && guard.throttled(req, target.username)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
       if (self && !(await verifyPassword(req.body?.current ?? '', target.pwHash, target.pwSalt))) {
-        guard.noteFailure(req);
+        // Counted against the account too: it was checked there but never
+        // counted, so a hijacked session could guess without limit (night review).
+        guard.noteFailure(req, target.username);
         return reply.code(401).send({ error: 'Current password is wrong.' });
       }
       const { hash, salt } = await hashPassword(password);
       store.setLocalAccountPassword(target.id, hash, salt);
+      revokeCliTokensOf(target.id);
       // Every session of that account dies with the old hash. Re-issue one for
       // the caller when it's their own, so changing it doesn't log them out.
       if (self) setSessionCookie(reply, req, mintSession(secret, target.id, hash, Date.now() + TTL_MS));
@@ -471,8 +527,7 @@ export function registerAccountRoutes(
   );
 
   app.delete<{ Params: { id: string } }>('/v1/local-accounts/:id', async (req, reply) => {
-    const me = store.localAccount(req.principal?.ownerId ?? '');
-    if (!me?.hostOwner) return reply.code(403).send({ error: 'Only the host owner removes accounts.' });
+    if (!manager(req)) return reply.code(403).send({ error: 'Only the host owner removes accounts.' });
     const target = store.localAccount(req.params.id);
     if (!target) return reply.code(404).send({ error: 'Not found' });
     if (target.hostOwner) return reply.code(400).send({ error: 'The host owner account cannot be removed.' });

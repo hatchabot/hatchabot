@@ -72,6 +72,16 @@ export class ChannelTakenError extends Error {
   }
 }
 
+/**
+ * How many tokens one sample adds over the one before. The counter is a SUM
+ * over the agent's sessions, so a drop (one session reset or removed) says
+ * nothing about use: counting the new total, as this once did, counted every
+ * other session's lifetime again as fresh use (night review, 2026-09-27).
+ */
+export function tokenRise(prev: number, next: number): number {
+  return next > prev ? next - prev : 0;
+}
+
 export class Store {
   constructor(private readonly db: Database.Database) {
     this.#migrate();
@@ -604,6 +614,9 @@ export class Store {
       // added to one after it shipped needs this line or every read of it
       // throws on an upgraded install (it did: v2.14.0, caught 2026-09-21).
       `ALTER TABLE pairing_window ADD COLUMN expect TEXT`,
+      // The day's own use, summed from counter rises (a lifetime total that
+      // came back after an agent was away counted as that day's use; night review).
+      `ALTER TABLE usage_snapshots ADD COLUMN used_tokens INTEGER`,
       // The doorman's own key, beside the manager's (30th audit).
       `ALTER TABLE ops_tokens ADD COLUMN doorman_key TEXT`,
       // A parked Discord bot: whom it last wrote to (told "this bot is now X"
@@ -2533,7 +2546,7 @@ export class Store {
   }
   /**
    * Tokens consumed per sample since `fromIso`, per agent: each sample's rise
-   * over the previous one (a counter reset counts the new total), stamped
+   * over the previous one (a drop counts nothing: see tokenRise), stamped
    * with the sample's time — what a usage chart bins by period.
    */
   tokenDeltas(agentIds: Set<string>, fromIso: string): Array<{ agentId: string; at: string; delta: number }> {
@@ -2547,7 +2560,7 @@ export class Store {
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
       if (prev && prev.agent_id === r.agent_id && r.at >= fromIso) {
-        const d = r.total >= prev.total ? r.total - prev.total : r.total;
+        const d = tokenRise(prev.total, r.total);
         if (d > 0) out.push({ agentId: r.agent_id, at: r.at, delta: d });
       }
       prev = r;
@@ -2574,7 +2587,7 @@ export class Store {
       Array<{ agent_id: string; at: string; model: string | null }>).map((r) => ({ agentId: r.agent_id, at: r.at, model: r.model ?? undefined }));
   }
   /** Tokens consumed since `fromIso` per agent on a source: the sum of each agent's counter
-   *  increases. A drop means the session was reset, so the new total is what was used since. */
+   *  increases. A drop counts nothing (see tokenRise). */
   tokenIncreasesByAgent(profileId: string, fromIso: string, agentIds: Set<string>): Map<string, number> {
     const out = new Map<string, number>();
     if (!agentIds.size) return out;
@@ -2586,7 +2599,7 @@ export class Store {
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
       if (prev && prev.agent_id === r.agent_id && r.profile_id === profileId && prev.profile_id === profileId && r.at >= fromIso) {
-        out.set(r.agent_id, (out.get(r.agent_id) ?? 0) + (r.total >= prev.total ? r.total - prev.total : r.total));
+        out.set(r.agent_id, (out.get(r.agent_id) ?? 0) + tokenRise(prev.total, r.total));
       }
       prev = r;
     }
@@ -2613,9 +2626,18 @@ export class Store {
     })();
   }
 
+  /** Record a day's own use (never lowered: a later, fuller count of the same day wins). */
+  setUsageUsed(ownerId: string, day: string, used: number): void {
+    this.db
+      .prepare(`UPDATE usage_snapshots SET used_tokens = MAX(COALESCE(used_tokens, 0), ?) WHERE owner_id = ? AND day = ?`)
+      .run(Math.max(0, Math.round(used)), ownerId, day);
+  }
+
   listUsageSnapshots(ownerId: string, limit = 30): Array<{
     day: string; totalTokens: number; byBilling: Record<string, number>;
     costLow: number | null; costHigh: number | null;
+    /** The day's own use from counter rises; undefined for days recorded before it was kept. */
+    usedTokens?: number;
   }> {
     return (this.db
       .prepare(`SELECT * FROM usage_snapshots WHERE owner_id = ? ORDER BY day DESC LIMIT ?`)
@@ -2624,6 +2646,7 @@ export class Store {
         day: r.day, totalTokens: r.total_tokens,
         byBilling: (() => { try { return JSON.parse(r.by_billing); } catch { return {}; } })(),
         costLow: r.cost_low, costHigh: r.cost_high,
+        ...(typeof r.used_tokens === 'number' ? { usedTokens: r.used_tokens } : {}),
       }))
       .reverse(); // oldest → newest for charting
   }

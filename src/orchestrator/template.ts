@@ -385,7 +385,7 @@ export function importTemplate(
   // anything (same no-half-made-agent rule as resolveParamValues above). The
   // reserved-name and clash rules mirror the data-sources route — a template
   // must not be a way around them.
-  const RESERVED_MOUNTS = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace']);
+  const RESERVED_MOUNTS = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace', 'connections', 'credentials', 'state', 'npm', 'devices', 'identity', 'cron', 'media', 'extensions', 'plugins', 'bin', 'data']);
   const dataSourceValues: Array<{ key: string; sshUrl: string; repoName: string }> = [];
   const dsProblems: string[] = [];
   for (const p of manifest.parameters) {

@@ -293,9 +293,13 @@ if [ "$TENANTS" -ge 2 ]; then
   x=$(code caddy "http://127.0.0.1:${PORT[$a]}/v1/config"); y=$(code caddy "http://127.0.0.1:${PORT[$b]}/v1/config")
   [ "$x" = 200 ] && [ "$y" = 200 ] && ok "the router user reaches both (${PORT[$a]}, ${PORT[$b]})" || bad "the router user cannot reach both ($x, $y)"
   x=$(L exec "$VM" -- sh -c "curl -s -o /dev/null -m 4 -w '%{http_code}' http://127.0.0.1:${PORT[$b]}/v1/config"); [ "$x" = 200 ] && ok "root reaches a tenant's port (the provisioner's smoke test)" || bad "root cannot reach ${PORT[$b]} ($x)"
-  # The other tenant's Docker socket and home are closed.
-  x=$(L exec "$VM" -- su - $a -s /bin/bash -c "ls /run/user/${UIDOF[$b]}/docker.sock /home/$b 2>&1 | sed -n 1p" | tr -d '\r')
-  echo "$x" | grep -qi "permission denied\|No such" && ok "$a cannot see $b's Docker socket or home" || bad "$a can see $b's files: $x"
+  # The other tenant's Docker socket and home are closed — each probed on its
+  # own: the first line of one combined ls was always the socket's refusal,
+  # so a readable home passed (night review, 2026-09-28).
+  xs=$(L exec "$VM" -- su - $a -s /bin/bash -c "ls /run/user/${UIDOF[$b]}/docker.sock 2>&1" | tr -d '\r')
+  xh=$(L exec "$VM" -- su - $a -s /bin/bash -c "ls /home/$b 2>&1" | tr -d '\r')
+  echo "$xs" | grep -qi "permission denied\|No such" && echo "$xh" | grep -qi "permission denied\|No such" \
+    && ok "$a cannot see $b's Docker socket or home" || bad "$a can see $b's files: socket '$xs' home '$xh'"
 fi
 
 L exec "$VM" -- sh -c 'free -m | sed -n 2p; for u in t1 t2; do printf "%s: " $u; systemctl show user-$(id -u $u).slice -p MemoryCurrent --value 2>/dev/null | awk "{printf \"%d MiB\\n\", \$1/1048576}"; done' >"$OUT/memory.txt" 2>/dev/null

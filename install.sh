@@ -141,10 +141,24 @@ fi
 # ends up serving a development tree. Checked BEFORE the checkout below moves
 # anything: it used to leave a development clone detached at the stable tag.
 UNIT="$HOME/.config/systemd/user/hatchabot.service"
+INSTALLED=""
 if [ -f "$UNIT" ]; then
   INSTALLED="$(sed -n 's/^WorkingDirectory=//p' "$UNIT" | sed -n 1p)"
   INSTALLED="${INSTALLED/#\%h/$HOME}"
-  if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$DIR" ]; then
+elif [ "$(uname -s)" = "Darwin" ]; then
+  # launchd has no WorkingDirectory: setup-host.sh bakes `cd "<repo>"` into the
+  # job's command (read back the same way uninstall.sh does). Linux-only, this
+  # guard let a Mac's one-line install repoint a working install at a fresh
+  # clone with an empty database (night review, 2026-09-28).
+  for p in com.hatchabot.control-plane com.agentclaw.control-plane; do
+    PL="$HOME/Library/LaunchAgents/$p.plist"
+    [ -f "$PL" ] || continue
+    INSTALLED="$(sed -n 's/.*cd &quot;\([^&]*\)&quot;.*/\1/p;s/.*cd "\([^"]*\)".*/\1/p' "$PL" | sed -n 1p)"
+    [ -n "$INSTALLED" ] && break
+  done
+fi
+if [ -n "$INSTALLED" ]; then
+  if [ "$INSTALLED" != "$DIR" ]; then
     die "Hatchabot is already installed here, running from:
     $INSTALLED
 Installing into $DIR would repoint the service at it and leave the other one dark.

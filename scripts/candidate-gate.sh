@@ -72,10 +72,17 @@ SLUG=$($HB list --json | json "v=>(v.find(a=>a.name==='$NAME')||{}).slug")
 step "pin it to the candidate and rebuild (hatchabot image try)"
 out=$($HB image try "$NAME" "$TAG" 2>&1)
 if echo "$out" | grep -q "rebuilding"; then
-  st=""
+  # A queued or checkpointing rebuild is still RUNNING before it leaves: the
+  # first RUNNING seen was the OLD container, which the steps below then
+  # inspected (night review, 2026-09-28). RUNNING counts once the agent has
+  # been seen leaving (busy, or another state) — as `hbt rebuild --wait` does.
+  st=""; left=0
   for i in $(seq 1 120); do
-    st=$($HB list --json | json "v=>(v.find(a=>a.name==='$NAME')||{}).state")
-    case "$st" in RUNNING|FAILED) break ;; esac
+    row=$($HB list --json | json "v=>{const a=v.find(a=>a.name==='$NAME')||{};return (a.state||'')+' '+(a.busy?1:0)}")
+    st="${row% *}"; busy="${row##* }"
+    if [ "$left" = 0 ] && { [ "$st" != RUNNING ] || [ "$busy" = 1 ]; }; then left=1; fi
+    [ "$st" = FAILED ] && break
+    [ "$left" = 1 ] && [ "$st" = RUNNING ] && [ "$busy" = 0 ] && break
     sleep 5
   done
   [ "$st" = RUNNING ] && ok || bad "state is '${st:-missing}' after the rebuild"

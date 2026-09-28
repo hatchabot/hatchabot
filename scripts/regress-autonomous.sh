@@ -93,7 +93,8 @@ N0=$($HB tasks "$NAME" runs heartbeat --json --limit 50 | json "v=>v.length")
 sleep 150
 N1=$($HB tasks "$NAME" runs heartbeat --json --limit 50 | json "v=>v.length")
 line=$($HB tasks "$NAME" | grep heartbeat)
-[ "$N0" = "$N1" ] && echo "$line" | grep -q " off " && ok || bad "runs went $N0 → $N1; listing: $line"
+# Both counts must be numbers: two failed reads gave "" = "" and passed (night review).
+[[ "$N0" =~ ^[0-9]+$ ]] && [ "$N0" = "$N1" ] && echo "$line" | grep -q " off " && ok || bad "runs went ${N0:-?} → ${N1:-?}; listing: $line"
 
 step "stop --wait / start --wait"
 $HB stop "$NAME" --wait >/dev/null 2>&1 && $HB start "$NAME" --wait --timeout 10 >/dev/null 2>&1 \
@@ -124,8 +125,13 @@ step "delete"
 if [ "$KEEP" = 1 ]; then RESULTS+=("– delete skipped (--keep)"); echo "skipped (--keep)"; else
   $HB delete "$NAME" --yes >/dev/null 2>&1
   sleep 3
-  st=$($HB list --json | json "v=>(v.find(a=>a.name==='$NAME')||{}).state")
-  [ -z "$st" ] || [ "$st" = DELETED ] || [ "$st" = DELETING ] && ok || bad "still listed as $st"
+  # A failed listing is not "gone": it printed nothing and passed (night review).
+  if lj=$($HB list --json 2>/dev/null) && [ -n "$lj" ]; then
+    st=$(printf %s "$lj" | json "v=>(v.find(a=>a.name==='$NAME')||{}).state")
+    { [ -z "$st" ] || [ "$st" = DELETED ] || [ "$st" = DELETING ]; } && ok || bad "still listed as $st"
+  else
+    bad "the listing failed after delete"
+  fi
   DONE=1  # already deleted; the exit trap has nothing left to do
 fi
 

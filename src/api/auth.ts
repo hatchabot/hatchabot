@@ -81,12 +81,26 @@ export function noteFailure(req: FastifyRequest, who?: string): void {
     if (!f || Date.now() > f.until) failures.set(k, { n: 1, until: Date.now() + FAIL_WINDOW_MS });
     else f.n += 1;
   }
-  // Bounded: drop the OLDEST entries, never everyone's count at once — a
-  // flood from many addresses used to reset the flooder's own bucket too.
+  // Bounded: expired entries go first, then client buckets with the fewest
+  // misses; an account's bucket goes last. Dropping the oldest by insertion
+  // let a flood of junk evict the very account being guessed at, and with it
+  // the per-account cap (night review, 2026-09-27).
   if (failures.size > 10_000) {
-    for (const k of [...failures.keys()].slice(0, 2_000)) failures.delete(k);
+    const now = Date.now();
+    for (const [k, f] of failures) if (now > f.until) failures.delete(k);
+    if (failures.size > 8_000) {
+      const order = [...failures.entries()].sort(([ka, a], [kb, b]) =>
+        (ka.startsWith('user:') ? 1 : 0) - (kb.startsWith('user:') ? 1 : 0) || a.n - b.n);
+      for (const [k] of order.slice(0, failures.size - 8_000)) failures.delete(k);
+    }
   }
 }
+/** A recovered account starts clean: the lock-out someone ran up on it ends. */
+export function clearFailures(who: string): void {
+  failures.delete(`user:${who.trim().toLowerCase()}`);
+}
+/** Password mode has one password, so one bucket for it: forged forwarded-for addresses each got a fresh client bucket and unlimited guesses (night review). */
+const PASSWORD_BUCKET = '*shared-password*';
 /** Test hook. */
 export function _resetLoginThrottle(): void { failures.clear(); }
 const LEGACY_COOKIE = 'agentclaw_session'; // set by pre-rename servers; cleared on logout, never read
@@ -255,7 +269,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
 
   app.post<{ Body: { password?: string } }>('/v1/login', async (req, reply) => {
     if (!opts.password) return { ok: true }; // auth disabled
-    if (throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
+    if (throttled(req, PASSWORD_BUCKET)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     const given = (req.body as { password?: string } | null)?.password ?? '';
     const a = Buffer.from(given, 'utf8');
     const b = Buffer.from(opts.password, 'utf8');
@@ -263,7 +277,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     if (!match) {
       // Flat-rate the brute-force path a little; real rate limiting can come
       // with real identity.
-      noteFailure(req);
+      noteFailure(req, PASSWORD_BUCKET);
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong password' });
     }
@@ -348,7 +362,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   const store = opts.store;
   if (!store) throw new Error('accounts mode needs a store (registerAuth opts.store)');
 
-  registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure });
+  registerAccountRoutes(app, { store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner }, { throttled, noteFailure, clearFailures });
 
   app.post('/v1/logout', async (_req, reply) => {
     reply.clearCookie(COOKIE, { path: '/' });
@@ -407,6 +421,14 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   });
 }
 
+/** With an allowlist set, is this Google owner still on it? True = refuse. */
+function cliAllowlistProblem(opts: AuthOptions, ownerId: string): boolean {
+  const raw = process.env.HATCHABOT_ALLOWED_EMAILS?.trim();
+  if (!raw || !opts.store) return false;
+  const allowed = raw.split(/[\s,]+/).filter(Boolean);
+  return !allowed.some((e) => opts.store!.ownerForEmail(e) === ownerId);
+}
+
 /**
  * Identity mode: the caller proves who they are with an Identity Platform ID
  * token (Authorization: Bearer …, or a cookie the browser got by posting one
@@ -423,7 +445,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     registerAccountRoutes(
       app,
       { store: opts.store, secret: opts.secret, onAuthenticated: opts.onAuthenticated, cliTokenOwner: opts.cliTokenOwner },
-      { throttled, noteFailure },
+      { throttled, noteFailure, clearFailures },
       { bootstrap: false }, // the host owner is the Google account; nobody bootstraps
     );
   }
@@ -490,9 +512,15 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     const session = readSession(cookieValue(header, COOKIE));
-    return session
-      ? { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub }
-      : undefined;
+    if (session) return { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub };
+    // A local account's session, as the request hook accepts it: without this
+    // their console's WebSocket was always refused (night review).
+    if (localAccounts && opts.store) {
+      const id = sessionAccount(opts.store, opts.secret, cookieValue(header, COOKIE));
+      const owner = id ? opts.store.localAccount(id) : undefined;
+      if (id && owner && !owner.disabled) return { ownerId: id, via: 'password', subject: id };
+    }
+    return undefined;
   });
 
   app.addHook('onRequest', async (req, reply) => {
@@ -521,9 +549,13 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (cliOwner) {
       // Same rule as accounts mode: a local account that was disabled or
       // removed takes its tokens with it (26th audit).
-      if (localAccounts) {
-        const owner = opts.store?.localAccount(cliOwner);
-        if (owner?.disabled) return reply.code(401).send({ error: 'That access token belongs to an account that no longer exists.' });
+      const local = localAccounts ? opts.store?.localAccount(cliOwner) : undefined;
+      if (local?.disabled) return reply.code(401).send({ error: 'That access token belongs to an account that no longer exists.' });
+      // A Google account's token answers to the allowlist too: an email taken
+      // off HATCHABOT_ALLOWED_EMAILS kept working through its 90-day tokens
+      // (night review). Its email is the one its last sign-in recorded.
+      if (!local && cliAllowlistProblem(opts, cliOwner)) {
+        return reply.code(403).send({ error: 'That access token belongs to an account this installation no longer allows.' });
       }
       req.principal = { ownerId: cliOwner, via: 'identity', subject: cliOwner };
       return;

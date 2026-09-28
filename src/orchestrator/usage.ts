@@ -25,18 +25,29 @@ export interface AgentUsage {
 const EMPTY: AgentUsage = { totalTokens: 0, sessions: 0, byModel: [] };
 const MIN_SPAN_MS = 10 * 60_000; // below this, a rate is noise
 
+/**
+ * `strict`: a failed or unreadable read throws instead of answering zero. The
+ * usage sampler needs that — a zero saved as a counter reading made the next
+ * good one count the agent's whole lifetime as fresh use (night review).
+ */
 export async function agentUsage(
   provider: RuntimeProvider,
   runtimeRef: string,
   slug: string,
+  opts: { strict?: boolean } = {},
 ): Promise<AgentUsage> {
   const res = await provider.exec(runtimeRef, ['sessions', 'list', '--agent', slug, '--json']);
-  if (res.code !== 0) return EMPTY;
+  if (res.code !== 0) {
+    if (opts.strict) throw new Error(`sessions list exited ${res.code}`);
+    return EMPTY;
+  }
   let sessions: Array<Record<string, unknown>>;
   try {
     const parsed = JSON.parse(res.stdout).sessions;
+    if (opts.strict && !Array.isArray(parsed)) throw new Error('sessions list gave no session array');
     sessions = Array.isArray(parsed) ? parsed : [];
-  } catch {
+  } catch (err) {
+    if (opts.strict) throw err;
     return EMPTY;
   }
 

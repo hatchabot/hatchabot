@@ -104,18 +104,25 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string)
 }
 
 /** The idle sweep: every eligible agent goes to sleep. Returns who did. */
+/** One idle sweep at a time: a second pass from a stale listing reached agents the first had just put to sleep, and logged false failures (night review). */
+let idleSweeping = false;
 export async function hibernateSweep(deps: HibernateDeps, now = Date.now(), afterMs = hibernateAfterMs()): Promise<string[]> {
-  if (!afterMs) return [];
+  if (!afterMs || idleSweeping) return [];
+  idleSweeping = true;
   const out: string[] = [];
-  for (const a of deps.store.listAllActiveAgents()) {
-    const blocker = await hibernateBlocker(deps, a, now, afterMs);
-    if (blocker) continue;
-    try {
-      await hibernateAgent(deps, a, `quiet for ${Math.round(afterMs / 60_000)} min`);
-      out.push(a.id);
-    } catch (err) {
-      deps.log(a.id)('hibernate.failed', { error: err instanceof Error ? err.message : String(err) });
+  try {
+    for (const a of deps.store.listAllActiveAgents()) {
+      const blocker = await hibernateBlocker(deps, a, now, afterMs);
+      if (blocker) continue;
+      try {
+        await hibernateAgent(deps, a, `quiet for ${Math.round(afterMs / 60_000)} min`);
+        out.push(a.id);
+      } catch (err) {
+        deps.log(a.id)('hibernate.failed', { error: err instanceof Error ? err.message : String(err) });
+      }
     }
+  } finally {
+    idleSweeping = false;
   }
   return out;
 }

@@ -11,6 +11,7 @@ import { needsPortHeal } from '../openclaw/configWriter.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ChannelRooms, OpenClawConfigPatch, RuntimeProvider, RuntimeSpec } from '../providers/provider.js';
 import { ProviderError } from '../providers/provider.js';
+import { sampleAgentUsage } from './sourceUsage.js';
 import type { ChannelProvisioner } from '../channels/channel.js';
 import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
@@ -99,6 +100,8 @@ export interface ProvisionDeps {
    * summary is what survives the reset. Best-effort; never blocks the rebuild.
    */
   checkpointMemory?: boolean;
+  /** Called once the checkpoint turn is over (it may have failed): the caller frees its checkpoint slot for the next agent. */
+  afterCheckpoint?: () => void;
   /**
    * The machine's embedding service (src/embedder), for agents switched to
    * it: bring it up, and mint this agent's key. Absent (a runner, a test):
@@ -640,6 +643,17 @@ export async function buildRuntimeSpec(
     delete perAgentEnv.HATCHABOT_AGENT_TOKEN;
     delete perAgentEnv.HATCHABOT_INTERNAL_URL;
   }
+  // Every shared folder is judged again at every build, not only when it was
+  // added: an agent that swapped a folder inside another share for a symlink
+  // to ~/.ssh got it mounted at the next rebuild (night review, 2026-09-28).
+  // Refused here, before anything is stopped, the agent keeps running.
+  for (const p of [
+    ...(agent.sharedPaths ?? []),
+    ...store.listDataSources(agent.id).filter((d) => d.kind === 'folder' && d.hostPath && !d.mountAtHostPath).map((d) => d.hostPath!),
+  ]) {
+    const problem = sharePathProblem(p);
+    if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
+  }
   return {
     agentId,
     slug: agent.slug,
@@ -853,12 +867,19 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   // still happens before stop/replace, and before the REBUILDING flip because
   // captureSnapshot only reads a RUNNING agent (no-op unless RUNNING).
   if (agent.state === 'RUNNING') {
+    // The model calls and refusals logged since the last usage sample live in
+    // this container's logs, which the rebuild removes (night review).
+    await sampleAgentUsage({ store, providerFor: () => provider }, agent).catch(() => {});
     await autoSnapshot({ store, provider, log }, agentId, 'pre-rebuild');
     // Save the conversation into memory BEFORE we touch the container, while
     // the old AI backend still answers — a source switch resets the thread on
     // first message under the new backend, and this is what survives it.
     if (deps.checkpointMemory) {
-      checkpointResult = await checkpointMemory(provider, agent.runtimeRef, agent.slug, log);
+      try {
+        checkpointResult = await checkpointMemory(provider, agent.runtimeRef, agent.slug, log);
+      } finally {
+        deps.afterCheckpoint?.();
+      }
     }
   }
   // Visible immediately: the chip must not read RUNNING while the container
@@ -1401,6 +1422,9 @@ export function sharePathProblem(p: string, opts: { home?: string } = {}): strin
   if (!p.startsWith('/')) return 'Use an absolute path.';
   let norm = resolve(p).replace(/\/+$/, '') || '/';
   if (norm === '/') return 'Sharing the whole filesystem is not allowed.';
+  // Docker splits -v on ':' — a colon in the path broke every later rebuild
+  // after the old container was already gone (night review, 2026-09-28).
+  if (norm.includes(':')) return `Refusing ${norm}: a folder name with ":" cannot be shared (Docker reads it as a separator). Rename the folder first.`;
   // Judge the real location: a symlink inside an already-shared folder must
   // not become a door to ~/.ssh. Non-existent paths are judged lexically.
   try {

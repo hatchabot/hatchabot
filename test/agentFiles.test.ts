@@ -85,7 +85,7 @@ describe('downloads', () => {
     expect(r.headers['content-disposition']).toBe('attachment; filename="hi.txt"');
     expect(r.headers['content-length']).toBe('5');
     expect(r.body).toBe('hello');
-    expect(provider.execLog.at(-1)![1]).toContain('exec cat');
+    expect(provider.execLog.at(-1)![1]).toContain('exec head -c 5');
   });
   it('a folder comes as .tar.gz; a file asked for as a folder (or the reverse) is refused; too big is refused before a byte', async () => {
     const { f, provider } = await world();

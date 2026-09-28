@@ -42,6 +42,8 @@ export interface Cron {
   lastDurationMs?: number;
   consecutiveErrors?: number;
   lastDelivered?: boolean;
+  /** Whether a run's result goes to the agent's chat (the gateway's delivery.mode, "none" = quiet). Undefined when the job says nothing. */
+  announce?: boolean;
 }
 
 /** One past run of a task: what the agent produced, and whether it arrived. */
@@ -73,6 +75,9 @@ function normalizeCron(j: Record<string, any>): Cron {
     everyMs: typeof s.everyMs === 'number' ? s.everyMs : typeof s.every_ms === 'number' ? s.every_ms : undefined,
     atMs: typeof s.at === 'number' ? s.at : typeof s.atMs === 'number' ? s.atMs : typeof s.at_ms === 'number' ? s.at_ms : undefined,
     payloadKind: p.kind,
+    // Read so an edit can keep it: the app's edit re-creates the task, and a
+    // quiet one came back announcing (night review, 2026-09-27).
+    announce: typeof j.delivery?.mode === 'string' ? j.delivery.mode !== 'none' : undefined,
     message:
       typeof p.message === 'string' ? p.message
       : typeof p.command === 'string' ? p.command

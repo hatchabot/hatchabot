@@ -198,12 +198,12 @@ fi
 docker build \
   --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" \
   --build-arg "EMBED_ENGINE=${EMBED_ENGINE}" \
-  "${PLUGIN_ARG[@]}" \
-  "${NODE_ARG[@]}" \
-  "${CHANNEL_ARG[@]}" \
-  "${BAKED_ARG[@]}" \
-  "${INSTALL_ARG[@]}" \
-  "${EXTRA_ARG[@]}" \
+  ${PLUGIN_ARG[@]+"${PLUGIN_ARG[@]}"} \
+  ${NODE_ARG[@]+"${NODE_ARG[@]}"} \
+  ${CHANNEL_ARG[@]+"${CHANNEL_ARG[@]}"} \
+  ${BAKED_ARG[@]+"${BAKED_ARG[@]}"} \
+  ${INSTALL_ARG[@]+"${INSTALL_ARG[@]}"} \
+  ${EXTRA_ARG[@]+"${EXTRA_ARG[@]}"} \
   -t "${REPO}:${IMAGE_TAG}" \
   -f docker/Dockerfile.runtime \
   docker/

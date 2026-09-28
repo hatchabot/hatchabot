@@ -120,8 +120,9 @@ installErrorHandler(app);
 // containers auto-restart with the box, the DB doesn't know that.
 // Time-boxed: a stalled daemon must not keep the API (and /healthz) down for
 // the whole sweep — the periodic loop below finishes whatever this didn't.
+const bootReconcile = reconcileAgents(store, providers, (e, d) => app.log.info(d, e));
 await Promise.race([
-  reconcileAgents(store, providers, (e, d) => app.log.info(d, e)),
+  bootReconcile.catch(() => {}),
   new Promise<void>((r) => setTimeout(r, Number(process.env.HATCHABOT_BOOT_RECONCILE_MS ?? 30_000)).unref()),
 ]);
 
@@ -228,7 +229,7 @@ if (bindHost !== '127.0.0.1' && !tls) {
 }
 // Keep mending state after boot: a container that wedges at 3am should not
 // stay green until someone notices.
-startReconcileLoop(store, providers, (e, d) => app.log.info(d, e));
+startReconcileLoop(store, providers, (e, d) => app.log.info(d, e), undefined, bootReconcile);
 
 // Finish any bot rename that didn't land. Renaming happens at the worst moment
 // for network calls — mid-provision, while the box is churning docker — and a

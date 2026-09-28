@@ -281,6 +281,8 @@ const MACHINE_OWNER_ONLY =
   'Only the account that set up this machine can do that — it touches the machine itself ' +
   '(its runtime images, hosts and runners), not just your own agents.';
 
+/** Binds a Google consent round-trip to the browser that started it. */
+const OAUTH_NONCE_COOKIE = 'hb_oauth';
 /** The manager lives with its machine: its door, network and tools are this machine's (night review, 2026-09-27). */
 const OPS_STAYS_HERE = 'The Hatchabot agent stays on this machine: its locked-down network and its tools belong here. Set one up on the other machine instead.';
 /** The manager's jail reaches only internet AI services, so it cannot run on a local model. */
@@ -901,8 +903,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const startedAt = Date.now();
     const task = (async () => {
       rebuildQueued.add(agentId);
+      // The checkpoint slot first, then the rebuild slot, and the checkpoint
+      // slot goes back as soon as the checkpoint turn ends: holding both for
+      // the whole rebuild left rebuild slots idle behind two checkpoints
+      // (night review, 2026-09-27).
+      let checkpointHeld = false;
+      if (opts.checkpoint) { await checkpointGate.acquire(); checkpointHeld = true; }
+      const releaseCheckpoint = () => { if (checkpointHeld) { checkpointHeld = false; checkpointGate.release(); } };
       await rebuildGate.acquire();
-      if (opts.checkpoint) await checkpointGate.acquire();
       rebuildQueued.delete(agentId);
       try {
         const now = store.getAgent(agentId);
@@ -911,12 +919,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         await rebuildAgent(
           {
             store, secrets, provider: providerFor(now!.hostId), channel: deps.channel,
-            log: trace(agentId), checkpointMemory: opts.checkpoint, embedder: embedderForProvision,
+            log: trace(agentId), checkpointMemory: opts.checkpoint, afterCheckpoint: releaseCheckpoint, embedder: embedderForProvision,
           },
           agentId,
         );
       } finally {
-        if (opts.checkpoint) checkpointGate.release();
+        releaseCheckpoint();
         rebuildGate.release();
       }
     })();
@@ -1206,9 +1214,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const dcId = store.identityOfUserAnywhere(account.id, 'discord');
     if (!tgId && !dcId) return settle();
 
+    // Only a bot whose token the account's own side holds: its own agents',
+    // or the machine owner's (who can read every stored token here anyway).
+    // Another member's pasted bot or Discord app would let THAT member read
+    // the link back and take the account (night review, 2026-09-28).
+    const hostOwners = new Set(store.listLocalAccounts().filter((x) => x.hostOwner).map((x) => x.id));
+    const mayCarry = (a: Agent) => a.ownerId === account.id || hostOwners.has(a.ownerId);
     // A bot that has already talked to this person — the manager first.
     const candidates = tgId ? store.listAllActiveAgents()
-      .filter((a) => a.state === 'RUNNING' && store.listAllowedChannelUserIds(a.id).includes(tgId))
+      .filter((a) => a.state === 'RUNNING' && mayCarry(a) && store.listAllowedChannelUserIds(a.id).includes(tgId))
       .sort((x, y) => Number(!!y.ops && y.ownerId === account.id) - Number(!!x.ops && x.ownerId === account.id)) : [];
     let token: string | undefined;
     let via: string | undefined;
@@ -1222,7 +1236,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // (a DM from the bot needs only a shared server, not a running agent).
     let discordRef: string | undefined;
     if (!token && dcId) {
-      const a = store.listAllActiveAgents().find((x) => store.listAllowedChannelUserIds(x.id, 'discord').includes(dcId) && store.getChannelForAgent(x.id, 'discord'));
+      const a = store.listAllActiveAgents()
+        .filter(mayCarry)
+        .sort((x, y) => Number(y.ownerId === account.id) - Number(x.ownerId === account.id))
+        .find((x) => store.listAllowedChannelUserIds(x.id, 'discord').includes(dcId) && store.getChannelForAgent(x.id, 'discord'));
       const ch = a && store.getChannelForAgent(a.id, 'discord');
       if (ch) { discordRef = ch.secretRef; via = `discord:${ch.accountId}`; }
     }
@@ -1679,7 +1696,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
         byBilling[billing] = (byBilling[billing] ?? 0) + t;
       }
-      if (any) store.upsertUsageSnapshot(ownerId, { day: new Date().toISOString().slice(0, 10), totalTokens: total, byBilling });
+      if (any) {
+        const day = new Date().toISOString().slice(0, 10);
+        store.upsertUsageSnapshot(ownerId, { day, totalTokens: total, byBilling });
+        // The day's own use, from per-sample deltas: differencing lifetime
+        // sums counted an agent's whole history on the day it came back from
+        // a long stop, or arrived by import (night review, 2026-09-28).
+        const used = store.tokenDeltas(new Set(list.map((a) => a.id)), `${day}T00:00:00.000Z`).reduce((s, d) => s + d.delta, 0);
+        store.setUsageUsed(ownerId, day, used);
+      }
     }
   };
   const runUsageSample = () => {
@@ -4617,7 +4642,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const size = Number(fsize) || 0;
     if (size > FILE_MAX_BYTES) return reply.code(413).send({ error: `Too big to download here (${Math.round(size / 1048576)} MB; the limit is ${FILE_MAX_BYTES / 1048576} MB — HATCHABOT_FILE_MAX_MB).` });
     const name = downloadName(t.rel, t.agent.slug) + (kind === 'archive' ? '.tar.gz' : '');
-    const stream = provider.streamFromVolume(t.agent.runtimeRef!, kind === 'file' ? catArgv(t.rel) : tarArgv(t.rel));
+    const stream = provider.streamFromVolume(t.agent.runtimeRef!, kind === 'file' ? catArgv(t.rel, size) : tarArgv(t.rel));
     // Opened in the browser (the Files tab's links) when the type is one it
     // shows; always sandboxed (originless: no cookies, no scripts, no reach
     // into the app) and never sniffed, so an agent-written page cannot act
@@ -5254,7 +5279,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     // git repos clone beside OpenClaw's own dirs under ~/.openclaw; a repo whose
     // name matches one of them (or a dotfile) would collide with runtime state.
-    const RESERVED = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace']);
+    const RESERVED = new Set(['agents', 'sessions', 'config', 'logs', 'pylibs', 'skills', 'memory', 'workspace', 'connections', 'credentials', 'state', 'npm', 'devices', 'identity', 'cron', 'media', 'extensions', 'plugins', 'bin', 'data']);
     if (RESERVED.has(git.repoName) || git.repoName.startsWith('.')) {
       return reply.code(400).send({ error: `"${git.repoName}" is a reserved name — it would collide with the agent's own files. Use a differently named repo.` });
     }
@@ -6116,7 +6141,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const snaps = store.listUsageSnapshots(ownerIdOf(req), 30);
     let prev: number | undefined;
     const points = snaps.map((s) => {
-      const delta = prev === undefined ? undefined : Math.max(0, s.totalTokens - prev);
+      const delta = s.usedTokens ?? (prev === undefined ? undefined : Math.max(0, s.totalTokens - prev));
       prev = s.totalTokens;
       return { day: s.day, totalTokens: s.totalTokens, delta, byBilling: s.byBilling, costHigh: s.costHigh };
     });
@@ -7310,7 +7335,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const requested = Array.isArray(body.services) && body.services.length ? body.services : DEFAULT_SERVICES;
     const services = requested.filter((s) => typeof s === 'string' && s in GOOGLE_SERVICES).slice(0, 8);
     if (!services.length) return reply.code(400).send({ error: 'Pick at least one service.' });
-    const state = stateJar.issue(ownerIdOf(req), services);
+    // The browser that asks is the browser that must come back: a Lax cookie
+    // (it rides Google's top-level redirect home), scoped to the callback.
+    const nonce = randomBytes(18).toString('base64url');
+    const state = stateJar.issue(ownerIdOf(req), services, nonce);
+    const fwd = req.headers['x-forwarded-proto'];
+    const secure = ((Array.isArray(fwd) ? fwd[0] : fwd) ?? req.protocol) === 'https';
+    reply.header('set-cookie', `${OAUTH_NONCE_COOKIE}=${nonce}; Path=/v1/connections/google/callback; Max-Age=600; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
     return { url: googleAuthUrl(client.clientId, oauthRedirectUri(req as any), state, services) };
   });
 
@@ -7333,9 +7364,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // This path is auth-exempt (the cross-site redirect can't carry the
       // strict-SameSite session cookie) — the single-use state token IS the
       // credential, and claim.ownerId names whose vault the result joins.
-      const claim = req.query.state ? stateJar.consume(req.query.state) : null;
+      const nonce = String(req.headers.cookie ?? '').split(';').map((c) => c.trim()).find((c) => c.startsWith(`${OAUTH_NONCE_COOKIE}=`))?.slice(OAUTH_NONCE_COOKIE.length + 1);
+      const claim = req.query.state ? stateJar.consume(req.query.state, nonce ?? '') : null;
+      reply.header('set-cookie', `${OAUTH_NONCE_COOKIE}=; Path=/v1/connections/google/callback; Max-Age=0; HttpOnly; SameSite=Lax`);
       if (!claim) {
-        return page("That didn't match", 'This consent link expired or was already used — go back to Hatchabot and press Connect again.', false);
+        return page("That didn't match", 'This consent link expired, was already used, or was opened in a different browser from the one that pressed Connect — go back to Hatchabot there and press Connect again.', false);
       }
       if (req.query.error || !req.query.code) {
         return page('Not connected', `Google reported: ${req.query.error ?? 'no code returned'}. Nothing was stored.`, false);
@@ -9101,7 +9134,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * be pushed to costs nothing: no bot, no docker exec.
    */
   const announcedPairings = new Set<string>();
+  // One sweep at a time: a slow pass finishing after a newer one forgot knocks
+  // the newer had told, and the next pass pushed them again (night review).
+  let pairingSweeping = false;
   const sweepPendingPairings = async (): Promise<void> => {
+    if (pairingSweeping) return;
+    pairingSweeping = true;
+    try { await sweepPendingPairingsOnce(); } finally { pairingSweeping = false; }
+  };
+  const sweepPendingPairingsOnce = async (): Promise<void> => {
     const live = store
       .listAllActiveAgents()
       .filter((a) => a.state === 'RUNNING' && a.runtimeRef && store.listChannelsForAgent(a.id).length);

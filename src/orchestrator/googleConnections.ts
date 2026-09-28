@@ -126,8 +126,14 @@ export async function revokeGoogleToken(refreshToken: string, fetchImpl: typeof 
  * on purpose: a restart mid-consent just means clicking Connect again.
  */
 export class OAuthStateJar {
-  #jar = new Map<string, { ownerId: string; services: string[]; expires: number }>();
-  issue(ownerId: string, services: string[]): string {
+  #jar = new Map<string, { ownerId: string; services: string[]; expires: number; nonce?: string }>();
+  /**
+   * `nonce` binds the flow to the browser that started it (a cookie the
+   * start route sets): without it, whoever finished Google's consent for a
+   * state someone else started put THEIR Google account in the starter's
+   * vault — one member could capture another's Gmail (night review).
+   */
+  issue(ownerId: string, services: string[], nonce?: string): string {
     // Occasional sweep so abandoned flows don't accumulate.
     const now = Date.now();
     for (const [k, v] of this.#jar) if (v.expires < now) this.#jar.delete(k);
@@ -135,13 +141,14 @@ export class OAuthStateJar {
     // unboundedly within the 10-min window — evict oldest first.
     while (this.#jar.size >= 256) this.#jar.delete(this.#jar.keys().next().value!);
     const state = randomBytes(24).toString('base64url');
-    this.#jar.set(state, { ownerId, services, expires: now + 10 * 60_000 });
+    this.#jar.set(state, { ownerId, services, expires: now + 10 * 60_000, ...(nonce ? { nonce } : {}) });
     return state;
   }
-  consume(state: string): { ownerId: string; services: string[] } | null {
+  consume(state: string, nonce?: string): { ownerId: string; services: string[] } | null {
     const v = this.#jar.get(state);
     this.#jar.delete(state); // single-use either way
     if (!v || v.expires < Date.now()) return null;
+    if (v.nonce !== undefined && v.nonce !== nonce) return null;
     return { ownerId: v.ownerId, services: v.services };
   }
 }

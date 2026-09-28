@@ -2,6 +2,25 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.92.0] — 2026-09-28
+
+The night review's second wave: sign-in, the Docker provider and memory service, the CLI and scripts, connections and files, and usage (see docs/audit-2026-09-28-night.md).
+
+### Security
+- **Agent secrets no longer ride the `docker` command line**, which every user on the machine can read (on a shared host, other tenants). AI keys, the setup token and the manager's door keys go in a private file the docker client reads.
+- **A password-reset link goes out only through a bot the account's own side holds**: its own agents' bots or the machine owner's. Another member's bot let that member read the link back and take the account.
+- **The Google consent callback must come back to the browser that pressed Connect.** Someone finishing consent for a link another member sent them no longer lands their Gmail in that member's vault.
+- A password change, reset or recovery now signs out the account's command-line tokens as well; Google accounts' CLI tokens follow the allowed-emails list. Password guessing is capped per account in every mode, and a flood of junk attempts can no longer evict an account's lock. A correct recovery code works even while the account is locked. Login takes the same time for a real and a made-up name. A claim link works once even when two people open it together.
+- A git data source can no longer be named after the agent's own state folders (`connections`, `credentials`, …): cloned there, its next push could publish the Google keyring. Shared folders are checked again at every build (a symlink swapped in later is refused, and the agent keeps running), and a folder with `:` in its path is refused.
+- Uploads write to a fresh temporary file, so a planted link cannot redirect them; folder downloads cannot be steered by a folder name starting with `-`.
+
+### Fixed
+- A missing `docker` (PATH under launchd) or an unexpected Docker error no longer reads as "every container is gone", which marked the fleet FAILED. Installs running as another user than uid 1000 can set up agents again. A timed-out restore stops its own extraction before the rollback. Restoring an old-layout archive no longer moves the agent's own settings on the next rebuild.
+- Usage: a failed token read no longer counts an agent's whole history as new use; a source's "rate-limited" status is its own, not its agents'; calls logged since the last sample are counted before a rebuild removes them; the daily trend counts each day's own use; short windows count five-minute slots. Editing a quiet task keeps it quiet, and a new task takes your browser's time zone. Sweeps (sleep, knocks, reconcile) no longer overlap themselves.
+- Google plus local accounts: the Google owner can manage local accounts, and a local account's console connects.
+- CLI and scripts: a failed deploy's rollback keeps the dependencies it needs; upgrade and deploy take the same lock; an upgrade installs dependencies once; the image build runs on macOS's bash; the installer spots an existing Mac install; uninstall refuses when it cannot read the database; `login --url` saves the address; the token prompt is hidden; relative paths are the caller's; `download` checks the target first; `get` writes mode 600; `accounts reset-password` signs out the account's CLI tokens.
+- A rebuild's checkpoint frees its slot as soon as the checkpoint turn ends.
+
 ## [2.91.0] — 2026-09-28
 
 The rest of the night review (see docs/audit-2026-09-28-night.md).

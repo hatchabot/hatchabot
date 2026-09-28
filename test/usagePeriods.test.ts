@@ -64,13 +64,13 @@ describe('computeUsagePeriod', () => {
     expect(v.byBilling).toEqual({ included: 50, api: 400, local: 0 });
   });
 
-  it('the last day: earlier hours count, a counter reset counts the new total, hourly buckets', () => {
+  it('the last day: earlier hours count, a counter drop counts nothing, hourly buckets', () => {
     const v = computeUsagePeriod(world(), OWNER, 'day', NOW);
     expect(v.bucketMinutes).toBe(60);
     const den = v.agents.find((a) => a.name === 'Den')!, kitchen = v.agents.find((a) => a.name === 'Kitchen')!;
     expect(den.tokens).toBe(5_400); // 5000 four hours ago + 400 in the last hour
     expect(den.requests).toBe(7);
-    expect(kitchen.tokens).toBe(250); // 200 after the reset + 50
+    expect(kitchen.tokens).toBe(50); // the drop counts nothing (a sum over sessions; night review), then +50
     expect(v.agents.map((a) => a.name)).toEqual(['Den', 'Kitchen']); // by tokens, desc; Attic used nothing
   });
 

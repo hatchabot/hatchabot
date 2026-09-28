@@ -31,7 +31,7 @@ fi
 [ ${#TAGS[@]} -gt 0 ] || { echo "No tags to check against — nothing to do."; exit 0; }
 
 fail=0
-for tag in "${TAGS[@]}"; do
+for tag in ${TAGS[@]+"${TAGS[@]}"}; do
   echo "== upgrading from $tag"
   rm -rf "$TMP/old"
   git worktree prune            # a removed directory stays registered otherwise

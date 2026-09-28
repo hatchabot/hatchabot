@@ -1,6 +1,6 @@
 # Night review, 2026-09-27/28
 
-Six read-only reviewers, one area each, against a shared brief: report only new, verified defects in a strict format, nothing already in the 2026-09-27 audit or walk-through. Every finding was checked in the code before it was fixed. Fixes shipped in v2.90.0 and v2.91.0.
+Six read-only reviewers, one area each, against a shared brief: report only new, verified defects in a strict format, nothing already in the 2026-09-27 audit or walk-through. Every finding was checked in the code before it was fixed. Fixes shipped in v2.90.0 and v2.91.0; a second wave of six more areas followed, fixed in v2.92.0 (and hatchabot-cloud 72ba4ac).
 
 ## Areas and results
 
@@ -13,12 +13,27 @@ Six read-only reviewers, one area each, against a shared brief: report only new,
 | Manager chat and its tools | 0 | 3 | 5 | 7 |
 | Web page logic | 0 | 3 | 2 | 8 |
 
-## The two criticals
+## Second wave
+
+| Area | Critical | Major | Medium | Low |
+|---|---|---|---|---|
+| Sign-in and accounts | 1 | 1 | 5 | 3 |
+| Memory service and Docker provider | 1 | 2 | 4 | 1 |
+| CLI and scripts | 0 | 1 | 7 | 10 |
+| Cloud provisioner (hatchabot-cloud) | 1 | 2 | 10 | 3 |
+| Connections and files | 1 | 1 | 7 | 3 |
+| Usage, schedules, notifications | 0 | 1 | 6 | 4 |
+
+Criticals: agent secrets on the docker command line (readable by every local user); a reset link delivered through another member's bot; the Google consent callback not bound to the starting browser; tenant output closing a heredoc in hc and running as root.
+
+## The first wave's two criticals
 
 1. **Change bot on a pool bot gave the agent its own bot back.** Pool leasing is idempotent per agent, so the "fresh" bot was the old one, which the swap then released: the next new agent took it too. Fixed in v2.90.0: the swap excludes the current bot, refuses if nothing else is free, and releases quietly.
 2. **Importing a Download could wire a bot that is a spare in this machine's pool.** The import checked only live channel rows. Fixed in v2.90.0: import and the move-here preflight refuse a pool bot, and the one-agent-per-bot index now ignores case.
 
 ## Left open, on purpose
+
+- **Second wave, still open:** detaching a Google account from a stopped agent takes effect only at its next rebuild (Start and wake do not re-sync connections); deleting a connection revokes a grant another account may share; a failed revoke leaves a stopped agent's token; `ssh://` URLs with a port lose it; the memory door frees a slot when the client disconnects; the engine is not replaced when its image changes; a Stop of the memory service trusts `docker rm`. Password mode still honours X-Forwarded-For from loopback (fixed buckets now cap it).
 
 - **Doorman listens on every interface.** It also answers on Docker's default bridge. Only an agent still on that bridge could reach it, and on the Spark nothing but Hatchabot's own doorman and memory door is there (checked 2026-09-28). Binding only the jail address would break the published console port, so this needs a live test before it changes.
 - **Checkpointing rebuilds hold a rebuild slot while they wait for the checkpoint gate.** A throughput issue during a source switch of many agents, not a correctness one.

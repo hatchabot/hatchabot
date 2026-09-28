@@ -22,8 +22,11 @@ export function startReconcileLoop(
   providers: Map<string, RuntimeProvider>,
   log: (event: string, detail: Record<string, unknown>) => void,
   intervalMs = Number(process.env.HATCHABOT_RECONCILE_MS ?? 120_000),
+  /** A sweep already under way (the boot one, whose wait is time-boxed but not the sweep): counted as in flight until it settles (night review). */
+  inFlight?: Promise<unknown>,
 ): NodeJS.Timeout {
-  let running = false;
+  let running = !!inFlight;
+  if (inFlight) void inFlight.catch(() => {}).finally(() => { running = false; });
   const tick = async () => {
     if (running) return; // never overlap a slow sweep with the next one
     running = true;

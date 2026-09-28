@@ -31,8 +31,15 @@ if [ -n "$(git status --porcelain)" ]; then
   echo "       git -C $PROD checkout -- <file>   (your .env and data/ are untouched)"
   exit 2
 fi
-LOCK="${TMPDIR:-/tmp}/hatchabot-upgrade-$(printf %s "$PROD" | cksum | cut -d' ' -f1).lock"
-exec 9>"$LOCK"; flock -n 9 || { echo "Another deploy of $PROD is running (lock $LOCK)."; exit 4; }
+# The SAME lock upgrade.sh takes (a directory: mkdir is atomic everywhere,
+# and macOS has no flock). A flock here and a mkdir there did not exclude each
+# other, so `hbt upgrade` and the follow-latest timer could race one checkout's
+# node_modules.prev (night review, 2026-09-28). Keyed on $PWD, as upgrade.sh
+# is. A lock older than an hour is a crash's leftover.
+LOCK="${TMPDIR:-/tmp}/hatchabot-upgrade-$(printf %s "$PWD" | cksum | cut -d' ' -f1).lock.d"
+if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null || true; fi
+mkdir "$LOCK" 2>/dev/null || { echo "Another deploy or upgrade of $PROD is running (lock $LOCK)."; exit 4; }
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 CUR="$(git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD)"
 echo "Deploying $TAG to $PROD (currently $CUR)…"
 # `npm ci` wipes node_modules first: keep the working one aside until the new
@@ -44,7 +51,9 @@ rollback() { echo "Rolling back to $CUR…"; git checkout --quiet "$CUR" && rest
 git checkout --quiet "$TAG"
 # A failed install must not leave prod checked out at a tag it can't run.
 npm ci --silent || { rollback; exit 3; }
-rm -rf node_modules.prev
+# node_modules.prev stays until the new release is SERVING: removed here, a
+# failed health check's rollback found nothing to restore and left prod with
+# no dependencies at all (night review, 2026-09-28).
 systemctl --user restart "$SVC" || { rollback; exit 1; }
 WANT="$(node -e 'console.log(require("./package.json").version)')"
 # Health URL from the production .env, not the caller's shell: PORT and native TLS.
@@ -54,7 +63,7 @@ SCHEME=http; [ -n "$(envval HATCHABOT_TLS_CERT)" ] && SCHEME=https
 URL="${HATCHABOT_HEALTH_URL:-$SCHEME://127.0.0.1:$P/}"
 for i in $(seq 1 45); do
   GOT="$(curl -sk "$URL" 2>/dev/null | grep -oE 'HATCHABOT_VERSION="[^"]+"' | sed -n 1p | cut -d'"' -f2 || true)"
-  [ "$GOT" = "$WANT" ] && { echo "Serving $GOT."; exit 0; }
+  [ "$GOT" = "$WANT" ] && { rm -rf node_modules.prev; echo "Serving $GOT."; exit 0; }
   sleep 2
 done
 echo "Service restarted but is not serving $WANT — check: journalctl --user -u $SVC -n 50"; rollback; exit 1

@@ -247,14 +247,14 @@ export class LocalDockerProvider implements RuntimeProvider {
       // on this box (or tunnelling to it), never for the whole LAN/tailnet.
       args.push('-p', `127.0.0.1:${p.host}:${p.container}`);
     }
-    for (const [k, v] of Object.entries(spec.env)) {
-      args.push('-e', `${k}=${v}`);
-    }
     const image = spec.image ?? this.image;
     if (!IMAGE_REF_RE.test(image)) throw new ProviderError(`bad image ref ${image}`, 'That image name is not valid.');
     await this.#ensureImage(image);
-    args.push(image, 'openclaw', 'gateway');
-    await this.#must(args, 'The agent runtime could not be created.');
+    // The environment (AI keys, the setup token, the manager's door and proxy
+    // keys) goes in a 0600 file the docker client reads, never on its command
+    // line: /proc/<pid>/cmdline is readable by every user on the machine, and
+    // on a shared host those are other tenants (night review, 2026-09-28).
+    await this.#withEnvFile(spec.env, (flag) => this.#must([...args, ...flag, image, 'openclaw', 'gateway'], 'The agent runtime could not be created.'));
 
     return { runtimeRef };
   }
@@ -319,7 +319,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Rootless Docker streams too: the seed dir is this user's private tmp,
       // and the one-shot runs as `node`, which under rootless is a subordinate
       // id on the host — "bash: /seed/seed.sh: Permission denied" (2026-09-25).
-      const streamSeed = this.remote || (await this.rootless());
+      // And whenever this process is not uid 1000 (the image's `node`): the
+      // 0700 seed dir is unreadable to the one-shot otherwise — an install as
+      // root on a VPS, or as a second account (night review, 2026-09-28).
+      const streamSeed = this.remote || (await this.rootless()) || (typeof process.getuid === 'function' && process.getuid() !== 1000);
       const seedBase = streamSeed ? '/tmp/hatchabot-seed' : '/seed';
       // The seed must be idempotent: rebuilds re-run it against a volume that
       // already holds a live workspace. Config sets are naturally re-runnable
@@ -475,10 +478,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       ) {
         return { phase: 'unknown' };
       }
-      // Default stays `absent`: a genuine "No such container" (the common
-      // stderr on inspect of a removed container) must still be caught so a
-      // vanished runtime gets flagged for Retry.
-      return { phase: 'absent' };
+      // Absent only when Docker says so ("No such container"/"object"): any
+      // other error (Docker Desktop answering 500 while it updates) is a
+      // daemon in trouble, and absent made reconcile FAIL the fleet (night review).
+      return /no such (container|object)/i.test(res.stderr) ? { phase: 'absent' } : { phase: 'unknown' };
     }
     const [addrs = '', publishedSelf = '', viaDoorman = ''] = res.stdout.trim().split('|');
     const published = publishedSelf.trim() || viaDoorman.trim();
@@ -827,8 +830,12 @@ export class LocalDockerProvider implements RuntimeProvider {
       // the archive (gzip -t on a staged copy) BEFORE deleting: a truncated or
       // corrupt snapshot must not empty the agent's volume and then fail,
       // leaving no state and nothing to roll back to.
+      // Named, so a timeout removes the one-shot itself: killing the docker
+      // client alone left it extracting while the rollback extracted into the
+      // same volume (night review, 2026-09-28).
+      const ioName = `${this.prefix}-io-${randomBytes(6).toString('hex')}`;
       const child = spawn(this.docker, this.#argv([
-        'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
+        'run', '--rm', '-i', '--name', ioName, '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
         // Archives made before the home-as-volume change hold ~/.openclaw's
         // CONTENTS at their root; newer ones hold the whole home (with
@@ -843,11 +850,15 @@ export class LocalDockerProvider implements RuntimeProvider {
           'if tar tzf /tmp/s.tgz | grep -qE "^\\./\\.openclaw/"; then DEST=/vol; else DEST=/vol/.openclaw; fi && ' +
           'find /vol -mindepth 1 -delete && mkdir -p "$DEST" && ' +
           'tar xz --no-same-owner -C "$DEST" -f /tmp/s.tgz && ' +
+          // An old-layout archive is already in the home layout once here:
+          // without the marker the next provision "moved" the agent's own
+          // ~/.config and ~/.local into ~/.openclaw (night review).
+          'if [ "$DEST" = /vol/.openclaw ]; then touch /vol/.openclaw/.agentclaw-home-v2; fi && ' +
           'chown -R 1000:1000 /vol && chmod -R a-s /vol',
       ]));
       let stderr = '';
       // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName]).catch(() => {}); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
       timer.unref();
       child.on('close', () => clearTimeout(timer));
       child.stderr.on('data', (c) => (stderr += c));
@@ -877,8 +888,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { volume } = this.#names(runtimeRef);
     const dir = `/vol/.openclaw/agents/${slug}/agent`;
     await new Promise<void>((resolve, reject) => {
+      const ioName = `${this.prefix}-io-${randomBytes(6).toString('hex')}`;
       const child = spawn(this.docker, this.#argv([
-        'run', '--rm', '-i', '-v', `${volume}:/vol`, 'alpine',
+        'run', '--rm', '-i', '--name', ioName, '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
         // Same untrusted-input rules as importState: refuse the archive's
         // ownership, then set the one the runtime actually needs.
@@ -887,7 +899,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       ]));
       let stderr = '';
       // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName]).catch(() => {}); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
       timer.unref();
       child.on('close', () => clearTimeout(timer));
       child.stderr.on('data', (c) => (stderr += c));
@@ -939,7 +951,7 @@ export class LocalDockerProvider implements RuntimeProvider {
     await this.#docker(['rm', '-f', name]);
     const routes = JSON.stringify(doormanRoutes({ opsPort: opts.opsPort, agentContainer, embedPort: opts.embedPort }));
     const alias = await this.hostAliasTarget();
-    const runDoorman = () => this.#docker([
+    const runDoorman = () => this.#withEnvFile(opts.doormanKey ? { DOORMAN_KEY: opts.doormanKey } : {}, (keyFlag) => this.#docker([
       'run', '-d', '--name', name,
       '--network', network, '--network-alias', DOORMAN_ALIAS,
       // Maps to this machine on every platform — the one thing the doorman may reach.
@@ -951,10 +963,10 @@ export class LocalDockerProvider implements RuntimeProvider {
       '--memory', '128m', '--pids-limit', '64', '--cap-drop', 'ALL',
       '--security-opt', 'no-new-privileges',
       '-e', `DOORMAN_ROUTES=${routes}`,
-      ...(opts.doormanKey ? ['-e', `DOORMAN_KEY=${opts.doormanKey}`] : []),
+      ...keyFlag,
       '--entrypoint', 'node',
       this.image, '-e', doormanScript(),
-    ]);
+    ]));
     // A doorman of a previous install (the uninstall never knew it) may still
     // hold this console port: a MacBook reinstall failed on it (2026-09-25).
     // Only a doorman of THIS prefix that serves another agent is an orphan.
@@ -1337,6 +1349,25 @@ export class LocalDockerProvider implements RuntimeProvider {
     return ['--network', name];
   }
 
+  /** Run `fn` with `--env-file <0600 file>` holding `env`; the file is gone afterwards. A value with a newline cannot live in an env file and is refused. */
+  async #withEnvFile<T>(env: Record<string, string>, fn: (flag: string[]) => Promise<T>): Promise<T> {
+    const entries = Object.entries(env);
+    if (!entries.length) return fn([]);
+    for (const [k, v] of entries) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || /[\r\n\0]/.test(v)) {
+        throw new ProviderError(`env ${k} cannot be passed to docker`, `The setting ${k} has a line break in it, which an agent's environment cannot carry.`);
+      }
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'hatchabot-env-'));
+    const file = join(dir, 'env');
+    try {
+      await writeFile(file, entries.map(([k, v]) => `${k}=${v}`).join('\n') + '\n', { mode: 0o600 });
+      return await fn(['--env-file', file]);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   async #must(args: string[], userMessage: string): Promise<ExecResult> {
     const res = await this.#docker(args);
     if (res.code !== 0) {
@@ -1389,6 +1420,13 @@ export class LocalDockerProvider implements RuntimeProvider {
           stdout: String(err.stdout ?? ''),
           stderr: `docker ${args[0]} timed out`,
         };
+      }
+      // A docker that could not be run at all (ENOENT: not on PATH, as under
+      // launchd; EACCES) is "docker unavailable", not "exited 1": a rejected
+      // execFile always carries stdout '', which used to read as a clean
+      // failure — and status() then called every container absent (night review).
+      if (typeof err?.code === 'string') {
+        throw new ProviderError(`docker unavailable: ${String(err)}`, 'Docker is not available on this host.');
       }
       if (typeof err?.code === 'number' || err?.stdout !== undefined) {
         return {

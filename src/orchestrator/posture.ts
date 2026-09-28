@@ -230,18 +230,22 @@ export function diffRisks(current: string[], previous: string[]): { added: strin
  * Snapshot every owner's posture and log any NEWLY-appeared risk. Run daily
  * (and once at boot) so the operator sees "an agent gained send-email while
  * reachable by a group" without having to open the UI. Diffs against each
- * owner's most recent prior snapshot, then records today's.
+ * owner's most recent snapshot (today's, once there is one), then records today's.
  */
 export function runPostureSweep(
   store: Store,
   opts: { authMode: 'password' | 'accounts' | 'identity'; log?: (event: string, detail: Record<string, unknown>) => void },
 ): void {
   const today = new Date().toISOString().slice(0, 10);
+  // Against the newest snapshot INCLUDING today's: diffing against the day
+  // before logged the same change again after every restart that day (the
+  // Spark restarts at every deploy; night review, 2026-09-27).
+  const tomorrow = new Date(Date.parse(`${today}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
   const hostOwner = store.localHostOwnerId();
   for (const ownerId of store.ownersWithAgents()) {
     const report = computePosture(store, { ownerId, isHostOwner: ownerId === hostOwner, authMode: opts.authMode });
     const keys = riskKeys(report);
-    const prev = store.latestPostureSnapshotBefore(ownerId, today);
+    const prev = store.latestPostureSnapshotBefore(ownerId, tomorrow);
     const changes = prev ? diffRisks(keys, prev) : { added: keys, removed: [] as string[] };
     store.upsertPostureSnapshot(ownerId, today, keys);
     if (changes.added.length || changes.removed.length) {

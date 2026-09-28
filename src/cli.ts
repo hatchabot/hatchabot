@@ -12,7 +12,7 @@
  */
 import './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { chmod, readFile, writeFile } from 'node:fs/promises';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -606,25 +606,25 @@ const ago = (iso?: string) => {
 
 /** Interactive sign-in for identity mode; stores the refresh token 0600. */
 async function doLogin(url: string, server: IdentityConfig, flags: Map<string, string>): Promise<void> {
-  const { createInterface: mkRl } = await import('node:readline');
-  const prompt = (q: string): Promise<string> => {
-    process.stderr.write(q);
-    const rl = mkRl({ input: process.stdin, output: process.stderr, terminal: false });
-    return new Promise((r) => rl.once('line', (l) => { rl.close(); r(l.trim()); }));
-  };
+  // `--url B` saves B too: the token alone, beside server A's saved URL, sent
+  // B's token to A on every later command (night review, 2026-09-28).
+  const saveUrl = () => { if (flags.has('url')) writeConfigValue('HATCHABOT_URL', url); };
 
   // An access token minted by the app. The only path that works for accounts
-  // with no password — i.e. anyone who signed in with Google.
+  // with no password — i.e. anyone who signed in with Google. Not echoed: a
+  // pasted token is a credential (night review).
   if (flags.has('token') || !flags.has('email')) {
     const token =
       flags.get('token') ||
-      (await prompt(
-        `Open ${url} → ⚙ Settings → Security → New token, then paste it here.\nToken: `,
-      ));
+      (await askSecret(
+        `Open ${url} → ⚙ Settings → Security → New token, then paste it here.\nToken (hidden): `,
+      )).trim();
+    if (!token) fail('no token given');
     if (!token.startsWith('hatchabot_') && !token.startsWith('agentclaw_')) fail('that does not look like a Hatchabot token');
     const res = await fetch(`${url}/v1/agents`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) fail(`that token was rejected (${res.status})`);
     writeConfigValue('HATCHABOT_TOKEN', token);
+    saveUrl();
     console.log(`signed in. Token saved to ${configPath()} (chmod 600)`);
     return;
   }
@@ -637,9 +637,10 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
   const ask = (q: string): Promise<string> => {
     process.stderr.write(q);
     const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
-    return new Promise((r) => rl.once('line', (l) => { rl.close(); r(l.trim()); }));
+    // Closed stdin answers "" (and fails below), never a silent exit 0.
+    return new Promise((r) => { let got = false; rl.once('line', (l) => { got = true; rl.close(); r(l.trim()); }); rl.once('close', () => { if (!got) r(''); }); });
   };
-  const email = flags.get('email') || (await ask('Email: '));
+  const email = flags.get('email') || (await ask('Email: ')) || fail('no email given');
   const password = await askSecret('Password: ');
   const res = await fetch(
     `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
@@ -652,6 +653,7 @@ async function doLogin(url: string, server: IdentityConfig, flags: Map<string, s
   const data = (await res.json()) as any;
   if (!res.ok) fail(`sign-in failed: ${data?.error?.message ?? res.status}`);
   writeConfigValue('HATCHABOT_REFRESH_TOKEN', data.refreshToken);
+  saveUrl();
   console.log(`signed in as ${data.email}`);
   console.log(`refresh token saved to ${configPath()} (chmod 600)`);
 }
@@ -979,7 +981,15 @@ async function main() {
       if (problem) { console.error(problem); process.exitCode = 1; return; }
       const { hash, salt } = await hashPassword(newPassword);
       store.setLocalAccountPassword(account.id, hash, salt);
-      console.log(`Password reset for ${account.username}. Every session of that account is now signed out.`);
+      // Its CLI tokens go too: a token minted from a stolen session outlived
+      // every password reset (night review, 2026-09-28). Rehost tokens (a peer
+      // machine's standing permission) and agents' own call tokens stay.
+      let revoked = 0;
+      for (const t of store.listCliTokens(account.id)) {
+        if (t.scope === 'rehost') continue;
+        if (store.revokeCliToken(account.id, t.id)) revoked++;
+      }
+      console.log(`Password reset for ${account.username}. Every session of that account is now signed out${revoked ? `, and its ${revoked} CLI token${revoked === 1 ? ' was' : 's were'} revoked (sign in again with hatchabot login)` : ''}.`);
       return;
     }
     if (sub === 'create' || sub === 'add') {
@@ -1335,7 +1345,10 @@ async function main() {
       return;
     }
     case 'adopt': {
-      const dir = rest[0] ?? fail('usage: hatchabot adopt <workspace-dir> <name>');
+      // Absolute, from where the command was typed: the server resolved a
+      // relative path against its own directory, and the Spark's hbt shim
+      // runs from the install (night review, 2026-09-28).
+      const dir = userPath((rest[0] ?? fail('usage: hatchabot adopt <workspace-dir> <name>')).replace(/^~(?=\/|$)/, homedir()));
       const name = rest.slice(1).join(' ').trim() || fail('give the new agent a name');
 
       const preview: any = await (await jsonPost('/v1/workspaces/inspect', { path: dir })).json();
@@ -1410,7 +1423,9 @@ async function main() {
               await jsonPost(`/v1/agents/${a.id}/channel-token`, { token: tok });
               break;
             } catch (err) {
-              if (attempt >= 2 || flags.get('bot-token')) throw err;
+              // A token from the environment is a script's: re-prompting there
+              // posted empty tokens twice (--bot-token is not a flag; night review).
+              if (attempt >= 2 || process.env.HATCHABOT_BOT_TOKEN?.trim() || !process.stdin.isTTY) throw err;
               console.error(`  ${err instanceof Error ? err.message : String(err)}`);
               tok = undefined;
             }
@@ -1440,7 +1455,7 @@ async function main() {
           apiDelete: (p) => api(ctx, p, { method: 'DELETE' }),
           log: console.log,
           fail,
-          resolvePath: (raw) => resolve(raw.replace(/^~(?=\/|$)/, homedir())),
+          resolvePath: (raw) => userPath(raw.replace(/^~(?=\/|$)/, homedir())),
         },
         rest,
         flags,
@@ -1540,7 +1555,7 @@ async function main() {
         const fromFile = flags.get('from');
         let dockerfile: string;
         if (fromFile) {
-          dockerfile = readFileSync(resolve(fromFile.replace(/^~(?=\/|$)/, homedir())), 'utf8');
+          dockerfile = readFileSync(userPath(fromFile.replace(/^~(?=\/|$)/, homedir())), 'utf8');
         } else if (!process.stdin.isTTY) {
           dockerfile = readFileSync(0, 'utf8');
         } else {
@@ -1793,8 +1808,9 @@ async function main() {
         const { createInterface } = await import('node:readline');
         const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: false });
         process.stderr.write('Proceed? [y/N] ');
-        const ans = await new Promise<string>((r) => rl.once('line', (l) => { rl.close(); r(l.trim().toLowerCase()); }));
-        if (ans !== 'y' && ans !== 'yes') return console.log('aborted');
+        // Closed stdin (a script) answers "" and says so, never a silent exit 0 (night review).
+        const ans = await new Promise<string>((r) => { let got = false; rl.once('line', (l) => { got = true; rl.close(); r(l.trim().toLowerCase()); }); rl.once('close', () => { if (!got) r(''); }); });
+        if (ans !== 'y' && ans !== 'yes') { if (!process.stdin.isTTY) fail('aborted: no answer on stdin — pass --yes to proceed'); return console.log('aborted'); }
       }
       const res = await api(ctx, `/v1/ai-profiles/${from.id}/migrate-agents`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1865,9 +1881,13 @@ async function main() {
       // pool): say so BEFORE the export stops the agent, and ask.
       const leftBehind = ((a as { otherChannels?: Array<{ kind: string }> }).otherChannels ?? []).map((c) => c.kind);
       if (leftBehind.length) await confirmOr(`The file will not carry its ${leftBehind.join(' and ')} bot or the people linked there — they stay on this machine. Continue?`);
+      // Where it goes is checked BEFORE the export stops the agent: a missing
+      // folder threw after the stop, leaving it STOPPED and the copy discarded
+      // (night review, 2026-09-28).
+      const out = userPath(flags.get('out') ?? `${a.slug}.hatchabot`);
+      try { accessSync(dirname(out), fsConstants.W_OK); } catch { fail(`cannot write into ${dirname(out)} — nothing was stopped`); }
       const res = await api(ctx, `/v1/agents/${a.id}/backup`);
       const droppedHeader = res.headers.get('x-hatchabot-dropped');
-      const out = userPath(flags.get('out') ?? `${a.slug}.hatchabot`);
       // 0600: this archive embeds the live bot token, so it must not be
       // readable by other accounts on the machine (the note below says as much).
       await writeFile(out, Buffer.from(await res.arrayBuffer()), { mode: 0o600 });
@@ -2324,7 +2344,12 @@ async function main() {
       const { createWriteStream } = await import('node:fs');
       const { pipeline } = await import('node:stream/promises');
       const { Readable } = await import('node:stream');
+      // `mode` applies only to a NEW file: an existing 0644 one kept its mode
+      // and the agent's file was world-readable (night review). Tightened
+      // before a byte is written, and again after.
+      if (existsSync(out)) await chmod(out, 0o600);
       await pipeline(Readable.fromWeb(res.body as never), createWriteStream(out, { mode: 0o600 }));
+      await chmod(out, 0o600);
       console.log(`saved ${out}${isDir ? ' (folder as .tar.gz)' : ''}`);
       return;
     }

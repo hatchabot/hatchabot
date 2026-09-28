@@ -73,7 +73,14 @@ agent_names() {
     for (const r of db.prepare("SELECT runtime_ref FROM agents WHERE runtime_ref IS NOT NULL").all())
       console.log(String(r.runtime_ref).replace(/^docker:\/\//, ""));' "$DB_PATH" 2>/dev/null)
 }
-NAMES="$(agent_names)"
+# Its exit status counts too: a database the module cannot open (a Node major
+# upgrade breaks the native build) printed nothing, which read as "no agents"
+# — "none running" with agents still up, or a purge that orphaned every
+# volume (night review, 2026-09-28).
+if NAMES="$(agent_names)"; then DB_READ=1; else DB_READ=0; NAMES=""; fi
+if [ "$DB_READ" = 0 ]; then
+  echo "Cannot read the database at $DB_PATH (node could not open it — after a Node upgrade, run npm rebuild in $REPO), so this install's agents are unknown. Refusing rather than guess."; exit 2
+fi
 # A database that is there but cannot be read (no node_modules yet) names no
 # agents: a purge would then delete the only map from agents to volumes and
 # leave every container nameless (30th audit). Refuse, rather than guess.

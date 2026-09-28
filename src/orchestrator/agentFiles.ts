@@ -86,13 +86,17 @@ export function parseListing(stdout: string): AgentFileEntry[] {
 }
 
 /** The argv a read-only one-shot runs to stream one file's bytes to stdout. */
-export function catArgv(rel: string): string[] {
-  return ['sh', '-c', `${guard(rel)} [ -f "$P" ] || exit 4; exec cat "$P"`];
+export function catArgv(rel: string, maxBytes?: number): string[] {
+  // With the size the response announced: a file the agent is still writing
+  // (a log, a session) streamed more bytes than Content-Length said, which
+  // broke the next response on the connection (night review, 2026-09-28).
+  const read = maxBytes !== undefined && Number.isSafeInteger(maxBytes) && maxBytes >= 0 ? `head -c ${maxBytes}` : 'cat';
+  return ['sh', '-c', `${guard(rel)} [ -f "$P" ] || exit 4; exec ${read} "$P"`];
 }
 
 /** The argv a read-only one-shot runs to stream a directory as tar.gz. */
 export function tarArgv(rel: string): string[] {
-  return ['sh', '-c', `${guard(rel)} [ -d "$P" ] || exit 4; cd "$(dirname "$P")" && exec tar cz "$(basename "$P")"`];
+  return ['sh', '-c', `${guard(rel)} [ -d "$P" ] || exit 4; cd "$(dirname "$P")" && exec tar cz -- "$(basename "$P")"`];
 }
 
 /** A download name for a path: the last segment, or the agent's slug for home. */
@@ -135,7 +139,7 @@ export function putArgv(relDir: string, name: string, overwrite: boolean, slug: 
   const stateGuard = `case "$P" in ${ws}|${ws}/*) ;; ${AGENT_HOME}/.openclaw|${AGENT_HOME}/.openclaw/*) exit 6;; esac;`;
   // A directory (or a link to one) under the target name is refused, not
   // written into.
-  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; cat > "$T.part-$$" && mv -f "$T.part-$$" "$T"`];
+  return ['sh', '-c', `${guard(relDir)} [ -d "$P" ] || exit 4; ${stateGuard} T="$P"/${n}; if [ -d "$T" ]; then exit 4; fi; if [ -e "$T" ] && [ "${overwrite ? 1 : 0}" != 1 ]; then exit 5; fi; TMP="$T.part-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \\n')"; set -C; cat > "$TMP" && mv -f "$TMP" "$T"`];
 }
 
 /**

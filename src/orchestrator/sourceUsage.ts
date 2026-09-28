@@ -57,6 +57,54 @@ export interface SampleDeps {
   log?: (event: string, detail: Record<string, unknown>) => void;
 }
 
+/**
+ * One agent's sample: its model calls since the last one, and a token
+ * reading. Exported so a rebuild can take it BEFORE the container (and the
+ * log it reads) is removed: calls and 429s logged since the last pass were
+ * lost at every rebuild (night review, 2026-09-27).
+ */
+export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.now()): Promise<{ calls: number; limited: number }> {
+  const { store } = deps;
+  const nowIso = new Date(now).toISOString();
+  let calls = 0, limited = 0;
+  const runtimeRef = a.runtimeRef;
+  if (!runtimeRef) return { calls, limited };
+  const provider = deps.providerFor(a.hostId);
+  const cursor = store.usageCursor(a.id);
+  const since = cursor?.lastTs ?? new Date(now - 7 * DAY).toISOString(); // first run: a week of history
+  try {
+    const text = await provider.modelCallLog(runtimeRef, since);
+    const fresh = parseModelCalls(text).filter((c) => c.at > since);
+    const buckets = new Map<string, { ok: number; limited: number; failed: number }>();
+    const slots = new Map<string, { ok: number; limited: number; failed: number }>();
+    let lastOk: string | undefined, lastLimited: string | undefined, maxAt = since;
+    for (const c of fresh) {
+      const b = buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
+      const sb = slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
+      if (c.status >= 200 && c.status < 300) { b.ok++; sb.ok++; lastOk = c.at; }
+      else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, a.aiProfileId, c.at, c.model); limited++; }
+      else { b.failed++; sb.failed++; }
+      buckets.set(hourOf(c.at), b);
+      slots.set(slotOf(c.at), sb);
+      if (c.at > maxAt) maxAt = c.at;
+    }
+    store.addModelCallHours(a.id, a.aiProfileId, buckets);
+    store.addModelCallSlots(a.id, a.aiProfileId, slots);
+    calls += fresh.length;
+    // No new calls: still move the cursor on (minus a little), so an idle agent
+    // isn't rescanned from a week ago every pass.
+    const next = fresh.length ? maxAt : new Date(Math.max(Date.parse(since), now - 5 * 60_000)).toISOString();
+    store.setUsageCursor(a.id, next, lastOk, lastLimited);
+  } catch (err) {
+    deps.log?.('usage.sample_log_failed', { agentId: a.id, error: String((err as Error).message ?? err).slice(0, 200) });
+  }
+  try {
+    const u = await agentUsage(provider, runtimeRef, a.slug, { strict: true });
+    store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
+  } catch { /* container busy/unreachable: no token sample this pass */ }
+  return { calls, limited };
+}
+
 /** One pass over every running agent: new model calls since last time + a token sample. */
 export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Promise<{ agents: number; calls: number; limited: number }> {
   const { store } = deps;
@@ -70,42 +118,10 @@ export async function sampleSourceUsage(deps: SampleDeps, now = Date.now()): Pro
   const running = store.listAllActiveAgents().filter((a) => a.state === 'RUNNING' && a.runtimeRef);
   const queue = [...running];
   const one = async (a: (typeof running)[number]): Promise<void> => {
-    const runtimeRef = a.runtimeRef;
-    if (!runtimeRef) return;
+    if (!a.runtimeRef) return;
     agents++;
-    const provider = deps.providerFor(a.hostId);
-    const cursor = store.usageCursor(a.id);
-    const since = cursor?.lastTs ?? new Date(now - 7 * DAY).toISOString(); // first run: a week of history
-    try {
-      const text = await provider.modelCallLog(runtimeRef, since);
-      const fresh = parseModelCalls(text).filter((c) => c.at > since);
-      const buckets = new Map<string, { ok: number; limited: number; failed: number }>();
-      const slots = new Map<string, { ok: number; limited: number; failed: number }>();
-      let lastOk: string | undefined, lastLimited: string | undefined, maxAt = since;
-      for (const c of fresh) {
-        const b = buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
-        const sb = slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
-        if (c.status >= 200 && c.status < 300) { b.ok++; sb.ok++; lastOk = c.at; }
-        else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, a.aiProfileId, c.at, c.model); limited++; }
-        else { b.failed++; sb.failed++; }
-        buckets.set(hourOf(c.at), b);
-        slots.set(slotOf(c.at), sb);
-        if (c.at > maxAt) maxAt = c.at;
-      }
-      store.addModelCallHours(a.id, a.aiProfileId, buckets);
-      store.addModelCallSlots(a.id, a.aiProfileId, slots);
-      calls += fresh.length;
-      // No new calls: still move the cursor on (minus a little), so an idle agent
-      // isn't rescanned from a week ago every pass.
-      const next = fresh.length ? maxAt : new Date(Math.max(Date.parse(since), now - 5 * 60_000)).toISOString();
-      store.setUsageCursor(a.id, next, lastOk, lastLimited);
-    } catch (err) {
-      deps.log?.('usage.sample_log_failed', { agentId: a.id, error: String((err as Error).message ?? err).slice(0, 200) });
-    }
-    try {
-      const u = await agentUsage(provider, runtimeRef, a.slug);
-      store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
-    } catch { /* container busy/unreachable: no token sample this pass */ }
+    const r = await sampleAgentUsage(deps, a, now);
+    calls += r.calls; limited += r.limited;
   };
   const worker = async (): Promise<void> => {
     for (;;) {
@@ -175,10 +191,20 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const w = (from: string, list = mineRows): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.hour >= from)
       .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
     const tokensFor = (agentIds: Set<string>, fromIso: string) => store.tokenIncreases(p.id, fromIso, agentIds);
+    // Windows of a day or less count five-minute slots: whole hours made
+    // "last 5 h" reach back up to six, and disagree with the tokens beside
+    // them, which use the exact time (night review, 2026-09-27).
+    const slotRows = store.modelCallSlotsFor(p.id, slotOf(t24));
+    const mineSlots = slotRows.filter((r) => myIds.has(r.agentId));
+    const ws = (fromIso: string, list = mineSlots): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.slot >= slotOf(fromIso))
+      .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
     const cursors = my.map((a) => store.usageCursor(a.id)).filter(Boolean) as Array<{ lastOk?: string; lastLimited?: string }>;
     const lastOkAt = cursors.map((c) => c.lastOk).filter(Boolean).sort().at(-1);
-    const lastLimitAt = cursors.map((c) => c.lastLimited).filter(Boolean).sort().at(-1);
     const hits = store.limitHitsFor(p.id, t7).filter((h) => myIds.has(h.agentId));
+    // The last refusal BY THIS SOURCE, from its own hits: an agent's cursor
+    // follows the agent, so one switched away after a 429 showed its new
+    // source as rate-limited and its old one as fine (night review).
+    const lastLimitAt = hits.map((h) => h.at).sort().at(-1);
     let status: SourceUsage['status'] = lastOkAt || lastLimitAt ? 'ok' : 'idle';
     let limitedSince: string | undefined;
     // A refusal counts as current only within the limit's own window: a Claude
@@ -218,9 +244,9 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const slotsList = Array.from({ length: 288 }, (_, i) => slotOf(new Date(now - (287 - i) * 300_000).toISOString()));
     const entry: SourceUsage = {
       id: p.id, name: p.name, agents: my.length,
-      window1h: { ...w(h1), tokens: tokensFor(myIds, t1) },
-      window5h: { ...w(h5), tokens: tokensFor(myIds, t5) },
-      window24h: { ...w(h24), tokens: tokensFor(myIds, t24) },
+      window1h: { ...ws(t1), tokens: tokensFor(myIds, t1) },
+      window5h: { ...ws(t5), tokens: tokensFor(myIds, t5) },
+      window24h: { ...ws(t24), tokens: tokensFor(myIds, t24) },
       window7d: { ...w(d7), tokens: tokensFor(myIds, t7) },
       status, limitedSince, lastLimitAt, lastOkAt, limitHits7d: hits.length, topAgents,
       tokensSince: store.firstTokenSampleAt(p.id, myIds),
@@ -231,7 +257,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
       const theirIds = new Set(all.filter((a) => a.aiProfileId === p.id && a.ownerId !== ownerId).map((a) => a.id));
       if (theirIds.size) {
         const theirRows = rows.filter((r) => theirIds.has(r.agentId));
-        entry.others = { agents: theirIds.size, requests5h: w(h5, theirRows).requests, requests7d: w(d7, theirRows).requests };
+        entry.others = { agents: theirIds.size, requests5h: ws(t5, slotRows.filter((r) => theirIds.has(r.agentId))).requests, requests7d: w(d7, theirRows).requests };
       }
     }
     out.push(entry);

@@ -7,6 +7,9 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 import { OAuthStateJar, googleAuthUrl, parseOAuthClient, syncConnections } from '../src/orchestrator/googleConnections.js';
 
+/** The browser-binding cookie the start route set (night review, 2026-09-28). */
+const nonceOf = (res: { cookies: Array<{ name: string; value: string }> }) => res.cookies.find((c) => c.name === 'hb_oauth')?.value ?? '';
+
 /**
  * Platform-managed Google connections: the control plane owns the OAuth
  * round-trip and materializes attached accounts into agent containers via
@@ -103,6 +106,16 @@ describe('OAuth client setup', () => {
 });
 
 describe('the consent round-trip', () => {
+  it('a callback from a different browser than the one that pressed Connect is refused (night review)', async () => {
+    const { fetchImpl } = googleMock();
+    const { f } = await world(fetchImpl);
+    await configureClient(f);
+    const start = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
+    const state = new URL(start.json().url).searchParams.get('state');
+    const other = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` });
+    expect(other.statusCode).toBe(400);
+    expect(other.body).toMatch(/different browser/);
+  });
   it('start → callback stores the connection; the refresh token lives only in the vault', async () => {
     const { calls, fetchImpl } = googleMock();
     const { f, store, secrets } = await world(fetchImpl);
@@ -111,7 +124,7 @@ describe('the consent round-trip', () => {
     expect(start.statusCode).toBe(200);
     const state = new URL(start.json().url).searchParams.get('state')!;
 
-    const cb = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=authcode&state=${state}`, headers: H });
+    const cb = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=authcode&state=${state}`, headers: H, cookies: { hb_oauth: nonceOf(start) } });
     expect(cb.statusCode).toBe(200);
     expect(cb.body).toContain('chris@example.com');
     expect(cb.body).not.toContain('rt-secret-1'); // never in the page
@@ -136,7 +149,7 @@ describe('the consent round-trip', () => {
     const start = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
     const state = new URL(start.json().url).searchParams.get('state')!;
     // NO auth headers at all — exactly how the browser arrives from Google.
-    const cb = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` });
+    const cb = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, cookies: { hb_oauth: nonceOf(start) } });
     expect(cb.statusCode).toBe(200);
     // ...and the vault entry lands under the STARTER, not some default owner.
     expect(store.listConnections(OWNER)).toHaveLength(1);
@@ -148,9 +161,9 @@ describe('the consent round-trip', () => {
     await configureClient(f);
     const start = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
     const state = new URL(start.json().url).searchParams.get('state')!;
-    await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` }); // consumes it
+    await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, cookies: { hb_oauth: nonceOf(start) } }); // consumes it
     calls.length = 0;
-    const replay = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}` });
+    const replay = await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, cookies: { hb_oauth: nonceOf(start) } });
     expect(replay.statusCode).toBe(400);
     const junk = await f.inject({ method: 'GET', url: '/v1/connections/google/callback?code=c&state=nope' });
     expect(junk.statusCode).toBe(400);
@@ -172,7 +185,7 @@ describe('attach / detach / remove', () => {
     await configureClient(w.f);
     const start = await w.f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
     const state = new URL(start.json().url).searchParams.get('state')!;
-    await w.f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: H });
+    await w.f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c&state=${state}`, headers: H, cookies: { hb_oauth: nonceOf(start) } });
     const connId = w.store.listConnections(OWNER)[0]!.id;
     return { ...w, connId };
   }
@@ -253,7 +266,7 @@ describe('attach / detach / remove', () => {
     const { f, store, secrets } = await connectedWorld();
     const again = await f.inject({ method: 'POST', url: '/v1/connections/google/start', headers: H, payload: {} });
     const state = new URL(again.json().url).searchParams.get('state')!;
-    await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c2&state=${state}`, headers: H });
+    await f.inject({ method: 'GET', url: `/v1/connections/google/callback?code=c2&state=${state}`, headers: H, cookies: { hb_oauth: nonceOf(again) } });
     const conns = store.listConnections(OWNER);
     expect(conns).toHaveLength(1);
     await expect(secrets.get(`connection/${conns[0]!.id}`)).resolves.toBe('rt-secret-1');

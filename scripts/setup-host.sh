@@ -187,7 +187,9 @@ if docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; t
   echo "   find \"first-run setup code\" in: journalctl --user -u hatchabot | tail -50,"
   echo "   or create it from the command line: hatchabot accounts create <you> --host-owner)"
 fi
-cat <<EOF | sed "s|__PORT__|${HATCHABOT_SETUP_PORT:-8080}|"
+# The port the install actually has (.env, read above), not the first-run
+# default: a re-run on a PORT=8101 install said "open :8080" (night review).
+cat <<EOF | sed "s|__PORT__|${P:-${HATCHABOT_SETUP_PORT:-8080}}|"
   1. Open http://localhost:__PORT__ on THIS machine. With family accounts you
      create your own account there (you become its owner); with a shared
      password you unlock with it.

@@ -73,7 +73,10 @@ if [ -d "$LOCK" ] && [ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ];
 mkdir "$LOCK" 2>/dev/null || { echo "Another upgrade of $DIR is running (lock $LOCK)."; exit 4; }
 trap 'rmdir "$LOCK" 2>/dev/null; rm -f "$HATCHABOT_UPGRADE_COPY"' EXIT
 RESTART="${HATCHABOT_RESTART_CMD:-./scripts/restart.sh}"   # overridable for tests only
-INSTALL="${HATCHABOT_INSTALL_CMD:-npm ci --silent}"         # (likewise)
+# ensure-deps writes the stamp restart.sh checks: a bare `npm ci` left none,
+# so restart.sh installed everything a second time, and a registry blip on
+# that second run failed (and blacklisted) a good release (night review).
+INSTALL="${HATCHABOT_INSTALL_CMD:-./scripts/ensure-deps.sh --quiet}"   # (likewise)
 echo "Upgrading $CUR → $TARGET ($CHANNEL)…"
 # `npm ci` deletes node_modules before installing, so a registry outage or a
 # full disk used to leave the machine with NO dependencies (and the rollback's

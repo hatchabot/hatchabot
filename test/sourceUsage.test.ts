@@ -88,7 +88,7 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     expect(src!.limitHits7d).toBe(4);
   });
 
-  it('tokens are the sum of counter increases; after a session reset the new total counts', async () => {
+  it('tokens are the sum of counter increases; a drop (a session reset) counts nothing', async () => {
     const { store, provider } = await world();
     const deps = { store, providerFor: () => provider };
     const at = (n: number) => provider.execResponses.set('sessions list', { code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: n, updatedAt: NOW }] }), stderr: '' });
@@ -97,7 +97,7 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     at(200);  await sampleSourceUsage(deps, NOW - 1 * 3_600_000); // reset
     at(900);  await sampleSourceUsage(deps, NOW);
     const [src] = summarizeSourceUsage(store, OWNER, NOW);
-    expect(src!.window5h.tokens).toBe(2 * (4000 + 200 + 700)); // two agents of mine: +4000, reset then 200 used, +700
+    expect(src!.window5h.tokens).toBe(2 * (4000 + 0 + 700)); // two agents of mine: +4000, the reset counts nothing, +700
     expect(src!.tokensSince).toBe(new Date(NOW - 3 * 3_600_000).toISOString());
   });
 
