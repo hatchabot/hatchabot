@@ -5,6 +5,7 @@ import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { parseModelCalls, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
+import { totalOf } from './helpers/usageFake.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 // Lines exactly as OpenClaw writes them (docker logs --timestamps prefix).
@@ -59,7 +60,7 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
       line('2026-09-15T15:48:58.345Z', 429),               // limited…
       line('2026-09-15T15:49:10.000Z', 429),
     ].join('\n');
-    provider.execResponses.set('sessions list', { code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: 1000, updatedAt: NOW }] }), stderr: '' });
+    provider.usage.set('*', totalOf(1000));
     const deps = { store, providerFor: () => provider };
     await sampleSourceUsage(deps, NOW);
     await sampleSourceUsage(deps, NOW + 60_000); // same log text again: nothing new
@@ -91,7 +92,7 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
   it('tokens are the sum of counter increases; a drop (a session reset) counts nothing', async () => {
     const { store, provider } = await world();
     const deps = { store, providerFor: () => provider };
-    const at = (n: number) => provider.execResponses.set('sessions list', { code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: n, updatedAt: NOW }] }), stderr: '' });
+    const at = (n: number) => provider.usage.set('*', totalOf(n));
     at(1000); await sampleSourceUsage(deps, NOW - 3 * 3_600_000);
     at(5000); await sampleSourceUsage(deps, NOW - 2 * 3_600_000);
     at(200);  await sampleSourceUsage(deps, NOW - 1 * 3_600_000); // reset
@@ -104,7 +105,7 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
   it('counts a day of tokens separately from five hours and a week', async () => {
     const { store, provider } = await world();
     const deps = { store, providerFor: () => provider };
-    const at = (n: number) => provider.execResponses.set('sessions list', { code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: n, updatedAt: NOW }] }), stderr: '' });
+    const at = (n: number) => provider.usage.set('*', totalOf(n));
     at(1000); await sampleSourceUsage(deps, NOW - 40 * 3_600_000); // older than a day
     at(3000); await sampleSourceUsage(deps, NOW - 30 * 3_600_000); // +2000, still older
     at(9000); await sampleSourceUsage(deps, NOW - 10 * 3_600_000); // +6000, inside the day

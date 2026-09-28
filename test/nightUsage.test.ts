@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import { Store, tokenRise } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { sampleAgentUsage, sampleSourceUsage, summarizeSourceUsage } from '../src/orchestrator/sourceUsage.js';
+import { totalOf } from './helpers/usageFake.js';
 import { runPostureSweep } from '../src/orchestrator/posture.js';
 
 // Night review, 2026-09-27: usage, limits and sweeps.
@@ -25,13 +26,13 @@ async function world() {
   return { store, provider, deps: { store, providerFor: () => provider } };
 }
 const line = (at: string, status: number) => `${at} [model-fetch] response provider=anthropic model=claude-opus-4-8 status=${status} elapsedMs=10`;
-const tokens = (p: MockProvider, n: number) => p.execResponses.set('sessions list', { code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: n, updatedAt: NOW }] }), stderr: '' });
+const tokens = (p: MockProvider, n: number) => p.usage.set('*', totalOf(n));
 
 describe('token counting', () => {
   it('a failed session read writes no sample, so the next good one is not counted as the whole lifetime', async () => {
     const { store, provider, deps } = await world();
     tokens(provider, 5_000_000); await sampleSourceUsage(deps, NOW - 3 * 3_600_000);
-    provider.execResponses.set('sessions list', { code: 1, stdout: '', stderr: 'gateway busy' });
+    provider.usage.set('*', { code: 1, stdout: '', stderr: 'gateway busy' });
     await sampleSourceUsage(deps, NOW - 2 * 3_600_000);
     tokens(provider, 5_000_100); await sampleSourceUsage(deps, NOW - 1 * 3_600_000);
     expect(summarizeSourceUsage(store, OWNER, NOW).find((s) => s.id === 'A')!.window5h.tokens).toBe(100);
@@ -102,5 +103,49 @@ describe('a zero reading between two real ones (2026-09-28)', () => {
     store.addTokenSample('b1', 'p1', '2026-09-28T10:00:00.000Z', 0);
     store.addTokenSample('b1', 'p1', '2026-09-28T11:00:00.000Z', 1200);
     expect(store.tokenIncreasesByAgent('p1', '2026-09-28T00:00:00.000Z', new Set(['b1'])).get('b1')).toBe(1200);
+  });
+});
+
+describe('real usage, backfilled (2026-09-28)', () => {
+  it('an agent\'s first reading writes its last days, so a day window shows the day\'s calls at once', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const { Store } = await import('../src/store/store.js');
+    const { MockProvider } = await import('../src/providers/mockProvider.js');
+    const { sampleAgentUsage } = await import('../src/orchestrator/sourceUsage.js');
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'k', workspace: { files: {}, configPatch: { agentId: 'k', authMode: 'api-key' } }, env: {} } as never);
+    const now = Date.parse('2026-09-28T12:00:00.000Z');
+    // 5,000,000 tokens over the agent's life; 30,000 of them in the last two hours.
+    provider.usage.set(runtimeRef, { models: { m: { calls: 3, input: 5_000_000, output: 0, cacheRead: 0, cacheWrite: 0, sessions: 1 } }, sessions: 1, first: 1, last: now - 60_000,
+      slots: { '2026-09-28T10:05:00.000Z': 10_000, '2026-09-28T11:30:00.000Z': 20_000 } });
+    await sampleAgentUsage({ store, providerFor: () => provider } as never, { id: 'a1', hostId: 'h1', aiProfileId: 'p1', runtimeRef, slug: 'k' } as never, now);
+    expect(store.tokenIncreasesByAgent('p1', '2026-09-28T09:00:00.000Z', new Set(['a1'])).get('a1')).toBe(30_000);
+    expect(store.tokenIncreasesByAgent('p1', '2026-09-28T11:00:00.000Z', new Set(['a1'])).get('a1')).toBe(20_000);
+  });
+  it('a reading stores the agent\'s price per token from its own mix of input, output and cache', async () => {
+    const store = new Store(new Database(':memory:'));
+    const provider = new MockProvider();
+    const { runtimeRef } = await provider.provision({ agentId: 'a2', slug: 'r', workspace: { files: {}, configPatch: { agentId: 'r', authMode: 'api-key' } }, env: {} } as never);
+    const { fakeUsage } = await import('./helpers/usageFake.js');
+    // 1M cache reads on Opus ($5 in): $0.50, i.e. $0.50 per million.
+    provider.usage.set(runtimeRef, fakeUsage([{ model: 'claude-opus-4-8', cacheRead: 1_000_000, at: 1 }]));
+    await sampleAgentUsage({ store, providerFor: () => provider } as never, { id: 'a2', hostId: 'h1', aiProfileId: 'p1', runtimeRef, slug: 'r' } as never, NOW);
+    expect(store.agentTokenRate('a2')!.usdPerToken * 1e6).toBeCloseTo(0.5, 9);
+  });
+  it('context-size samples from before the switch are dropped once', async () => {
+    const Database = (await import('better-sqlite3')).default;
+    const { Store } = await import('../src/store/store.js');
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE token_samples (agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, total INTEGER NOT NULL, PRIMARY KEY (agent_id, at))`);
+    db.prepare(`INSERT INTO token_samples VALUES ('a1','p1','2026-09-28T00:00:00.000Z', 246000)`).run();
+    const store = new Store(db);
+    expect(store.latestTokenTotal('a1')).toBeUndefined();
+    expect(store.listUsageSnapshots('o1', 30)).toHaveLength(0);
+    store.addTokenSample('a1', 'p1', '2026-09-28T01:00:00.000Z', 10);
+    store.upsertUsageSnapshot('o1', { day: '2026-09-28', totalTokens: 10, byBilling: {} });
+    new Store(db); // a restart: nothing dropped again
+    expect(store.latestTokenTotal('a1')).toBe(10);
+    expect(store.listUsageSnapshots('o1', 30)).toHaveLength(1);
   });
 });

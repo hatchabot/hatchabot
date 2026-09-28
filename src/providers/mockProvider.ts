@@ -113,8 +113,20 @@ export class MockProvider implements RuntimeProvider {
     return { code: 0, stdout: '', stderr: '' };
   }
 
+  /**
+   * What the usage reader (orchestrator/usage.ts) finds in each container's
+   * transcripts, keyed by runtimeRef ('*' for any): tests set per-call usage
+   * here. A value that is an ExecResult is answered as-is (a failed read).
+   */
+  usage = new Map<string, unknown>();
   async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
     this.#require(runtimeRef);
+    if (script.startsWith('node -e "$(echo ') && script.includes('| base64 -d)"')) {
+      const u = this.usage.get(runtimeRef) ?? this.usage.get('*');
+      this.execLog.push(['usage-read', runtimeRef]);
+      if (u && typeof u === 'object' && 'code' in (u as object)) return u as ExecResult;
+      return { code: 0, stdout: JSON.stringify(u ?? { models: {}, sessions: 0, first: 0, last: 0 }), stderr: '' };
+    }
     this.execLog.push(['sh', script]);
     return this.execResponses.get('sh') ?? { code: 0, stdout: '', stderr: '' };
   }

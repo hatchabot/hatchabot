@@ -294,6 +294,15 @@ export class Store {
         agent_id TEXT NOT NULL, profile_id TEXT, at TEXT NOT NULL, total INTEGER NOT NULL,
         PRIMARY KEY (agent_id, at)
       );
+      -- Which reading token_samples holds. Before 2026-09-28 it was each
+      -- session's context size (OpenClaw's totalTokens), not usage: those
+      -- rows are dropped once, and the first real reading backfills 8 days.
+      CREATE TABLE IF NOT EXISTS token_samples_source (source TEXT NOT NULL);
+      -- Each agent's API price per token at its own mix of input, output and
+      -- cache (from its transcripts), so a window's cost needs no guessing.
+      CREATE TABLE IF NOT EXISTS agent_token_rates (
+        agent_id TEXT PRIMARY KEY, usd_per_token REAL NOT NULL, partial INTEGER NOT NULL, at TEXT NOT NULL
+      );
 
       -- Daily security-posture risk snapshots per owner: the set of active risk
       -- keys, so a run can be diffed against the previous one to flag what newly
@@ -691,6 +700,18 @@ export class Store {
         // (typo, missing table) must surface, not run against a broken schema.
         if (!/duplicate column name/i.test(String((e as Error)?.message ?? e))) throw e;
       }
+    }
+    // token_samples held context sizes until 2026-09-28: dropped once, so the
+    // first real reading does not count the whole history as that moment's use.
+    if (!this.db.prepare(`SELECT 1 FROM token_samples_source WHERE source = 'transcripts'`).get()) {
+      this.db.transaction(() => {
+        this.db.exec(`DELETE FROM token_samples`);
+        // The daily snapshots summed the same context sizes; their day-over-day
+        // differences were never usage. The trend restarts from real readings.
+        this.db.exec(`DELETE FROM usage_snapshots`);
+        this.db.exec(`DELETE FROM token_samples_source`);
+        this.db.exec(`INSERT INTO token_samples_source (source) VALUES ('transcripts')`);
+      })();
     }
     // model_call_hours was first keyed on (agent_id, hour), which let a later
     // upsert retag an already-counted hour onto whatever source the agent had
@@ -2599,6 +2620,15 @@ export class Store {
     return out;
   }
   /** The newest token counter reading for an agent, if any. */
+  setAgentTokenRate(agentId: string, usdPerToken: number, partial: boolean, at: string): void {
+    this.db.prepare(`INSERT INTO agent_token_rates (agent_id, usd_per_token, partial, at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id) DO UPDATE SET usd_per_token = excluded.usd_per_token, partial = excluded.partial, at = excluded.at`)
+      .run(agentId, usdPerToken, partial ? 1 : 0, at);
+  }
+  agentTokenRate(agentId: string): { usdPerToken: number; partial: boolean } | undefined {
+    const r = this.db.prepare(`SELECT usd_per_token, partial FROM agent_token_rates WHERE agent_id = ?`).get(agentId) as { usd_per_token: number; partial: number } | undefined;
+    return r ? { usdPerToken: r.usd_per_token, partial: !!r.partial } : undefined;
+  }
   latestTokenTotal(agentId: string): number | undefined {
     const r = this.db.prepare(`SELECT total FROM token_samples WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(agentId) as { total: number } | undefined;
     return r?.total;

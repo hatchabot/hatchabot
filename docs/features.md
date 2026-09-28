@@ -960,16 +960,18 @@ what your agents used in that window, as tokens and requests per agent
 (ranked by tokens for the window, with refusals in red), two charts of the
 same over the window (5-minute, hourly or 2-hour buckets), the billing split,
 and an **estimated API cost** for the window. It answers at once: everything
-comes from the usage samples Hatchabot takes every ten minutes (token counter
-readings, calls in slots and hours), not from reading each container, so
+comes from the usage samples Hatchabot takes every ten minutes (each agent's
+tokens summed call by call from its own transcripts — input, output, cache
+reads and cache writes — plus calls in slots and hours), not from reading each container, so
 stopped agents count for what they used while they ran. Nothing here is a
 lifetime figure or an average, so a burst days ago does not read as use right
 now; the 30-day daily trend below is the longer view, its daily point now
 written by the sampler. Cost is honest about its limits — only API-keyed
 agents have a per-token price (subscription and local agents show
-"included" / "local", both $0), and since OpenClaw reports one combined
-input+output token counter, the figure is a *range* (low = all input, high =
-all output; the true cost sits near the low end for context-heavy agents). A
+"included" / "local", both $0). Each agent is priced at its own measured mix
+(cache reads, usually most of the tokens, cost a tenth of input); before an
+agent's first reading the figure is a *range* (low = all input, high = all
+output). A
 trailing `+` means a model had no known price and was left out. On the CLI,
 `hatchabot usage` (no agent name) prints the lifetime ranked table with cost;
 `hatchabot usage <agent>` shows one agent's breakdown by model.

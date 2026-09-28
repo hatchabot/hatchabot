@@ -90,7 +90,12 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     const billing: UsageAgentRow['billing'] = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
     const r = per.get(a.id) ?? { tokens: 0, requests: 0, limited: 0 };
     const model = a.model ?? p?.model;
-    const cost = billing === 'api' && r.tokens > 0 ? estimateCost([{ model: model ?? '', tokens: r.tokens }]) : null;
+    // At the agent's own measured price per token when known (cache reads, most
+    // of the tokens, cost a tenth of input); else the all-input..all-output bracket.
+    const rate = billing === 'api' && r.tokens > 0 ? store.agentTokenRate(a.id) : undefined;
+    const cost = billing !== 'api' || r.tokens <= 0 ? null
+      : rate ? { low: r.tokens * rate.usdPerToken, high: r.tokens * rate.usdPerToken, partial: rate.partial }
+      : estimateCost([{ model: model ?? '', tokens: r.tokens }]);
     return { id: a.id, name: a.name, state: a.state, ...r, billing, profileName: p?.name, model, cost };
   }).filter((r) => r.tokens || r.requests).sort((x, y) => y.tokens - x.tokens || y.requests - x.requests);
 

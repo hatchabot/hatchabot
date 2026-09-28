@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.100.0] — 2026-09-28
+
+### Fixed
+- **Usage now counts the tokens each agent actually used.** It used to read OpenClaw's `totalTokens` per session, which is the size of the last call's context, not a running total: a busy agent showed a small, flat number while it spent hundreds of millions of tokens a day, and a context shrinking after a reset hid real use. Usage is now summed call by call from each agent's own transcripts (the 2026.9 transcript database, or the session files on 2026.7), split into input, output, cache reads and cache writes. API cost is now exact per call instead of a range. Copies of replies sent to a channel carry no tokens and are not counted as calls. The hour/day/week cost is priced at each agent's own measured mix (cache reads, most of the tokens, cost a tenth of input) instead of an all-input..all-output range.
+- The old context-size readings and the daily snapshots built from them are dropped once on upgrade. Each agent's first new reading fills in its last 8 days from the transcripts, so the hour, day and week views are right at once; the 30-day trend restarts today.
+
 ## [2.99.1] — 2026-09-28
 
 ### Fixed

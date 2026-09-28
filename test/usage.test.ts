@@ -6,6 +6,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { agentUsage } from '../src/orchestrator/usage.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
+import { fakeUsage } from './helpers/usageFake.js';
 
 class MemSecrets implements SecretStore {
   map = new Map<string, string>();
@@ -17,13 +18,13 @@ class MemSecrets implements SecretStore {
 const OWNER = 'user-owner';
 const as = { 'x-hatchabot-owner': OWNER };
 
-const SESSIONS_JSON = JSON.stringify({
-  sessions: [
-    { totalTokens: 1000, model: 'claude-opus-4-8', updatedAt: 2000 },
-    { totalTokens: 500, model: 'claude-opus-4-8', updatedAt: 3000 },
-    { totalTokens: 250, model: 'claude-sonnet-5', updatedAt: 1000 },
-  ],
-});
+// Per-call usage as the transcripts record it (2026-09-28: the old source was
+// each session's context size, not what the calls used).
+const KITCHEN = fakeUsage([
+  { model: 'claude-opus-4-8', input: 1000, session: 's1', at: 2000 },
+  { model: 'claude-opus-4-8', input: 500, session: 's2', at: 3000 },
+  { model: 'claude-sonnet-5', input: 250, session: 's3', at: 1000 },
+]);
 
 async function seedRuntime(p: MockProvider, slug = 'kitchen', agentId = 'a1') {
   const { runtimeRef } = await p.provision({
@@ -33,33 +34,35 @@ async function seedRuntime(p: MockProvider, slug = 'kitchen', agentId = 'a1') {
 }
 
 describe('agentUsage aggregation', () => {
-  it('sums totalTokens, groups by model (desc), counts sessions, tracks last active', async () => {
+  it('sums what the calls used, groups by model (desc), counts conversations, tracks the last call', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
-    p.execResponses.set('sessions list', { code: 0, stdout: SESSIONS_JSON, stderr: '' });
+    p.usage.set(ref, KITCHEN);
     const u = await agentUsage(p, ref, 'kitchen');
     expect(u.totalTokens).toBe(1750);
+    expect(u.calls).toBe(3);
     expect(u.sessions).toBe(3);
     expect(u.lastActive).toBe(new Date(3000).toISOString());
-    expect(u.byModel).toEqual([
-      { model: 'claude-opus-4-8', tokens: 1500, sessions: 2 },
-      { model: 'claude-sonnet-5', tokens: 250, sessions: 1 },
+    expect(u.byModel.map((m) => [m.model, m.tokens, m.sessions, m.calls])).toEqual([
+      ['claude-opus-4-8', 1500, 2, 2],
+      ['claude-sonnet-5', 250, 1, 1],
     ]);
-    expect(p.execLog).toContainEqual(['sessions', 'list', '--agent', 'kitchen', '--json']);
+    expect(p.execLog).toContainEqual(['usage-read', ref]);
+  });
+  it('counts input, output, cache reads and cache writes, each kept apart', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.usage.set(ref, fakeUsage([{ input: 10, output: 20, cacheRead: 400_000, cacheWrite: 30_000 }]));
+    const u = await agentUsage(p, ref, 'kitchen');
+    expect(u).toMatchObject({ input: 10, output: 20, cacheRead: 400_000, cacheWrite: 30_000, totalTokens: 430_030 });
   });
 
   it('computes tokens/hour from the session span (start → last activity)', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
     const HOUR = 3_600_000;
-    // 6000 tokens over a 2-hour span → 3000/hr.
-    p.execResponses.set('sessions list', {
-      code: 0, stderr: '',
-      stdout: JSON.stringify({ sessions: [
-        { totalTokens: 4000, model: 'm', sessionStartedAt: 0, updatedAt: HOUR },
-        { totalTokens: 2000, model: 'm', sessionStartedAt: HOUR, updatedAt: 2 * HOUR },
-      ] }),
-    });
+    // 6000 tokens over a 2-hour span (first call → last call) → 3000/hr.
+    p.usage.set(ref, fakeUsage([{ model: 'm', input: 4000, at: HOUR }, { model: 'm', input: 2000, at: 3 * HOUR }]));
     const u = await agentUsage(p, ref, 'kitchen');
     expect(u.totalTokens).toBe(6000);
     expect(u.spanMs).toBe(2 * HOUR);
@@ -69,10 +72,7 @@ describe('agentUsage aggregation', () => {
   it('omits tokens/hour when the span is too short to be meaningful (< 10 min)', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
-    p.execResponses.set('sessions list', {
-      code: 0, stderr: '',
-      stdout: JSON.stringify({ sessions: [{ totalTokens: 5000, model: 'm', sessionStartedAt: 0, updatedAt: 60_000 }] }),
-    });
+    p.usage.set(ref, fakeUsage([{ model: 'm', input: 2500, at: 1_000 }, { model: 'm', input: 2500, at: 61_000 }]));
     const u = await agentUsage(p, ref, 'kitchen');
     expect(u.tokensPerHour).toBeUndefined();
   });
@@ -80,10 +80,12 @@ describe('agentUsage aggregation', () => {
   it('returns an empty usage on a nonzero exit or bad json', async () => {
     const p = new MockProvider();
     const ref = await seedRuntime(p);
-    p.execResponses.set('sessions list', { code: 1, stdout: '', stderr: 'down' });
-    expect(await agentUsage(p, ref, 'kitchen')).toEqual({ totalTokens: 0, sessions: 0, byModel: [] });
-    p.execResponses.set('sessions list', { code: 0, stdout: 'not json', stderr: '' });
-    expect(await agentUsage(p, ref, 'kitchen')).toEqual({ totalTokens: 0, sessions: 0, byModel: [] });
+    const empty = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, sessions: 0, byModel: [] };
+    p.usage.set(ref, { code: 1, stdout: '', stderr: 'down' });
+    expect(await agentUsage(p, ref, 'kitchen')).toEqual(empty);
+    p.usage.set(ref, { code: 0, stdout: 'not json', stderr: '' });
+    expect(await agentUsage(p, ref, 'kitchen')).toEqual(empty);
+    await expect(agentUsage(p, ref, 'kitchen', { strict: true })).rejects.toThrow();
   });
 });
 
@@ -102,7 +104,7 @@ async function world(state = 'RUNNING') {
 describe('GET /v1/agents/:id/usage', () => {
   it('returns aggregated usage for a RUNNING agent', async () => {
     const { provider, f } = await world();
-    provider.execResponses.set('sessions list', { code: 0, stdout: SESSIONS_JSON, stderr: '' });
+    provider.usage.set('*', KITCHEN);
     const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/usage', headers: as });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ totalTokens: 1750, sessions: 3 });
@@ -137,13 +139,12 @@ describe('GET /v1/usage (fleet rollup)', () => {
       store.insertAgent({ id, ownerId: OWNER, name, slug, state, aiProfileId: 'p1', hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
     }
     // Den out-uses Kitchen — it should rank first.
-    provider.execResponses.set('sessions list --agent kitchen', { code: 0, stdout: SESSIONS_JSON, stderr: '' }); // 1750
-    provider.execResponses.set('sessions list --agent den', {
-      code: 0, stdout: JSON.stringify({ sessions: [{ totalTokens: 9000, model: 'claude-opus-4-8', updatedAt: 5000 }] }), stderr: '',
-    });
+    const refOf = (slug: string) => store.listAllActiveAgents().find((a) => a.slug === slug)!.runtimeRef!;
+    provider.usage.set(refOf('kitchen'), KITCHEN); // 1750
+    provider.usage.set(refOf('den'), fakeUsage([{ model: 'claude-opus-4-8', input: 9000, at: 5000 }]));
     const f = Fastify();
     await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
-    return { f, provider };
+    return { f, provider, store };
   }
 
   it('ranks RUNNING agents by tokens and counts stopped ones as skipped (live-only)', async () => {
@@ -161,21 +162,25 @@ describe('GET /v1/usage (fleet rollup)', () => {
   it('attaches an API cost RANGE per agent and a fleet total (api-keyed only)', async () => {
     const { f } = await fleetWorld();
     const body = (await f.inject({ method: 'GET', url: '/v1/usage', headers: as })).json();
-    // Den: 9000 opus-4-8 tokens @ [5,25]/1M → low $0.045, high $0.225.
+    // Den: 9000 opus-4-8 INPUT tokens @ $5/1M → exactly $0.045 (the split
+    // is known now, so low = high).
     expect(body.agents[0].billing).toBe('api');
     expect(body.agents[0].cost.low).toBeCloseTo(0.045, 4);
-    expect(body.agents[0].cost.high).toBeCloseTo(0.225, 4);
+    expect(body.agents[0].cost.high).toBeCloseTo(0.045, 4);
     expect(body.agents[0].cost.partial).toBe(false);
-    // Fleet cost sums both api agents; low = 0.045 (Den) + 0.00825 (Kitchen).
+    // Fleet cost sums both api agents: 0.045 (Den) + Kitchen's 1500 opus input
+    // (0.0075) + 250 sonnet input @ $3 (0.00075).
     expect(body.cost.agents).toBe(2);
     expect(body.cost.low).toBeCloseTo(0.05325, 4);
   });
 
   it('drops an unreachable container to skipped rather than failing the whole list', async () => {
-    const { f, provider } = await fleetWorld();
-    provider.exec = (async (_ref: string, argv: string[]) => {
-      if (argv.includes('den')) throw new Error('container gone');
-      return { code: 0, stdout: SESSIONS_JSON, stderr: '' };
+    const { f, provider, store } = await fleetWorld();
+    const den = store.listAllActiveAgents().find((a) => a.slug === 'den')!.runtimeRef!;
+    const real = provider.execShell.bind(provider);
+    provider.execShell = (async (ref: string, script: string) => {
+      if (ref === den) throw new Error('container gone');
+      return real(ref, script);
     }) as any;
     const res = await f.inject({ method: 'GET', url: '/v1/usage', headers: as });
     expect(res.statusCode).toBe(200);
@@ -200,7 +205,7 @@ describe('GET /v1/usage (fleet rollup)', () => {
       const { runtimeRef } = await provider.provision({ agentId: id, slug, workspace: { files: {}, configPatch: { agentId: slug, authMode: 'api-key' } }, env: {} } as any);
       store.insertAgent({ id, ownerId: OWNER, name, slug, state: 'RUNNING', aiProfileId: prof, hostId: 'h1', runtimeRef, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' });
     }
-    provider.execResponses.set('sessions list', { code: 0, stdout: SESSIONS_JSON, stderr: '' });
+    provider.usage.set('*', KITCHEN);
     const f = Fastify();
     await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
     const body = (await f.inject({ method: 'GET', url: '/v1/usage', headers: as })).json();
@@ -226,7 +231,7 @@ describe('usage history (snapshot trend)', () => {
     store.insertAgent({ id: 'a1', ownerId: OWNER, name: 'Kitchen', slug: 'kitchen', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
     const { runtimeRef } = await provider.provision({ agentId: 'a1', slug: 'kitchen', workspace: { files: {}, configPatch: { agentId: 'kitchen', authMode: 'api-key' } }, env: {} } as any);
     store.setAgentRuntimeRef('a1', runtimeRef);
-    provider.execResponses.set('sessions list', { code: 0, stdout: SESSIONS_JSON, stderr: '' });
+    provider.usage.set('*', KITCHEN);
     const f = Fastify();
     await registerRoutes(f, { store, secrets: new MemSecrets(), providers: new Map([['mock', provider]]), channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any });
 
@@ -247,5 +252,29 @@ describe('usage history (snapshot trend)', () => {
     const snaps = store.listUsageSnapshots(OWNER, 30);
     expect(snaps.map((s) => s.day)).toEqual(['2026-09-01', '2026-09-02']); // oldest→newest
     expect(snaps[0]!.totalTokens).toBe(5000);
+  });
+});
+
+describe('the reader script itself (2026-09-28)', () => {
+  it('sums real calls from a transcript and skips zero-token mirror copies', async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { execFileSync } = await import('node:child_process');
+    const { USAGE_READER_SCRIPT } = await import('../src/orchestrator/usage.js');
+    const root = mkdtempSync(join(tmpdir(), 'hb-usage-'));
+    mkdirSync(join(root, 'main', 'sessions'), { recursive: true });
+    const at = new Date().toISOString();
+    const line = (model: string, usage: object) => JSON.stringify({ type: 'message', timestamp: at, message: { model, usage } });
+    writeFileSync(join(root, 'main', 'sessions', 's1.jsonl'), [
+      line('claude-sonnet-5', { input: 10, output: 5, cacheRead: 100, cacheWrite: 20 }),
+      line('claude-sonnet-5', { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }),
+      line('delivery-mirror', { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+    ].join('\n'));
+    const script = USAGE_READER_SCRIPT.replace('"/home/node/.openclaw/agents"', JSON.stringify(root));
+    const out = JSON.parse(execFileSync(process.execPath, ['-e', script], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+    expect(Object.keys(out.models)).toEqual(['claude-sonnet-5']);
+    expect(out.models['claude-sonnet-5']).toMatchObject({ calls: 2, input: 11, output: 6, cacheRead: 100, cacheWrite: 20, sessions: 1 });
+    expect(Object.values(out.slots as Record<string, number>).reduce((a, b) => a + b, 0)).toBe(137);
   });
 });

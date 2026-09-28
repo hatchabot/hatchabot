@@ -84,6 +84,15 @@ describe('computeUsagePeriod', () => {
     expect(v.buckets.reduce((s, b) => s + b.requests, 0)).toBe(9);
   });
 
+  it('prices a window at the agent\'s measured rate, not the input..output bracket (2026-09-28)', () => {
+    const store = world();
+    // Mostly cache reads: $0.60 per million tokens, where the bracket said $5..$25.
+    store.setAgentTokenRate('den', 0.6 / 1e6, false, iso(0));
+    const den = computeUsagePeriod(store, OWNER, 'hour', NOW).agents[0]!;
+    expect(den.cost!.low).toBeCloseTo(400 * 0.6 / 1e6, 9);
+    expect(den.cost!.high).toBe(den.cost!.low);
+  });
+
   it('scopes to the caller', () => {
     expect(computeUsagePeriod(world(), 'someone-else', 'day', NOW).agents).toEqual([]);
   });

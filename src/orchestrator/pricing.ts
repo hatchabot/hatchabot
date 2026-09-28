@@ -32,7 +32,7 @@ export interface CostRange {
  * contribute nothing and set `partial`.
  */
 export function estimateCost(
-  byModel: Array<{ model: string; tokens: number }>,
+  byModel: Array<{ model: string; tokens: number; input?: number; output?: number; cacheRead?: number; cacheWrite?: number }>,
 ): CostRange {
   let low = 0;
   let high = 0;
@@ -41,6 +41,14 @@ export function estimateCost(
     const price = MODEL_PRICES[m.model];
     if (!price) {
       if (m.tokens > 0) partial = true;
+      continue;
+    }
+    // With the per-call split (2026-09-28) the figure is exact: input and
+    // output at their prices, cache reads at a tenth of input, cache writes
+    // at 1.25× (Anthropic's 5-minute cache). Without it, the old bracket.
+    if (typeof m.input === 'number' && typeof m.output === 'number') {
+      const exact = ((m.input + 1.25 * (m.cacheWrite ?? 0) + 0.1 * (m.cacheRead ?? 0)) * price[0] + m.output * price[1]) / 1e6;
+      low += exact; high += exact;
       continue;
     }
     low += (m.tokens / 1e6) * price[0];

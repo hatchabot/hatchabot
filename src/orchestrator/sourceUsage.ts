@@ -2,6 +2,7 @@ import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Agent } from '../domain/types.js';
 import { agentUsage } from './usage.js';
+import { estimateCost } from './pricing.js';
 
 /**
  * AI-source usage visibility. Anthropic won't tell a setup-token how much of a
@@ -100,7 +101,23 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
   }
   try {
     const u = await agentUsage(provider, runtimeRef, a.slug, { strict: true });
+    // An agent's first reading of real usage writes its last 8 days as the
+    // counter would have read them, so the windows are right at once instead
+    // of starting empty (2026-09-28, when the source became the transcripts).
+    if (store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
+      let running = u.totalTokens - u.recent.reduce((s, [, t]) => s + t, 0);
+      store.addTokenSample(a.id, a.aiProfileId, new Date(Date.parse(u.recent[0]![0]) - 300_000).toISOString(), running);
+      for (const [at, t] of u.recent) {
+        running += t;
+        if (at < nowIso) store.addTokenSample(a.id, a.aiProfileId, at, running);
+      }
+    }
     store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
+    const priced = u.byModel.filter((m) => m.tokens > 0);
+    if (u.totalTokens > 0 && priced.length) {
+      const c = estimateCost(priced);
+      if (c.low > 0) store.setAgentTokenRate(a.id, c.low / u.totalTokens, c.partial, nowIso);
+    }
   } catch { /* container busy/unreachable: no token sample this pass */ }
   return { calls, limited };
 }
