@@ -135,6 +135,12 @@ describe('removing a member clears their room access too (night review)', () => 
     const out = JSON.parse(readFileSync(join(dir, 'openclaw.json'), 'utf8'));
     expect(out.channels.discord.guilds.g1.users).toEqual(['999']);
     expect(out.channels.discord.accounts.hatchabot.allowFrom).toEqual(['999']);
+    // A room the removed member was the only one in is removed, not left with
+    // an empty list (which OpenClaw reads as "anyone").
+    writeFileSync(join(dir, 'openclaw.json'), JSON.stringify({ channels: { discord: { accounts: { hatchabot: { allowFrom: ['123456789012345678'] } }, guilds: { g1: { users: ['123456789012345678'] }, g2: { users: ['5'] } } } } }));
+    execFileSync(process.execPath, ['-e', js]);
+    const out2 = JSON.parse(readFileSync(join(dir, 'openclaw.json'), 'utf8'));
+    expect(out2.channels.discord.guilds).toEqual({ g2: { users: ['5'] } });
   });
 });
 

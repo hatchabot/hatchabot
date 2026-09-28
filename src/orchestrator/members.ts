@@ -566,7 +566,33 @@ export async function revokeMember(
     log('member.revoked', { agentId, userId });
     return;
   }
-  const script = `node -e '
+  const script = allowlistScrubScript(targets);
+  const res = await provider.execShellOnVolume(agent.runtimeRef, script);
+  if (res.code !== 0) {
+    // The row is still 'active' (we haven't flipped it), so "remove them
+    // again" genuinely retries the scrub. A rebuild would NOT help — both
+    // files live on the volume and a rebuild re-seeds config from members.
+    throw new RevokeError(
+      'Updating the bot allowlist failed, so they are still a member and may still be able to ' +
+        'chat. Remove them again to retry.',
+    );
+  }
+
+  store.revokeMembership(agentId, userId);
+  log('member.revoked', { agentId, userId });
+  log('member.allowlist_scrubbed', { agentId, userId, channels: targets.map((t) => t.channel) });
+}
+
+
+/**
+ * The on-volume scrub of chat ids from an agent's allowlists: the approval
+ * credentials file, the 2026.9 approval rows, the config's account allowFrom,
+ * and every Slack channel's / Discord server's users (a room left with nobody
+ * is removed — an empty list means "anyone"). Shared by member removal and by
+ * unlinking an account's identity (regression review, 2026-09-28).
+ */
+export function allowlistScrubScript(targets: Array<{ channel: string; acct: string; id: string; cred: string }>): string {
+  return `node -e '
     const fs = require("fs");
     const writeAtomic = (f, obj) => {
       const tmp = f + ".tmp";
@@ -600,23 +626,17 @@ export async function revokeMember(
         for (const key of ["channels", "guilds"]) {
           const rooms = chCfg[key];
           if (!rooms || typeof rooms !== "object") continue;
-          for (const r of Object.values(rooms)) if (r && Array.isArray(r.users)) { r.users = drop(r.users); cfgChanged = true; }
+          // An EMPTY users list means "no restriction" to OpenClaw: a room
+          // left with nobody is removed, never opened to everyone (regression review).
+          for (const [rk, r] of Object.entries(rooms)) {
+            if (!r || !Array.isArray(r.users)) continue;
+            const had = r.users.length;
+            r.users = drop(r.users);
+            if (r.users.length !== had) cfgChanged = true;
+            if (had && !r.users.length) delete rooms[rk];
+          }
         }
       }
     }
     if (cfgChanged) writeAtomic(cfgPath, cfg);'`;
-  const res = await provider.execShellOnVolume(agent.runtimeRef, script);
-  if (res.code !== 0) {
-    // The row is still 'active' (we haven't flipped it), so "remove them
-    // again" genuinely retries the scrub. A rebuild would NOT help — both
-    // files live on the volume and a rebuild re-seeds config from members.
-    throw new RevokeError(
-      'Updating the bot allowlist failed, so they are still a member and may still be able to ' +
-        'chat. Remove them again to retry.',
-    );
-  }
-
-  store.revokeMembership(agentId, userId);
-  log('member.revoked', { agentId, userId });
-  log('member.allowlist_scrubbed', { agentId, userId, channels: targets.map((t) => t.channel) });
 }

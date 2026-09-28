@@ -850,6 +850,18 @@ export async function checkpointMemory(
   }
 }
 
+/**
+ * Rebuilds refused at render time, kept running: the unattended sweep must
+ * not retry them every five minutes (each try takes a snapshot, rotating out
+ * the older ones, and starves the rest of the queue — regression review).
+ * An owner's own Rebuild tries again, and clears it on success.
+ */
+const renderRefused = new Map<string, { at: number; reason: string }>();
+export function renderRefusedRecently(agentId: string, withinMs = 6 * 3_600_000): boolean {
+  const r = renderRefused.get(agentId);
+  return !!r && Date.now() - r.at < withinMs;
+}
+
 export async function rebuildAgent(deps: ProvisionDeps, agentId: string): Promise<Agent> {
   return whileBusy(agentId, () => rebuildAgentInner(deps, agentId));
 }
@@ -908,6 +920,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
   // manager is the exception: its spec rotates the door token, which the
   // old container must not keep using, so it stops first as before.
   let early: Awaited<ReturnType<typeof buildRuntimeSpec>> | undefined;
+  renderRefused.delete(agentId);
   if (!agent.ops && agent.state === 'RUNNING') {
     try {
       early = await buildRuntimeSpec(deps, agentId);
@@ -915,6 +928,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       const reason = userMessageFor(err);
       log('rebuild.failed', { agentId, reason, error: String(err), keptRunning: true });
       forgetEmbedDecision(agentId);
+      renderRefused.set(agentId, { at: Date.now(), reason });
       return store.setAgentState(agentId, 'RUNNING');
     }
   }

@@ -1563,7 +1563,8 @@ async function main() {
             "  e.g.  echo 'RUN apt-get update && apt-get install -y ffmpeg' | hatchabot image derive media");
         }
         if (!dockerfile.trim()) fail('The Dockerfile snippet is empty.');
-        const body: any = { name, dockerfile };
+        // `image derive <name>` is also how an image's lines are changed.
+        const body: any = { name, dockerfile, replace: true };
         if (flags.get('base')) body.base = flags.get('base');
         const res: any = await (await jsonPost('/v1/images', body)).json();
         console.log(`Building ${res.tag}… (runs as root, then restores USER node)\n`);

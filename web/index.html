@@ -8316,6 +8316,7 @@ async function loadEditFile() {
   if (!editAgentId) return;
   const forId = editAgentId, file = $('editFile').value;
   editLoaded = null;
+  $('editErr').textContent = '';
   $('editSaveBtn').disabled = true;
   $('editContent').value = 'Loading…';
   try {

@@ -71,7 +71,11 @@ export function throttled(req: FastifyRequest, who?: string): boolean {
     const f = failures.get(k);
     if (!f) continue;
     if (Date.now() > f.until) { failures.delete(k); continue; }
-    if (f.n >= failLimit()) return true;
+    // A shared bucket (the one password, the first-run code) is a ceiling on
+    // everyone together, not a lock: at the per-client limit, ten misses from
+    // anyone locked the owner out too (regression review, 2026-09-28).
+    const limit = k.startsWith('user:*') ? failLimit() * 10 : failLimit();
+    if (f.n >= limit) return true;
   }
   return false;
 }

@@ -404,6 +404,12 @@ async function settleImage(
   // an import by anyone else pinned whatever tag the file named, a candidate
   // or another owner's derived image included (night review, 2026-09-27).
   if (here && opts.mayBuild) return { pin: image.tag };
+  // The machine's own default image under another name is no choice at all:
+  // pinned for anyone (regression review, 2026-09-28).
+  if (here) {
+    const [def, tagged] = await Promise.all([provider.currentImageInfo(undefined), provider.currentImageInfo(image.tag)]).catch(() => [{}, {}] as Array<{ imageId?: string }>);
+    if (def.imageId && def.imageId === tagged.imageId) return { pin: image.tag };
+  }
   if (opts.image === 'drop') return {};
   if (here) {
     throw new ImageDecisionNeeded(image.tag, undefined, "only this machine's owner can pin an agent to a particular image", false, where);
@@ -536,7 +542,8 @@ async function importAgentInner(
   // Data written by 2026.8+ cannot be read by 2026.7: refused before anything
   // is made, not discovered when the agent fails to start (night review).
   if (manifest.openclawVersion && !needsPortHeal(manifest.openclawVersion)) {
-    const here = await deps.provider.currentImageInfo(image.pin).catch(() => ({} as { openclawVersion?: string }));
+    // The image it will run: its pin, or — when one is to be built — the recipe's base.
+    const here = await deps.provider.currentImageInfo(image.pin && !image.build ? image.pin : image.build?.base ?? image.pin).catch(() => ({} as { openclawVersion?: string }));
     if (here.openclawVersion && needsPortHeal(here.openclawVersion)) {
       throw new TransferError(`This copy was saved by OpenClaw ${manifest.openclawVersion}; this machine would run it on ${here.openclawVersion}, which cannot read it. Update this machine's image first.`);
     }

@@ -282,7 +282,7 @@ if (store.listOpsAgents().length) {
   // The same candidates provisioning uses: the door must land on the address
   // Docker's host alias points at, or no doorman can reach it.
   const localProvider = providers.get('local-docker');
-  void ensureOpsServer([await localProvider?.hostGatewayAddress?.()])
+  void ensureOpsServer([await localProvider?.hostGatewayAddress?.().catch(() => undefined)])
     .catch((err) => app.log.error({ err: String(err) }, 'ops server failed to start'));
 
   // A management agent asks Hatchabot for its tool list ONCE, when its gateway

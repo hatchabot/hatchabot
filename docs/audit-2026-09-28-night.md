@@ -37,6 +37,10 @@ Fixed later in v2.95.0: the stale setup token, the claim-window door, the sweep 
 1. **Change bot on a pool bot gave the agent its own bot back.** Pool leasing is idempotent per agent, so the "fresh" bot was the old one, which the swap then released: the next new agent took it too. Fixed in v2.90.0: the swap excludes the current bot, refuses if nothing else is free, and releases quietly.
 2. **Importing a Download could wire a bot that is a spare in this machine's pool.** The import checked only live channel rows. Fixed in v2.90.0: import and the move-here preflight refuse a pool bot, and the one-agent-per-bot index now ignores case.
 
+## Regression review
+
+Three reviewers read the diff v2.89.6..v2.97.0 for mistakes in tonight's own fixes. They found 4 majors (an emptied room list opening the room, multi-line env values failing rebuilds, docker-missing crashing boot, password-mode lockout) and ~20 smaller ones, fixed in v2.97.1. Left as they were: uninstall still refuses (both kinds) when it cannot read the database; an invite "for @alice" asks a known Alice to message first (her id cannot be matched to the handle); the boot purge of tombstone channel rows does not delete their secrets.
+
 ## Left open, on purpose
 
 - **Second wave, still open:** password mode still honours X-Forwarded-For from loopback (fixed per-account buckets now cap guessing; dropping it would bring back the shared-bucket bug behind a proxy). Everything else in the second wave was fixed in v2.92.0 and v2.93.0.

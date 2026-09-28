@@ -2,6 +2,23 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.97.1] — 2026-09-28
+
+A regression review of tonight's own changes (v2.90.0–v2.97.0), and its fixes.
+
+### Fixed
+- **Removing the last linked member of a Slack channel or Discord server no longer opens it to everyone**: a room left with nobody is removed (an empty list means "anyone" to OpenClaw).
+- **An environment value with a line break** (a PEM, a pretty-printed JSON credential) is passed as before instead of failing the rebuild after the old container was gone.
+- **Docker that cannot be run at boot** no longer stops the server from starting; only a missing or forbidden `docker` reads as "Docker is not available".
+- **Password mode can no longer be locked for everyone by ten wrong guesses**; the shared limit is a ceiling ten times each client's own. The first-run code likewise.
+- A request cut off mid-way no longer holds an agent-limit place, or blocks "Set up Hatchabot agent" and Restore, until a restart.
+- An agent with a rebuild waiting for its turn is not put to sleep (the rebuild was then skipped); a rebuild refused at render time is not retried by the quiet-hours sweep for six hours; a sleeping agent whose bedtime was cut short by a restart wakes on messages again.
+- Change bot on Telegram stops the agent before its old bot goes back to the pool, and keeps it leased if it would not stop. A clashing pool bot is no longer released onto another agent's bot.
+- Google Connect from an address other than the public one says where to open Hatchabot, instead of failing after consent.
+- Unlinking your Discord account removes only that account from each agent's allowlists, stopped agents included; others admitted since the last rebuild stay.
+- Derived images can be changed again: `hatchabot image derive <name>` replaces the lines (the create route takes `replace`). The pinned-tag guard on base builds judges the tag the build will actually write.
+- Smaller: consult holds are counted per caller; a busy memory-policy change refuses before touching the memory cap; a temporary Discord outage keeps a queued rename; the web reader has one deadline and closes unread pages; a timed-out restore removes its one-shot before the rollback; the file editor clears an old error; archiving a stopped agent on an offline runner works again; importing onto the machine's own default image never asks; the import version check judges the image it will build; the approve card uses the request's own code.
+
 ## [2.97.0] — 2026-09-28
 
 ### Fixed

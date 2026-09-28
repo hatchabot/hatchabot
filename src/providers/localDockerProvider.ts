@@ -862,7 +862,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       ]));
       let stderr = '';
       // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
-      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName]).catch(() => {}); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      // The one-shot is gone before the caller hears: its rollback extracts
+      // into the same volume (regression review, 2026-09-28).
+      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName], 120_000).catch(() => {}).finally(() => reject(new ProviderError('docker import timed out', 'Docker did not respond in time.'))); }, IO_TIMEOUT_MS);
       timer.unref();
       child.on('close', () => clearTimeout(timer));
       child.stderr.on('data', (c) => (stderr += c));
@@ -903,7 +905,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       ]));
       let stderr = '';
       // A stalled daemon must fail the call, not pin the agent busy for ever (30th audit).
-      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName]).catch(() => {}); reject(new ProviderError('docker import timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      // The one-shot is gone before the caller hears: its rollback extracts
+      // into the same volume (regression review, 2026-09-28).
+      const timer = setTimeout(() => { child.kill('SIGKILL'); void this.#docker(['rm', '-f', ioName], 120_000).catch(() => {}).finally(() => reject(new ProviderError('docker import timed out', 'Docker did not respond in time.'))); }, IO_TIMEOUT_MS);
       timer.unref();
       child.on('close', () => clearTimeout(timer));
       child.stderr.on('data', (c) => (stderr += c));
@@ -1363,20 +1367,24 @@ export class LocalDockerProvider implements RuntimeProvider {
     return ['--network', name];
   }
 
-  /** Run `fn` with `--env-file <0600 file>` holding `env`; the file is gone afterwards. A value with a newline cannot live in an env file and is refused. */
+  /**
+   * Run `fn` with `--env-file <0600 file>` holding `env`; the file is gone
+   * afterwards. A value an env file cannot carry (a line break: a PEM, a
+   * pretty-printed JSON credential) still goes as `-e`, as every value did
+   * before — refusing it failed the rebuild after the old container was
+   * already removed (regression review, 2026-09-28).
+   */
   async #withEnvFile<T>(env: Record<string, string>, fn: (flag: string[]) => Promise<T>): Promise<T> {
     const entries = Object.entries(env);
     if (!entries.length) return fn([]);
-    for (const [k, v] of entries) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || /[\r\n\0]/.test(v)) {
-        throw new ProviderError(`env ${k} cannot be passed to docker`, `The setting ${k} has a line break in it, which an agent's environment cannot carry.`);
-      }
-    }
+    const inFile = entries.filter(([k, v]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k) && !/[\r\n\0]/.test(v));
+    const asArgs = entries.filter((e) => !inFile.includes(e)).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
+    if (!inFile.length) return fn(asArgs);
     const dir = await mkdtemp(join(tmpdir(), 'hatchabot-env-'));
     const file = join(dir, 'env');
     try {
-      await writeFile(file, entries.map(([k, v]) => `${k}=${v}`).join('\n') + '\n', { mode: 0o600 });
-      return await fn(['--env-file', file]);
+      await writeFile(file, inFile.map(([k, v]) => `${k}=${v}`).join('\n') + '\n', { mode: 0o600 });
+      return await fn(['--env-file', file, ...asArgs]);
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
@@ -1439,7 +1447,7 @@ export class LocalDockerProvider implements RuntimeProvider {
       // launchd; EACCES) is "docker unavailable", not "exited 1": a rejected
       // execFile always carries stdout '', which used to read as a clean
       // failure — and status() then called every container absent (night review).
-      if (typeof err?.code === 'string') {
+      if (err?.code === 'ENOENT' || err?.code === 'EACCES') {
         throw new ProviderError(`docker unavailable: ${String(err)}`, 'Docker is not available on this host.');
       }
       if (typeof err?.code === 'number' || err?.stdout !== undefined) {

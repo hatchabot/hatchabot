@@ -212,6 +212,14 @@ export async function telegramWaiting(deps: HibernateDeps, a: Agent): Promise<nu
 /** Mail = an update newer than the one that was already waiting when the agent went to sleep. */
 export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<boolean> {
   const waiting = await telegramWaiting(deps, a);
+  // The placeholder mark outlived its sleep (a restart between it and the
+  // real mark): what waits now becomes the mark, or the agent never woke on
+  // a message again (regression review, 2026-09-28).
+  if (a.hibernateMark === Number.MAX_SAFE_INTEGER) {
+    const now = deps.store.getAgent(a.id);
+    if (now?.hibernatedAt && now.hibernateMark === Number.MAX_SAFE_INTEGER) deps.store.setHibernated(a.id, now.hibernatedAt, waiting ?? 0);
+    return false;
+  }
   if (waiting === undefined) return false;
   return waiting > (a.hibernateMark ?? 0);
 }

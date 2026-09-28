@@ -62,7 +62,10 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
       } catch (err) {
         if (agent.state === 'RUNNING') throw err;
         const st = await provider.status(agent.runtimeRef).catch(() => ({ phase: 'unknown' as const }));
-        if (st.phase !== 'absent' && st.phase !== 'stopped') {
+        // A record that says STOPPED on a machine that cannot be reached (a
+        // runner that is off) archives as it used to (regression review).
+        const offline = agent.state === 'STOPPED' && st.phase === 'unknown';
+        if (!offline && st.phase !== 'absent' && st.phase !== 'stopped') {
           throw new ArchiveError("Couldn't stop its runtime, so its bot was not given up. Try again in a moment.");
         }
       }

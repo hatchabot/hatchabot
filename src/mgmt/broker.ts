@@ -659,7 +659,9 @@ export class Broker {
         if (!req) throw new BrokerError('INVALID_INPUT', `No one is waiting with pairing code ${code} on this agent. list_pending shows who is.`);
         const m = req.meta ?? {};
         const who = [[m.firstName, m.lastName].filter(Boolean).join(' '), m.username ? `@${m.username}` : ''].filter(Boolean).join(' ') || 'someone with no name set';
-        return { ...base, code, who };
+        // The waiting request's own spelling: the approve route matches it
+        // exactly (regression review, 2026-09-28).
+        return { ...base, code: req.code, who };
       }
       case 'remove_member': {
         const userId = args.userId;

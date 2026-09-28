@@ -94,11 +94,16 @@ describe('password mode: one bucket for the one password', () => {
   it('forged forwarded-for addresses from a loopback peer do not buy fresh guesses', async () => {
     const f = Fastify();
     await registerAuth(f, { password: 'the-real-one', secret: SECRET, mode: 'password' });
-    let last = 0;
-    for (let i = 0; i < 12; i++) {
-      last = (await f.inject({ method: 'POST', url: '/v1/login', payload: { password: `guess-${i}` }, remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': `203.0.113.${i + 1}` } })).statusCode;
-    }
-    expect(last).toBe(429);
+    // The shared bucket is a ceiling at ten times the per-client limit (a lock
+    // at the per-client limit let anyone shut the owner out): limit 1 here.
+    process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW = '1';
+    try {
+      let last = 0;
+      for (let i = 0; i < 12; i++) {
+        last = (await f.inject({ method: 'POST', url: '/v1/login', payload: { password: `guess-${i}` }, remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': `203.0.113.${i + 1}` } })).statusCode;
+      }
+      expect(last).toBe(429);
+    } finally { delete process.env.HATCHABOT_LOGIN_FAILS_PER_WINDOW; }
   }, 30_000);
 });
 

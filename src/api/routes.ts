@@ -40,6 +40,7 @@ import {
   type ProvisionDeps,
   sharePathProblem,
   rebuildAgent,
+  renderRefusedRecently,
   runProvisionSteps,
   syncDataSourceDocs,
   syncGitDataSources,
@@ -108,7 +109,7 @@ import {
 } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
-import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, setDmPolicy } from '../orchestrator/members.js';
+import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
   DEFAULT_SERVICES, GOOGLE_CLIENT_REF, GOOGLE_SERVICES, OAuthStateJar,
@@ -507,7 +508,7 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
       // Discord's quota: remembered, and the sweep below applies it later —
       // the same promise a Telegram pool bot's pending rename carries.
       store.setChannelSettings(agent.id, chan.kind, { ...(chan.settings ?? {}), pendingName: { name, retryAt: new Date(Date.now() + 40 * 60_000).toISOString() } });
-    } else if ((chan.settings as Record<string, unknown> | undefined)?.pendingName) {
+    } else if ((chan.settings as Record<string, unknown> | undefined)?.pendingName && (res.ok || !/network|timed? ?out|unreachable|busy|\b5\d\d\b|reach/i.test(res.note ?? ''))) {
       // Done, or refused for good (a reset token, a refused name): either way
       // no longer pending — it was retried every ten minutes for ever (night review).
       const st = { ...(store.getChannelForAgent(agent.id, chan.kind)?.settings ?? {}) } as Record<string, unknown>;
@@ -738,29 +739,40 @@ export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promi
   // seconds before the row exists): each request that passed the cap holds a
   // place until it answers, or parallel requests all passed it (night review).
   const capHeld = new Map<string, number>();
-  const capHolds = new Map<string, string>(); // request id → owner
+  const capHolds = new Map<string, { owner: string; at: number }>(); // request id → owner
   // One request at a time for a key (an agent's un-archive, an owner's
   // manager setup): a double-click ran both, and each made its own (night review).
-  const onceHeld = new Map<string, string>(); // key → request id
+  // Held until the request answers — or ten minutes: a request whose
+  // client went away never answers, and its holds must not outlive it
+  // (Fastify fires no onResponse for an aborted request).
+  const HOLD_MS = 10 * 60_000;
+  const onceHeld = new Map<string, { id: string; at: number }>(); // key → request
   const holdOnce = (req: FastifyRequest, key: string): boolean => {
     const holder = onceHeld.get(key);
-    if (holder !== undefined && holder !== req.id) return false;
-    onceHeld.set(key, req.id);
+    if (holder && holder.id !== req.id && Date.now() - holder.at < HOLD_MS) return false;
+    onceHeld.set(key, { id: req.id, at: Date.now() });
     return true;
   };
-  app.addHook('onResponse', async (req) => {
-    for (const [k, id] of onceHeld) if (id === req.id) onceHeld.delete(k);
-    const owner = capHolds.get(req.id);
-    if (owner === undefined) return;
-    capHolds.delete(req.id);
-    const n = (capHeld.get(owner) ?? 1) - 1;
-    if (n > 0) capHeld.set(owner, n); else capHeld.delete(owner);
-  });
+  const releaseHolds = (reqId: string): void => {
+    for (const [k, h] of onceHeld) if (h.id === reqId) onceHeld.delete(k);
+    const hold = capHolds.get(reqId);
+    if (hold === undefined) return;
+    capHolds.delete(reqId);
+    const n = (capHeld.get(hold.owner) ?? 1) - 1;
+    if (n > 0) capHeld.set(hold.owner, n); else capHeld.delete(hold.owner);
+  };
+  const expireHolds = (): void => {
+    const cutoff = Date.now() - HOLD_MS;
+    for (const [id, h] of capHolds) if (h.at < cutoff) releaseHolds(id);
+    for (const [k, h] of onceHeld) if (h.at < cutoff) onceHeld.delete(k);
+  };
+  app.addHook('onResponse', async (req) => { releaseHolds(req.id); });
   const capProblem = (req: FastifyRequest): string | undefined => {
+    expireHolds();
     const problem = capProblemNow(req);
     if (!problem && !capHolds.has(req.id)) {
       const owner = ownerIdOf(req);
-      capHolds.set(req.id, owner);
+      capHolds.set(req.id, { owner, at: Date.now() });
       capHeld.set(owner, (capHeld.get(owner) ?? 0) + 1);
     }
     return problem;
@@ -809,6 +821,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const n = Number(process.env[name]); return Number.isFinite(n) && process.env[name] !== '' && process.env[name] !== undefined ? n : dflt;
   };
   const a2aInFlight = new Set<string>();
+  /** How many consults each caller is waiting on (it is held in a2aInFlight while any is). */
+  const a2aCallerHolds = new Map<string, number>();
   const a2aOwnerLive = new Map<string, number>();
   const A2A_MAX_CONCURRENT = Math.max(1, envNum('HATCHABOT_A2A_MAX_CONCURRENT', 8));
   const A2A_PER_HOUR = Math.max(1, envNum('HATCHABOT_A2A_PER_HOUR', 60));
@@ -2216,7 +2230,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     ownCrons: async (a) => (await listCrons(providerFor(a.hostId), a.runtimeRef!, a.slug)).map((c) => ({ enabled: c.enabled, system: c.system })),
     // Busy is the flag AND a turn in flight: an ask or a consult is not on the
     // flag, and the idle sweep stopped a container mid-answer (30th audit).
-    isBusy: (id) => isBusy(id) || a2aInFlight.has(id),
+    // A rebuild waiting for its turn counts too: put to sleep meanwhile, its
+    // rebuild was skipped and the change it carried lost (regression review).
+    isBusy: (id) => isBusy(id) || a2aInFlight.has(id) || inflight.has(id),
     log: (id) => (event, detail) => trace(id)(event, detail ?? {}),
     fetchImpl: deps.oauthFetch,
   };
@@ -2473,14 +2489,6 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // the shared service (docs/embedder-and-openclaw-port-design.md, step 4).
     // Only with that service on: an image nobody can run is no candidate.
     if (b.engine !== undefined && b.engine !== 'baked' && b.engine !== 'none') return reply.code(400).send({ error: "engine must be 'baked' or 'none'" });
-    // A build is tagged <repo>:<version>: rebuilding a version an agent or
-    // class pins (the Hatchabot agent pins its own) changed what they run —
-    // and a failed build removed the tag (night review, 2026-09-28).
-    if (version) {
-      const tag = `${RUNTIME_REPO}:${version}`;
-      const pinnedBy = [...store.listAllActiveAgents().filter((a) => a.image === tag).map((a) => a.name), ...store.listAllAgentClasses().filter((c) => c.image === tag).map((c) => `class ${c.name}`)];
-      if (pinnedBy.length) return reply.code(409).send({ error: `${tag} is pinned by ${pinnedBy.slice(0, 5).join(', ')}${pinnedBy.length > 5 ? ` and ${pinnedBy.length - 5} more` : ''}; rebuilding it would change what they run. Unpin them first, or build another version.` });
-    }
     const engine = b.engine === 'none' || needsSharedEmbedder(version) ? 'none' as const : undefined;
     if (engine && !embedder.enabled && !embedder.external) {
       return reply.code(400).send({ error: (needsSharedEmbedder(version) ? `OpenClaw ${version} has no memory search engine of its own to bake, so its agents need` : 'An image without its own memory search engine needs') + ' the shared memory search service: start it first (Settings → Hosts).' });
@@ -2491,6 +2499,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // Extras are a candidate's business: the fleet's own image stays the
     // standard list, so nobody promotes a surprise into every agent.
     if (packages.value && !candidate) return reply.code(400).send({ error: 'An image with extra packages is built as a candidate; try it on one agent, then promote it.' });
+    // The tag the build will write, as the script names it: extras get
+    // <version>-plus-…, an engine-free build of a version that could bake gets
+    // -lite, and no version means the Dockerfile's own. Only a build onto the
+    // PLAIN version tag replaces what its pinners run (the Hatchabot agent
+    // pins its own); a failed one removed that tag (night review, 2026-09-28).
+    {
+      const outVersion = version ?? (() => { try { return /^ARG OPENCLAW_VERSION=(\S+)/m.exec(readFileSync('docker/Dockerfile.runtime', 'utf8'))?.[1]; } catch { return undefined; } })();
+      const plain = !packages.value && !(b.engine === 'none' && !needsSharedEmbedder(outVersion));
+      if (outVersion && plain) {
+        const tag = `${RUNTIME_REPO}:${outVersion}`;
+        const pinnedBy = [...store.listAllActiveAgents().filter((a) => a.image === tag).map((a) => a.name), ...store.listAllAgentClasses().filter((c) => c.image === tag).map((c) => `class ${c.name}`)];
+        if (pinnedBy.length) return reply.code(409).send({ error: `${tag} is pinned by ${pinnedBy.slice(0, 5).join(', ')}${pinnedBy.length > 5 ? ` and ${pinnedBy.length - 5} more` : ''}; rebuilding it would change what they run. Unpin them first, or build another version.` });
+      }
+    }
     const logPath = buildLogPath('_base', buildDataDir);
     mkdirSync(dirname(logPath), { recursive: true });
     baseBuild = { running: true, version, candidate, startedAt: new Date().toISOString(), ok: undefined, error: undefined };
@@ -2559,8 +2581,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       // Creating is not editing: a name that exists was silently replaced,
       // changing what its pinned agents get at their next rebuild (night review).
-      if (store.getDerivedImage(name)) {
-        return reply.code(409).send({ error: `An image called ${name} already exists. Change it with Rebuild (it keeps its agents informed), or pick another name.` });
+      // Replacing one is said out loud (`replace: true`; the CLI's `image
+      // derive <name>` does), never done by a create that hit an old name.
+      if (store.getDerivedImage(name) && (req.body as { replace?: unknown } | null)?.replace !== true) {
+        return reply.code(409).send({ error: `An image called ${name} already exists. Send replace to change its lines (its agents get them at their next rebuild), or pick another name.` });
       }
 
       store.upsertDerivedImage({ name, tag: deriveTag(name), base, dockerfile, createdBy: ownerIdOf(req) });
@@ -4093,7 +4117,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         id: a.id,
         state: a.state,
         ops: a.ops,
-        busy: isBusy(a.id) || inflight.has(a.id),
+        busy: isBusy(a.id) || inflight.has(a.id) || renderRefusedRecently(a.id),
         need,
         switchPending,
         // Asking an agent when it last talked is a docker exec: only for the ones that matter.
@@ -4537,6 +4561,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           return reply.code(409).send({ error: 'Start the agent to change its memory policy.' });
         }
       }
+      // The policy rewrite runs under the busy flag: refused now, before the
+      // cap is applied, or a 409 would leave the cap changed (regression review).
+      if (flippingMemory && isBusy(agent.id)) return reply.code(409).send({ error: 'The agent is busy — try again in a moment.' });
       if (parsed.data.memoryCap !== undefined) {
         const r = await setMemoryCap(req, agent, parsed.data.memoryCap);
         if (r.error) return reply.code(r.status ?? 400).send({ error: r.error });
@@ -6141,8 +6168,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     a2aInFlight.add(target.id);
     // The caller too, while it waits: B consulting A back while A waits on B
     // was admitted (only targets were held), an A→B→A loop (night review).
-    const holdCaller = !a2aInFlight.has(caller.agentId);
-    if (holdCaller) a2aInFlight.add(caller.agentId);
+    // Counted: one caller may wait on two consults at once, and the first to
+    // finish must not un-hold it while the second still waits (regression review).
+    const callerHolds = a2aCallerHolds.get(caller.agentId) ?? 0;
+    const holdCaller = callerHolds > 0 || !a2aInFlight.has(caller.agentId);
+    if (holdCaller) { a2aCallerHolds.set(caller.agentId, callerHolds + 1); a2aInFlight.add(caller.agentId); }
     a2aOwnerLive.set(caller.ownerId, (a2aOwnerLive.get(caller.ownerId) ?? 0) + 1);
     try {
       const fromName = store.getAgent(caller.agentId)?.name ?? 'another agent';
@@ -6189,7 +6219,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       return reply.code(502).send({ error: `Consult failed: ${String((err as Error).message ?? err).slice(0, 200)}` });
     } finally {
       a2aInFlight.delete(target.id);
-      if (holdCaller) a2aInFlight.delete(caller.agentId);
+      if (holdCaller) {
+        const left = (a2aCallerHolds.get(caller.agentId) ?? 1) - 1;
+        if (left > 0) a2aCallerHolds.set(caller.agentId, left);
+        else { a2aCallerHolds.delete(caller.agentId); a2aInFlight.delete(caller.agentId); }
+      }
       const n = (a2aOwnerLive.get(caller.ownerId) ?? 1) - 1;
       if (n <= 0) a2aOwnerLive.delete(caller.ownerId); else a2aOwnerLive.set(caller.ownerId, n);
     }
@@ -6617,10 +6651,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const clash = store.findAgentUsingAccount(result.accountId);
     if (clash && clash.id !== agent.id) {
-      // A pool lease this call took goes back, or every retry got the same
-      // clashing bot and the slot stayed leased (night review). A pasted
-      // bot's token is the other agent's: never released here.
-      if (!token && deps.channel.pool.owns(result.accountId)) await deps.channel.release(result.accountId, { reason: 'swapped' }).catch(() => {});
+      // The lease stays: the bot is live on the other agent, and releasing it
+      // queued the idle name onto that agent's bot (regression review).
       return reply.code(409).send({ error: `@${result.accountId} already belongs to "${clash.name}".` });
     }
     store.insertChannel({
@@ -7528,6 +7560,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!services.length) return reply.code(400).send({ error: 'Pick at least one service.' });
     // The browser that asks is the browser that must come back: a Lax cookie
     // (it rides Google's top-level redirect home), scoped to the callback.
+    // Google returns to the public address; a cookie set on another address
+    // (the LAN IP, localhost) never reaches it, so say where to connect from
+    // rather than fail at the end (regression review, 2026-09-28).
+    if (deps.publicUrl) {
+      let publicHost = '';
+      try { publicHost = new URL(deps.publicUrl).host; } catch { /* unparsable: no check */ }
+      const fwdHost = req.headers['x-forwarded-host'];
+      const here = String((Array.isArray(fwdHost) ? fwdHost[0] : fwdHost) ?? req.headers.host ?? '');
+      if (publicHost && here && here.toLowerCase() !== publicHost.toLowerCase()) {
+        return reply.code(409).send({ error: `Google sends you back to ${deps.publicUrl}. Open Hatchabot there, then press Connect again.` });
+      }
+    }
     const nonce = randomBytes(18).toString('base64url');
     const state = stateJar.issue(ownerIdOf(req), services, nonce);
     const fwd = req.headers['x-forwarded-proto'];
@@ -8416,17 +8460,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * left the handed-on account able to DM every agent (night review).
    */
   app.delete('/v1/account/discord', async (req) => {
+    // Only THIS id comes out of each agent's allowlists, on its volume, in any
+    // state: wiping the whole approval store locked out everyone admitted since
+    // the last rebuild, and a stopped agent kept the id until then (regression review).
+    const ownId = store.identityOfUserAnywhere(ownerIdOf(req), 'discord');
     const agentIds = store.agentsWithIdentity(ownerIdOf(req), 'discord');
     const n = store.unbindIdentityEverywhere(ownerIdOf(req), 'discord');
-    for (const id of agentIds) {
-      const agent = store.getAgent(id);
-      if (!agent?.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) continue;
-      if (!store.getChannelForAgent(id, 'discord')) continue;
-      await scrubChannelAllowlist(
-        { store, provider: providerFor(agent.hostId), log: trace(id) },
-        { agentId: id, runtimeRef: agent.runtimeRef, kind: 'discord', accountId: CHANNEL_ACCOUNT },
-      ).catch(() => false);
-      if (agent.state === 'RUNNING') kickRebuild(id);
+    if (ownId && /^\d{5,32}$/.test(ownId)) {
+      for (const id of agentIds) {
+        const agent = store.getAgent(id);
+        if (!agent?.runtimeRef || agent.state === 'DELETED' || !store.getChannelForAgent(id, 'discord')) continue;
+        const script = allowlistScrubScript([{ channel: 'discord', acct: CHANNEL_ACCOUNT, id: ownId, cred: `/home/node/.openclaw/credentials/discord-${CHANNEL_ACCOUNT.toLowerCase()}-allowFrom.json` }]);
+        const res = await providerFor(agent.hostId).execShellOnVolume(agent.runtimeRef, script).catch(() => undefined);
+        if (res?.code !== 0) trace(id)('channel.unlink_scrub_failed', { kind: 'discord' });
+      }
     }
     return { unlinked: true, agents: n };
   });
@@ -9696,9 +9743,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       try { await tgPool.addToPool(old.accountId, await secrets.get(old.secretRef), agent.ownerId); }
       catch (err) { trace(agent.id)('channel.recycle_failed', { error: String(err).slice(0, 200) }); }
     }
+    // Stopped before its old bot goes back: until its rebuild the container
+    // still polls that token, and a new agent could lease it meanwhile
+    // (regression review, 2026-09-28). The rebuild below starts it again.
+    const oldStopped = await whileBusy(agent.id, () => stopForBotHandover(agent)).catch(() => false);
     // `swapped`: the members were told above where to go; no "removed" notice.
-    await deps.channel.release(old.accountId, { reason: 'swapped', agentId: agent.id }).catch((err: unknown) =>
-      app.log.warn({ agentId: agent.id, err: String(err) }, 'old bot release failed'));
+    // Not stopped: the old bot stays leased to it, so nobody else can take it.
+    if (oldStopped) {
+      await deps.channel.release(old.accountId, { reason: 'swapped', agentId: agent.id }).catch((err: unknown) =>
+        app.log.warn({ agentId: agent.id, err: String(err) }, 'old bot release failed'));
+    } else {
+      trace(agent.id)('channel.stop_failed', { error: 'kept the old bot leased: the agent would not stop' });
+    }
     store.replaceChannelRow(agent.id, 'telegram', {
       id: randomUUID(), agentId: agent.id, kind: 'telegram',
       accountId: fresh.accountId, secretRef: fresh.secretRef, deepLink: fresh.deepLink,
