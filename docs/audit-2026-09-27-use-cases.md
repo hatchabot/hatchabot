@@ -66,7 +66,13 @@ refuses that.
 | 14 | K | ~~A download the server refuses replaces the app with raw JSON.~~ done in v2.89.4: the download is fetched; a refusal is a toast. |
 | 15 | H/I | ~~Sleepers are told to "Start"; sleep controls shown where they can never apply; bulk Put to sleep counts refusals as failures.~~ done in v2.89.4: sleepers are told to wake; sleep controls only where sleep applies; refusals count as skipped. |
 
-Low: CLI `members` ignores Discord/Slack links; the agent PATCH writes before its last checks; rename allows a duplicate name; the source order comment; `list_sources`' description; template import's name check; image/backup routes' "host folders" refusal text; image tag delete checks only the caller's classes; `list --all` strips fields only when a role is set; the legacy folder removal re-checks the rest; event-trigger "applies immediately" unchecked; CLI `memory` prints a field the server does not return; docs naming test files that do not exist; drain's coverage-ledger wording; use-cases.md not yet mentioning the click-through gate.
+Low: all fixed in v2.89.5 except two, left on purpose. The agent settings
+PATCH still writes some fields before its last checks (making it one
+validate-then-write pass is a larger change to a 300-line handler; no
+reported case). Removing one legacy shared folder re-checks the ones that
+stay (only agents from before per-source data sources have legacy folders).
+Status → Health keeps its own, wider "attention" list (it also flags quiet
+agents); the home screen and Bulk actions now agree with each other.
 
 ## Still only a person can test
 
