@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.97.0] — 2026-09-28
+
+### Fixed
+- A model change or a file-size setting on a stopped agent runs its own image's OpenClaw, not the default image's, which could refuse or rewrite a config another version wrote.
+- The manager's card for putting an agent in a class says what it takes: the class's AI source, model, image and memory cap, and that a source or image change applies at the next rebuild.
+
 ## [2.96.0] — 2026-09-28
 
 ### Fixed

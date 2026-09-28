@@ -182,12 +182,26 @@ export const REST_TOOLS: RestTool[] = [
     call: async ({ agent, input, get }) => {
       const ref = typeof input.class === 'string' ? input.class.trim() : '';
       if (!ref) return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: null } };
-      const { classes } = (await get('/v1/agent-classes')) as { classes: Array<{ id: string; name: string }> };
+      const { classes } = (await get('/v1/agent-classes')) as { classes: Array<{ id: string; name: string; model?: string; aiProfileId?: string; image?: string; memoryCap?: string }> };
       const cls = pick(classes ?? [], ref, 'class');
       input.__className = cls.name;
+      // What joining changes, on the card: the class's source, model, image
+      // and memory cap — the card named only the class (night review).
+      let source: string | undefined;
+      if (cls.aiProfileId) {
+        try {
+          const profiles = (await get('/v1/ai-profiles')) as Array<{ id: string; name: string }> | { profiles?: Array<{ id: string; name: string }> };
+          const list = Array.isArray(profiles) ? profiles : profiles.profiles ?? [];
+          source = list.find((p) => p.id === cls.aiProfileId)?.name ?? 'another source';
+        } catch { source = 'another source'; }
+      }
+      const parts = [source && `AI source ${source}`, cls.model && `model ${cls.model}`, cls.image && `image ${cls.image}`, cls.memoryCap && `memory cap ${cls.memoryCap}`].filter(Boolean);
+      input.__classDetail = parts.length ? parts.join(', ') : 'nothing beyond the label';
       return { method: 'POST', path: `/v1/agents/${agent!.id}/class`, body: { classId: cls.id } };
     },
-    card: ({ agent, input }) => input.__className ? `🏷 Put "${agent!.name}" in the class "${String(input.__className)}"` : `🏷 Remove "${agent!.name}" from its class`,
+    card: ({ agent, input }) => input.__className
+      ? `🏷 Put "${agent!.name}" in the class "${String(input.__className)}" — it takes the class's ${String(input.__classDetail ?? 'settings')}. A source or image change applies at its next rebuild.`
+      : `🏷 Remove "${agent!.name}" from its class`,
   },
   {
     name: 'pin_image', tier: 'mutate', agentArg: true, rebuildAfter: true,

@@ -526,15 +526,19 @@ export class LocalDockerProvider implements RuntimeProvider {
     return this.#docker(['exec', container, 'bash', '-c', script]);
   }
 
-  async execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean }): Promise<ExecResult> {
+  async execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean; image?: string }): Promise<ExecResult> {
     const { volume } = this.#names(runtimeRef);
     // The runtime image (has bash + node, runs as uid 1000 like the files on
     // the volume), mounted at the path the agent itself sees. Read-only callers
     // (archive inspection) get a :ro mount so the guarantee is enforced by
     // Docker, not just by which commands the script happens to run.
     const mount = opts?.readOnly ? `${volume}:/home/node:ro` : `${volume}:/home/node`;
+    // The agent's own image when a caller runs its OpenClaw CLI against the
+    // volume: the default image's version could refuse, or rewrite, a config
+    // written by another (night review, 2026-09-28).
+    const image = opts?.image && IMAGE_REF_RE.test(opts.image) ? opts.image : this.image;
     return this.#docker([
-      'run', '--rm', '-v', mount, this.image,
+      'run', '--rm', '-v', mount, image,
       'bash', '-c', script,
     ]);
   }

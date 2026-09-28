@@ -1442,7 +1442,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const provider = providerFor(a.hostId);
     let res;
     if (a.state === 'RUNNING') res = await provider.exec(a.runtimeRef, ['models', 'set', ref]);
-    else if (a.state === 'STOPPED') res = await provider.execShellOnVolume(a.runtimeRef, `openclaw models set '${ref.replace(/'/g, '')}' >/dev/null`);
+    else if (a.state === 'STOPPED') res = await provider.execShellOnVolume(a.runtimeRef, `openclaw models set '${ref.replace(/'/g, '')}' >/dev/null`, { image: a.image ?? undefined });
     else return 'none';
     if (res.code !== 0) { trace(agentId)('model.live_set_failed', { model: ref, stderr: (res.stderr || res.stdout).slice(0, 200) }); return 'failed'; }
     recordApplied(store, agentId);
@@ -3986,7 +3986,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const mb = String(filesMb(kind, a.filesMaxMb));
       const res = a.state === 'RUNNING'
         ? await provider.exec(a.runtimeRef, ['config', 'set', `channels.${kind}.mediaMaxMb`, mb]).catch(() => undefined)
-        : await provider.execShellOnVolume(a.runtimeRef, `openclaw config set channels.${kind}.mediaMaxMb ${mb} >/dev/null`).catch(() => undefined);
+        : await provider.execShellOnVolume(a.runtimeRef, `openclaw config set channels.${kind}.mediaMaxMb ${mb} >/dev/null`, { image: a.image ?? undefined }).catch(() => undefined);
       if (res?.code === 0) n++;
       else trace(a.id)('files.cap_failed', { kind, error: String(res?.stderr ?? 'no answer').slice(0, 200) });
     }

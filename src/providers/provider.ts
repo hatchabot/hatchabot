@@ -239,7 +239,7 @@ export interface RuntimeProvider {
    * safe against concurrent reads). The volume is mounted at the same path
    * the agent sees it, so scripts use the same file paths either way.
    */
-  execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean }): Promise<ExecResult>;
+  execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean; image?: string }): Promise<ExecResult>;
 
   /**
    * Stream a command's stdout from a read-only one-shot on the agent's
