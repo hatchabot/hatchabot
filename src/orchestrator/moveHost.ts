@@ -3,6 +3,7 @@ import type { RuntimeProvider } from '../providers/provider.js';
 import { whileBusy } from './busy.js';
 import {
   buildRuntimeSpec,
+  forgetEmbedDecision,
   recordApplied,
   reindexMemoryIfSwitched,
   runRebuildHook,
@@ -158,6 +159,9 @@ async function moveInner(deps: MoveDeps, agentId: string, targetHostId: string):
       store.setAgentState(agentId, 'RUNNING');
     }
   } catch (err) {
+    // The target's memory-search decision was never applied: a later model
+    // change must not record it as the agent's (night review, 2026-09-27).
+    forgetEmbedDecision(agentId);
     // Roll back onto the source host. Daemons are confirmed distinct (the
     // daemonId guard above), so purging the target runtime never touches the
     // source's storage.

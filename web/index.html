@@ -9169,7 +9169,8 @@ async function cloneAgent(id, name) {
   if (cn === null) return;
   try {
     const res = await api(`/v1/agents/${id}/clone`, { method: 'POST', body: { name: cn } });
-    toast(`Cloned as "${res.name}" — connect its Telegram bot to finish`, 30000);
+    const left = (res.notCopied || []).length ? ` Its data sources (${res.notCopied.join(', ')}) did not come along: add them under Data.` : '';
+    toast(`Cloned as "${res.name}" — connect its Telegram bot to finish.${left}`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
 }

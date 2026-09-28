@@ -240,16 +240,6 @@ export async function restoreAgentFromBackup(
     store.setAgentState(agentId, 'STOPPED');
   }
 
-  // Safety net: capture the current volume so a failed extract can be undone.
-  // Best-effort — if we can't read the current state we still proceed, but we
-  // then have nothing to roll back to (logged).
-  let safety: Buffer | undefined;
-  try {
-    safety = await provider.exportState(agent.runtimeRef);
-  } catch (err) {
-    log('restore.safety_capture_failed', { agentId, error: String(err) });
-  }
-
   const restartIfWasRunning = async () => {
     if (!wasRunning) return;
     try {
@@ -259,6 +249,21 @@ export async function restoreAgentFromBackup(
       log('restore.restart_failed', { agentId, error: String(startErr) });
     }
   };
+
+  // Safety net: capture the current volume so a failed extract can be undone.
+  // No copy, no restore: the extract empties the volume first, so a failure
+  // part-way left nothing to go back to (night review, 2026-09-27).
+  let safety: Buffer | undefined;
+  try {
+    safety = await provider.exportState(agent.runtimeRef);
+  } catch (err) {
+    log('restore.safety_capture_failed', { agentId, error: String(err) });
+    await restartIfWasRunning();
+    throw new RestoreError(
+      "Its current state could not be copied first, so the restore would not be undoable — nothing was changed. " +
+        'Download a copy of the agent first (Advanced → Download copy), then try again.',
+    );
+  }
 
   try {
     await provider.importState(agent.runtimeRef, data);

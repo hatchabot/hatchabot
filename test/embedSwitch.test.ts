@@ -5,7 +5,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { buildConfigCommands, memoryKeyPrefix } from '../src/openclaw/configWriter.js';
-import { buildRuntimeSpec, recordApplied, reindexMemoryIfSwitched, type ProvisionDeps } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, rebuildAgent, recordApplied, reindexMemoryIfSwitched, type ProvisionDeps } from '../src/orchestrator/provision.js';
 import { embedKeyHash } from '../src/embedder/embedder.js';
 
 /**
@@ -260,5 +260,20 @@ describe('a 2026.8+ image with a partial index', () => {
     recordApplied(w.store, 'todo');
     await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', (e) => w.events.push(e));
     expect(calls.filter((c) => c[0] === 'memory').map((c) => c[1])).toEqual(['status']);
+  });
+});
+
+describe('a rebuild refused at render time (night review, 2026-09-27)', () => {
+  it('leaves a running agent running, not stopped and FAILED', async () => {
+    const w = world();
+    const { runtimeRef } = await w.provider.provision({ agentId: 'todo', slug: 'to-do', workspace: { files: {}, configPatch: { agentId: 'to-do', authMode: 'api-key' } }, env: {} });
+    await w.provider.start(runtimeRef);
+    w.store.setAgentRuntimeRef('todo', runtimeRef);
+    w.store.setAgentState('todo', 'RUNNING');
+    w.provider.imageEmbedEngine = 'none'; // and no service: the spec refuses
+    const after = await rebuildAgent(w.deps(false), 'todo');
+    expect(after.state).toBe('RUNNING');
+    expect((await w.provider.status(runtimeRef)).phase).toBe('running');
+    expect(w.events).toContain('rebuild.failed');
   });
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { RuntimeProvider } from '../providers/provider.js';
+import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 
 /**
@@ -73,6 +73,23 @@ export async function readCoreFiles(
   return files;
 }
 
+/**
+ * Write a file inside an agent (its path as the agent sees it) from base64.
+ * Small content goes through the shell as before; larger content is fed on
+ * stdin to a one-shot on the volume. Linux caps one argument at 128 KiB, so
+ * a MEMORY.md past ~98 KB failed to spawn ("Docker is not available") and a
+ * snapshot restore stopped half-way (night review, 2026-09-27).
+ */
+export async function writeFileInAgent(provider: RuntimeProvider, runtimeRef: string, path: string, b64: string): Promise<ExecResult> {
+  if (b64.length <= ARGV_SAFE_B64) {
+    return provider.execShell(runtimeRef, `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`);
+  }
+  if (!provider.writeToVolume) return { code: 1, stdout: '', stderr: 'this machine cannot write a file that large into the agent' };
+  return provider.writeToVolume(runtimeRef, ['sh', '-c', 'cat > "$1.part-$$" && mv -f "$1.part-$$" "$1"', 'sh', path], Buffer.from(b64, 'base64'));
+}
+/** Base64 up to this size rides in the shell argument; beyond it, stdin. */
+export const ARGV_SAFE_B64 = 96 * 1024;
+
 export async function writeCoreFile(
   provider: RuntimeProvider,
   runtimeRef: string,
@@ -82,10 +99,7 @@ export async function writeCoreFile(
 ): Promise<void> {
   // base64 through the shell so arbitrary content can't break quoting.
   const b64 = Buffer.from(content, 'utf8').toString('base64');
-  const res = await provider.execShell(
-    runtimeRef,
-    `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(workspacePath(slug, name))}`,
-  );
+  const res = await writeFileInAgent(provider, runtimeRef, workspacePath(slug, name), b64);
   if (res.code !== 0) {
     throw new SnapshotError(`Couldn't write ${name}: ${res.stderr.slice(-200)}`);
   }

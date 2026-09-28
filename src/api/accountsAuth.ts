@@ -492,6 +492,17 @@ export function registerAccountRoutes(
         error: `${target.username} still owns ${sources.length} AI source${sources.length === 1 ? '' : 's'}. Delete those first.`,
       });
     }
+    // The rest of what they hold, for the same reason (night review).
+    const left = store.accountLeftovers(target.id);
+    const what = [
+      left.connections && `${left.connections} Google connection${left.connections === 1 ? '' : 's'}`,
+      left.peers && `${left.peers} linked Hatchabot${left.peers === 1 ? '' : 's'}`,
+      left.bots && `${left.bots} spare bot${left.bots === 1 ? '' : 's'}`,
+      left.seats && `a place on ${left.seats} agent${left.seats === 1 ? '' : 's'} (remove them there)`,
+    ].filter(Boolean);
+    if (what.length) {
+      return reply.code(409).send({ error: `${target.username} still has ${what.join(', ')}. Remove ${what.length === 1 ? 'that' : 'those'} first.` });
+    }
     store.deleteLocalAccount(target.id); // also revokes their CLI tokens
     return { ok: true };
   });

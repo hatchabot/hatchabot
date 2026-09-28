@@ -111,9 +111,15 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
    * in the app).
    */
   async addToPool(username: string, botToken: string, ownerId?: string | null): Promise<void> {
+    const asGiven = username;
     username = username.toLowerCase(); // Telegram @handles are case-insensitive
     const secretRef = `telegram/bot/${username}`;
     await this.secrets.put(secretRef, botToken);
+    // A pasted bot's token was stored under the case getMe gave (@MyBot);
+    // parked here under the lower-case ref, that first copy outlived every
+    // removal and showed up as an orphan anyone on the box could reveal
+    // (night review, 2026-09-27). One copy only.
+    if (asGiven !== username) await this.secrets.delete(`telegram/bot/${asGiven}`).catch(() => {});
     this.db
       .prepare(
         `INSERT INTO telegram_pool (username, secret_ref, owner_id) VALUES (?, ?, ?)
@@ -279,7 +285,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .run(name, new Date(Date.now() + delayMs).toISOString(), username);
   }
 
-  async #applyDisplayName(secretRef: string, username: string, name: string): Promise<void> {
+  async #applyDisplayName(secretRef: string, username: string, name: string, fromSweep = false): Promise<void> {
     let res: { ok: boolean; error?: string; retryAfter?: number };
     try {
       const token = await this.secrets.get(secretRef);
@@ -295,7 +301,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
         .catch(() => null)) as { result?: { first_name?: string } } | null;
       if (me?.result?.first_name === name.trim()) {
         this.opts.log?.('channel.named', { username, name, ok: true, skipped: 'already correct' });
-        this.#clearParked(username);
+        this.#clearParked(username, fromSweep ? name : undefined);
         return;
       }
       res = await setTelegramDisplayName(token, name, fetchImpl, this.opts.renameBackoffMs);
@@ -304,7 +310,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     }
     this.opts.log?.('channel.named', { username, name, ...res });
     if (res.ok) {
-      this.#clearParked(username);
+      this.#clearParked(username, fromSweep ? name : undefined);
       this.db
         .prepare(`UPDATE telegram_pool SET renamed_at = ? WHERE username = ? COLLATE NOCASE`)
         .run(new Date().toISOString(), username);
@@ -317,7 +323,7 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     // (Settings → Telegram) is where a dead token gets dealt with.
     if (permanentTelegramFailure(res.error)) {
       this.opts.log?.('channel.name_abandoned', { username, name, error: String(res.error).slice(0, 120) });
-      this.#clearParked(username);
+      this.#clearParked(username, fromSweep ? name : undefined);
       return;
     }
     // Keep the name parked, and respect the deadline Telegram gave us. Without
@@ -326,10 +332,15 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
     this.#park(username, name, waitMs);
   }
 
-  #clearParked(username: string): void {
+  /**
+   * Clear the queued name. From the retry sweep, only if it is still the name
+   * the sweep applied: a lease may have queued another meanwhile (night
+   * review). A lease or a sync names the bot with authority and clears any.
+   */
+  #clearParked(username: string, onlyIf?: string): void {
     this.db
-      .prepare(`UPDATE telegram_pool SET desired_name = NULL, rename_after = NULL WHERE username = ? COLLATE NOCASE`)
-      .run(username);
+      .prepare(`UPDATE telegram_pool SET desired_name = NULL, rename_after = NULL WHERE username = ? COLLATE NOCASE AND (? IS NULL OR desired_name IS ?)`)
+      .run(username, onlyIf ?? null, onlyIf ?? null);
   }
 
   /**
@@ -348,7 +359,13 @@ export class TelegramPoolProvisioner implements ChannelProvisioner {
       .all(new Date().toISOString()) as Array<{ username: string; secret_ref: string; desired_name: string }>;
     let fixed = 0;
     for (const r of rows) {
-      await this.#applyDisplayName(r.secret_ref, r.username, r.desired_name);
+      // Each rename can take ~25 s when Telegram is flaky; a lease during the
+      // sweep queues (and applies) its own name. Only what is queued NOW.
+      const now = this.db
+        .prepare(`SELECT desired_name, rename_after FROM telegram_pool WHERE username = ?`)
+        .get(r.username) as { desired_name: string | null; rename_after: string | null } | undefined;
+      if (now?.desired_name !== r.desired_name || (now.rename_after && now.rename_after > new Date().toISOString())) continue;
+      await this.#applyDisplayName(r.secret_ref, r.username, r.desired_name, true);
       const still = this.db
         .prepare(`SELECT desired_name FROM telegram_pool WHERE username = ?`)
         .get(r.username) as { desired_name: string | null } | undefined;

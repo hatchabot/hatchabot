@@ -2,6 +2,28 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.91.0] — 2026-09-28
+
+The rest of the night review (see docs/audit-2026-09-28-night.md).
+
+### Fixed
+- **Restoring a snapshot, or saving a file, over about 98 KB failed** ("Docker is not available") and a restore stopped half-way: the content went as one shell argument, which Linux caps. Large files now go on standard input.
+- **A rebuild refused at render time** (an engine-free image with the memory service off, an un-shared source, a missing secret) left a working agent stopped and FAILED. It now keeps running and the trail says why.
+- A failed first setup whose container could not be removed no longer hands its bot back to the pool. The health wait is bounded by time as well as tries, so a stalled Docker cannot hold a rebuild slot for hours.
+- Putting an agent to sleep holds the busy flag, and its bedtime mark is written only while it is still asleep: a wake or a state check in between left a running agent marked asleep.
+- Archive stops the runtime whatever the state (a failed agent's container may still be polling), and checks the state again after waiting.
+- A move that fails keeps the image pin it was going to drop. A failed move or setup forgets its memory-search decision.
+- An import pins an image only for the machine's owner. Restoring a backup refuses when its safety copy cannot be taken.
+- The manager cannot be moved, sent to another Hatchabot, downloaded as a copy or used as a template.
+- A Download reads its secrets before stopping the agent. A share can be accepted once; a Dismiss during an Accept is not overwritten.
+- Removing or swapping a Discord or Slack bot stops the agent before the bot goes back to the pool (its container still held the token). A pasted Telegram bot's token is stored once when parked.
+- Renaming an agent on a pool bot makes one rename call, not two; the rename retry no longer puts an old name back on a bot leased meanwhile.
+- An invite made for a named person admits only that person. Unlinking your Discord account clears its approvals on each agent. A clashing pool lease is released. Messages are counted as sent only when Telegram accepts them.
+- A class whose AI source was deleted can be edited again; deleting a source clears it from classes.
+- Removing a family account is refused while it still holds Google connections, linked Hatchabots, spare bots or places on agents, and removes its Telegram link.
+- Deleting an agent also removes its five-minute usage slots, claim windows and lost-context note.
+- Clone copies the agent's environment variables and says which data sources did not come along.
+
 ## [2.90.0] — 2026-09-28
 
 A night review in six areas (provisioning, moves, the database, chat apps, the manager's tools, the web page). This release fixes what it found in the chat apps, moves, the manager's tools and the page; the rest follows.

@@ -3,6 +3,7 @@ import type { SecretStore } from '../secrets/secretStore.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { CompositeTelegramProvisioner } from '../channels/composite.js';
 import { whileBusy } from './busy.js';
+import { canTransition } from '../domain/stateMachine.js';
 
 /**
  * Archive: a STOPPED agent that has handed its Telegram bot back.
@@ -43,13 +44,28 @@ export async function archiveAgent(deps: ArchiveDeps, agentId: string): Promise<
     const agent = store.getAgent(agentId);
     if (!agent) throw new ArchiveError('No such agent.');
     if (agent.state === 'ARCHIVED') return; // idempotent: a double tap is not an error
+    // Judged now, inside the busy flag: the route's check came before it
+    // waited out a Retry, and giving up the bot first then failing to flip
+    // the state left the agent neither archived nor whole (night review).
+    if (!canTransition(agent.state, 'ARCHIVED')) throw new ArchiveError(`It is ${agent.state.toLowerCase()} — wait for it to settle, then archive it.`);
 
     // Stop first, and only release the bot once the runtime is actually down.
     // A container left polling a token that has gone back in the pool is the
     // one genuinely bad outcome here: the next agent to lease it would fight
     // this one for every message.
-    if (agent.runtimeRef && agent.state === 'RUNNING') {
-      await provider.stop(agent.runtimeRef);
+    // Whatever the state: a FAILED agent's container may still be up and
+    // polling (a failed delete or rebuild leaves it so). If it cannot be
+    // stopped, the bot is not given up (night review, 2026-09-27).
+    if (agent.runtimeRef) {
+      try {
+        await provider.stop(agent.runtimeRef);
+      } catch (err) {
+        if (agent.state === 'RUNNING') throw err;
+        const st = await provider.status(agent.runtimeRef).catch(() => ({ phase: 'unknown' as const }));
+        if (st.phase !== 'absent' && st.phase !== 'stopped') {
+          throw new ArchiveError("Couldn't stop its runtime, so its bot was not given up. Try again in a moment.");
+        }
+      }
     }
 
     const row = store.getChannelForAgent(agentId);

@@ -296,7 +296,7 @@ async function runProvisionStepsInner(
     // agent's memory permanently, turning a transient failure (slow boot,
     // port clash, image missing) into irreversible loss.
     const createdStorage = !spec.previousRef;
-    rollback.push(() => provider.destroy(runtimeRef, { purge: createdStorage }));
+    rollback.push(Object.assign(() => provider.destroy(runtimeRef, { purge: createdStorage }), { holdsBot: true }));
     store.setAgentRuntimeRef(agentId, runtimeRef);
     log('runtime.provisioned', { agentId, runtimeRef });
 
@@ -383,6 +383,7 @@ async function runProvisionStepsInner(
 
     const reason = userMessageFor(err);
     log('provision.failed', { agentId, reason, error: String(err) });
+    forgetEmbedDecision(agentId);
 
     // Roll back newest-first so nothing keeps billing or stays leased.
     for (const undo of rollback.reverse()) {
@@ -390,6 +391,11 @@ async function runProvisionStepsInner(
         await undo();
       } catch (cleanupErr) {
         log('rollback.failed', { agentId, error: String(cleanupErr) });
+        // A container that could not be removed may still be polling its
+        // bot: handing the bot back to the pool now would give it to the next
+        // agent too. Stop here; the agent stays FAILED with the bot attached,
+        // and Delete finishes the job (night review, 2026-09-27).
+        if ((undo as { holdsBot?: boolean }).holdsBot) break;
       }
     }
 
@@ -871,9 +877,26 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
       'that was the save attempt, not your message. Nothing you sent was lost.').catch(() => {});
   };
 
+  // Render the new spec BEFORE stopping what runs: a refusal at render time
+  // (an engine-free image with the memory service off, an un-shared source,
+  // a missing secret) used to leave a working agent stopped and FAILED. Now
+  // it keeps running and the trail says why (night review, 2026-09-27). The
+  // manager is the exception: its spec rotates the door token, which the
+  // old container must not keep using, so it stops first as before.
+  let early: Awaited<ReturnType<typeof buildRuntimeSpec>> | undefined;
+  if (!agent.ops && agent.state === 'RUNNING') {
+    try {
+      early = await buildRuntimeSpec(deps, agentId);
+    } catch (err) {
+      const reason = userMessageFor(err);
+      log('rebuild.failed', { agentId, reason, error: String(err), keptRunning: true });
+      forgetEmbedDecision(agentId);
+      return store.setAgentState(agentId, 'RUNNING');
+    }
+  }
   try {
     await provider.stop(agent.runtimeRef).catch(() => {}); // may already be stopped
-    const spec = await buildRuntimeSpec(deps, agentId);
+    const spec = early ?? (await buildRuntimeSpec(deps, agentId));
     // Deletion may have started while we were stopping. Re-creating the
     // container now would resurrect a purged agent as an orphan.
     const current = store.getAgent(agentId);
@@ -1340,7 +1363,12 @@ export async function waitForHealthy(
   attempts = 30,
   intervalMs = 1000,
 ): Promise<void> {
-  for (let i = 0; i < attempts; i++) {
+  // Time as well as tries: on a stalled daemon each status() waits out the
+  // docker timeout, and 120 tries became two hours holding a rebuild slot and
+  // the busy flag (night review, 2026-09-27). Sleeps are the caller's (tests
+  // pass a no-op), so the deadline counts only real waiting.
+  const deadline = Date.now() + Math.max(attempts * intervalMs, 60_000) * 2;
+  for (let i = 0; i < attempts && Date.now() < deadline; i++) {
     const status = await provider.status(runtimeRef);
     if (status.phase === 'running' && status.healthy) return;
     if (status.phase === 'error') {

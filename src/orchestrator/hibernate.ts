@@ -17,6 +17,7 @@ import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
+import { whileBusy } from './busy.js';
 
 export interface HibernateDeps {
   store: Store;
@@ -72,20 +73,31 @@ export async function hibernateAgent(deps: HibernateDeps, a: Agent, why: string)
   // rebuild or a turn may have started during the blocker's own docker calls.
   const now = deps.store.getAgent(a.id);
   if (!now || now.state !== 'RUNNING' || !now.runtimeRef || deps.isBusy(a.id)) throw new Error('it is busy or no longer running');
-  deps.store.setAgentState(a.id, 'STOPPED');
-  deps.store.setHibernated(a.id, new Date().toISOString(), 0);
-  try {
-    await provider.stop(now.runtimeRef);
-  } catch (err) {
-    deps.store.setAgentState(a.id, 'RUNNING');
-    deps.store.setHibernated(a.id, null);
-    throw err;
-  }
+  // Under the busy flag: reconcile skips busy agents, and during the
+  // up-to-ten-second docker stop it read the still-running container and
+  // flipped the record back to RUNNING (night review, 2026-09-27).
+  await whileBusy(a.id, async () => {
+    deps.store.setAgentState(a.id, 'STOPPED');
+    deps.store.setHibernated(a.id, new Date().toISOString(), Number.MAX_SAFE_INTEGER);
+    try {
+      await provider.stop(now.runtimeRef!);
+    } catch (err) {
+      deps.store.setAgentState(a.id, 'RUNNING');
+      deps.store.setHibernated(a.id, null);
+      throw err;
+    }
+  });
   // The gateway confirms an update only on its NEXT poll: the last message it
   // handled is still "waiting" once the container is stopped, and it woke the
   // agent two seconds after it slept (the Spark, 2026-09-26). Remember the
   // newest thing waiting now; only something newer is mail.
+  // Until the real mark is known, nothing counts as mail: a wake poll in
+  // this gap saw the unconfirmed update as new, woke the agent, and the
+  // write below then marked a RUNNING agent asleep (night review).
+  deps.store.setHibernated(a.id, new Date().toISOString(), Number.MAX_SAFE_INTEGER);
   const mark = (await telegramWaiting(deps, a)) ?? 0;
+  const still = deps.store.getAgent(a.id);
+  if (still?.state !== 'STOPPED' || !still.hibernatedAt) return still ?? a;
   deps.store.setHibernated(a.id, new Date().toISOString(), mark);
   deps.log(a.id)('agent.hibernated', { why });
   return deps.store.getAgent(a.id)!;

@@ -35,7 +35,12 @@ export async function notifyAgentChat(
         body: JSON.stringify({ chat_id: id, text }),
         signal: AbortSignal.timeout(5000),
       })
-        .then(() => { sent++; })
+        // Only a message Telegram accepted counts: a 403 (they blocked the
+        // bot) or a 429 is not "told" (night review, 2026-09-27).
+        .then(async (res) => {
+          const body = (await res.json().catch(() => ({}))) as { ok?: boolean };
+          if (res.ok && body.ok === true) sent++;
+        })
         .catch(() => {}),
     ),
   );

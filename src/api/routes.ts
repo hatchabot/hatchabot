@@ -172,6 +172,7 @@ import {
   MAX_FILE_BYTES,
   restoreSnapshot,
   SnapshotError,
+  writeFileInAgent,
 } from '../orchestrator/snapshots.js';
 
 export interface ApiDeps {
@@ -280,6 +281,8 @@ const MACHINE_OWNER_ONLY =
   'Only the account that set up this machine can do that — it touches the machine itself ' +
   '(its runtime images, hosts and runners), not just your own agents.';
 
+/** The manager lives with its machine: its door, network and tools are this machine's (night review, 2026-09-27). */
+const OPS_STAYS_HERE = 'The Hatchabot agent stays on this machine: its locked-down network and its tools belong here. Set one up on the other machine instead.';
 /** The manager's jail reaches only internet AI services, so it cannot run on a local model. */
 const OPS_NO_LOCAL = "The Hatchabot agent can't use a local model: its locked-down network reaches only the internet AI services. Pick a Claude, OpenAI or Gemini source.";
 
@@ -1600,10 +1603,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       const clash = store.agentClassByName(cls.ownerId, name);
       if (clash && clash.id !== cls.id) return reply.code(400).send({ error: `There's already a class called "${name}".` });
       const model = b.model !== undefined ? (b.model.trim() || undefined) : cls.model;
-      const aiProfileId = b.aiProfileId !== undefined ? (b.aiProfileId || undefined) : cls.aiProfileId;
+      let aiProfileId = b.aiProfileId !== undefined ? (b.aiProfileId || undefined) : cls.aiProfileId;
       if (aiProfileId) {
         const src = store.getAIProfile(aiProfileId);
-        if (!src || (src.ownerId !== ownerIdOf(req) && !src.shared)) return reply.code(400).send({ error: 'Unknown AI source.' });
+        const usable = !!src && (src.ownerId === ownerIdOf(req) || src.shared);
+        // Only a source this request names is refused. A stored one that was
+        // deleted or un-shared since is dropped: it made every edit of the
+        // class (a rename, a model) answer "Unknown AI source" (night review).
+        if (!usable && b.aiProfileId !== undefined) return reply.code(400).send({ error: 'Unknown AI source.' });
+        if (!usable) aiProfileId = undefined;
       }
       store.upsertAgentClass({ id: cls.id, ownerId: cls.ownerId, name, model, aiProfileId, image, memoryCap });
       // Propagate the (possibly changed) model/source/image to every agent in the class.
@@ -4403,10 +4411,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             );
             const next = replaceMemoryPolicy(read.stdout, memoryPolicySection(shared!));
             const b64 = Buffer.from(next, 'utf8').toString('base64');
-            return provider.execShell(
-              agent.runtimeRef!,
-              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-            );
+            return writeFileInAgent(provider, agent.runtimeRef!, path, b64);
           });
         } catch (err) {
           if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
@@ -4497,11 +4502,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         botNameCache.delete(agent.id);
         // A pool bot's queued name (a rename Telegram refused earlier) must be
         // this one now, or the sweep would put the old name back later.
-        if (chan?.kind === 'telegram') void deps.channel.syncDisplayName?.(chan.accountId, name).catch(() => {});
-        if (chan?.kind === 'telegram') {
-          void secrets
-            .get(chan.secretRef)
-            .then((tok) => setTelegramDisplayName(tok, name))
+        // One rename call, not two: Telegram grants about one per bot every few
+        // hours, and the loser of two concurrent calls either skipped the
+        // members' notice or queued a "pending" name that had landed (night
+        // review). A pool bot goes through the pool, which parks a refusal.
+        const poolBot = chan?.kind === 'telegram' && deps.channel.pool.owns(chan.accountId);
+        const renamed = !chan || chan.kind !== 'telegram' ? undefined
+          : poolBot
+            ? (deps.channel.syncDisplayName?.(chan.accountId, name) ?? Promise.resolve())
+                .then(() => ({ ok: !deps.channel.pool.pendingName?.(chan.accountId), via: 'pool' as const }))
+            : secrets.get(chan.secretRef).then((tok) => setTelegramDisplayName(tok, name));
+        if (chan?.kind === 'telegram' && renamed) {
+          void renamed
             .then((res) => {
               trace(agent.id)('channel.renamed', { name, ...res });
               // Document the change in the chat itself, so members aren't left
@@ -4668,10 +4680,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const res = await whileBusy(agent.id, async () => {
           // Version the files BEFORE overwriting — a bad save must be recoverable.
           await autoSnapshot(snapshotDeps(agent), agent.id, 'pre-edit');
-          return providerFor(agent.hostId).execShell(
-            agent.runtimeRef!,
-            `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-          );
+          return writeFileInAgent(providerFor(agent.hostId), agent.runtimeRef!, path, b64);
         });
         if (res.code !== 0) return reply.code(500).send({ error: 'Write failed' });
         // Keep the template layer in step with a direct edit: the layer is
@@ -4792,10 +4801,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           for (const w of writes) {
             const b64 = Buffer.from(w.content, 'utf8').toString('base64');
             const path = workspacePath(agent.slug, w.name);
-            const r = await providerFor(agent.hostId).execShell(
-              agent.runtimeRef!,
-              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-            );
+            const r = await writeFileInAgent(providerFor(agent.hostId), agent.runtimeRef!, path, b64);
             if (r.code !== 0) return r;
           }
           return { code: 0, stdout: '', stderr: '' };
@@ -6443,6 +6449,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     const clash = store.findAgentUsingAccount(result.accountId);
     if (clash && clash.id !== agent.id) {
+      // A pool lease this call took goes back, or every retry got the same
+      // clashing bot and the slot stayed leased (night review). A pasted
+      // bot's token is the other agent's: never released here.
+      if (!token && deps.channel.pool.owns(result.accountId)) await deps.channel.release(result.accountId, { reason: 'swapped' }).catch(() => {});
       return reply.code(409).send({ error: `@${result.accountId} already belongs to "${clash.name}".` });
     }
     store.insertChannel({
@@ -6810,6 +6820,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * servers; the new one is named for the agent; the chat is told where to
    * find it next.
    */
+  /**
+   * Stop a running agent before its Discord/Slack bot goes back to the pool:
+   * until its rebuild, the container still holds the token, and a spare taken
+   * by another agent in that window answered on two gateways (night review,
+   * 2026-09-27). Telegram's detach does the same. False = it would not stop,
+   * so the bot must not be parked. The caller's rebuild starts it again.
+   */
+  const stopForBotHandover = async (agent: Agent): Promise<boolean> => {
+    const now = store.getAgent(agent.id);
+    if (!now?.runtimeRef || now.state !== 'RUNNING') return true;
+    try {
+      await providerFor(now.hostId).stop(now.runtimeRef);
+      store.setAgentState(now.id, 'STOPPED');
+      return true;
+    } catch (err) {
+      trace(agent.id)('channel.stop_failed', { error: String(err).slice(0, 200) });
+      return false;
+    }
+  };
   app.post<{ Params: { id: string; kind: string }; Body: { pooled?: string } }>('/v1/agents/:id/channels/:kind/swap', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
@@ -6864,7 +6893,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         throw err;
       }
       told = await dmChannelPeople(agent, kind, old.secretRef, `📮 ${agent.name} is moving to the bot “${newName}”. Message that one from now on — this chat will stop answering. Everything it knows comes with it.`);
-      try { await parkDiscordBot({ store, secrets }, agent.ownerId, old); parked = true; }
+      const stopped = await stopForBotHandover(agent);
+      try { if (!stopped) throw new Error('the agent would not stop, so its old bot is not handed on'); await parkDiscordBot({ store, secrets }, agent.ownerId, old); parked = true; }
       catch (err) { trace(agent.id)('channel.park_failed', { kind, error: String(err).slice(0, 200) }); if (old.secretRef !== secretRef) await secrets.delete(old.secretRef).catch(() => {}); }
       store.deleteDiscordBot(wanted.applicationId);
       if (wanted.secretRef !== secretRef) await secrets.delete(wanted.secretRef).catch(() => {});
@@ -6990,7 +7020,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // farewell): people who reached it here lose it.
     const told = await dmChannelPeople(agent, conn.kind, row.secretRef, `👋 ${agent.name} no longer answers on ${conn.label}. Its owner took it off ${conn.label}; it is not gone. Reach it another way, or ask its owner.`);
     let parked = false;
-    try { await parkDiscordBot({ store, secrets }, agent.ownerId, row); parked = true; }
+    const stopped = await whileBusy(agent.id, () => stopForBotHandover(agent)).catch(() => false);
+    try { if (!stopped) throw new Error('the agent would not stop, so its bot is not handed on'); await parkDiscordBot({ store, secrets }, agent.ownerId, row); parked = true; }
     catch (err) { trace(agent.id)('channel.park_failed', { kind: conn.kind, error: String(err).slice(0, 200) }); }
     if (!parked) await secrets.delete(row.secretRef).catch(() => {});
     store.deleteChannelForAgent(agent.id, conn.kind);
@@ -7855,6 +7886,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (movedAway(agent, reply)) return reply;
       const targetId = z.string().min(1).safeParse((req.body as { hostId?: unknown } | null)?.hostId);
       const host = targetId.success ? store.getHost(targetId.data) : undefined;
@@ -7928,6 +7960,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         );
         return publicAgent(moved);
       } catch (err) {
+        // A move that did not happen keeps its pin: the agent stays on the
+        // old host, where the next rebuild would otherwise drop the image's
+        // extra packages (the 26th-audit bug by another door; night review).
+        if (dropPin && store.getAgent(agent.id)?.hostId === agent.hostId) {
+          store.setAgentImage(agent.id, agent.image ?? null);
+          trace(agent.id)('image.repinned', { reason: 'move-host failed', image: agent.image });
+        }
         if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -7940,6 +7979,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       // A tombstoned copy still holds the live bot token — migrating it again
       // ships that token to a third server and mints a second poller, the
       // exact thing the tombstone exists to prevent.
@@ -8068,6 +8108,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (busyNow(agent, reply)) return reply;
       try {
         const { filename, data } = await exportTemplate(
@@ -8127,9 +8168,25 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     store.setAccountTelegram(ownerIdOf(req), null);
     return { unlinked: true };
   });
-  /** Forget the caller's Discord identity on every agent: the next bot asks again ("That's me"). Doors update at each agent's next rebuild. */
+  /**
+   * Forget the caller's Discord identity on every agent: the next bot asks
+   * again ("That's me"). The approval each agent's volume holds is scrubbed
+   * too, and the agent rebuilt from its members: removing the link alone
+   * left the handed-on account able to DM every agent (night review).
+   */
   app.delete('/v1/account/discord', async (req) => {
+    const agentIds = store.agentsWithIdentity(ownerIdOf(req), 'discord');
     const n = store.unbindIdentityEverywhere(ownerIdOf(req), 'discord');
+    for (const id of agentIds) {
+      const agent = store.getAgent(id);
+      if (!agent?.runtimeRef || (agent.state !== 'RUNNING' && agent.state !== 'STOPPED')) continue;
+      if (!store.getChannelForAgent(id, 'discord')) continue;
+      await scrubChannelAllowlist(
+        { store, provider: providerFor(agent.hostId), log: trace(id) },
+        { agentId: id, runtimeRef: agent.runtimeRef, kind: 'discord', accountId: CHANNEL_ACCOUNT },
+      ).catch(() => false);
+      if (agent.state === 'RUNNING') kickRebuild(id);
+    }
     return { unlinked: true, agents: n };
   });
 
@@ -8143,6 +8200,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (busyNow(agent, reply)) return reply;
       const toEmail = (req.body as { toEmail?: string } | null)?.toEmail?.trim();
       const message = (req.body as { message?: string } | null)?.message?.trim();
@@ -8236,6 +8294,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(400).send({ error: 'Unknown host.' });
       }
       const host = body.hostId ? undefined : store.listHosts(me.ownerId).find((h) => h.kind === 'local');
+      // Claimed before the first await; a second Accept finds it taken.
+      if (!store.setShareStatus(req.params.id, 'accepted', me.ownerId)) {
+        return reply.code(409).send({ error: 'That share was already accepted or dismissed.' });
+      }
       try {
         const { agent, needs, envValues, dataSourceValues } = importTemplate(
           { store, provider: providerFor((body.hostId ?? host?.id)!), log: trace() },
@@ -8249,10 +8311,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (share.sourceAgentId && store.getAgent(share.sourceAgentId)?.state !== 'DELETED' && store.getAgent(share.sourceAgentId)) {
           store.setAgentParent(agent.id, share.sourceAgentId);
         }
-        store.setShareStatus(req.params.id, 'accepted', me.ownerId);
         kickProvision(agent.id);
         return reply.code(201).send({ ...publicAgent(agent), needs });
       } catch (err) {
+        store.reopenShare(req.params.id);
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
       }
@@ -8339,8 +8401,21 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           ownerId: ownerIdOf(req), name, values: agent.paramValues ?? {}, lenient: true,
         });
         store.setAgentParent(clone.id, agent.id); // lineage: a clone is a child
+        // A faithful copy carries its environment variables too (new secret
+        // refs, same values), before its first build reads them. Data
+        // sources (deploy keys, clones) are not copied: they are named in the
+        // answer so the owner is told, not left with tools that fail (night review).
+        for (const e of store.listAgentEnv(agent.id)) {
+          const value = await secrets.get(e.secretRef).catch(() => undefined);
+          if (value === undefined) continue;
+          const id = randomUUID();
+          const secretRef = `agent-env/${id}`;
+          await secrets.put(secretRef, value);
+          store.insertAgentEnv({ id, agentId: clone.id, name: e.name, secretRef, createdAt: new Date().toISOString() });
+        }
+        const notCopied = store.listDataSources(agent.id).map((d) => d.mountName);
         kickProvision(clone.id);
-        return reply.code(201).send(publicAgent(clone));
+        return reply.code(201).send({ ...publicAgent(clone), notCopied });
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -8360,6 +8435,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       { const capErr = capProblem(req); if (capErr) return reply.code(429).send({ error: capErr }); }
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (busyNow(agent, reply)) return reply;
       const body = (req.body ?? {}) as { name?: string; values?: Record<string, string> };
       const name = body.name?.trim();
@@ -8466,10 +8542,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
               rendered = replaceSection(rendered, DATA_SOURCES_HEADING, childDataSection);
             }
             const b64 = Buffer.from(rendered, 'utf8').toString('base64');
-            const r = await providerFor(child.hostId).execShell(
-              child.runtimeRef!,
-              `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(workspacePath(child.slug, nameF))}`,
-            );
+            const r = await writeFileInAgent(providerFor(child.hostId), child.runtimeRef!, workspacePath(child.slug, nameF), b64);
             if (r.code !== 0) throw new Error('write failed');
           }
         });
@@ -8594,10 +8667,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           }
           const merged = `${read.stdout.trimEnd()}${distilledBlock}`;
           const b64 = Buffer.from(merged, 'utf8').toString('base64');
-          const r = await providerFor(master.hostId).execShell(
-            master.runtimeRef!,
-            `echo ${JSON.stringify(b64)} | base64 -d > ${JSON.stringify(path)}`,
-          );
+          const r = await writeFileInAgent(providerFor(master.hostId), master.runtimeRef!, path, b64);
           if (r.code !== 0) throw new Error('write failed');
         });
       } catch (err) {
@@ -8833,9 +8903,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // written on the volume and the gateway re-reads it per message, so
       // their first message just works — and no pairing window is opened,
       // which is one fewer moment when the door stands ajar.
-      const knownId = !accountId ? undefined
+      // An invite made "for @alice" admits only Alice: a known id is used
+      // outright only when the invite named that very id; otherwise the
+      // claim below checks the handle (night review, 2026-09-27).
+      const expected = joined.expectHandle?.replace(/^@/, '');
+      const knownIdRaw = !accountId ? undefined
         : joinKind === 'telegram' ? store.knownChannelUserId(accountId)
         : store.identityOfUserAnywhere(accountId, joinKind);
+      const knownId = expected && knownIdRaw !== expected ? undefined : knownIdRaw;
       if (knownId && agent.runtimeRef && channelRow && agent.state === 'RUNNING') {
         try {
           await grantChannelAccess(

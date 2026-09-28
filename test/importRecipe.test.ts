@@ -124,9 +124,17 @@ describe('a pinned image in a downloaded copy', () => {
   it('the same image already here: used as it is, no question asked', async () => {
     const dst = await installation('me');
     dst.provider.tags.push({ tag: 'hatchabot-runtime:derived-media', imageId: 'local' });
-    const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me' });
+    const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: true });
     expect(dst.store.getAgent(agent.id)?.image).toBe('hatchabot-runtime:derived-media');
     expect(dst.provider.built).toEqual([]);
+  });
+
+  it('the same image here, imported by someone who is not the machine\'s owner: asked, never pinned (night review)', async () => {
+    const dst = await installation('me');
+    dst.provider.tags.push({ tag: 'hatchabot-runtime:derived-media', imageId: 'local' });
+    await expect(importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: false })).rejects.toThrow(/machine's owner/);
+    const agent = await importAgent(dst.deps as never, await derivedFile(), { ownerId: 'me', mayBuild: false, image: 'drop' });
+    expect(dst.store.getAgent(agent.id)?.image ?? null).toBeNull();
   });
 
   it.each([

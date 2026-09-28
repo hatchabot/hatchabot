@@ -802,6 +802,14 @@ export class Store {
     for (const t of ['memberships', 'invites', 'data_sources', 'agent_env', 'agent_seed', 'model_call_hours', 'usage_cursor', 'limit_hits', 'token_samples'] as const) {
       this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId);
     }
+    // Night review, 2026-09-27: the five-minute usage slots (a source's chart
+    // kept counting a deleted agent for days), claim windows (they carry an
+    // invitee's @handle) and the lost-context note. Tables that may not exist
+    // yet on an old database are skipped.
+    for (const t of ['model_call_slots', 'pairing_windows', 'agent_context_reset'] as const) {
+      try { this.db.prepare(`DELETE FROM ${t} WHERE agent_id = ?`).run(agentId); }
+      catch (err) { if (!/no such table/.test(String(err))) throw err; }
+    }
     // Proposals addressed TO a deleted master are unreachable (no route can
     // list or resolve them) and hold up to 20KB of model-written text about
     // the household — same tombstone-hygiene rule as the rows above. Child-
@@ -938,6 +946,8 @@ export class Store {
 
   deleteAIProfile(id: string): void {
     this.db.prepare(`DELETE FROM ai_profiles WHERE id = ?`).run(id);
+    // A class naming it keeps its agents' own sources (night review).
+    this.db.prepare(`UPDATE agent_classes SET ai_profile_id = NULL WHERE ai_profile_id = ?`).run(id);
   }
 
   setAIProfileModels(id: string, models: string[] | undefined): void {
@@ -1570,12 +1580,33 @@ export class Store {
     this.db.prepare(`UPDATE local_accounts SET disabled = ? WHERE id = ?`).run(disabled ? 1 : 0, id);
   }
 
+  /**
+   * What an account still holds that nothing could clean up once it is gone:
+   * Google links and peer servers (their tokens), parked bots (theirs), and
+   * seats on other people's agents (their Telegram stays admitted there).
+   */
+  accountLeftovers(id: string): { connections: number; peers: number; bots: number; seats: number } {
+    const n = (sql: string): number => {
+      try { return (this.db.prepare(sql).get(id) as { n: number }).n; }
+      catch (err) { if (/no such table/.test(String(err))) return 0; throw err; }
+    };
+    return {
+      connections: n(`SELECT COUNT(*) AS n FROM connections WHERE owner_id = ?`),
+      peers: n(`SELECT COUNT(*) AS n FROM peers WHERE owner_id = ?`),
+      bots: n(`SELECT COUNT(*) AS n FROM discord_bots WHERE owner_id = ?`) + n(`SELECT COUNT(*) AS n FROM telegram_pool WHERE owner_id = ?`),
+      seats: n(`SELECT COUNT(*) AS n FROM memberships m JOIN agents a ON a.id = m.agent_id WHERE m.user_id = ? AND m.status = 'active' AND a.state != 'DELETED'`),
+    };
+  }
+
   deleteLocalAccount(id: string): void {
     // Their CLI tokens must die with them: ownerForCliToken only checks the
     // hash and expiry, so a leftover row would keep authenticating as an owner
     // who no longer exists (audit 2026-09-16).
     this.db.transaction(() => {
       this.db.prepare(`DELETE FROM cli_tokens WHERE owner_id = ?`).run(id);
+      // Their account-level Telegram link too: kept, it made a re-created
+      // account unable to link the same Telegram ever again (night review).
+      this.db.prepare(`DELETE FROM accounts WHERE owner_id = ?`).run(id);
       this.db.prepare(`DELETE FROM local_accounts WHERE id = ?`).run(id);
     })();
   }
@@ -1674,10 +1705,19 @@ export class Store {
       : undefined;
   }
 
-  setShareStatus(id: string, status: 'accepted' | 'dismissed', ownerId: string): void {
-    this.db
-      .prepare(`UPDATE agent_shares SET status = ?, to_owner = COALESCE(to_owner, ?) WHERE id = ?`)
-      .run(status, ownerId, id);
+  /**
+   * Settle a pending share. True when THIS call settled it: two Accepts (a
+   * double-click, two tabs) both passed the pending check and made two
+   * agents, and a Dismiss during an Accept was overwritten (night review).
+   */
+  setShareStatus(id: string, status: 'accepted' | 'dismissed', ownerId: string): boolean {
+    return this.db
+      .prepare(`UPDATE agent_shares SET status = ?, to_owner = COALESCE(to_owner, ?) WHERE id = ? AND status = 'pending'`)
+      .run(status, ownerId, id).changes === 1;
+  }
+  /** An Accept that failed after claiming its share puts it back. */
+  reopenShare(id: string): void {
+    this.db.prepare(`UPDATE agent_shares SET status = 'pending' WHERE id = ? AND status = 'accepted'`).run(id);
   }
 
   /** On sign-in, bind any email-addressed pending shares to this owner. */
@@ -3733,6 +3773,11 @@ export class Store {
   }
 
   /** Forget a user's identity on a channel everywhere (the account-level unlink Telegram has). */
+  /** The agents this user's Slack/Discord identity is bound on. */
+  agentsWithIdentity(userId: string, kind: Exclude<ChannelKind, 'telegram'>): string[] {
+    return (this.db.prepare(`SELECT agent_id FROM member_identities WHERE user_id = ? AND kind = ?`).all(userId, kind) as Array<{ agent_id: string }>).map((r) => r.agent_id);
+  }
+
   unbindIdentityEverywhere(userId: string, kind: Exclude<ChannelKind, 'telegram'>): number {
     return this.db.prepare(`DELETE FROM member_identities WHERE user_id = ? AND kind = ?`).run(userId, kind).changes;
   }

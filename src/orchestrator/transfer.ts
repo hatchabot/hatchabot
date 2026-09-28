@@ -240,6 +240,29 @@ export async function exportAgent(
   const dropped = store.listChannelsForAgent(agentId).filter((c) => c.kind !== 'telegram').map((c) => c.kind);
   const profile = store.getAIProfile(agent.aiProfileId);
 
+  // Every secret the file carries is read BEFORE the agent is stopped: a
+  // missing one used to fail the export after the stop, leaving a running
+  // agent stopped (and each failing env var started it again; night review).
+  let botToken: string | undefined;
+  if (channel) {
+    try { botToken = await secrets.get(channel.secretRef); } catch {
+      throw new TransferError("Its Telegram bot's token is missing here, so the copy could not include it. Detach Telegram (it keeps everything it knows), then export again.");
+    }
+  }
+  const envVars: Array<{ name: string; value: string }> = [];
+  for (const e of store.listAgentEnv(agentId)) {
+    try {
+      envVars.push({ name: e.name, value: await secrets.get(e.secretRef) });
+    } catch {
+      // A missing secret means the var is already broken here — say so
+      // rather than exporting an archive that silently lacks it.
+      throw new TransferError(
+        `Env var "${e.name}" has no stored value (its secret is missing). Remove it in ` +
+          'Settings → Environment, then export again.',
+      );
+    }
+  }
+
   // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
   // of an export is usually that the agent is about to live somewhere else.
   const wasRunning = agent.state === 'RUNNING';
@@ -319,28 +342,14 @@ export async function exportAgent(
       kind: 'telegram',
       accountId: channel.accountId,
       deepLink: channel.deepLink,
-      botToken: await secrets.get(channel.secretRef),
+      botToken: botToken!,
     } : undefined,
     memberships: store.listMemberships(agentId).map((m) => ({
       ...m,
       role: m.role as MemberRole,
       status: m.status as 'active' | 'revoked',
     })),
-    envVars: await Promise.all(
-      store.listAgentEnv(agentId).map(async (e) => {
-        try {
-          return { name: e.name, value: await secrets.get(e.secretRef) };
-        } catch {
-          // A missing secret means the var is already broken here — say so
-          // rather than exporting an archive that silently lacks it.
-          await restoreIfRunning();
-          throw new TransferError(
-            `Env var "${e.name}" has no stored value (its secret is missing). Remove it in ` +
-              'Settings → Environment, then export again.',
-          );
-        }
-      }),
-    ),
+    envVars,
     image,
     state: state.toString('base64'),
   };
@@ -385,8 +394,14 @@ async function settleImage(
 ): Promise<{ pin?: string; build?: ImageRecipe }> {
   const { store, provider } = deps;
   const here = await provider.listImageTags().then((t) => t.some((x) => x.tag === image.tag), () => false);
-  if (here) return { pin: image.tag };
+  // Which image runs here is the machine owner's call (PATCH image says so);
+  // an import by anyone else pinned whatever tag the file named, a candidate
+  // or another owner's derived image included (night review, 2026-09-27).
+  if (here && opts.mayBuild) return { pin: image.tag };
   if (opts.image === 'drop') return {};
+  if (here) {
+    throw new ImageDecisionNeeded(image.tag, undefined, "only this machine's owner can pin an agent to a particular image", false, where);
+  }
   const recipe: ImageRecipe | undefined = image.recipe ? { tag: image.tag, ...image.recipe } : undefined;
   let problem = recipe ? recipeProblem(recipe) : (image.problem ?? 'the file has no recipe for it');
   // A derived image here under the same name but other lines is someone

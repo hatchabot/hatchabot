@@ -28,7 +28,7 @@ describe('notifyAgentChat', () => {
     const calls: Array<{ url: string; body: any }> = [];
     const fetchImpl = (async (url: string, init: any) => {
       calls.push({ url, body: JSON.parse(init.body) });
-      return { ok: true } as Response;
+      return new Response(JSON.stringify({ ok: true }));
     }) as unknown as typeof fetch;
 
     const sent = await notifyAgentChat(store, secrets, 'a1', 'hello', { chatIds: ['555'], fetchImpl });

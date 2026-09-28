@@ -75,7 +75,7 @@ async function setup(opts: { imageChannels?: string[] } = {}) {
     return id;
   };
   const inject = (method: string, url: string, payload?: unknown, headers = H) => f.inject({ method: method as never, url, headers, payload: payload as never });
-  return { store, secrets, f, add, inject };
+  return { store, secrets, f, add, inject, provider };
 }
 
 describe('adding Slack or Discord', () => {
@@ -415,7 +415,9 @@ describe('the bot is named for the agent (2026-09-25)', () => {
 
 describe('a successful swap keeps BOTH tokens (use-case audit, 2026-09-27)', () => {
   it('the agent runs on the spare\'s token, the old bot is parked with its own token, nothing points at a deleted secret', async () => {
-    const { store, secrets, add, inject } = await setup();
+    const { store, secrets, add, inject, provider } = await setup();
+    // Its container is a name in this world, not a mock runtime: stopping it (the swap now does, before parking) succeeds.
+    provider.stop = async () => {};
     const id = add();
     await inject('POST', `/v1/agents/${id}/channels/discord`, { token: 'ok-good' });
     // The attach kicks a rebuild the mock world cannot finish; the swap wants a settled agent.
