@@ -298,6 +298,10 @@ export class Store {
       -- session's context size (OpenClaw's totalTokens), not usage: those
       -- rows are dropped once, and the first real reading backfills 8 days.
       CREATE TABLE IF NOT EXISTS token_samples_source (source TEXT NOT NULL);
+      -- Successful calls are counted from the transcripts (OpenClaw logs only
+      -- calls slower than 1 s): the newest slot each agent's count was written
+      -- through. No row = its log-derived counts not yet replaced (v2.104.0).
+      CREATE TABLE IF NOT EXISTS usage_calls_through (agent_id TEXT PRIMARY KEY, slot TEXT NOT NULL);
       -- One-time data cleanups that have run (name = the cleanup), so each
       -- runs once per database rather than on every start.
       CREATE TABLE IF NOT EXISTS store_migrations (name TEXT PRIMARY KEY, at TEXT NOT NULL);
@@ -712,14 +716,19 @@ export class Store {
     }
     // token_samples held context sizes until 2026-09-28: dropped once, so the
     // first real reading does not count the whole history as that moment's use.
-    if (!this.db.prepare(`SELECT 1 FROM token_samples_source WHERE source = 'transcripts'`).get()) {
+    // 'transcripts-archives' (v2.104.0): the counter also holds deleted and
+    // reset sessions (cron runs OpenClaw archives hours later). A reading of
+    // the new kind is larger by all that history, so the old readings go once
+    // and the first new one backfills 8 days again — or that history would
+    // count as new use in one slot.
+    if (!this.db.prepare(`SELECT 1 FROM token_samples_source WHERE source = 'transcripts-archives'`).get()) {
       this.db.transaction(() => {
         this.db.exec(`DELETE FROM token_samples`);
-        // The daily snapshots summed the same context sizes; their day-over-day
-        // differences were never usage. The trend restarts from real readings.
+        // The daily snapshots summed the same readings (context sizes before
+        // v2.100.0, archive-less since); the trend restarts from real readings.
         this.db.exec(`DELETE FROM usage_snapshots`);
         this.db.exec(`DELETE FROM token_samples_source`);
-        this.db.exec(`INSERT INTO token_samples_source (source) VALUES ('transcripts')`);
+        this.db.exec(`INSERT INTO token_samples_source (source) VALUES ('transcripts-archives')`);
       })();
     }
     // Before v2.68.0 every settle logged "channel.dm_policy unchanged": 8,000+
@@ -2616,6 +2625,44 @@ export class Store {
          last_ok = COALESCE(excluded.last_ok, usage_cursor.last_ok),
          last_limited = COALESCE(excluded.last_limited, usage_cursor.last_limited)`,
     ).run(agentId, lastTs, lastOk ?? null, lastLimited ?? null);
+  }
+  /**
+   * Successful calls from the transcripts, as absolute counts: each slot
+   * (and each hour, summed from its slots) from `fromSlot` on is set, not
+   * added to, so a reading can be repeated. The first time for an agent
+   * (`replaceAll`) its log-derived ok counts are cleared everywhere first:
+   * those missed every call under a second.
+   */
+  setModelCallOk(agentId: string, profileId: string, okBySlot: Map<string, number>, fromSlot: string, replaceAll: boolean): void {
+    const fromHour = fromSlot.slice(0, 13);
+    const hours = new Map<string, number>();
+    for (const [sl, n] of okBySlot) if (sl.slice(0, 13) >= fromHour) hours.set(sl.slice(0, 13), (hours.get(sl.slice(0, 13)) ?? 0) + n);
+    const slotUp = this.db.prepare(`INSERT INTO model_call_slots (agent_id, profile_id, slot, ok) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id, profile_id, slot) DO UPDATE SET ok = excluded.ok`);
+    const hourUp = this.db.prepare(`INSERT INTO model_call_hours (agent_id, profile_id, hour, ok) VALUES (?, ?, ?, ?)
+      ON CONFLICT(agent_id, profile_id, hour) DO UPDATE SET ok = excluded.ok`);
+    let newest = fromSlot;
+    this.db.transaction(() => {
+      if (replaceAll) {
+        this.db.prepare(`UPDATE model_call_slots SET ok = 0 WHERE agent_id = ?`).run(agentId);
+        this.db.prepare(`UPDATE model_call_hours SET ok = 0 WHERE agent_id = ?`).run(agentId);
+      } else {
+        // Slots in the rewritten range that no longer have calls go to zero on this source.
+        this.db.prepare(`UPDATE model_call_slots SET ok = 0 WHERE agent_id = ? AND profile_id = ? AND slot >= ?`).run(agentId, profileId, fromHour);
+        this.db.prepare(`UPDATE model_call_hours SET ok = 0 WHERE agent_id = ? AND profile_id = ? AND hour >= ?`).run(agentId, profileId, fromHour);
+      }
+      for (const [sl, n] of okBySlot) if (sl >= fromHour) { slotUp.run(agentId, profileId, sl, n); if (sl > newest) newest = sl; }
+      for (const [h, n] of hours) hourUp.run(agentId, profileId, h, n);
+      this.db.prepare(`INSERT INTO usage_calls_through (agent_id, slot) VALUES (?, ?) ON CONFLICT(agent_id) DO UPDATE SET slot = excluded.slot`).run(agentId, newest);
+    })();
+  }
+  /** The newest slot an agent's transcript call counts were written through, if ever. */
+  callsThrough(agentId: string): string | undefined {
+    return (this.db.prepare(`SELECT slot FROM usage_calls_through WHERE agent_id = ?`).get(agentId) as { slot: string } | undefined)?.slot;
+  }
+  /** A success seen in the transcripts: the source is answering (moves last_ok forward only). */
+  noteUsageOk(agentId: string, at: string): void {
+    this.db.prepare(`UPDATE usage_cursor SET last_ok = ? WHERE agent_id = ? AND (last_ok IS NULL OR last_ok < ?)`).run(at, agentId, at);
   }
   addModelCallHours(agentId: string, profileId: string, buckets: Map<string, { ok: number; limited: number; failed: number }>): void {
     const up = this.db.prepare(

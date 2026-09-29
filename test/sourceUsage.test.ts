@@ -54,13 +54,16 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
   const NOW = Date.parse('2026-09-15T18:00:00Z');
   it('counts requests and 429s per window, flags a source limited until a call succeeds again, never double-counts', async () => {
     const { store, provider } = await world();
+    // Refusals come from the log; successes from the transcripts, which have
+    // every call (the log only has those over a second; review, 2026-09-29).
     provider.modelCallLines = [
-      line('2026-09-10T12:00:00.000Z', 200),               // 6 days ago: 7-day window only
-      line('2026-09-15T14:30:00.000Z', 200),               // inside 5 h
       line('2026-09-15T15:48:58.345Z', 429),               // limited…
       line('2026-09-15T15:49:10.000Z', 429),
     ].join('\n');
-    provider.usage.set('*', totalOf(1000));
+    provider.usage.set('*', { ...totalOf(1000), callSlots: {
+      '2026-09-10T12:05:00.000Z': 1,                        // 6 days ago: 7-day window only
+      '2026-09-15T14:35:00.000Z': 1,                        // inside 5 h
+    } });
     const deps = { store, providerFor: () => provider };
     await sampleSourceUsage(deps, NOW);
     await sampleSourceUsage(deps, NOW + 60_000); // same log text again: nothing new
@@ -82,11 +85,27 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     expect(summarizeSourceUsage(store, OWNER, NOW + 5 * 3_600_000)[0]!.status).toBe('ok');
     expect(summarizeSourceUsage(store, OWNER, NOW + 2 * 3_600_000)[0]!.status).toBe('limited');
     // a later success clears it
-    provider.modelCallLines += '\n' + line('2026-09-15T18:01:30.000Z', 200); // logged after the last pass, as real lines are
+    provider.usage.set('*', { ...totalOf(1000), last: Date.parse('2026-09-15T18:01:30.000Z'), callSlots: {
+      '2026-09-10T12:05:00.000Z': 1, '2026-09-15T14:35:00.000Z': 1, '2026-09-15T18:05:00.000Z': 1,
+    } });
     await sampleSourceUsage(deps, NOW + 120_000);
     [src] = summarizeSourceUsage(store, OWNER, NOW + 120_000);
     expect(src!.status).toBe('ok');
     expect(src!.limitHits7d).toBe(4);
+  });
+
+  it('successes come from the transcripts: the first pass replaces the log\'s partial counts, a repeat never doubles (review, 2026-09-29)', async () => {
+    const { store, provider } = await world();
+    const deps = { store, providerFor: () => provider };
+    const agentIds = store.listAgents(OWNER).map((a) => a.id);
+    // Before: the log saw only the slow calls — 1 in this slot.
+    for (const id of agentIds) store.addModelCallSlots(id, store.getAgent(id)!.aiProfileId, new Map([['2026-09-15T14:30', { ok: 1, limited: 0, failed: 0 }]]));
+    provider.modelCallLines = '';
+    provider.usage.set('*', { ...totalOf(1000), callSlots: { '2026-09-15T14:35:00.000Z': 4 } });
+    await sampleSourceUsage(deps, NOW);
+    await sampleSourceUsage(deps, NOW + 600_000);
+    const [src] = summarizeSourceUsage(store, OWNER, NOW + 600_000);
+    expect(src!.slots.find((x) => x.slot === '2026-09-15T14:30')).toEqual({ slot: '2026-09-15T14:30', ok: 4 * agentIds.length, limited: 0 });
   });
 
   it('tokens are the sum of counter increases; a drop (a session reset) counts nothing', async () => {

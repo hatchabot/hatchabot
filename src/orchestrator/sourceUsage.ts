@@ -82,7 +82,9 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
     for (const c of fresh) {
       const b = buckets.get(hourOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
       const sb = slots.get(slotOf(c.at)) ?? { ok: 0, limited: 0, failed: 0 };
-      if (c.status >= 200 && c.status < 300) { b.ok++; sb.ok++; lastOk = c.at; }
+      // Successes are counted from the transcripts below: OpenClaw logs only
+      // those slower than a second, so the log missed 10–28% (review, 2026-09-29).
+      if (c.status >= 200 && c.status < 300) { lastOk = c.at; }
       else if (c.status === 429) { b.limited++; sb.limited++; lastLimited = c.at; store.addLimitHit(a.id, a.aiProfileId, c.at, c.model); limited++; }
       else { b.failed++; sb.failed++; }
       buckets.set(hourOf(c.at), b);
@@ -119,6 +121,20 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
       }
     }
     store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);
+    // Successful calls per slot, from the transcripts: the whole 8 days the
+    // first time (replacing the log's partial counts), then from an hour
+    // before the last slot written, so late-arriving calls land.
+    if (u.recentCalls) {
+      const ok = new Map<string, number>();
+      for (const [end, n] of u.recentCalls) {
+        const start = new Date(Date.parse(end) - 300_000).toISOString();
+        if (start < nowIso) ok.set(slotOf(start), (ok.get(slotOf(start)) ?? 0) + n);
+      }
+      const through = store.callsThrough(a.id);
+      const from = through ? slotOf(new Date(Date.parse(`${through}:00Z`) - 3_600_000).toISOString()) : '';
+      store.setModelCallOk(a.id, a.aiProfileId, ok, from, !through);
+      if (u.lastActive) store.noteUsageOk(a.id, u.lastActive);
+    }
     const priced = u.byModel.filter((m) => m.tokens > 0);
     if (u.totalTokens > 0 && priced.length) {
       const c = estimateCost(priced);

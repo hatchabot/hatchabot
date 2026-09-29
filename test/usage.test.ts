@@ -324,17 +324,28 @@ describe('the reader script and the agent database (review, 2026-09-29)', () => 
   const call = (input: number) => ({ model: 'claude-sonnet-5', usage: { input, output: 0, cacheRead: 0, cacheWrite: 0 } });
   const jsonl = (input: number) => JSON.stringify({ type: 'message', timestamp: new Date().toISOString(), message: call(input) });
 
-  it('2026.9: reads transcript_events and ignores the leftover .jsonl files', async () => {
+  it('2026.9: reads transcript_events, the archived sessions and pre-upgrade resets, each call once; a leftover plain .jsonl is not read', async () => {
+    const { zstdCompressSync } = await import('node:zlib');
     const r = await runReader((root) => {
       const p = dirsFor(root, 'kitchen');
       const db = new Database(p.db);
       db.exec('CREATE TABLE transcript_events (session_id TEXT, created_at INTEGER, event_json TEXT, event_zstd BLOB)');
-      db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, NULL)').run('s1', Date.now(), JSON.stringify({ message: call(700) }));
+      db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, NULL)').run('s1', Date.now(), JSON.stringify({ id: 'e1', message: call(700) }));
+      // A cron session OpenClaw deleted: its calls live on only in the archive (review, 2026-09-29).
+      db.exec('CREATE TABLE session_transcript_archives (session_id TEXT, encoding TEXT, archive_blob BLOB)');
+      const archived = [{ type: 'message', id: 'e2', timestamp: new Date().toISOString(), message: call(30) }].map((x) => JSON.stringify(x)).join('\n');
+      db.prepare('INSERT INTO session_transcript_archives VALUES (?, ?, ?)').run('cron1', 'zstd', zstdCompressSync(Buffer.from(archived)));
       db.close();
-      writeFileSync(join(p.sessions, 'old.jsonl.reset.2026-09-01'), jsonl(5));
+      // The same deleted session, also published as a file: counted once.
+      writeFileSync(join(p.sessions, 'cron1.jsonl.deleted.2026-09-26T12-00-00Z.abc.zst'), zstdCompressSync(Buffer.from(archived)));
+      // A session reset before the upgrade never reached the database: counted.
+      writeFileSync(join(p.sessions, 'old.jsonl.reset.2026-09-01'), JSON.stringify({ type: 'message', id: 'e3', timestamp: new Date().toISOString(), message: call(5) }));
+      // A plain leftover whose session the database already holds: not read.
+      writeFileSync(join(p.sessions, 's1.jsonl'), JSON.stringify({ type: 'message', id: 'e9', timestamp: new Date().toISOString(), message: call(9000) }));
     });
     expect(r.code).toBe(0);
-    expect(r.out.models['claude-sonnet-5']).toMatchObject({ calls: 1, input: 700 });
+    expect(r.out.models['claude-sonnet-5']).toMatchObject({ calls: 3, input: 735 });
+    expect(Object.values(r.out.callSlots as Record<string, number>).reduce((a, b) => a + b, 0)).toBe(3);
   });
 
   it('2026.7: a database without a transcript_events table still reads the .jsonl files', async () => {
