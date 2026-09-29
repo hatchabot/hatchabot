@@ -2211,6 +2211,16 @@ export class Store {
     });
   }
 
+  /** The newest snapshot of any kind, files included (the dedupe in captureSnapshot). */
+  latestSnapshot(agentId: string):
+    | { id: string; label: string; reason: string; createdAt: string; files: Record<string, string> }
+    | undefined {
+    const r = this.db
+      .prepare(`SELECT id FROM snapshots WHERE agent_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(agentId) as { id: string } | undefined;
+    return r ? this.getSnapshot(agentId, r.id) : undefined;
+  }
+
   getSnapshot(agentId: string, id: string):
     | { id: string; label: string; reason: string; createdAt: string; files: Record<string, string> }
     | undefined {
