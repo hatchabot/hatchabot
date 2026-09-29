@@ -5,7 +5,7 @@ import { MockProvider } from '../src/providers/mockProvider.js';
 import { Store } from '../src/store/store.js';
 import { registerRoutes } from '../src/api/routes.js';
 import { buildConfigCommands, memoryKeyPrefix } from '../src/openclaw/configWriter.js';
-import { buildRuntimeSpec, rebuildAgent, recordApplied, reindexMemoryIfSwitched, type ProvisionDeps } from '../src/orchestrator/provision.js';
+import { buildRuntimeSpec, memoryIndexIncomplete, rebuildAgent, recordApplied, reindexMemoryIfSwitched, type ProvisionDeps } from '../src/orchestrator/provision.js';
 import { embedKeyHash } from '../src/embedder/embedder.js';
 
 /**
@@ -256,6 +256,46 @@ describe('a 2026.8+ image with a partial index', () => {
     expect(w.events).toContain('memory.reindex');
     // Complete: one status call, no index.
     calls.length = 0; indexed = '10/10';
+    await buildRuntimeSpec(w.deps(true), 'todo');
+    recordApplied(w.store, 'todo');
+    await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', (e) => w.events.push(e));
+    expect(calls.filter((c) => c[0] === 'memory').map((c) => c[1])).toEqual(['status']);
+  });
+});
+
+describe('judging the index per source (review, 2026-09-29)', () => {
+  const status = (mem: string, ses: string, total: string) =>
+    `Indexed: ${total} files\nBy source:\n  memory · ${mem} files\n  sessions · ${ses} files\nEmbeddings: ready`;
+  it('tolerates the one live session transcript, but not missing memory files or a real session gap', () => {
+    expect(memoryIndexIncomplete(status('2/2', '1/2', '3/4'))).toBe(false);
+    expect(memoryIndexIncomplete(status('1/2', '2/2', '3/4'))).toBe(true);
+    expect(memoryIndexIncomplete(status('2/2', '3/10', '5/12'))).toBe(true);
+    // What the last forced pass could not close does not force another one.
+    expect(memoryIndexIncomplete(status('53/53', '365/378', '418/431'), 13)).toBe(false);
+    // An OpenClaw without per-source lines still judges by the total.
+    expect(memoryIndexIncomplete('Indexed: 7/10 files')).toBe(true);
+    expect(memoryIndexIncomplete('Indexed: 10/10 files')).toBe(false);
+  });
+
+  it('a rebuild after a forced pass that left the live transcript behind does not re-index again', async () => {
+    const w = world();
+    w.store.setAgentEmbedApplied('todo', 'shared');
+    w.store.setAgentEmbedIndex('todo', '2026-09-23T13:40:51.475Z', null);
+    w.provider.imageOpenclawVersion = '2026.9.6';
+    w.provider.imageEmbedEngine = 'none';
+    const calls: string[][] = [];
+    let text = status('1/2', '1/2', '2/4');
+    w.provider.exec = async (_ref: string, argv: string[]) => {
+      calls.push(argv);
+      if (argv[0] === 'memory' && argv[1] === 'index') text = status('2/2', '1/2', '3/4'); // the live one stays behind
+      if (argv[0] === 'memory' && argv[1] === 'status') return { code: 0, stdout: text, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    await buildRuntimeSpec(w.deps(true), 'todo');
+    recordApplied(w.store, 'todo');
+    await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', (e) => w.events.push(e));
+    expect(calls.filter((c) => c[1] === 'index')).toHaveLength(1);
+    calls.length = 0;
     await buildRuntimeSpec(w.deps(true), 'todo');
     recordApplied(w.store, 'todo');
     await reindexMemoryIfSwitched(w.deps(true), 'todo', 'docker://todo', (e) => w.events.push(e));

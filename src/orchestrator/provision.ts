@@ -1020,6 +1020,39 @@ const embedDecision = new Map<string, { used: 'baked' | 'shared'; before: 'baked
 /** …and then, for the re-index step that follows. */
 const embedToIndex = new Map<string, { used: 'baked' | 'shared'; before: 'baked' | 'shared'; openclawVersion?: string }>();
 
+/** Per agent: how many session files a forced index still left unindexed. */
+const sessionsGapAfterForce = new Map<string, number>();
+
+/** The counts `openclaw memory status` prints: the total line and, under
+ *  "By source", one `memory · a/b files` / `sessions · a/b files` line each. */
+export function memoryIndexCounts(text: string): { total?: [number, number]; memory?: [number, number]; sessions?: [number, number] } {
+  const out: { total?: [number, number]; memory?: [number, number]; sessions?: [number, number] } = {};
+  const t = /Indexed:\s*(\d+)\s*\/\s*(\d+)/i.exec(text);
+  if (t) out.total = [Number(t[1]), Number(t[2])];
+  for (const src of ['memory', 'sessions'] as const) {
+    const m = new RegExp(`^\\s*${src}\\s*[·:\\-]\\s*(\\d+)\\s*/\\s*(\\d+)`, 'im').exec(text);
+    if (m) out[src] = [Number(m[1]), Number(m[2])];
+  }
+  return out;
+}
+
+/**
+ * Whether a 2026.8+ index needs a forced pass. Judged per source (review,
+ * 2026-09-29): the total line always counts the live session transcript,
+ * which OpenClaw indexes on its own schedule, so "3/4" was forcing a full
+ * re-embed on every rebuild. Memory files must all be in; sessions may trail
+ * by the active transcript (or by what the last forced pass left behind).
+ * Only an old OpenClaw without per-source lines falls back to the total.
+ */
+export function memoryIndexIncomplete(text: string, tolerateSessions = 0): boolean {
+  const c = memoryIndexCounts(text);
+  if (c.memory || c.sessions) {
+    if (c.memory && c.memory[0] < c.memory[1]) return true;
+    return !!c.sessions && c.sessions[1] - c.sessions[0] > Math.max(1, tolerateSessions);
+  }
+  return !!c.total && c.total[0] < c.total[1];
+}
+
 /**
  * Changing the memory-search engine changes OpenClaw's index identity: vector
  * search pauses until the index is rebuilt, and it does not rebuild itself.
@@ -1051,8 +1084,7 @@ export async function reindexMemoryIfSwitched(
   if (!switched && !sharedUnconfirmed && needsPortHeal(d.openclawVersion)) {
     const st = await provider.exec(runtimeRef, ['memory', 'status', '--agent', agent.slug], { timeoutMs: 120_000 })
       .catch((err) => ({ code: -1, stdout: '', stderr: String(err) }));
-    const m = /Indexed:\s*(\d+)\s*\/\s*(\d+)/i.exec(`${st.stdout}\n${st.stderr}`);
-    incomplete = !!m && Number(m[1]) < Number(m[2]);
+    incomplete = memoryIndexIncomplete(`${st.stdout}\n${st.stderr}`, sessionsGapAfterForce.get(agentId) ?? 0);
   }
   if (!switched && !sharedUnconfirmed && !incomplete) return;
   log('memory.reindex', { agentId, engine: d.used, was: d.before, ...(incomplete ? { why: 'index incomplete' } : {}) });
@@ -1078,6 +1110,10 @@ export async function reindexMemoryIfSwitched(
   const text = `${status.stdout}\n${status.stderr}`;
   // What OpenClaw prints when the provider answers: "Embeddings: ready".
   const ready = status.code === 0 && /embeddings:\s*ready/i.test(text);
+  // What a forced pass could not close (transcripts OpenClaw skips or has not
+  // reached yet) is not a reason to force it again next rebuild.
+  const after = memoryIndexCounts(text).sessions;
+  if (after) sessionsGapAfterForce.set(agentId, Math.max(0, after[1] - after[0]));
   store.setAgentEmbedIndex(agentId, ready ? new Date().toISOString() : null, ready ? null : `memory search not ready: ${text.trim().slice(-300)}`);
   log(ready ? 'memory.reindexed' : 'memory.reindex_not_ready', { agentId, engine: d.used });
 }

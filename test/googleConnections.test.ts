@@ -199,6 +199,8 @@ describe('attach / detach / remove', () => {
     expect(script).toContain('gog auth credentials');
     expect(script).toContain('gog auth import --email "chris@example.com" --refresh-token-stdin');
     expect(script).toContain('--gmail-no-send');
+    // Overwrites an entry the volume already holds (a rebuild or wake re-imports it; review, 2026-09-29).
+    expect(script).toMatch(/gog auth import [^\n]*--force/);
     expect(script).toContain('keyring_password'); // non-interactive plumbing bootstrapped
     const attached = store.listAgentConnections('a1');
     expect(attached).toHaveLength(1);

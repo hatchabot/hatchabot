@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -542,6 +542,39 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     expect(withBrave.findIndex((c) => c === line)).toBeGreaterThan(withBrave.findIndex((c) => c.rawShell?.includes('hb-npm-cache')));
     expect(buildConfigCommands({ ...base, pluginInstall: 'npm', bakedPlugins: ['duckduckgo'] }).some((c) => c.rawShell?.includes('brave-plugin'))).toBe(false);
     expect(buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2', bakedPlugins: ['brave'] }).some((c) => c.rawShell?.includes('brave-plugin'))).toBe(false);
+  });
+  it('brave is reinstalled only when the copy on the volume is not the baked version (review, 2026-09-29)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-seed-'));
+    try {
+      const opt = join(home, 'opt'); mkdirSync(join(opt, 'plugins/brave/node_modules/@openclaw/brave-plugin'), { recursive: true });
+      writeFileSync(join(opt, 'plugins/brave/node_modules/@openclaw/brave-plugin/package.json'), JSON.stringify({ version: '2026.9.6' }));
+      // A confined PATH: the stub openclaw plus only the tools the line uses.
+      const bin = join(home, 'bin'); mkdirSync(bin); const calls = join(home, 'calls'); writeFileSync(calls, '');
+      writeFileSync(join(bin, 'openclaw'), `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\necho "Installed plugin: brave"\n`, { mode: 0o755 });
+      for (const tool of ['node', 'ls', 'tail']) {
+        const real = spawnSync('bash', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+        symlinkSync(real, join(bin, tool));
+      }
+      const line = buildConfigCommands({ ...base, pluginInstall: 'npm', bakedPlugins: ['duckduckgo', 'brave'] })
+        .find((c) => c.rawShell?.includes('@openclaw/brave-plugin@$V'))!.rawShell!
+        .replaceAll('/opt/hatchabot', opt).replaceAll('/home/node', home);
+      const run = () => spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${line}\necho seed-continues`], { encoding: 'utf8',
+        env: { PATH: bin, HOME: home, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null' } });
+      // Never had brave: nothing to move.
+      let r = run();
+      expect(r.stdout).toContain('seed-continues'); expect(readFileSync(calls, 'utf8')).toBe('');
+      const proj = join(home, '.openclaw/npm/projects/openclaw-brave-plugin-ab12__openclaw-generation__g-1/node_modules/@openclaw/brave-plugin');
+      mkdirSync(proj, { recursive: true });
+      // An older copy: moved to the baked version.
+      writeFileSync(join(proj, 'package.json'), JSON.stringify({ version: '2026.7.1' }));
+      r = run();
+      expect(r.stdout).toContain('seed-continues');
+      expect(readFileSync(calls, 'utf8')).toContain('plugins install @openclaw/brave-plugin@2026.9.6 --force');
+      // Already the baked version: left alone.
+      writeFileSync(join(proj, 'package.json'), JSON.stringify({ version: '2026.9.6' })); writeFileSync(calls, '');
+      r = run();
+      expect(r.stdout).toContain('seed-continues'); expect(readFileSync(calls, 'utf8')).toBe('');
+    } finally { rmSync(home, { recursive: true, force: true }); }
   });
   it('a link image (2026.7, or absent label) links as before', () => {
     const cmds = buildConfigCommands({ ...base, openclawVersion: '2026.7.1-2', channelPlugins: ['slack'], slack });

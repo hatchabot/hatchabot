@@ -235,7 +235,11 @@ export async function materializeConnection(
     `trap 'rm -f ${GOG_HOME}/.client_secret.json' EXIT`,
     `echo ${JSON.stringify(b64Client)} | base64 -d > ${GOG_HOME}/.client_secret.json`,
     `~/.local/bin/gog auth credentials ${GOG_HOME}/.client_secret.json >/dev/null`,
-    `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${conn.email}" --refresh-token-stdin --no-input${noSend}`,
+    // --force: the vault's token is the authority, and gog refuses an email it
+    // already holds ("entry already exists … use --force") — every rebuild and
+    // wake logged a false failure and a re-consented token never landed
+    // (review, 2026-09-29).
+    `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${conn.email}" --refresh-token-stdin --no-input --force${noSend}`,
   ].join('\n');
   const res = await provider.execShell(agent.runtimeRef, script);
   if (res.code !== 0) {
@@ -265,7 +269,9 @@ export async function dematerializeConnection(
  * Provision-time sync (step 7.6): every ATTACHED connection lands on the
  * volume before the agent goes RUNNING. Best-effort per connection — a
  * Google outage must not fail a rebuild; failures are logged and retried on
- * the next provision (import is idempotent: same email+client overwrites).
+ * the next provision. Re-running is safe: the import overwrites the entry
+ * for that email with the vault's token (--force; without it gog refused
+ * every account it already held — review, 2026-09-29).
  */
 export async function syncConnections(
   deps: ConnectionSyncDeps,

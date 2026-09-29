@@ -288,10 +288,13 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   // Brave key is set; a copy from 2026.7 drifts on 2026.9 ("plugin
   // version_drift", the gate on 2026-09-24). When the image carries brave in
   // its cache, an agent that has it is moved to the baked version. Static.
+  // Only when the installed copy is not that version already: it was a forced
+  // reinstall (a cold CLI start and an npm install) on every rebuild of 36
+  // agents (review, 2026-09-29). Same always-exit-0 probe as channelPlugin.
   if (npmMode && baked.has('brave')) {
     cmds.push({
       argv: [],
-      rawShell: `if ls /home/node/.openclaw/npm/projects/openclaw-brave-plugin-* >/dev/null 2>&1; then V=$(node -p 'require("/opt/hatchabot/plugins/brave/node_modules/@openclaw/brave-plugin/package.json").version') && openclaw plugins install "@openclaw/brave-plugin@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1; fi || true`,
+      rawShell: `if ls /home/node/.openclaw/npm/projects/openclaw-brave-plugin-* >/dev/null 2>&1; then V=$(node -p 'require("/opt/hatchabot/plugins/brave/node_modules/@openclaw/brave-plugin/package.json").version') && H=$(node -e 'const fs=require("fs");const d="/home/node/.openclaw/npm/projects";let v="";try{for(const n of fs.readdirSync(d).sort()){if(!n.startsWith("openclaw-brave-plugin-"))continue;try{v=JSON.parse(fs.readFileSync(d+"/"+n+"/node_modules/@openclaw/brave-plugin/package.json","utf8")).version||""}catch{}}}catch{}process.stdout.write(v)') && if [ "$H" != "$V" ]; then openclaw plugins install "@openclaw/brave-plugin@$V" --force --accept-capabilities --acknowledge-install-policy-warning --pin 2>&1 | tail -1; fi; fi || true`,
     });
   }
   const channelPlugin = (kind: 'slack' | 'discord'): ConfigCommand => npmMode
