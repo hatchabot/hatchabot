@@ -37,7 +37,7 @@ const RECORDER = `(() => {
     const path = url.split('?')[0];
     const method = (init.method || 'GET').toUpperCase();
     let body; try { body = init.body ? JSON.parse(init.body) : undefined; } catch { body = init.body; }
-    window.__calls.push({ method, path, body });
+    window.__calls.push({ method, path, url, body });
     const json = (b, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'content-type': 'application/json' } });
     // Scripted answers: window.__answer['POST /v1/x'] = [{ status, body }, …], taken in order.
     const q = (window.__answer || {})[method + ' ' + path];
@@ -413,6 +413,139 @@ const SCENARIOS = String.raw`(() => {
       await until(() => document.getElementById('fleetUsageBody').textContent.includes('about 5× its usual day'));
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
+    },
+    sheetPollKeepsTabs: async () => {
+      // A poll must not reload the Files or Discord tab under someone (night review #18).
+      window.__override['/v1/agents/a1/fs'] = { path: '', entries: [{ name: 'notes.md', type: 'file', size: 10 }] };
+      const fsCalls = () => calls('GET', /\/v1\/agents\/a1\/fs$/).length;
+      openV2Agent('a1', 'files');
+      const note = await until(() => document.getElementById('v2UploadNote'));
+      note.hidden = false; note.textContent = 'Uploading big.zip…';
+      const before = fsCalls();
+      await refresh(false);
+      eq('no new listing on a poll', fsCalls(), before);
+      ok('the upload note survives', document.getElementById('v2UploadNote')?.textContent === 'Uploading big.zip…');
+      // A real change to the agent still repaints the tab.
+      const list = await (await fetch('/v1/agents')).json();
+      window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: 'STOPPED' } : a);
+      await refresh(false);
+      await until(() => fsCalls() > before);
+      v2Close(); delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/fs'];
+      await refresh(false);
+      // Discord: a group-chat choice not yet saved is not reverted by a poll.
+      window.__override['/v1/agents/a2/channels'] = { channels: [{ kind: 'discord', rooms: { mode: 'off' } }], imageSupports: ['discord'] };
+      openV2Agent('a2', 'channels');
+      const sel = await until(() => document.getElementById('chanRoomMode-discord'));
+      sel.value = 'room'; sel.dispatchEvent(new Event('change', { bubbles: true }));
+      const chans = calls('GET', /\/v1\/agents\/a2\/channels$/).length;
+      await refresh(false);
+      eq('no new channels read on a poll', calls('GET', /\/v1\/agents\/a2\/channels$/).length, chans);
+      eq('the choice stays', document.getElementById('chanRoomMode-discord')?.value, 'room');
+      v2Close(); delete window.__override['/v1/agents/a2/channels'];
+    },
+    modalOnlyDialogs: async () => {
+      // A stray click outside must not close the recovery code before "I've saved it", nor the sign-in (night review #19).
+      const outside = (dlg) => dlg.dispatchEvent(new MouseEvent('click', { clientX: 3, clientY: 3, bubbles: true, cancelable: true }));
+      showRecoveryCode('WXYZ-1234-TEST');
+      outside(recoveryDlg);
+      ok('the recovery code stays open', recoveryDlg.open && document.getElementById('recoveryCode').textContent === 'WXYZ-1234-TEST');
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      recoveryDlg.dispatchEvent(esc);
+      ok('Esc is refused too', esc.defaultPrevented);
+      document.getElementById('recoverySaved').checked = true;
+      outside(recoveryDlg);
+      ok('once saved, it may go', !recoveryDlg.open);
+      loginDlg.showModal();
+      outside(loginDlg);
+      ok('the sign-in stays open', loginDlg.open);
+      loginDlg.close();
+      v2IconDlg.showModal();
+      const r = v2IconDlg.getBoundingClientRect();
+      if (r.left > 3 && r.top > 3) { outside(v2IconDlg); ok('an ordinary dialog still closes on an outside click', !v2IconDlg.open); }
+      if (v2IconDlg.open) v2IconDlg.close();
+    },
+    memberPane: async () => {
+      // A member of a Discord-only agent is sent to Discord; an asleep agent still offers its link (night review #20).
+      const list = await (await fetch('/v1/agents')).json();
+      const base = list.find((a) => a.id === 'a1');
+      window.__override['/v1/agents'] = [...list,
+        { ...base, id: 'm1', name: 'Club Bot', role: 'member', ownerId: 'o2', botUsername: undefined, deepLink: undefined, otherChannels: [{ kind: 'discord', deepLink: 'https://discord.com/users/1' }] },
+        { ...base, id: 'm2', name: 'Nap Bot', role: 'member', ownerId: 'o2', state: 'STOPPED', hibernatedAt: new Date().toISOString() }];
+      await refresh(false);
+      openV2Agent('m1');
+      let t = document.getElementById('v2Pane').textContent;
+      ok('Discord, not Telegram: ' + t.replace(/\s+/g, ' ').slice(0, 160), t.includes('Open in Discord') && t.includes('answers in Discord') && !t.includes('Telegram') && !t.includes('Not running'));
+      v2Close();
+      openV2Agent('m2');
+      t = document.getElementById('v2Pane').textContent;
+      ok('asleep, with its link: ' + t.replace(/\s+/g, ' ').slice(0, 160), t.includes('Open in Telegram') && t.includes('a message wakes it') && !t.includes('Not running'));
+      v2Close();
+      delete window.__override['/v1/agents'];
+      await refresh(false);
+    },
+    limitBannerLive: async () => {
+      // The rate-limit banner counts the agents that could answer, not archived ones (night review #21).
+      const u = await (await fetch('/v1/ai-profiles/usage')).json();
+      window.__override['/v1/ai-profiles/usage'] = { ...u, sources: [{ ...u.sources[0], status: 'limited', limitedSince: new Date().toISOString(), agents: 5, liveAgents: 3 }] };
+      await loadSourceUsage();
+      const t = document.getElementById('limitBanner').textContent;
+      ok('three, not five: ' + t, t.includes('its 3 agents'));
+      delete window.__override['/v1/ai-profiles/usage'];
+      await loadSourceUsage();
+    },
+    notRunningWording: async () => {
+      // A rebuilding agent is not "stopped — start it" (night review #22).
+      const g = agents.find((a) => a.name === 'Grocery Runner');
+      ok('a rebuilding agent in the stub', g && g.state === 'REBUILDING');
+      openV2Agent(g.id, 'usage');
+      let t = document.getElementById('v2Pane').textContent;
+      ok('usage says rebuilt: ' + t.slice(0, 120), t.includes('being rebuilt') && !t.includes('stopped'));
+      openV2Agent(g.id, 'schedule');
+      t = document.getElementById('v2Pane').textContent;
+      ok('schedule says rebuilt: ' + t.slice(0, 120), t.includes('being rebuilt') && !t.includes('Start it'));
+      v2Close();
+    },
+    hiddenTabPauses: async () => {
+      // A hidden tab stops polling and catches up when shown (night review #23).
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+      await refresh(false);
+      ok('paused while hidden', pollPaused === true);
+      const n = calls('GET', /^\/v1\/agents$/).length;
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await until(() => calls('GET', /^\/v1\/agents$/).length > n);
+      await until(() => pollPaused === false);
+      delete document.hidden;
+    },
+    pollFetchesLess: async () => {
+      // No /members fan-out on v2, no /pairing for web-only agents, no hidden Activity card, a light backups read (night review #24/#25/#47).
+      pairTick = 0; mgmtTick = 0;
+      const mark = window.__calls.length;
+      await refresh(false);
+      await sleep(200);
+      const pass = window.__calls.slice(mark);
+      const got = (re) => pass.filter((c) => c.method === 'GET' && re.test(c.path));
+      eq('members reads on a poll', got(/\/members$/).length, 0);
+      ok('pairing still read for chat agents', got(/\/v1\/agents\/a1\/pairing$/).length === 1);
+      const webOnly = agents.filter((a) => !a.botUsername && !(a.otherChannels || []).length).map((a) => a.id);
+      ok('web-only agents in the stub', webOnly.length >= 2);
+      eq('pairing reads for web-only agents', got(/\/pairing$/).filter((c) => webOnly.some((id) => c.path === '/v1/agents/' + id + '/pairing')).length, 0);
+      eq('events for a hidden card', got(/^\/v1\/events$/).length, 0);
+      const bk = got(/^\/v1\/backups$/);
+      ok('the backups read is the light one', bk.length === 1 && bk[0].url.includes('latest=1'));
+    },
+    failingTasks: async () => {
+      // A task that fails every day says so (night review #45).
+      const now = Date.now();
+      window.__crons = [
+        { id: 'c9', name: 'Daily lunch', scheduleExpr: '0 12 * * *', enabled: true, payloadKind: 'agentTurn', message: 'lunch', lastStatus: 'error', consecutiveErrors: 5, lastRunAtMs: now - 3600e3, nextRunAtMs: now + 3600e3 },
+        { id: 'c8', name: 'Morning brief', scheduleExpr: '0 8 * * *', enabled: true, payloadKind: 'agentTurn', message: 'hi', lastStatus: 'ok', consecutiveErrors: 0, lastRunAtMs: now - 7200e3, nextRunAtMs: now + 7200e3, lastDelivered: true }];
+      openV2Agent('a1', 'schedule');
+      await until(() => cronCache.some((c) => c.id === 'c9'));
+      const rows = await until(() => { const r = [...document.querySelectorAll('#cronList .pair')]; return r.length === 2 ? r : null; });
+      ok('the failing one says so: ' + rows[0].textContent.replace(/\s+/g, ' ').slice(0, 200), rows[0].querySelector('.chip.FAILED') && rows[0].textContent.includes('5 in a row') && rows[0].textContent.includes('next'));
+      ok('the healthy one is ok: ' + rows[1].textContent.replace(/\s+/g, ' ').slice(0, 200), !rows[1].querySelector('.chip.FAILED') && rows[1].textContent.includes('last run ok'));
+      v2Close(); window.__crons = [];
     },
   };
   (async () => {

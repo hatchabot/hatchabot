@@ -7882,8 +7882,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // These sets hold the whole fleet's data plus the decryption key in the
   // clear, so every route is gated to the machine's owner and returns only
   // metadata — never the backup files themselves.
-  app.get('/v1/backups', async (req, reply) => {
+  app.get<{ Querystring: { latest?: string } }>('/v1/backups', async (req, reply) => {
     if (!ownsLocalHost(req)) return reply.code(403).send({ error: MACHINE_OWNER_ONLY });
+    // ?latest=1: only the newest set's date and flags, no volume list — the
+    // home screen polls this for "how old is the last backup", and the full
+    // list is ~140 KB on a big fleet (night review).
+    if (req.query?.latest === '1') {
+      return { backups: listBackups().slice(0, 1).map(({ volumes: _v, ...set }) => ({ ...set, volumes: [] })) };
+    }
     // Match each backed-up volume to a live agent so the panel can offer a
     // per-agent Restore (and show its real name). Backups are machine-level (the
     // nightly script captures EVERY volume, across all owners) and this route is

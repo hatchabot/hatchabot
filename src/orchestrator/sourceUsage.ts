@@ -158,6 +158,8 @@ export interface SourceUsage {
   id: string;
   name: string;
   agents: number;
+  /** Of those, the ones not archived: what the rate-limit banner says "can't answer". */
+  liveAgents: number;
   /** The last hour: what the home screen's "tokens / hr" tile counts (samples are ten minutes apart). */
   window1h: SourceWindow;
   window5h: SourceWindow;
@@ -260,7 +262,7 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     }
     const slotsList = Array.from({ length: 288 }, (_, i) => slotOf(new Date(now - (287 - i) * 300_000).toISOString()));
     const entry: SourceUsage = {
-      id: p.id, name: p.name, agents: my.length,
+      id: p.id, name: p.name, agents: my.length, liveAgents: my.filter((a) => a.state !== 'ARCHIVED').length,
       window1h: { ...ws(t1), tokens: tokensFor(myIds, t1) },
       window5h: { ...ws(t5), tokens: tokensFor(myIds, t5) },
       window24h: { ...ws(t24), tokens: tokensFor(myIds, t24) },
