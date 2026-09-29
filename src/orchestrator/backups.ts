@@ -48,7 +48,54 @@ export interface BackupSet {
   /** whether the secret key rode along — without it the backup can't be decrypted */
   hasKey: boolean;
   volumes: BackupVolume[];
+  /**
+   * Whether the run that wrote this set finished with every volume in, from
+   * its backup-status.json. False: a volume failed, the run refused, or it
+   * never finished. Undefined: no record (a set from before the record, or a
+   * run still going). The dated directory alone said nothing — it exists
+   * before the first volume is in (review, 2026-09-29).
+   */
+  complete?: boolean;
+  /** The run is still writing this set. */
+  running?: boolean;
+  /** Volumes that failed to archive. */
+  failedVolumes?: string[];
+  /** Volumes no agent uses, left out of the set (a leftover to remove by hand). */
+  orphans?: string[];
+  /** When the run started (ISO), from the record. */
+  startedAt?: string;
 }
+
+/** A run that has said "running" this long without a verdict was killed. */
+const RUN_STALE_MS = 6 * 3600_000;
+
+/** What a set's backup-status.json says, read defensively (the file is the script's, not ours). */
+export function readSetStatus(dir: string, now = Date.now()): Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt'> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(dir, STATUS_FILE), 'utf8'));
+  } catch {
+    return {};
+  }
+  if (!raw || typeof raw !== 'object') return {};
+  const r = raw as Record<string, unknown>;
+  const names = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 500) : []);
+  const startedAt = typeof r.startedAt === 'string' ? r.startedAt : undefined;
+  const out: Pick<BackupSet, 'complete' | 'running' | 'failedVolumes' | 'orphans' | 'startedAt'> = {
+    ...(startedAt ? { startedAt } : {}),
+    failedVolumes: names(r.failedVolumes),
+    orphans: names(r.orphans),
+  };
+  if (r.state === 'complete') out.complete = true;
+  else if (r.state === 'running') {
+    // Killed outright (no trap ran) reads as unfinished once it is hours old.
+    if (now - (Date.parse(startedAt ?? '') || 0) > RUN_STALE_MS) out.complete = false;
+    else out.running = true;
+  } else out.complete = false;
+  return out;
+}
+
+export const STATUS_FILE = 'backup-status.json';
 
 function safeStatSize(p: string): number {
   try {
@@ -94,10 +141,36 @@ export function listBackups(base = backupsDir()): BackupSet[] {
       hasDb: files.includes('hatchabot.sqlite') || files.includes('agentclaw.sqlite'),
       hasKey: files.includes('secret-key.env'),
       volumes,
+      ...readSetStatus(dir),
     });
   }
   sets.sort((a, b) => b.date.localeCompare(a.date));
   return sets;
+}
+
+/**
+ * Active agents whose volume is not in this set — an agent on another
+ * machine (a runner) is never in it, since the nightly script archives only
+ * this machine's volumes, and the panel listed only what a set holds, so
+ * nothing said so (review, 2026-09-29). Agents made after the run started
+ * are not "missing" from it.
+ */
+export function agentsMissingFromSet(
+  set: Pick<BackupSet, 'date' | 'volumes' | 'startedAt'>,
+  agents: Array<{ id: string; name: string; runtimeRef?: string; createdAt: string; hostId: string }>,
+  hostName: (hostId: string) => string | undefined,
+): Array<{ agentId: string; name: string; host?: string }> {
+  const have = new Set(set.volumes.map((v) => v.file));
+  const cutoff = Date.parse(set.startedAt ?? '') || Date.parse(`${set.date}T00:00:00`);
+  const out: Array<{ agentId: string; name: string; host?: string }> = [];
+  for (const a of agents) {
+    if (!a.runtimeRef || have.has(agentArchiveName(a.runtimeRef))) continue;
+    const made = Date.parse(a.createdAt);
+    if (Number.isFinite(made) && made >= cutoff) continue;
+    const host = hostName(a.hostId);
+    out.push({ agentId: a.id, name: a.name, ...(host ? { host } : {}) });
+  }
+  return out;
 }
 
 /** Delete one dated backup set. Refuses anything that isn't a `YYYY-MM-DD`
