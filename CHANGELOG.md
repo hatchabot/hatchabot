@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.106.0] — 2026-09-29
+
+### Added
+- **`.env` lists every setting.** Hatchabot now puts the settings file in order every time it starts, and the installer does on a fresh install: every setting it has (about 100), in groups, each with a line saying what it does. What you set stays in force exactly as written; every other setting is listed commented out with its default, so you can see what exists and change one by removing the `#`. A commented example or note you wrote stays, and lines Hatchabot doesn't know are kept under "Other settings". It never changes a value in force (it refuses to write if it would) and keeps the previous file as `.env.bak-<time>`. By hand: `npm run env:sync`. Changes made in the app (Settings → Hosts → Defaults, rebuild policy) still land on their own line.
+- `.env.example` is generated from the same list, and a test fails when the code reads a setting nobody documented.
+
 ## [2.105.0] — 2026-09-29
 
 ### Fixed

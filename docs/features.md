@@ -905,6 +905,23 @@ six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image a
 dropdown of every image with a line saying what each one is, and **Fleet
 default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
 
+## The settings file (.env)
+
+`.env` lists every setting Hatchabot has, in groups (Basics, Sign-in, Data
+and backups, Limits, Agents, Usage, Memory search service, Docker and
+runtime, the Hatchabot agent, Managed installs, Timeouts), each with a line
+saying what it does. A setting you set is a plain `NAME=value` line; every
+other one is `# NAME=default` — remove the `#`, change the value, restart.
+Hatchabot puts the file in order every time it starts (and the installer on
+a fresh install): your values stay exactly as written, a commented example
+or note you wrote stays, and lines it doesn't know (`DOCKER_HOST`, old
+`AGENTCLAW_*` names) move to *Other settings* unchanged. It refuses to write
+if any value in force would change, and keeps the previous file as
+`.env.bak-<time>` (the newest three). By hand: `npm run env:sync`.
+`.env.example` is the same file for an empty install. The list lives in
+`src/config/envCatalog.ts`; a test fails when the code reads a setting that
+isn't in it.
+
 ## Defaults for this machine
 
 Settings → Hosts → **Defaults for this machine** holds what every agent here

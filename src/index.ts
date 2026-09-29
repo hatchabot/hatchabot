@@ -24,6 +24,7 @@ import { reconcileAgents, startReconcileLoop } from './orchestrator/reconcile.js
 import { runPostureSweep } from './orchestrator/posture.js';
 import { LOCAL_OWNER } from './api/principal.js';
 import type { RuntimeProvider } from './providers/provider.js';
+import { syncEnvFile } from './config/envFile.js';
 
 const DB_PATH = process.env.HATCHABOT_DB ?? defaultDbPath();
 const PORT = Number(process.env.PORT ?? 8080);
@@ -289,6 +290,16 @@ postureDaily.unref();
   }
 }
 await app.listen({ port: PORT, host: bindHost });
+// Keep .env listing every setting (what's set stays in force; everything else
+// commented with its default). This process already read it; the file is only
+// put in order, never changed in meaning (src/config/envFile.ts).
+{
+  const envPath = process.env.HATCHABOT_ENV_FILE ?? resolve(process.cwd(), '.env');
+  void syncEnvFile(envPath).then((r) => {
+    if (r.error && !/can't read/.test(r.error)) app.log.warn({ error: r.error }, 'env.sync_refused');
+    else if (r.changed) app.log.info({ backup: r.backup }, 'env.synced');
+  });
+}
 // Management agents reach their tools and their AI provider only through the
 // ops server; bring it up with the control plane whenever one exists.
 if (store.listOpsAgents().length) {

@@ -22,6 +22,8 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   it used to show the size of each conversation, not what was spent, so a
   busy agent looked cheap. The last 8 days fill in at once. Status → Usage
   also shows the last 3, 6, 9 or 12 hours.
+- **Every setting in .env** (v2.106.0): the file lists all of them with
+  their defaults, kept in order at each start; your values never change.
 - **Usage counts everything** (v2.104.0): every call (the old count missed
   those under a second) and the scheduled-task sessions OpenClaw archives.
   History resets once and refills 8 days.

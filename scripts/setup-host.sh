@@ -78,6 +78,10 @@ if [ ! -f .env ]; then
 else
   say ".env already exists — keeping it."
 fi
+# Every setting written out: what's set stays in force, the rest listed with
+# its default (src/config/envFile.ts). Hatchabot does this again at each start.
+./node_modules/.bin/tsx scripts/env-sync.ts .env >/dev/null || say "Couldn't list every setting in .env yet; Hatchabot will when it starts."
+
 
 if docker image inspect hatchabot-runtime:latest >/dev/null 2>&1; then
   # An existing install may have promoted a NEWER image to :latest — a default

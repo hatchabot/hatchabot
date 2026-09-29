@@ -1,6 +1,6 @@
 {
   "name": "hatchabot",
-  "version": "2.105.0",
+  "version": "2.106.0",
   "private": true,
   "type": "module",
   "description": "Deployment & management layer for OpenClaw agents",
@@ -23,7 +23,8 @@
     "smoke:adopt": "bash scripts/smoke-adopt.sh",
     "smoke:adopt:full": "tsx scripts/smoke-adopt-full.ts",
     "smoke": "bash scripts/smoke.sh",
-    "test:ui": "node scripts/ui-clickthrough.mjs"
+    "test:ui": "node scripts/ui-clickthrough.mjs",
+    "env:sync": "tsx scripts/env-sync.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.119.0",
