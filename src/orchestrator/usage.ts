@@ -52,6 +52,8 @@ export interface AgentUsage extends UsageSplit {
 
 const EMPTY: AgentUsage = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, sessions: 0, byModel: [] };
 const MIN_SPAN_MS = 10 * 60_000; // below this, a rate is noise
+/** How far back a reading's `recent` slots reach (the script's `since`): a first reading knows this much history. */
+export const FIRST_READ_REACH_MS = 8 * 86_400_000;
 
 /** Runs inside the agent's container (node 22+). Static text: nothing of the agent's is spliced in. */
 export const USAGE_READER_SCRIPT = String.raw`

@@ -123,6 +123,15 @@ describe('computeUsagePeriod', () => {
     expect(later.buckets.filter((b) => b.at > iso(0) && b.at < iso(-4 * H)).every((b) => b.tokens === 0)).toBe(true);
   });
 
+  it('an idle agent first read 3 hours ago does not make the day or week partial (review, 2026-09-29)', () => {
+    const store = world();
+    store.insertAgent({ id: 'idle', ownerId: OWNER, name: 'Idle', slug: 'idle', state: 'RUNNING', aiProfileId: 'sub', hostId: 'h1', runtimeRef: 'mock://idle', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    // Its first reading found no calls in the transcripts' last 8 days, so there was nothing to backfill.
+    store.addTokenSample('idle', 'sub', iso(3 * H), 42_000);
+    expect(computeUsagePeriod(store, OWNER, 'day', NOW).countingSince).toBeUndefined();
+    expect(computeUsagePeriod(store, OWNER, 'week', NOW).countingSince).toBeUndefined();
+  });
+
   it('scopes to the caller', () => {
     expect(computeUsagePeriod(world(), 'someone-else', 'day', NOW).agents).toEqual([]);
   });

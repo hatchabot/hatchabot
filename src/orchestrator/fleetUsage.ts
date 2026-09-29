@@ -10,6 +10,7 @@
  */
 import type { Store } from '../store/store.js';
 import { estimateCost, type CostRange } from './pricing.js';
+import { FIRST_READ_REACH_MS } from './usage.js';
 import { hourOf, slotOf } from './sourceUsage.js';
 
 export type UsagePeriod = 'hour' | '3h' | '6h' | '9h' | '12h' | 'day' | 'week';
@@ -130,12 +131,20 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     ? { low: billed.reduce((s, r) => s + r.cost!.low, 0), high: billed.reduce((s, r) => s + r.cost!.high, 0), partial: billed.some((r) => r.cost!.partial), agents: billed.length }
     : null;
   const totals = { tokens: rows.reduce((s, r) => s + r.tokens, 0), requests: rows.reduce((s, r) => s + r.requests, 0), limited: rows.reduce((s, r) => s + r.limited, 0) };
-  // Counting starts at each agent's first sample; the latest of those bounds what this window can know.
+  // What each agent's readings can know reaches FIRST_READ_REACH_MS before its
+  // first sample: a first reading reads the transcripts' last 8 days, writing
+  // them when there were calls and showing there were none when not. Taking
+  // the first sample itself flagged every window as partial for a day (a
+  // week, on the week view) after an idle agent was first read (review,
+  // 2026-09-29). The latest reach bounds what this window can know.
   let countingSince: string | undefined;
   for (const a of agents) {
     const p = store.getAIProfile(a.aiProfileId); if (!p) continue;
     const first = store.firstTokenSampleAt(p.id, new Set([a.id]));
-    if (first && (!countingSince || first > countingSince)) countingSince = first;
+    if (!first) continue;
+    const reach = new Date(Date.parse(first) - FIRST_READ_REACH_MS).toISOString();
+    if (!countingSince || reach > countingSince) countingSince = reach;
   }
-  return { period, from, to, bucketMinutes, buckets: [...buckets.values()], agents: rows, totals, byBilling, cost, countingSince };
+  if (countingSince && countingSince <= from) countingSince = undefined;
+  return { period, from, to, bucketMinutes, buckets: [...buckets.values()], agents: rows, totals, byBilling, cost, ...(countingSince ? { countingSince } : {}) };
 }
