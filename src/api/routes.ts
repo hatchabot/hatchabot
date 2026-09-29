@@ -1,15 +1,16 @@
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
-import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, createWriteStream, mkdirSync, statSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
 import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, resolve } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { hostname as osHostname, totalmem } from 'node:os';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import compress from '@fastify/compress';
 import { ChannelTakenError, normalizeHandle, type SectionSort, type Store } from '../store/store.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { ContainerStats, ExecResult, RuntimeInfo, RuntimeProvider } from '../providers/provider.js';
@@ -131,6 +132,10 @@ import { needsPortHeal } from '../openclaw/configWriter.js';
 const FILE_MAX_BYTES = Math.max(1, Number(process.env.HATCHABOT_FILE_MAX_MB ?? 512)) * 1024 * 1024;
 /** Rebuilds at once: 1–12; the default 6 fits an ordinary machine. */
 const MAX_REBUILD_CONCURRENCY = 12;
+/** Route option: never compress this response. For downloads and streams
+ *  (already compressed, or sent with a length the client checks) and the
+ *  console proxy (review, 2026-09-29). */
+const NO_COMPRESS = { compress: false } as const;
 function clampConcurrency(raw: string | undefined): number {
   const n = Math.floor(Number(raw));
   return Number.isFinite(n) && n >= 1 ? Math.min(MAX_REBUILD_CONCURRENCY, n) : 6;
@@ -189,6 +194,8 @@ export interface ApiDeps {
   webIndexPath?: string;
   /** Absolute path to the invitee join page. */
   webJoinPath?: string;
+  /** The version stamped into the page and its ETag; APP_VERSION unless a test sets it. */
+  appVersion?: string;
   /**
    * Canonical origin others should use to reach this control plane, e.g.
    * http://my-host.example.ts.net:8080. Invite links are built from it,
@@ -423,8 +430,34 @@ const CURATED_ANTHROPIC_MODELS = [
   'claude-fable-5',
 ] as const;
 
+/** If-None-Match against our ETag, by weak comparison (RFC 9110 13.1.2):
+ *  any listed tag, W/ or not, or `*`. */
+export function etagMatches(header: string | undefined, etag: string): boolean {
+  if (!header) return false;
+  const bare = (t: string) => t.trim().replace(/^W\//, '');
+  return header.split(',').some((t) => t.trim() === '*' || bare(t) === bare(etag));
+}
+
 export async function registerRoutes(app: FastifyInstance, deps: ApiDeps): Promise<void> {
   const { store, secrets } = deps;
+
+  // Compress what the app fetches: the page was 778 KB per load and the
+  // /v1/agents poll 91 KB every 8 s, a quarter and an eighth of that gzipped —
+  // it matters on a phone over the tailnet (review, 2026-09-29). Registered
+  // first so every route below gets it. Text, JSON, JS, SVG and what mime-db
+  // calls compressible — which includes octet-stream, so every download and
+  // stream opts out by name (NO_COMPRESS): archives are already compressed and
+  // files are streamed with a length the client checks. So does the console
+  // proxy, which rewrites its page and passes the gateway's own encoding
+  // through. Websocket upgrades never reach Fastify's reply at all. Request bodies are left alone (no decompression): an
+  // upload is taken as sent. Brotli at quality 4, the plugin's default, since
+  // 11 costs a second on the page.
+  await app.register(compress, {
+    threshold: 1024,
+    encodings: ['br', 'gzip'],
+    customTypes: /^text\/(?!event-stream)|(?:\+|\/)json(?:;|$)|^(?:application|text)\/javascript(?:;|$)|^image\/svg\+xml(?:;|$)/,
+    globalDecompression: false,
+  });
 
   // Browser hardening on every response. No other site may frame the app (the
   // session cookie is SameSite=Strict, so a framed copy would be signed out
@@ -1017,18 +1050,38 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // ---- app ----------------------------------------------------------------
 
   if (deps.webIndexPath) {
-    app.get('/', async (_req, reply) => {
-      // Re-read per request: dev-friendly, and this page is tiny.
-      const html = readFileSync(deps.webIndexPath!, 'utf8');
-      // The whole app is this one file. With no cache headers the browser was
-      // free to keep an old copy, so a shipped fix could sit unused behind a
-      // stale tab — indistinguishable from "the fix doesn't work". Never store
-      // it, and stamp the running version in so what's loaded is checkable.
-      return reply
+    // The whole app is this one file. With no cache headers the browser was
+    // free to keep an old copy, so a shipped fix could sit unused behind a
+    // stale tab — indistinguishable from "the fix doesn't work". So the
+    // running version is stamped in (what's loaded is checkable) and the
+    // browser must revalidate every load. It used to be no-store and a disk
+    // read per request: 778 KB each time. Now the stamped page is kept in
+    // memory (re-read only when the file changes, so an edited checkout still
+    // shows at once), with an ETag over its bytes: a reload whose copy is
+    // current costs a 304, and a deploy — a new version stamped in, so new
+    // bytes — never matches an old copy (review, 2026-09-29). Weak, because
+    // compression changes the bytes on the wire.
+    const pageVersion = deps.appVersion ?? APP_VERSION;
+    let page: { mtime: number; html: string; etag: string } | undefined;
+    const indexPage = () => {
+      const mtime = statSync(deps.webIndexPath!).mtimeMs;
+      if (page?.mtime !== mtime) {
+        const html = readFileSync(deps.webIndexPath!, 'utf8')
+          .replace('</head>', `<script>window.HATCHABOT_VERSION=${JSON.stringify(pageVersion)};console.info('Hatchabot '+window.HATCHABOT_VERSION);</script></head>`);
+        const digest = createHash('sha256').update(html).digest('base64url').slice(0, 22);
+        page = { mtime, html, etag: `W/"${pageVersion.replace(/[^\w.+-]/g, '_')}-${digest}"` };
+      }
+      return page;
+    };
+    app.get('/', async (req, reply) => {
+      const p = indexPage();
+      reply
         .type('text/html; charset=utf-8')
-        .header('cache-control', 'no-store, must-revalidate')
-        .header('x-hatchabot-version', APP_VERSION)
-        .send(html.replace('</head>', `<script>window.HATCHABOT_VERSION=${JSON.stringify(APP_VERSION)};console.info('Hatchabot '+window.HATCHABOT_VERSION);</script></head>`));
+        .header('cache-control', 'no-cache')
+        .header('etag', p.etag)
+        .header('x-hatchabot-version', pageVersion);
+      if (etagMatches(req.headers['if-none-match'], p.etag)) return reply.code(304).send();
+      return reply.send(p.html);
     });
 
     // PWA assets so the web app is installable to a phone home screen. Served
@@ -4799,7 +4852,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (kind === 'file') reply.header('content-length', String(size));
     return reply.send(stream);
   };
-  app.get<{ Params: { id: string }; Querystring: { path?: string; inline?: string } }>('/v1/agents/:id/fs/file', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file', req.query.inline === '1'));
+  app.get<{ Params: { id: string }; Querystring: { path?: string; inline?: string } }>('/v1/agents/:id/fs/file', NO_COMPRESS, (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'file', req.query.inline === '1'));
 
   /** Upload one file into a folder of the agent's home (raw body). */
   app.put<{ Params: { id: string }; Querystring: { path?: string; name?: string; overwrite?: string } }>('/v1/agents/:id/fs/file', async (req, reply) => {
@@ -4822,7 +4875,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (res.code !== 0) return fsFailure(reply, res.code);
     return { ok: true, path: t.rel, name, size: body.length };
   });
-  app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/archive', (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'archive'));
+  app.get<{ Params: { id: string }; Querystring: { path?: string } }>('/v1/agents/:id/fs/archive', NO_COMPRESS, (req, reply) => fsStream(req, reply, req.params.id, req.query.path, 'archive'));
 
   app.put<{ Params: { id: string; name: string }; Body: { content?: string } }>(
     '/v1/agents/:id/files/:name',
@@ -5223,13 +5276,13 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { approved };
   });
 
-  app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui', async (req, reply) => {
+  app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui', NO_COMPRESS, async (req, reply) => {
     // The UI is a SPA served from a directory; without the trailing slash its
     // relative asset paths would resolve one level too high.
     return reply.redirect(`/v1/agents/${req.params.id}/ui/`);
   });
 
-  app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', async (req, reply) => {
+  app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', NO_COMPRESS, async (req, reply) => {
     const target = await gatewayTarget(req, req.params.id);
     if (!target) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     const path = `/${req.params['*'] ?? ''}`;
@@ -5935,7 +5988,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // ---- chat history (from the agent's own transcript store) ----------------
   // The Telegram Bot API can't read past messages; OpenClaw's session files can,
   // including conversations from before a reset. Owner only.
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/transcript', async (req, reply) => {
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/transcript', NO_COMPRESS, async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
     if (!['RUNNING', 'STOPPED', 'ARCHIVED'].includes(agent.state) || isBusy(agent.id)) {
@@ -8333,7 +8386,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // The archive contains the bot token — it IS the agent's identity — so the
   // download is a credential. The export leaves the agent STOPPED here: once
   // it's imported elsewhere, two pollers on one bot would flip-flop.
-  app.get<{ Params: { id: string } }>('/v1/agents/:id/backup', async (req, reply) => {
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/backup', NO_COMPRESS, async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // A moved-away copy's archive carries the live bot token — refuse it.
@@ -8407,6 +8460,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // agent that provisions its own bot (pool or paste), owned by the importer.
   app.get<{ Params: { id: string }; Querystring: { excludeMemory?: string } }>(
     '/v1/agents/:id/export',
+    NO_COMPRESS,
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent) return reply.code(404).send({ error: 'Not found' });
