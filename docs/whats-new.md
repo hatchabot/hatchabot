@@ -22,7 +22,14 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   it used to show the size of each conversation, not what was spent, so a
   busy agent looked cheap. The last 8 days fill in at once. Status → Usage
   also shows the last 3, 6, 9 or 12 hours.
-- **A full review, 47 fixes** (v2.103.0): rebuilds no longer re-index memory
+- **Usage counts everything** (v2.104.0): every call (the old count missed
+  those under a second) and the scheduled-task sessions OpenClaw archives.
+  History resets once and refills 8 days.
+- **Sign out on every device**, in the account menu; removing a person ends
+  their sessions too.
+- **A faster page**: compressed, and cached until an update.
+- **Nightly backups about a third smaller**: caches the agent rebuilds are left out.
+- **A full review, 38 fixes** (v2.103.0): rebuilds no longer re-index memory
   every time, no stray containers left on agent storage, Google accounts stop
   failing on every wake, partial backups and uncovered agents are flagged,
   duplicate snapshots skipped, sleeping agents stay asleep after a failed move,

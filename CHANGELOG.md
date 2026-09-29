@@ -2,6 +2,27 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.104.0] — 2026-09-29
+
+The larger fixes from the full review, each approved first.
+
+### Usage
+- **Usage now counts every call.** Requests used to come from OpenClaw's log, which records only calls slower than a second, so every request figure was 10–28% low. They now come from the transcripts, which have every call; the log still supplies refusals (429s) and failures.
+- **Usage now includes deleted and reset sessions.** OpenClaw moves a finished scheduled-task session into an archive hours after it runs, and Usage stopped seeing it: Retro Stock Picker showed 30M tokens where it had used 135M. The archives, sessions reset before the 2026.9 upgrade, and deleted-session files are all read now, each call counted once.
+- Because the counter now counts more, Usage's history is reset once on upgrade: each agent's first reading refills its last 8 days, so the hour to week views are right at once; the 30-day trend restarts.
+
+### Sign-in
+- **Sign out on every device.** The account menu (and the classic header) now has "Sign out on every device". It ends every session you have, on every phone, tablet and computer, including this one. Until now, a Google sign-in left on a borrowed or lost device kept working for its full 14 days, even after you signed out. It works the same with Google sign-in, local accounts and the shared password. Plain "Sign out" still signs out only the browser you're using.
+- **Removing or disabling a person signs them out everywhere.** When the host owner removes an account, its sessions end at once. Disabling an account ends its sessions too, and re-enabling it later doesn't bring the old sessions back.
+- Existing sessions keep working through the upgrade. Nobody has to sign in again until they choose "Sign out on every device".
+
+### Faster page
+- The app loads faster, especially on a phone: the page and its data are now sent compressed (the page drops from about 780 KB to about 225 KB, and the agent list refreshed every few seconds shrinks by 10x or more). File downloads, backups and the agent console are sent exactly as before.
+- Reloading the app no longer downloads the whole page again when nothing has changed; the browser checks that its copy is current, and after an update it always gets the new version.
+
+### Backups
+- Nightly backups are about a third smaller. They now skip the caches an agent rebuilds by itself: the Control UI copy OpenClaw re-creates on every start, OpenClaw's temporary files, npm's download cache and pip's download cache. Plugins, globally installed tools, workspaces and the rest of `~/.cache` are still backed up, and a restored agent rebuilds the skipped caches when it starts. "Download copy" and moves are unchanged.
+
 ## [2.103.0] — 2026-09-29
 
 A full review (six reviewers across the whole codebase, every finding re-checked by a second; 47 confirmed) and the fixes for everything small. The larger ones follow separately.
