@@ -153,3 +153,13 @@ describe('history follows the source that served it, not the agent', () => {
     expect(after.agents).toBe(0); // …while "agents on it now" correctly drops
   });
 });
+
+describe('liveAgents', () => {
+  it('leaves archived agents out of the count the rate-limit banner shows', async () => {
+    const { store } = await world();
+    store.setAgentState('b', 'ARCHIVED');
+    const src = summarizeSourceUsage(store, OWNER).find((s) => s.id === 'max')!;
+    expect(src.agents).toBe(2); // still attached to the source
+    expect(src.liveAgents).toBe(1); // …but only one can answer
+  });
+});

@@ -1016,7 +1016,7 @@
   <iframe id="consoleFrame" title="Agent console" src="about:blank"></iframe>
 </dialog>
 
-<dialog id="loginDlg">
+<dialog id="loginDlg" closedby="none">
   <h3 style="margin:0 0 4px">Welcome back</h3>
   <form id="pwLogin" onsubmit="event.preventDefault();doLogin()">
     <div class="sub">Enter the Hatchabot password for this machine.</div>
@@ -1097,7 +1097,7 @@
   <div class="err" id="loginErr"></div>
 </dialog>
 
-<dialog id="recoveryDlg" style="max-width:520px">
+<dialog id="recoveryDlg" closedby="none" style="max-width:520px">
   <h3 style="margin:0 0 6px">Your recovery code</h3>
   <div class="sub" id="recoveryLede">If you ever forget your password, this code lets you choose a new one — with no Telegram, no email and no one else's help. Keep it somewhere safe, away from this computer: a password manager, or on paper.</div>
   <div id="recoveryCode" style="font:600 22px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;text-align:center;margin:16px 0;padding:14px;border:1px dashed var(--line);border-radius:10px;user-select:all;word-break:break-all"></div>
@@ -3016,6 +3016,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const acts = $('v2HubActions'), acct = document.querySelector('#v2Header .v2acct');
   if (acts && acct) acct.parentNode.insertBefore(acts, acct);
   $('recoveryDlg')?.addEventListener('cancel', (e) => { if (!$('recoverySaved').checked) e.preventDefault(); });
+  // Esc is stopped at the key as well: a browser lets a second Esc past a refused 'cancel'.
+  $('recoveryDlg')?.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('recoverySaved').checked) e.preventDefault(); });
 });
 function showRecoveryCode(code, lede) {
   // Gone from the page when the dialog closes: a one-time code must not sit in the DOM for the next person at the keyboard.
@@ -3104,6 +3106,7 @@ document.addEventListener('keydown', (e) => {
 });
 // dialogs shouldn't be escapable into a broken page when auth is required
 loginDlg?.addEventListener('cancel', (e) => e.preventDefault());
+loginDlg?.addEventListener('keydown', (e) => { if (e.key === 'Escape') e.preventDefault(); });
 
 let toastTimer;
 function toast(msg, ms, cls) {
@@ -4605,9 +4608,11 @@ const fmtN = (n) => n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 
 const clock = (iso) => new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
 function renderLimitBanner() {
   const el = $('limitBanner'); if (!el) return;
-  const limited = (sourceUsageData?.sources || []).filter(s => s.status === 'limited' && s.agents);
+  // Archived agents can't answer anyway: count the live ones (an older server sends only `agents`).
+  const live = (s) => s.liveAgents ?? s.agents;
+  const limited = (sourceUsageData?.sources || []).filter(s => s.status === 'limited' && live(s));
   el.hidden = !limited.length;
-  el.innerHTML = limited.map(s => `⛔ <b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — its ${s.agents} agent${s.agents === 1 ? '' : 's'} can't answer until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
+  el.innerHTML = limited.map(s => `⛔ <b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — its ${live(s)} agent${live(s) === 1 ? '' : 's'} can't answer until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
 }
 /**
  * Time markers for a bar chart over a period (Chris, 2026-09-25): which
@@ -6949,7 +6954,6 @@ function prepareEdit(id, name, tab = 'def') {
   $('editProfile').innerHTML = profiles.map(p =>
     `<option value="${p.id}"${p.id === cur?.aiProfileId ? ' selected' : ''}>${sourceOptionLabel(p)}</option>`).join('');
   renderModelPickerForAgent(cur);
-  const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
   void populateImagePicker(cur?.image ?? '');
   if ($('editEmbedMode')) { $('editEmbedMode').value = cur?.embedMode || 'baked'; $('embedModeStatus').textContent = cur ? embedModeText(cur) : ''; }
   editParams = (cur?.parameters ?? []).map(p => ({ ...p }));
@@ -6960,11 +6964,7 @@ function prepareEdit(id, name, tab = 'def') {
   $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
   $('editCheckpoint').checked = true; // shared control — reset to safe default so a prior card's uncheck doesn't silently drop this agent's conversation on switch
   $('editShared').checked = !!cur?.sharedMemory;
-  $('editShared').disabled = otherMembers.length > 0;
-  $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
-  $('editSharedLock').textContent = otherMembers.length
-    ? `Locked — this agent has ${otherMembers.length} other member${otherMembers.length > 1 ? 's' : ''}. Remove them first to change how memory is shared.`
-    : '';
+  renderSharedLock(id);
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   renderDataList(cur?.dataSources);
@@ -8173,6 +8173,16 @@ function renderHealth(h) {
   $('healthBody').innerHTML = body + rows.join('');
 }
 
+/** Shared memory can't change while other people are members. Drawn again
+ *  when the members arrive: v2 reads them on opening the sheet, not on a poll. */
+function renderSharedLock(id) {
+  const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
+  $('editShared').disabled = otherMembers.length > 0;
+  $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
+  $('editSharedLock').textContent = otherMembers.length
+    ? `Locked — this agent has ${otherMembers.length} other member${otherMembers.length > 1 ? 's' : ''}. Remove them first to change how memory is shared.`
+    : '';
+}
 async function renderEditMembers() {
   const el = $('tgMemberList');
   if (!el) return;
@@ -8180,6 +8190,7 @@ async function renderEditMembers() {
   try {
     const ms = (members[forId] = await api(`/v1/agents/${forId}/members`));
     if (editAgentId !== forId) return;
+    renderSharedLock(forId);
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
       const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
       // Someone who redeemed an invite and never messaged: their window has
@@ -8525,6 +8536,21 @@ async function addCronJob() {
   } catch (e) { $('cronErr').textContent = e.message; }
   finally { $('cronAddBtn').disabled = false; }
 }
+/** How a task's runs are going, from the scheduler's own state: a task that
+ *  fails every day looked exactly like a healthy one (night review). */
+function cronRunLine(c) {
+  const errs = Number(c.consecutiveErrors) || 0;
+  const failing = errs > 0 || c.lastStatus === 'error';
+  const bits = [];
+  if (c.lastRunAtMs) {
+    const when = ago(new Date(c.lastRunAtMs).toISOString());
+    bits.push(failing ? `last run failed ${when}${errs > 1 ? ` · ${errs} in a row` : ''}`
+      : `last run ${c.lastStatus && c.lastStatus !== 'ok' ? esc(c.lastStatus) + ' ' : 'ok '}${when}${c.lastDelivered === false ? ' · not delivered' : ''}`);
+  } else if (failing) bits.push(errs > 1 ? `failing · ${errs} in a row` : 'last run failed');
+  if (c.enabled !== false && c.nextRunAtMs) bits.push(`next ${esc(clock(new Date(c.nextRunAtMs).toISOString()))}`);
+  if (!bits.length) return '';
+  return `<div class="sub cronRuns">${failing ? '<span class="chip FAILED">failing</span> ' : ''}${bits.join(' · ')}</div>`;
+}
 function renderCrons(crons) {
   if (!crons.length) {
     $('cronList').innerHTML = '<div class="sub">No scheduled tasks yet — add one below.</div>';
@@ -8538,12 +8564,14 @@ function renderCrons(crons) {
       <span class="grow">
         <b>${esc(c.name || '(unnamed task)')}</b> <span class="chip" title="Declared by OpenClaw itself; it cannot be changed or deleted from here">built into OpenClaw</span>
         <div class="sub">⏱ ${esc(cronScheduleLabel(c))}</div>
+        ${cronRunLine(c)}
         ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
       </span></div>`;
     return `<div class="pair" style="align-items:flex-start">
       <span class="grow">
         <b>${esc(c.name || '(unnamed task)')}</b> ${c.enabled ? '' : '<span style="color:var(--dim)">· disabled</span>'}
         <div class="sub">⏱ ${esc(cronScheduleLabel(c))}${c.payloadKind === 'command' ? ' · shell' : ''}</div>
+        ${cronRunLine(c)}
         ${msg ? `<div class="sub" style="margin-top:2px;opacity:.85">${esc(msg.slice(0, 160))}${msg.length > 160 ? '…' : ''}</div>` : ''}
       </span>
       <button onclick="editCronJob('${jsq(c.id)}')" title="Load this task into the form below — saving replaces it">✏️ Edit</button>
@@ -10459,7 +10487,7 @@ function mgmtCardPlace(p) {
 
 
 
-let pollTimer, pairTick = 0;
+let pollTimer, pairTick = 0, pollPaused = false;
 async function refresh(withMeta) {
   void refreshInboxBadge(); // keep the inbox count live without opening it
   try {
@@ -10487,20 +10515,27 @@ async function refresh(withMeta) {
     agents = await api('/v1/agents');
     agentsLoaded = true;
     $('offlineBanner').hidden = true; // reached the server: any earlier warning is stale
-    loadActivity();
+    // The classic Activity card; v2 hides it (Status → Activity loads its own).
+    if (!UI_V2) loadActivity();
     // Presence strip: cheap single-row read, but 30s staleness is fine —
     // refresh it on the meta pass and every 4th poll.
     if (withMeta || mgmtTick++ % 4 === 0) { void loadSourceUsage(); void loadProposals(); void loadBackupAge(); loadFleetKeys(); }
     if (withMeta && tailnet === null) void loadTailnet();
     // Pairing checks hit docker exec — do them on a slower cadence.
     if (pairTick++ % 3 === 0) {
-      const running = agents.filter(a => a.state === 'RUNNING');
+      // Only agents in a chat app can be knocked on: one with none answers 404.
+      const running = agents.filter(a => a.state === 'RUNNING' && v2ChannelKinds(a).length);
       const results = await Promise.allSettled(running.map(a => api(`/v1/agents/${a.id}/pairing`)));
       pairings = {};
       results.forEach((r, i) => { if (r.status === 'fulfilled') pairings[running[i].id] = r.value; });
-      const mres = await Promise.allSettled(agents.map(a => api(`/v1/agents/${a.id}/members`)));
-      members = {};
-      mres.forEach((r, i) => { if (r.status === 'fulfilled') members[agents[i].id] = r.value; });
+      // Members show only on the classic cards; v2 reads them when a sheet
+      // opens (renderEditMembers). Archived agents have nobody to show.
+      if (!UI_V2) {
+        const live = agents.filter(a => a.state !== 'ARCHIVED');
+        const mres = await Promise.allSettled(live.map(a => api(`/v1/agents/${a.id}/members`)));
+        members = {};
+        mres.forEach((r, i) => { if (r.status === 'fulfilled') members[live[i].id] = r.value; });
+      }
     }
     // Don't re-render out from under a drag, or an open position picker (it would close).
     renderSetup(); if (!drag.st?.active && !document.activeElement?.classList?.contains('posdd')) renderAgents();
@@ -10515,8 +10550,14 @@ async function refresh(withMeta) {
   }
   const busy = agents.some(a => a.busy || a.state === 'PROVISIONING' || a.state === 'REBUILDING' || a.state === 'DELETING');
   clearTimeout(pollTimer);
-  pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
+  // A tab nobody is looking at does not poll: it catches up the moment it is
+  // shown again (below). Each poll costs the server about a second.
+  pollPaused = document.hidden;
+  if (!pollPaused) pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
 }
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && pollPaused) { pollPaused = false; void refresh(false); }
+});
 
 /**
  * Escape for a JS string literal that lives inside an HTML attribute
@@ -11123,6 +11164,7 @@ function v2RenderSheet() {
   $('v2Tabs').hidden = !tabs.length;
   $('v2Tabs').innerHTML = tabs.map(([k, l]) => `<button role="tab" aria-selected="${k === v2Tab}" onclick="openV2Agent('${jsq(a.id)}','${k}')">${l}</button>`).join('');
   v2ParkPanes();
+  v2SheetSig = v2SheetSigOf(a);
   $('v2Pane').innerHTML = v2Mine(a) ? v2Pane(a, v2Tab) : v2MemberPane(a);
   if (v2Mine(a)) v2EmbedPanes(a, v2Tab);
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
@@ -11212,15 +11254,33 @@ async function v2UploadFiles(id, path, files) {
 }
 
 function v2MemberPane(a) {
-  const run = a.state === 'RUNNING' && a.deepLink;
+  // Every app it is in, not only Telegram. Asleep is not down: a Telegram
+  // message wakes it, so the link stays (only Telegram agents sleep).
+  const asleep = a.state === 'STOPPED' && !!a.hibernatedAt;
+  const links = a.state === 'RUNNING' || asleep ? agentChannelLinks(a) : [];
+  const apps = v2ChannelKinds(a).map(k => V2_CHAN_LABEL[k]);
+  const named = apps.length > 1 ? `${apps.slice(0, -1).join(', ')} or ${apps.at(-1)}` : apps[0];
   return `<div class="v2row"><div class="v2k">Chat</div><div class="v2v">
-      ${run ? `<a class="btn primary" href="${esc(a.deepLink)}" target="_blank" rel="noopener">Open in Telegram</a>
-               <a class="btn" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : '<span>Not running right now.</span>'}
-      <span class="sub">It answers in Telegram, which works wherever you are.</span></div></div>
+      ${links.map((l, i) => `<a class="btn${i ? '' : ' primary'}" href="${esc(l.url)}" target="_blank" rel="noopener">Open in ${V2_CHAN_LABEL[l.kind]}</a>`).join('')}
+      ${links.some(l => l.kind === 'telegram') ? `<a class="btn" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : ''}
+      ${asleep ? '<span>Asleep — a message wakes it.</span>' : links.length ? '' : '<span>Not running right now.</span>'}
+      ${named ? `<span class="sub">It answers in ${named}, which works wherever you are.</span>` : ''}</div></div>
     ${a.persona ? `<div class="v2row"><div class="v2k">What it does</div><div class="v2v">${esc(a.persona)}</div></div>` : ''}
     <div class="v2row"><div class="v2k">Memory</div><div class="v2v">${a.sharedMemory ? 'Shared — it remembers what everyone who uses it tells it.' : 'Private to each person who talks to it.'}</div></div>`;
 }
 
+/** Why a tab that reads from the running container is empty, in the agent's
+ *  real state: a rebuild or a failure is not "stopped — start it". */
+function v2NotRunning(a, what) {
+  switch (a.state) {
+    case 'PROVISIONING': return `It is being set up — ${what} show here once it is running.`;
+    case 'REBUILDING': return `It is being rebuilt — ${what} show here again in a minute.`;
+    case 'FAILED': return `It failed to start — see Overview, then Retry. ${what[0].toUpperCase() + what.slice(1)} show here once it is running.`;
+    case 'ARCHIVED': return `It is archived — restore it to see ${what}.`;
+    case 'DELETING': return 'It is being deleted.';
+    default: return a.hibernatedAt ? `It is asleep — wake it to see ${what}.` : `It is stopped — start it to see ${what}.`;
+  }
+}
 /** The pill colour for a status — the bar and anything else that shows one. */
 const v2PillCls = (st) => st.cls === 'ok' ? 'ok' : st.cls === 'blocked' ? 'bad' : st.cls === 'waiting' ? 'info' : 'warn';
 
@@ -11292,8 +11352,8 @@ function v2Pane(a, tab) {
       ${slot('paneEditPeers')}`;
     }
     case 'usage': return run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
-      : row('Usage', `<span>${a.hibernatedAt ? 'It is asleep' : 'It is stopped'} — its figures are read from its container, so start it to see them. Status → Usage still counts what it used while running.</span>`);
-    case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${a.hibernatedAt ? 'It is asleep — wake it to see its tasks.' : 'Start it to see its tasks.'}</span>`);
+      : row('Usage', `<span>${v2NotRunning(a, 'its figures')} They are read from its container; Status → Usage still counts what it used while running.</span>`);
+    case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${v2NotRunning(a, 'its tasks')}</span>`);
     case 'files': return built ? `<div id="v2Files" data-agent="${id}"><div class="sub">Loading…</div></div>`
       : row('Files', '<span>Nothing is built yet.</span>');
     case 'advanced': return `
@@ -11729,11 +11789,19 @@ async function v2SetGroup(id, value) {
 
 // Keep an open sheet current as the poll brings news (a pairing request, a
 // finished rebuild), but never repaint a pane someone is typing in.
+/** Tabs that load their own content (a volume listing, the channels, the
+ *  usage read): repainted only when the agent itself changed, never on a
+ *  plain poll — each repaint reloaded them, and an upload lost its progress. */
+const V2_SELF_LOADING = { files: 1, channels: 1, slack: 1, usage: 1 };
+let v2SheetSig = '';
+const v2SheetSigOf = (a) => JSON.stringify([a.id, a.state, a.hibernatedAt ?? null, a.runtimeRef ?? null, a.botUsername ?? null, a.otherChannels ?? [], pairings[a.id] ?? []]);
 function v2RefreshSheet() {
   if (!v2AgentDlg.open) return;
   const pane = $('v2Pane');
+  const a = v2Find(v2AgentId);
+  const same = V2_SELF_LOADING[v2Tab] && a && v2Mine(a) && v2SheetSigOf(a) === v2SheetSig;
   // Tabs holding the edit sections manage their own state; only repaint the bar.
-  const busy = V2_EMBED[v2Tab] || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
+  const busy = V2_EMBED[v2Tab] || same || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
   if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
 }
 v2AgentDlg.addEventListener('close', () => { v2ParkPanes(); v2AgentId = null; v2EditFor = null; });
@@ -12011,7 +12079,7 @@ async function loadFleetKeys() {
 }
 async function loadBackupAge() {
   try {
-    const r = await api('/v1/backups');
+    const r = await api('/v1/backups?latest=1');
     const newest = (r.backups ?? [])[0];
     backupAgeH = newest ? (Date.now() - Date.parse(newest.date + 'T03:30:00')) / 3600_000 : null;
   } catch { backupAgeH = null; } // not the host owner, or no backups configured
@@ -12367,7 +12435,9 @@ refresh(true);
       if (e.target !== dlg) return;
       const r = dlg.getBoundingClientRect();
       const inPanel = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-      if (!inPanel) dlg.close();
+      // Through 'cancel', so a dialog that refuses to go (the sign-in, a
+      // recovery code not yet saved) refuses a stray click too, as it does Esc.
+      if (!inPanel && dlg.dispatchEvent(new Event('cancel', { cancelable: true }))) dlg.close();
     });
   }
 </script>

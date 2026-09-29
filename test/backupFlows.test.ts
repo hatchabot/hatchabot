@@ -63,6 +63,20 @@ describe('Backups list — GET /v1/backups', () => {
     expect(set.hasDb).toBe(true);
     expect(set.hasKey).toBe(false);
   });
+
+  it('?latest=1 answers with the newest set only, without its volume list (the home screen polls it)', async () => {
+    const w = await makeWorld();
+    await seedRunningAgent(w, { id: 'a1' });
+    writeSet('2026-08-20', w, ['a1']);
+    writeSet('2026-08-21', w, ['a1']);
+    const res = await w.f.inject({ method: 'GET', url: '/v1/backups?latest=1', headers: as() });
+    expect(res.statusCode).toBe(200);
+    const { backups } = res.json();
+    expect(backups).toHaveLength(1);
+    expect(backups[0]).toMatchObject({ date: '2026-08-21', volumes: [] });
+    // Still the machine owner's alone.
+    expect((await w.f.inject({ method: 'GET', url: '/v1/backups?latest=1', headers: as('someone-else') })).statusCode).toBe(403);
+  });
 });
 
 describe('Backups restore — POST /v1/backups/restore', () => {
