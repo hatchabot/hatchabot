@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.108.0] — 2026-09-29
+
+### Added
+- **Chat on the web, for people you trust.** Someone you invite can now talk to an agent from Hatchabot's own page, with no Telegram, Discord or Slack needed. They open the agent and press **💬 Chat**. They see only their own conversation; the agent's memory is still shared.
+- **A third way to invite.** The invite dialog now offers **Chat on the web — for people you trust**. The link asks them to sign in to this Hatchabot: with Google on a Google sign-in install, or with their account on an accounts install. Once signed in they are in at once, with no pairing and no waiting window. For an agent that isn't in any chat app yet, this is the only way offered.
+- **Web chat on the Members list.** A member who has web chat shows a **web chat** badge and a **Turn off web chat** button. A member who signs in here can be given it with **Allow web chat…**, which asks first. Removing a member ends their web chat too.
+- **Know what you hand over.** A web chat message runs with your rights on that agent. Through it, the person can schedule tasks and change the agent's settings. The invite, the switch and the docs all say so.
+- New setting `HATCHABOT_WEB_CHAT_PER_HOUR` (default 60) sets how many messages one person may send one agent per hour.
+
 ## [2.107.2] — 2026-09-29
 
 ### Changed

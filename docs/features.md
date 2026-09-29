@@ -909,6 +909,25 @@ six at a time). An agent's own pin lives in its ⚙ Advanced → Runtime image a
 dropdown of every image with a line saying what each one is, and **Fleet
 default** at the top to put it back. **Pin & rebuild** does both at once — the agent moves onto the image right away, memory kept (a stopped one moves when it starts).
 
+## Chat on the web
+
+People you trust can talk to one of your agents from Hatchabot's own page, with no chat app needed.
+
+**Inviting someone.** Open the agent → **Sharing** → **Invite…**, then under **Chat on the web — for people you trust** press **Make a web chat link** and send it to them. It works once and expires in 48 hours. When they open it they give their name and sign in:
+
+- on a Google sign-in install, with Google on the join page. If you limit who may sign in (`HATCHABOT_ALLOWED_EMAILS`), add their address first;
+- on an accounts install, with the account you made for them (⚙ Settings → Access). If they are already signed in on that browser, they just press Join.
+
+They are in straight away: no pairing, no waiting window. Someone who already talks to the agent in a chat app and signs in here can also be given web chat from the Members list (**Allow web chat…**). A member who joined without signing in has no way to reach this page as themselves, so send them a web chat invite instead. An install with one shared password has no accounts, so it doesn't offer web chat.
+
+**What they can do.** They open Hatchabot, tap the agent and press **💬 Chat**. Each person has a conversation of their own and sees only that. The agent's memory is shared, just as it is for chat-app members: what they tell it may be remembered and used with the others. The agent is told who is writing ("[Sam via the web app]"). A sleeping agent wakes when they write. They can send up to `HATCHABOT_WEB_CHAT_PER_HOUR` messages an hour (60 by default), one at a time.
+
+**The rights caveat. Read this before you invite anyone.** For now, a web chat message runs through OpenClaw as you, the agent's owner. That means a web chat guest has your rights on that agent. Through it they can **schedule tasks** (OpenClaw's `cron` tool) and **change its settings** (its `gateway` tool). Only invite people you'd hand your laptop to. A later version will give web guests a limited identity of their own.
+
+**They need to reach this machine.** Web chat is this Hatchabot's own page, so the person must be able to open it: on your Tailscale network, or however you reach Hatchabot from other devices. Chat-app members don't need that.
+
+**Turning it off.** In the Members list, **Turn off web chat** stops it and leaves their chat-app access alone. **Remove** ends both. Owners can't give themselves web chat; they always have the console.
+
 ## The settings file (.env)
 
 `.env` lists every setting Hatchabot has, in groups (Basics, Sign-in, Data

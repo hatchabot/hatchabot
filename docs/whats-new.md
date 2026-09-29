@@ -22,6 +22,9 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   it used to show the size of each conversation, not what was spent, so a
   busy agent looked cheap. The last 8 days fill in at once. Status → Usage
   also shows the last 3, 6, 9 or 12 hours.
+- **Chat on the web for people you trust** (v2.108.0): invite someone to
+  talk to an agent from Hatchabot's own page, no chat app needed. For now
+  they have your rights on that agent, so it's for people you trust.
 - **Memory is shared, said truthfully** (v2.107.0): the "private memory"
   switch never made memory private (an agent has one memory in OpenClaw), so
   it is gone, and everyone who joins an agent is told its memory is shared.
