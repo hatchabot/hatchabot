@@ -63,7 +63,9 @@ const SCENARIOS = String.raw`(() => {
   // Checks refresh by hand; a timed poll mid-check made the suite flaky under load.
   window.__noAutoPoll = true; clearTimeout(pollTimer);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const until = async (f, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); } throw new Error('timed out waiting'); };
+  // 8 s: a condition that holds returns at once; a slow run of headless Chrome
+  // (it happens) used to fail checks that were only late.
+  const until = async (f, ms = 8000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); } throw new Error('timed out waiting'); };
   const calls = (method, re) => window.__calls.filter((c) => c.method === method && re.test(c.path));
   const eq = (what, got, want) => { if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want)); };
   const ok = (what, cond) => { if (!cond) throw new Error(what); };
@@ -388,10 +390,12 @@ const SCENARIOS = String.raw`(() => {
       ok('its warning', body.includes('about 5× its usual day'));
       usageDlg.close();
       // The same page as a tab on the agent's sheet.
-      openV2Agent('a1', 'usage');
-      ok('a Usage tab', !!byText('#v2Tabs button', 'Usage'));
-      await until(() => (document.getElementById('v2UsageBody') || {}).textContent?.includes('Conversation size now'));
-      v2Close(); delete window.__override['/v1/agents/a1/usage'];
+      try {
+        openV2Agent('a1', 'usage');
+        ok('a Usage tab', !!byText('#v2Tabs button', 'Usage'));
+        await until(() => (document.getElementById('v2UsageBody') || {}).textContent?.includes('Conversation size now'))
+          .catch(() => { throw new Error('the Usage tab showed: ' + JSON.stringify((document.getElementById('v2UsageBody') || { textContent: '(no tab body)' }).textContent.slice(0, 160)) + ' state=' + JSON.stringify(agents.find((x) => x.id === 'a1')?.state)); });
+      } finally { v2Close(); delete window.__override['/v1/agents/a1/usage']; }
     },
     agentUsageReadFails: async () => {
       // A read that fails says so; it used to read "No sessions yet — nothing used" (review, 2026-09-29).
@@ -401,6 +405,17 @@ const SCENARIOS = String.raw`(() => {
       ok('names the failure: ' + body.slice(0, 200), body.includes('database is locked'));
       ok('not "nothing used"', !body.includes('nothing used'));
       usageDlg.close(); window.__answer = {};
+    },
+    reopenRightAway: async () => {
+      // Close one agent's sheet and open another in the same moment: the late
+      // close event used to clear the new one, leaving the sheet deaf (2026-09-29).
+      openV2Agent('a1', 'overview');
+      v2Close();
+      openV2Agent('a2', 'overview');
+      await sleep(50);
+      eq('the sheet shows the agent just opened', v2AgentId, 'a2');
+      v2Close();
+      await sleep(50);
     },
     usageHours: async () => {
       // Status → Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
@@ -446,8 +461,16 @@ const SCENARIOS = String.raw`(() => {
       // A real change to the agent still repaints the tab.
       const list = await (await fetch('/v1/agents')).json();
       window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: 'STOPPED' } : a);
+      // Nobody typing: the sheet rightly holds still while a field has focus,
+      // and where focus landed varied from run to run (the old flake).
+      document.activeElement?.blur?.();
       await refresh(false);
-      await until(() => fsCalls() > before).catch(() => { throw new Error('a real change (stopped) did not repaint the Files tab'); });
+      await until(() => fsCalls() > before).catch(() => {
+        const pane = document.getElementById('v2Pane');
+        const a = agents.find((x) => x.id === 'a1');
+        const filled = [...pane.querySelectorAll('input, textarea, select')].filter((i) => (i.value && i.tagName !== 'SELECT') || i === document.activeElement).map((i) => i.id || i.name || i.tagName);
+        throw new Error('a real change (stopped) did not repaint the Files tab: tab=' + v2Tab + ' open=' + v2AgentDlg.open + ' state=' + a?.state + ' sigChanged=' + (v2SheetSigOf(a) !== v2SheetSig) + ' filled=' + JSON.stringify(filled) + ' fs=' + fsCalls() + '/' + before);
+      });
       v2Close(); delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/fs'];
       await refresh(false);
       // Discord: a group-chat choice not yet saved is not reverted by a poll.

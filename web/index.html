@@ -434,10 +434,10 @@
      the version tucks under the wordmark instead of taking a slot beside it,
      and Fleet drops out of the bar (it stays in the account menu, and the
      dashboard tiles open the same screens). */
-  .v2brandtext { display:flex; flex-direction:column; align-items:flex-start; line-height:1.1 }
-  /* .appver centres itself in the classic header's row; under the wordmark it
-     lines up with the H instead. */
-  .v2top #v2AppVer { font-size:10px; line-height:1; margin:1px 0 0; align-self:flex-start }
+  /* The wordmark stands as tall as the egg beside it, with the version on the
+     same line after it (Chris, 2026-09-29). */
+  .v2brandtext { display:flex; flex-direction:row; align-items:center; gap:10px; line-height:1; font-size:30px }
+  .v2top #v2AppVer { font-size:11px; line-height:1; margin:0; align-self:center; font-weight:400; letter-spacing:0 }
   .v2acct { position:relative }
   .v2avatar { width:38px; height:38px; border-radius:50%; border:1px solid var(--line); background:var(--panel-2); color:var(--text);
               font:inherit; font-weight:700; font-size:15px; cursor:pointer; display:grid; place-items:center; padding:0 }
@@ -463,6 +463,10 @@
     .v2btn .lbl { display:none }
     .v2btn { padding:0 11px }
     .v2brand { font-size:18px }
+    /* A phone has no room for both on one line beside the header buttons:
+       the version goes back under the wordmark, at the old size. */
+    .v2brandtext { flex-direction:column; align-items:flex-start; gap:1px; font-size:18px; line-height:1.1 }
+    .v2top #v2AppVer { font-size:10px; align-self:flex-start }
   }
   .res-sort { background:none; border:0; padding:0; font:inherit; color:inherit; cursor:pointer }
   .res-sort.on { color:var(--accent-text, var(--accent)) }
@@ -11785,7 +11789,10 @@ function v2RefreshSheet() {
   const busy = V2_EMBED[v2Tab] || same || pane.querySelector('#healthDlgBody') || [...pane.querySelectorAll('input, textarea, select')].some(i => (i.value && i.tagName !== 'SELECT') || i === document.activeElement);
   if (busy) v2RenderSheetBar(); else { const top = pane.scrollTop; v2RenderSheet(); pane.scrollTop = top; }
 }
-v2AgentDlg.addEventListener('close', () => { v2ParkPanes(); v2AgentId = null; v2EditFor = null; });
+// The close event arrives a task later: reopened by then (close one agent,
+// open the next), it must not clear the agent now showing — that left the
+// sheet deaf to updates and its Usage tab on "Loading…" (2026-09-29).
+v2AgentDlg.addEventListener('close', () => { if (v2AgentDlg.open) return; v2ParkPanes(); v2AgentId = null; v2EditFor = null; });
 
 // ---- icon picker ---------------------------------------------------------------------
 const V2_EMOJI = ['📈', '💹', '🧾', '⚖️', '💰', '🏢', '🏡', '🚗', '✈️', '🧭', '📅', '✅', '☑️', '🍳', '🥗', '🏃', '🩺', '🛡️',

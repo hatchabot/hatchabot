@@ -2,6 +2,15 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.107.1] — 2026-09-29
+
+### Changed
+- The header's Hatchabot wordmark is as tall as the egg beside it, with the version number on the same line after it. On a phone the version stays under the name, so the header buttons still fit.
+
+### Fixed
+- Closing an agent's sheet and opening another right away no longer leaves the new one frozen (not updating, its Usage tab stuck on "Loading…"): the first sheet's late close event was clearing the new one.
+- The click-through checks clean up after a failure and wait up to 8 s, so one slow moment no longer fails the checks after it.
+
 ## [2.107.0] — 2026-09-29
 
 ### Fixed
