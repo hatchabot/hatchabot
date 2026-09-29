@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.108.1] — 2026-09-29
+
+### Fixed
+- The shared-host and clean-install test scripts no longer leave their test VM running. `--keep` now keeps it stopped, so its qemu process exits and gives back its memory (a kept VM held about 10 GB for three days); `--keep-running` leaves it up for poking at by hand. The shared-host script starts a kept VM again when it is reused with `--vm`.
+
 ## [2.108.0] — 2026-09-29
 
 ### Added

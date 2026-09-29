@@ -19,7 +19,8 @@
 #   4. with --ai-source: that source's credential is copied into the VM (never
 #      printed), and scripts/regress-autonomous.sh runs there — about eight
 #      model turns on that source;
-#   5. deletes the VM (unless --keep). Logs stay in ~/hatchabot-clean-install/<time>/.
+#   5. deletes the VM; --keep keeps it STOPPED (its qemu process exits),
+#      --keep-running leaves it up. Logs stay in ~/hatchabot-clean-install/<time>/.
 #
 # Needs LXD (sudo snap install lxd && sudo lxd init --auto && sudo usermod -aG lxd $USER).
 # On a machine that also runs Docker, the VM has no internet until Docker's
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
     --channel) CHANNEL="$2"; shift 2 ;;
     --no-upgrade) UPGRADE=0; shift ;;
     --keep) KEEP=1; shift ;;
+    --keep-running) KEEP=1; KEEP_RUNNING=1; shift ;;   # leave the VM up afterwards (stop it by hand when done)
     --ai-source) AI_SOURCE="$2"; shift 2 ;;
     --installer-url) INSTALLER_URL="$2"; shift 2 ;;
     -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -54,7 +56,10 @@ vmi() { vm "bash -ic $(printf '%q' "$1") 2>&1" | grep -vE '^bash: (cannot set te
 
 command -v lxc >/dev/null || { echo "LXD is not installed. sudo snap install lxd && sudo lxd init --auto && sudo usermod -aG lxd \$USER"; exit 2; }
 cleanup() {
-  if [ "$KEEP" = 1 ]; then echo "kept: $VM   (lxc exec $VM -- su - ubuntu · lxc delete $VM --force)"; return; fi
+  # Kept VMs are stopped unless asked otherwise, so no qemu process is left
+  # holding memory after a run (2026-09-29).
+  if [ "${KEEP_RUNNING:-0}" = 1 ]; then echo "kept RUNNING: $VM   (lxc exec $VM -- su - ubuntu · stop it with: lxc stop $VM)"; return; fi
+  if [ "$KEEP" = 1 ]; then L stop "$VM" --force >/dev/null 2>&1; echo "kept, stopped: $VM   (lxc start $VM · lxc delete $VM --force)"; return; fi
   L delete "$VM" --force >/dev/null 2>&1 && echo "deleted $VM"
 }
 trap cleanup EXIT

@@ -25,18 +25,21 @@
 #      the manager's answer proves its door works under rootless networking;
 #   4. isolation: a tenant's shell and a tenant's container try the other
 #      tenant's ports; the router user and root reach both;
-#   5. deletes the VM (unless --keep). Logs stay in ~/hatchabot-shared-host/<time>/.
+#   5. deletes the VM; --keep keeps it STOPPED (its qemu process exits and
+#      frees ~10 GB), --keep-running leaves it up for poking at by hand.
+#      Logs stay in ~/hatchabot-shared-host/<time>/.
 #
 # Needs LXD (see clean-install-test.sh). On a machine that also runs Docker the
 # VM has no internet until Docker's firewall lets LXD's bridge through; the
 # script checks and says how.
 set -uo pipefail
-CHANNEL=latest; KEEP=0; AI_SOURCE=""; TENANTS=2; VM=""; SHARED=0
+CHANNEL=latest; KEEP=0; KEEP_RUNNING=0; AI_SOURCE=""; TENANTS=2; VM=""; SHARED=0
 INSTALLER_URL="https://raw.githubusercontent.com/hatchabot/hatchabot/main/install.sh"
 while [ $# -gt 0 ]; do
   case "$1" in
     --channel) CHANNEL="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
+    --keep-running) KEEP=1; KEEP_RUNNING=1; shift ;;   # leave the VM up afterwards (it holds ~10 GB until stopped)
     --ai-source) AI_SOURCE="$2"; shift 2 ;;
     --tenants) TENANTS="$2"; shift 2 ;;
     --shared-embedder) SHARED=1; shift ;;
@@ -64,7 +67,10 @@ tenanti() { local u="$1"; shift; tenant "$u" "bash -ic $(printf '%q' "$*") 2>&1"
 
 command -v lxc >/dev/null || { echo "LXD is not installed. sudo snap install lxd && sudo lxd init --auto && sudo usermod -aG lxd \$USER"; exit 2; }
 cleanup() {
-  if [ "$KEEP" = 1 ]; then echo "kept: $VM   (lxc exec $VM -- su - t1 · lxc delete $VM --force)"; return; fi
+  # A kept VM is stopped unless asked otherwise: a running one left behind held
+  # ~10 GB and a CPU for days after a run (hb-s0, 2026-09-29).
+  if [ "$KEEP_RUNNING" = 1 ]; then echo "kept RUNNING: $VM   (lxc exec $VM -- su - t1 · stop it with: lxc stop $VM)"; return; fi
+  if [ "$KEEP" = 1 ]; then L stop "$VM" --force >/dev/null 2>&1; echo "kept, stopped: $VM   (reuse: --vm $VM · delete: lxc delete $VM --force)"; return; fi
   L delete "$VM" --force >/dev/null 2>&1 && echo "deleted $VM"
 }
 trap cleanup EXIT
@@ -76,6 +82,11 @@ if [ "$FRESH" = 1 ]; then
     || { bad "launch a fresh Ubuntu 24.04 VM ($(tail -1 "$OUT/launch.log"))"; exit 1; }
   for _ in $(seq 1 60); do L exec "$VM" -- cloud-init status 2>/dev/null | grep -q done && break; sleep 5; done
   ok "fresh Ubuntu 24.04 VM ($(L exec "$VM" -- uname -m))"
+fi
+if [ "$FRESH" = 0 ]; then
+  # A kept VM is kept stopped: start it, and wait until it answers.
+  L start "$VM" >/dev/null 2>&1 || true
+  for _ in $(seq 1 60); do L exec "$VM" -- true >/dev/null 2>&1 && break; sleep 3; done
 fi
 if ! L exec "$VM" -- sh -c 'timeout 8 ping -c1 -W5 1.1.1.1 >/dev/null 2>&1'; then
   bad "the VM has no internet"
