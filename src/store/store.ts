@@ -2548,7 +2548,8 @@ export class Store {
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(owner_id, day) DO UPDATE SET
            total_tokens = excluded.total_tokens, by_billing = excluded.by_billing,
-           cost_low = excluded.cost_low, cost_high = excluded.cost_high, captured_at = excluded.captured_at
+           cost_low = COALESCE(excluded.cost_low, usage_snapshots.cost_low),
+           cost_high = COALESCE(excluded.cost_high, usage_snapshots.cost_high), captured_at = excluded.captured_at
          WHERE excluded.total_tokens >= usage_snapshots.total_tokens`,
       )
       .run(ownerId, s.day, Math.round(s.totalTokens), JSON.stringify(s.byBilling),
@@ -2718,6 +2719,12 @@ export class Store {
     this.db
       .prepare(`UPDATE usage_snapshots SET used_tokens = MAX(COALESCE(used_tokens, 0), ?) WHERE owner_id = ? AND day = ?`)
       .run(Math.max(0, Math.round(used)), ownerId, day);
+  }
+
+  /** Record a day's API cost, from that day's own use (null: nothing API-billed). A total
+   *  snapshot without a cost leaves it alone (review, 2026-09-29). */
+  setUsageCost(ownerId: string, day: string, low: number | null, high: number | null): void {
+    this.db.prepare(`UPDATE usage_snapshots SET cost_low = ?, cost_high = ? WHERE owner_id = ? AND day = ?`).run(low, high, ownerId, day);
   }
 
   listUsageSnapshots(ownerId: string, limit = 30): Array<{

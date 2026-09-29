@@ -1,7 +1,7 @@
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
-import { computeUsagePeriod, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
+import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
@@ -1746,35 +1746,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // the exact % of a Claude plan isn't readable with a setup-token.
   let usageSampling: Promise<unknown> | null = null;
   let usageSampledAt: string | undefined;
-  /**
-   * The daily trend point, from the newest counter reading of every agent —
-   * the Usage view used to write it only when someone opened it, and only
-   * from a live read of each container.
-   */
-  const snapshotUsageFromSamples = () => {
-    const byOwner = new Map<string, Agent[]>();
-    for (const a of store.listAllActiveAgents()) { const l = byOwner.get(a.ownerId) ?? []; l.push(a); byOwner.set(a.ownerId, l); }
-    for (const [ownerId, list] of byOwner) {
-      const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
-      let total = 0, any = false;
-      for (const a of list) {
-        const t = store.latestTokenTotal(a.id); if (t === undefined) continue;
-        any = true; total += t;
-        const p = store.getAIProfile(a.aiProfileId);
-        const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
-        byBilling[billing] = (byBilling[billing] ?? 0) + t;
-      }
-      if (any) {
-        const day = new Date().toISOString().slice(0, 10);
-        store.upsertUsageSnapshot(ownerId, { day, totalTokens: total, byBilling });
-        // The day's own use, from per-sample deltas: differencing lifetime
-        // sums counted an agent's whole history on the day it came back from
-        // a long stop, or arrived by import (night review, 2026-09-28).
-        const used = store.tokenDeltas(new Set(list.map((a) => a.id)), `${day}T00:00:00.000Z`).reduce((s, d) => s + d.delta, 0);
-        store.setUsageUsed(ownerId, day, used);
-      }
-    }
-  };
+  /** The daily trend point, from the sampler's readings (fleetUsage.ts). */
+  const snapshotUsageFromSamples = () => snapshotDailyUsage(store);
   /** A spike warning goes to the owner's own Telegram: from their Hatchabot
    *  agent's bot, else from the busy agent's own bot. */
   const tellUsageSpike = async (ownerId: string, agent: Agent, text: string) => {
@@ -6306,10 +6279,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // and the smaller one used to pull the day down (use-case audit, 2026-09-27).
     if (agentsUsage.length) {
       try {
-        store.upsertUsageSnapshot(ownerId, {
-          day: new Date().toISOString().slice(0, 10),
-          totalTokens, byBilling, costLow: cost?.low ?? null, costHigh: cost?.high ?? null,
-        });
+        // No cost: this one prices LIFETIME totals, which on a day's bar read
+        // as that day's spend; the sampler prices the day's own use (review, 2026-09-29).
+        store.upsertUsageSnapshot(ownerId, { day: localDay(Date.now()).day, totalTokens, byBilling });
       } catch { /* trend is a nicety; never break the view */ }
     }
     return {
