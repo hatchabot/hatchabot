@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.107.2] — 2026-09-29
+
+### Changed
+- The version beside the header wordmark sits on the same baseline as "Hatchabot".
+
 ## [2.107.1] — 2026-09-29
 
 ### Changed

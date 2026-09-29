@@ -436,8 +436,9 @@
      dashboard tiles open the same screens). */
   /* The wordmark stands as tall as the egg beside it, with the version on the
      same line after it (Chris, 2026-09-29). */
-  .v2brandtext { display:flex; flex-direction:row; align-items:center; gap:10px; line-height:1; font-size:30px }
-  .v2top #v2AppVer { font-size:11px; line-height:1; margin:0; align-self:center; font-weight:400; letter-spacing:0 }
+  .v2brandtext { display:flex; flex-direction:row; align-items:baseline; gap:10px; line-height:1; font-size:30px }
+  /* On the wordmark's baseline: its text sits on the same line as "Hatchabot". */
+  .v2top #v2AppVer { font-size:11px; line-height:1; margin:0; align-self:baseline; font-weight:400; letter-spacing:0 }
   .v2acct { position:relative }
   .v2avatar { width:38px; height:38px; border-radius:50%; border:1px solid var(--line); background:var(--panel-2); color:var(--text);
               font:inherit; font-weight:700; font-size:15px; cursor:pointer; display:grid; place-items:center; padding:0 }
