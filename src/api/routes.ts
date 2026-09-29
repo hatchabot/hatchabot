@@ -110,6 +110,7 @@ import {
 } from '../orchestrator/template.js';
 import { agentHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
+import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
 import { memoryPolicySection, replaceMemoryPolicy, replaceSection, extractSection, DATA_SOURCES_HEADING } from '../openclaw/workspace.js';
 import {
@@ -2227,6 +2228,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // no longer names (runtimePins.ts): once its gateway answers, clear them.
   const clearPinsWhenUp = (a: Agent): void => {
     if (!a.runtimeRef) return;
+    forgetDmPolicy(a.id); // started or woken: the door is asserted afresh at the next rest
     void clearStaleRuntimePinsWhenUp(providerFor(a.hostId), a.runtimeRef, a.slug, (e, d) => trace(a.id)(e, d)).catch(() => {});
     // Google accounts attached or detached while it was stopped or asleep take
     // effect now, not at its next rebuild: a detached account used to stay

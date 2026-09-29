@@ -2,6 +2,7 @@ import type { ChannelKind } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { normalizeHandle, Store } from '../store/store.js';
 import { ID_SHAPE } from './channelIds.js';
+import { forgetDmPolicy } from './dmPolicyMemo.js';
 
 /**
  * First-contact claim (the §12.4 owner-lockout fix), built on OpenClaw's
@@ -174,6 +175,7 @@ export async function claimFirstContact(
   }).catch(() => false);
   /** Back to silence, unless the owner wants this agent open to anyone — or another window is still waiting for its person. */
   const restoreDoor = async (): Promise<void> => {
+    forgetDmPolicy(opts.agentId); // a window closing re-asserts the door for real
     const agent = deps.store.getAgent(opts.agentId);
     if (!agent || agent.allowKnocks) return;
     if (deps.store.pairingWindows(opts.agentId).some((w) => w.seat !== seat)) return;

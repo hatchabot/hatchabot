@@ -21,6 +21,7 @@ import { autoSnapshot, writeFileInAgent } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
+import { forgetDmPolicy } from './dmPolicyMemo.js';
 import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 
@@ -292,6 +293,7 @@ async function runProvisionStepsInner(
     // Step 4: runtime + persistent volume.
     log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
     const { runtimeRef } = await provider.provision(spec);
+    forgetDmPolicy(agentId); // the seed wrote the channel config afresh
     recordApplied(store, agentId);
     store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant
     // Purge ONLY storage this run created. On a retry, spec.previousRef makes
@@ -946,6 +948,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     // can be asked what it is doing (the Setup log; Chris, 2026-09-24).
     log('runtime.seeding', { agentId, migrating: needsPortHeal(spec.workspace.configPatch.openclawVersion) });
     const { runtimeRef } = await provider.provision(spec);
+    forgetDmPolicy(agentId); // the seed wrote the channel config afresh
     log('runtime.provisioned', { agentId, runtimeRef });
     recordApplied(store, agentId);
     store.recordAppliedPeers(agentId); // the sync below installs the tool for this grant

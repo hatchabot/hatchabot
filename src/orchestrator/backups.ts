@@ -13,6 +13,7 @@ import { defaultBackupsDir } from '../envCompat.js';
 import { fileURLToPath } from 'node:url';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
+import { forgetDmPolicy } from './dmPolicyMemo.js';
 
 // A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
 // creates (`date +%F`) and prunes. Anything else in the base dir is ignored,
@@ -265,6 +266,7 @@ export async function restoreAgentFromBackup(
     );
   }
 
+  forgetDmPolicy(agentId); // the restored config is whatever the archive held
   try {
     await provider.importState(agent.runtimeRef, data);
   } catch (err) {

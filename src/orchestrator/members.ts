@@ -5,6 +5,7 @@ import type { Store } from '../store/store.js';
 import { ACCOUNT_SHAPE, ID_SHAPE } from './channelIds.js';
 import { approvePairing, listPairingRequests, PAIRING_DB, PAIRING_DB_JS, pairingStorePath } from './claim.js';
 import { CHANNEL_ACCOUNT } from '../openclaw/configWriter.js';
+import { dmPolicyAsserted, forgetDmPolicy, forgetDmPolicyEntry, rememberDmPolicy } from './dmPolicyMemo.js';
 
 /**
  * Revoke = flip status + drop the member from the bot's allowlist immediately
@@ -78,6 +79,7 @@ export interface AdmitResult {
  */
 export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise<AdmitResult> {
   const kind = opts.kind ?? 'telegram';
+  forgetDmPolicy(opts.agentId); // a member change: the next rest asserts the door afresh
   if (kind !== 'telegram') return admitOtherChannel(deps, { ...opts, kind });
   const { store, provider } = deps;
   const log = deps.log ?? (() => {});
@@ -393,6 +395,7 @@ export async function grantChannelAccess(
         && cfg.channels[t.channel].accounts[t.acct];
       if (acc) { acc.allowFrom = add(acc.allowFrom); writeAtomic(cfgPath, cfg); }
     }'`;
+  forgetDmPolicy(opts.agentId); // the config's allowFrom is being written
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
   if (res.code !== 0) {
     throw new AdmitError('Adding them to the bot allowlist failed — try again in a moment.');
@@ -429,6 +432,7 @@ export async function scrubChannelAllowlist(
       n += db.prepare("delete from channel_pairing_requests where channel_key = ? and lower(account_id) = lower(?)").run(t.channel, t.acct).changes;
     }
     console.log(String(n));'`;
+  forgetDmPolicy(opts.agentId);
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
   if (res.code !== 0) {
     log('channel.allowlist_scrub_failed', { agentId: opts.agentId, kind: opts.kind });
@@ -467,6 +471,8 @@ export async function setDmPolicy(
   const log = deps.log ?? (() => {});
   if (!/^[A-Za-z0-9_]{1,64}$/.test(opts.accountId)) return false;
   const admit = (opts.allowFrom ?? []).filter((id) => ID_SHAPE[opts.kind].test(id));
+  // Already asserted, and nothing since could have changed it: no container (review, 2026-09-29).
+  if (dmPolicyAsserted(opts, opts.policy, admit)) return true;
   const target = { channel: opts.kind, acct: opts.accountId, policy: opts.policy, admit };
   const script = `node -e '
     const fs = require("fs");
@@ -493,7 +499,9 @@ export async function setDmPolicy(
   // A sweep re-asserts the policy every few minutes; "unchanged" is not news
   // (it filled Genetic Algorithm Trading's Setup log, 2026-09-24).
   if (!(res.code === 0 && out === 'unchanged')) log('channel.dm_policy', { agentId: opts.agentId, policy: opts.policy, result: res.code === 0 ? out : `failed:${res.code}` });
-  return res.code === 0 && (out === 'set' || out === 'unchanged');
+  const ok = res.code === 0 && (out === 'set' || out === 'unchanged');
+  if (ok) rememberDmPolicy(opts, opts.policy, admit); else forgetDmPolicyEntry(opts);
+  return ok;
 }
 
 export async function revokeMember(
@@ -567,6 +575,7 @@ export async function revokeMember(
     return;
   }
   const script = allowlistScrubScript(targets);
+  forgetDmPolicy(agentId);
   const res = await provider.execShellOnVolume(agent.runtimeRef, script);
   if (res.code !== 0) {
     // The row is still 'active' (we haven't flipped it), so "remove them
