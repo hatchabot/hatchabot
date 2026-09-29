@@ -61,6 +61,7 @@ import { CronSystemOwnedError, addCron, listCrons, setCronEnabled, runCronNow, d
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
+import { runUsageAlerts } from '../orchestrator/usageAlerts.js';
 import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orchestrator/unread.js';
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
@@ -1774,10 +1775,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
     }
   };
+  /** A spike warning goes to the owner's own Telegram: from their Hatchabot
+   *  agent's bot, else from the busy agent's own bot. */
+  const tellUsageSpike = async (ownerId: string, agent: Agent, text: string) => {
+    const chat = store.knownChannelUserId(ownerId);
+    if (!chat) return false;
+    const manager = store.listAllActiveAgents().find((a) => a.ownerId === ownerId && a.ops);
+    for (const via of [manager?.id, agent.id]) {
+      if (via && (await notifyAgentChat(store, secrets, via, text, { chatIds: [chat] }).catch(() => 0)) > 0) return true;
+    }
+    return false;
+  };
   const runUsageSample = () => {
     if (usageSampling) return usageSampling;
     usageSampling = sampleSourceUsage({ store, providerFor, log: (e, d) => app.log.info(d, e) })
-      .then((r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); } return r; })
+      .then(async (r) => { usageSampledAt = new Date().toISOString(); if (r.limited) app.log.info(r, 'usage.sample_rate_limits_seen'); try { snapshotUsageFromSamples(); } catch (err) { app.log.warn({ err: String(err) }, 'usage.snapshot_failed'); }
+        await runUsageAlerts({ store, tell: tellUsageSpike, log: (e, d) => app.log.info(d, e) }).catch((err) => app.log.warn({ err: String(err) }, 'usage.alerts_failed'));
+        return r; })
       .catch((err) => app.log.warn({ err: String(err) }, 'usage.sample_failed'))
       .finally(() => { usageSampling = null; });
     return usageSampling;
@@ -6232,7 +6246,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'see its usage');
     if (!agent) return reply;
-    return agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
+    const u = await agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
+    // Its spike warnings of the last week (usageAlerts.ts); the 8-day slots are the sampler's, not the page's.
+    const { recent: _recent, ...rest } = u;
+    return { ...rest, alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
   });
 
   // Fleet usage rollup: every RUNNING agent the caller can see, ranked by
@@ -6307,7 +6324,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Querystring: { period?: string } }>('/v1/usage/periods', async (req, reply) => {
     const period = String(req.query?.period ?? 'day');
     if (!(USAGE_PERIODS as string[]).includes(period)) return reply.code(400).send({ error: `period must be one of ${USAGE_PERIODS.join(', ')}` });
-    return { ...computeUsagePeriod(store, ownerIdOf(req), period as UsagePeriod), sampledAt: usageSampledAt };
+    const ownerId = ownerIdOf(req);
+    // Spike warnings of the last week, newest first, with the agent's name (usageAlerts.ts).
+    const alerts = store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { ownerId })
+      .map((x) => ({ ...x, name: store.getAgent(x.agentId)?.name ?? 'an agent' }));
+    return { ...computeUsagePeriod(store, ownerId, period as UsagePeriod), sampledAt: usageSampledAt, alerts };
   });
 
   /** Daily fleet-usage snapshots for the trend chart, oldest → newest, with a

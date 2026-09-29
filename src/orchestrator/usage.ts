@@ -35,7 +35,13 @@ export interface AgentUsage extends UsageSplit {
   sessions: number;
   /** When the newest call was made. */
   lastActive?: string;
-  byModel: Array<{ model: string; tokens: number; sessions: number; calls: number } & UsageSplit>;
+  byModel: Array<{ model: string; tokens: number; sessions: number; calls: number; maxContext?: number } & UsageSplit>;
+  /** The last 24 hours, from the transcripts. */
+  lastDay?: { calls: number; tokens: number };
+  /** Tokens the newest call carried in (prompt + cache): the size of the conversation now. */
+  lastContext?: number;
+  /** The largest any call carried in. */
+  maxContext?: number;
   /** Active span in ms: first call → latest call. */
   spanMs?: number;
   /** Lifetime average tokens/hour (totalTokens ÷ span); undefined under 10 min. */
@@ -53,12 +59,18 @@ const fs = require("fs"); const path = require("path"); const zlib = require("zl
 const root = "/home/node/.openclaw/agents";
 const models = {}; const sessions = new Set(); let first = Infinity, last = 0, bad = 0;
 const since = Date.now() - 8 * 86400000; const slots = {};
+const dayAgo = Date.now() - 86400000; const day = { calls: 0, tokens: 0 }; let lastCtx = 0, lastCtxAt = 0;
 const add = (sid, at, msg) => {
   const u = msg && msg.usage; if (!u || typeof u !== "object") return;
   const n = (x) => (typeof x === "number" && isFinite(x) && x > 0 ? x : 0);
   // A copy of a reply sent to a channel ("delivery-mirror") carries no tokens: not a call.
   const tok = n(u.input) + n(u.output) + n(u.cacheRead) + n(u.cacheWrite); if (!tok) return;
-  const m = models[msg.model || "(unknown)"] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, s: new Set() };
+  const m = models[msg.model || "(unknown)"] ||= { calls: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, maxCtx: 0, s: new Set() };
+  // What this call carried in: the prompt, cached or not. Big = a long conversation re-sent every call.
+  const ctx = n(u.input) + n(u.cacheRead) + n(u.cacheWrite);
+  if (ctx > m.maxCtx) m.maxCtx = ctx;
+  if (at >= lastCtxAt) { lastCtxAt = at; lastCtx = ctx; }
+  if (at >= dayAgo) { day.calls++; day.tokens += tok; }
   m.calls++; m.input += n(u.input); m.output += n(u.output); m.cacheRead += n(u.cacheRead); m.cacheWrite += n(u.cacheWrite); m.s.add(sid);
   if (at >= since) { const k = new Date(at - (at % 300000) + 300000).toISOString(); slots[k] = (slots[k] || 0) + tok; }
   sessions.add(sid);
@@ -96,8 +108,8 @@ for (const d of dirs) {
     }
   }
 }
-const out = { models: {}, sessions: sessions.size, first: first === Infinity ? 0 : first, last, bad, slots };
-for (const [k, m] of Object.entries(models)) out.models[k] = { calls: m.calls, input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite, sessions: m.s.size };
+const out = { models: {}, sessions: sessions.size, first: first === Infinity ? 0 : first, last, bad, slots, day, lastCtx };
+for (const [k, m] of Object.entries(models)) out.models[k] = { calls: m.calls, input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite, maxCtx: m.maxCtx, sessions: m.s.size };
 process.stdout.write(JSON.stringify(out));
 `;
 
@@ -118,7 +130,7 @@ export async function agentUsage(
     if (opts.strict) throw new Error(`usage read exited ${res.code}: ${res.stderr.slice(-200)}`);
     return EMPTY;
   }
-  let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number> };
+  let raw: { models?: Record<string, UsageSplit & { calls: number; sessions: number; maxCtx?: number }>; sessions?: number; first?: number; last?: number; slots?: Record<string, number>; day?: { calls?: number; tokens?: number }; lastCtx?: number };
   try {
     raw = JSON.parse(res.stdout);
     if (!raw || typeof raw.models !== 'object') throw new Error('no usage object');
@@ -128,7 +140,8 @@ export async function agentUsage(
   }
   const byModel = Object.entries(raw.models ?? {}).map(([model, m]) => {
     const tokens = m.input + m.output + m.cacheRead + m.cacheWrite;
-    return { model, tokens, calls: m.calls, sessions: m.sessions, input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite };
+    return { model, tokens, calls: m.calls, sessions: m.sessions, input: m.input, output: m.output, cacheRead: m.cacheRead, cacheWrite: m.cacheWrite,
+      ...(typeof m.maxCtx === 'number' ? { maxContext: m.maxCtx } : {}) };
   }).sort((a, b) => b.tokens - a.tokens);
   const sum = (k: keyof UsageSplit | 'calls' | 'tokens') => byModel.reduce((s, m) => s + (m[k] as number), 0);
   const totalTokens = sum('tokens');
@@ -143,6 +156,9 @@ export async function agentUsage(
     byModel,
     spanMs,
     tokensPerHour: spanMs && spanMs >= MIN_SPAN_MS ? Math.round(totalTokens / (spanMs / 3_600_000)) : undefined,
+    ...(raw.day && typeof raw.day.calls === 'number' ? { lastDay: { calls: raw.day.calls, tokens: Number(raw.day.tokens) || 0 } } : {}),
+    ...(typeof raw.lastCtx === 'number' ? { lastContext: raw.lastCtx } : {}),
+    ...(byModel.some((m) => m.maxContext !== undefined) ? { maxContext: Math.max(...byModel.map((m) => m.maxContext ?? 0)) } : {}),
     recent: Object.entries(raw.slots ?? {}).filter(([k, v]) => !Number.isNaN(Date.parse(k)) && typeof v === 'number').sort(([a], [b]) => a.localeCompare(b)),
   };
 }

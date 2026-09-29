@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.102.0] — 2026-09-28
+
+### Added
+- **A warning when an agent's use jumps.** After each usage pass, every agent's last 24 hours is compared with its own usual day (the average of the days before it, over the last week). At 3× usual and at least 20M tokens, you get one Telegram message, from your Hatchabot agent's bot or else the busy agent's own: which agent, how much, how many times usual, and its busiest hour. An agent with under 3 measured days is warned at 100M. At most one warning per agent a day. Recent warnings also show at the top of Status → Usage and on the agent's own Usage. Tune with `HATCHABOT_USAGE_ALERT_RATIO`, `HATCHABOT_USAGE_ALERT_MIN_TOKENS`, `HATCHABOT_USAGE_ALERT_NEW_TOKENS`.
+- **An agent's own Usage (⋯ → Usage) says where the tokens went:** its last 24 hours (tokens, calls, per call), the size of its conversation now and the largest a call has carried, the split between new input, cache reads, cache writes and output, and calls per model. A conversation over 150K tokens says so: every call re-sends it, and that is usually most of what an agent costs.
+
 ## [2.101.0] — 2026-09-28
 
 ### Added

@@ -276,5 +276,9 @@ describe('the reader script itself (2026-09-28)', () => {
     expect(Object.keys(out.models)).toEqual(['claude-sonnet-5']);
     expect(out.models['claude-sonnet-5']).toMatchObject({ calls: 2, input: 11, output: 6, cacheRead: 100, cacheWrite: 20, sessions: 1 });
     expect(Object.values(out.slots as Record<string, number>).reduce((a, b) => a + b, 0)).toBe(137);
+    // What each call carried in (input + cache), and the last day's calls.
+    expect(out.models['claude-sonnet-5'].maxCtx).toBe(130);
+    expect(out.lastCtx).toBeGreaterThan(0);
+    expect(out.day).toEqual({ calls: 2, tokens: 137 });
   });
 });

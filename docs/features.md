@@ -976,14 +976,26 @@ trailing `+` means a model had no known price and was left out. On the CLI,
 `hatchabot usage` (no agent name) prints the lifetime ranked table with cost;
 `hatchabot usage <agent>` shows one agent's breakdown by model.
 
+**Spike warnings.** After each usage pass Hatchabot compares every agent's
+last 24 hours with its usual day (the average of the measured days before,
+over the last week). At 3× usual and at least 20M tokens — or 100M for an
+agent with under 3 measured days — it sends you one Telegram message (from
+your Hatchabot agent's bot, else the busy agent's) naming the agent, the
+amount, the multiple and the busiest hour; at most one per agent a day.
+Recent warnings show at the top of Status → Usage and on the agent's Usage.
+Settings: `HATCHABOT_USAGE_ALERT_RATIO` (3), `HATCHABOT_USAGE_ALERT_MIN_TOKENS`
+(20000000), `HATCHABOT_USAGE_ALERT_NEW_TOKENS` (100000000).
+
 **View by → AI source / Model** on the home screen (📊 Sources in the classic look) answers "who runs on what": each AI source with its
 credential kind, the agents on it and each agent's current model (pins and
 pending switches flagged), plus a models-in-use tally. The card's status line
 also names each agent's AI source (when more than one exists) alongside its
 model, bot, and host.
 
-Per-agent, the card's ⋯ menu has **📊 Usage** (tokens by model,
-honest billing context), **❤️ Health** (is it actually answering?), and
+Per-agent, the card's ⋯ menu has **📊 Usage** (lifetime tokens and calls,
+the last 24 hours, the conversation's size now — each call re-sends it — the
+split between new input, cache reads, cache writes and output, calls per model,
+billing context), **❤️ Health** (is it actually answering?), and
 **Logs**.
 
 **⚙ Settings → Hosts** manages the machines this cluster runs agents on

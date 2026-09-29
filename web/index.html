@@ -7632,12 +7632,28 @@ async function loadUsage() {
 function renderUsage(u) {
   if (!u.sessions) { $('usageBody').innerHTML = '<div class="sub">No sessions yet — nothing used.</div>'; return; }
   const models = u.byModel.map(m => m.model);
+  const n = (x) => Number(x) || 0;
   const rows = u.byModel.map(m => `<div class="pair"><span class="grow"><code>${esc(m.model)}</code>
-      <span class="sub">${m.sessions} session${m.sessions > 1 ? 's' : ''}</span></span>
+      <span class="sub">${fmtN(n(m.calls))} call${m.calls === 1 ? '' : 's'} · ${m.sessions} session${m.sessions > 1 ? 's' : ''}${m.maxContext ? ` · largest call ${fmtTokens(m.maxContext)}` : ''}</span></span>
       <b>${fmtTokens(m.tokens)}</b></div>`).join('');
+  // Where the tokens went (v2.102.0): cache reads are the conversation re-read each call.
+  const parts = [['input', 'new input', 'var(--accent)'], ['cacheRead', 'cache reads', '#6b8fb5'], ['cacheWrite', 'cache writes', 'var(--warn)'], ['output', 'output', 'var(--ok)']]
+    .map(([k, label, color]) => ({ label, color, v: n(u[k]) })).filter(p => p.v > 0);
+  const whole = parts.reduce((s, p) => s + p.v, 0) || 1;
+  const split = parts.length ? `
+    <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:10px 0 4px">${parts.map(p => `<span title="${p.label}: ${fmtTokens(p.v)}" style="background:${p.color};width:${p.v / whole * 100}%"></span>`).join('')}</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${parts.map(p => `<span class="sub" style="display:inline-flex;align-items:center;gap:4px"><span style="width:9px;height:9px;border-radius:2px;background:${p.color};display:inline-block"></span>${p.label} ${fmtTokens(p.v)} (${Math.round(p.v / whole * 100)}%)</span>`).join('')}</div>` : '';
+  const day = u.lastDay ? `<div style="margin:2px 0"><b>Last 24 hours:</b> ${fmtTokens(u.lastDay.tokens)} tokens · ${fmtN(u.lastDay.calls)} call${u.lastDay.calls === 1 ? '' : 's'}${u.lastDay.calls ? ` · about ${fmtTokens(u.lastDay.tokens / u.lastDay.calls)} a call` : ''}</div>` : '';
+  // Each call re-sends the conversation; past ~150K it is most of what the agent costs.
+  const big = n(u.lastContext) >= 150_000;
+  const ctx = u.lastContext !== undefined ? `<div style="margin:2px 0"><b>Conversation size now:</b> ${fmtTokens(u.lastContext)} tokens a call${u.maxContext ? ` <span class="sub">(largest ever ${fmtTokens(u.maxContext)})</span>` : ''}</div>
+    ${big ? `<div class="sub" style="margin:2px 0 6px">Every call carries this much in. A long-running conversation or a scheduled task that keeps adding to it is the usual cause; a fresh session makes each call far smaller.</div>` : ''}` : '';
+  const alerts = (u.alerts || []).map(x => `<div class="sub">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</div>`).join('');
   $('usageBody').innerHTML =
-    `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens</div>
-     <div class="sub" style="margin:2px 0 12px">${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(usageAgentId, models)}</div>
+    `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
+     <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(usageAgentId, models)}</div>
+     ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
+     ${day}${ctx}${split}
      ${rows}`;
 }
 
@@ -7716,12 +7732,15 @@ function renderFleetUsage(f) {
     <div style="display:flex;height:8px;border-radius:4px;overflow:hidden;background:var(--panel-2);margin:2px 0 6px">${seg('included', 'Subscription', 'var(--ok)')}${seg('api', 'API', 'var(--warn)')}${seg('local', 'Local', '#6b8fb5')}</div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">${legend('included', 'subscription', 'var(--ok)')}${legend('api', 'API', 'var(--warn)')}${legend('local', 'local', '#6b8fb5')}</div>` : '';
   const totalCost = f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '';
+  // Spike warnings of the last week (sent to Telegram when they happened).
+  const alerts = (f.alerts || []).map((x) => `<div class="sub" style="margin:2px 0">⚠️ <b>${esc(x.name)}</b> used ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}${x.told ? '' : ' · not sent (no Telegram)'}</div>`).join('');
   $('fleetUsageBody').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>
     </div>
     <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
     ${partial}
+    ${alerts ? `<div style="margin:6px 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
     ${breakdown}
     ${f.totals.tokens ? fleetUsageBars(f.buckets, 'tokens', `Tokens ${per}`, period) : ''}
     ${f.totals.requests ? fleetUsageBars(f.buckets, 'requests', `Requests ${per}`, period) : ''}

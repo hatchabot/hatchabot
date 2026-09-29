@@ -357,6 +357,21 @@ const SCENARIOS = String.raw`(() => {
       delete window.__override['/v1/agents'];
       await refresh(false);
     },
+    agentUsagePage: async () => {
+      // ⋯ → Usage says where the tokens went: the last day, the conversation size, the split, the calls (v2.102.0).
+      window.__override['/v1/agents/a1/usage'] = { totalTokens: 1_000_000_000, input: 7e6, output: 2e6, cacheRead: 851e6, cacheWrite: 140e6, calls: 4700, sessions: 12,
+        lastActive: new Date().toISOString(), lastDay: { calls: 400, tokens: 109e6 }, lastContext: 395_000, maxContext: 410_000,
+        byModel: [{ model: 'claude-opus-4-8', tokens: 1e9, calls: 4700, sessions: 12, maxContext: 410_000, input: 7e6, output: 2e6, cacheRead: 851e6, cacheWrite: 140e6 }],
+        alerts: [{ agentId: 'a1', at: new Date().toISOString(), tokens: 109e6, usual: 20e6, told: true }] };
+      await openUsage('a1', 'Homework Helper');
+      const body = await until(() => { const t = document.getElementById('usageBody').textContent; return t.includes('Last 24 hours') ? t : null; });
+      ok('the last day: ' + body.slice(0, 200), /Last 24 hours:\s*109M tokens · 400 calls/.test(body));
+      ok('the conversation size, and why it matters', body.includes('Conversation size now:') && body.includes('395K') && body.includes('Every call carries this much in'));
+      ok('the split', body.includes('cache reads 851M (85%)'));
+      ok('calls per model', body.includes('4.7k calls'));
+      ok('its warning', body.includes('about 5× its usual day'));
+      usageDlg.close(); delete window.__override['/v1/agents/a1/usage'];
+    },
     usageHours: async () => {
       // Status → Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
       const now = Date.now(), at = (m) => new Date(Math.floor((now - m * 60000) / 900000) * 900000).toISOString();
@@ -371,6 +386,13 @@ const SCENARIOS = String.raw`(() => {
       await until(() => calls('GET', /\/v1\/usage\/periods$/).length && document.getElementById('fleetUsageBody').textContent.includes('last 6 hours'));
       ok('6h is the one on', document.querySelector('#fleetUsageBody .su-period.on').textContent === '6h');
       ok('bars per 15 minutes', document.getElementById('fleetUsageBody').textContent.includes('Tokens per 15 minutes'));
+      fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
+      // A spike warning of the last week shows at the top.
+      window.__override['/v1/usage/periods'] = { period: 'day', from: at(1440), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
+        agents: [], totals: { tokens: 0, requests: 0, limited: 0 }, byBilling: {}, cost: null,
+        alerts: [{ agentId: 'a1', name: 'Homework Helper', at: new Date(now - 3600000).toISOString(), tokens: 100e6, usual: 20e6, told: true }] };
+      openFleetUsage();
+      await until(() => document.getElementById('fleetUsageBody').textContent.includes('about 5× its usual day'));
       fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
       try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
     },

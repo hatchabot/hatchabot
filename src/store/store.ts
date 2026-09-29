@@ -298,6 +298,12 @@ export class Store {
       -- session's context size (OpenClaw's totalTokens), not usage: those
       -- rows are dropped once, and the first real reading backfills 8 days.
       CREATE TABLE IF NOT EXISTS token_samples_source (source TEXT NOT NULL);
+      -- Warnings sent when an agent used far more than its usual day (v2.102.0).
+      CREATE TABLE IF NOT EXISTS usage_alerts (
+        agent_id TEXT NOT NULL, owner_id TEXT NOT NULL, at TEXT NOT NULL,
+        tokens INTEGER NOT NULL, usual INTEGER NOT NULL, told INTEGER NOT NULL,
+        PRIMARY KEY (agent_id, at)
+      );
       -- Each agent's API price per token at its own mix of input, output and
       -- cache (from its transcripts), so a window's cost needs no guessing.
       CREATE TABLE IF NOT EXISTS agent_token_rates (
@@ -2619,7 +2625,6 @@ export class Store {
     }
     return out;
   }
-  /** The newest token counter reading for an agent, if any. */
   setAgentTokenRate(agentId: string, usdPerToken: number, partial: boolean, at: string): void {
     this.db.prepare(`INSERT INTO agent_token_rates (agent_id, usd_per_token, partial, at) VALUES (?, ?, ?, ?)
       ON CONFLICT(agent_id) DO UPDATE SET usd_per_token = excluded.usd_per_token, partial = excluded.partial, at = excluded.at`)
@@ -2629,6 +2634,25 @@ export class Store {
     const r = this.db.prepare(`SELECT usd_per_token, partial FROM agent_token_rates WHERE agent_id = ?`).get(agentId) as { usd_per_token: number; partial: number } | undefined;
     return r ? { usdPerToken: r.usd_per_token, partial: !!r.partial } : undefined;
   }
+  /** The oldest token reading of an agent, or of any agent: when measuring began. */
+  firstTokenSample(agentId?: string): string | undefined {
+    const r = (agentId
+      ? this.db.prepare(`SELECT MIN(at) at FROM token_samples WHERE agent_id = ?`).get(agentId)
+      : this.db.prepare(`SELECT MIN(at) at FROM token_samples`).get()) as { at: string | null } | undefined;
+    return r?.at ?? undefined;
+  }
+  addUsageAlert(a: { agentId: string; ownerId: string; at: string; tokens: number; usual: number; told: boolean }): void {
+    this.db.prepare(`INSERT OR REPLACE INTO usage_alerts (agent_id, owner_id, at, tokens, usual, told) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(a.agentId, a.ownerId, a.at, Math.round(a.tokens), Math.round(a.usual), a.told ? 1 : 0);
+  }
+  /** Warnings at or after `sinceIso`, newest first; for one owner, or one agent. */
+  usageAlertsSince(sinceIso: string, by: { ownerId?: string; agentId?: string }): Array<{ agentId: string; at: string; tokens: number; usual: number; told: boolean }> {
+    const rows = this.db.prepare(
+      `SELECT agent_id, at, tokens, usual, told FROM usage_alerts WHERE at >= ? AND (? IS NULL OR owner_id = ?) AND (? IS NULL OR agent_id = ?) ORDER BY at DESC`,
+    ).all(sinceIso, by.ownerId ?? null, by.ownerId ?? null, by.agentId ?? null, by.agentId ?? null) as Array<{ agent_id: string; at: string; tokens: number; usual: number; told: number }>;
+    return rows.map((r) => ({ agentId: r.agent_id, at: r.at, tokens: r.tokens, usual: r.usual, told: !!r.told }));
+  }
+  /** The newest token counter reading for an agent, if any. */
   latestTokenTotal(agentId: string): number | undefined {
     const r = this.db.prepare(`SELECT total FROM token_samples WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(agentId) as { total: number } | undefined;
     return r?.total;
