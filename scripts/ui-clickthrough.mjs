@@ -558,6 +558,31 @@ const SCENARIOS = String.raw`(() => {
       ok('the healthy one is ok: ' + rows[1].textContent.replace(/\s+/g, ' ').slice(0, 200), !rows[1].querySelector('.chip.FAILED') && rows[1].textContent.includes('last run ok'));
       v2Close(); window.__crons = [];
     },
+    signOutEverywhere: async () => {
+      // The account menu ends every session, after asking; a refusal is shown, not swallowed (review, 2026-09-29).
+      window.__noReload = true;
+      const everywhere = () => calls('POST', /^\/v1\/logout\/everywhere$/).length;
+      document.getElementById('v2AvatarBtn').click();
+      const item = await until(() => { const b = document.getElementById('v2SignOutAll'); return b && b.offsetParent ? b : null; });
+      ok('it sits beside plain sign-out', item.previousElementSibling.classList.contains('v2signout'));
+      window.__confirmAnswer = false;
+      item.click(); await sleep(100);
+      ok('it asked first', window.__confirms.at(-1).includes('every device'));
+      eq('declined: nothing sent', everywhere(), 0);
+      ok('the menu closed', document.getElementById('v2AcctPop').hidden);
+      window.__confirmAnswer = true;
+      window.__answer = { 'POST /v1/logout/everywhere': [{ status: 400, body: { error: 'Nobody signs in to this installation, so there are no sessions to end.' } }] };
+      document.getElementById('v2AvatarBtn').click();
+      document.getElementById('v2SignOutAll').click();
+      await until(() => document.getElementById('toast').textContent.includes('no sessions to end'));
+      eq('one call', everywhere(), 1);
+      document.getElementById('v2AvatarBtn').click();
+      document.getElementById('v2SignOutAll').click();
+      await until(() => document.getElementById('toast').textContent.includes('Signed out on every device'));
+      eq('two calls', everywhere(), 2);
+      eq('plain logout never called', calls('POST', /^\/v1\/logout$/).length, 0);
+      window.__answer = {};
+    },
   };
   (async () => {
     for (const [name, run] of Object.entries(T)) {

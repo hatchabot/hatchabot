@@ -241,6 +241,29 @@ function cookieValue(header: string | undefined, name: string): string | undefin
   return undefined;
 }
 
+/**
+ * "Sign out everywhere": ends every session the signed-in person has, on every
+ * device, by bumping their sign-in epoch (store.session_epochs), and clears
+ * this browser's cookie. Plain /v1/logout still only forgets this browser's
+ * copy — a cookie copied off a shared device kept working for its full 14
+ * days with no way to end it short of rotating the secret key (review,
+ * 2026-09-29). Not auth-exempt: only a signed-in person ends their own.
+ */
+function registerLogoutEverywhere(app: FastifyInstance, store: Store | undefined, signsIn = true): void {
+  app.post('/v1/logout/everywhere', async (req, reply) => {
+    // The management agent's in-process reads never sign anyone out.
+    if (internalPrincipal(req)) return reply.code(403).send({ error: 'Only the person themselves can sign out everywhere.' });
+    const who = req.principal?.ownerId;
+    if (!who) return reply.code(401).send({ error: 'auth required' });
+    if (!signsIn) return reply.code(400).send({ error: 'Nobody signs in to this installation, so there are no sessions to end.' });
+    if (!store) return reply.code(503).send({ error: 'This server has no database to record the sign-out in.' });
+    store.bumpSessionEpoch(who);
+    reply.clearCookie(COOKIE, { path: '/' });
+    reply.clearCookie(LEGACY_COOKIE, { path: '/' });
+    return { ok: true };
+  });
+}
+
 /** The console proxy: a browser reaches an agent's Control UI through here, with its cookie. */
 const CONSOLE_PATH = /^\/v1\/agents\/[^/]+\/ui(\/|$)/;
 
@@ -273,8 +296,13 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     .digest('hex')
     .slice(0, 16);
 
-  const sign = (exp: number): string =>
-    createHmac('sha256', opts.secret).update(`session:${exp}:${pwEpoch}`).digest('hex');
+  // The one owner's sign-in epoch is signed in too, so "sign out everywhere"
+  // ends every device's session without changing the password. Epoch 0 signs
+  // exactly what it did before, so existing sessions survive the upgrade
+  // (review, 2026-09-29).
+  const epochNow = (): number => opts.store?.sessionEpoch(LOCAL_OWNER) ?? 0;
+  const sign = (exp: number, epoch = epochNow()): string =>
+    createHmac('sha256', opts.secret).update(`session:${exp}:${pwEpoch}${epoch ? `:e${epoch}` : ''}`).digest('hex');
 
   const validSession = (token: string | undefined): boolean => {
     if (!token) return false;
@@ -325,6 +353,7 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     reply.clearCookie(LEGACY_COOKIE, { path: '/' });
     return { ok: true };
   });
+  registerLogoutEverywhere(app, opts.store, !!opts.password);
 
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     if (!opts.password) return { ownerId: LOCAL_OWNER, via: 'password' };
@@ -390,6 +419,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     reply.clearCookie(LEGACY_COOKIE, { path: '/' });
     return { ok: true };
   });
+  registerLogoutEverywhere(app, store);
 
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     const id = sessionAccount(store, opts.secret, cookieValue(header, COOKIE));
@@ -477,8 +507,14 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   const sign = (payload: string): string =>
     createHmac('sha256', opts.secret).update(payload).digest('hex');
 
+  // Payload: sub:exp:e<epoch>[:email]. The epoch field starts with "e" and
+  // has no "@", so it never reads as an email; a cookie from before it
+  // (sub:exp[:email]) is epoch 0 and keeps working until the person's first
+  // "sign out everywhere" (review, 2026-09-29).
+  const epochOf = (ownerId: string): number => opts.store?.sessionEpoch(ownerId) ?? 0;
   const mintSession = (sub: string, expMs: number, email?: string): string => {
-    const payload = email ? `${sub}:${expMs}:${email}` : `${sub}:${expMs}`;
+    const epoch = epochOf(`user-${sub}`);
+    const payload = `${sub}:${expMs}:e${epoch}${email ? `:${email}` : ''}`;
     return `${Buffer.from(payload).toString('base64url')}.${sign(payload)}`;
   };
 
@@ -495,6 +531,9 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     // the same way password-mode's validSession does.
     const exp = Number(expStr);
     if (!sub || !Number.isFinite(exp) || exp < Date.now()) return undefined;
+    // Minted before the person's last "sign out everywhere": over.
+    const epochField = rest[0] !== undefined && /^e\d+$/.test(rest[0]) ? rest.shift()! : 'e0';
+    if (Number(epochField.slice(1)) < epochOf(`user-${sub}`)) return undefined;
     // A long session still answers to the allowed-emails list, checked now.
     // (Sessions from before the email rode along were an hour long; they
     // are refused once a list is set.)
@@ -540,6 +579,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     reply.clearCookie(LEGACY_COOKIE, { path: '/' });
     return { ok: true };
   });
+  registerLogoutEverywhere(app, opts.store);
 
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     const session = readSession(cookieValue(header, COOKIE));

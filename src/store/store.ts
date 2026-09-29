@@ -533,6 +533,16 @@ export class Store {
         found_at TEXT NOT NULL,
         dismissed_at TEXT
       );
+      -- A person's sign-in generation. Every session cookie carries (or is
+      -- signed with) the epoch it was minted under; bumping it ends every
+      -- session that person has, on every device. No row = epoch 0, which is
+      -- what cookies from before this table were minted under (review,
+      -- 2026-09-29).
+      CREATE TABLE IF NOT EXISTS session_epochs (
+        owner_id TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL,
+        bumped_at TEXT NOT NULL
+      );
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1667,6 +1677,9 @@ export class Store {
 
   setLocalAccountDisabled(id: string, disabled: boolean): void {
     this.db.prepare(`UPDATE local_accounts SET disabled = ? WHERE id = ?`).run(disabled ? 1 : 0, id);
+    // Disabling ends their sessions for good: without a bump, re-enabling the
+    // account brought every old cookie back to life (review, 2026-09-29).
+    if (disabled) this.bumpSessionEpoch(id);
   }
 
   /**
@@ -1687,11 +1700,32 @@ export class Store {
     };
   }
 
+  /** The sign-in generation a session of this owner must carry; 0 until the first bump. */
+  sessionEpoch(ownerId: string): number {
+    const row = this.db.prepare(`SELECT epoch FROM session_epochs WHERE owner_id = ?`).get(ownerId) as { epoch: number } | undefined;
+    return row?.epoch ?? 0;
+  }
+
+  /** End every session this owner has, everywhere: cookies minted under an older epoch are refused. Returns the new epoch. */
+  bumpSessionEpoch(ownerId: string): number {
+    const row = this.db
+      .prepare(
+        `INSERT INTO session_epochs (owner_id, epoch, bumped_at) VALUES (?, 1, ?)
+         ON CONFLICT(owner_id) DO UPDATE SET epoch = session_epochs.epoch + 1, bumped_at = excluded.bumped_at
+         RETURNING epoch`,
+      )
+      .get(ownerId, new Date().toISOString()) as { epoch: number };
+    return row.epoch;
+  }
+
   deleteLocalAccount(id: string): void {
     // Their CLI tokens must die with them: ownerForCliToken only checks the
     // hash and expiry, so a leftover row would keep authenticating as an owner
     // who no longer exists (audit 2026-09-16).
     this.db.transaction(() => {
+      // …and their browser sessions, by generation rather than by the row's
+      // absence alone (review, 2026-09-29).
+      this.bumpSessionEpoch(id);
       this.db.prepare(`DELETE FROM cli_tokens WHERE owner_id = ?`).run(id);
       // Their account-level Telegram link too: kept, it made a re-created
       // account unable to link the same Telegram ever again (night review).
