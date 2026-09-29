@@ -613,6 +613,117 @@ const SCENARIOS = String.raw`(() => {
       eq('plain logout never called', calls('POST', /^\/v1\/logout$/).length, 0);
       window.__answer = {};
     },
+    // Chat on the web (2026-09-29): a member the owner gave it opens 💬 Chat, sees their conversation, sends, reads the reply.
+    webChatMember: async () => {
+      try {
+        const list = await (await fetch('/v1/agents')).json();
+        const base = list.find((a) => a.id === 'a1');
+        window.__override['/v1/agents'] = [...list, { ...base, id: 'w1', name: 'Book Club', role: 'user', ownerId: 'o2', webChat: true, botUsername: undefined, deepLink: undefined, otherChannels: [] }];
+        window.__override['/v1/agents/w1/chat'] = { messages: [
+          { role: 'user', text: 'Hi' },
+          { role: 'assistant', text: 'Hello <b>there</b>\nline two' } ] };
+        await refresh(false);
+        openV2Agent('w1');
+        const pane = document.getElementById('v2Pane').textContent;
+        ok('the pane offers the web: ' + pane.replace(/\s+/g, ' ').slice(0, 160), pane.includes('On the web') && pane.includes('No chat app needed') && !pane.includes('Not running'));
+        byText('#v2Pane button', 'Chat').click();
+        await until(() => webChatDlg.open);
+        const log = document.getElementById('wchatLog');
+        await until(() => log.querySelectorAll('.wchat-msg').length === 2);
+        ok('the agent\'s text is shown as text, never HTML', !log.querySelector('b') && log.textContent.includes('Hello <b>there</b>'));
+        ok('its line breaks are kept', getComputedStyle(log.querySelector('.wchat-msg')).whiteSpace === 'pre-wrap');
+        const box = document.getElementById('wchatText');
+        const key = (shiftKey) => box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey, bubbles: true, cancelable: true }));
+        box.value = 'What should we read?';
+        key(true);
+        eq('Shift+Enter sends nothing', calls('POST', /\/v1\/agents\/w1\/chat$/).length, 0);
+        window.__answer = { 'POST /v1/agents/w1/chat': [{ status: 200, body: { reply: 'Try Middlemarch.' } },
+          { status: 429, body: { error: "That's 60 messages this hour — try again in 12 minutes." } }] };
+        key(false);
+        ok('their message shows at once, with the thinking line', log.textContent.includes('What should we read?'));
+        const sent = await until(() => calls('POST', /\/v1\/agents\/w1\/chat$/)[0]);
+        eq('Enter sent it', sent.body, { text: 'What should we read?' });
+        await until(() => log.textContent.includes('Try Middlemarch.'));
+        ok('the thinking line is gone', !document.getElementById('wchatWait'));
+        box.value = 'And after that?';
+        document.getElementById('wchatSend').click();
+        await until(() => document.getElementById('wchatErr').textContent.includes('60 messages this hour'));
+        ok('the box is free again', !document.getElementById('wchatSend').disabled);
+      } finally {
+        window.__answer = {};
+        if (webChatDlg.open) webChatDlg.close();
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/w1/chat'];
+        await refresh(false);
+      }
+    },
+    // The owner's Members list: a badge on who has web chat, and the switch — turning it ON repeats the rights warning.
+    webChatToggle: async () => {
+      try {
+        window.__override['/v1/agents/a1/members'] = [
+          { userId: 'o1', role: 'owner', status: 'active', channelUserId: '11', identities: {}, account: true, webChat: false },
+          { userId: 'user-sam', displayName: 'Sam', role: 'user', status: 'active', channelUserId: '12', identities: {}, account: true, webChat: false },
+          { userId: 'user-jo', displayName: 'Jo', role: 'user', status: 'active', identities: {}, account: true, webChat: true },
+          { userId: 'member-1', displayName: 'Lee', role: 'user', status: 'active', channelUserId: '13', identities: {}, account: false, webChat: false }];
+        openV2Agent('a1', 'sharing');
+        const rows = await until(() => { const r = [...document.querySelectorAll('#tgMemberList .pair')]; return r.length === 4 ? r : null; });
+        const [, sam, jo, lee] = rows;
+        ok('Jo carries the web chat badge', !!jo.querySelector('.chip.webchat') && !sam.querySelector('.chip.webchat'));
+        ok('a web-only member is not told to message a bot', !jo.textContent.includes("hasn't messaged yet"));
+        ok('no switch for someone who cannot sign in here', !byText('#tgMemberList .pair:nth-child(4) button', 'web chat') && !lee.textContent.includes('Allow web chat'));
+        const allow = [...sam.querySelectorAll('button')].find((b) => b.textContent.includes('Allow web chat'));
+        ok('an Allow web chat switch for Sam', !!allow);
+        window.__confirmAnswer = false;
+        allow.click(); await sleep(100);
+        ok('it warns about the rights first: ' + (window.__confirms.at(-1) || ''), /your rights on this agent/.test(window.__confirms.at(-1)) && /schedule tasks/.test(window.__confirms.at(-1)));
+        eq('declined: nothing sent', calls('PUT', /\/web-chat$/).length, 0);
+        window.__confirmAnswer = true;
+        allow.click();
+        const on = await until(() => calls('PUT', /\/v1\/agents\/a1\/members\/user-sam\/web-chat$/)[0]);
+        eq('turned on', on.body, { on: true });
+        const asked = window.__confirms.length;
+        const off = await until(() => [...document.querySelectorAll('#tgMemberList .pair')].map((r) => [...r.querySelectorAll('button')].find((b) => b.textContent.includes('Turn off web chat'))).find(Boolean));
+        off.click();
+        const offCall = await until(() => calls('PUT', /\/v1\/agents\/a1\/members\/user-jo\/web-chat$/)[0]);
+        eq('turned off', offCall.body, { on: false });
+        eq('turning off does not ask', window.__confirms.length, asked);
+      } finally {
+        window.__confirmAnswer = true;
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/members'];
+      }
+    },
+    // The invite dialog's third way, with its warning; a link only when asked for. An agent in no chat app gets the web way alone.
+    inviteWebChat: async () => {
+      try {
+        window.__promptAnswer = '';
+        window.__answer = { 'POST /v1/agents/a1/invites': [
+          { status: 201, body: { code: 'PLAIN', path: '/join/PLAIN' } },
+          { status: 201, body: { code: 'WEBCHAT', path: '/join/WEBCHAT', url: 'https://hb.example/join/WEBCHAT' } }] };
+        await invite('a1', 'Homework Helper');
+        await until(() => inviteDlg.open);
+        const web = document.getElementById('invWeb');
+        ok('the web way shows', !web.hidden && web.textContent.includes('Chat on the web — for people you trust'));
+        ok('it says they need to reach this machine', web.textContent.includes('Tailscale'));
+        ok('it says what it hands over', /They will have your rights on this agent: through it\s+they can schedule tasks and change its settings/.test(web.textContent) && web.textContent.includes("hand your laptop to"));
+        eq('only the plain invite so far', calls('POST', /\/v1\/agents\/a1\/invites$/).map((c) => c.body), [{}]);
+        document.getElementById('invWebBtn').click();
+        await until(() => !document.getElementById('invWebLink').hidden);
+        eq('the web chat invite', calls('POST', /\/v1\/agents\/a1\/invites$/)[1].body, { webChat: true });
+        eq('its link', document.getElementById('invWebLink').textContent, 'https://hb.example/join/WEBCHAT');
+        inviteDlg.close();
+        const piano = agents.find((a) => a.name === 'Piano Practice');
+        const posts = calls('POST', /\/invites$/).length;
+        window.__promptAnswer = null; // a Telegram question would cancel the invite
+        await invite(piano.id, piano.name);
+        await until(() => inviteDlg.open);
+        ok('no chat-app part for an agent in no chat app', document.getElementById('invApps').hidden && !document.getElementById('invWeb').hidden);
+        eq('nothing minted until asked', calls('POST', /\/invites$/).length, posts);
+      } finally {
+        window.__promptAnswer = null; window.__answer = {};
+        if (inviteDlg.open) inviteDlg.close();
+      }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

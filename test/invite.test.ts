@@ -18,7 +18,7 @@ describe('invites (§12.3)', () => {
     const store = makeStore();
     const { code } = createInvite(store, 'a1', 'owner');
 
-    expect(checkInvite(store, code)).toEqual({ valid: true, agentId: 'a1' });
+    expect(checkInvite(store, code)).toEqual({ valid: true, agentId: 'a1', webChat: false });
     // Codes are read off phone screens — case-insensitive.
     expect(checkInvite(store, code.toLowerCase()).valid).toBe(true);
 

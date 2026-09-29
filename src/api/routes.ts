@@ -173,7 +173,8 @@ import {
   botPollState,
 } from '../orchestrator/adopt.js';
 import type { Agent, AIProfile, Channel } from '../domain/types.js';
-import { ownerIdOf, principalOf } from './principal.js';
+import { LOCAL_OWNER, ownerIdOf, principalOf } from './principal.js';
+import { registerWebChatRoutes, webChatBusy } from './webChat.js';
 import type { IdentityVerifier } from './identity.js';
 import {
   autoSnapshot,
@@ -858,6 +859,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const n = Number(process.env[name]); return Number.isFinite(n) && process.env[name] !== '' && process.env[name] !== undefined ? n : dflt;
   };
   const a2aInFlight = new Set<string>();
+  /** Web chat turns in flight, `${agentId} ${userId}` (api/webChat.ts): one per person at a time. */
+  const webChatInFlight = new Set<string>();
   /** How many consults each caller is waiting on (it is held in a2aInFlight while any is). */
   const a2aCallerHolds = new Map<string, number>();
   const a2aOwnerLive = new Map<string, number>();
@@ -2276,7 +2279,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // flag, and the idle sweep stopped a container mid-answer (30th audit).
     // A rebuild waiting for its turn counts too: put to sleep meanwhile, its
     // rebuild was skipped and the change it carried lost (regression review).
-    isBusy: (id) => isBusy(id) || a2aInFlight.has(id) || inflight.has(id),
+    isBusy: (id) => isBusy(id) || a2aInFlight.has(id) || inflight.has(id) || webChatBusy(webChatInFlight, id),
     log: (id) => (event, detail) => trace(id)(event, detail ?? {}),
     fetchImpl: deps.oauthFetch,
   };
@@ -4243,6 +4246,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           imageTrial: !a.ops && !!a.image && !(await defaultAliasesFor(a.hostId)).has(a.image) && (!a.classId || (classes.get(a.classId) ?? store.getAgentClass(a.classId))?.image !== a.image),
           /** What the viewer may do — drives which controls the app renders. */
           role,
+          /** A member the owner lets chat from this app (the 💬 Chat panel, 2026-09-29). */
+          ...(role && role !== 'owner' && store.webChatAllowed(a.id, ownerIdOf(req)) ? { webChat: true } : {}),
           // The owner's applied setup ANSWERS are theirs — a member (or the
           // ?all=1 metadata view) gets the declarations, never the values.
           ...(role === 'owner' ? {} : { paramValues: undefined }),
@@ -6491,6 +6496,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     } finally {
       a2aInFlight.delete(agent.id);
     }
+  });
+
+  // Chat on the web for the people the owner trusts with it (2026-09-29).
+  registerWebChatRoutes(app, {
+    store, providerFor, ensureAwake, isBusy,
+    trace: (id) => trace(id),
+    inFlight: webChatInFlight,
+    timeoutMs: ASK_TIMEOUT_MS,
+    afterTurn: (id) => sessionsCache.delete(id),
   });
 
   // Delete a task.
@@ -9201,13 +9215,68 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // ---- invites & join (§12.3) --------------------------------------------
 
+  /** Someone who signs in here: a Google account (identity mode) or a local account. */
+  const isAccountId = (userId: string): boolean => /^user-./.test(userId) || !!store.localAccount(userId);
+
+  /**
+   * The account behind a join request (2026-09-29): a Google sign-in made on
+   * the join page, or the session cookie of someone already signed in here
+   * (/v1/join is auth-exempt, so the hook has not read it). Never the
+   * password-mode owner: that is the owner, not an invitee.
+   */
+  const joiningAccount = async (req: FastifyRequest, idToken?: string): Promise<string | undefined> => {
+    if (idToken && deps.verifier) {
+      const token = await deps.verifier.verify(idToken); // throws on a bad token
+      return `user-${token.sub}`;
+    }
+    const decorated = (app as unknown as { principalFromCookieHeader?: (h: string | undefined) => { ownerId: string } | undefined }).principalFromCookieHeader;
+    const fromCookie = decorated?.(req.headers.cookie)?.ownerId;
+    // Tests say who they are with the opt-in header (principal.ts).
+    const p = fromCookie ?? (principalOf(req).via === 'header' ? principalOf(req).ownerId : undefined);
+    return p && p !== LOCAL_OWNER ? p : undefined;
+  };
+
+  /**
+   * A web-chat invite: signed in, let in at once with web chat on. No pairing
+   * window, no channel — they talk to it from this app.
+   */
+  const joinForWebChat = async (req: FastifyRequest, reply: any, body: { code?: string; name?: string; idToken?: string }) => {
+    if ((deps.authMode ?? 'password') === 'password') {
+      return reply.code(400).send({ error: 'This Hatchabot has no accounts to sign in with, so it cannot offer chat on the web.' });
+    }
+    let accountId: string | undefined;
+    try { accountId = await joiningAccount(req, body.idToken); }
+    catch { return reply.code(401).send({ error: "That sign-in didn't verify — try again." }); }
+    if (!accountId) return reply.code(401).send({ error: 'Sign in to this Hatchabot first.', signIn: true });
+    const inv = checkInvite(store, body.code!);
+    const agent = inv.valid ? store.getAgent(inv.agentId) : undefined;
+    if (agent && agent.ownerId === accountId) {
+      return reply.code(400).send({ error: 'This is your own agent — you can already talk to it.' });
+    }
+    try {
+      const joined = redeemInvite(store, body.code!, body.name ?? '', accountId);
+      trace(joined.agentId)('member.web_chat_joined', { userId: joined.membershipUserId });
+      return reply.code(201).send({ agentName: store.getAgent(joined.agentId)!.name, agentId: joined.agentId, webChat: true });
+    } catch (err) {
+      if (err instanceof InviteInvalidError) return reply.code(400).send({ error: err.userMessage });
+      throw err;
+    }
+  };
+
   app.post<{ Params: { id: string } }>('/v1/agents/:id/invites', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const ownerId = ownerIdOf(req);
-    const forParsed = z.object({ for: z.string().trim().max(64).optional() }).safeParse(req.body ?? {});
+    const forParsed = z.object({ for: z.string().trim().max(64).optional(), webChat: z.boolean().optional() }).safeParse(req.body ?? {});
     if (!forParsed.success) return reply.code(400).send({ error: zodMessage(forParsed.error) });
-    const { code, expiresAt } = createInvite(store, agent.id, ownerId, forParsed.data.for);
+    // Web chat is used signed in: with one shared password there is nobody
+    // else to sign in as (2026-09-29).
+    if (forParsed.data.webChat && (deps.authMode ?? 'password') === 'password') {
+      return reply.code(400).send({ error: 'Chat on the web needs people to sign in to this Hatchabot — switch it to accounts or Google sign-in first (⚙ Settings → Access).' });
+    }
+    if (forParsed.data.webChat && agent.ops) return reply.code(400).send({ error: 'Your Hatchabot agent is yours alone.' });
+    const { code, expiresAt } = createInvite(store, agent.id, ownerId, forParsed.data.for, { webChat: forParsed.data.webChat });
+    if (forParsed.data.webChat) trace(agent.id)('invite.web_chat', {});
     const path = `/join/${code}`;
     return reply.code(201).send({
       code,
@@ -9221,9 +9290,34 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const agent = ownedAgent(req, req.params.id);
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     // With each person's identities on Discord and Slack too (Telegram's is the seat's own id).
+    // `account`: they sign in here, so web chat can be given to them.
     return store.listMemberships(agent.id).filter((m) => m.status === 'active')
-      .map((m) => ({ ...m, identities: store.memberIdentities(agent.id, m.userId) }));
+      .map((m) => ({ ...m, identities: store.memberIdentities(agent.id, m.userId), account: isAccountId(m.userId) }));
   });
+
+  /**
+   * Web chat on or off for one member (2026-09-29). Only for someone who signs
+   * in here — a chat-app-only member has no way to reach the page as
+   * themselves. Removing them (DELETE below) ends it too.
+   */
+  app.put<{ Params: { id: string; userId: string }; Body: { on?: boolean } }>(
+    '/v1/agents/:id/members/:userId/web-chat',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      const on = (req.body as { on?: unknown } | null)?.on;
+      if (typeof on !== 'boolean') return reply.code(400).send({ error: 'on must be true or false' });
+      const m = store.getMembership(agent.id, req.params.userId);
+      if (!m || m.status !== 'active') return reply.code(404).send({ error: 'Not a member of this agent.' });
+      if (m.role === 'owner' || m.userId === agent.ownerId) return reply.code(400).send({ error: 'You can always chat with your own agent.' });
+      if (on && !isAccountId(m.userId)) {
+        return reply.code(409).send({ error: 'They joined without signing in here, so they cannot open this page as themselves. Send them a “Chat on the web” invite instead.' });
+      }
+      store.setMembershipWebChat(agent.id, m.userId, on);
+      trace(agent.id)(on ? 'member.web_chat_on' : 'member.web_chat_off', { userId: m.userId });
+      return { userId: m.userId, webChat: on };
+    },
+  );
 
   app.delete<{ Params: { id: string; userId: string } }>(
     '/v1/agents/:id/members/:userId',
@@ -9256,7 +9350,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ...(c.kind === 'discord' && Array.isArray(c.settings?.servers)
         ? { servers: (c.settings.servers as Array<{ name?: string }>).map((g) => String(g.name ?? '')).filter(Boolean).slice(0, 5) } : {}),
     }));
-    return { valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory, channels };
+    return {
+      valid: true, agentName: agent.name, sharedMemory: agent.sharedMemory, channels,
+      // A web-chat invite: the page asks them to sign in, not to pick an app.
+      ...(check.webChat ? { webChat: true, authMode: deps.authMode ?? 'password' } : {}),
+    };
   });
 
   // Unauthenticated (code-gated): redeem + start watching for the invitee's
@@ -9264,6 +9362,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.post<{ Body: { code?: string; name?: string; idToken?: string; channel?: string } }>('/v1/join', async (req, reply) => {
     const body = (req.body ?? {}) as { code?: string; name?: string; idToken?: string; channel?: string };
     if (!body.code) return reply.code(400).send({ error: 'code required' });
+    const pre = checkInvite(store, body.code);
+    if (pre.valid && pre.webChat) return joinForWebChat(req, reply, body);
     // Which app the invitee will message. One window per join, on that channel
     // only: a big Slack workspace or Discord server has strangers in it, and
     // an open window on every channel would hand the seat to whoever DMs first.

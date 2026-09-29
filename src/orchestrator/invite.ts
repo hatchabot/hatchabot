@@ -39,6 +39,9 @@ export function createInvite(
   /** Who it is for — a Telegram @handle. The claim window it opens then
    *  admits only that person, instead of whoever knocks first. */
   expectHandle?: string,
+  /** An invite to chat on the web: the invitee signs in here and is let in
+   *  with web chat on (2026-09-29). */
+  opts: { webChat?: boolean } = {},
 ): { code: string; expiresAt: string } {
   const code = generateInviteCode();
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
@@ -50,13 +53,14 @@ export function createInvite(
     createdBy,
     createdAt: new Date().toISOString(),
     expiresAt,
-    expectHandle,
+    expectHandle: opts.webChat ? undefined : expectHandle,
+    webChat: opts.webChat === true,
   });
   return { code, expiresAt };
 }
 
 export type InviteCheck =
-  | { valid: true; agentId: string }
+  | { valid: true; agentId: string; webChat: boolean }
   | { valid: false; reason: 'unknown' | 'expired' | 'used' };
 
 export function checkInvite(store: Store, code: string): InviteCheck {
@@ -71,7 +75,7 @@ export function checkInvite(store: Store, code: string): InviteCheck {
   if (!agent || agent.state === 'DELETED' || agent.state === 'DELETING') {
     return { valid: false, reason: 'unknown' };
   }
-  return { valid: true, agentId: invite.agentId };
+  return { valid: true, agentId: invite.agentId, webChat: invite.webChat };
 }
 
 export interface JoinResult {
@@ -79,6 +83,8 @@ export interface JoinResult {
   agentId: string;
   /** Who the invite named, if anyone — the claim window narrows to them. */
   expectHandle?: string;
+  /** The invite was for web chat: the membership has it on. */
+  webChat: boolean;
 }
 
 /**
@@ -104,7 +110,12 @@ export function redeemInvite(
   // and see this agent; otherwise it's an opaque per-invite id.
   const userId = accountId ?? `member-${randomUUID()}`;
   const existing = accountId ? store.getMembership(check.agentId, accountId) : undefined;
-  if (existing && existing.status === 'active') {
+  // A web-chat invite needs an account: web chat is used signed in here.
+  if (check.webChat && !accountId) throw new InviteInvalidError('signin');
+  // Someone already in (on a chat app) who is sent a web-chat invite gets web
+  // chat added to the seat they have (2026-09-29).
+  const upgrade = check.webChat && existing?.status === 'active';
+  if (existing && existing.status === 'active' && !upgrade) {
     throw new InviteInvalidError('used'); // already a member of this agent
   }
   const name = displayName.trim().slice(0, 64) || 'Guest';
@@ -115,11 +126,13 @@ export function redeemInvite(
     if (!store.markInviteRedeemed(code.trim().toUpperCase(), userId)) {
       throw new InviteInvalidError('used'); // lost the race — rolls back
     }
-    if (existing) {
+    if (upgrade) {
+      store.setMembershipWebChat(check.agentId, userId, true);
+    } else if (existing) {
       // A previously-revoked account member is re-admitted, not blocked forever
       // (insertMembership would also hit UNIQUE(agent_id, user_id)). Reactivate
       // the row and let the caller's claim re-bind their telegram id.
-      store.reactivateMembership(check.agentId, userId, name);
+      store.reactivateMembership(check.agentId, userId, name, check.webChat);
     } else {
       store.insertMembership({
         id: randomUUID(),
@@ -129,14 +142,15 @@ export function redeemInvite(
         displayName: name,
         status: 'active',
         joinedAt: new Date().toISOString(),
+        webChat: check.webChat,
       });
     }
   });
-  return { membershipUserId: userId, agentId: check.agentId, expectHandle: invite?.expectHandle };
+  return { membershipUserId: userId, agentId: check.agentId, expectHandle: invite?.expectHandle, webChat: check.webChat };
 }
 
 export class InviteInvalidError extends Error {
-  constructor(readonly reason: 'unknown' | 'expired' | 'used') {
+  constructor(readonly reason: 'unknown' | 'expired' | 'used' | 'signin') {
     super(`Invite invalid: ${reason}`);
     this.name = 'InviteInvalidError';
   }
@@ -146,6 +160,8 @@ export class InviteInvalidError extends Error {
         return 'This invite has expired. Ask for a new one.';
       case 'used':
         return 'This invite was already used. Ask for a new one.';
+      case 'signin':
+        return 'Sign in to this Hatchabot first — chatting on the web is done signed in.';
       default:
         return "This invite link isn't valid.";
     }

@@ -657,6 +657,11 @@ export class Store {
       // Who an invite is FOR, when the owner said so: a Telegram @handle. The
       // claim window it opens then admits only that person.
       `ALTER TABLE invites ADD COLUMN expect_handle TEXT`,
+      // Chat on the web (2026-09-29): a member the owner trusts to talk to the
+      // agent from this app, and the invite that grants it. Off by default —
+      // a web turn runs as the owner, so it is given, never assumed.
+      `ALTER TABLE memberships ADD COLUMN web_chat INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE invites ADD COLUMN web_chat INTEGER NOT NULL DEFAULT 0`,
       // …and the window the redeemed invite opens carries it. CREATE TABLE IF
       // NOT EXISTS does nothing to a table that already exists, so a column
       // added to one after it shipped needs this line or every read of it
@@ -1592,11 +1597,11 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO memberships (id, agent_id, user_id, role, display_name, channel_user_id,
-                                  status, invited_by, joined_at)
+                                  status, invited_by, joined_at, web_chat)
          VALUES (@id, @agentId, @userId, @role, @displayName, @channelUserId, @status,
-                 @invitedBy, @joinedAt)`,
+                 @invitedBy, @joinedAt, @webChat)`,
       )
-      .run({ channelUserId: null, invitedBy: null, joinedAt: null, displayName: null, ...m });
+      .run({ channelUserId: null, invitedBy: null, joinedAt: null, displayName: null, ...m, webChat: m.webChat ? 1 : 0 });
   }
 
   /**
@@ -2359,13 +2364,14 @@ export class Store {
     createdAt: string;
     expiresAt: string;
     expectHandle?: string;
+    webChat?: boolean;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO invites (id, agent_id, code, role, created_by, created_at, expires_at, expect_handle)
-         VALUES (@id, @agentId, @code, @role, @createdBy, @createdAt, @expiresAt, @expectHandle)`,
+        `INSERT INTO invites (id, agent_id, code, role, created_by, created_at, expires_at, expect_handle, web_chat)
+         VALUES (@id, @agentId, @code, @role, @createdBy, @createdAt, @expiresAt, @expectHandle, @webChat)`,
       )
-      .run({ ...i, expectHandle: normalizeHandle(i.expectHandle) ?? null });
+      .run({ ...i, expectHandle: normalizeHandle(i.expectHandle) ?? null, webChat: i.webChat ? 1 : 0 });
   }
 
   getInviteByCode(code: string):
@@ -2377,6 +2383,7 @@ export class Store {
         expiresAt: string;
         redeemedAt?: string;
         expectHandle?: string;
+        webChat: boolean;
       }
     | undefined {
     const r = this.db.prepare(`SELECT * FROM invites WHERE code = ?`).get(code) as any;
@@ -2389,6 +2396,7 @@ export class Store {
       expiresAt: r.expires_at,
       expectHandle: r.expect_handle ?? undefined,
       redeemedAt: r.redeemed_at ?? undefined,
+      webChat: r.web_chat === 1,
     };
   }
 
@@ -2422,10 +2430,11 @@ export class Store {
     channelUserId?: string;
     status: string;
     joinedAt?: string;
+    webChat: boolean;
   }> {
     const rows = this.db
       .prepare(
-        `SELECT user_id, role, display_name, channel_user_id, status, joined_at
+        `SELECT user_id, role, display_name, channel_user_id, status, joined_at, web_chat
          FROM memberships WHERE agent_id = ? ORDER BY joined_at`,
       )
       .all(agentId) as any[];
@@ -2436,15 +2445,16 @@ export class Store {
       joinedAt: r.joined_at ?? undefined,
       channelUserId: r.channel_user_id ?? undefined,
       status: r.status,
+      webChat: r.web_chat === 1,
     }));
   }
 
   getMembership(agentId: string, userId: string):
-    | { userId: string; role: string; channelUserId?: string; status: string }
+    | { userId: string; role: string; channelUserId?: string; status: string; displayName?: string; webChat: boolean }
     | undefined {
     const r = this.db
       .prepare(
-        `SELECT user_id, role, channel_user_id, status FROM memberships
+        `SELECT user_id, role, channel_user_id, status, display_name, web_chat FROM memberships
          WHERE agent_id = ? AND user_id = ?`,
       )
       .get(agentId, userId) as any;
@@ -2454,7 +2464,30 @@ export class Store {
       role: r.role,
       channelUserId: r.channel_user_id ?? undefined,
       status: r.status,
+      displayName: r.display_name ?? undefined,
+      webChat: r.web_chat === 1,
     };
+  }
+
+  /**
+   * May this person chat with the agent from the web app? Its owner, or an
+   * ACTIVE member the owner gave web chat. Removal (status 'revoked') ends it
+   * without touching the flag (2026-09-29).
+   */
+  webChatAllowed(agentId: string, userId: string): boolean {
+    const agent = this.getAgent(agentId);
+    if (!agent || agent.state === 'DELETED') return false;
+    if (agent.ownerId === userId) return true;
+    const m = this.getMembership(agentId, userId);
+    return !!m && m.status === 'active' && m.webChat;
+  }
+
+  /** Turn web chat on or off for an active member. False when there is no such member. */
+  setMembershipWebChat(agentId: string, userId: string, on: boolean): boolean {
+    const res = this.db
+      .prepare(`UPDATE memberships SET web_chat = ? WHERE agent_id = ? AND user_id = ? AND status = 'active'`)
+      .run(on ? 1 : 0, agentId, userId);
+    return res.changes === 1;
   }
 
   /**
@@ -3874,15 +3907,17 @@ export class Store {
    * Clears the old bound telegram id so they claim first contact anew — the
    * person behind the account may have changed, and pairing re-binds it.
    */
-  reactivateMembership(agentId: string, userId: string, displayName: string): void {
+  reactivateMembership(agentId: string, userId: string, displayName: string, webChat = false): void {
+    // web_chat is set from THIS invite: a web-chat right given before the
+    // removal does not come back with a plain chat-app invite (2026-09-29).
     this.db
       .prepare(
         `UPDATE memberships
            SET status = 'active', display_name = ?, channel_user_id = NULL,
-               joined_at = ?
+               joined_at = ?, web_chat = ?
          WHERE agent_id = ? AND user_id = ?`,
       )
-      .run(displayName, new Date().toISOString(), agentId, userId);
+      .run(displayName, new Date().toISOString(), webChat ? 1 : 0, agentId, userId);
     this.clearMemberIdentities(agentId, userId);
   }
 

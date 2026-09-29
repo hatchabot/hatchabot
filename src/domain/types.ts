@@ -415,4 +415,6 @@ export interface Membership {
   status: 'active' | 'revoked';
   invitedBy?: string;
   joinedAt?: string;
+  /** May talk to the agent from the web app (as its owner — see docs/features.md). */
+  webChat?: boolean;
 }

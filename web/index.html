@@ -357,6 +357,14 @@
                  margin: 12px 0; user-select: all; }
   .empty { text-align: center; color: var(--dim); padding: 48px 12px; }
   .err { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
+  /* Chat on the web (2026-09-29): plain bubbles, theirs in the soft gold wash. */
+  .wchat-log { max-height: min(56vh, 520px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; margin: 12px 0 4px; padding: 2px; }
+  .wchat-msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; background: var(--panel-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .wchat-msg.me { align-self: flex-end; background: color-mix(in srgb, var(--accent) 17%, var(--panel)); }
+  .wchat-msg.wait { color: var(--dim); font-style: italic; }
+  .wchat-send { display: flex; gap: 8px; align-items: flex-end; }
+  .wchat-send textarea { min-height: 44px; flex: 1; }
+  .chip.webchat { background: color-mix(in srgb, var(--accent) 17%, transparent); color: var(--text); }
   .toast {
     position: fixed; left: 50%; transform: translateX(-50%); bottom: 92px;
     background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
@@ -2543,6 +2551,7 @@
 
 <dialog id="inviteDlg">
   <h3 style="margin:0 0 4px">Invite someone to <span id="invAgent"></span></h3>
+  <div id="invApps">
   <div class="sub">
     Send them this link. It works once, expires in 48 hours, and they join as a
     member — they can chat, not change settings.
@@ -2561,11 +2570,40 @@
     <img id="invTgQr" alt="Telegram link QR code" width="112" height="112"
          style="display:none;border-radius:8px;background:#fff;padding:4px">
   </div>
+  </div>
+  <!-- The third way (2026-09-29): chat here, signed in. A web turn runs as the
+       owner, so the rights it hands over are said before the link exists. -->
+  <div id="invWeb" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+    <div class="sub"><b>Chat on the web — for people you trust.</b> They sign in to this
+      Hatchabot and chat with the agent here; no chat app needed. They need to reach
+      this machine (Tailscale).</div>
+    <div class="sub" id="invWebWarn" style="color:var(--warn);margin-top:4px">They will have your rights on this agent: through it
+      they can schedule tasks and change its settings. Only invite people you'd hand your laptop to.</div>
+    <div class="invite-link" id="invWebLink" hidden></div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+      <button id="invWebBtn" onclick="makeWebChatInvite()">Make a web chat link</button>
+      <button id="invWebCopy" hidden onclick="copyWebChatInvite()">Copy web chat link</button>
+    </div>
+  </div>
   <div class="actions" style="justify-content:flex-end;flex-wrap:wrap">
     <button onclick="inviteDlg.close()">Done</button>
-    <button onclick="copyInvite()" title="The web /join link — needs Tailscale, but lets them log into this UI too">Copy web link</button>
-    <button onclick="shareInviteTg()" id="invShareBtn" title="Share the ready-to-send Telegram invite">Share…</button>
-    <button class="primary" onclick="copyInviteTg()">Copy Telegram invite</button>
+    <button class="invAppBtn" onclick="copyInvite()" title="The web /join link — needs Tailscale, but lets them log into this UI too">Copy web link</button>
+    <button class="invAppBtn" onclick="shareInviteTg()" id="invShareBtn" title="Share the ready-to-send Telegram invite">Share…</button>
+    <button class="primary invAppBtn" onclick="copyInviteTg()">Copy Telegram invite</button>
+  </div>
+</dialog>
+
+<dialog id="webChatDlg" style="width:min(560px,94vw)">
+  <div style="display:flex;align-items:center;gap:8px">
+    <h3 style="margin:0;flex:1;min-width:0">Chat with <span id="wchatAgent"></span></h3>
+    <button onclick="webChatDlg.close()" aria-label="Close">✕</button>
+  </div>
+  <div class="sub">Its memory is shared: what you tell it, it may remember and use with the others who talk to it.</div>
+  <div class="wchat-log" id="wchatLog" aria-live="polite"></div>
+  <div class="err" id="wchatErr"></div>
+  <div class="wchat-send">
+    <textarea id="wchatText" rows="2" maxlength="8000" placeholder="Message — Enter sends, Shift+Enter for a new line"></textarea>
+    <button class="primary" id="wchatSend" onclick="webChatSend()">Send</button>
   </div>
 </dialog>
 
@@ -8196,14 +8234,23 @@ async function renderEditMembers() {
       // Someone who redeemed an invite and never messaged: their window has
       // almost certainly lapsed, and the agent is deaf to them outside it, so
       // offer to hold the door open again rather than leaving them stuck.
+      // Someone who only chats on the web never messages a bot: nothing to link, no door to hold open.
+      const webOnlyMember = m.webChat && !m.channelUserId && !Object.keys(m.identities || {}).length;
       const linked = m.channelUserId
         ? `<span class="sub" title="Telegram id ${esc(m.channelUserId)}">✓ linked</span>`
+        : webOnlyMember || m.role === 'owner' && !m.channelUserId && !v2ChannelKinds(agents.find(x => x.id === forId) || {}).length ? ''
         : `<span class="sub" style="color:var(--warn)">hasn't messaged yet</span>
            <button onclick="reopenDoor('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || 'They')}')"
                    title="Hold the door open for 30 minutes so their next message is let through">Let them in again</button>`;
+      const who = jsq(m.displayName || 'them');
+      // Web chat (2026-09-29): a badge, and the switch — offered only to someone who signs in here.
+      const web = m.role === 'owner' ? ''
+        : m.webChat ? `<span class="chip webchat" title="Chats with it on this page — with your rights on this agent">web chat</span>
+            <button onclick="setWebChat('${forId}','${jsq(m.userId)}','${who}',false)" title="They can no longer chat with it on this page">Turn off web chat</button>`
+        : m.account && appConfig.authMode !== 'password' ? `<button onclick="setWebChat('${forId}','${jsq(m.userId)}','${who}',true)" title="Let them chat with it on this page, signed in">Allow web chat…</button>` : '';
       const kickBtn = m.role === 'owner' ? '' :
         `<button class="danger" onclick="kick('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || m.userId)}').then(renderEditMembers)">Remove</button>`;
-      return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${kickBtn}</div>`;
+      return `<div class="pair"><span class="grow"><b>${label}</b>${m.role === 'owner' ? ' ★' : ''} <span class="sub">· ${esc(m.role)}</span> ${linked}</span>${web}${kickBtn}</div>`;
     }).join('') || '<div class="sub">Just you so far — Invite… below to add someone.</div>';
   } catch (e) { if (editAgentId === forId) el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
   void renderKnownPeople();
@@ -8220,6 +8267,16 @@ async function renderEditMembers() {
  * "they redeemed the invite and got round to it two hours later" is therefore
  * to open it again, on demand, rather than to leave it ajar for a day.
  */
+/** Web chat on or off for a member; turning it ON repeats what it hands over (2026-09-29). */
+async function setWebChat(agentId, userId, name, on) {
+  if (on && !confirm(`Let ${name} chat with this agent on the web?\n\nThey will have your rights on this agent: through it they can schedule tasks and change its settings. Only do this for people you'd hand your laptop to.`)) return;
+  try {
+    await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/web-chat`, { method: 'PUT', body: { on } });
+    toast(on ? `${name} can chat with it on the web now.` : `Web chat is off for ${name}.`);
+    if (editAgentId === agentId) await renderEditMembers();
+  } catch (e) { toast(e.message, 8000); }
+}
+
 async function reopenDoor(agentId, userId, name) {
   try {
     const r = await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/reopen`, { method: 'POST', body: {} });
@@ -8624,6 +8681,18 @@ let invShare = null; // { name, link, message } for the current invite dialog
  * named person. Optional, because you don't always know their handle.
  */
 async function invite(id, name) {
+  const a = agents.find(x => x.id === id);
+  // Web chat is offered where people sign in, and never for your Hatchabot agent.
+  const web = appConfig.authMode !== 'password' && !a?.ops;
+  // In no chat app yet: the web is the only way in, so no Telegram question and no chat-app link.
+  const webOnly = web && !!a && !v2ChannelKinds(a).length;
+  invWebFor = { id, name };
+  $('invWeb').hidden = !web;
+  $('invWebLink').hidden = true; $('invWebLink').textContent = '';
+  $('invWebCopy').hidden = true; $('invWebBtn').hidden = false; $('invWebBtn').disabled = false;
+  $('invApps').hidden = webOnly;
+  document.querySelectorAll('#inviteDlg .invAppBtn').forEach((b) => { b.hidden = webOnly; });
+  if (webOnly) { $('invAgent').textContent = name; invShare = null; inviteDlg.showModal(); return; }
   try {
     const who = prompt(
       `Who is this invite for?\n\nTheir Telegram @handle — then only they can use it, and anyone else who messages the bot is turned away.\n\nLeave blank if you don't know it: the first person to message within 30 minutes is admitted instead.`,
@@ -8633,7 +8702,6 @@ async function invite(id, name) {
     const inv = await api(`/v1/agents/${id}/invites`, { method: 'POST', body: { for: who.trim() || undefined } });
     $('invAgent').textContent = name;
     $('invLink').textContent = inv.url ?? (location.origin + inv.path);
-    const a = agents.find(x => x.id === id);
     const link = a?.deepLink ?? '';
     $('invTgLink').textContent = link;
     const qr = $('invTgQr');
@@ -8651,6 +8719,24 @@ async function invite(id, name) {
     $('invShareBtn').style.display = (link && navigator.share) ? '' : 'none';
     inviteDlg.showModal();
   } catch (e) { toast(e.message); }
+}
+
+/** The web-chat link: minted only when asked for, since it hands over the owner's rights (2026-09-29). */
+let invWebFor = null;
+async function makeWebChatInvite() {
+  if (!invWebFor) return;
+  $('invWebBtn').disabled = true;
+  try {
+    const inv = await api(`/v1/agents/${invWebFor.id}/invites`, { method: 'POST', body: { webChat: true } });
+    $('invWebLink').textContent = inv.url ?? (location.origin + inv.path);
+    $('invWebLink').hidden = false;
+    $('invWebBtn').hidden = true;
+    $('invWebCopy').hidden = false;
+  } catch (e) { toast(e.message, 8000); $('invWebBtn').disabled = false; }
+}
+async function copyWebChatInvite() {
+  const ok = await copyText($('invWebLink').textContent);
+  toast(ok ? 'Web chat link copied — it works once, for 48 hours' : 'Select the link and copy it manually');
 }
 
 // Robust clipboard copy. navigator.clipboard exists ONLY in a secure context
@@ -11140,6 +11226,7 @@ function v2RenderSheetBar() {
     ${a.state === 'FAILED' ? `<button class="primary" onclick="act('${jsq(a.id)}','provision')">Retry</button>` : ''}
     ${a.state === 'ARCHIVED' ? `<button class="primary" onclick="v2Close();restoreAgent('${jsq(a.id)}','${jsq(a.name)}')">📤 Restore</button><button onclick="openInspect('${jsq(a.id)}','${jsq(a.name)}')">🔍 Inspect</button>` : ''}
     ${chat ? `<button class="primary" onclick="v2Close();openGateway('${jsq(a.id)}','${jsq(a.slug)}')" title="Talk to it here">💬 Chat</button>` : ''}
+    ${!v2Mine(a) && a.webChat && a.state !== 'ARCHIVED' ? `<button class="primary" onclick="v2Close();openWebChat('${jsq(a.id)}')" title="Talk to it here — no chat app needed">💬 Chat</button>` : ''}
     <button onclick="v2Close()" aria-label="Close">✕</button>`;
 }
 function v2RenderSheet() {
@@ -11246,14 +11333,83 @@ function v2MemberPane(a) {
   const links = a.state === 'RUNNING' || asleep ? agentChannelLinks(a) : [];
   const apps = v2ChannelKinds(a).map(k => V2_CHAN_LABEL[k]);
   const named = apps.length > 1 ? `${apps.slice(0, -1).join(', ')} or ${apps.at(-1)}` : apps[0];
-  return `<div class="v2row"><div class="v2k">Chat</div><div class="v2v">
+  // Web chat, when the owner gave it (2026-09-29): the page itself is a way in.
+  const web = a.webChat && a.state !== 'ARCHIVED' ? `<div class="v2row"><div class="v2k">On the web</div><div class="v2v">
+      <button class="${apps.length ? '' : 'primary'}" onclick="v2Close();openWebChat('${jsq(a.id)}')">💬 Chat</button>
+      <span class="sub">Talk to it right here${asleep ? ' — a message wakes it' : ''}. No chat app needed.</span></div></div>` : '';
+  if (a.webChat && !apps.length) return web + v2MemberAbout(a);
+  return `${web}<div class="v2row"><div class="v2k">Chat</div><div class="v2v">
       ${links.map((l, i) => `<a class="btn${i ? '' : ' primary'}" href="${esc(l.url)}" target="_blank" rel="noopener">Open in ${V2_CHAN_LABEL[l.kind]}</a>`).join('')}
       ${links.some(l => l.kind === 'telegram') ? `<a class="btn" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : ''}
       ${asleep ? '<span>Asleep — a message wakes it.</span>' : links.length ? '' : '<span>Not running right now.</span>'}
       ${named ? `<span class="sub">It answers in ${named}, which works wherever you are.</span>` : ''}</div></div>
-    ${a.persona ? `<div class="v2row"><div class="v2k">What it does</div><div class="v2v">${esc(a.persona)}</div></div>` : ''}
+    ${v2MemberAbout(a)}`;
+}
+function v2MemberAbout(a) {
+  return `${a.persona ? `<div class="v2row"><div class="v2k">What it does</div><div class="v2v">${esc(a.persona)}</div></div>` : ''}
     <div class="v2row"><div class="v2k">Memory</div><div class="v2v">${a.ops ? 'Yours alone — only you talk to it.' : 'Shared — it remembers what everyone who uses it tells it, and anyone who talks to it can get at what it remembers.'}</div></div>`;
 }
+
+/**
+ * Chat on the web (2026-09-29): a member the owner trusts talks to the agent
+ * here, in a conversation of their own. Everything the agent says is shown
+ * as plain text (escaped; line breaks kept by the bubble's pre-wrap) — never
+ * as HTML.
+ */
+let webChatAgentId = null, webChatSending = false;
+const webChatBubble = (role, text, cls = '') => `<div class="wchat-msg${role === 'user' ? ' me' : ''}${cls}">${esc(text)}</div>`;
+const webChatScroll = () => { const l = $('wchatLog'); l.scrollTop = l.scrollHeight; };
+async function openWebChat(id) {
+  const a = v2Find(id); if (!a) return;
+  webChatAgentId = id;
+  $('wchatAgent').textContent = a.name;
+  $('wchatErr').textContent = '';
+  $('wchatLog').innerHTML = '<div class="sub" id="wchatEmpty">Loading your conversation…</div>';
+  if (!webChatDlg.open) webChatDlg.showModal();
+  $('wchatText').focus();
+  try {
+    const r = await api(`/v1/agents/${id}/chat`);
+    if (webChatAgentId !== id) return;
+    // A message sent while the history loaded stays; the history goes above it.
+    const sent = [...$('wchatLog').querySelectorAll('.wchat-msg')];
+    $('wchatLog').innerHTML = (r.messages || []).map(m => webChatBubble(m.role, m.text)).join('')
+      || (sent.length ? '' : `<div class="sub" id="wchatEmpty">${esc(r.note || 'Nothing here yet — say hello.')}</div>`);
+    for (const el of sent) $('wchatLog').append(el);
+    webChatScroll();
+  } catch (e) {
+    if (webChatAgentId !== id) return;
+    $('wchatEmpty')?.remove();
+    $('wchatErr').textContent = e.message;
+  }
+}
+async function webChatSend() {
+  const id = webChatAgentId, box = $('wchatText');
+  const text = box.value.trim();
+  if (!id || !text || webChatSending) return;
+  webChatSending = true; $('wchatSend').disabled = true;
+  $('wchatErr').textContent = '';
+  $('wchatEmpty')?.remove();
+  box.value = '';
+  $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('user', text) + '<div class="wchat-msg wait" id="wchatWait">…thinking</div>');
+  webChatScroll();
+  try {
+    const r = await api(`/v1/agents/${id}/chat`, { method: 'POST', body: { text } });
+    $('wchatWait')?.remove();
+    if (webChatAgentId === id) $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply));
+  } catch (e) {
+    $('wchatWait')?.remove();
+    // Busy, too many this hour, no answer in time, not allowed: said where they are typing.
+    if (webChatAgentId === id) $('wchatErr').textContent = e.message;
+  } finally {
+    webChatSending = false; $('wchatSend').disabled = false;
+    webChatScroll();
+  }
+}
+// Enter sends, Shift+Enter is a new line (nothing is sent mid-composition, e.g. Japanese input).
+$('wchatText').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); void webChatSend(); }
+});
+webChatDlg.addEventListener('close', () => { webChatAgentId = null; });
 
 /** Why a tab that reads from the running container is empty, in the agent's
  *  real state: a rebuild or a failure is not "stopped — start it". */
@@ -11324,11 +11480,12 @@ function v2Pane(a, tab) {
       ${slot('paneEditConn')}
       ${built ? `<h4 class="v2sec">History</h4>${row('Every conversation', `${B('💬 Download', `downloadHistory('${id}','${n}')`)}<span class="sub">A file of everything it has ever been told, oldest first.</span>`)}` : ''}`;
     case 'sharing': {
+      // Where people sign in, invited people can chat on the web: the member list shows without a chat app (2026-09-29).
+      const webOk = appConfig.authMode !== 'password' && !a.ops;
       return `
-      ${v2ChannelKinds(a).length
-        ? `<div data-v2slot="tgMembersBlock"></div>`
-        : row('People', `<span>Only you — it is not in a chat app yet.</span>${B('Add Telegram…', goto('messaging'))}${B('Add Discord…', goto('channels'))}
-            <span class="sub">Other people reach an agent through a chat app: Telegram or Discord.</span>`)}
+      ${v2ChannelKinds(a).length || webOk ? `<div data-v2slot="tgMembersBlock"></div>` : ''}
+      ${v2ChannelKinds(a).length ? '' : row('People', `<span>${webOk ? 'It is in no chat app yet — people you invite can chat with it on the web, here.' : 'Only you — it is not in a chat app yet.'}</span>${B('Add Telegram…', goto('messaging'))}${B('Add Discord…', goto('channels'))}
+            <span class="sub">Other people reach an agent through a chat app: Telegram or Discord${webOk ? ' — or the web chat, for people you trust' : ''}.</span>`)}
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}

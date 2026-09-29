@@ -119,8 +119,24 @@ export class MockProvider implements RuntimeProvider {
    * here. A value that is an ExecResult is answered as-is (a failed read).
    */
   usage = new Map<string, unknown>();
+  /**
+   * What each web chat session holds (orchestrator/webChat.ts), keyed by the
+   * store key agent:<slug>:web:<hex>: the messages the history reader would
+   * print, raw (prefix and all). An ExecResult answers as-is (a failed read).
+   */
+  webChatSessions = new Map<string, unknown>();
+  #webChatRead(script: string): ExecResult | undefined {
+    if (!script.includes('/tmp/hatchabot-webchat-')) return undefined;
+    const key = /SKEY='([^']*)'/.exec(script)?.[1] ?? '';
+    this.execLog.push(['webchat-history', key]);
+    const v = this.webChatSessions.get(key);
+    if (v && typeof v === 'object' && 'code' in (v as object)) return v as ExecResult;
+    return { code: 0, stdout: JSON.stringify({ messages: v ?? [] }), stderr: '' };
+  }
   async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
     this.#require(runtimeRef);
+    const chat = this.#webChatRead(script);
+    if (chat) return chat;
     if (script.startsWith('node -e "$(echo ') && script.includes('| base64 -d)"')) {
       const u = this.usage.get(runtimeRef) ?? this.usage.get('*');
       this.execLog.push(['usage-read', runtimeRef]);
@@ -133,6 +149,8 @@ export class MockProvider implements RuntimeProvider {
 
   async execShellOnVolume(runtimeRef: string, script: string, _opts?: { readOnly?: boolean }): Promise<ExecResult> {
     this.#require(runtimeRef);
+    const chat = this.#webChatRead(script);
+    if (chat) return chat;
     this.execLog.push(['sh-volume', script]);
     return this.execResponses.get('sh-volume') ?? { code: 0, stdout: '', stderr: '' };
   }

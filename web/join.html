@@ -60,6 +60,7 @@ async function init() {
     card.innerHTML = `<div class="agent">Hmm.</div><div class="notice">${why} Ask the person who sent it for a new one.</div>`;
     return;
   }
+  if (info.webChat) return initWebChat(info);
   ways = Array.isArray(info.channels) && info.channels.length ? info.channels : [{ kind: 'telegram' }];
   card.innerHTML = `
     <div style="color:var(--dim);font-size:14px">You've been invited to</div>
@@ -89,7 +90,7 @@ async function init() {
  * account, so the invitee can also open this page's app and see the agent.
  * Without it the membership is Telegram-only, exactly as before.
  */
-async function setupSignIn() {
+async function setupSignIn(onToken = join) {
   let cfg;
   try { cfg = await fetch('/v1/config').then(r => r.json()); } catch { return; }
   const cid = cfg?.identity?.googleClientId, apiKey = cfg?.identity?.apiKey;
@@ -110,7 +111,7 @@ async function setupSignIn() {
                 requestUri: location.origin, returnSecureToken: true }) },
           ).then(r => r.json());
           if (!out.idToken) throw new Error('Sign-in failed');
-          await join(out.idToken);
+          await onToken(out.idToken);
         } catch (e) { document.getElementById('err').textContent = e.message; }
       },
     });
@@ -162,6 +163,93 @@ async function join(idToken) {
     btn.disabled = false;
   }
 }
+/**
+ * An invite to chat on the web (2026-09-29): no app to pick, no pairing. They
+ * sign in to this Hatchabot — Google in identity mode, their account here in
+ * accounts mode (an existing session is used as is) — and are in at once.
+ */
+function initWebChat(info) {
+  card.innerHTML = `
+    <div style="color:var(--dim);font-size:14px">You've been invited to chat on the web with</div>
+    <div class="agent">${esc(info.agentName)}</div>
+    <div class="notice">
+      You chat with it on this Hatchabot's own page — no chat app needed. You'll need to
+      reach this machine (the person who invited you will have set that up).<br><br>
+      <b>Heads up:</b> it is a shared agent. Things you tell it may be remembered and
+      shared with the other people who use it.
+    </div>
+    <label>Your name (so it knows who's writing)</label>
+    <input id="name" maxlength="64" placeholder="e.g. Sam">
+    ${info.authMode === 'identity' ? `<div id="gsi" style="display:flex;justify-content:center;margin:16px 0 4px"></div>
+      <div style="color:var(--dim);font-size:13px;text-align:center">Sign in with Google to join.</div>`
+      : `<div id="acct" hidden>
+          <div class="notice" style="margin-bottom:0">Sign in with the account you have on this Hatchabot.
+            No account yet? Ask the person who invited you to make you one, then open this link again.</div>
+          <label>Username</label><input id="user" autocomplete="username">
+          <label>Password</label><input id="pass" type="password" autocomplete="current-password">
+        </div>
+        <button id="joinBtn">Join</button>`}
+    <div class="err" id="err"></div>`;
+  if (info.authMode === 'identity') { setupSignIn(joinWeb); return; }
+  document.getElementById('joinBtn').onclick = () => joinWebAccount();
+}
+
+/** Accounts mode: join with the session this browser has; asked to sign in only when there is none. */
+async function joinWebAccount() {
+  const btn = document.getElementById('joinBtn'), err = document.getElementById('err');
+  const acct = document.getElementById('acct');
+  btn.disabled = true; err.textContent = '';
+  try {
+    if (!acct.hidden) {
+      const r = await fetch('/v1/login', { method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: document.getElementById('user').value, password: document.getElementById('pass').value }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || 'Sign-in failed');
+    }
+    const out = await postJoin();
+    if (out.signIn) { acct.hidden = false; btn.textContent = 'Sign in and join'; document.getElementById('user').focus(); return; }
+    webChatDone(out);
+  } catch (e) { err.textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+
+/** Identity mode: the Google sign-in joins, then starts their session here so the app opens signed in. */
+async function joinWeb(idToken) {
+  const err = document.getElementById('err');
+  err.textContent = '';
+  try {
+    const out = await postJoin(idToken);
+    let note = '';
+    const s = await fetch('/v1/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ idToken }) });
+    if (!s.ok) {
+      const d = await s.json().catch(() => ({}));
+      note = `You're a member, but signing you in here failed: ${d.error || s.statusText}. Ask the person who invited you to add your address to this Hatchabot.`;
+    }
+    webChatDone(out, note);
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function postJoin(idToken) {
+  const res = await fetch('/v1/join', { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ code, name: document.getElementById('name').value, idToken }) });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && data.signIn) return { signIn: true };
+  if (!res.ok) throw new Error(data.error ?? 'Something went wrong');
+  return data;
+}
+
+function webChatDone(data, note = '') {
+  card.innerHTML = `
+    <div class="agent">You're in 🎉</div>
+    <ol class="steps">
+      <li>Open Hatchabot below.</li>
+      <li>Tap <b>${esc(data.agentName)}</b>, then <b>💬 Chat</b>.</li>
+      <li>Just talk — your conversation is yours; its memory is shared.</li>
+    </ol>
+    ${note ? `<div class="notice">${esc(note)}</div>` : ''}
+    <a class="btn" href="/">Open Hatchabot</a>`;
+}
+
 init();
 </script>
 </body>
