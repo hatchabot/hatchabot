@@ -14,7 +14,7 @@ import {
 const COOKIE = 'hatchabot_session';
 
 /**
- * Optional allowlist for identity mode: HATCHABOT_ALLOWED_EMAILS="a@x.com, b@y.org".
+ * Optional allowlist for identity mode: HATCHABOT_ALLOWED_EMAILS="a@example.com, b@example.org".
  * Unset = anyone the identity provider accepts may sign in (the household
  * default). Set = only these addresses become tenants; everyone else is 403.
  */
@@ -127,7 +127,19 @@ const TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
  * signed in again every hour (Chris, 2026-09-28). The allowed-emails list is
  * still enforced on every request: the email rides in the signed cookie.
  */
-const SESSION_TTL_MS = Number(process.env.HATCHABOT_SESSION_DAYS ?? 14) * 24 * 60 * 60 * 1000;
+export function sessionTtlMs(raw = process.env.HATCHABOT_SESSION_DAYS): number {
+  // An empty or mistyped value (`HATCHABOT_SESSION_DAYS=` reaches us as '')
+  // gave 0 or NaN: every Google sign-in "succeeded" into an already-expired
+  // cookie and looped back to the login screen (review, 2026-09-29).
+  const days = Number(raw);
+  if (raw !== undefined && raw.trim() !== '' && Number.isFinite(days) && days > 0) return days * 24 * 60 * 60 * 1000;
+  if (raw !== undefined && !warnedSessionDays) {
+    warnedSessionDays = true;
+    console.warn(`HATCHABOT_SESSION_DAYS=${JSON.stringify(raw)} is not a positive number of days; using 14.`);
+  }
+  return 14 * 24 * 60 * 60 * 1000;
+}
+let warnedSessionDays = false;
 
 export interface AuthOptions {
   /** Shared password (HATCHABOT_PASSWORD). Unset = auth disabled, loudly. */
@@ -470,7 +482,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     return `${Buffer.from(payload).toString('base64url')}.${sign(payload)}`;
   };
 
-  const readSession = (cookie: string | undefined): { sub: string } | undefined => {
+  const readSession = (cookie: string | undefined): { sub: string; email?: string } | undefined => {
     if (!cookie) return undefined;
     const [b64, sig] = cookie.split('.');
     if (!b64 || !sig) return undefined;
@@ -488,7 +500,10 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     // are refused once a list is set.)
     const email = rest.length ? rest.join(':') : undefined;
     if (process.env.HATCHABOT_ALLOWED_EMAILS?.trim() && allowedEmailProblem(email)) return undefined;
-    return { sub };
+    // The email rides along to the principal: without it shares were stored
+    // "from another user" and the own-address guard never fired (review,
+    // 2026-09-29). Only verified emails are ever minted (see /v1/session).
+    return { sub, email };
   };
 
   app.post<{ Body: { idToken?: string } }>('/v1/session', async (req, reply) => {
@@ -497,9 +512,13 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     if (throttled(req)) return reply.code(429).send({ error: 'Too many failed attempts — try again later.' });
     try {
       const token = await verifier.verify(idToken);
+      // principalFor refuses an unverified email. It ran AFTER the cookie
+      // was set, so the 401 carried a working 14-day session and "verify
+      // your email" gated nothing (review, 2026-09-29). Judge first, mint last.
+      const principal = principalFor(token);
       const denied = allowedEmailProblem(token.email);
       if (denied) return reply.code(403).send({ error: denied });
-      const exp = Date.now() + SESSION_TTL_MS;
+      const exp = Date.now() + sessionTtlMs();
       reply.setCookie(COOKIE, mintSession(token.sub, exp, token.email), {
         httpOnly: true,
         sameSite: 'strict',
@@ -507,7 +526,6 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
         path: '/',
         maxAge: Math.floor((exp - Date.now()) / 1000),
       });
-      const principal = principalFor(token);
       opts.onAuthenticated?.(principal);
       return { ok: true, ownerId: principal.ownerId, email: principal.email };
     } catch (err) {
@@ -525,7 +543,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
 
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     const session = readSession(cookieValue(header, COOKIE));
-    if (session) return { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub };
+    if (session) return { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub, email: session.email };
     // A local account's session, as the request hook accepts it: without this
     // their console's WebSocket was always refused (night review).
     if (localAccounts && opts.store) {
@@ -599,7 +617,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     // Browser session cookie minted from an already-verified token.
     const session = readSession(req.cookies[COOKIE]);
     if (session) {
-      req.principal = { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub };
+      req.principal = { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub, email: session.email };
       return;
     }
     // …or a local account's session, when those run alongside Google. The two

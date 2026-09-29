@@ -111,7 +111,7 @@ describe('Google sign-in with local accounts beside it', () => {
   async function mixed() {
     process.env.HATCHABOT_LOCAL_ACCOUNTS = '1';
     const store = new Store(new Database(':memory:'));
-    const verifier = { verify: async () => ({ sub: 'g-owner', email: 'owner@example.com', expMs: Date.now() + 3_600_000 }) };
+    const verifier = { verify: async () => ({ sub: 'g-owner', email: 'owner@example.com', emailVerified: true, expMs: Date.now() + 3_600_000 }) };
     const f = Fastify();
     await registerAuth(f, { secret: SECRET, mode: 'identity', store, verifier: verifier as never, cliTokenOwner: (t) => store.ownerForCliToken(t) });
     f.get('/v1/whoami', async (req) => principalOf(req));
@@ -144,7 +144,7 @@ describe('Google sign-in with local accounts beside it', () => {
 describe('Google sign-in sessions (2026-09-28)', () => {
   it('last beyond the hour-long Google token, and still answer to the allowed-emails list', async () => {
     const store = new Store(new Database(':memory:'));
-    const verifier = { verify: async () => ({ sub: 'g-owner', email: 'owner@example.com', expMs: Date.now() + 3_600_000 }) };
+    const verifier = { verify: async () => ({ sub: 'g-owner', email: 'owner@example.com', emailVerified: true, expMs: Date.now() + 3_600_000 }) };
     const f = Fastify();
     await registerAuth(f, { secret: SECRET, mode: 'identity', store, verifier: verifier as never, cliTokenOwner: () => undefined });
     f.get('/v1/whoami', async (req) => principalOf(req));

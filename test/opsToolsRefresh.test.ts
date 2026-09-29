@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
 import { APP_VERSION } from '../src/domain/appVersion.js';
+import { opsToolsFingerprint } from '../src/ops/opsTools.js';
 
 /**
  * A management agent reads its tool list once, when its gateway starts. After
@@ -43,6 +44,6 @@ describe('remembering which version an agent was built against', () => {
     store.setAgentWebOnly(agent.id, true);
     store.setAgentOps(agent.id, true);
     await buildRuntimeSpec(deps as never, agent.id);
-    expect(store.appliedAppVersion(agent.id)).toBe(APP_VERSION);
+    expect(store.appliedAppVersion(agent.id)).toBe(opsToolsFingerprint());
   });
 });
