@@ -589,7 +589,8 @@ async function importAgentInner(
     aiProfileId: profile.id,
     hostId: host.id,
     persona: manifest.agent.persona,
-    sharedMemory: manifest.agent.sharedMemory,
+    // Always shared here, whatever the file says: memory is one per agent (2026-09-29).
+    sharedMemory: true,
     webOnly: !manifest.channel,
     icon: validIcon(manifest.agent.icon) ? manifest.agent.icon : undefined,
     iconColor: validIconColor(manifest.agent.iconColor) ? manifest.agent.iconColor : undefined,

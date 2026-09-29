@@ -56,11 +56,11 @@ describe('admitMember', () => {
     expect(send![send!.length - 1]).toContain('shared agent');
   });
 
-  it('omits the shared-memory disclosure when memory is not shared', async () => {
+  it('always says memory is shared: an agent has one memory, whatever it was set to (2026-09-29)', async () => {
     const { store, provider, opts } = await setup(false);
     await admitMember({ store, provider }, opts);
     const send = provider.execLog.find((a) => a[0] === 'message' && a[1] === 'send');
-    expect(send![send!.length - 1]).not.toContain('shared agent');
+    expect(send![send!.length - 1]).toContain('shared agent');
   });
 
   it('does not mint a second membership when the sender is already a member', async () => {

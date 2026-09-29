@@ -223,8 +223,12 @@ Download copy and import it there instead.
 
 To create an agent, tap **+** in the web app: name it, optionally answer
 "What is it for?" (that text becomes its persona), pick an AI source, and —
-when more than one host exists — pick where it runs ("Runs on"). A "Keep
-memory private" checkbox decides shared vs private memory at birth.
+when more than one host exists — pick where it runs ("Runs on"). Its memory
+is shared: OpenClaw gives an agent one memory, reachable from every
+conversation it has, so what anyone tells it may come up with the others.
+Everyone who joins is told so. (Until v2.107.0 there was a "Keep memory
+private" switch; it only changed an instruction to the agent, so it was
+removed — for something private, give that person their own agent.)
 
 An agent that is on Telegram has its own bot — its identity there. Telegram has no
 API to mint bots, so normally you're walked through creating one at

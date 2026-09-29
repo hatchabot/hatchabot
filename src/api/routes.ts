@@ -4591,6 +4591,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // cap goes first (it writes its own record only once docker took it),
       // then the rewrite, and the plain DB writes last — so a 400/409 changes
       // nothing and a 502 leaves at most the cap, which stands on its own.
+      // Memory is always shared now (2026-09-29): an agent's memory is one,
+      // reachable from every conversation, so "private" could not be kept.
+      if (shared === false && !agent.ops) {
+        return reply.code(400).send({ error: "An agent's memory is always shared with everyone who talks to it. For something private, give that person their own agent." });
+      }
       const flippingMemory = shared !== undefined && shared !== agent.sharedMemory;
       if (flippingMemory) {
         const others = store
@@ -6629,7 +6634,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const taken = new Set(store.listAllActiveAgents().filter((a) => a.ownerId === ownerId).map((a) => a.slug));
     const name = [OPS_AGENT_NAME, 'Hatchabot agent', 'Hatchabot manager'].find((n) => !taken.has(slugify(n)));
     if (!name) return reply.code(409).send({ error: 'Rename your agent called "Hatchabot" first.' });
-    const agent = createAgentRecord(store, { ownerId, name, persona: OPS_AGENT_PERSONA, aiProfileId: profile.id, hostId: host.id, sharedMemory: false });
+    const agent = createAgentRecord(store, { ownerId, name, persona: OPS_AGENT_PERSONA, aiProfileId: profile.id, hostId: host.id, ownerOnlyMemory: true });
     store.setAgentWebOnly(agent.id, true);
     store.setAgentOps(agent.id, true);
     store.setAgentIcon(agent.id, OPS_AGENT_ICON, '#e0a13a');

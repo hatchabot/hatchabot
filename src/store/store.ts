@@ -745,6 +745,14 @@ export class Store {
     // rows that filled a dozen agents' 200-row Setup logs with noise. The
     // logging stopped; the rows stayed. Dropped once (review, 2026-09-29) —
     // the real history they pushed out is gone for good.
+    // Memory is one per agent in OpenClaw: every conversation can reach
+    // MEMORY.md and memory search, whatever the agent was told. "Private to
+    // each person" could never be true, so every agent is shared and the
+    // switch is gone (2026-09-29, Chris). The Hatchabot agent keeps its own
+    // owner-only wording: it can have no members.
+    this.runOnce('2026-09-29-memory-always-shared', () => {
+      this.db.exec(`UPDATE agents SET shared_memory = 1 WHERE ops = 0 AND shared_memory = 0`);
+    });
     this.runOnce('2026-09-29-dm-policy-unchanged', () => {
       this.db.exec(`DELETE FROM agent_events WHERE event = 'channel.dm_policy' AND CASE WHEN json_valid(detail) THEN json_extract(detail, '$.result') END = 'unchanged'`);
     });

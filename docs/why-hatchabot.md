@@ -92,7 +92,7 @@ a fleet, by more than one person.
   send"; per-agent secrets are write-only. No keyrings to hand-copy into each
   install.
 - **More than one human.** Owners, members, invites by link or QR, pairing
-  approvals, group rooms, shared-vs-private memory that people are told about,
+  approvals, group rooms, a shared memory that everyone is told about,
   per-owner isolation for a household. OpenClaw's allowlist is a config line.
 - **Fleet operations.** One app for the whole fleet: health probes, usage per
   agent per day, an audit timeline, a daily security posture with diffs, classes
@@ -113,7 +113,7 @@ when there are several, they matter, and other people talk to them.
 |---|---|
 | **Create agents fast** | Name + one paragraph + a bot token → a running, remembering agent in a minute. Clone one you like; import a shared template. |
 | **Talk through Telegram** | You and your family message agents like contacts. Invite by link or QR; group rooms; per-agent allowlists. |
-| **Many humans, one agent** | Private one-to-one threads with the same agent, or a shared room. Shared or private memory, declared. |
+| **Many humans, one agent** | Several people on the same agent, or a shared room. One shared memory, declared to everyone who joins. |
 | **Choose the brain per agent** | Claude, OpenAI, Gemini, or a local model; switch the model live; classes for tiers; live source migration. |
 | **Give agents accounts and data** | Gmail / Calendar / Drive / Sheets connections, folders, git repos it commits to, per-agent secrets. |
 | **Schedule and react** | Cron tasks, event-triggered tasks (a zero-cost check decides whether to wake the model), run-now tests. |

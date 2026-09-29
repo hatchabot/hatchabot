@@ -76,7 +76,8 @@ export interface CreateAgentInput {
   persona?: string;
   aiProfileId: string;
   hostId: string;
-  sharedMemory?: boolean;
+  /** Only the Hatchabot agent: it can have no members, so its memory is its owner's alone. */
+  ownerOnlyMemory?: boolean;
   /** Optional per-agent model override (cloud only); absent = profile default. */
   model?: string;
 }
@@ -151,10 +152,9 @@ export function createAgentRecord(store: Store, input: CreateAgentInput): Agent 
     aiProfileId: profile.id,
     hostId: host.id,
     persona: input.persona ?? '',
-    // Shared by default: a multi-member agent with a single MEMORY.md is only
-    // honest when everyone knows memory is common. Private is the opt-out for
-    // a strictly personal agent.
-    sharedMemory: input.sharedMemory ?? true,
+    // Always shared: OpenClaw gives an agent one memory, reachable from every
+    // conversation, so "private to each person" could not be kept (2026-09-29).
+    sharedMemory: !input.ownerOnlyMemory,
     // Only meaningful for cloud profiles; effectiveModel() ignores it for local.
     model: profile.vendor === 'local' ? undefined : input.model || undefined,
     // sortOrder is left to the store, which lands a new agent FIRST in its

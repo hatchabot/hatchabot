@@ -480,7 +480,6 @@ export function importTemplate(
       persona: applyParamValues(manifest.agent.persona, values),
       aiProfileId: profile.id,
       hostId: host.id,
-      sharedMemory: manifest.agent.sharedMemory,
     });
   } catch {
     throw new TransferError(`Couldn't create "${name}" — an agent with that name may already exist here. Import under a different name.`);

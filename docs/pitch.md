@@ -32,7 +32,7 @@ machine in one click. Back them up. Nothing about them belongs to a provider.
 ## What makes it different
 
 - **Telegram as the front door** — the one app everyone already has. Invite by link or QR.
-- **Many people, one agent** — privately, or together in a group room; shared or private memory, and everyone is told which.
+- **Many people, one agent** — one to one or together in a group room; one shared memory, and everyone is told so.
 - **Real capabilities, real limits** — give an agent your Gmail but not the power to send; a folder but read-only; a git repo where every change is a commit.
 - **Runs at home** — your data stays on your machine. Pair it with a local model and nothing leaves at all.
 - **Operator-grade tooling** — rebuilds that keep memory, snapshots before every edit, one-click recovery of lost context, usage per agent per day, a daily security posture check, an audit trail of everything.

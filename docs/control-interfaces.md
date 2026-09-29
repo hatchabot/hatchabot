@@ -46,7 +46,7 @@ it per device (`"pixel-app"`, `"tg-bot"`), and revoke per device.
 Grouped for reference (full list in `src/api/routes.ts`):
 
 - **Fleet:** `GET /v1/agents`, `GET /v1/agents/:id`, `POST /v1/agents`,
-  `PATCH /v1/agents/:id` (name, model, aiProfileId, sharedPaths, sharedMemory),
+  `PATCH /v1/agents/:id` (name, model, aiProfileId, sharedPaths; sharedMemory:false is refused since v2.107.0),
   `DELETE /v1/agents/:id`
 - **Lifecycle:** `POST /v1/agents/:id/{start,stop,rebuild,provision}`
 - **Observe:** `GET /v1/agents/:id/logs`, `GET /v1/events`, `GET /v1/pool`

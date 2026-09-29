@@ -107,7 +107,7 @@ Commands:
                                (default: all of yours). --rebuild applies now,
                                else each shows "rebuild to apply".
   create <name> [--persona <text>] [--profile <id|name>] [--host <id>]
-         [--private] [--no-telegram] [--timeout <min>]
+         [--no-telegram] [--timeout <min>]
                                Create an agent and wait for it to boot (up to
                                15 min). Without --profile it gets your ⭐
                                default AI source, as in the app.
@@ -1252,6 +1252,7 @@ async function main() {
       const profiles: any[] = await (await api(ctx, '/v1/ai-profiles')).json() as any[];
       const hosts: any[] = await (await api(ctx, '/v1/hosts')).json() as any[];
       const picked = pickProfile(profiles, flags.get('profile'));
+      if (flags.has('private')) fail("--private is gone: an agent's memory is always shared with everyone who talks to it. For something private, give that person their own agent.");
       const profile = picked.hit?.id ?? fail(picked.problem!);
       const host = flags.get('host') ?? (hosts.find((h) => h.kind === 'local') ?? hosts[0])?.id ?? fail('no host configured');
       const res = await jsonPost('/v1/agents', {
@@ -1259,7 +1260,6 @@ async function main() {
         persona: flags.get('persona') || undefined,
         aiProfileId: profile,
         hostId: host,
-        sharedMemory: !flags.has('private'),
         // --no-telegram: no bot; talk to it in the web app's console.
         telegram: flags.has('no-telegram') ? false : undefined,
       });
@@ -1397,7 +1397,7 @@ async function main() {
         console.log(`  keeping ${seedMembers.length} approved chat member(s) — no re-pairing`);
       }
       const created: any = await (await jsonPost('/v1/agents', {
-        name, aiProfileId: profile, hostId: host, sharedMemory: false,
+        name, aiProfileId: profile, hostId: host,
         ...(seedMembers.length ? { seedMembers } : {}),
       })).json();
 

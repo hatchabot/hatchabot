@@ -7,10 +7,11 @@ import { registerRoutes } from '../src/api/routes.js';
 import type { SecretStore } from '../src/secrets/secretStore.js';
 
 /**
- * PATCH /v1/agents/:id { sharedMemory }: the flag must be persisted ONLY after
- * AGENTS.md is rewritten. A failed write must 502 and leave the stored flag
- * unchanged — otherwise the DB and the agent's own file diverge forever (nothing
- * reconciles them). This is the exact regression the ordering was written to fix.
+ * Memory is always shared (2026-09-29). OpenClaw gives an agent one memory,
+ * reachable from every conversation — a test agent with a marker in MEMORY.md
+ * answered it from a separate direct-message session too — so "private to
+ * each person" could never be kept. The switch is gone; asking for it is
+ * refused with the reason, and agents that were "private" became shared once.
  */
 
 class MemSecrets implements SecretStore {
@@ -41,46 +42,34 @@ async function world(state = 'RUNNING') {
 
 const patch = (f: any, body: unknown) => f.inject({ method: 'PATCH', url: '/v1/agents/a1', headers: as, payload: body });
 
-describe('PATCH sharedMemory', () => {
-  it('flips the flag and writes AGENTS.md on success', async () => {
+describe('memory is always shared', () => {
+  it('refuses a request to make an agent private, saying why, and changes nothing', async () => {
     const { store, provider, f } = await world();
-    const res = await patch(f, { sharedMemory: false });
-    expect(res.statusCode).toBe(200);
-    expect(store.getAgent('a1')!.sharedMemory).toBe(false);
-    // The base64 round-trip write was issued.
-    expect(provider.execLog.some((c) => c[0] === 'sh' && /base64 -d/.test(c[1] ?? ''))).toBe(true);
-  });
-
-  it('502s and leaves the flag UNCHANGED when the AGENTS.md write fails', async () => {
-    const { store, provider, f } = await world();
-    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'disk full' });
-    const res = await patch(f, { sharedMemory: false });
-    expect(res.statusCode).toBe(502);
-    expect(store.getAgent('a1')!.sharedMemory).toBe(true); // not persisted
-  });
-
-  it('409s when the agent is not RUNNING', async () => {
-    const { store, f } = await world('STOPPED');
-    const res = await patch(f, { sharedMemory: false });
-    expect(res.statusCode).toBe(409);
-    expect(store.getAgent('a1')!.sharedMemory).toBe(true);
-  });
-
-  it('400s when the agent has an active non-owner member', async () => {
-    const { store, f } = await world();
-    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'someone', role: 'user', status: 'active' });
+    const before = provider.execLog.length;
     const res = await patch(f, { sharedMemory: false });
     expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/always shared/);
     expect(store.getAgent('a1')!.sharedMemory).toBe(true);
+    expect(provider.execLog.length).toBe(before);
   });
 
-  it('is atomic: a combined PATCH that 502s on the memory write changes nothing', async () => {
-    const { store, provider, f } = await world();
-    provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'disk full' });
-    const res = await patch(f, { name: 'Renamed', sharedMemory: false });
-    expect(res.statusCode).toBe(502);
-    // Neither the name nor the flag was committed — the whole PATCH rolled off.
-    expect(store.getAgent('a1')!.name).toBe('Kitchen');
-    expect(store.getAgent('a1')!.sharedMemory).toBe(true);
+  it('a new agent is shared even when a client still asks for private', async () => {
+    const { store, f } = await world();
+    const res = await f.inject({ method: 'POST', url: '/v1/agents', headers: as, payload: { name: 'Den', aiProfileId: 'p1', hostId: 'h1', sharedMemory: false, telegram: false } });
+    expect(res.statusCode).toBeLessThan(300);
+    expect(store.getAgent(res.json().id)!.sharedMemory).toBe(true);
+  });
+
+  it('agents that were "private" become shared once on upgrade; the Hatchabot agent keeps its own', async () => {
+    const db = new Database(':memory:');
+    const s1 = new Store(db);
+    s1.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    s1.insertAIProfile({ id: 'p1', ownerId: OWNER, name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/p1', createdAt: 'now' });
+    s1.insertAgent({ id: 'b1', ownerId: OWNER, name: 'Condo', slug: 'condo', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' } as any);
+    s1.insertAgent({ id: 'b2', ownerId: OWNER, name: 'Hatchabot', slug: 'hatchabot', state: 'RUNNING', aiProfileId: 'p1', hostId: 'h1', persona: '', sharedMemory: false, ops: true, createdAt: 'now', updatedAt: 'now' } as any);
+    db.exec(`DELETE FROM store_migrations WHERE name = '2026-09-29-memory-always-shared'`);
+    const s2 = new Store(db);
+    expect(s2.getAgent('b1')!.sharedMemory).toBe(true);
+    expect(s2.getAgent('b2')!.sharedMemory).toBe(false);
   });
 });

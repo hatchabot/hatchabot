@@ -161,9 +161,9 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
 
   // Welcome + disclosure. Best-effort: the membership is already real, and
   // they'll see the agent respond to their held message either way.
-  const disclosure = opts.sharedMemory
-    ? ' Heads up: this is a shared agent — things you tell it may be remembered and shared with the other people who use it.'
-    : '';
+  // Always said: an agent has one memory, reachable from every conversation
+  // (it was said only for "shared" agents, and "private" ones were not private).
+  const disclosure = ' Heads up: this is a shared agent — things you tell it may be remembered and shared with the other people who use it.';
   const welcome = `You're in! You're now a member of ${opts.agentName}.${disclosure} Say hi whenever you're ready.`;
   const sent = await provider
     .exec(opts.runtimeRef, [
@@ -234,9 +234,7 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
   store.bindMemberIdentity(opts.agentId, userId, kind, req.id);
   log('member.admitted', { agentId: opts.agentId, userId, kind, channelUserId: req.id, displayName });
 
-  const disclosure = opts.sharedMemory
-    ? ' Heads up: this is a shared agent — things you tell it may be remembered and shared with the other people who use it.'
-    : '';
+  const disclosure = ' Heads up: this is a shared agent — things you tell it may be remembered and shared with the other people who use it.';
   const sent = await provider
     .exec(opts.runtimeRef, [
       'message', 'send', '--channel', kind, '--account', opts.accountId, '--target', `user:${req.id}`,

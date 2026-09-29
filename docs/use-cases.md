@@ -44,7 +44,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 ## C. Creating agents
 | id | Use case | Surfaces | Coverage |
 |---|---|---|---|
-| C1 | Create an agent (name, persona, source, host, private memory, no Telegram) | U C A M | auto (userFlows, cliArgs) |
+| C1 | Create an agent (name, persona, source, host, no Telegram) | U C A M | auto (userFlows, cliArgs) |
 | C2 | Paste a BotFather token when the pool is empty | U C | auto (poolFlows, botToken tests) |
 | C3 | Finish a stuck agent as web-only | U C | auto (skipTelegram) |
 | C4 | Ask Hatchabot what agent I'm missing | U M | auto (opsSuggest.test.ts) |
@@ -69,7 +69,7 @@ regression or the candidate gate); **manual** = only a person has exercised it;
 | D5 | Edit SOUL/AGENTS/MEMORY | U M | auto (agentFiles.test.ts, workspace.test.ts) |
 | D6 | Description / introduction | U | auto |
 | D7 | Setup fields and values | U | auto (templateParams.test.ts) |
-| D8 | Shared vs private memory | U | auto |
+| D8 | Memory is shared, and every member is told so | U | auto (sharedMemory.test.ts) |
 | D9 | Peers (A2A), mesh, remove | U A M | auto (peerMesh.test.ts, a2a.test.ts, doormanPeers.test.ts, routeGaps2.test.ts) |
 | D10 | Per-agent environment variables | U C A | auto (agentEnv.test.ts) |
 

@@ -1136,11 +1136,7 @@
     <select id="agentHost" onchange="onHostPicked()"></select>
     <div class="sub" id="agentHostHint"></div>
   </div>
-  <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
-    <input type="checkbox" id="agentPrivate" style="width:auto">
-    Keep memory private — just for you. Leave off for a family/group agent:
-    everyone you invite reads and writes one common memory
-  </label>
+  <div class="sub" style="margin-top:14px">Its memory is shared: people you invite can get at what it remembers. For something private, give them their own agent.</div>
   <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
     <input type="checkbox" id="agentNoTelegram" style="width:auto" onchange="$('agentPoolRow').hidden = this.checked">
     <span>No Telegram — talk to it here in Hatchabot only
@@ -1242,20 +1238,7 @@
       <button id="descBtn" onclick="saveDescription()">Save</button>
     </div>
     <div class="sub" style="margin:-4px 0 4px">Cosmetic — this is the card label only. To change how the agent actually behaves, edit <b>SOUL.md</b> below.</div>
-    <label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:400;margin:10px 0 0">
-      <input type="checkbox" id="editShared" onchange="toggleSharedFromEdit()" style="width:auto;flex:none">
-      <span><b>Share memory</b> across everyone who uses this agent</span>
-    </label>
-    <div class="sub" id="editSharedLock" style="display:none;color:var(--warn)"></div>
-    <details style="margin-top:2px">
-      <summary class="sub" style="cursor:pointer">What sharing memory means</summary>
-      <div class="sub" style="margin-top:4px">
-        <b>On</b> — MEMORY.md is a common log for every member: entries are tagged with who
-        said them, and anything written may surface to other members.
-        <b>Off</b> — memory is private to you, untagged, and never surfaced to anyone else.
-        Applies on new conversations. You can only change this while you're the only member.
-      </div>
-    </details>
+    <div class="sub" style="margin:10px 0 0"><b>Memory is shared</b> with everyone who uses this agent: what anyone tells it may come up with the others (an agent has one memory in OpenClaw). For something private, give that person their own agent.</div>
     <!-- Collapsed by default: the everyday surface is Setup VALUES below;
          this drawer is the author's field-definition editor, and showing both
          expanded listed every field twice. -->
@@ -6004,7 +5987,6 @@ $('topBtn').onclick = () => window.scrollTo({ top: 0, behavior: 'smooth' });
 window.addEventListener('scroll', () => { $('topBtn').hidden = window.scrollY < 400; }, { passive: true });
 $('fabBtn').onclick = () => {
   $('createErr').textContent = '';
-  $('agentPrivate').checked = false; // shared control — reset so a prior tick doesn't silently make the next agent's memory private
   // Show usage against the per-account cap up front, so hitting it isn't a
   // surprise 429. Archived agents don't count (server-side rule).
   const cap = appConfig?.maxAgentsPerAccount || 0;
@@ -6088,12 +6070,11 @@ async function createAgent() {
       name, persona: $('agentPersona').value.trim() || undefined,
       aiProfileId: (profiles.length > 1 && $('agentProfile').value) || profiles[0].id,
       hostId,
-      sharedMemory: !$('agentPrivate').checked,
       // Only meaningful when the pool row was offered and declined.
       skipPool: ($('agentPoolRow').style.display !== 'none' && !$('agentUsePool').checked) || undefined,
       telegram: $('agentNoTelegram').checked ? false : undefined,
     }});
-    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = ''; $('agentPrivate').checked = false;
+    createDlg.close(); $('agentName').value = ''; $('agentPersona').value = '';
     $('agentNoTelegram').checked = false; $('agentPoolRow').hidden = false;
     await refresh(false);
   } catch (e) { $('createErr').textContent = e.message; }
@@ -6305,7 +6286,6 @@ async function doAdopt({ path, name, reuse, token, bot, onStatus }) {
       name,
       aiProfileId: (profiles.length > 1 && $('adoptProfile').value) || profiles[0].id,
       hostId: localHost.id,
-      sharedMemory: false,
       ...(reuse && bot?.allowFrom?.length ? { seedMembers: bot.allowFrom } : {}),
     }});
     let a = await pollAgent(created.id);
@@ -6410,7 +6390,7 @@ function memberCard(a) {
       <span class="chip ${a.busy ? 'WORKING' : a.state}">${a.busy ? 'WORKING' : a.state}</span>
     </div>
     <div class="sub" style="margin-top:8px">
-      You're a member of this agent${a.sharedMemory ? ' — its memory is shared with everyone who uses it' : ''}.
+      You're a member of this agent — its memory is shared with everyone who uses it, so what you tell it may come up with them.
     </div>
     <div class="actions">
       ${a.deepLink && a.state === 'RUNNING' ? `<a class="btn primary" href="${tgWebLink(botOf(a))}" target="_blank" rel="noopener">Telegram Web</a>` : ''}
@@ -6473,7 +6453,6 @@ function agentMeta(a) {
   if (a.lastActiveAt) bits.push(`active ${ago(a.lastActiveAt)}`);
   if (a.modelWarm === false) bits.push('warming up');
   if (a.dataSummary) bits.push(esc(a.dataSummary));
-  if (a.sharedMemory) bits.push('shared memory');
   if (a.className) bits.push(`🏷 ${esc(a.className)}`);
   if (a.image) bits.push(`📌 ${esc(a.image)}`);
   const debug = esc(a.runtimeRef.replace('docker://', '')) + (a.openclawVersion ? ` · openclaw ${esc(a.openclawVersion)}` : '');
@@ -6992,8 +6971,6 @@ function prepareEdit(id, name, tab = 'def') {
   renderParamList();
   $('setupFieldsRow').open = false; // definitions drawer starts closed; values are the everyday surface
   $('editCheckpoint').checked = true; // shared control — reset to safe default so a prior card's uncheck doesn't silently drop this agent's conversation on switch
-  $('editShared').checked = !!cur?.sharedMemory;
-  renderSharedLock(id);
   $('editBotToken').value = '';
   $('botTokenBtn').textContent = 'Show';
   renderDataList(cur?.dataSources);
@@ -8202,16 +8179,6 @@ function renderHealth(h) {
   $('healthBody').innerHTML = body + rows.join('');
 }
 
-/** Shared memory can't change while other people are members. Drawn again
- *  when the members arrive: v2 reads them on opening the sheet, not on a poll. */
-function renderSharedLock(id) {
-  const otherMembers = (members[id] ?? []).filter(m => m.role !== 'owner' && m.status === 'active');
-  $('editShared').disabled = otherMembers.length > 0;
-  $('editSharedLock').style.display = otherMembers.length ? 'block' : 'none';
-  $('editSharedLock').textContent = otherMembers.length
-    ? `Locked — this agent has ${otherMembers.length} other member${otherMembers.length > 1 ? 's' : ''}. Remove them first to change how memory is shared.`
-    : '';
-}
 async function renderEditMembers() {
   const el = $('tgMemberList');
   if (!el) return;
@@ -8219,7 +8186,6 @@ async function renderEditMembers() {
   try {
     const ms = (members[forId] = await api(`/v1/agents/${forId}/members`));
     if (editAgentId !== forId) return;
-    renderSharedLock(forId);
     el.innerHTML = ms.filter(m => m.status !== 'revoked').map(m => {
       const label = m.role === 'owner' && (DEMO || !m.displayName) ? 'You' : `<span class="pii">${esc(m.displayName || m.userId.slice(0, 12))}</span>`;
       // Someone who redeemed an invite and never messaged: their window has
@@ -9271,22 +9237,6 @@ async function cloneAgent(id, name) {
   } catch (e) { toast(e.message, 30000); }
 }
 
-async function toggleSharedFromEdit() {
-  const cb = $('editShared');
-  const want = cb.checked;
-  cb.disabled = true;
-  $('editErr').textContent = '';
-  try {
-    const res = await api(`/v1/agents/${editAgentId}`, { method: 'PATCH', body: { sharedMemory: want } });
-    toast(res.sharedMemory ? 'Memory is now shared' : 'Memory is now private');
-    await refresh(false);
-  } catch (e) {
-    cb.checked = !want; // roll back the toggle the server rejected
-    $('editErr').textContent = e.message;
-  } finally {
-    cb.disabled = false;
-  }
-}
 
 async function approve(id, code, asSelf, kind = 'telegram', who = '') {
   // "That's me" is the one tap that grants an identity rather than a seat: it
@@ -11297,7 +11247,7 @@ function v2MemberPane(a) {
       ${asleep ? '<span>Asleep — a message wakes it.</span>' : links.length ? '' : '<span>Not running right now.</span>'}
       ${named ? `<span class="sub">It answers in ${named}, which works wherever you are.</span>` : ''}</div></div>
     ${a.persona ? `<div class="v2row"><div class="v2k">What it does</div><div class="v2v">${esc(a.persona)}</div></div>` : ''}
-    <div class="v2row"><div class="v2k">Memory</div><div class="v2v">${a.sharedMemory ? 'Shared — it remembers what everyone who uses it tells it.' : 'Private to each person who talks to it.'}</div></div>`;
+    <div class="v2row"><div class="v2k">Memory</div><div class="v2v">${a.ops ? 'Yours alone — only you talk to it.' : 'Shared — it remembers what everyone who uses it tells it, and anyone who talks to it can get at what it remembers.'}</div></div>`;
 }
 
 /** Why a tab that reads from the running container is empty, in the agent's

@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.107.0] — 2026-09-29
+
+### Fixed
+- **Memory is shared, and the app now says so truthfully.** The "Keep memory private" switch only changed an instruction written into the agent's notes. OpenClaw gives an agent one memory, loaded into every conversation it has (checked on a test agent: a fact in its memory was answered from a separate direct-message conversation too), and by default one conversation for every direct message. So "Private to each person who talks to it" was never true. The switch is gone from the create and edit screens and the CLI (`--private`); asking the API for private memory is refused with the reason. Agents that were set to private become shared once on upgrade (their notes follow at the next rebuild); the Hatchabot agent, which can have no members, keeps its own. For something private, give that person their own agent.
+- **Everyone who joins an agent is told its memory is shared.** The notice on the invite page and the welcome message were shown only for agents set to shared, so people who joined a "private" agent were never told.
+- The agent's Memory row, the member view, the README, the pitch and the website no longer promise private memory or private threads.
+
+### Added
+- `docs/review-prompt.md`: the review prompt, now with a step that checks every promise the app makes against what actually enforces it.
+
 ## [2.106.0] — 2026-09-29
 
 ### Added
