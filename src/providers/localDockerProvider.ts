@@ -86,6 +86,8 @@ const GATEWAY_PORT = 18789;
 const ROOTLESS_HOST_ADDRESS = '10.0.2.2';
 /** Bound for volume import/export and seeding (large tarballs, slow runners). */
 const IO_TIMEOUT_MS = Number(process.env.HATCHABOT_DOCKER_IO_TIMEOUT_MS ?? 15 * 60_000);
+/** The label on every volume one-shot; its value is the install's prefix. */
+export const ONESHOT_LABEL = 'hatchabot.oneshot';
 
 export class LocalDockerProvider implements RuntimeProvider {
   readonly key: string;
@@ -111,6 +113,37 @@ export class LocalDockerProvider implements RuntimeProvider {
   /** Full argv for a docker call: connection args first, then the command. */
   #argv(args: string[]): string[] {
     return [...this.#conn, ...args];
+  }
+
+  /**
+   * Every one-shot on an agent's volume gets a name and this install's label.
+   * An unnamed `run --rm` whose client was killed (a timeout, a control-plane
+   * restart before the daemon started it) stayed behind as a 'created'
+   * container nothing could find, and `volume rm` refuses a volume one of
+   * those references — three of them blocked deleting their agents (review,
+   * 2026-09-29). Named, a timeout removes it; labelled, the boot sweep and
+   * destroy() find the rest.
+   */
+  #oneShot(kind: 'vx' | 'io' | 'fs' = 'vx'): { name: string; flags: string[] } {
+    const name = `${this.prefix}-${kind}-${randomBytes(6).toString('hex')}`;
+    return { name, flags: ['--name', name, '--label', `${ONESHOT_LABEL}=${this.prefix}`] };
+  }
+
+  /** A one-shot whose client gave up: remove the container itself, so it stops writing and pins nothing. */
+  async #reapOneShot(name: string): Promise<void> {
+    await this.#docker(['rm', '-f', name], 120_000).catch(() => {});
+  }
+
+  /**
+   * Boot: remove this install's one-shots that never ran or never got
+   * removed ('created' / 'exited'). A running one is left alone — it may
+   * belong to a call still in flight. Returns how many went.
+   */
+  async sweepOneShots(): Promise<number> {
+    const res = await this.#docker(['ps', '-aq', '--filter', `label=${ONESHOT_LABEL}=${this.prefix}`, '--filter', 'status=created', '--filter', 'status=exited']);
+    const ids = res.code === 0 ? res.stdout.split(/\s+/).filter(Boolean) : [];
+    if (ids.length) await this.#docker(['rm', '-f', ...ids]);
+    return ids.length;
   }
 
   /**
@@ -290,9 +323,11 @@ export class LocalDockerProvider implements RuntimeProvider {
       'find /vol -mindepth 1 -maxdepth 1 ! -name .openclaw -exec mv -t /vol/.openclaw {} + ; ' +
       // Marker LAST: a run that dies midway simply finishes next time.
       'touch /vol/.openclaw/.agentclaw-home-v2';
+    const one = this.#oneShot();
     const res = await this.#docker([
-      'run', '--rm', '-v', `${volume}:/vol`, 'alpine', 'sh', '-c', script,
+      'run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/vol`, 'alpine', 'sh', '-c', script,
     ]);
+    if (res.timedOut) await this.#reapOneShot(one.name);
     if (res.code !== 0) {
       throw new ProviderError(
         `home-layout migration failed (${res.code}): ${res.stderr.slice(-300)}`,
@@ -403,6 +438,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       }
 
       let res: ExecResult;
+      // Named: a seed that timed out kept running doctor against the volume,
+      // and a Retry could start a second one on it (review, 2026-09-29).
+      const one = this.#oneShot();
       if (streamSeed) {
         // The seed dir is on THIS box; a remote daemon can't bind-mount it (and
         // a rootless one can't read it), so stream it in as a tar over stdin
@@ -412,9 +450,10 @@ export class LocalDockerProvider implements RuntimeProvider {
           maxBuffer: 256 * 1024 * 1024,
         });
         res = await this.#runStdin(
-          ['run', '--rm', '-i', '--network', 'none', '-v', `${volume}:/home/node`, spec.image ?? this.image,
+          ['run', '--rm', '-i', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, spec.image ?? this.image,
             'bash', '-c', `mkdir -p ${seedBase} && tar xz -C ${seedBase} && bash ${seedBase}/seed.sh`],
           tar.stdout as Buffer,
+          one.name,
         );
       } else {
         // The long timeout, not the probe default (60 s): on OpenClaw 2026.8+
@@ -424,9 +463,10 @@ export class LocalDockerProvider implements RuntimeProvider {
         // doctor, the token paste are all local — and with it, doctor's npm
         // calls for a stale per-volume plugin stall on DNS retries.
         res = await this.#docker([
-          'run', '--rm', '--network', 'none', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
+          'run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, '-v', `${seedDir}:/seed:ro`,
           spec.image ?? this.image, 'bash', '/seed/seed.sh',
         ], IO_TIMEOUT_MS);
+        if (res.timedOut) await this.#reapOneShot(one.name);
       }
       if (res.code !== 0) {
         // The failure text is recorded as an event every member of the agent
@@ -465,7 +505,35 @@ export class LocalDockerProvider implements RuntimeProvider {
       );
     };
     check(await this.#docker(['rm', '-f', container]), 'rm');
-    if (opts?.purge) check(await this.#docker(['volume', 'rm', '-f', volume]), 'volume rm');
+    if (opts?.purge) {
+      await this.#removeVolumeOneShots(volume, container);
+      check(await this.#docker(['volume', 'rm', '-f', volume]), 'volume rm');
+    }
+  }
+
+  /**
+   * `volume rm -f` refuses a volume any container references, even one that
+   * never started — a leaked one-shot made the agent undeletable (review,
+   * 2026-09-29). Remove the one-shots on it first: ours by label, and the
+   * unlabelled ones from before (auto-remove, never started or finished).
+   * Never a container that is anything else — an agent's main container on
+   * another ref keeps the volume, and `volume rm` then says so.
+   */
+  async #removeVolumeOneShots(volume: string, container: string): Promise<void> {
+    const users = await this.#docker(['ps', '-aq', '--filter', `volume=${volume}`]);
+    const ids = users.code === 0 ? users.stdout.split(/\s+/).filter(Boolean) : [];
+    if (!ids.length) return;
+    const ins = await this.#docker(['inspect', '--format', `{{.Id}}|{{.Name}}|{{ index .Config.Labels "${ONESHOT_LABEL}" }}|{{.HostConfig.AutoRemove}}|{{.State.Status}}`, ...ids]);
+    const doomed: string[] = [];
+    for (const line of ins.stdout.split('\n')) {
+      const [id, name, rawLabel, autoRemove, state] = line.trim().split('|');
+      const label = rawLabel === '<no value>' ? '' : rawLabel;
+      if (!id || name?.replace(/^\//, '') === container) continue;
+      const labelled = label === this.prefix;
+      const oldUnnamed = !label && autoRemove === 'true' && (state === 'created' || state === 'exited');
+      if (labelled || oldUnnamed) doomed.push(id);
+    }
+    if (doomed.length) await this.#docker(['rm', '-f', ...doomed]);
   }
 
   async status(runtimeRef: string): Promise<RuntimeStatus> {
@@ -552,10 +620,15 @@ export class LocalDockerProvider implements RuntimeProvider {
     // volume: the default image's version could refuse, or rewrite, a config
     // written by another (night review, 2026-09-28).
     const image = opts?.image && IMAGE_REF_RE.test(opts.image) ? opts.image : this.image;
-    return this.#docker([
-      'run', '--rm', '-v', mount, image,
+    // No network: every caller only touches files on the volume (review,
+    // 2026-09-29).
+    const one = this.#oneShot();
+    const res = await this.#docker([
+      'run', '--rm', ...one.flags, '--network', 'none', '-v', mount, image,
       'bash', '-c', script,
     ]);
+    if (res.timedOut) await this.#reapOneShot(one.name);
+    return res;
   }
 
   streamFromVolume(runtimeRef: string, argv: string[]): Readable {
@@ -566,9 +639,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     // Named, so a reader that goes away can have the CONTAINER removed:
     // killing the docker client alone leaves the one-shot streaming into the
     // daemon's log until cat/tar finishes (28th audit).
-    const name = `${this.prefix}-fs-${randomBytes(6).toString('hex')}`;
+    const { name, flags } = this.#oneShot('fs');
     const child = spawn(this.docker, this.#argv([
-      'run', '--rm', '--name', name, '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
+      'run', '--rm', ...flags, '--network', 'none', '-v', `${volume}:/home/node:ro`, this.image, ...argv,
     ]), { stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
     child.stderr.on('data', (c: Buffer) => { if (err.length < 2000) err += c.toString('utf8'); });
@@ -587,7 +660,8 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { volume } = this.#names(runtimeRef);
     // Writable mount, no network, as the agent's own uid (the image's user),
     // so what lands is the agent's to read and change.
-    return this.#runStdin(['run', '--rm', '-i', '--network', 'none', '-v', `${volume}:/home/node`, this.image, ...argv], input);
+    const one = this.#oneShot();
+    return this.#runStdin(['run', '--rm', '-i', ...one.flags, '--network', 'none', '-v', `${volume}:/home/node`, this.image, ...argv], input, one.name);
   }
 
   async info(runtimeRef: string): Promise<RuntimeInfo> {
@@ -818,14 +892,17 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   async exportState(runtimeRef: string): Promise<Buffer> {
     const { volume } = this.#names(runtimeRef);
+    const one = this.#oneShot('io');
     try {
       const { stdout } = await execFileP(
         this.docker,
-        this.#argv(['run', '--rm', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.']),
+        this.#argv(['run', '--rm', ...one.flags, '--network', 'none', '-v', `${volume}:/vol:ro`, 'alpine', 'tar', 'cz', '-C', '/vol', '.']),
         { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024, timeout: IO_TIMEOUT_MS, killSignal: 'SIGKILL' },
       );
       return stdout as Buffer;
     } catch (err) {
+      // A killed client (the timeout, an archive past maxBuffer) leaves the one-shot behind.
+      if ((err as { killed?: boolean })?.killed || /maxBuffer/i.test(String(err))) await this.#reapOneShot(one.name);
       throw new ProviderError(
         `volume export failed: ${String(err).slice(0, 500)}`,
         "Couldn't snapshot the agent's state.",
@@ -852,9 +929,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       // Named, so a timeout removes the one-shot itself: killing the docker
       // client alone left it extracting while the rollback extracted into the
       // same volume (night review, 2026-09-28).
-      const ioName = `${this.prefix}-io-${randomBytes(6).toString('hex')}`;
+      const { name: ioName, flags: ioFlags } = this.#oneShot('io');
       const child = spawn(this.docker, this.#argv([
-        'run', '--rm', '-i', '--name', ioName, '-v', `${volume}:/vol`, 'alpine',
+        'run', '--rm', '-i', ...ioFlags, '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
         // Archives made before the home-as-volume change hold ~/.openclaw's
         // CONTENTS at their root; newer ones hold the whole home (with
@@ -909,9 +986,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     const { volume } = this.#names(runtimeRef);
     const dir = `/vol/.openclaw/agents/${slug}/agent`;
     await new Promise<void>((resolve, reject) => {
-      const ioName = `${this.prefix}-io-${randomBytes(6).toString('hex')}`;
+      const { name: ioName, flags: ioFlags } = this.#oneShot('io');
       const child = spawn(this.docker, this.#argv([
-        'run', '--rm', '-i', '--name', ioName, '-v', `${volume}:/vol`, 'alpine',
+        'run', '--rm', '-i', ...ioFlags, '-v', `${volume}:/vol`, 'alpine',
         'sh', '-c',
         // Same untrusted-input rules as importState: refuse the archive's
         // ownership, then set the one the runtime actually needs.
@@ -1418,11 +1495,16 @@ export class LocalDockerProvider implements RuntimeProvider {
 
   /** Run a docker command, piping `data` to its stdin (for tar-over-stdin on a
    *  remote daemon, where bind mounts of this box's paths aren't possible). */
-  async #runStdin(args: string[], data: Buffer): Promise<ExecResult> {
+  async #runStdin(args: string[], data: Buffer, oneShot?: string): Promise<ExecResult> {
     return new Promise<ExecResult>((resolve, reject) => {
       const child = spawn(this.docker, this.#argv(args));
       // A stalled daemon/runner must fail the call, not pin the agent busy forever.
-      const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new ProviderError('docker stdin op timed out', 'Docker did not respond in time.')); }, IO_TIMEOUT_MS);
+      // A named one-shot goes with it: the killed client alone leaves it running.
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        const fail = () => reject(new ProviderError('docker stdin op timed out', 'Docker did not respond in time.'));
+        if (oneShot) void this.#reapOneShot(oneShot).finally(fail); else fail();
+      }, IO_TIMEOUT_MS);
       timer.unref();
       child.on('close', () => clearTimeout(timer));
       let stdout = '';

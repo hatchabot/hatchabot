@@ -241,8 +241,27 @@ if [ "$PURGE" = 1 ]; then
     say "Deleting agent volumes…"
     VOLS="$(volumes)"
     if [ -n "$VOLS" ]; then
-      # shellcheck disable=SC2086
-      docker volume rm $VOLS >/dev/null 2>&1 && echo "  removed $(echo "$VOLS" | wc -l | tr -d ' ') volumes"
+      VOLS_GONE=0
+      for v in $VOLS; do
+        # Docker refuses a volume any container references, even one that
+        # never started: a volume one-shot whose client was killed stayed
+        # 'created' (review, 2026-09-29). This install's agents are gone by
+        # now, so what still holds one of their volumes is such a one-shot —
+        # ours by label, or one that never ran or has finished.
+        LEFT="$( { docker ps -aq --filter "volume=$v" --filter "label=hatchabot.oneshot=$PREFIX"
+                   docker ps -aq --filter "volume=$v" --filter status=created --filter status=exited; } 2>/dev/null | sort -u)"
+        # shellcheck disable=SC2086
+        [ -n "$LEFT" ] && docker rm -f $LEFT >/dev/null 2>&1
+        # Said, not hidden: the database that maps agents to volumes goes
+        # next, and a silent failure left their data behind unannounced.
+        if ERR="$(docker volume rm "$v" 2>&1 >/dev/null)"; then
+          VOLS_GONE=$((VOLS_GONE + 1))
+        else
+          VOLS_LEFT="${VOLS_LEFT:-}${VOLS_LEFT:+ }$v"
+          echo "  could NOT remove volume $v: ${ERR:-docker refused}"
+        fi
+      done
+      echo "  removed $VOLS_GONE volumes"
     else
       echo "  none"
     fi
@@ -277,7 +296,11 @@ fi
 
 say "Done."
 echo "Hatchabot is no longer running or installed on this machine."
-if [ "$PURGE" = 1 ]; then
+if [ "$PURGE" = 1 ] && [ -n "${VOLS_LEFT:-}" ]; then
+  echo "Its agents and database are gone, but these agent volumes are NOT — their data is still on this machine:"
+  for v in $VOLS_LEFT; do echo "  · $v"; done
+  echo "See what holds one:  docker ps -a --filter volume=<name>   then:  docker volume rm <name>"
+elif [ "$PURGE" = 1 ]; then
   echo "Its agents, volumes and database are gone."
   if [ "$BACKUPS" != 1 ] && [ -d "$BACKUP_DIR" ]; then echo "Backups remain in $BACKUP_DIR (--backups removes them)."; fi
 else
@@ -298,3 +321,5 @@ else
 fi
 echo "The clone itself is untouched. To remove it:  rm -rf \"$REPO\""
 echo "Telegram bots are not deletable from here: @BotFather → /mybots → /deletebot."
+# A purge that left volumes behind did not finish its job: say so to a caller too.
+[ -z "${VOLS_LEFT:-}" ] || exit 1

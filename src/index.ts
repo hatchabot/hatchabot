@@ -126,6 +126,15 @@ await Promise.race([
   new Promise<void>((r) => setTimeout(r, Number(process.env.HATCHABOT_BOOT_RECONCILE_MS ?? 30_000)).unref()),
 ]);
 
+// Volume one-shots whose client died with the last process (a restart mid-
+// sweep) stay 'created' and pin their agent's volume (review, 2026-09-29).
+// Only this install's labelled ones; in the background, never blocking boot.
+for (const p of new Set(providers.values())) {
+  void p.sweepOneShots?.()
+    .then((n) => { if (n) app.log.warn({ provider: p.key, removed: n }, 'removed leftover volume one-shots'); })
+    .catch((err) => app.log.error({ err: String(err) }, 'one-shot sweep failed'));
+}
+
 // Bot-token secrets no table references anymore are dead weight holding a live
 // credential (a failed best-effort pool release on delete leaks them). All
 // referencing stores are constructed above, so the sweep sees every table.
