@@ -6303,10 +6303,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   app.get('/v1/usage', async (req) => computeFleetUsage(ownerIdOf(req)));
 
-  /** The fleet's use in the last hour, day or week, from what the sampler recorded — answers at once. */
+  /** The fleet's use in the last hour, 3/6/9/12 hours, day or week, from what the sampler recorded — answers at once. */
   app.get<{ Querystring: { period?: string } }>('/v1/usage/periods', async (req, reply) => {
     const period = String(req.query?.period ?? 'day');
-    if (!(USAGE_PERIODS as string[]).includes(period)) return reply.code(400).send({ error: 'period must be hour, day or week' });
+    if (!(USAGE_PERIODS as string[]).includes(period)) return reply.code(400).send({ error: `period must be one of ${USAGE_PERIODS.join(', ')}` });
     return { ...computeUsagePeriod(store, ownerIdOf(req), period as UsagePeriod), sampledAt: usageSampledAt };
   });
 

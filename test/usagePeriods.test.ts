@@ -93,6 +93,16 @@ describe('computeUsagePeriod', () => {
     expect(den.cost!.high).toBe(den.cost!.low);
   });
 
+  it('a few hours back: 6 hours in 15-minute bars counts the last hours, not the morning (2026-09-28)', () => {
+    const v = computeUsagePeriod(world(), OWNER, '6h', NOW);
+    expect(v.bucketMinutes).toBe(15);
+    expect(v.buckets.length).toBeGreaterThanOrEqual(24);
+    const den = v.agents.find((a) => a.name === 'Den')!;
+    expect(den.tokens).toBe(5_400); // 5000 four hours ago + 400 in the last hour
+    expect(computeUsagePeriod(world(), OWNER, '3h', NOW).agents.find((a) => a.name === 'Den')!.tokens).toBe(400);
+    expect(computeUsagePeriod(world(), OWNER, '12h', NOW).bucketMinutes).toBe(30);
+  });
+
   it('scopes to the caller', () => {
     expect(computeUsagePeriod(world(), 'someone-else', 'day', NOW).agents).toEqual([]);
   });

@@ -20,7 +20,8 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   downloaded stays down.
 - **Usage counts real tokens**, call by call from each agent's transcripts;
   it used to show the size of each conversation, not what was spent, so a
-  busy agent looked cheap. The last 8 days fill in at once.
+  busy agent looked cheap. The last 8 days fill in at once. Status → Usage
+  also shows the last 3, 6, 9 or 12 hours.
 - **Usage figures** no longer count an agent's whole history as new use after
   a failed read, or when it comes back from a long stop.
 - **Machine defaults** (⚙ Settings → Hosts): sleep after, memory per agent,

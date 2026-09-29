@@ -357,6 +357,23 @@ const SCENARIOS = String.raw`(() => {
       delete window.__override['/v1/agents'];
       await refresh(false);
     },
+    usageHours: async () => {
+      // Status → Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
+      const now = Date.now(), at = (m) => new Date(Math.floor((now - m * 60000) / 900000) * 900000).toISOString();
+      window.__override['/v1/usage/periods'] = { period: '6h', from: at(360), to: new Date(now).toISOString(), bucketMinutes: 15,
+        buckets: [360, 345, 30, 15].map((m) => ({ at: at(m), tokens: m === 15 ? 5000 : 0, requests: m === 15 ? 2 : 0, limited: 0 })),
+        agents: [{ id: 'a1', name: 'Homework Helper', state: 'RUNNING', tokens: 5000, requests: 2, limited: 0, billing: 'included', cost: null }],
+        totals: { tokens: 5000, requests: 2, limited: 0 }, byBilling: { included: 5000, api: 0, local: 0 }, cost: null };
+      openFleetUsage();
+      const six = await until(() => [...document.querySelectorAll('#fleetUsageBody .su-period')].find((b) => b.textContent === '6h'));
+      eq('the choices', [...document.querySelectorAll('#fleetUsageBody .su-period')].map((b) => b.textContent), ['Hour', '3h', '6h', '9h', '12h', 'Day', 'Week']);
+      six.click();
+      await until(() => calls('GET', /\/v1\/usage\/periods$/).length && document.getElementById('fleetUsageBody').textContent.includes('last 6 hours'));
+      ok('6h is the one on', document.querySelector('#fleetUsageBody .su-period.on').textContent === '6h');
+      ok('bars per 15 minutes', document.getElementById('fleetUsageBody').textContent.includes('Tokens per 15 minutes'));
+      fleetUsageDlg.close(); delete window.__override['/v1/usage/periods'];
+      try { localStorage.removeItem('hb-fleet-usage-period'); } catch {} fleetUsagePeriod = 'day';
+    },
   };
   (async () => {
     for (const [name, run] of Object.entries(T)) {

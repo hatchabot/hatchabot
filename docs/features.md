@@ -955,10 +955,10 @@ health** (latest set and its age) and **runtime** (image version, upgrade
 available). **Run health checks** probes each running agent's in-container
 gateway live.
 
-**Status → Usage** is the fleet rollup **by period** — Hour, Day or Week:
+**Status → Usage** is the fleet rollup **by period** — Hour, 3h, 6h, 9h, 12h, Day or Week:
 what your agents used in that window, as tokens and requests per agent
 (ranked by tokens for the window, with refusals in red), two charts of the
-same over the window (5-minute, hourly or 2-hour buckets), the billing split,
+same over the window (5-minute, 15-minute up to 6 hours, 30-minute up to 12 hours, hourly or 2-hour buckets), the billing split,
 and an **estimated API cost** for the window. It answers at once: everything
 comes from the usage samples Hatchabot takes every ten minutes (each agent's
 tokens summed call by call from its own transcripts — input, output, cache

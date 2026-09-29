@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.101.0] — 2026-09-28
+
+### Added
+- **Status → Usage has 3h, 6h, 9h and 12h** between Hour and Day: the last few hours in 15-minute bars (30-minute from 9 hours).
+
 ## [2.100.0] — 2026-09-28
 
 ### Fixed

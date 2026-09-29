@@ -4620,6 +4620,7 @@ function usageAxis(buckets, period, barW) {
   buckets.forEach((b, i) => {
     const d = new Date(b.at);
     if (period === 'hour') { if (d.getMinutes() % 15 === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })]); }
+    else if (/^\d+h$/.test(period)) { if (d.getMinutes() === 0 && d.getHours() % (parseInt(period) > 6 ? 2 : 1) === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric' })]); }
     else if (period === 'day') { if (d.getHours() % 6 === 0) marks.push([i, d.toLocaleTimeString([], { hour: 'numeric' })]); }
     else if (d.getHours() === 0) marks.push([i, d.toLocaleDateString([], { weekday: 'short' })]);
   });
@@ -7644,10 +7645,11 @@ function openFleetUsage() {
   fleetUsageDlg.showModal();
   loadFleetUsage();
 }
-// The period of the Status → Usage view (hour, day, week); remembered per browser.
+// The period of the Status → Usage view (hour, 3–12 hours, day, week); remembered per browser.
+const FLEET_USAGE_PERIODS = [['hour', 'Hour'], ['3h', '3h'], ['6h', '6h'], ['9h', '9h'], ['12h', '12h'], ['day', 'Day'], ['week', 'Week']];
 let fleetUsagePeriod = (() => { try { return localStorage.getItem('hb-fleet-usage-period') || 'day'; } catch { return 'day'; } })();
 function setFleetUsagePeriod(p) {
-  fleetUsagePeriod = ['hour', 'day', 'week'].includes(p) ? p : 'day';
+  fleetUsagePeriod = FLEET_USAGE_PERIODS.some(([k]) => k === p) ? p : 'day';
   try { localStorage.setItem('hb-fleet-usage-period', fleetUsagePeriod); } catch {}
   void loadFleetUsage();
 }
@@ -7663,7 +7665,8 @@ async function loadFleetUsage() {
 /** Small bar chart of one series over the period's buckets; refusals stack in red. */
 function fleetUsageBars(buckets, key, unitLabel, period) {
   const max = Math.max(1, ...buckets.map(b => b[key]));
-  const W = period === 'hour' ? 44 : period === 'day' ? 22 : 6, H = 40, top = 1, w = buckets.length * W;
+  // The same drawing width (about 528) whatever the period; a week's bars stay thin.
+  const W = period === 'week' ? 6 : Math.max(6, Math.round(528 / Math.max(1, buckets.length))), H = 40, top = 1, w = buckets.length * W;
   const label = (b) => period === 'week'
     ? new Date(b.at).toLocaleString([], { weekday: 'short', hour: 'numeric' })
     : new Date(b.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -7681,8 +7684,9 @@ function fleetUsageBars(buckets, key, unitLabel, period) {
 }
 function renderFleetUsage(f) {
   const period = f.period || fleetUsagePeriod;
-  const span = period === 'hour' ? 'last hour' : period === 'day' ? 'last 24 hours' : 'last 7 days';
-  const per = period === 'hour' ? 'per 5 minutes' : period === 'day' ? 'per hour' : 'per 2 hours';
+  const span = period === 'hour' ? 'last hour' : period === 'day' ? 'last 24 hours' : period === 'week' ? 'last 7 days' : `last ${parseInt(period)} hours`;
+  const bm = f.bucketMinutes || 60;
+  const per = bm < 60 ? `per ${bm} minutes` : bm === 60 ? 'per hour' : `per ${bm / 60} hours`;
   const btn = (p, l) => `<button class="su-period${period === p ? ' on' : ''}" onclick="setFleetUsagePeriod('${p}')" aria-pressed="${period === p}">${l}</button>`;
   const partial = f.countingSince && Date.parse(f.countingSince) > Date.parse(f.from)
     ? `<div class="sub" style="margin:4px 0 8px">Counting began ${esc(ago(f.countingSince))} for the newest agent, so this window is partial for it.</div>` : '';
@@ -7714,7 +7718,7 @@ function renderFleetUsage(f) {
   const totalCost = f.cost ? `<span class="sub">· <b style="color:var(--warn)">est. ${fmtCostRange(f.cost)}</b> API cost</span>` : '';
   $('fleetUsageBody').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <span class="su-periods" style="margin:0">${btn('hour', 'Hour')}${btn('day', 'Day')}${btn('week', 'Week')}</span>
+      <span class="su-periods" style="margin:0;flex-wrap:wrap">${FLEET_USAGE_PERIODS.map(([k, l]) => btn(k, l)).join('')}</span>
     </div>
     <div style="font-size:20px;font-weight:700;margin-top:8px">${fmtTokens(f.totals.tokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">· ${fmtN(f.totals.requests)} request${f.totals.requests === 1 ? '' : 's'}${f.totals.limited ? ` · <b style="color:var(--bad)">${f.totals.limited}</b> refused` : ''} · ${span}</span> ${totalCost}</div>
     ${partial}

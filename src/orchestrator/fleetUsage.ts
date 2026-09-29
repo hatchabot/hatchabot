@@ -12,8 +12,8 @@ import type { Store } from '../store/store.js';
 import { estimateCost, type CostRange } from './pricing.js';
 import { hourOf, slotOf } from './sourceUsage.js';
 
-export type UsagePeriod = 'hour' | 'day' | 'week';
-export const USAGE_PERIODS: UsagePeriod[] = ['hour', 'day', 'week'];
+export type UsagePeriod = 'hour' | '3h' | '6h' | '9h' | '12h' | 'day' | 'week';
+export const USAGE_PERIODS: UsagePeriod[] = ['hour', '3h', '6h', '9h', '12h', 'day', 'week'];
 
 export interface UsageBucket { at: string; tokens: number; requests: number; limited: number }
 export interface UsageAgentRow {
@@ -39,6 +39,11 @@ export interface UsagePeriodView {
 const MIN = 60_000;
 const SPAN: Record<UsagePeriod, { ms: number; bucketMinutes: number }> = {
   hour: { ms: 60 * MIN, bucketMinutes: 5 },
+  // A few hours back (Chris, 2026-09-28): 15-minute bars to 6 hours, 30 after.
+  '3h': { ms: 3 * 60 * MIN, bucketMinutes: 15 },
+  '6h': { ms: 6 * 60 * MIN, bucketMinutes: 15 },
+  '9h': { ms: 9 * 60 * MIN, bucketMinutes: 30 },
+  '12h': { ms: 12 * 60 * MIN, bucketMinutes: 30 },
   day: { ms: 24 * 60 * MIN, bucketMinutes: 60 },
   week: { ms: 7 * 24 * 60 * MIN, bucketMinutes: 120 },
 };
