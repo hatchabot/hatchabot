@@ -19,6 +19,8 @@
 #   docker run --rm --user root -v <volume>:/data -v <backup-dir>:/in:ro \
 #     hatchabot-runtime:latest \
 #     bash -c 'cd /data && tar xzf /in/<volume>.tgz --no-same-owner && chown -R 1000:1000 /data'
+# The tarballs leave out caches the agent rebuilds on start (TAR_EXCLUDES
+# below), so a restored volume without them is complete.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -125,6 +127,23 @@ fi
 # every volume is taken, as before.
 known="$(node -e 'const D=require("better-sqlite3");const db=new D(process.argv[1],{readonly:true});for(const r of db.prepare("SELECT runtime_ref FROM agents WHERE state != \x27DELETED\x27 AND runtime_ref IS NOT NULL").all())console.log(String(r.runtime_ref).replace(/^\w+:\/\//,"")+"-vol")' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
 
+# What every agent rebuilds by itself, left out of the tarball — about a
+# third of the raw volume data (review, 2026-09-29). Each was checked against
+# the OpenClaw source in the image and the live volumes before it went here:
+#   .openclaw/cache/control-ui-assets  a copy of the Control UI shipped in the
+#       image; the gateway re-publishes it on every start (and OpenClaw's own
+#       `openclaw backup` skips it). 54 MB per agent.
+#   .openclaw/tmp                      per-process scratch and lock files
+#       (plugin-captures is removed on exit; `openclaw backup` skips tmp/).
+#   .npm                               npm's download cache only — global
+#       installs live in ~/.npm-global and plugins in .openclaw/npm, both kept.
+#   .cache/pip                         pip's HTTP download cache; installed
+#       packages live elsewhere. The rest of .cache stays: puppeteer browsers,
+#       the Claude CLI's files and the like are not ours to call regenerable.
+# --anchored: the patterns match only at the volume root, so a project's own
+# .npm or .cache/pip inside the workspace is still backed up.
+TAR_EXCLUDES="--anchored --exclude=./.openclaw/cache/control-ui-assets --exclude=./.openclaw/tmp --exclude=./.npm --exclude=./.cache/pip"
+
 while IFS= read -r vol; do
   [ -n "$vol" ] || continue
   # No agent uses it: say so and leave it out, or a pre-rename leftover rides
@@ -145,7 +164,7 @@ while IFS= read -r vol; do
   # one bad volume must not abort the rest of the run.
   rc=0
   docker run --rm --user root -v "$vol:/data:ro" -v "$DEST:/out" "$IMAGE" \
-    bash -c "umask 077 && tar czf '/out/$vol.tgz' -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz' 2>/dev/null; exit \$rc" || rc=$?
+    bash -c "umask 077 && tar czf '/out/$vol.tgz' $TAR_EXCLUDES -C /data . ; rc=\$?; chown $(id -u):$(id -g) '/out/$vol.tgz' 2>/dev/null; exit \$rc" || rc=$?
   if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz" ]; then
     echo "  ✗ $vol failed (exit $rc)" >&2
     failed=$((failed + 1))
