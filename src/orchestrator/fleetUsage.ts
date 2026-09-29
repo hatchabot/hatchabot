@@ -37,6 +37,8 @@ export interface UsagePeriodView {
 }
 
 const MIN = 60_000;
+/** A rise spreads over at most this much time before its reading (readings are ten minutes apart; a pass can run late). */
+const SPREAD_MAX_MS = 20 * MIN;
 const SPAN: Record<UsagePeriod, { ms: number; bucketMinutes: number }> = {
   hour: { ms: 60 * MIN, bucketMinutes: 5 },
   // A few hours back (Chris, 2026-09-28): 15-minute bars to 6 hours, 30 after.
@@ -70,9 +72,26 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
   }
   const bucket = (iso: string) => buckets.get(bucketStart(iso, bucketMinutes));
 
+  const firstBucket = [...buckets.values()][0];
   for (const d of store.tokenDeltas(ids, from)) {
     row(d.agentId).tokens += d.delta;
-    const b = bucket(d.at); if (b) b.tokens += d.delta;
+    // A rise happened between two readings ten minutes apart: spread it over
+    // the buckets that span covers. All of it at the reading's time made the
+    // 5-minute bars alternate full and empty, one reading behind the request
+    // bars beside them (review, 2026-09-29). A long gap (a stop, an
+    // unreachable container) spreads over its last SPREAD_MAX_MS only.
+    const end = Date.parse(d.at), start = Math.max(Date.parse(d.prevAt), end - SPREAD_MAX_MS);
+    if (!(end > start)) { const b = bucket(d.at) ?? firstBucket; if (b) b.tokens += d.delta; continue; }
+    // Whole tokens that sum to the rise exactly: each bucket takes the rounded
+    // cumulative share less what the buckets before it took.
+    let given = 0;
+    for (let t = Math.floor(start / (bucketMinutes * MIN)) * bucketMinutes * MIN; t < end; t += bucketMinutes * MIN) {
+      const share = Math.round(d.delta * (Math.min(end, t + bucketMinutes * MIN) - start) / (end - start)) - given;
+      given += share;
+      // A span that began before the window lands its early part on the first bar.
+      const b = buckets.get(new Date(t).toISOString()) ?? firstBucket;
+      if (b) b.tokens += share;
+    }
   }
   // Requests: the hour and day views count five-minute slots (whole hours
   // reached up to an hour past the window, while tokens use the exact time;

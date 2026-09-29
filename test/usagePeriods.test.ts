@@ -103,6 +103,26 @@ describe('computeUsagePeriod', () => {
     expect(computeUsagePeriod(world(), OWNER, '12h', NOW).bucketMinutes).toBe(30);
   });
 
+  it('a busy agent read every 10 minutes fills every 5-minute bar, not every other one (review, 2026-09-29)', () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'sub', ownerId: OWNER, name: 'Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/sub', createdAt: 'now' });
+    store.insertAgent({ id: 'busy', ownerId: OWNER, name: 'Busy', slug: 'busy', state: 'RUNNING', aiProfileId: 'sub', hostId: 'h1', runtimeRef: 'mock://busy', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    // Readings on the 10-minute marks, +1000 tokens each: 500 per 5 minutes.
+    for (let m = 70, total = 1000; m >= 0; m -= 10, total += 1000) store.addTokenSample('busy', 'sub', iso(m * MIN), total);
+    const v = computeUsagePeriod(store, OWNER, 'hour', NOW);
+    // The reading at the window's start counts (its span began before it: the first bar takes that part).
+    expect(v.agents[0]!.tokens).toBe(7000);
+    expect(v.buckets.reduce((s, b) => s + b.tokens, 0)).toBe(7000);
+    const inner = v.buckets.filter((b) => b.at >= iso(55 * MIN) && b.at < iso(0));
+    expect(inner.map((b) => b.tokens)).toEqual(Array(11).fill(500));
+    // A long gap (stopped for hours) lands in the 20 minutes before its reading, not across the day.
+    store.addTokenSample('busy', 'sub', iso(-5 * H), 11_000); // a reading five hours on: a later view
+    const later = computeUsagePeriod(store, OWNER, 'day', NOW + 5 * H);
+    expect(later.buckets.find((b) => b.at === iso(-4 * H))!.tokens).toBe(3000);
+    expect(later.buckets.filter((b) => b.at > iso(0) && b.at < iso(-4 * H)).every((b) => b.tokens === 0)).toBe(true);
+  });
+
   it('scopes to the caller', () => {
     expect(computeUsagePeriod(world(), 'someone-else', 'day', NOW).agents).toEqual([]);
   });

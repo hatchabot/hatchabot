@@ -2604,22 +2604,23 @@ export class Store {
   /**
    * Tokens consumed per sample since `fromIso`, per agent: each sample's rise
    * over the previous one (a drop counts nothing: see tokenRise), stamped
-   * with the sample's time — what a usage chart bins by period.
+   * with the sample's time and the previous one's (`prevAt`: the rise
+   * happened somewhere between them) — what a usage chart bins by period.
    */
-  tokenDeltas(agentIds: Set<string>, fromIso: string): Array<{ agentId: string; at: string; delta: number }> {
+  tokenDeltas(agentIds: Set<string>, fromIso: string): Array<{ agentId: string; at: string; delta: number; prevAt: string }> {
     if (!agentIds.size) return [];
     const rows = this.db.prepare(
       `SELECT agent_id, profile_id, at, total FROM token_samples WHERE agent_id IN (${[...agentIds].map(() => '?').join(',')})
          AND at >= COALESCE((SELECT MAX(t2.at) FROM token_samples t2 WHERE t2.agent_id = token_samples.agent_id AND t2.at < ? AND t2.total > 0), ?)
        ORDER BY agent_id, at`,
     ).all(...agentIds, fromIso, fromIso) as Array<{ agent_id: string; profile_id: string | null; at: string; total: number }>;
-    const out: Array<{ agentId: string; at: string; delta: number }> = [];
+    const out: Array<{ agentId: string; at: string; delta: number; prevAt: string }> = [];
     let prev: (typeof rows)[number] | undefined;
     for (const r of rows) {
       if (zeroAfterReading(prev, r)) continue;
       if (prev && prev.agent_id === r.agent_id && r.at >= fromIso) {
         const d = tokenRise(prev.total, r.total);
-        if (d > 0) out.push({ agentId: r.agent_id, at: r.at, delta: d });
+        if (d > 0) out.push({ agentId: r.agent_id, at: r.at, delta: d, prevAt: prev.at });
       }
       prev = r;
     }
