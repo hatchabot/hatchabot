@@ -21,7 +21,7 @@ import { autoSnapshot, writeFileInAgent } from './snapshots.js';
 import { addCron, listCrons } from './crons.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
-import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
+import { buildWorkspaceSeed, dataSourcesSection, installConventionsSection, memoryPolicySection, removeInstallSections, operatorSection, peerToolsSection, removeSection, replaceSection, DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING } from '../openclaw/workspace.js';
 import { effectiveMemoryCap, memoryBudgetSection } from './memoryCap.js';
 
 /**
@@ -1282,13 +1282,24 @@ async function syncInstallDocs(
     const current = read.stdout;
     const base = current.trim() ? current : '# TOOLS.md - Local Notes\n';
     const next = replaceSection(base, INSTALL_HEADING, installConventionsSection());
-    if (next === current) return; // already current: never churn the agent's file
-    const b64 = Buffer.from(next, 'utf8').toString('base64');
-    // Through the helper: above ~96 KB it goes on stdin (one shell argument
-    // caps at 128 KiB; a big AGENTS.md never synced again — night review).
-    const res = await writeFileInAgent(provider, runtimeRef, path, b64);
+    if (next !== current) { // already current: never churn the agent's file
+      const b64 = Buffer.from(next, 'utf8').toString('base64');
+      // Through the helper: above ~96 KB it goes on stdin (one shell argument
+      // caps at 128 KiB; a big AGENTS.md never synced again — night review).
+      const res = await writeFileInAgent(provider, runtimeRef, path, b64);
+      if (res.code !== 0) { log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) }); return; }
+      log('installdocs.synced', { agentId });
+    }
+    // With TOOLS.md holding the section, drop the copies earlier versions left
+    // in AGENTS.md: each went out with every call (review, 2026-09-29).
+    const agentsPath = `/home/node/.openclaw/agents/${agent.slug}/agent/AGENTS.md`;
+    const agentsRead = await provider.execShell(runtimeRef, `cat ${JSON.stringify(agentsPath)} 2>/dev/null || true`);
+    if (agentsRead.code !== 0) { log('installdocs.failed', { agentId, stderr: agentsRead.stderr.slice(0, 300) }); return; }
+    const cleaned = removeInstallSections(agentsRead.stdout);
+    if (cleaned === agentsRead.stdout) return;
+    const res = await writeFileInAgent(provider, runtimeRef, agentsPath, Buffer.from(cleaned, 'utf8').toString('base64'));
     if (res.code !== 0) log('installdocs.failed', { agentId, stderr: res.stderr.slice(0, 300) });
-    else log('installdocs.synced', { agentId });
+    else log('installdocs.agentsmd_cleaned', { agentId });
   } catch (e) {
     log('installdocs.error', { agentId, error: String((e as Error).message ?? e) });
   }

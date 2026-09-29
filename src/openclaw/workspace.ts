@@ -204,6 +204,20 @@ verbatim.`;
 export const INSTALL_HEADING = '## Installing tools (managed by Hatchabot)';
 
 /**
+ * AGENTS.md without the install sections earlier versions wrote there. The
+ * section moved to TOOLS.md, but the old copies stayed, under both names:
+ * 34 agents carried 2 or 3 copies, re-sent with every call (review,
+ * 2026-09-29). Every copy of either heading goes.
+ */
+export function removeInstallSections(content: string): string {
+  let out = content;
+  for (const heading of ['## Installing tools (managed by AgentClaw)', INSTALL_HEADING]) {
+    for (;;) { const next = removeSection(out, heading); if (next === out) break; out = next; }
+  }
+  return out;
+}
+
+/**
  * The install conventions, written INTO each agent's TOOLS.md.
  *
  * Every mechanism here has existed for a while ($HOME survives rebuilds,

@@ -757,6 +757,32 @@ describe('TOOLS.md carries the install conventions', () => {
     expect(out).toContain('home-server -> 192.168.1.100'); // the agent's own notes
     expect(out).toContain('~/.local/bin');
   });
+
+  it('drops the old copies from AGENTS.md, under either name, and keeps the rest (review, 2026-09-29)', async () => {
+    const w = await world();
+    const { agent } = await provisionAgent(w.deps, INPUT);
+    const p = w.provider as MockProvider;
+    const section = (by: string) => `## Installing tools (managed by ${by})\n\n<!-- ${by} rewrites this section on rebuild - keep your own notes outside it. -->\n\n- **No root, no apt.**\n`;
+    const agentsMd = `# AGENTS.md - Your Workspace\n\n## Memory\n\nWrite it down.\n\n${section('AgentClaw')}\n${section('Hatchabot')}\n## Heartbeats\n\nCheck the list.\n\n${section('Hatchabot')}`;
+    const real = p.execShell.bind(p);
+    p.execShell = (async (ref: string, script: string) => {
+      if (script.startsWith('cat ') && script.includes('/AGENTS.md')) return { code: 0, stdout: agentsMd, stderr: '' };
+      return real(ref, script);
+    }) as typeof p.execShell;
+    const before = p.execLog.length;
+    await rebuildAgent(w.deps, agent.id);
+    const out = written(p, 'AGENTS.md')!;
+    expect(out.match(/Installing tools \(managed/g)).toBeNull();
+    expect(out).toContain('Write it down.');
+    expect(out).toContain('## Heartbeats\n\nCheck the list.');
+    expect(p.execLog.slice(before).some((a) => a[1]?.includes('TOOLS.md') && a[1].includes('base64 -d'))).toBe(true);
+  });
+
+  it('leaves an AGENTS.md without old copies untouched', async () => {
+    const { removeInstallSections } = await import('../src/openclaw/workspace.js');
+    const doc = '# AGENTS.md\n\n## Tools\n\nSee TOOLS.md for installing tools.\n';
+    expect(removeInstallSections(doc)).toBe(doc);
+  });
 });
 
 describe('a pinned runtime image reaches docker', () => {
