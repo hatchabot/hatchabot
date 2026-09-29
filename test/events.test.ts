@@ -94,3 +94,29 @@ describe('GET /v1/events', () => {
     expect(res.json()).toEqual([]);
   });
 });
+
+describe('stale "channel.dm_policy unchanged" rows (review, 2026-09-29)', () => {
+  it('are dropped once at start; real results, other events and later rows stay', () => {
+    const db = new Database(':memory:');
+    const store = new Store(db);
+    store.insertAgent({
+      id: 'a1', ownerId: 'o', name: 'A', slug: 'a1', state: 'PROVISIONING',
+      aiProfileId: 'p', hostId: 'h', persona: '', sharedMemory: false,
+      createdAt: 'now', updatedAt: 'now',
+    });
+    // As an older build left them: the cleanup marker absent, the noise present.
+    db.exec(`DELETE FROM store_migrations`);
+    store.recordEvent('a1', 'channel.dm_policy', { policy: 'allowlist', result: 'unchanged' });
+    store.recordEvent('a1', 'channel.dm_policy', { policy: 'allowlist', result: 'unchanged' });
+    store.recordEvent('a1', 'channel.dm_policy', { policy: 'allowlist', result: 'set' });
+    store.recordEvent('a1', 'runtime.started', { result: 'unchanged' });
+    db.prepare(`INSERT INTO agent_events (agent_id, at, event, detail) VALUES ('a1', 'now', 'channel.dm_policy', 'not json')`).run();
+    new Store(db); // the next start
+    const kept = () => store.listEvents(['a1']).map((e) => `${e.event}:${(e.detail as any)?.result ?? '-'}`).sort();
+    expect(kept()).toEqual(['channel.dm_policy:-', 'channel.dm_policy:set', 'runtime.started:unchanged']);
+    // Once: a row recorded afterwards is not touched by later starts.
+    store.recordEvent('a1', 'channel.dm_policy', { policy: 'allowlist', result: 'unchanged' });
+    new Store(db);
+    expect(kept()).toHaveLength(4);
+  });
+});

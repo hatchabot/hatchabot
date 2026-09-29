@@ -298,6 +298,9 @@ export class Store {
       -- session's context size (OpenClaw's totalTokens), not usage: those
       -- rows are dropped once, and the first real reading backfills 8 days.
       CREATE TABLE IF NOT EXISTS token_samples_source (source TEXT NOT NULL);
+      -- One-time data cleanups that have run (name = the cleanup), so each
+      -- runs once per database rather than on every start.
+      CREATE TABLE IF NOT EXISTS store_migrations (name TEXT PRIMARY KEY, at TEXT NOT NULL);
       -- Warnings sent when an agent used far more than its usual day (v2.102.0).
       CREATE TABLE IF NOT EXISTS usage_alerts (
         agent_id TEXT NOT NULL, owner_id TEXT NOT NULL, at TEXT NOT NULL,
@@ -719,6 +722,13 @@ export class Store {
         this.db.exec(`INSERT INTO token_samples_source (source) VALUES ('transcripts')`);
       })();
     }
+    // Before v2.68.0 every settle logged "channel.dm_policy unchanged": 8,000+
+    // rows that filled a dozen agents' 200-row Setup logs with noise. The
+    // logging stopped; the rows stayed. Dropped once (review, 2026-09-29) —
+    // the real history they pushed out is gone for good.
+    this.runOnce('2026-09-29-dm-policy-unchanged', () => {
+      this.db.exec(`DELETE FROM agent_events WHERE event = 'channel.dm_policy' AND CASE WHEN json_valid(detail) THEN json_extract(detail, '$.result') END = 'unchanged'`);
+    });
     // model_call_hours was first keyed on (agent_id, hour), which let a later
     // upsert retag an already-counted hour onto whatever source the agent had
     // moved to — across accounts, for a shared source. Rebuild it under the
@@ -842,6 +852,15 @@ export class Store {
       DELETE FROM agent_seed  WHERE agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
       DELETE FROM agent_proposals WHERE master_agent_id IN (SELECT id FROM agents WHERE state = 'DELETED');
     `);
+  }
+
+  /** A one-time data cleanup: runs, and is recorded, in one transaction. */
+  private runOnce(name: string, fn: () => void): void {
+    if (this.db.prepare(`SELECT 1 FROM store_migrations WHERE name = ?`).get(name)) return;
+    this.db.transaction(() => {
+      fn();
+      this.db.prepare(`INSERT INTO store_migrations (name, at) VALUES (?, ?)`).run(name, new Date().toISOString());
+    })();
   }
 
   /**
