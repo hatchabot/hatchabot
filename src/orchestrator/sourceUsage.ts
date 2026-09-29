@@ -106,10 +106,16 @@ export async function sampleAgentUsage(deps: SampleDeps, a: Agent, now = Date.no
     // of starting empty (2026-09-28, when the source became the transcripts).
     if (store.latestTokenTotal(a.id) === undefined && u.recent?.length) {
       let running = u.totalTokens - u.recent.reduce((s, [, t]) => s + t, 0);
-      store.addTokenSample(a.id, a.aiProfileId, new Date(Date.parse(u.recent[0]![0]) - 300_000).toISOString(), running);
+      let prevAt = new Date(Date.parse(u.recent[0]![0]) - 300_000).toISOString();
+      store.addTokenSample(a.id, a.aiProfileId, prevAt, running);
       for (const [at, t] of u.recent) {
+        // Each slot's own start too, so a chart that spreads a rise between
+        // two readings keeps it in its five minutes, not the idle hours
+        // before it (review, 2026-09-29).
+        const start = new Date(Date.parse(at) - 300_000).toISOString();
+        if (start > prevAt && start < nowIso) store.addTokenSample(a.id, a.aiProfileId, start, running);
         running += t;
-        if (at < nowIso) store.addTokenSample(a.id, a.aiProfileId, at, running);
+        if (at < nowIso) { store.addTokenSample(a.id, a.aiProfileId, at, running); prevAt = at; }
       }
     }
     store.addTokenSample(a.id, a.aiProfileId, nowIso, u.totalTokens);

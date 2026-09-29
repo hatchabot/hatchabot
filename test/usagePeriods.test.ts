@@ -4,7 +4,7 @@ import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
 import { registerRoutes } from '../src/api/routes.js';
-import { computeUsagePeriod } from '../src/orchestrator/fleetUsage.js';
+import { computeUsagePeriod, localDay, snapshotDailyUsage } from '../src/orchestrator/fleetUsage.js';
 
 /**
  * Status → Usage by period: from the sampler's records (token counter
@@ -103,6 +103,35 @@ describe('computeUsagePeriod', () => {
     expect(computeUsagePeriod(world(), OWNER, '12h', NOW).bucketMinutes).toBe(30);
   });
 
+  it('a busy agent read every 10 minutes fills every 5-minute bar, not every other one (review, 2026-09-29)', () => {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'sub', ownerId: OWNER, name: 'Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/sub', createdAt: 'now' });
+    store.insertAgent({ id: 'busy', ownerId: OWNER, name: 'Busy', slug: 'busy', state: 'RUNNING', aiProfileId: 'sub', hostId: 'h1', runtimeRef: 'mock://busy', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    // Readings on the 10-minute marks, +1000 tokens each: 500 per 5 minutes.
+    for (let m = 70, total = 1000; m >= 0; m -= 10, total += 1000) store.addTokenSample('busy', 'sub', iso(m * MIN), total);
+    const v = computeUsagePeriod(store, OWNER, 'hour', NOW);
+    // The reading at the window's start counts (its span began before it: the first bar takes that part).
+    expect(v.agents[0]!.tokens).toBe(7000);
+    expect(v.buckets.reduce((s, b) => s + b.tokens, 0)).toBe(7000);
+    const inner = v.buckets.filter((b) => b.at >= iso(55 * MIN) && b.at < iso(0));
+    expect(inner.map((b) => b.tokens)).toEqual(Array(11).fill(500));
+    // A long gap (stopped for hours) lands in the 20 minutes before its reading, not across the day.
+    store.addTokenSample('busy', 'sub', iso(-5 * H), 11_000); // a reading five hours on: a later view
+    const later = computeUsagePeriod(store, OWNER, 'day', NOW + 5 * H);
+    expect(later.buckets.find((b) => b.at === iso(-4 * H))!.tokens).toBe(3000);
+    expect(later.buckets.filter((b) => b.at > iso(0) && b.at < iso(-4 * H)).every((b) => b.tokens === 0)).toBe(true);
+  });
+
+  it('an idle agent first read 3 hours ago does not make the day or week partial (review, 2026-09-29)', () => {
+    const store = world();
+    store.insertAgent({ id: 'idle', ownerId: OWNER, name: 'Idle', slug: 'idle', state: 'RUNNING', aiProfileId: 'sub', hostId: 'h1', runtimeRef: 'mock://idle', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    // Its first reading found no calls in the transcripts' last 8 days, so there was nothing to backfill.
+    store.addTokenSample('idle', 'sub', iso(3 * H), 42_000);
+    expect(computeUsagePeriod(store, OWNER, 'day', NOW).countingSince).toBeUndefined();
+    expect(computeUsagePeriod(store, OWNER, 'week', NOW).countingSince).toBeUndefined();
+  });
+
   it('scopes to the caller', () => {
     expect(computeUsagePeriod(world(), 'someone-else', 'day', NOW).agents).toEqual([]);
   });
@@ -122,4 +151,63 @@ describe('GET /v1/usage/periods', () => {
       expect((await f.inject({ method: 'GET', url: '/v1/usage/periods?period=month', headers: { 'x-hatchabot-owner': OWNER } })).statusCode).toBe(400);
     } finally { if (prev === undefined) delete process.env.HATCHABOT_ALLOW_OWNER_HEADER; else process.env.HATCHABOT_ALLOW_OWNER_HEADER = prev; }
   });
+});
+
+describe('the daily trend point (review, 2026-09-29)', () => {
+  function withTz<T>(tz: string, f: () => T): T {
+    const prev = process.env.TZ; process.env.TZ = tz;
+    try { return f(); } finally { if (prev === undefined) delete process.env.TZ; else process.env.TZ = prev; }
+  }
+  function trendWorld() {
+    const store = new Store(new Database(':memory:'));
+    store.insertHost({ id: 'h1', ownerId: OWNER, kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'api', ownerId: OWNER, name: 'Key', vendor: 'anthropic', kind: 'api_key', model: 'claude-opus-4-8', secretRef: 'ai/api', createdAt: 'now' });
+    store.insertAIProfile({ id: 'sub', ownerId: OWNER, name: 'Max', vendor: 'anthropic', kind: 'subscription', model: 'claude-sonnet-5', secretRef: 'ai/sub', createdAt: 'now' });
+    for (const [id, prof] of [['den', 'api'], ['kitchen', 'sub']] as const) {
+      store.insertAgent({ id, ownerId: OWNER, name: id, slug: id, state: 'RUNNING', aiProfileId: prof, hostId: 'h1', runtimeRef: `mock://${id}`, persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    }
+    return store;
+  }
+
+  it('days are the host\'s own: 21:00 on a UTC−4 host is that day, not the next', () => withTz('America/New_York', () => {
+    const store = trendWorld();
+    const now = Date.parse('2026-09-29T01:00:00.000Z'); // 21:00 on Sep 28 in New York
+    expect(localDay(now)).toEqual({ day: '2026-09-28', startIso: '2026-09-28T04:00:00.000Z' });
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T03:50:00.000Z', 100);   // 23:50 on the 27th
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T04:10:00.000Z', 300);   // +200 on the 28th
+    store.addTokenSample('kitchen', 'sub', '2026-09-29T00:50:00.000Z', 1000);  // +700 at 20:50
+    store.addTokenSample('kitchen', 'sub', '2026-09-29T01:00:00.000Z', 1500);  // +500 at 21:00
+    snapshotDailyUsage(store, now);
+    expect(store.listUsageSnapshots(OWNER, 30).map((s) => [s.day, s.usedTokens])).toEqual([['2026-09-28', 1400]]);
+  }));
+
+  it('the day\'s API cost is the day\'s own use at the agent\'s rate, and a snapshot without a cost keeps it', () => withTz('UTC', () => {
+    const store = trendWorld();
+    const now = Date.parse('2026-09-28T12:00:00.000Z');
+    store.setAgentTokenRate('den', 2 / 1e6, false, '2026-09-28T00:00:00.000Z'); // $2 per million
+    store.addTokenSample('den', 'api', '2026-09-27T23:00:00.000Z', 5_000_000); // lifetime: not today's cost
+    store.addTokenSample('den', 'api', '2026-09-28T11:00:00.000Z', 6_000_000); // +1M today
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T11:00:00.000Z', 9_000_000); // included: no cost
+    snapshotDailyUsage(store, now);
+    const day = () => store.listUsageSnapshots(OWNER, 30).find((s) => s.day === '2026-09-28')!;
+    expect(day().costLow).toBeCloseTo(2, 9);
+    expect(day().costHigh).toBeCloseTo(2, 9);
+    // The CLI's rollup (any snapshot without a cost) leaves it alone.
+    store.upsertUsageSnapshot(OWNER, { day: '2026-09-28', totalTokens: 16_000_000, byBilling: {} });
+    expect(day().costHigh).toBeCloseTo(2, 9);
+    // The next pass still has it, with the new use added.
+    store.addTokenSample('den', 'api', '2026-09-28T11:10:00.000Z', 6_500_000);
+    snapshotDailyUsage(store, now + 600_000);
+    expect(day().costHigh).toBeCloseTo(3, 9);
+  }));
+
+  it('yesterday is finished on the first pass after midnight', () => withTz('UTC', () => {
+    const store = trendWorld();
+    store.addTokenSample('kitchen', 'sub', '2026-09-27T23:40:00.000Z', 1000);
+    snapshotDailyUsage(store, Date.parse('2026-09-27T23:45:00.000Z'));
+    store.addTokenSample('kitchen', 'sub', '2026-09-27T23:55:00.000Z', 1600); // after that pass, before midnight
+    store.addTokenSample('kitchen', 'sub', '2026-09-28T00:05:00.000Z', 1700);
+    snapshotDailyUsage(store, Date.parse('2026-09-28T00:05:00.000Z'));
+    expect(store.listUsageSnapshots(OWNER, 30).map((s) => [s.day, s.usedTokens])).toEqual([['2026-09-27', 600], ['2026-09-28', 100]]);
+  }));
 });

@@ -1,7 +1,7 @@
 import { defaultSpec, filesMb, readMachineDefaults, type ChannelKindForFiles } from '../orchestrator/machineDefaults.js';
 import { existsSync, readFileSync, createWriteStream, mkdirSync } from 'node:fs';
 import { sampleSourceUsage, summarizeSourceUsage } from '../orchestrator/sourceUsage.js';
-import { computeUsagePeriod, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
+import { computeUsagePeriod, localDay, snapshotDailyUsage, USAGE_PERIODS, type UsagePeriod } from '../orchestrator/fleetUsage.js';
 import { parkDiscordBot, poolRef, publicDiscordBot, type DiscordBotRow } from '../orchestrator/discordPool.js';
 import { defaultDbPath } from '../envCompat.js';
 import { spawn } from 'node:child_process';
@@ -1748,35 +1748,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // the exact % of a Claude plan isn't readable with a setup-token.
   let usageSampling: Promise<unknown> | null = null;
   let usageSampledAt: string | undefined;
-  /**
-   * The daily trend point, from the newest counter reading of every agent —
-   * the Usage view used to write it only when someone opened it, and only
-   * from a live read of each container.
-   */
-  const snapshotUsageFromSamples = () => {
-    const byOwner = new Map<string, Agent[]>();
-    for (const a of store.listAllActiveAgents()) { const l = byOwner.get(a.ownerId) ?? []; l.push(a); byOwner.set(a.ownerId, l); }
-    for (const [ownerId, list] of byOwner) {
-      const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
-      let total = 0, any = false;
-      for (const a of list) {
-        const t = store.latestTokenTotal(a.id); if (t === undefined) continue;
-        any = true; total += t;
-        const p = store.getAIProfile(a.aiProfileId);
-        const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
-        byBilling[billing] = (byBilling[billing] ?? 0) + t;
-      }
-      if (any) {
-        const day = new Date().toISOString().slice(0, 10);
-        store.upsertUsageSnapshot(ownerId, { day, totalTokens: total, byBilling });
-        // The day's own use, from per-sample deltas: differencing lifetime
-        // sums counted an agent's whole history on the day it came back from
-        // a long stop, or arrived by import (night review, 2026-09-28).
-        const used = store.tokenDeltas(new Set(list.map((a) => a.id)), `${day}T00:00:00.000Z`).reduce((s, d) => s + d.delta, 0);
-        store.setUsageUsed(ownerId, day, used);
-      }
-    }
-  };
+  /** The daily trend point, from the sampler's readings (fleetUsage.ts). */
+  const snapshotUsageFromSamples = () => snapshotDailyUsage(store);
   /** A spike warning goes to the owner's own Telegram: from their Hatchabot
    *  agent's bot, else from the busy agent's own bot. */
   const tellUsageSpike = async (ownerId: string, agent: Agent, text: string) => {
@@ -6249,7 +6222,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'see its usage');
     if (!agent) return reply;
-    const u = await agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
+    // Strict: a failed read answered zeros, and the page said "nothing used"
+    // for an agent it simply could not read (review, 2026-09-29).
+    let u;
+    try { u = await agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, { strict: true }); }
+    catch (err) { return reply.code(502).send({ error: `Couldn't read ${agent.name}'s usage: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     // Its spike warnings of the last week (usageAlerts.ts); the 8-day slots are the sampler's, not the page's.
     const { recent: _recent, ...rest } = u;
     return { ...rest, alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
@@ -6271,7 +6248,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const results = await Promise.all(
       running.map(async (a) => {
         try {
-          const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug);
+          // Strict, so a failed read lands in `skipped` below instead of counting as 0 (review, 2026-09-29).
+          const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug, { strict: true });
           const p = store.getAIProfile(a.aiProfileId);
           const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
           const cost = billing === 'api' ? estimateCost(u.byModel) : null;
@@ -6304,10 +6282,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     // and the smaller one used to pull the day down (use-case audit, 2026-09-27).
     if (agentsUsage.length) {
       try {
-        store.upsertUsageSnapshot(ownerId, {
-          day: new Date().toISOString().slice(0, 10),
-          totalTokens, byBilling, costLow: cost?.low ?? null, costHigh: cost?.high ?? null,
-        });
+        // No cost: this one prices LIFETIME totals, which on a day's bar read
+        // as that day's spend; the sampler prices the day's own use (review, 2026-09-29).
+        store.upsertUsageSnapshot(ownerId, { day: localDay(Date.now()).day, totalTokens, byBilling });
       } catch { /* trend is a nicety; never break the view */ }
     }
     return {

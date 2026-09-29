@@ -52,6 +52,8 @@ export interface AgentUsage extends UsageSplit {
 
 const EMPTY: AgentUsage = { totalTokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, calls: 0, sessions: 0, byModel: [] };
 const MIN_SPAN_MS = 10 * 60_000; // below this, a rate is noise
+/** How far back a reading's `recent` slots reach (the script's `since`): a first reading knows this much history. */
+export const FIRST_READ_REACH_MS = 8 * 86_400_000;
 
 /** Runs inside the agent's container (node 22+). Static text: nothing of the agent's is spliced in. */
 export const USAGE_READER_SCRIPT = String.raw`
@@ -80,11 +82,24 @@ let dirs = []; try { dirs = fs.readdirSync(root); } catch {}
 for (const d of dirs) {
   const dbf = path.join(root, d, "agent", "openclaw-agent.sqlite");
   let usedDb = false;
-  if (fs.existsSync(dbf)) {
+  let sqlite = null; try { sqlite = require("node:sqlite"); } catch {}
+  if (sqlite && fs.existsSync(dbf)) {
+    // Only a DB without the table (2026.7 keeps its calls in the .jsonl files)
+    // falls back. Any other failure — busy, locked, corrupt — fails the whole
+    // read: on 2026.9 the .jsonl files are pre-migration leftovers, and a
+    // much smaller total saved as a reading made the next good one count
+    // hundreds of millions of tokens as new use (review, 2026-09-29).
+    let db = null, rows = null;
     try {
-      const { DatabaseSync } = require("node:sqlite");
-      const db = new DatabaseSync(dbf, { readOnly: true });
-      const rows = db.prepare("SELECT session_id, created_at, event_json, event_zstd FROM transcript_events").all();
+      db = new sqlite.DatabaseSync(dbf, { readOnly: true });
+      try { db.exec("PRAGMA busy_timeout = 3000"); } catch {}
+      try { rows = db.prepare("SELECT session_id, created_at, event_json, event_zstd FROM transcript_events").all(); }
+      catch (e) { if (!/no such table/i.test(String(e && e.message))) throw e; }
+    } catch (e) {
+      process.stderr.write("usage read failed for " + d + ": " + String((e && e.message) || e));
+      process.exit(3);
+    } finally { try { if (db) db.close(); } catch {} }
+    if (rows) {
       usedDb = true;
       for (const r of rows) {
         let j = r.event_json;
@@ -93,8 +108,7 @@ for (const d of dirs) {
         let e; try { e = JSON.parse(j); } catch { continue; }
         add(d + ":" + r.session_id, Number(r.created_at) || 0, e && e.message);
       }
-      db.close();
-    } catch { usedDb = false; }
+    }
   }
   if (usedDb) continue;
   const sd = path.join(root, d, "sessions"); let files = [];

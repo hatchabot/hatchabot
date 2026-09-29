@@ -122,6 +122,12 @@ describe('real usage, backfilled (2026-09-28)', () => {
     await sampleAgentUsage({ store, providerFor: () => provider } as never, { id: 'a1', hostId: 'h1', aiProfileId: 'p1', runtimeRef, slug: 'k' } as never, now);
     expect(store.tokenIncreasesByAgent('p1', '2026-09-28T09:00:00.000Z', new Set(['a1'])).get('a1')).toBe(30_000);
     expect(store.tokenIncreasesByAgent('p1', '2026-09-28T11:00:00.000Z', new Set(['a1'])).get('a1')).toBe(20_000);
+    // Each slot's rise is bounded by its own five minutes, so a chart that
+    // spreads a rise between readings keeps it there (review, 2026-09-29).
+    expect(store.tokenDeltas(new Set(['a1']), '2026-09-28T09:00:00.000Z').map((d) => [d.prevAt, d.at, d.delta])).toEqual([
+      ['2026-09-28T10:00:00.000Z', '2026-09-28T10:05:00.000Z', 10_000],
+      ['2026-09-28T11:25:00.000Z', '2026-09-28T11:30:00.000Z', 20_000],
+    ]);
   });
   it('a reading stores the agent\'s price per token from its own mix of input, output and cache', async () => {
     const store = new Store(new Database(':memory:'));

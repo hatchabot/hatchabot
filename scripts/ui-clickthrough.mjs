@@ -390,6 +390,15 @@ const SCENARIOS = String.raw`(() => {
       await until(() => (document.getElementById('v2UsageBody') || {}).textContent?.includes('Conversation size now'));
       v2Close(); delete window.__override['/v1/agents/a1/usage'];
     },
+    agentUsageReadFails: async () => {
+      // A read that fails says so; it used to read "No sessions yet — nothing used" (review, 2026-09-29).
+      window.__answer = { 'GET /v1/agents/a1/usage': [{ status: 502, body: { error: "Couldn't read Homework Helper's usage: usage read exited 3: database is locked" } }] };
+      await openUsage('a1', 'Homework Helper');
+      const body = await until(() => { const t = document.getElementById('usageBody').textContent; return t.includes("Couldn't read") ? t : null; });
+      ok('names the failure: ' + body.slice(0, 200), body.includes('database is locked'));
+      ok('not "nothing used"', !body.includes('nothing used'));
+      usageDlg.close(); window.__answer = {};
+    },
     usageHours: async () => {
       // Status → Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).
       const now = Date.now(), at = (m) => new Date(Math.floor((now - m * 60000) / 900000) * 900000).toISOString();

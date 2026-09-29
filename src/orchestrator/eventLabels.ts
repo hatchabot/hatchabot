@@ -13,6 +13,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'runtime.syncing': 'syncing data folders, connections and skills',
   'datasource.git_synced': (d) => `data folder synced: ${String(d.mountName ?? '')}`.trim(),
   'installdocs.synced': 'install notes synced',
+  'installdocs.agentsmd_cleaned': 'old install notes removed from AGENTS.md',
   'agentsmd.synced': 'AGENTS.md synced',
   'connection.sync_failed': (d) => `a connection did not sync: ${String(d.error ?? '')}`.trim(),
   'runtime.settling': 'waiting for its skills to settle',
@@ -212,4 +213,4 @@ export function eventLabel(event: string, detail?: Record<string, unknown>): str
 }
 
 /** Steps that mean "still working" when they are the newest event of a busy agent. */
-export const IN_PROGRESS = new Set(['runtime.seeding', 'runtime.provisioned', 'runtime.started', 'runtime.healthy', 'runtime.syncing', 'runtime.settling', 'memory.reindex', 'memory.reindex_retry', 'datasource.git_synced', 'installdocs.synced', 'agentsmd.synced', 'runtime.ready']);
+export const IN_PROGRESS = new Set(['runtime.seeding', 'runtime.provisioned', 'runtime.started', 'runtime.healthy', 'runtime.syncing', 'runtime.settling', 'memory.reindex', 'memory.reindex_retry', 'datasource.git_synced', 'installdocs.synced', 'installdocs.agentsmd_cleaned', 'agentsmd.synced', 'runtime.ready']);
