@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import Fastify from 'fastify';
 import { Store } from '../src/store/store.js';
 import { MockProvider } from '../src/providers/mockProvider.js';
@@ -110,6 +114,14 @@ describe('GET /v1/agents/:id/usage', () => {
     expect(res.json()).toMatchObject({ totalTokens: 1750, sessions: 3 });
   });
 
+  it('answers an error, not "nothing used", when the read fails (review, 2026-09-29)', async () => {
+    const { provider, f } = await world();
+    provider.usage.set('*', { code: 3, stdout: '', stderr: 'usage read failed for kitchen: database is locked' });
+    const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/usage', headers: as });
+    expect(res.statusCode).toBe(502);
+    expect(res.json().error).toMatch(/Couldn't read Kitchen's usage.*database is locked/);
+  });
+
   it('409s when the agent is not RUNNING', async () => {
     const { f } = await world('STOPPED');
     const res = await f.inject({ method: 'GET', url: '/v1/agents/a1/usage', headers: as });
@@ -187,6 +199,15 @@ describe('GET /v1/usage (fleet rollup)', () => {
     const body = res.json();
     expect(body.agents.map((a: any) => a.name)).toEqual(['Kitchen']); // Den dropped
     expect(body.skipped).toBe(2); // the STOPPED agent + the unreachable one
+  });
+
+  it('a read that exits non-zero counts as skipped, not as an idle agent (review, 2026-09-29)', async () => {
+    const { f, provider, store } = await fleetWorld();
+    provider.usage.set(store.listAllActiveAgents().find((a) => a.slug === 'den')!.runtimeRef!, { code: 3, stdout: '', stderr: 'database is locked' });
+    const body = (await f.inject({ method: 'GET', url: '/v1/usage', headers: as })).json();
+    expect(body.agents.map((a: any) => a.name)).toEqual(['Kitchen']);
+    expect(body.counted).toBe(1);
+    expect(body.skipped).toBe(2);
   });
 
   it('scopes to the caller — another user sees none of these agents', async () => {
@@ -280,5 +301,70 @@ describe('the reader script itself (2026-09-28)', () => {
     expect(out.models['claude-sonnet-5'].maxCtx).toBe(130);
     expect(out.lastCtx).toBeGreaterThan(0);
     expect(out.day).toEqual({ calls: 2, tokens: 137 });
+  });
+});
+
+// A failed SQLite read used to fall back to the .jsonl files silently; on
+// 2026.9 those are pre-migration leftovers, so a much smaller total was saved
+// as a real reading (review, 2026-09-29).
+describe('the reader script and the agent database (review, 2026-09-29)', () => {
+  async function runReader(build: (root: string) => void): Promise<{ code: number; out?: any; stderr: string }> {
+    const { USAGE_READER_SCRIPT } = await import('../src/orchestrator/usage.js');
+    const root = mkdtempSync(join(tmpdir(), 'hb-usage-db-'));
+    build(root);
+    const script = USAGE_READER_SCRIPT.replace('"/home/node/.openclaw/agents"', JSON.stringify(root));
+    const r = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
+    return { code: r.status ?? -1, out: r.status === 0 ? JSON.parse(r.stdout) : undefined, stderr: r.stderr };
+  }
+  const dirsFor = (root: string, slug: string) => {
+    mkdirSync(join(root, slug, 'agent'), { recursive: true });
+    mkdirSync(join(root, slug, 'sessions'), { recursive: true });
+    return { db: join(root, slug, 'agent', 'openclaw-agent.sqlite'), sessions: join(root, slug, 'sessions') };
+  };
+  const call = (input: number) => ({ model: 'claude-sonnet-5', usage: { input, output: 0, cacheRead: 0, cacheWrite: 0 } });
+  const jsonl = (input: number) => JSON.stringify({ type: 'message', timestamp: new Date().toISOString(), message: call(input) });
+
+  it('2026.9: reads transcript_events and ignores the leftover .jsonl files', async () => {
+    const r = await runReader((root) => {
+      const p = dirsFor(root, 'kitchen');
+      const db = new Database(p.db);
+      db.exec('CREATE TABLE transcript_events (session_id TEXT, created_at INTEGER, event_json TEXT, event_zstd BLOB)');
+      db.prepare('INSERT INTO transcript_events VALUES (?, ?, ?, NULL)').run('s1', Date.now(), JSON.stringify({ message: call(700) }));
+      db.close();
+      writeFileSync(join(p.sessions, 'old.jsonl.reset.2026-09-01'), jsonl(5));
+    });
+    expect(r.code).toBe(0);
+    expect(r.out.models['claude-sonnet-5']).toMatchObject({ calls: 1, input: 700 });
+  });
+
+  it('2026.7: a database without a transcript_events table still reads the .jsonl files', async () => {
+    const r = await runReader((root) => {
+      const p = dirsFor(root, 'numbers');
+      const db = new Database(p.db);
+      db.exec('CREATE TABLE memory_chunks (id TEXT)');
+      db.close();
+      writeFileSync(join(p.sessions, 's1.jsonl'), [jsonl(40), jsonl(2)].join('\n'));
+    });
+    expect(r.code).toBe(0);
+    expect(r.out.models['claude-sonnet-5']).toMatchObject({ calls: 2, input: 42 });
+  });
+
+  it('a database that exists but cannot be read fails the read instead of answering from the .jsonl files', async () => {
+    const r = await runReader((root) => {
+      const p = dirsFor(root, 'kitchen');
+      writeFileSync(p.db, 'this is not a database, only bytes that fill a page '.repeat(200));
+      writeFileSync(join(p.sessions, 'old.jsonl'), jsonl(5));
+    });
+    expect(r.code).not.toBe(0);
+    expect(r.out).toBeUndefined();
+    expect(r.stderr).toMatch(/usage read failed for kitchen/);
+  });
+
+  it('the sampler stores no reading when the read fails', async () => {
+    const { sampleAgentUsage } = await import('../src/orchestrator/sourceUsage.js');
+    const { store, provider } = await world();
+    provider.usage.set('*', { code: 3, stdout: '', stderr: 'usage read failed for kitchen: database is locked' });
+    await sampleAgentUsage({ store, providerFor: () => provider }, store.getAgent('a1')!);
+    expect(store.latestTokenTotal('a1')).toBeUndefined();
   });
 });

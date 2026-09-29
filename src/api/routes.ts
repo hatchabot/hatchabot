@@ -6246,7 +6246,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/usage', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'see its usage');
     if (!agent) return reply;
-    const u = await agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug);
+    // Strict: a failed read answered zeros, and the page said "nothing used"
+    // for an agent it simply could not read (review, 2026-09-29).
+    let u;
+    try { u = await agentUsage(providerFor(agent.hostId), agent.runtimeRef!, agent.slug, { strict: true }); }
+    catch (err) { return reply.code(502).send({ error: `Couldn't read ${agent.name}'s usage: ${String((err as Error).message ?? err).slice(0, 200)}` }); }
     // Its spike warnings of the last week (usageAlerts.ts); the 8-day slots are the sampler's, not the page's.
     const { recent: _recent, ...rest } = u;
     return { ...rest, alerts: store.usageAlertsSince(new Date(Date.now() - 7 * 86_400_000).toISOString(), { agentId: agent.id }) };
@@ -6268,7 +6272,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const results = await Promise.all(
       running.map(async (a) => {
         try {
-          const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug);
+          // Strict, so a failed read lands in `skipped` below instead of counting as 0 (review, 2026-09-29).
+          const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug, { strict: true });
           const p = store.getAIProfile(a.aiProfileId);
           const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
           const cost = billing === 'api' ? estimateCost(u.byModel) : null;
