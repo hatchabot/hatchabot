@@ -259,9 +259,11 @@ export async function restoreAgentFromBackup(
   } catch (err) {
     log('restore.safety_capture_failed', { agentId, error: String(err) });
     await restartIfWasRunning();
+    // No pointer at Download copy: it tars the same volume the same way, so it
+    // fails for the same reason (review, 2026-09-29).
     throw new RestoreError(
       "Its current state could not be copied first, so the restore would not be undoable — nothing was changed. " +
-        'Download a copy of the agent first (Advanced → Download copy), then try again.',
+        "Try again in a moment; if it keeps failing, check this machine's free disk space.",
     );
   }
 

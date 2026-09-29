@@ -283,3 +283,31 @@ describe('one agent per bot, any case (night review, 2026-09-27)', () => {
     expect(() => w.store.insertChannel({ id: 'c9', agentId: 'a9', kind: 'telegram', accountId: existing.accountId.toUpperCase(), secretRef: 'x', deepLink: 'https://t.me/x', createdAt: 'now' } as any)).toThrow(ChannelTakenError);
   });
 });
+
+describe('review, 2026-09-29: a failed move of a sleeping agent', () => {
+  it('puts the agent back to sleep, mark and all, when the destination refuses', async () => {
+    const w = await world();
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    await w.provider.stop(ref);
+    w.store.setAgentState('a1', 'STOPPED');
+    const at = new Date().toISOString();
+    w.store.setHibernated('a1', at, 42);
+    peerResponds({ importStatus: 400, import: { error: 'disk full' } });
+    await expect(migrateAgent(w.deps as any, 'a1', PEER)).rejects.toThrow(/disk full/);
+    const a = w.store.getAgent('a1')!;
+    expect(a.state).toBe('STOPPED');
+    expect(a.hibernatedAt).toBe(at); // the wake poll will still answer its messages
+    expect(a.hibernateMark).toBe(42);
+  });
+
+  it('a successful move leaves it plain stopped (asleep, it would wake beside its copy)', async () => {
+    const w = await world();
+    const ref = w.store.getAgent('a1')!.runtimeRef!;
+    await w.provider.stop(ref);
+    w.store.setAgentState('a1', 'STOPPED');
+    w.store.setHibernated('a1', new Date().toISOString(), 42);
+    peerResponds({});
+    await migrateAgent(w.deps as any, 'a1', PEER);
+    expect(w.store.getAgent('a1')!.hibernatedAt ?? null).toBeNull();
+  });
+});
