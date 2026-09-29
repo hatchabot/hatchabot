@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.105.0] — 2026-09-29
+
+### Fixed
+- **Restoring an agent from a nightly backup keeps who may use it and its bot as they are now.** The backup is that night's whole volume, including its settings, so a restore used to bring back people removed since then, without the app showing it, and a bot since swapped away, which then ran on two agents at once. Now the agent's memory and files come from the backup, then Hatchabot puts its current bot, members and model back (as Import and Move already did) and removes the removed people again. The restore message says what that undid, for example "That night's copy still let Sam in; they stay removed." To bring someone back, add them again. If a full re-apply can't run (say its AI source is gone, which would stop a rebuild too), the restore still keeps only the current bot and removes the removed people, and says the rest follows at the next rebuild; if even that fails, the agent is left exactly as it was before the restore.
+
 ## [2.104.0] — 2026-09-29
 
 The larger fixes from the full review, each approved first.

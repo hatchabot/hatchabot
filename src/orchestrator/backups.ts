@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
+import { allowlistScrubScript, keepOnlyTelegramAccountScript, RESTORED_ACCESS_SCRIPT, revokedScrubTargets } from './members.js';
 
 // A dated backup directory is exactly `YYYY-MM-DD`, matching what the script
 // creates (`date +%F`) and prunes. Anything else in the base dir is ignored,
@@ -276,6 +277,8 @@ export interface RestoreResult {
   date: string;
   /** whether the agent was running before, and was started again after */
   running: boolean;
+  /** What that night's copy had that Hatchabot's current settings undid: people since removed, an old bot. */
+  undone?: string[];
 }
 
 /**
@@ -288,7 +291,11 @@ export interface RestoreResult {
  * the machine's owner.
  */
 export async function restoreAgentFromBackup(
-  deps: { store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void },
+  deps: {
+    store: Store; provider: RuntimeProvider; log?: (e: string, d: Record<string, unknown>) => void;
+    /** Put this installation's current settings (bot, members, model) back over the restored config, as Import and Move do. */
+    reapply?: (runtimeRef: string) => Promise<void>;
+  },
   agentId: string,
   date: string,
 ): Promise<RestoreResult> {
@@ -358,8 +365,56 @@ export async function restoreAgentFromBackup(
     throw new RestoreError("Restore failed — the agent was left as it was.");
   }
 
-  log('agent.restored', { agentId, date });
+  // The backup is that night's whole volume, config and approvals included.
+  // Memory and files are what a restore is for; who may talk to the agent and
+  // which bot it uses follow Hatchabot's records now, or a removed member was
+  // let back in where the app could not show it, and a swapped-away bot was
+  // polled by two agents (review #5, 2026-09-29; Chris chose this over a
+  // whole-volume rollback). What was undone is reported, not silently dropped.
+  const undone: string[] = [];
+  try {
+    const seen = await provider.execShellOnVolume(agent.runtimeRef, RESTORED_ACCESS_SCRIPT, { readOnly: true });
+    const had = JSON.parse(seen.stdout || '{}') as { ids?: string[]; telegramAccounts?: string[] };
+    const ids = new Set(had.ids ?? []);
+    const back = revokedScrubTargets(store, agentId).people.filter((p) => p.ids.some((id) => ids.has(id))).map((p) => p.name);
+    if (back.length) undone.push(`That night's copy still let ${back.join(', ')} in; ${back.length === 1 ? 'they stay' : 'they all stay'} removed.`);
+    const current = store.getChannelForAgent(agentId, 'telegram')?.accountId;
+    if ((had.telegramAccounts ?? []).some((k) => k !== current)) {
+      undone.push(current ? 'It used a different Telegram bot that night; it keeps the one it has now.' : 'It had a Telegram bot that night; it stays without one.');
+    }
+  } catch (err) {
+    log('restore.access_read_failed', { agentId, error: String(err) });
+  }
+  try {
+    if (deps.reapply) {
+      try { await deps.reapply(agent.runtimeRef); }
+      catch (err) {
+        // A full re-apply can fail for reasons a rebuild would too (its AI
+        // source gone). The part that matters for safety still runs: only its
+        // current bot stays; the rest follows at its next rebuild.
+        log('restore.reapply_partial', { agentId, error: String(err).slice(0, 200) });
+        const res = await provider.execShellOnVolume(agent.runtimeRef, keepOnlyTelegramAccountScript(store.getChannelForAgent(agentId, 'telegram')?.accountId));
+        if (res.code !== 0) throw new Error(`dropping the old bot failed: ${res.stderr.slice(-200)}`);
+        undone.push("Its other current settings (model, AI source) couldn't be put back now; they follow at its next rebuild.");
+      }
+    }
+    const { targets } = revokedScrubTargets(store, agentId);
+    if (targets.length) {
+      const res = await provider.execShellOnVolume(agent.runtimeRef, allowlistScrubScript(targets));
+      if (res.code !== 0) throw new Error(`removing people again failed: ${res.stderr.slice(-200)}`);
+    }
+  } catch (err) {
+    // Never leave that night's access in force: back to how it was before.
+    log('restore.reapply_failed', { agentId, error: String(err) });
+    if (safety) {
+      try { await provider.importState(agent.runtimeRef, safety); } catch (rollbackErr) { log('restore.rollback_failed', { agentId, error: String(rollbackErr) }); }
+    }
+    await restartIfWasRunning();
+    throw new RestoreError("The backup was read, but this agent's current settings could not be put back over it, so it was left as it was.");
+  }
+
+  log('agent.restored', { agentId, date, undone: undone.length });
   await restartIfWasRunning();
   // What it IS now, not what it was: a failed restart used to report "restarting".
-  return { date, running: deps.store.getAgent(agentId)?.state === 'RUNNING' };
+  return { date, running: deps.store.getAgent(agentId)?.state === 'RUNNING', ...(undone.length ? { undone } : {}) };
 }

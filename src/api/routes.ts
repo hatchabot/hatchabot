@@ -38,6 +38,7 @@ import {
   effectiveModel,
   prefixedModelRef,
   recordApplied,
+  buildRuntimeSpec,
   type ProvisionDeps,
   sharePathProblem,
   rebuildAgent,
@@ -7978,7 +7979,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (busyNow(agent, reply)) return reply;
     try {
       return await whileBusy(agent.id, () =>
-        restoreAgentFromBackup(snapshotDeps(agent), agent.id, date),
+        restoreAgentFromBackup({
+          ...snapshotDeps(agent),
+          // The same second provision Import and Move use: this installation's
+          // bot, members and model over the restored openclaw.json.
+          reapply: async () => {
+            const pdeps = { store, secrets, provider: providerFor(agent.hostId), channel: deps.channel, log: trace(agent.id), embedder: embedderForProvision };
+            await pdeps.provider.provision(await buildRuntimeSpec(pdeps, agent.id));
+            recordApplied(store, agent.id);
+          },
+        }, agent.id, date),
       );
     } catch (err) {
       if (err instanceof AgentBusyError) return reply.code(409).send({ error: err.userMessage });

@@ -4191,7 +4191,8 @@ async function restoreFromBackup(agentId, date, name) {
   if (typed.trim() !== name) { toast('Name did not match — restore cancelled.', 8000); return; }
   try {
     const r = await api('/v1/backups/restore', { method: 'POST', body: { agentId, date } });
-    toast(`Restored “${name}” from ${date}${r.running ? ' — restarting' : ''}`, 12000);
+    // Memory and files come back; who may use it and its bot stay as they are now, and it says what that undid.
+    toast(`Restored “${name}” from ${date}${r.running ? ' — restarting' : ''}.${(r.undone || []).map(u => ' ' + u).join('')}`, (r.undone || []).length ? 20000 : 12000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
 }

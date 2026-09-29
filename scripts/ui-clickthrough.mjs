@@ -269,12 +269,13 @@ const SCENARIOS = String.raw`(() => {
       await until(() => document.getElementById('toast').textContent.includes('did not match'));
       eq('no restore on a wrong name', calls('POST', /\/v1\/backups\/restore$/).length, 0);
       window.__promptAnswer = 'Homework Helper';
-      window.__answer = { 'POST /v1/backups/restore': [{ status: 200, body: { date: '2026-09-26', running: false } }] };
+      window.__answer = { 'POST /v1/backups/restore': [{ status: 200, body: { date: '2026-09-26', running: false, undone: ["That night's copy still let Sam in; they stay removed."] } }] };
       restore.click();
       const post = await until(() => calls('POST', /\/v1\/backups\/restore$/)[0]);
       eq('the restore', post.body, { agentId: 'a1', date: '2026-09-26' });
       await until(() => document.getElementById('toast').textContent.includes('Restored'));
       ok('no "restarting" when it is not running', !document.getElementById('toast').textContent.includes('restarting'));
+      ok('it says what the restore undid', document.getElementById('toast').textContent.includes('still let Sam in; they stay removed'));
       aiDlg.close(); window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/backups'];
     },
     // A partial set, an agent the set does not cover, and a left-out orphan are said, not shown green (review, 2026-09-29).
@@ -427,10 +428,16 @@ const SCENARIOS = String.raw`(() => {
     },
     sheetPollKeepsTabs: async () => {
       // A poll must not reload the Files or Discord tab under someone (night review #18).
+      // Cleans up even when it fails: a leftover STOPPED override broke the checks after it.
+      try { await sheetPollKeepsTabsBody(); }
+      finally { try { v2Close(); } catch {} delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/fs']; delete window.__override['/v1/agents/a2/channels']; await refresh(false); }
+    },
+  };
+  async function sheetPollKeepsTabsBody() {
       window.__override['/v1/agents/a1/fs'] = { path: '', entries: [{ name: 'notes.md', type: 'file', size: 10 }] };
       const fsCalls = () => calls('GET', /\/v1\/agents\/a1\/fs$/).length;
       openV2Agent('a1', 'files');
-      const note = await until(() => document.getElementById('v2UploadNote'));
+      const note = await until(() => document.getElementById('v2UploadNote')).catch(() => { throw new Error('the Files tab never showed its upload note'); });
       note.hidden = false; note.textContent = 'Uploading big.zip…';
       const before = fsCalls();
       await refresh(false);
@@ -440,7 +447,7 @@ const SCENARIOS = String.raw`(() => {
       const list = await (await fetch('/v1/agents')).json();
       window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: 'STOPPED' } : a);
       await refresh(false);
-      await until(() => fsCalls() > before);
+      await until(() => fsCalls() > before).catch(() => { throw new Error('a real change (stopped) did not repaint the Files tab'); });
       v2Close(); delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/fs'];
       await refresh(false);
       // Discord: a group-chat choice not yet saved is not reverted by a poll.
@@ -452,8 +459,8 @@ const SCENARIOS = String.raw`(() => {
       await refresh(false);
       eq('no new channels read on a poll', calls('GET', /\/v1\/agents\/a2\/channels$/).length, chans);
       eq('the choice stays', document.getElementById('chanRoomMode-discord')?.value, 'room');
-      v2Close(); delete window.__override['/v1/agents/a2/channels'];
-    },
+  }
+  Object.assign(T, {
     modalOnlyDialogs: async () => {
       // A stray click outside must not close the recovery code before "I've saved it", nor the sign-in (night review #19).
       const outside = (dlg) => dlg.dispatchEvent(new MouseEvent('click', { clientX: 3, clientY: 3, bubbles: true, cancelable: true }));
@@ -583,7 +590,7 @@ const SCENARIOS = String.raw`(() => {
       eq('plain logout never called', calls('POST', /^\/v1\/logout$/).length, 0);
       window.__answer = {};
     },
-  };
+  });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
       try { await run(); results.push({ name, ok: true }); }

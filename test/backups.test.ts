@@ -126,6 +126,49 @@ describe('restoreAgentFromBackup', () => {
     expect(store.getAgent('a1')!.state).toBe('RUNNING');
   });
 
+  it('keeps who may use it and its bot as they are now, removes people again, and says what that undid (review #5, 2026-09-29)', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'NewBot', secretRef: 'chan/a1', deepLink: 'x', createdAt: 'now' } as never);
+    store.insertMembership({ id: 'm2', agentId: 'a1', userId: 'u-sam', role: 'member', displayName: 'Sam', channelUserId: '4242', status: 'active' } as never);
+    store.revokeMembership('a1', 'u-sam');
+    mkdirSync(join(rbase, '2026-08-22'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-22', agentArchiveName(runtimeRef)), 'that-night');
+    // What the restored volume holds: Sam still approved, and the bot it had then.
+    provider.execResponses.set('sh-volume', { code: 0, stdout: JSON.stringify({ ids: ['4242'], telegramAccounts: ['OldBot'] }), stderr: '' });
+    const reapplied: string[] = [];
+    const r = await restoreAgentFromBackup({ store, provider, reapply: async (ref) => { reapplied.push(ref); } }, 'a1', '2026-08-22');
+    expect(reapplied).toEqual([runtimeRef]);
+    expect(r.undone).toEqual([
+      "That night's copy still let Sam in; they stay removed.",
+      'It used a different Telegram bot that night; it keeps the one it has now.',
+    ]);
+    const scrub = provider.execLog.filter(([k, sc]) => k === 'sh-volume' && (sc ?? '').includes('channel_pairing_allow_entries where channel_key'));
+    expect(scrub.length).toBe(1);
+    expect(scrub[0]![1]).toContain('"id":"4242"');
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('that-night'); // memory and files are the backup's
+  });
+
+  it('when a full re-apply cannot run, still drops the old bot and says the rest waits for a rebuild', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    mkdirSync(join(rbase, '2026-08-24'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-24', agentArchiveName(runtimeRef)), 'that-night');
+    const r = await restoreAgentFromBackup({ store, provider, reapply: async () => { throw new Error('its AI source is gone'); } }, 'a1', '2026-08-24');
+    expect(r.undone?.at(-1)).toMatch(/follow at its next rebuild/);
+    expect(provider.execLog.some(([k, sc]) => k === 'sh-volume' && (sc ?? '').includes('delete tg.accounts[k]'))).toBe(true);
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('that-night');
+  });
+
+  it('puts the agent back as it was when even that cannot be done', async () => {
+    const { store, provider, runtimeRef } = await runningAgent();
+    mkdirSync(join(rbase, '2026-08-23'), { recursive: true });
+    writeFileSync(join(rbase, '2026-08-23', agentArchiveName(runtimeRef)), 'that-night');
+    provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'disk full' });
+    await expect(restoreAgentFromBackup({ store, provider, reapply: async () => { throw new Error('no build'); } }, 'a1', '2026-08-23'))
+      .rejects.toBeInstanceOf(RestoreError);
+    expect(provider.stateStore.get(runtimeRef)!.toString()).toBe('current-memory');
+    expect(store.getAgent('a1')!.state).toBe('RUNNING');
+  });
+
   it('refuses when the set has no tarball for this agent, leaving it untouched', async () => {
     const { store, provider, runtimeRef } = await runningAgent();
     mkdirSync(join(rbase, '2026-08-21'), { recursive: true }); // empty set

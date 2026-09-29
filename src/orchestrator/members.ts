@@ -594,6 +594,82 @@ export async function revokeMember(
 
 
 /**
+ * Everyone removed from this agent, as scrub targets on the chat apps it has
+ * now. A restore from a nightly backup brings back that night's approvals, so
+ * the people Hatchabot has since removed must be removed again (review,
+ * 2026-09-29). An odd-shaped id is left out rather than failing the restore:
+ * it never reaches a script.
+ */
+export function revokedScrubTargets(store: Store, agentId: string): {
+  targets: Array<{ channel: string; acct: string; id: string; cred: string }>;
+  people: Array<{ userId: string; name: string; ids: string[] }>;
+} {
+  const targets: Array<{ channel: string; acct: string; id: string; cred: string }> = [];
+  const people: Array<{ userId: string; name: string; ids: string[] }> = [];
+  for (const mem of store.listMemberships(agentId)) {
+    if (mem.status !== 'revoked') continue;
+    const ids = store.memberIdentities(agentId, mem.userId);
+    const mine: string[] = [];
+    for (const kind of Object.keys(ids) as ChannelKind[]) {
+      const id = ids[kind]!;
+      const channel = store.getChannelForAgent(agentId, kind);
+      if (!channel && kind === 'telegram') continue;
+      const acct = kind === 'telegram' ? channel!.accountId : CHANNEL_ACCOUNT;
+      if (!ID_SHAPE[kind].test(id) || !/^[A-Za-z0-9_]{1,64}$/.test(acct)) continue;
+      targets.push({ channel: kind, acct, id, cred: `/home/node/.openclaw/credentials/${kind}-${acct.toLowerCase()}-allowFrom.json` });
+      mine.push(id);
+    }
+    if (mine.length) people.push({ userId: mem.userId, name: mem.displayName ?? 'someone', ids: mine });
+  }
+  return { targets, people };
+}
+
+/**
+ * What a restored volume admits and which bots its config names, read before
+ * Hatchabot puts its current settings back: the restore can then say what the
+ * backup had that was undone. Read-only; prints JSON.
+ */
+export const RESTORED_ACCESS_SCRIPT = `node -e '
+  const fs = require("fs"); const path = require("path");
+  const out = { ids: [], telegramAccounts: [] };
+  const add = (x) => { if (x !== undefined && x !== null) out.ids.push(String(x)); };
+  try {
+    const cfg = JSON.parse(fs.readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));
+    const ch = (cfg && cfg.channels) || {};
+    for (const k of Object.keys(ch)) for (const a of Object.values((ch[k] && ch[k].accounts) || {})) for (const x of ((a && a.allowFrom) || [])) add(x);
+    out.telegramAccounts = Object.keys((ch.telegram && ch.telegram.accounts) || {});
+  } catch {}
+  const cd = "/home/node/.openclaw/credentials";
+  try { for (const f of fs.readdirSync(cd)) if (f.endsWith("-allowFrom.json")) { try { for (const x of (JSON.parse(fs.readFileSync(path.join(cd, f), "utf8")).allowFrom || [])) add(x); } catch {} } } catch {}
+  try {
+    if (fs.existsSync(${JSON.stringify(PAIRING_DB)})) {
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(${JSON.stringify(PAIRING_DB)}, { readOnly: true });
+      for (const r of db.prepare("select entry from channel_pairing_allow_entries").all()) add(r.entry);
+    }
+  } catch {}
+  process.stdout.write(JSON.stringify(out));'`;
+
+/**
+ * Drop every Telegram bot from a restored config except the one the agent has
+ * now (none: all of them). The fallback when a full re-apply can't run, so a
+ * swapped-away bot is never polled by two agents (review #5, 2026-09-29).
+ */
+export function keepOnlyTelegramAccountScript(accountId: string | undefined): string {
+  if (accountId !== undefined && !/^[A-Za-z0-9_]{1,64}$/.test(accountId)) throw new Error('unexpected account id');
+  return `node -e '
+    const fs = require("fs"); const f = "/home/node/.openclaw/openclaw.json";
+    if (!fs.existsSync(f)) process.exit(0);
+    const cfg = JSON.parse(fs.readFileSync(f, "utf8"));
+    const tg = cfg.channels && cfg.channels.telegram;
+    if (!tg || !tg.accounts) process.exit(0);
+    const keep = ${JSON.stringify(accountId ?? null)};
+    for (const k of Object.keys(tg.accounts)) if (k !== keep) delete tg.accounts[k];
+    if (!Object.keys(tg.accounts).length) tg.enabled = false;
+    fs.writeFileSync(f + ".tmp", JSON.stringify(cfg, null, 2)); fs.renameSync(f + ".tmp", f);'`;
+}
+
+/**
  * The on-volume scrub of chat ids from an agent's allowlists: the approval
  * credentials file, the 2026.9 approval rows, the config's account allowFrom,
  * and every Slack channel's / Discord server's users (a room left with nobody
