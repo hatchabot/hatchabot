@@ -180,6 +180,7 @@ export const COVERAGE: Record<string, string> = {
   'POST /v1/local-accounts/recover-with-code': 'app: secret — a recovery code and a new password, used signed out',
   'POST /v1/login': 'app: browser — signing in to this machine',
   'POST /v1/logout': 'app: browser — signing out of this machine',
+  'POST /v1/logout/everywhere': 'app: browser — ending your own sessions on every device',
   'POST /v1/session': 'app: browser — Google sign-in',
   'POST /v1/join': 'app: browser — someone joining an agent',
   'POST /v1/cli-tokens': 'app: secret — mints an access token',

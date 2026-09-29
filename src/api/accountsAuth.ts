@@ -128,12 +128,18 @@ function onThisMachine(req: FastifyRequest): boolean {
 /** Session signature. The account's password hash rides in the material, so
  *  changing (or resetting) a password invalidates that account's sessions
  *  everywhere without touching anyone else's. */
-function signSession(secret: Buffer, accountId: string, pwHash: string, exp: number): string {
-  return createHmac('sha256', secret).update(`acct:${accountId}:${exp}:${pwHash}`).digest('hex');
+function signSession(secret: Buffer, accountId: string, pwHash: string, exp: number, epoch = 0): string {
+  // The account's sign-in epoch is signed in too, so "sign out everywhere"
+  // and removing the account end its sessions without a password change. The
+  // cookie itself is unchanged: epoch 0 signs exactly what it always did, so
+  // sessions from before this keep working until the first bump (review,
+  // 2026-09-29).
+  const material = `acct:${accountId}:${exp}:${pwHash}${epoch ? `:e${epoch}` : ''}`;
+  return createHmac('sha256', secret).update(material).digest('hex');
 }
 
-export function mintSession(secret: Buffer, accountId: string, pwHash: string, exp: number): string {
-  return `${accountId}:${exp}.${signSession(secret, accountId, pwHash, exp)}`;
+export function mintSession(secret: Buffer, accountId: string, pwHash: string, exp: number, epoch = 0): string {
+  return `${accountId}:${exp}.${signSession(secret, accountId, pwHash, exp, epoch)}`;
 }
 
 /** Resolve a session cookie to an account id, or undefined. */
@@ -150,7 +156,7 @@ export function sessionAccount(store: Store, secret: Buffer, token: string | und
   if (!accountId || !Number.isFinite(exp) || exp < Date.now()) return undefined;
   const account = store.localAccount(accountId);
   if (!account || account.disabled) return undefined;
-  const expected = signSession(secret, accountId, account.pwHash, exp);
+  const expected = signSession(secret, accountId, account.pwHash, exp, store.sessionEpoch(accountId));
   if (sig.length !== expected.length) return undefined;
   return timingSafeEqual(Buffer.from(sig, 'utf8'), Buffer.from(expected, 'utf8')) ? accountId : undefined;
 }
@@ -275,7 +281,7 @@ export function registerAccountRoutes(
       // The host owner is the one person nobody can send a reset link to: give
       // them their way back in now, while they are here to write it down.
       const recoveryCode = await issueRecoveryCode(id);
-      setSessionCookie(reply, req, mintSession(secret, id, hash, Date.now() + TTL_MS));
+      setSessionCookie(reply, req, mintSession(secret, id, hash, Date.now() + TTL_MS, store.sessionEpoch(id)));
       return reply.code(201).send({ ok: true, id, username, hostOwner: true, adopted, recoveryCode });
     },
   );
@@ -308,7 +314,7 @@ export function registerAccountRoutes(
     // time: the one person nobody can send a reset link gets a recovery code
     // now, as account #1 does at bootstrap.
     const recoveryCode = account.hostOwner && !account.recoveryHash ? await issueRecoveryCode(account.id) : undefined;
-    setSessionCookie(reply, req, mintSession(secret, account.id, hash, Date.now() + TTL_MS));
+    setSessionCookie(reply, req, mintSession(secret, account.id, hash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
     return { ok: true, id: account.id, username: account.username, ...(recoveryCode ? { recoveryCode } : {}) };
   });
 
@@ -364,7 +370,7 @@ export function registerAccountRoutes(
       await new Promise((r) => setTimeout(r, 400));
       return reply.code(401).send({ error: 'Wrong username or password' });
     }
-    setSessionCookie(reply, req, mintSession(secret, account.id, account.pwHash, Date.now() + TTL_MS));
+    setSessionCookie(reply, req, mintSession(secret, account.id, account.pwHash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
     deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
     return { ok: true, id: account.id, username: account.username, hostOwner: account.hostOwner };
   });
@@ -438,7 +444,7 @@ export function registerAccountRoutes(
     guard.clearFailures?.(account.username);
     app.log.warn({ account: account.id }, 'account.recovered_with_code');
     // The new hash signs out every other session; this browser gets a fresh one.
-    setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS));
+    setSessionCookie(reply, req, mintSession(secret, account.id, pw.hash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
     deps.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
     return { ok: true, username: account.username, recoveryCode };
   });
@@ -521,7 +527,7 @@ export function registerAccountRoutes(
       revokeCliTokensOf(target.id);
       // Every session of that account dies with the old hash. Re-issue one for
       // the caller when it's their own, so changing it doesn't log them out.
-      if (self) setSessionCookie(reply, req, mintSession(secret, target.id, hash, Date.now() + TTL_MS));
+      if (self) setSessionCookie(reply, req, mintSession(secret, target.id, hash, Date.now() + TTL_MS, store.sessionEpoch(target.id)));
       return { ok: true };
     },
   );

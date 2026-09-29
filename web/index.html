@@ -870,6 +870,7 @@
         <button role="menuitem" onclick="location.search = '?ui=classic'">Classic look</button>
         <div class="v2popsep"></div>
         <button role="menuitem" class="v2signout" onclick="signOut()">Sign out or switch account</button>
+        <button role="menuitem" id="v2SignOutAll" onclick="v2CloseAccount(); signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included">Sign out on every device</button>
         <div class="v2ver" id="v2Ver"></div>
       </div>
     </div>
@@ -890,6 +891,7 @@
       </label>
       <button id="logoutBtn" class="hbtn" onclick="signOut()"
               title="Sign out — then sign in as anyone: the Google chooser offers 'Use another account'. Tabs share one login; for two accounts AT ONCE, use another browser profile or a private window.">Sign out / switch</button>
+      <button id="logoutAllBtn" class="hbtn" onclick="signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included">Sign out everywhere</button>
     </div>
     <div class="hrow">
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
@@ -2760,6 +2762,21 @@ async function signOut() {
   // the same email — this is what makes account SWITCHING actually work.
   try { google.accounts.id.disableAutoSelect(); } catch { /* GSI not loaded */ }
   location.reload();
+}
+
+/**
+ * Ends every session this person has, on every device: a sign-in left on a
+ * borrowed or lost device otherwise kept working for its full 14 days
+ * (review, 2026-09-29). Plain sign-out above still only forgets this browser.
+ */
+async function signOutEverywhere() {
+  if (!confirm('Sign out on every device? Every phone, tablet and computer signed in as you, this one included, will need to sign in again.')) return;
+  try { await api('/v1/logout/everywhere', { method: 'POST' }); }
+  catch (e) { if (e.message !== 'auth required') toast(e.message); return; }
+  localStorage.removeItem('hatchabot_email');
+  try { google.accounts.id.disableAutoSelect(); } catch { /* GSI not loaded */ }
+  toast('Signed out on every device.');
+  if (!window.__noReload) location.reload(); // the click-through check stays on the page
 }
 
 async function onGoogleCredential(response) {
