@@ -93,6 +93,13 @@ case "$1 $2" in
     vol=""; out=""
     for a in "$@"; do case "$a" in *:/data:ro) vol="\${a%%:/data:ro}";; *:/out) out="\${a%%:/out}";; esac; done
     case "$vol" in *broken*) exit 2;; esac
+    # A volume with a fixture tree runs the script's own tar command for
+    # real, /data and /out pointed at temp dirs (review, 2026-09-29).
+    if [ -d "${root}/vols/$vol" ]; then
+      o='/out/'; d='-C /data '
+      cmd="\${@: -1}"; cmd="\${cmd//"$o"/$out/}"; cmd="\${cmd//"$d"/-C ${root}/vols/$vol }"
+      exec bash -c "$cmd"
+    fi
     echo fake > "$out/$vol.tgz" ;;
 esac
 `, { mode: 0o755 });
@@ -107,7 +114,11 @@ esac
     },
   });
   const setDir = () => join(backups, readdirSync(backups).find((d) => /^20\d\d-/.test(d))!);
-  return { run, setDir };
+  /** Give a volume real files, so its tarball is made by the script's own tar. */
+  const fillVolume = (vol: string, files: string[]) => {
+    for (const f of files) { mkdirSync(dirname(join(root, 'vols', vol, f)), { recursive: true }); writeFileSync(join(root, 'vols', vol, f), 'x'); }
+  };
+  return { run, setDir, fillVolume };
 }
 
 describe('scripts/backup-volumes.sh records how the run ended', () => {
@@ -135,5 +146,42 @@ describe('scripts/backup-volumes.sh records how the run ended', () => {
     const r = w.run();
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(existsSync(join(w.setDir(), 'agentclaw-old-sophie.tgz'))).toBe(true);
+  });
+});
+
+describe('scripts/backup-volumes.sh leaves out what an agent rebuilds (review, 2026-09-29)', () => {
+  it('skips the regenerable caches at the volume root and keeps plugins, installs and workspace look-alikes', () => {
+    const w = scriptWorld(['hatchabot-kitchen-1-vol'], ['docker://hatchabot-kitchen-1']);
+    const skipped = [
+      '.openclaw/cache/control-ui-assets/0123abcd/index.html',
+      '.openclaw/tmp/plugin-captures/one/owner.sqlite',
+      '.openclaw/tmp/openclaw-1000/gateway.state.lock',
+      '.npm/_cacache/index-v5/aa/bb',
+      '.cache/pip/http-v2/a/b',
+    ];
+    const kept = [
+      '.openclaw/openclaw.json',
+      '.openclaw/agents/main/agent/auth-profiles.json',
+      '.openclaw/npm/projects/openclaw-discord/node_modules/x/package.json', // plugin installs
+      '.openclaw/cache/other/keep.json', // only control-ui-assets is known to be rebuilt
+      '.openclaw/tmpfoo/keep', // a prefix, not the tmp directory
+      '.npm-global/lib/node_modules/some-cli/package.json', // npm install -g
+      '.cache/puppeteer/chrome/keep', // not proven regenerable
+      '.cache/claude-cli-nodejs/keep',
+      '.openclaw/workspace/proj/.npm/keep', // anchored: only the volume root's
+      '.openclaw/workspace/proj/.cache/pip/keep',
+      '.openclaw/workspace/.openclaw/tmp/keep',
+    ];
+    w.fillVolume('hatchabot-kitchen-1-vol', [...skipped, ...kept]);
+    const r = w.run();
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const listing = spawnSync('tar', ['tzf', join(w.setDir(), 'hatchabot-kitchen-1-vol.tgz')], { encoding: 'utf8' });
+    expect(listing.status, listing.stderr).toBe(0);
+    const names = new Set(listing.stdout.split('\n').filter(Boolean));
+    for (const f of kept) expect(names.has(`./${f}`), f).toBe(true);
+    for (const f of skipped) expect(names.has(`./${f}`), f).toBe(false);
+    // The directories themselves are gone too, not only their files.
+    for (const d of ['./.npm/', './.openclaw/tmp/', './.openclaw/cache/control-ui-assets/', './.cache/pip/']) expect(names.has(d), d).toBe(false);
+    expect(names.has('./.openclaw/cache/')).toBe(true);
   });
 });
