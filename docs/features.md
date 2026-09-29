@@ -992,11 +992,11 @@ pending switches flagged), plus a models-in-use tally. The card's status line
 also names each agent's AI source (when more than one exists) alongside its
 model, bot, and host.
 
-Per-agent, the card's ⋯ menu has **📊 Usage** (lifetime tokens and calls,
+Per-agent, the sheet's **Usage** tab (and ⋯ → 📊 Usage) shows lifetime tokens and calls,
 the last 24 hours, the conversation's size now — each call re-sends it — the
 split between new input, cache reads, cache writes and output, calls per model,
-billing context), **❤️ Health** (is it actually answering?), and
-**Logs**.
+billing context. Advanced → Checks has **❤️ Health** (is it actually
+answering?) and **Logs**.
 
 **⚙ Settings → Hosts** manages the machines this cluster runs agents on
 ("this machine" is the built-in runner). Adding one is a guided three-step

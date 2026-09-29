@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.102.1] — 2026-09-28
+
+### Fixed
+- **An agent's sheet has a Usage tab** (between Schedule and Advanced). The page was only reachable from a 📊 Usage button in Advanced → Checks. A stopped or sleeping agent's tab says to start it; Status → Usage still counts what it used.
+
 ## [2.102.0] — 2026-09-28
 
 ### Added

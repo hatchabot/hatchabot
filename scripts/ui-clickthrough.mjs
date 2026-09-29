@@ -370,7 +370,12 @@ const SCENARIOS = String.raw`(() => {
       ok('the split', body.includes('cache reads 851M (85%)'));
       ok('calls per model', body.includes('4.7k calls'));
       ok('its warning', body.includes('about 5× its usual day'));
-      usageDlg.close(); delete window.__override['/v1/agents/a1/usage'];
+      usageDlg.close();
+      // The same page as a tab on the agent's sheet.
+      openV2Agent('a1', 'usage');
+      ok('a Usage tab', !!byText('#v2Tabs button', 'Usage'));
+      await until(() => (document.getElementById('v2UsageBody') || {}).textContent?.includes('Conversation size now'));
+      v2Close(); delete window.__override['/v1/agents/a1/usage'];
     },
     usageHours: async () => {
       // Status → Usage offers 3, 6, 9 and 12 hours between Hour and Day (Chris, 2026-09-28).

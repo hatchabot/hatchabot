@@ -7629,8 +7629,9 @@ async function loadUsage() {
     if (usageAgentId === forId) renderUsage(u);
   } catch (e) { if (usageAgentId === forId) $('usageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
-function renderUsage(u) {
-  if (!u.sessions) { $('usageBody').innerHTML = '<div class="sub">No sessions yet — nothing used.</div>'; return; }
+function renderUsage(u) { $('usageBody').innerHTML = usageHTML(u, usageAgentId); }
+function usageHTML(u, agentId) {
+  if (!u.sessions) return '<div class="sub">No sessions yet — nothing used.</div>';
   const models = u.byModel.map(m => m.model);
   const n = (x) => Number(x) || 0;
   const rows = u.byModel.map(m => `<div class="pair"><span class="grow"><code>${esc(m.model)}</code>
@@ -7649,9 +7650,8 @@ function renderUsage(u) {
   const ctx = u.lastContext !== undefined ? `<div style="margin:2px 0"><b>Conversation size now:</b> ${fmtTokens(u.lastContext)} tokens a call${u.maxContext ? ` <span class="sub">(largest ever ${fmtTokens(u.maxContext)})</span>` : ''}</div>
     ${big ? `<div class="sub" style="margin:2px 0 6px">Every call carries this much in. A long-running conversation or a scheduled task that keeps adding to it is the usual cause; a fresh session makes each call far smaller.</div>` : ''}` : '';
   const alerts = (u.alerts || []).map(x => `<div class="sub">⚠️ ${fmtTokens(x.tokens)} tokens in 24 hours${x.usual >= 1e6 ? ` — about ${Math.round(x.tokens / x.usual)}× its usual day` : ''} · ${esc(ago(x.at))}</div>`).join('');
-  $('usageBody').innerHTML =
-    `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
-     <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(usageAgentId, models)}</div>
+  return `<div style="font-size:22px;font-weight:700">${fmtTokens(u.totalTokens)} tokens <span class="sub" style="font-size:13px;font-weight:400">in all</span></div>
+     <div class="sub" style="margin:2px 0 8px">${fmtN(n(u.calls))} call${u.calls === 1 ? '' : 's'} · ${u.sessions} session${u.sessions > 1 ? 's' : ''}${u.lastActive ? ' · last active ' + ago(u.lastActive) : ''} · ${billingLine(agentId, models)}</div>
      ${alerts ? `<div style="margin:0 0 8px;padding:6px 10px;border-radius:8px;background:color-mix(in srgb, var(--warn) 12%, transparent)">${alerts}</div>` : ''}
      ${day}${ctx}${split}
      ${rows}`;
@@ -11010,7 +11010,7 @@ function v2Open(id) {
 
 // ---- the settings sheet ----------------------------------------------------------------
 let v2AgentId = null, v2Tab = 'overview';
-const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', 'Discord'], ['slack', 'Slack'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['advanced', 'Advanced']];
+const V2_TABS = [['overview', 'Overview'], ['personality', 'Personality'], ['ai', 'AI'], ['knowledge', 'Data'], ['files', 'Files'], ['messaging', 'Telegram'], ['channels', 'Discord'], ['slack', 'Slack'], ['sharing', 'Sharing'], ['schedule', 'Schedule'], ['usage', 'Usage'], ['advanced', 'Advanced']];
 /** Where each classic edit tab now lives in the sheet (so every old deep link,
  *  e.g. "fill its Setup values", still lands in the right place). */
 const V2_TAB_FOR_EDIT = { def: 'personality', snap: 'personality', ai: 'ai', data: 'knowledge', conn: 'knowledge', peers: 'sharing', tg: 'messaging', env: 'advanced' };
@@ -11128,6 +11128,20 @@ function v2RenderSheet() {
   const g = $('v2GroupSel'); if (g) g.value = a.group || '';
   if ($('editClass')) void renderClassPicker(a);
   if ($('v2Chans')) void v2LoadChans(a.id);
+  if ($('v2UsageBody')) void v2LoadUsage(a.id);
+}
+/** The Usage tab: the same page as ⋯ → Usage, inline. A read runs node in the
+ *  container, so a sheet re-render within a minute reuses the last one. */
+let v2UsageCache = null;
+async function v2LoadUsage(id) {
+  const fresh = v2UsageCache && v2UsageCache.id === id && Date.now() - v2UsageCache.at < 60_000;
+  if (fresh) { $('v2UsageBody').innerHTML = v2UsageCache.html; return; }
+  try {
+    const u = await api(`/v1/agents/${id}/usage`);
+    const html = usageHTML(u, id);
+    v2UsageCache = { id, at: Date.now(), html };
+    if ($('v2UsageBody') && v2AgentId === id) $('v2UsageBody').innerHTML = html;
+  } catch (e) { if ($('v2UsageBody') && v2AgentId === id) $('v2UsageBody').innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
 }
 
 /** The Files tab: browse the agent's home (read-only), download a file or a folder. */
@@ -11277,6 +11291,8 @@ function v2Pane(a, tab) {
         ${a.parentAgentId ? B('💡 Propose to master', `distillToMaster('${id}','${n}')`) : ''}`) : ''}
       ${slot('paneEditPeers')}`;
     }
+    case 'usage': return run ? `<div id="v2UsageBody" style="padding:4px 2px">Loading…</div>`
+      : row('Usage', `<span>${a.hibernatedAt ? 'It is asleep' : 'It is stopped'} — its figures are read from its container, so start it to see them. Status → Usage still counts what it used while running.</span>`);
     case 'schedule': return run ? slot('cronBody') : row('Scheduled tasks', `<span>${a.hibernatedAt ? 'It is asleep — wake it to see its tasks.' : 'Start it to see its tasks.'}</span>`);
     case 'files': return built ? `<div id="v2Files" data-agent="${id}"><div class="sub">Loading…</div></div>`
       : row('Files', '<span>Nothing is built yet.</span>');
