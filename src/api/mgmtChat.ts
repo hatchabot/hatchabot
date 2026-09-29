@@ -5,11 +5,12 @@ import { quoteOutput } from '../ops/notify.js';
 import { Broker } from '../mgmt/broker.js';
 import { PendingStore, type PendingConfirm } from '../mgmt/pendingStore.js';
 import { HttpApiClient, type Requester } from '../mgmt/apiClient.js';
-import { MANIFEST, toolDef } from '../mgmt/tools.js';
+import { toolDef } from '../mgmt/tools.js';
 import { timingSafeEqual } from 'node:crypto';
 import { internalHeaders, ownerIdOf } from './principal.js';
 import { OpsAuthError, setOpsHandlers } from '../ops/opsServer.js';
-import { makeOpsWeb, OPS_WEB_TOOLS, type OpsWebDeps } from '../ops/opsWeb.js';
+import { makeOpsWeb, type OpsWebDeps } from '../ops/opsWeb.js';
+import { opsDoorTools } from '../ops/opsTools.js';
 import { SEARCH_KEY_REF } from '../orchestrator/provision.js';
 
 /**
@@ -223,14 +224,8 @@ export function registerMgmtChat(app: FastifyInstance, deps: MgmtChatDeps): void
       case 'ping':
         return ok({});
       case 'tools/list':
-        // Change tools take one extra argument here: the agent's reason, shown
-        // to the owner on the card, labelled as the agent's words.
-        return ok({ tools: [...MANIFEST.map((t) => ({
-          name: t.name, description: t.description,
-          inputSchema: t.tier === 'mutate'
-            ? { ...t.input_schema, properties: { ...t.input_schema.properties, why: { type: 'string', maxLength: 400, description: 'One or two sentences for the owner: why you propose this.' } } }
-            : t.input_schema,
-        })), ...OPS_WEB_TOOLS] });
+        // Change tools take one extra argument, the agent's reason (opsTools.ts).
+        return ok({ tools: opsDoorTools() });
       case 'tools/call': {
         const name = String(m.params?.name ?? '');
         const text = (t: string, isError = false) => ok({ content: [{ type: 'text', text: t }], isError });

@@ -1711,6 +1711,24 @@ export class Store {
       .map((r) => ({ ownerId: r.owner_id, email: r.email ?? undefined }));
   }
 
+  /**
+   * The accounts one person already has a reason to know: whoever they have
+   * sent an agent to or received one from, plus any owners named in `also`
+   * (the machine's owner). A member listing every signed-in address was an
+   * enumeration of the household (review, 2026-09-29).
+   */
+  listRelatedAccounts(ownerId: string, also: string[] = []): Array<{ ownerId: string; email?: string }> {
+    const partners = this.db
+      .prepare(
+        `SELECT to_owner AS o FROM agent_shares WHERE from_owner = ? AND to_owner IS NOT NULL
+         UNION SELECT from_owner AS o FROM agent_shares WHERE to_owner = ?`,
+      )
+      .all(ownerId, ownerId) as Array<{ o: string }>;
+    const wanted = new Set([...partners.map((r) => r.o), ...also]);
+    wanted.delete(ownerId);
+    return this.listAccounts(ownerId).filter((a) => wanted.has(a.ownerId));
+  }
+
   // ---- agent shares (the inbox) -------------------------------------------
 
   insertShare(s: {

@@ -1,5 +1,7 @@
 import { whileBusy } from './orchestrator/busy.js';
 import { ensureOpsServer } from './ops/opsServer.js';
+import { opsToolsFingerprint } from './ops/opsTools.js';
+import { requestLogSerializer } from './api/requestLog.js';
 import { APP_VERSION } from './domain/appVersion.js';
 import { defaultDbPath } from './envCompat.js'; // must stay the first import: aliases AGENTCLAW_* env on load
 import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
@@ -111,7 +113,9 @@ const tls =
 // rest of the app (registerRoutes/registerAuth expecting the default instance)
 // then rejects. Attach it past the base type so `app` stays the default type;
 // the runtime behaviour is identical.
-const serverOptions: FastifyServerOptions = { logger: true };
+// The request log keeps method and path but never a query string: media
+// capability tickets rode there into the journal (review, 2026-09-29).
+const serverOptions: FastifyServerOptions = { logger: { serializers: { req: requestLogSerializer as never } } };
 if (tls) (serverOptions as FastifyServerOptions & { https: unknown }).https = tls;
 const app = Fastify(serverOptions);
 installErrorHandler(app);
@@ -291,9 +295,12 @@ if (store.listOpsAgents().length) {
   // can (reported 2026-09-19: it refused to add a package to a base image, a
   // release after that became possible). Restarting the container is enough;
   // its memory lives on the volume.
+  // Keyed on a hash of the list the door serves, not the app version: every
+  // release used to restart it, cutting off its turn (review, 2026-09-29).
+  const toolsKey = opsToolsFingerprint();
   for (const a of store.listOpsAgents()) {
     if (a.state !== 'RUNNING' || !a.runtimeRef) continue;
-    if (store.appliedAppVersion(a.id) === APP_VERSION) continue;
+    if (store.appliedAppVersion(a.id) === toolsKey) continue;
     void (async () => {
       try {
         const provider = providers.get(store.getHost(a.hostId)?.provider ?? 'local-docker');
@@ -305,8 +312,8 @@ if (store.listOpsAgents().length) {
           await provider.stop(a.runtimeRef!);
           await provider.start(a.runtimeRef!);
         });
-        store.setAppliedAppVersion(a.id, APP_VERSION);
-        app.log.info({ agentId: a.id, version: APP_VERSION }, 'ops.restarted_for_tools');
+        store.setAppliedAppVersion(a.id, toolsKey);
+        app.log.info({ agentId: a.id, version: APP_VERSION, tools: toolsKey }, 'ops.restarted_for_tools');
       } catch (err) {
         app.log.error({ agentId: a.id, err: String(err) }, 'ops.restart_for_tools_failed');
       }

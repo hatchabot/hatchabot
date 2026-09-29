@@ -8435,9 +8435,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // ---- inbox sharing: hand an agent to another user in-app -----------------
 
-  /** People a share can be addressed to — accounts that have signed in. */
+  /**
+   * People a share can be addressed to — suggestions only; the dialog takes
+   * any typed address. The machine's owner sees every account that has
+   * signed in; anyone else sees the owner and the people they have already
+   * swapped agents with, not the whole household (review, 2026-09-29).
+   */
   app.get('/v1/accounts', async (req) => {
-    return { accounts: store.listAccounts(ownerIdOf(req)) };
+    const me = ownerIdOf(req);
+    if (ownsLocalHost(req)) return { accounts: store.listAccounts(me) };
+    const hostOwner = store.listHosts(me).find((h) => h.kind === 'local')?.ownerId;
+    return { accounts: store.listRelatedAccounts(me, hostOwner ? [hostOwner] : []) };
   });
 
   /** The caller's own account: email + linked Telegram identity. */

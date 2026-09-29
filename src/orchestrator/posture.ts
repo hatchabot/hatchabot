@@ -69,6 +69,22 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
               detail: 'Every login is the same owner. Switch to accounts mode (local logins) or identity mode before giving anyone their own account.',
             },
     );
+    // Identity mode admits ANY Google account that can reach the machine
+    // unless an allowlist is set — each one a tenant that can run agents on
+    // the shared (default) Claude sources (review, 2026-09-29).
+    if (authMode === 'identity') {
+      const allowed = (process.env.HATCHABOT_ALLOWED_EMAILS ?? '').split(/[\s,]+/).filter(Boolean);
+      install.push(
+        allowed.length
+          ? { key: 'allowed-emails', level: 'ok', title: `Google sign-in limited to ${allowed.length} address${allowed.length > 1 ? 'es' : ''}`, detail: 'HATCHABOT_ALLOWED_EMAILS decides who may sign in.' }
+          : {
+              key: 'allowed-emails',
+              level: 'critical',
+              title: 'Any Google account can sign in',
+              detail: 'HATCHABOT_ALLOWED_EMAILS is unset, so anyone who can reach this machine can sign in with Google, become an account and run agents on your shared Claude sources. Set it to your household’s addresses (comma-separated) and restart.',
+            },
+      );
+    }
     install.push(
       process.env.HATCHABOT_ALLOW_OWNER_HEADER === '1'
         ? {
