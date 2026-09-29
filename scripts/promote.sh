@@ -4,6 +4,7 @@
 #
 #   ./scripts/promote.sh v2.31.0            # stable
 #   ./scripts/promote.sh v2.32.0-beta.1 beta
+#   HATCHABOT_PROMOTE_TRAILERS='Co-Authored-By: …' ./scripts/promote.sh v2.31.0
 #
 # Tagging a release makes it `latest` and nothing more; `stable` only moves
 # when you run this. That is what lets you release several times a day
@@ -35,9 +36,13 @@ fi
 sed -i.bak -E "s/(\"$CH\"[[:space:]]*:[[:space:]]*\")v[^\"]*(\")/\1$TAG\2/" channels.json && rm -f channels.json.bak
 grep -q "\"$CH\": \"$TAG\"" channels.json || die "Could not update channels.json."
 git add channels.json
-git commit -q -m "Promote $TAG to $CH
+# Trailers only when the caller passes them (HATCHABOT_PROMOTE_TRAILERS, one
+# per line): a fixed Co-Authored-By and session URL stamped every promote
+# with a session that never made it (review, 2026-09-29).
+MSG="Promote $TAG to $CH"
+[ -z "${HATCHABOT_PROMOTE_TRAILERS:-}" ] || MSG="$MSG
 
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01P3fBHKoWro8CpKL4pgECGa"
+$HATCHABOT_PROMOTE_TRAILERS"
+git commit -q -m "$MSG"
 git push -q origin main
 echo "✓ $CH → $TAG  (was ${CURRENT:-unset}). New installs on $CH get it now."
