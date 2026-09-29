@@ -10,7 +10,7 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { openclawConfigAgents, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 import { openclawConfigPath } from './openclawImport.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
@@ -55,14 +55,14 @@ export function openclawAgentEntryForWorkspace(
   workspaceDir: string,
   cfgPath = configPath(),
 ): OpenclawAgentEntry | undefined {
-  let cfg: { agents?: { list?: Array<{ id?: string; workspace?: string; agentDir?: string }> } };
+  let cfg: { agents?: unknown };
   try {
     cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
   } catch {
     return undefined;
   }
   const want = resolve(workspaceDir);
-  const a = (cfg.agents?.list ?? []).find(
+  const a = openclawConfigAgents(cfg).find(
     (x) => (x.workspace && resolve(x.workspace) === want) || (x.agentDir && resolve(x.agentDir) === want),
   );
   return a?.id ? { id: a.id, workspace: a.workspace, agentDir: a.agentDir } : undefined;

@@ -71,6 +71,27 @@ export interface ConfigCommand {
 
 export const WORKSPACE_DIR_TEMPLATE = '/home/node/.openclaw/agents/{slug}/agent';
 
+/** One agent as an OpenClaw config names it (both shapes carry these). */
+export interface OpenclawConfigAgent { id?: string; workspace?: string; agentDir?: string }
+
+/**
+ * The agents an OpenClaw config holds, whichever shape it has: `agents.list`
+ * (up to 2026.7) or keyed `agents.entries` (2026.8+, whose entries carry no id —
+ * the key is the id). Reading only `list` made discover, adopt and cron import
+ * see nothing on a newer host OpenClaw (review, 2026-09-29).
+ */
+export function openclawConfigAgents(cfg: { agents?: unknown } | undefined): OpenclawConfigAgent[] {
+  const a = cfg?.agents as { list?: unknown; entries?: unknown } | undefined;
+  if (!a || typeof a !== 'object') return [];
+  if (Array.isArray(a.list)) return a.list.filter((x): x is OpenclawConfigAgent => !!x && typeof x === 'object');
+  if (a.entries && typeof a.entries === 'object') {
+    return Object.entries(a.entries as Record<string, unknown>)
+      .filter(([, e]) => !!e && typeof e === 'object')
+      .map(([id, e]) => ({ ...(e as OpenclawConfigAgent), id }));
+  }
+  return [];
+}
+
 /**
  * Baked-image paths for local memory embeddings (docker/Dockerfile.runtime,
  * mirrored by the HATCHABOT_EMBED_* env). The plugin (with node-llama-cpp's
