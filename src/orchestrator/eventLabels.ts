@@ -41,6 +41,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'memory.peaks_cleared': 'memory peak and cap-hit readings cleared',
   'memory.cap_set': (d) => `memory cap ${d.cap === 'default' ? 'back to the default' : d.cap === 'class' ? 'set by its class' : 'set'}: ${String(d.effective ?? '')}${d.live ? ' — applied to the running container' : ''}`,
   'snapshot.captured': 'memory files snapshotted',
+  'snapshot.unchanged': 'memory files unchanged since the last snapshot, so no new one',
   'memory.checkpointed': 'conversation written to memory',
   'channel.dm_policy': 'chat access policy applied',
   'channel.rechecked': (d) => `${String(d.kind ?? 'channel')} checked again with the platform${Number(d.warnings) ? ` — ${d.warnings} thing${d.warnings === 1 ? '' : 's'} to fix` : ' — all good'}`,

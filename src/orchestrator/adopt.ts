@@ -7,6 +7,7 @@ import { sharePathProblem } from './provision.js';
 import type { ProvisionDeps } from './provision.js';
 import { whileBusy } from './busy.js';
 import { openclawConfigPath } from './openclawImport.js';
+import { openclawConfigAgents } from '../openclaw/configWriter.js';
 
 const execFileP = promisify(execFile);
 
@@ -248,7 +249,7 @@ export interface ExistingBot {
 }
 
 interface OpenClawConfig {
-  agents?: { list?: Array<{ id?: string; workspace?: string; agentDir?: string }> };
+  agents?: unknown; // list or entries: openclawConfigAgents reads both
   bindings?: Array<{ agentId?: string; match?: { channel?: string; accountId?: string } }>;
   channels?: {
     telegram?: {
@@ -275,7 +276,7 @@ export function findExistingBot(
     return undefined;
   }
   const want = resolve(workspaceDir);
-  const agent = (cfg.agents?.list ?? []).find(
+  const agent = openclawConfigAgents(cfg).find(
     (a) =>
       (a.workspace && resolve(a.workspace) === want) ||
       (a.agentDir && resolve(a.agentDir) === want),

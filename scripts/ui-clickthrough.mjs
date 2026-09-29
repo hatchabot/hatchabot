@@ -275,6 +275,19 @@ const SCENARIOS = String.raw`(() => {
       ok('no "restarting" when it is not running', !document.getElementById('toast').textContent.includes('restarting'));
       aiDlg.close(); window.__promptAnswer = null; window.__answer = {}; delete window.__override['/v1/backups'];
     },
+    // A partial set, an agent the set does not cover, and a left-out orphan are said, not shown green (review, 2026-09-29).
+    backupIncomplete: async () => {
+      window.__override['/v1/backups'] = { dir: '/backups', keepDays: 7, run: { status: 'idle' },
+        missing: [{ agentId: 'a9', name: 'Book Advisor', host: 'Laptop runner' }],
+        backups: [{ date: '2026-09-28', sizeBytes: 1024, hasDb: true, hasKey: true, complete: false, failedVolumes: ['hatchabot-kitchen-vol'],
+          orphans: ['agentclaw-old-vol'], volumes: [{ name: 'Homework Helper', agentId: 'a1', sizeBytes: 1024 }] }] };
+      await openAiDlg('backups');
+      const list = await until(() => { const t = document.getElementById('bkList').textContent; return t.includes('2026-09-28') ? t : null; });
+      ok('the set is marked incomplete, with its failure count', list.includes('incomplete (1 agent failed)'));
+      ok('the uncovered agent is named with its machine', list.includes('Not in the newest backup: Book Advisor (Laptop runner)'));
+      ok('the orphan volume is named as left out', list.includes('Left out: agentclaw-old-vol'));
+      aiDlg.close(); delete window.__override['/v1/backups'];
+    },
     hostsDrain: async () => {
       window.__override['/v1/hosts'] = [{ id: 'h1', name: 'This machine', hostname: 'home', kind: 'local', online: true, status: 'online', agentCount: 13 },
         { id: 'h2', name: 'Laptop', kind: 'docker', settings: { dockerHost: 'ssh://laptop' }, online: true, status: 'online', agentCount: 2 }];

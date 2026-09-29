@@ -224,6 +224,35 @@ const MAX_STATE_BYTES = 256 * 1024 * 1024;
  */
 const MAX_RAW_STATE_BYTES = Math.floor((MAX_STATE_BYTES - 8192) * 0.75);
 
+function tooLarge(bytes: number): TransferError {
+  return new TransferError(
+    `This agent's saved state is ${(bytes / 1e6).toFixed(0)} MB — too large to move as ` +
+      `a single file (the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB). Trim old ` +
+      `sessions, or keep the bulk data in a shared folder instead of the agent's own volume.`,
+  );
+}
+
+/**
+ * What the export's archive would weigh, measured on a read-only mount while
+ * the agent keeps running. The raw size answers when it is already under the
+ * limit (compression only shrinks it); only a bigger volume pays for a trial
+ * compress, and that runs beside the live agent, not after stopping it.
+ * Undefined when it can't be measured: the check after the real tar still holds.
+ */
+export async function estimateStateBytes(provider: ProvisionDeps['provider'], runtimeRef: string): Promise<number | undefined> {
+  const script =
+    `s=$(du -sb /home/node 2>/dev/null | cut -f1); ` +
+    `if [ -n "$s" ] && [ "$s" -le ${MAX_RAW_STATE_BYTES} ]; then echo "$s"; ` +
+    `else tar cz -C /home/node . 2>/dev/null | wc -c; fi`;
+  try {
+    const res = await provider.execShellOnVolume(runtimeRef, script, { readOnly: true });
+    const n = Number(res.stdout.trim());
+    return /^\d+$/.test(res.stdout.trim()) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function exportAgent(
   deps: ProvisionDeps,
   agentId: string,
@@ -267,6 +296,12 @@ export async function exportAgent(
     }
   }
 
+  // Too big to travel: say so BEFORE the stop. The size check below used to
+  // come after the stop and a full tar (up to a minute of downtime on the
+  // biggest agents) only to refuse (review, 2026-09-29).
+  const estimate = await estimateStateBytes(provider, agent.runtimeRef);
+  if (estimate !== undefined && estimate > MAX_RAW_STATE_BYTES) throw tooLarge(estimate);
+
   // Quiesce for a consistent snapshot, and LEAVE it stopped: the whole point
   // of an export is usually that the agent is about to live somewhere else.
   const wasRunning = agent.state === 'RUNNING';
@@ -274,11 +309,6 @@ export async function exportAgent(
     await provider.stop(agent.runtimeRef);
     store.setAgentState(agentId, 'STOPPED');
   }
-  // A sleeping agent stays down as an ordinary stopped one: asleep, the wake
-  // poll here kept reading its bot and started it the moment a message came,
-  // next to the copy that now answers it elsewhere (night review, 2026-09-27).
-  if (agent.hibernatedAt) store.setHibernated(agentId, null);
-
   // If the snapshot fails AFTER quiescing, a plain export (not a migrate,
   // which owns its own undo) would strand a running agent silently STOPPED —
   // it stops answering Telegram with no error the owner ever sees. Put it back.
@@ -306,11 +336,7 @@ export async function exportAgent(
   }
   if (state.length > MAX_RAW_STATE_BYTES) {
     await restoreIfRunning();
-    throw new TransferError(
-      `This agent's saved state is ${(state.length / 1e6).toFixed(0)} MB — too large to move as ` +
-        `a single file (the limit is about ${(MAX_RAW_STATE_BYTES / 1e6).toFixed(0)} MB). Trim old ` +
-        `sessions, or keep the bulk data in a shared folder instead of the agent's own volume.`,
-    );
+    throw tooLarge(state.length);
   }
   // Read BEFORE the manifest is assembled: a lookup failure only costs the
   // recipe (noted in the file), never the export.
@@ -359,12 +385,16 @@ export async function exportAgent(
     image,
     state: state.toString('base64'),
   };
+  const data = gzipSync(Buffer.from(JSON.stringify(manifest), 'utf8'));
+  // A sleeping agent stays down as an ordinary stopped one: asleep, the wake
+  // poll here kept reading its bot and started it the moment a message came,
+  // next to the copy that now answers it elsewhere (night review, 2026-09-27).
+  // Only once the file exists: cleared up front, a refused or failed export
+  // left a sleeping agent plain STOPPED, never to wake on a message again
+  // (review, 2026-09-29). The busy flag keeps the wake poll off it meanwhile.
+  if (agent.hibernatedAt) store.setHibernated(agentId, null);
   log('agent.exported', { agentId, bytes: state.length, ...(dropped.length ? { dropped } : {}) });
-  return {
-    filename: `${agent.slug}.hatchabot`,
-    data: gzipSync(Buffer.from(JSON.stringify(manifest), 'utf8')),
-    dropped,
-  };
+  return { filename: `${agent.slug}.hatchabot`, data, dropped };
 }
 
 export interface ImportOptions {

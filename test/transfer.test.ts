@@ -412,3 +412,56 @@ describe('night review, 2026-09-27', () => {
     expect(dst.store.listAllActiveAgents()).toHaveLength(0);
   });
 });
+
+describe('review, 2026-09-29: too-big and sleeping agents', () => {
+  it('a sleeping agent whose export is refused as too large stays asleep, mark and all', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    await src.provider.stop(ref);
+    src.store.setAgentState('a1', 'STOPPED');
+    const at = new Date().toISOString();
+    src.store.setHibernated('a1', at, 7);
+    src.provider.exportState = async () => ({ length: 300 * 1024 * 1024 } as any);
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/too large to move/);
+    const a = src.store.getAgent('a1')!;
+    expect(a.state).toBe('STOPPED');
+    expect(a.hibernatedAt).toBe(at);
+    expect(a.hibernateMark).toBe(7);
+  });
+
+  it('a sleeping agent whose snapshot fails stays asleep', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    await src.provider.stop(ref);
+    src.store.setAgentState('a1', 'STOPPED');
+    src.store.setHibernated('a1', new Date().toISOString(), 3);
+    src.provider.exportState = async () => { throw new Error('docker exploded'); };
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/docker exploded/);
+    expect(src.store.getAgent('a1')!.hibernatedAt).toBeTruthy();
+  });
+
+  it('refuses a too-big agent BEFORE stopping or tarring it, from a live read-only measure', async () => {
+    const src = await installation();
+    const ref = await seedSourceAgent(src);
+    let tarred = false;
+    src.provider.exportState = async () => { tarred = true; return Buffer.from('x'); };
+    src.provider.execResponses.set('sh-volume', { code: 0, stdout: `${400 * 1000 * 1000}\n`, stderr: '' });
+    await expect(exportAgent(src.deps, 'a1')).rejects.toThrow(/400 MB — too large to move/);
+    expect(tarred).toBe(false);
+    expect(src.provider.runtimes.get(ref)!.phase).toBe('running'); // never stopped
+    expect(src.store.getAgent('a1')!.state).toBe('RUNNING');
+    const [, script] = src.provider.execLog.find(([k]) => k === 'sh-volume')!;
+    expect(script).toMatch(/du -sb/); // raw size first; a trial compress only past the limit
+  });
+
+  it('a small measure, or none at all, lets the export go ahead', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    src.provider.execResponses.set('sh-volume', { code: 0, stdout: '12345\n', stderr: '' });
+    await expect(exportAgent(src.deps, 'a1')).resolves.toBeTruthy();
+    const other = await installation();
+    await seedSourceAgent(other);
+    other.provider.execResponses.set('sh-volume', { code: 1, stdout: '', stderr: 'no docker' });
+    await expect(exportAgent(other.deps, 'a1')).resolves.toBeTruthy();
+  });
+});

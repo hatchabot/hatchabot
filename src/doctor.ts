@@ -7,6 +7,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { defaultBackupsDir, defaultDbPath } from './envCompat.js';
+import { readSetStatus } from './orchestrator/backups.js';
 import { tailnetInfo } from './ops/tailnet.js';
 
 export interface DoctorFacts {
@@ -21,7 +22,7 @@ export interface DoctorFacts {
     dockerDenied?: boolean };
   controlPlane: { url: string; ok: boolean; version?: string; error?: string };
   diskFreeGb?: number;
-  backups: { dir: string; lastSet?: string; ageDays?: number };
+  backups: { dir: string; lastSet?: string; ageDays?: number; complete?: boolean; failed?: number };
   tailscale?: { installed: boolean; up?: boolean; dns?: string; serving?: boolean; reachable?: boolean; url?: string; appOnly?: boolean };
   containers?: { running: number; total: number;
     /** RUNNING agent containers still on docker's shared bridge network (made before v1.16's isolation). */
@@ -92,6 +93,9 @@ export function doctorReport(f: DoctorFacts): DoctorLine[] {
   if (f.diskFreeGb !== undefined) out.push(f.diskFreeGb < 10 ? { level: f.diskFreeGb < 3 ? 'fail' : 'warn', text: `Only ${f.diskFreeGb.toFixed(1)} GB free — each agent volume grows; the image is ~2 GB`, fix: 'docker system prune; remove old backup sets; move backups to a NAS (HATCHABOT_BACKUP_DIR)' } : { level: 'ok', text: `${f.diskFreeGb.toFixed(0)} GB free` });
   if (!f.backups.lastSet) out.push({ level: 'warn', text: `No backup set in ${f.backups.dir} yet`, fix: 'systemctl --user start hatchabot-backup (or wait for 03:30); scripts/restore-drill.sh proves a set restores' });
   else if ((f.backups.ageDays ?? 0) > 2) out.push({ level: 'warn', text: `Last backup set is ${f.backups.ageDays} days old (${f.backups.lastSet})`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
+  // A set can exist and still be partial: judged by its run's own record,
+  // not the directory (review, 2026-09-29).
+  else if (f.backups.complete === false) out.push({ level: 'warn', text: `Last backup set ${f.backups.lastSet} is incomplete${f.backups.failed ? ` (${f.backups.failed} volume${f.backups.failed === 1 ? '' : 's'} failed)` : ' (the run did not finish)'}`, fix: 'journalctl --user -u hatchabot-backup -n 30' });
   else out.push({ level: 'ok', text: `Backups: last set ${f.backups.lastSet}` });
   if (f.tailscale) {
     const t = f.tailscale;
@@ -175,7 +179,14 @@ export async function gatherFacts(urlIn: string): Promise<DoctorFacts> {
   try {
     const sets = readdirSync(bdir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && readdirSync(join(bdir, d)).some((f) => f.endsWith('.sqlite'))).sort();
     const last = sets.pop();
-    if (last) backups = { dir: bdir, lastSet: last, ageDays: Math.floor((Date.now() - new Date(last).getTime()) / 86_400_000) };
+    if (last) {
+      const st = readSetStatus(join(bdir, last));
+      backups = {
+        dir: bdir, lastSet: last, ageDays: Math.floor((Date.now() - new Date(last).getTime()) / 86_400_000),
+        ...(st.complete !== undefined ? { complete: st.complete } : {}),
+        ...(st.failedVolumes?.length ? { failed: st.failedVolumes.length } : {}),
+      };
+    }
   } catch { /* no dir */ }
   // The same lookup the app's HTTPS step uses: it knows the Mac app bundle,
   // Homebrew's path and `serve`. A plain `tailscale` on PATH missed the Mac

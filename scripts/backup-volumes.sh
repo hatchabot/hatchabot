@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Nightly agent backups: one tarball per hatchabot volume, 14 days retention.
 #
-# Backs up ALL hatchabot volumes found in docker, not just what the registry
-# knows — a backup tool should trust the disk, not the database.
+# Backs up the hatchabot volumes found in docker. A volume no agent in the
+# registry uses (a leftover from before a rename) is reported, not archived
+# every night; when the registry can't be read, every volume is taken — a
+# backup tool trusts the disk before it trusts a database it could not read.
+#
+# Each set ends with backup-status.json (complete or not, how many volumes,
+# which failed or were left out), so the app can tell a finished set from a
+# partial one: the dated directory exists long before the last volume is in.
 #
 #   ./scripts/backup-volumes.sh            # manual run
 #   HATCHABOT_BACKUP_DIR=/mnt/nas/claw …   # override destination
@@ -33,6 +39,26 @@ mkdir -m 700 -p "$DEST"
 # mkdir -m only applies on creation — tighten a pre-existing directory too.
 chmod 700 "$DEST"
 umask 077
+
+# The set's own record. "running" until the end; whatever way the script ends
+# (a refusal, a failed volume, set -e, Ctrl-C) the EXIT trap writes the verdict.
+# Only a SIGKILL leaves "running", which the app reads as unfinished once it
+# is hours old (review, 2026-09-29).
+STATUS="$DEST/backup-status.json"
+count=0
+failed=0
+failed_list=""
+orphan_list=""
+started="$(date -u +%FT%TZ)"
+json_list() { local out="" x; for x in $1; do out="$out${out:+,}\"$x\""; done; printf '[%s]' "$out"; }
+write_status() {
+  printf '{"state":"%s","startedAt":"%s","finishedAt":"%s","volumes":%d,"failed":%d,"failedVolumes":%s,"orphans":%s}\n' \
+    "$1" "$started" "$(date -u +%FT%TZ)" "$count" "$failed" "$(json_list "$failed_list")" "$(json_list "$orphan_list")" \
+    > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
+}
+write_status running
+finish() { local rc=$?; if [ "$rc" -eq 0 ]; then write_status complete; else write_status incomplete; fi; exit "$rc"; }
+trap finish EXIT
 
 # The control plane's own database first: it holds the encrypted bot tokens,
 # the agent registry, memberships and snapshots. Volumes survive without it,
@@ -94,10 +120,21 @@ if [ -z "$vols" ]; then
   exit 1
 fi
 
-count=0
-failed=0
+# The volumes the registry's agents use (`<runtime ref name>-vol`, the same
+# rule agentArchiveName follows). Empty when the DB copy can't be read: then
+# every volume is taken, as before.
+known="$(node -e 'const D=require("better-sqlite3");const db=new D(process.argv[1],{readonly:true});for(const r of db.prepare("SELECT runtime_ref FROM agents WHERE state != \x27DELETED\x27 AND runtime_ref IS NOT NULL").all())console.log(String(r.runtime_ref).replace(/^\w+:\/\//,"")+"-vol")' "$DEST/hatchabot.sqlite" 2>/dev/null || true)"
+
 while IFS= read -r vol; do
   [ -n "$vol" ] || continue
+  # No agent uses it: say so and leave it out, or a pre-rename leftover rides
+  # along in every set for good (review, 2026-09-29). Remove it by hand after
+  # a look: docker volume rm <name>.
+  if [ -n "$known" ] && ! grep -qxF -- "$vol" <<<"$known"; then
+    echo "  • $vol: no agent uses it — not backed up (docker volume rm $vol once you have looked)"
+    orphan_list="$orphan_list $vol"
+    continue
+  fi
   # Read-only mount; tar from inside a throwaway container so we never need
   # root on the host to reach /var/lib/docker. Run as root so it can read
   # uid-1000 volume files on ANY host (macOS uid is 501), then chown the
@@ -112,6 +149,7 @@ while IFS= read -r vol; do
   if [ "$rc" -gt 1 ] || [ ! -f "$DEST/$vol.tgz" ]; then
     echo "  ✗ $vol failed (exit $rc)" >&2
     failed=$((failed + 1))
+    failed_list="$failed_list $vol"
     continue
   fi
   # Already 0600 from the in-container umask; this is belt-and-suspenders and

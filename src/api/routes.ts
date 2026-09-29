@@ -70,6 +70,7 @@ import { estimateCost } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
   agentArchiveName,
+  agentsMissingFromSet,
   backupRunState,
   backupsDir,
   keepDays,
@@ -7898,7 +7899,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return a ? { ...v, agentId: a.id, name: a.name } : v;
       }),
     }));
-    return { dir: backupsDir(), keepDays: keepDays(), run: backupRunState(), backups };
+    // Who the newest set does NOT cover: an agent on a runner is never in it
+    // (the script archives this machine's volumes only), and nothing said so
+    // (review, 2026-09-29). The host is named when it is not this machine.
+    const newest = backups[0];
+    const missing = newest && !newest.running
+      ? agentsMissingFromSet(newest, all, (hostId) => {
+          const h = store.getHost(hostId);
+          return h && h.kind !== 'local' ? h.name : undefined;
+        })
+      : [];
+    return { dir: backupsDir(), keepDays: keepDays(), run: backupRunState(), backups, missing };
   });
 
   app.post('/v1/backups/run', async (req, reply) => {

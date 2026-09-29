@@ -293,12 +293,18 @@ async function migrateAgentInner(
 
   // 2. Export — this STOPS the source, so from here nothing is polling the bot.
   const wasRunning = agent.state === 'RUNNING';
+  // The export wakes nothing but clears a sleeping agent's hibernation (so
+  // the wake poll here leaves the bot alone); undo puts it back, or a failed
+  // move left the agent plain STOPPED, never to wake on a message again
+  // (review, 2026-09-29).
+  const slept = agent.hibernatedAt ? { at: agent.hibernatedAt, mark: agent.hibernateMark } : undefined;
   const { data } = await exportAgent(deps, agentId);
   log('migrate.exported', { agentId, bytes: data.length });
 
   /** Put the source back exactly as we found it. */
   const undo = async (why: string) => {
     log('migrate.rolled_back', { agentId, why });
+    if (slept && store.getAgent(agentId)?.state === 'STOPPED') store.setHibernated(agentId, slept.at, slept.mark);
     if (wasRunning) {
       try {
         await provider.start(agent.runtimeRef!);

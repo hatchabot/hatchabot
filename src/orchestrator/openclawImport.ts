@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
+import { openclawConfigAgents } from '../openclaw/configWriter.js';
 import { botPollState } from './adopt.js';
 import type { SecretStore } from '../secrets/secretStore.js';
 import type { Store } from '../store/store.js';
@@ -24,7 +25,7 @@ function gatewayUnit(): string {
 }
 
 interface Cfg {
-  agents?: { list?: Array<{ id?: string; workspace?: string; agentDir?: string }> };
+  agents?: unknown;
   bindings?: Array<{ agentId?: string; match?: { channel?: string; accountId?: string } }>;
   channels?: {
     telegram?: {
@@ -98,7 +99,7 @@ export async function discoverOpenclawAgents(
   }
 
   const out: OpenclawAgent[] = [];
-  for (const a of cfg.agents?.list ?? []) {
+  for (const a of openclawConfigAgents(cfg)) {
     const workspace = a.workspace ?? a.agentDir;
     if (!a.id || !workspace) continue;
     const ws = resolve(workspace);

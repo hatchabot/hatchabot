@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
 
@@ -115,6 +115,13 @@ export interface SnapshotSummary {
   files: string[];
 }
 
+/** Content hash of a file set, independent of key order. */
+function filesHash(files: Record<string, string>): string {
+  const h = createHash('sha256');
+  for (const k of Object.keys(files).sort()) h.update(`${k}\0${files[k]}\0`);
+  return h.digest('hex');
+}
+
 export async function captureSnapshot(
   deps: SnapshotDeps,
   agentId: string,
@@ -133,6 +140,17 @@ export async function captureSnapshot(
     throw new SnapshotError("Couldn't read the agent's files — is it healthy?");
   }
   const reason = opts.reason ?? 'manual';
+  // An automatic capture identical to the newest snapshot adds nothing: two
+  // thirds of them were copies (every fleet rebuild made one), and rotation
+  // then evicted older, different versions to keep them (review, 2026-09-29).
+  // A named one is always kept — the owner asked for that point by name.
+  if (reason !== 'manual') {
+    const last = store.latestSnapshot(agentId);
+    if (last && filesHash(last.files) === filesHash(files)) {
+      log('snapshot.unchanged', { agentId, reason, same: last.id });
+      return { id: last.id, label: last.label, reason: last.reason, createdAt: last.createdAt, files: Object.keys(last.files) };
+    }
+  }
   const snapshot = {
     id: randomUUID(),
     agentId,
@@ -197,7 +215,11 @@ export async function restoreSnapshot(
     // No copy, no restore: the app promises "this is undoable", and a file too
     // big for a snapshot (MEMORY.md past 256 KB) would have been overwritten
     // with nothing to go back to (use-case audit, 2026-09-27).
-    throw new SnapshotError('Its current files could not be snapshotted first, so the restore would not be undoable — nothing was changed. Download a copy of the agent first (Advanced → Download copy), or trim its largest file.');
+    // Says why, and points only at what fixes it: "Download a copy first"
+    // changed nothing here (the restore still refuses) and cannot work for an
+    // agent too big to download (review, 2026-09-29).
+    const why = err instanceof SnapshotError ? ` (${err.userMessage.split(' — ')[0]!.replace(/\.$/, '')})` : '';
+    throw new SnapshotError(`Its current files could not be snapshotted first${why}, so the restore would not be undoable — nothing was changed. Trim its largest file, then try again.`);
   }
 
   const restored: string[] = [];

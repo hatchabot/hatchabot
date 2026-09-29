@@ -3184,9 +3184,9 @@ function setupSteps() {
         ? `Reachable at ${esc(((tailnet?.url || appConfig?.appUrl) ?? '').replace(/^https:\/\//, ''))}`
         : 'Reach it from your phone, over HTTPS',
       body: tailnetStepBody() }]),
-    ...(managed ? [] : [{ key: 'backup', done: backupAgeH !== null && backupAgeH < 48, title: backupAgeH !== null && backupAgeH < 48 ? 'Backups are running' : 'Check a backup has actually run', body: `
+    ...(managed ? [] : [{ key: 'backup', done: backupAgeH !== null && backupAgeH < 48 && !backupIncomplete, title: backupAgeH !== null && backupAgeH < 48 && !backupIncomplete ? 'Backups are running' : 'Check a backup has actually run', body: `
       <p class="sub" style="margin:4px 0 6px">Agents keep everything on a volume — memory, files, members. A nightly backup set is what stands between that and a bad day,
-        and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old.`}</p>
+        and a backup nobody has looked at is not a backup. ${backupAgeH === null ? 'Nothing has been backed up yet.' : `The newest set is ${Math.round(backupAgeH / 24)} days old${backupIncomplete ? ', and it is incomplete' : ''}.`}</p>
       <div class="actions" style="justify-content:flex-start"><button class="primary" onclick="openAiDlg('backups')">Open Backups</button></div>` }]),
     { key: 'gemini', optional: true, done: fleetKeys.media === true,
       title: fleetKeys.media ? 'Voice notes are transcribed (Gemini key set)' : 'Add a Gemini key so agents understand voice notes',
@@ -4084,9 +4084,19 @@ async function loadBackups() {
       el.innerHTML = `<div class="sub">No backups yet. The nightly job runs at 03:30, or use <b>Back up now</b>.</div>`;
       return;
     }
-    el.innerHTML = r.backups.map(b => {
+    // Agents the newest set does not hold (one on a runner is never in it), and
+    // a set whose run did not finish, said rather than shown green (review, 2026-09-29).
+    const missing = (r.missing ?? []).length
+      ? `<div class="sub" style="color:var(--warn);padding:4px 0 8px">⚠ Not in the newest backup: ${r.missing.map(m => `${esc(m.name)}${m.host ? ` (${esc(m.host)})` : ''}`).join(', ')}.
+          Nightly backups cover the agents on this machine only; use <b>Download copy</b> for an agent that lives elsewhere.</div>` : '';
+    el.innerHTML = missing + r.backups.map(b => {
+      const failedN = (b.failedVolumes ?? []).length;
       const warn = !b.hasDb ? `<span style="color:var(--warn)"> · ⚠ no registry</span>`
-        : !b.hasKey ? `<span style="color:var(--warn)"> · ⚠ no key (can't decrypt)</span>` : '';
+        : b.complete === false ? `<span style="color:var(--warn)"> · ⚠ incomplete${failedN ? ` (${failedN} agent${failedN === 1 ? '' : 's'} failed)` : ' (the run did not finish)'}</span>`
+        : !b.hasKey ? `<span style="color:var(--warn)"> · ⚠ no key (can't decrypt)</span>`
+        : b.running ? `<span class="sub"> · still running</span>` : '';
+      const orphans = (b.orphans ?? []).length
+        ? `<div class="sub" style="margin-top:4px">Left out: ${b.orphans.map(esc).join(', ')} — no agent uses ${b.orphans.length === 1 ? 'this volume' : 'these volumes'}; remove by hand once you have looked (docker volume rm).</div>` : '';
       // Each agent in the set gets a Restore, but only when it maps to an agent
       // that still exists (the server attaches agentId then). Others are shown
       // greyed — there's no live agent to restore into.
@@ -4105,6 +4115,7 @@ async function loadBackups() {
           <button class="hbtn" onclick="pruneBackup('${jsq(b.date)}')">Delete set</button>
         </div>
         ${rows ? `<div style="margin-top:6px">${rows}</div>` : ''}
+        ${orphans}
       </div>`;
     }).join('');
   } catch (e) { el.innerHTML = `<div class="sub">${esc(e.message)}</div>`; }
@@ -8105,9 +8116,9 @@ async function renderFleetOps() {
     const latest = b.backups?.[0];
     if (latest) {
       const ageDays = Math.floor((Date.now() - Date.parse(latest.date + 'T00:00:00')) / 86400000);
-      const warn = ageDays > 2 || !latest.hasKey;
+      const warn = ageDays > 2 || !latest.hasKey || latest.complete === false || (b.missing ?? []).length > 0;
       ops.innerHTML += `<div><b class="sub">Backups</b>
-        <div style="color:${warn ? 'var(--warn)' : 'var(--ok)'}">${warn ? '⚠ ' : '✓ '}latest ${esc(latest.date)} · ${ageDays}d ago</div>
+        <div style="color:${warn ? 'var(--warn)' : 'var(--ok)'}">${warn ? '⚠ ' : '✓ '}latest ${esc(latest.date)} · ${ageDays}d ago${latest.complete === false ? ' · incomplete' : ''}${(b.missing ?? []).length ? ` · ${b.missing.length} agent${b.missing.length === 1 ? '' : 's'} not covered` : ''}</div>
         <div class="sub">${b.backups.length} set${b.backups.length === 1 ? '' : 's'} · kept ${b.keepDays}d${latest.hasKey ? '' : ' · ⚠ no key'}</div></div>`;
     } else {
       ops.innerHTML += `<div><b class="sub">Backups</b><div style="color:var(--warn)">⚠ none yet</div><div class="sub">nightly job runs at 03:30</div></div>`;
@@ -11997,6 +12008,7 @@ function renderV2Stats() {
 }
 let v2PendingCount = 0;
 let backupAgeH = null; // hours since the newest backup set; null = unknown or not the machine owner
+let backupIncomplete = false; // the newest set's run failed or never finished (review, 2026-09-29)
 /** What this machine knows about its own tailnet, for the HTTPS setup step. */
 let tailnet = null;
 async function loadTailnet() {
@@ -12014,7 +12026,8 @@ async function loadBackupAge() {
     const r = await api('/v1/backups');
     const newest = (r.backups ?? [])[0];
     backupAgeH = newest ? (Date.now() - Date.parse(newest.date + 'T03:30:00')) / 3600_000 : null;
-  } catch { backupAgeH = null; } // not the host owner, or no backups configured
+    backupIncomplete = newest?.complete === false;
+  } catch { backupAgeH = null; backupIncomplete = false; } // not the host owner, or no backups configured
 }
 
 

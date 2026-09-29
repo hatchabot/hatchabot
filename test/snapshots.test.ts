@@ -52,6 +52,7 @@ describe('captureSnapshot', () => {
     const first = await captureSnapshot(w.deps, 'a1', { label: 'good state' });
     expect(first.files.sort()).toEqual(['AGENTS.md', 'MEMORY.md', 'SOUL.md']);
 
+    w.files['MEMORY.md'] += '- and bread\n';
     await captureSnapshot(w.deps, 'a1', { reason: 'pre-edit' });
     const list = w.store.listSnapshots('a1');
     expect(list).toHaveLength(2);
@@ -95,11 +96,28 @@ describe('captureSnapshot', () => {
     const w = fileWorld(SEED);
     await captureSnapshot(w.deps, 'a1', { label: 'keep me' }); // manual
     for (let i = 0; i < AUTO_KEEP + 5; i++) {
+      w.files['MEMORY.md'] = `# Memory\n- note ${i}\n`;
       await captureSnapshot(w.deps, 'a1', { reason: 'pre-edit' });
     }
     const list = w.store.listSnapshots('a1');
     expect(list.filter((s) => s.reason === 'pre-edit')).toHaveLength(AUTO_KEEP);
     expect(list.some((s) => s.label === 'keep me')).toBe(true);
+  });
+
+  it('skips an automatic snapshot identical to the newest one, never a named one (review, 2026-09-29)', async () => {
+    const w = fileWorld(SEED);
+    const first = await captureSnapshot(w.deps, 'a1', { reason: 'pre-rebuild' });
+    const again = await captureSnapshot(w.deps, 'a1', { reason: 'pre-rebuild' });
+    expect(again.id).toBe(first.id); // the rebuild-twice case: one row, not two
+    expect(w.store.listSnapshots('a1')).toHaveLength(1);
+    // A named snapshot of the same files is still its own row.
+    await captureSnapshot(w.deps, 'a1', { label: 'named' });
+    expect(w.store.listSnapshots('a1')).toHaveLength(2);
+    // Any change is a new version.
+    w.files['SOUL.md'] += 'Also bakes.\n';
+    const changed = await captureSnapshot(w.deps, 'a1', { reason: 'pre-rebuild' });
+    expect(changed.id).not.toBe(first.id);
+    expect(w.store.listSnapshots('a1')).toHaveLength(3);
   });
 });
 
