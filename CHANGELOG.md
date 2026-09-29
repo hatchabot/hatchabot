@@ -2,6 +2,60 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.103.0] — 2026-09-29
+
+A full review (six reviewers across the whole codebase, every finding re-checked by a second; 47 confirmed) and the fixes for everything small. The larger ones follow separately.
+
+### Security and sign-in
+- Google sign-in with an email address that was never verified no longer leaves a working session behind: the "verify your email" refusal now comes before any sign-in cookie is set.
+- Security check: in Google sign-in mode with no HATCHABOT_ALLOWED_EMAILS list, the owner now sees a critical warning that any Google account able to reach the machine can sign in and use the shared Claude sources.
+- Agents sent from the browser now show who sent them (no more "from another user"), and sending an agent to your own address is caught again.
+- The share dialog's address suggestions no longer list every signed-in person to everyone: the machine's owner sees all accounts, anyone else sees the owner and the people they have already swapped agents with. Any address can still be typed.
+- The request log no longer writes query strings or invitation codes, so console media tickets stop landing in the system journal.
+- The Hatchabot management agent is restarted after an upgrade only when its tool list actually changed, not on every release (it used to lose its turn at every deploy). Expect one last restart on the first deploy with this change.
+- An empty or mistyped HATCHABOT_SESSION_DAYS no longer signs everyone out at once: it falls back to 14 days and logs a warning.
+
+### Usage figures
+- If an agent's usage database can't be read (busy, locked or damaged), that reading is now skipped. Before, Hatchabot fell back to old leftover files, saved a much smaller total, and the next good reading showed up as a huge fake spike, sometimes with a spike warning.
+- When an agent's usage can't be read, its Usage page now says so and gives the reason, instead of "No sessions yet — nothing used". `hatchabot usage` now lists that agent as skipped instead of counting it as zero.
+- The Hour, 3h and 6h token charts no longer alternate between full and empty bars. Each reading's tokens are spread over the minutes since the previous reading, so the token bars line up with the request bars.
+- The "this window is partial" note no longer appears across the whole fleet after an idle agent is read for the first time.
+- The daily trend now shows each day's estimated API cost for API-key agents, based on that day's own use. Before, the cost was wiped every 10 minutes.
+- Daily trend days now follow the host's clock, so evening use lands on the right day's bar. The last few minutes before midnight also count toward the day they happened on.
+- On rebuild, the old duplicate "Installing tools" copies are removed from each agent's AGENTS.md. The notes now live only in TOOLS.md, which saves a few hundred tokens on every call.
+
+### Rebuilds, storage and chat apps
+- Rebuilding an agent on OpenClaw 2026.8 or later no longer re-indexes its whole memory every time. The check counted the conversation in progress, which is always one file behind, so it always looked incomplete. Each such rebuild spent 7 seconds to several minutes in the shared memory search service.
+- Rebuilds no longer reinstall the Brave search plugin when the agent already has the version the image carries. This saves a few seconds on every rebuild of an agent that uses Brave.
+- Google accounts attached to an agent no longer log "connection failed" on every rebuild, start or wake. If you reconnect an account while the agent is stopped, the new sign-in now reaches the agent.
+- A Docker call that timed out, or a Hatchabot restart in the middle of one, no longer leaves a stray container holding the agent's storage. Stray containers could make the agent impossible to delete. Hatchabot now names these short-lived containers, removes one when its call times out, and cleans up leftovers when it starts. Deleting an agent removes any stray container on its storage first.
+- `uninstall.sh --purge` now clears stray containers on agent storage and lists every agent volume it could not remove. It exits with an error in that case. Before, the failure was silent and the agents' data stayed on the machine without a word.
+- The check every five minutes that keeps agents closed to strangers no longer starts a throwaway container for each agent (about 39 each time). Hatchabot remembers what it last set. It checks again after a start, wake, rebuild, restore or member change, when an invite window closes, and every six hours in any case.
+
+### Moves, backups and snapshots
+- **A sleeping agent stays asleep when Download copy or Rehost fails.** The export cleared its sleep before anything could fail, so a refused or failed attempt left it plain stopped, and it never woke on a message again. Now its sleep is cleared only once the file is made, and a failed move puts it back to sleep.
+- **An agent too big to download or move is refused before it is stopped.** The size check came after stopping the agent and packing its whole volume, which could take up to a minute, only to refuse. Its size is now measured first, while it keeps running. The restore error messages no longer point you at Download copy.
+- **Bringing in agents from an existing OpenClaw works with OpenClaw 2026.8 and newer.** Those versions keep agents in `agents.entries`, and discovery, adopt's existing-bot lookup and cron import read only the older `agents.list`, so they found nothing. They now read both.
+- **A partial nightly backup no longer shows as healthy.** Each backup set now records whether its run finished, which volumes failed, and which were left out. The Backups panel, the Ops card, the setup checklist and `hatchabot doctor` warn when the newest set is incomplete. Before, they only checked that the dated folder existed.
+- **Backups say which agents they don't cover.** An agent on another machine, like a runner, is never in the nightly backup. The Backups panel now names it and the machine it runs on, and the Ops card counts it.
+- **A volume that no agent uses is no longer backed up every night.** It is left out of the set and named in the panel and in the backup log, so you can remove it by hand once you have looked (`docker volume rm`). If the backup can't read the list of agents, it still backs up every volume, as before.
+- **Setup logs no longer fill up with "chat access policy unchanged".** Builds before v2.68.0 logged thousands of these rows, and they pushed older real history out of a dozen agents' logs. They are removed once on upgrade. The history they pushed out can't be brought back.
+- **Automatic snapshots skip a copy that is identical to the newest one.** Two thirds of them were duplicates, one from every rebuild, and rotation deleted older, different versions to keep them. Snapshots you name are always kept.
+- **`promote.sh` no longer adds a fixed Co-Authored-By line and an old session link to promote commits.** To add trailers, pass them in `HATCHABOT_PROMOTE_TRAILERS`.
+
+### The web page
+- An agent's Files, Discord, Slack and Usage tabs no longer reload every few seconds while you look at them: no "Loading…" blink, a drag-and-drop upload keeps showing its progress, and a group-chat choice you haven't saved yet stays put. They still update when the agent itself changes (it stops, sleeps, gets a new app, someone knocks).
+- The recovery-code window can no longer be closed by a stray click outside it (or Esc) before you tick "I've saved it", and the sign-in window can't be clicked away either.
+- People you share an agent with now see the right app: a Discord or Slack agent says "Open in Discord/Slack" instead of "Not running · it answers in Telegram", and an asleep agent still offers its Telegram link with "a message wakes it".
+- The rate-limit banner counts only agents that could answer: archived agents are no longer included in "its N agents can't answer".
+- An agent's Usage and Schedule tabs say what is really going on — being set up, being rebuilt, failed (see Overview → Retry), archived — instead of "It is stopped — start it" for every non-running state.
+- The page stops checking the server while its tab is hidden, and catches up the moment you come back to it.
+- The home screen asks the server much less: no member lists on every poll (the agent's sheet reads them when opened), no knock checks for agents that aren't in any chat app, no reads for the hidden activity card, and the "last backup" check reads one small record instead of the whole backup list.
+- Scheduled tasks now show how their runs are going: "last run ok 2h ago · next Tue 8:00 AM", or a red "failing" mark with "last run failed · 5 in a row" for a task that keeps failing.
+
+### Internal
+- The click-through checks no longer run the page's timed poll, which made them flaky on a loaded machine.
+
 ## [2.102.1] — 2026-09-28
 
 ### Fixed

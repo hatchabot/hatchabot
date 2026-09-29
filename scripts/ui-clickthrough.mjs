@@ -60,6 +60,8 @@ const RECORDER = `(() => {
 /** The scenarios run inside the page once it has painted. Each is a name and an async body; \`t\` is the toolkit. */
 const SCENARIOS = String.raw`(() => {
   const results = [];
+  // Checks refresh by hand; a timed poll mid-check made the suite flaky under load.
+  window.__noAutoPoll = true; clearTimeout(pollTimer);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const until = async (f, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { const v = f(); if (v) return v; await sleep(50); } throw new Error('timed out waiting'); };
   const calls = (method, re) => window.__calls.filter((c) => c.method === method && re.test(c.path));

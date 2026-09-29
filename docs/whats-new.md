@@ -22,6 +22,12 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   it used to show the size of each conversation, not what was spent, so a
   busy agent looked cheap. The last 8 days fill in at once. Status → Usage
   also shows the last 3, 6, 9 or 12 hours.
+- **A full review, 47 fixes** (v2.103.0): rebuilds no longer re-index memory
+  every time, no stray containers left on agent storage, Google accounts stop
+  failing on every wake, partial backups and uncovered agents are flagged,
+  duplicate snapshots skipped, sleeping agents stay asleep after a failed move,
+  the page asks the server far less and stops while hidden, failing scheduled
+  tasks show as failing, and several sign-in and privacy gaps are closed.
 - **A Telegram warning when an agent's use jumps** to 3× its usual day, and
   each agent's Usage now shows its last 24 hours, how big its conversation
   is (every call re-sends it) and where the tokens went.

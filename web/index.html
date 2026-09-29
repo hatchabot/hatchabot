@@ -10564,7 +10564,9 @@ async function refresh(withMeta) {
   // A tab nobody is looking at does not poll: it catches up the moment it is
   // shown again (below). Each poll costs the server about a second.
   pollPaused = document.hidden;
-  if (!pollPaused) pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
+  // The click-through checks (scripts/ui-clickthrough.mjs) refresh by hand: a
+  // timed poll landing mid-check made them flaky on a loaded machine.
+  if (!pollPaused && !window.__noAutoPoll) pollTimer = setTimeout(() => refresh(false), busy ? 2500 : 8000);
 }
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && pollPaused) { pollPaused = false; void refresh(false); }
