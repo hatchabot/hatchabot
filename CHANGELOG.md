@@ -2,6 +2,12 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.112.1] — 2026-09-30
+
+### Fixed
+- **A new agent gets the personality you describe.** On OpenClaw 2026.9, a new agent's first build now puts Hatchabot's SOUL.md (built from your "What is it for?") and AGENTS.md over the generic ones OpenClaw writes; before, OpenClaw's "SOUL.md - Who You Are" won and the description never reached the agent. Only a first build does this; existing agents keep their files.
+- The Hatchabot agent was given back its own SOUL.md and AGENTS.md the same day (it had been running on OpenClaw's generic files since 2026.9); a snapshot of the old files was kept.
+
 ## [2.112.0] — 2026-09-30
 
 A check of every promise the app makes against what actually enforces it (docs/review-prompt.md, step 2), and the fixes.
