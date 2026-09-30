@@ -547,6 +547,22 @@ export class Store {
         epoch INTEGER NOT NULL,
         bumped_at TEXT NOT NULL
       );
+      -- Each agent's measured storage, from the daily posture sweep, so the
+      -- "Disk warning at N GB" the security check shows is backed by a
+      -- measurement (2026-09-30; before, nothing measured it).
+      CREATE TABLE IF NOT EXISTS agent_disk (
+        agent_id TEXT PRIMARY KEY,
+        bytes INTEGER NOT NULL,
+        measured_at TEXT NOT NULL
+      );
+      -- Hourly limits that must survive a restart (web chat per person,
+      -- consults per agent): one row per counted event, pruned after an hour.
+      -- They lived in memory and every deploy reset them (2026-09-30).
+      CREATE TABLE IF NOT EXISTS rate_hits (
+        bucket TEXT NOT NULL,
+        at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS rate_hits_bucket_at ON rate_hits (bucket, at);
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1419,6 +1435,7 @@ export class Store {
     if (next === 'DELETED') {
       this.db.prepare(`DELETE FROM agent_seen WHERE agent_id = ?`).run(id);
       this.db.prepare(`DELETE FROM member_identities WHERE agent_id = ?`).run(id);
+      this.db.prepare(`DELETE FROM agent_disk WHERE agent_id = ?`).run(id);
     }
     return this.getAgent(id)!;
   }
@@ -1726,6 +1743,33 @@ export class Store {
   sessionEpoch(ownerId: string): number {
     const row = this.db.prepare(`SELECT epoch FROM session_epochs WHERE owner_id = ?`).get(ownerId) as { epoch: number } | undefined;
     return row?.epoch ?? 0;
+  }
+
+  /** Record an agent's measured storage (bytes on its volume). */
+  setAgentDiskBytes(agentId: string, bytes: number, at = new Date().toISOString()): void {
+    this.db
+      .prepare(
+        `INSERT INTO agent_disk (agent_id, bytes, measured_at) VALUES (?, ?, ?)
+         ON CONFLICT(agent_id) DO UPDATE SET bytes = excluded.bytes, measured_at = excluded.measured_at`,
+      )
+      .run(agentId, Math.max(0, Math.round(bytes)), at);
+  }
+
+  /** Every measured agent's storage, newest measurement each. */
+  agentDiskBytes(): Map<string, { bytes: number; measuredAt: string }> {
+    const rows = this.db.prepare(`SELECT agent_id, bytes, measured_at FROM agent_disk`).all() as Array<{ agent_id: string; bytes: number; measured_at: string }>;
+    return new Map(rows.map((r) => [r.agent_id, { bytes: r.bytes, measuredAt: r.measured_at }]));
+  }
+
+  /** Times (ms) of the events counted in `bucket` since `sinceMs`, oldest first. */
+  rateHitsSince(bucket: string, sinceMs: number): number[] {
+    return (this.db.prepare(`SELECT at FROM rate_hits WHERE bucket = ? AND at >= ? ORDER BY at`).all(bucket, sinceMs) as Array<{ at: number }>).map((r) => r.at);
+  }
+
+  /** Count one event in `bucket`; rows older than `keepMs` (every bucket) go. */
+  addRateHit(bucket: string, at: number, keepMs = 3_600_000): void {
+    this.db.prepare(`DELETE FROM rate_hits WHERE at < ?`).run(at - keepMs);
+    this.db.prepare(`INSERT INTO rate_hits (bucket, at) VALUES (?, ?)`).run(bucket, at);
   }
 
   /** End every session this owner has, everywhere: cookies minted under an older epoch are refused. Returns the new epoch. */

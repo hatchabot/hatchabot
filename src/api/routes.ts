@@ -123,7 +123,7 @@ import {
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
-import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js';
+import { computePosture, riskKeys, diffRisks, diskWarnBytes, measureAgentDisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
@@ -4219,6 +4219,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return picked;
   };
   (app as unknown as { rebuildSweep?: typeof rebuildSweep }).rebuildSweep = rebuildSweep;
+  /** Each agent's storage, once a day, before the posture sweep reads it (src/index.ts). */
+  const diskSweep = () => measureAgentDisks({ store, providerFor, isBusy: (id) => isBusy(id) || inflight.has(id), log: (e, d) => app.log.warn(d, e) });
+  (app as unknown as { diskSweep?: typeof diskSweep }).diskSweep = diskSweep;
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setInterval(() => { void rebuildSweep().catch((err) => app.log.warn({ err }, 'rebuild sweep failed')); },
       Number(process.env.HATCHABOT_REBUILD_SWEEP_MS) || 5 * 60_000).unref();
@@ -4244,6 +4247,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const peersPendingSet = store.agentsWithPeersPending(ownerIdOf(req));
     const classes = new Map(store.listAgentClasses(ownerIdOf(req)).map((c) => [c.id, c]));
     const classNames = new Map([...classes].map(([id, c]) => [id, c.name]));
+    // The daily storage measurement (posture.ts measureAgentDisks): an agent
+    // over HATCHABOT_AGENT_DISK_WARN_GB goes to Needs you (2026-09-30).
+    const disks = store.agentDiskBytes();
+    const diskWarn = diskWarnBytes();
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -4277,6 +4284,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           memoryPeakBytes: peakSinceClear(a, rebuild?.running.memPeakBytes, undefined),
           memoryCapHits: rebuild?.running.memCapHits === undefined ? undefined : Math.max(0, rebuild.running.memCapHits - (a.memoryCapBaseline ?? 0)),
           memoryKills: rebuild?.running.memOomKills,
+          ...(role === 'owner' && (disks.get(a.id)?.bytes ?? 0) > diskWarn
+            ? { diskOver: { bytes: disks.get(a.id)!.bytes, warnBytes: diskWarn, measuredAt: disks.get(a.id)!.measuredAt } }
+            : {}),
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).

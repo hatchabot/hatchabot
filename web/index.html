@@ -3609,7 +3609,8 @@ async function loadPosture() {
     el.innerHTML = `${when}${chg}
       <div class="posture-group"><div class="posture-label">This machine</div>${install}</div>
       <div class="posture-group"><div class="posture-label">Limits</div>
-        <div class="sub">Agents: ${lim.liveAgents}${lim.agentCap ? ` / ${lim.agentCap}` : ' (no cap set)'} · Disk warning at ${lim.diskWarnGB} GB per agent</div></div>`;
+        <div class="sub">Agents: ${lim.liveAgents}${lim.agentCap ? ` / ${lim.agentCap}` : ' (no cap set)'} · Disk warning at ${lim.diskWarnGB} GB per agent (measured daily)</div>
+        ${(lim.overDisk || []).map(d => `<div class="sub" style="color:var(--warn)">⚠ <b>${esc(d.name)}</b> uses ${(d.bytes / 1e9).toFixed(1)} GB (measured ${esc(new Date(d.measuredAt).toLocaleDateString())})</div>`).join('')}</div>`;
   } catch (e) {
     el.textContent = e.message;
   } finally {
@@ -10291,6 +10292,9 @@ function agentAttention(a) {
   if (rebuild.length && !rechecking) out.push({ key: 'rebuild:' + rebuild.join('|'), icon: a.rebuild?.level === 'required' ? '⚠' : '🔄', why: rebuild.join('; ') });
   if (a.botNamePending) out.push({ key: 'botName', icon: '🏷', why: `Telegram rename to "${a.botNamePending.name}" pending (Telegram rate-limits renames)` });
   if (a.memoryCapHits || a.memoryKills) out.push({ key: 'memory', icon: '🧠', why: `${a.memoryKills ? `${a.memoryKills} of its processes ${a.memoryKills === 1 ? 'was' : 'were'} killed for memory` : `it hit its memory cap ${a.memoryCapHits}×`} (${a.memoryCapEffective ? capLabel(a.memoryCapEffective) : 'default cap'}) — raise it under Runtime → Memory cap, or ask it to run smaller jobs` });
+  // Measured once a day by the security sweep (2026-09-30); keyed on the size
+  // in whole GB so a cleared warning comes back only if it keeps growing.
+  if (a.diskOver) out.push({ key: 'disk:' + Math.floor(a.diskOver.bytes / 1e9), icon: '💾', why: `it uses ${(a.diskOver.bytes / 1e9).toFixed(1)} GB of storage (the warning is at ${(a.diskOver.warnBytes / 1e9).toFixed(0)} GB) — ask it to clear old files, or look under Files` });
   if (a.selfRestarts) out.push({ key: 'restart:' + a.selfRestarts, icon: '↻', why: `its process quit and was started again ${a.selfRestarts === 1 ? 'once' : `${a.selfRestarts} times`} since the last rebuild — the Setup log has when and the exit code; Status → Resources shows its memory against the cap` });
   return out;
 }

@@ -262,15 +262,24 @@ nameRepair.unref();
 // anything that newly appeared (a shared machine-login source, an agent that
 // gained send-email while reachable by a group). Runs once shortly after boot,
 // then daily — a cheap DB-only pass. The UI's "Run check" button shows the same.
-const postureSweep = () => {
+// Before it, each agent's storage is measured (at most once a day per agent,
+// so the boot run after a deploy measures nothing new) — the disk warning the
+// check shows had nothing behind it until 2026-09-30.
+const postureSweep = async () => {
+  try {
+    const r = await (app as unknown as { diskSweep?: () => Promise<{ measured: number; failed: number }> }).diskSweep?.();
+    if (r && (r.measured || r.failed)) app.log.info(r, 'security.disk_measured');
+  } catch (err) {
+    app.log.warn({ err: String(err) }, 'security.disk_sweep_failed');
+  }
   try {
     runPostureSweep(store, { authMode: authModeFromEnv(), log: (e, d) => app.log.info(d, e) });
   } catch (err) {
     app.log.warn({ err: String(err) }, 'security.posture_sweep_failed');
   }
 };
-setTimeout(postureSweep, 60_000).unref();
-const postureDaily = setInterval(postureSweep, Number(process.env.HATCHABOT_POSTURE_SWEEP_MS ?? 86_400_000));
+setTimeout(() => void postureSweep(), 60_000).unref();
+const postureDaily = setInterval(() => void postureSweep(), Number(process.env.HATCHABOT_POSTURE_SWEEP_MS ?? 86_400_000));
 postureDaily.unref();
 
 // Under a rootless daemon every agent container reaches this process from
