@@ -56,3 +56,7 @@ export function estimateCost(
   }
   return { low, high, partial };
 }
+
+/** A range that priced nothing because no model's price is known: shown as
+ *  "no price known", never "$0.00+" (2026-09-30). */
+export const pricesNothing = (c: CostRange | null | undefined): boolean => !!c && c.partial && c.high === 0;

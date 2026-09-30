@@ -7,6 +7,7 @@ import {
   batchConfigCommands,
   buildConfigCommands,
   describeConfigCommands,
+  seedInvocation,
 } from '../src/openclaw/configWriter.js';
 
 const argFor = (cmds: ReturnType<typeof buildConfigCommands>, path: string): string | undefined =>
@@ -613,5 +614,94 @@ describe('command owners (2026-09-29)', () => {
   it('leaves the key alone when not given', () => {
     const raw = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
     expect(raw.some((c) => c.argv[2] === 'commands.ownerAllowFrom')).toBe(false);
+  });
+});
+
+// 2026-09-30: "keys never on a command line other users could read". A
+// process's argv is world-readable through /proc; the seed put bot tokens,
+// the gateway token and the ops key on `openclaw config set --batch-json`.
+describe('seed lines keep secrets off command lines', () => {
+  // Built at run time: nothing here should look like a real credential.
+  const BOT = ['made', 'up', 'bot', 'secret'].join('-');
+  const GW = ['made', 'up', 'gateway', 'secret'].join('-');
+  const OPS = ['made', 'up', 'ops', 'secret'].join('-');
+  const SETUP = ['made', 'up', 'setup', 'secret'].join('-');
+  const patch = {
+    agentId: 'todo', model: 'm', authMode: 'setup-token' as const, openclawVersion: '2026.9.6', gatewayToken: GW, setupToken: SETUP,
+    telegram: { accountId: 'todo_bot', botToken: BOT, dmPolicy: 'pairing' as const, allowFrom: ['42'] },
+    ops: { mcpUrl: 'http://10.0.0.1:1/mcp', token: OPS },
+  };
+
+  it('the ops key goes in as a config set (the entry `mcp set` wrote), so it batches', () => {
+    const raw = buildConfigCommands(patch as never);
+    expect(raw.some((c) => c.argv[0] === 'mcp')).toBe(false);
+    const set = raw.find((c) => c.argv[2] === 'mcp.servers.hatchabot')!;
+    expect(set.sensitive).toBe(true);
+    expect(JSON.parse(set.argv[3]!)).toEqual({ url: 'http://10.0.0.1:1/mcp', transport: 'streamable-http', headers: { Authorization: `Bearer ${OPS}` } });
+  });
+
+  it('every sensitive command renders with no secret outside a builtin; plain ones are unchanged', () => {
+    const cmds = batchConfigCommands(buildConfigCommands(patch as never));
+    for (const c of cmds) {
+      const line = seedInvocation(c);
+      if (!c.sensitive) {
+        if (!c.rawShell && !c.stdin) expect(line.startsWith('openclaw ')).toBe(true);
+        continue;
+      }
+      // What reaches `openclaw` itself: the words after the last builtin.
+      const call = line.slice(line.lastIndexOf('openclaw '));
+      for (const secret of [BOT, GW, OPS, SETUP]) expect(call.split('||')[0]).not.toContain(secret);
+    }
+    // The batch with the tokens really is a batch-file run now.
+    expect(cmds.filter((c) => c.sensitive && !c.stdin).every((c) => seedInvocation(c).includes('--batch-file "$__hb_f"'))).toBe(true);
+  });
+
+  it('runs: openclaw gets only a file path, the file holds the batch, and it is gone after — success or failure', () => {
+    const home = mkdtempSync(join(tmpdir(), 'hb-seed-'));
+    try {
+      const bin = join(home, 'bin'); mkdirSync(bin); mkdirSync(join(home, 'tmp'));
+      const argvLog = join(home, 'argv'), files = join(home, 'files');
+      writeFileSync(argvLog, ''); writeFileSync(files, '');
+      // The stub records its argv, and the content of any --batch-file it is handed.
+      writeFileSync(join(bin, 'openclaw'), `#!/bin/bash
+echo "$*" >> ${JSON.stringify(argvLog)}
+prev=""; for a in "$@"; do if [ "$prev" = "--batch-file" ]; then cat "$a" >> ${JSON.stringify(files)}; echo >> ${JSON.stringify(files)}; echo "$a" >> ${JSON.stringify(join(home, 'paths'))}; fi; prev="$a"; done
+[ -f ${JSON.stringify(join(home, 'fail'))} ] && exit 3
+exit 0
+`, { mode: 0o755 });
+      for (const tool of ['mktemp', 'rm', 'cat']) {
+        const real = spawnSync('bash', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+        symlinkSync(real, join(bin, tool));
+      }
+      const cmds = batchConfigCommands(buildConfigCommands(patch as never)).filter((c) => c.sensitive && !c.stdin);
+      expect(cmds.length).toBeGreaterThan(0);
+      const script = cmds.map(seedInvocation).join('\n');
+      const run = () => spawnSync('/bin/bash', ['-c', `set -euo pipefail\n${script}\necho seed-continues`], { encoding: 'utf8',
+        env: { PATH: bin, HOME: home, TMPDIR: join(home, 'tmp') } });
+      let r = run();
+      expect(r.stdout, r.stderr).toContain('seed-continues');
+      const argv = readFileSync(argvLog, 'utf8');
+      for (const secret of [BOT, GW, OPS]) expect(argv).not.toContain(secret);
+      expect(argv).toMatch(/^config set --batch-file \S+ --replace$/m);
+      const written = readFileSync(files, 'utf8').trim().split('\n').flatMap((l) => JSON.parse(l) as Array<{ path: string; value: unknown }>);
+      expect(JSON.stringify(written)).toContain(BOT);
+      expect(JSON.stringify(written)).toContain(GW);
+      expect(written.find((e) => e.path === 'mcp.servers.hatchabot')?.value).toMatchObject({ headers: { Authorization: `Bearer ${OPS}` } });
+      expect(spawnSync('/bin/ls', ['-A', join(home, 'tmp')], { encoding: 'utf8' }).stdout).toBe('');
+      // A failing set ends the seed (set -e) and still leaves no file behind.
+      writeFileSync(join(home, 'fail'), '');
+      r = run();
+      expect(r.status).not.toBe(0);
+      expect(r.stdout).not.toContain('seed-continues');
+      expect(spawnSync('/bin/ls', ['-A', join(home, 'tmp')], { encoding: 'utf8' }).stdout).toBe('');
+    } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+
+  it('a single sensitive set becomes a one-entry batch with the value parsed as the plain form would', () => {
+    const line = seedInvocation({ argv: ['config', 'set', 'gateway.auth', '{"mode":"password","password":"p"}'], sensitive: true });
+    const json = /printf %s '([^']*)'/.exec(line)![1]!;
+    expect(JSON.parse(json)).toEqual([{ path: 'gateway.auth', value: { mode: 'password', password: 'p' } }]);
+    // Not a plain set (another flag): left as it was rather than guessed at.
+    expect(seedInvocation({ argv: ['config', 'set', 'x', 'y', '--strict-json'], sensitive: true })).toBe("openclaw 'config' 'set' 'x' 'y' '--strict-json'");
   });
 });

@@ -143,26 +143,26 @@ export const CHANNEL_ACCOUNT = 'hatchabot';
  * add, paste-token, the heal script) breaks the run, so semantics are
  * unchanged.
  */
+/**
+ * The single-set form hands OpenClaw a string it parses as JSON5; batch
+ * mode takes `value` literally, so an object must be passed as an object or
+ * it lands in the config as a string ("expected record, received string").
+ */
+function asValue(raw: string): unknown {
+  // JSON.parse IS the discriminator, matching the single-set form's JSON5
+  // parse-with-string-fallback: '{"a":1}' → object, 'true' → boolean,
+  // '["*"]' → array, but 'local'/'loopback'/'none' stay strings.
+  try {
+    return JSON.parse(raw.trim());
+  } catch {
+    return raw;
+  }
+}
+
 export function batchConfigCommands(cmds: ConfigCommand[]): ConfigCommand[] {
   const out: ConfigCommand[] = [];
   let run: Array<{ path: string; value: unknown; raw: string }> = [];
   let sensitive = false;
-
-  /**
-   * The single-set form hands OpenClaw a string it parses as JSON5; batch
-   * mode takes `value` literally, so an object must be passed as an object or
-   * it lands in the config as a string ("expected record, received string").
-   */
-  const asValue = (raw: string): unknown => {
-    // JSON.parse IS the discriminator, matching the single-set form's JSON5
-    // parse-with-string-fallback: '{"a":1}' → object, 'true' → boolean,
-    // '["*"]' → array, but 'local'/'loopback'/'none' stay strings.
-    try {
-      return JSON.parse(raw.trim());
-    } catch {
-      return raw;
-    }
-  };
 
   const flush = () => {
     if (run.length === 0) return;
@@ -604,8 +604,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (patch.ops) {
     cmds.push({ argv: ['config', 'set', 'tools.allow', JSON.stringify(OPS_TOOLS_ALLOW)] });
     cmds.push({ argv: ['config', 'set', 'tools.deny', JSON.stringify(OPS_TOOLS_DENY)] });
+    // The same entry `openclaw mcp set hatchabot …` writes (checked on
+    // 2026.7.1 and 2026.9.6), as a config set so it travels in the seed's
+    // private batch file: `mcp set` could only carry the key on its command
+    // line (2026-09-30). It also joins the batch — one CLI start fewer.
     cmds.push({
-      argv: ['mcp', 'set', 'hatchabot', JSON.stringify({
+      argv: ['config', 'set', 'mcp.servers.hatchabot', JSON.stringify({
         url: patch.ops.mcpUrl, transport: 'streamable-http', headers: { Authorization: `Bearer ${patch.ops.token}` },
       })],
       sensitive: true, // carries the key
@@ -860,6 +864,42 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   }
 
   return cmds;
+}
+
+const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The shell text that runs one command in the seed, keeping secrets off every
+ * command line. A process's arguments are readable by any local user (/proc
+ * has no hidepid on a stock host), and the one-shot's processes are host
+ * processes: `config set --batch-json '<bot token…>'` put keys in reach of
+ * `ps` for the seconds a rebuild ran (2026-09-30). So a secret travels only
+ * through shell builtins (printf, redirection — no process of their own):
+ *  - stdin commands (paste-token) are piped from printf, as before;
+ *  - a sensitive `config set` — batched or single — is written to a private
+ *    temp file (mktemp: 0600, in the one-shot's own /tmp) and read with
+ *    `--batch-file`, which on 2026.9 must be a regular file (/dev/stdin is
+ *    refused). The file goes whether the set worked or not.
+ * Same CLI starts as before: nothing here adds an `openclaw` run.
+ */
+export function seedInvocation(cmd: ConfigCommand): string {
+  if (cmd.rawShell) return cmd.rawShell;
+  const invoke = (argv: string[]) => `openclaw ${argv.map(shellQuote).join(' ')}`;
+  if (cmd.stdin) return `printf %s ${shellQuote(cmd.stdin)} | ${invoke(cmd.argv)}`;
+  const entries = cmd.sensitive ? sensitiveSetEntries(cmd.argv) : undefined;
+  if (!entries) return invoke(cmd.argv);
+  return `{ __hb_f=$(mktemp); printf %s ${shellQuote(entries)} > "$__hb_f"; __hb_rc=0; ` +
+    `openclaw config set --batch-file "$__hb_f" --replace || __hb_rc=$?; rm -f "$__hb_f"; [ "$__hb_rc" -eq 0 ]; }`;
+}
+
+/** A sensitive `config set` as batch-file JSON; undefined for anything else. */
+function sensitiveSetEntries(argv: string[]): string | undefined {
+  if (argv[0] !== 'config' || argv[1] !== 'set') return undefined;
+  if (argv[2] === '--batch-json') return typeof argv[3] === 'string' ? argv[3] : undefined;
+  const [path, raw, ...flags] = argv.slice(2);
+  // Only the plain form: flags other than --replace would change its meaning.
+  if (typeof path !== 'string' || typeof raw !== 'string' || path.startsWith('-') || flags.some((f) => f !== '--replace')) return undefined;
+  return JSON.stringify([{ path, value: asValue(raw) }]);
 }
 
 /** Renders the commands for logging, with secrets masked. */

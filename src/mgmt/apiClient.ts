@@ -219,33 +219,8 @@ export class HttpApiClient implements ApiClient {
     await this.#req('DELETE', `/v1/images/${encodeURIComponent(name)}`);
   }
 
-  // ---- LLM via the control plane's proxy ----------------------------------
-
-  async llmStatus(): Promise<{
-    available: boolean;
-    profileName?: string;
-    model?: string;
-    credential?: string;
-  }> {
-    return (await this.#req('GET', '/v1/mgmt/llm')) as {
-      available: boolean;
-      profileName?: string;
-      model?: string;
-      credential?: string;
-    };
-  }
-
-  async llmComplete(req: {
-    system: string;
-    tools: unknown[];
-    messages: unknown[];
-    maxTokens: number;
-  }): Promise<{ stopReason: string; content: never[] }> {
-    return (await this.#req('POST', '/v1/mgmt/llm/complete', req)) as {
-      stopReason: string;
-      content: never[];
-    };
-  }
+  // 2026-09-30: llmStatus/llmComplete removed — their /v1/mgmt/llm routes
+  // went with the management proxy in v2.0.0, so nothing could answer them.
 
   /** Phase-A presence: tell the control plane this bot is alive and how it's
    *  armed, so the web UI can show a real card instead of guessing. */

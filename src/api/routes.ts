@@ -69,7 +69,7 @@ import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orches
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
-import { estimateCost } from '../orchestrator/pricing.js';
+import { estimateCost, pricesNothing } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
   agentArchiveName,
@@ -124,7 +124,7 @@ import {
   parseOAuthClient, revokeGoogleToken, type OAuthClient,
 } from '../orchestrator/googleConnections.js';
 import { INSPECTABLE_FILES, listInspectableFiles, readInspectableFile, readTranscript } from '../orchestrator/inspect.js';
-import { computePosture, riskKeys, diffRisks } from '../orchestrator/posture.js';
+import { computePosture, riskKeys, diffRisks, diskWarnBytes, measureAgentDisks } from '../orchestrator/posture.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { exportAgent, ImageDecisionNeeded, importAgent, peekFormat, TransferError } from '../orchestrator/transfer.js';
 import { derivedByTag, ensureImageOn } from '../orchestrator/imageRecipe.js';
@@ -858,7 +858,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   //    unrelated parallel consults alone (a per-owner depth counter didn't).
   //  - a2aOwnerLive: a per-owner concurrency cap, so one injected agent can't
   //    hold every docker exec slot.
-  //  - a2aBucket: per-caller consults/hour — each consult is a paid model turn
+  //  - a2aRateOk: per-caller consults/hour — each consult is a paid model turn
   //    on the peer, and a prompt-injected loop would burn the budget serially.
   const envNum = (name: string, dflt: number): number => {
     const n = Number(process.env[name]); return Number.isFinite(n) && process.env[name] !== '' && process.env[name] !== undefined ? n : dflt;
@@ -875,12 +875,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** An owner's `ask` can be real work (research, a report): longer than a
    *  consult, and under the 300 s a client's fetch waits for response headers. */
   const ASK_TIMEOUT_MS = Math.max(10_000, envNum('HATCHABOT_ASK_TIMEOUT_MS', 280_000));
-  const a2aBucket = new Map<string, number[]>();
+  // Kept in SQLite (rate_hits) since 2026-09-30: in memory, every restart
+  // (every deploy) reset the hour.
   const a2aRateOk = (callerId: string): boolean => {
     const now = Date.now();
-    const hits = (a2aBucket.get(callerId) ?? []).filter((t) => now - t < 3_600_000);
-    if (hits.length >= A2A_PER_HOUR) { a2aBucket.set(callerId, hits); return false; }
-    hits.push(now); a2aBucket.set(callerId, hits); return true;
+    const bucket = `a2a:${callerId}`;
+    if (store.rateHitsSince(bucket, now - 3_600_000 + 1).length >= A2A_PER_HOUR) return false;
+    store.addRateHit(bucket, now);
+    return true;
   };
   const kickProvision = (agentId: string): void => {
     if (inflight.has(agentId)) return;
@@ -2313,7 +2315,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * (quiet when neither is possible): OpenClaw 2026.9 refuses implicit
    * delivery, so they ran daily and reached nobody.
    * Agents create such tasks themselves too, so this runs after each start and
-   * then daily, one agent at a time (promise review, 2026-09-29).
+   * then daily, one agent at a time (promise review, 2026-09-29). The same pass
+   * keeps the command owner and the per-app file ceilings in each config.
    */
   const retargetCronSweep = async () => {
     for (const a of store.listAllActiveAgents()) {
@@ -2332,6 +2335,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (read.code === 0 && read.stdout.trim() !== want) {
           const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'commands.ownerAllowFrom', want, '--strict-json']);
           trace(a.id)('owner.command_owner_set', { ok: set.code === 0, had: (JSON.parse(read.stdout || '[]') as unknown[]).length });
+        }
+      } catch { /* next time */ }
+      // The per-app file ceiling reached OpenClaw only at a build or when
+      // changed, so agents built before it ran with OpenClaw's own 100 MB
+      // (32 of 35 Telegram agents on the Spark, 2026-09-30). Set it on any app
+      // whose config section lacks it — once: afterwards the key is there.
+      try {
+        const kinds = [...new Set(store.listChannelsForAgent(a.id).map((c) => c.kind))]
+          .filter((k): k is ChannelKindForFiles => k === 'telegram' || k === 'discord' || k === 'slack');
+        if (kinds.length) {
+          const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+            `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8")).channels||{};process.stdout.write(JSON.stringify(process.argv.slice(1).filter(k=>c[k]&&typeof c[k]==="object"&&c[k].mediaMaxMb===undefined)))' ${kinds.join(' ')}`);
+          const missing = read.code === 0 ? (JSON.parse(read.stdout || '[]') as ChannelKindForFiles[]).filter((k) => kinds.includes(k)) : [];
+          for (const kind of missing) {
+            const n = await applyFilesCap(a, kind);
+            trace(a.id)('files.cap_backfilled', { kind, ok: n > 0 });
+          }
         }
       } catch { /* next time */ }
     }
@@ -3617,9 +3637,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /**
    * Reveal a source's stored credential — the only way to copy a Claude
    * subscription token or an API key to a SECOND installation, since the app
-   * stores secrets write-only everywhere else. Owner only: a source shared
-   * with other accounts lets them SPEND it, never read it. Logged, because a
-   * credential leaving the box is exactly the event an audit wants.
+   * stores secrets write-only everywhere else. Owner only here — but this is
+   * not the only way out: a source shared with other accounts is materialized
+   * into THEIR agents' containers, which their owners can read (Files, export,
+   * or just asking the agent). 2026-09-30: the page no longer claims they
+   * "never see it". Logged, because a credential leaving the box is exactly
+   * the event an audit wants.
    */
   app.get<{ Params: { id: string } }>('/v1/ai-profiles/:id/credential', async (req, reply) => {
     const profile = store.getAIProfile(req.params.id);
@@ -4118,14 +4141,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
     process.env[spec.env] = checked.value;
     let applied = 0;
+    // Every agent this control plane runs, runners included: their next build
+    // takes these values from this .env anyway, and the live paths (docker
+    // update, openclaw config set) reach a runner through its provider just as
+    // the per-agent settings do. Only this machine's agents got them before,
+    // though the page said "on every agent" (2026-09-30). A runner that fails
+    // once is skipped for the rest of this change — one unreachable runner
+    // must not hold the page for a Docker timeout per agent.
     const local = store.localHostId();
-    const fleet = store.listAllActiveAgents().filter((a) => a.hostId === local && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED'));
+    const fleet = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED') && !!store.getHost(a.hostId));
+    const unreachable = new Set<string>();
     if (spec.key === 'agentMemory') {
       for (const a of fleet) {
         const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
         if (parseMemoryCap(a.memoryCap) || parseMemoryCap(cls?.memoryCap)) continue; // its own or its class's cap stands
+        if (unreachable.has(a.hostId)) continue;
         const prov = providerFor(a.hostId);
-        try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch { /* the next rebuild applies it */ }
+        try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch {
+          // The next rebuild applies it.
+          if (a.hostId !== local) { unreachable.add(a.hostId); continue; }
+        }
         // And tell the agent its new budget (AGENTS.md), as a per-agent change does.
         if (a.state === 'RUNNING') void syncDataSourceDocs({ store, secrets, provider: prov, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)).catch(() => {});
       }
@@ -4133,7 +4168,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (embedder.enabled && !embedder.external) { await embedder.restart().catch(() => undefined); applied = 1; }
     } else if (spec.key.startsWith('files')) {
       const kind = spec.key.slice(5).toLowerCase() as ChannelKindForFiles;
-      for (const a of fleet) applied += await applyFilesCap(a, kind);
+      for (const a of fleet) {
+        if (unreachable.has(a.hostId)) continue;
+        const n = await applyFilesCap(a, kind);
+        applied += n;
+        if (!n && a.hostId !== local && store.listChannelsForAgent(a.id).some((c) => c.kind === kind)) unreachable.add(a.hostId);
+      }
     }
     trace()('machine.default_set', { key: spec.key, value: checked.value || 'off', applied });
     return { default: readMachineDefaults().find((d) => d.key === spec.key), applied };
@@ -4217,6 +4257,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return picked;
   };
   (app as unknown as { rebuildSweep?: typeof rebuildSweep }).rebuildSweep = rebuildSweep;
+  /** Each agent's storage, once a day, before the posture sweep reads it (src/index.ts). */
+  const diskSweep = () => measureAgentDisks({ store, providerFor, isBusy: (id) => isBusy(id) || inflight.has(id), log: (e, d) => app.log.warn(d, e) });
+  (app as unknown as { diskSweep?: typeof diskSweep }).diskSweep = diskSweep;
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     setInterval(() => { void rebuildSweep().catch((err) => app.log.warn({ err }, 'rebuild sweep failed')); },
       Number(process.env.HATCHABOT_REBUILD_SWEEP_MS) || 5 * 60_000).unref();
@@ -4242,6 +4285,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const peersPendingSet = store.agentsWithPeersPending(ownerIdOf(req));
     const classes = new Map(store.listAgentClasses(ownerIdOf(req)).map((c) => [c.id, c]));
     const classNames = new Map([...classes].map(([id, c]) => [id, c.name]));
+    // The daily storage measurement (posture.ts measureAgentDisks): an agent
+    // over HATCHABOT_AGENT_DISK_WARN_GB goes to Needs you (2026-09-30).
+    const disks = store.agentDiskBytes();
+    const diskWarn = diskWarnBytes();
     return Promise.all(
       agents.map(async (a) => {
         let openclawVersion: string | undefined;
@@ -4275,6 +4322,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           memoryPeakBytes: peakSinceClear(a, rebuild?.running.memPeakBytes, undefined),
           memoryCapHits: rebuild?.running.memCapHits === undefined ? undefined : Math.max(0, rebuild.running.memCapHits - (a.memoryCapBaseline ?? 0)),
           memoryKills: rebuild?.running.memOomKills,
+          ...(role === 'owner' && (disks.get(a.id)?.bytes ?? 0) > diskWarn
+            ? { diskOver: { bytes: disks.get(a.id)!.bytes, warnBytes: diskWarn, measuredAt: disks.get(a.id)!.measuredAt } }
+            : {}),
           peersPending: peersPendingSet.has(a.id),
           className: a.classId ? classNames.get(a.classId) : undefined,
           // Pinned to an image its class doesn't prescribe → a trial (🧪 in the legend).
@@ -6483,8 +6533,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug, { strict: true });
           const p = store.getAIProfile(a.aiProfileId);
           const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
-          const cost = billing === 'api' ? estimateCost(u.byModel) : null;
-          return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost };
+          const priced = billing === 'api' ? estimateCost(u.byModel) : null;
+          // No known price for any of its models: say so, not "$0.00+" (2026-09-30).
+          const unpriced = pricesNothing(priced);
+          const cost = unpriced ? null : priced;
+          return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost, ...(unpriced ? { unpriced: true } : {}) };
         } catch {
           return null; // unreachable container — treat as skipped, not zero
         }
@@ -6498,7 +6551,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ? {
           low: billed.reduce((s, a) => s + a.cost!.low, 0),
           high: billed.reduce((s, a) => s + a.cost!.high, 0),
-          partial: billed.some((a) => a.cost!.partial),
+          partial: billed.some((a) => a.cost!.partial) || agentsUsage.some((a) => 'unpriced' in a && a.unpriced),
           agents: billed.length,
         }
       : null;

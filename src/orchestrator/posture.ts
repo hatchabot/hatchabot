@@ -9,9 +9,12 @@
  * Telegram is the one surface exposed to other people, and a hostile message to
  * a high-capability, wide-audience agent is where real damage happens.
  *
- * Pure DB reads (no Docker), so it's cheap enough to run on demand.
+ * Pure DB reads (no Docker), so it's cheap enough to run on demand. The one
+ * Docker-backed input — each agent's storage — is measured by the daily sweep
+ * (measureAgentDisks) and read back from the DB here.
  */
 import type { Store } from '../store/store.js';
+import type { RuntimeProvider } from '../providers/provider.js';
 
 export type Level = 'ok' | 'info' | 'warn' | 'critical';
 
@@ -32,11 +35,19 @@ export interface AgentExposure {
    *  this agent", and a count never answered it. */
   audience?: Array<{ name: string; role: string; channels: string[]; pending?: boolean }>;
   reasons: string[];
+  /** Its storage at the last daily measurement, when it passed the disk warning. */
+  diskOverBytes?: number;
 }
 export interface PostureReport {
   install: InstallCheck[];
   agents: AgentExposure[];
-  limits: { agentCap: number; liveAgents: number; diskWarnGB: number };
+  limits: {
+    agentCap: number;
+    liveAgents: number;
+    diskWarnGB: number;
+    /** Agents whose last measured storage passed diskWarnGB (2026-09-30). */
+    overDisk?: Array<{ id: string; name: string; bytes: number; measuredAt: string }>;
+  };
 }
 
 export interface PostureInput {
@@ -51,6 +62,14 @@ function envNum(name: string, dflt: number): number {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
+
+/** HATCHABOT_AGENT_DISK_WARN_GB in bytes (decimal GB, as the page prints it). */
+export function diskWarnBytes(): number {
+  return envNum('HATCHABOT_AGENT_DISK_WARN_GB', 10) * 1e9;
+}
+
+/** "12.3 GB" — the unit the warning is set in. */
+export const gbLabel = (bytes: number): string => `${(bytes / 1e9).toFixed(1)} GB`;
 
 export function computePosture(store: Store, input: PostureInput): PostureReport {
   const { ownerId, isHostOwner, authMode } = input;
@@ -159,6 +178,9 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
 
   // Per-agent Telegram exposure (the caller's own agents).
   const agents: AgentExposure[] = [];
+  const disks = store.agentDiskBytes();
+  const warnBytes = diskWarnBytes();
+  const overDisk: NonNullable<PostureReport['limits']['overDisk']> = [];
   for (const a of store.listAgents(ownerId)) {
     if (a.state === 'ARCHIVED') continue;
     const audienceCount = store.listAllowedChannelUserIds(a.id).length;
@@ -205,7 +227,17 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
       })
       .sort((x, y) => (x.role === 'owner' ? -1 : y.role === 'owner' ? 1 : x.name.localeCompare(y.name)));
 
-    agents.push({ id: a.id, name: a.name, audienceCount, group, capabilities, exposure, reasons, audience });
+    // The storage warning the Limits line has always promised, backed by the
+    // daily measurement (2026-09-30). Not an exposure level: a full disk hurts
+    // the machine, not who can reach the agent.
+    const disk = disks.get(a.id);
+    const over = disk && disk.bytes > warnBytes ? disk : undefined;
+    if (over) {
+      reasons.push(`uses ${gbLabel(over.bytes)} of storage (warning at ${gbLabel(warnBytes)})`);
+      overDisk.push({ id: a.id, name: a.name, bytes: over.bytes, measuredAt: over.measuredAt });
+    }
+
+    agents.push({ id: a.id, name: a.name, audienceCount, group, capabilities, exposure, reasons, audience, ...(over ? { diskOverBytes: over.bytes } : {}) });
   }
   agents.sort((x, y) => ({ high: 0, medium: 1, low: 2 })[x.exposure] - ({ high: 0, medium: 1, low: 2 })[y.exposure]);
 
@@ -213,8 +245,54 @@ export function computePosture(store: Store, input: PostureInput): PostureReport
   return {
     install,
     agents,
-    limits: { agentCap: envNum('HATCHABOT_MAX_AGENTS_PER_ACCOUNT', 0), liveAgents, diskWarnGB: envNum('HATCHABOT_AGENT_DISK_WARN_GB', 10) },
+    limits: {
+      agentCap: envNum('HATCHABOT_MAX_AGENTS_PER_ACCOUNT', 0),
+      liveAgents,
+      diskWarnGB: envNum('HATCHABOT_AGENT_DISK_WARN_GB', 10),
+      overDisk: overDisk.sort((x, y) => y.bytes - x.bytes),
+    },
   };
+}
+
+/**
+ * Measure each agent's storage (its volume, `du -sb /home/node` on a read-only
+ * one-shot mount — the same measurement the export estimate uses) and store it
+ * for computePosture. Nothing did this until 2026-09-30, so "Disk warning at
+ * 10 GB per agent" never warned. Sequential and skipped for an agent measured
+ * within `maxAgeMs`, so the boot-time sweep after every deploy costs nothing
+ * and the daily one is one short container per agent. A failed measurement
+ * (runner offline, agent mid-rebuild) keeps the previous one.
+ */
+export async function measureAgentDisks(deps: {
+  store: Store;
+  providerFor: (hostId: string) => RuntimeProvider;
+  isBusy?: (agentId: string) => boolean;
+  maxAgeMs?: number;
+  now?: () => number;
+  log?: (event: string, detail: Record<string, unknown>) => void;
+}): Promise<{ measured: number; failed: number }> {
+  const now = deps.now ?? Date.now;
+  const maxAge = deps.maxAgeMs ?? 20 * 3_600_000;
+  const known = deps.store.agentDiskBytes();
+  let measured = 0;
+  let failed = 0;
+  for (const a of deps.store.listAllActiveAgents()) {
+    if ((a.state !== 'RUNNING' && a.state !== 'STOPPED') || !a.runtimeRef) continue;
+    if (deps.isBusy?.(a.id)) continue;
+    const last = known.get(a.id);
+    if (last && now() - Date.parse(last.measuredAt) < maxAge) continue;
+    try {
+      const res = await deps.providerFor(a.hostId).execShellOnVolume(a.runtimeRef, 'du -sb /home/node 2>/dev/null | cut -f1', { readOnly: true });
+      const out = res.stdout.trim();
+      if (!/^\d+$/.test(out)) { failed++; continue; }
+      deps.store.setAgentDiskBytes(a.id, Number(out), new Date(now()).toISOString());
+      measured++;
+    } catch (err) {
+      failed++;
+      deps.log?.('security.disk_measure_failed', { agentId: a.id, err: String(err).slice(0, 200) });
+    }
+  }
+  return { measured, failed };
 }
 
 /**
@@ -228,6 +306,7 @@ export function riskKeys(report: PostureReport): string[] {
   }
   for (const a of report.agents) {
     if (a.exposure !== 'low') keys.push(`agent:${a.id}:${a.exposure}`);
+    if (a.diskOverBytes) keys.push(`disk:${a.id}`);
   }
   return keys.sort();
 }

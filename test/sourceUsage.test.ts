@@ -79,7 +79,7 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     expect(src!.slots).toHaveLength(288);
     expect(src!.slots.find((x) => x.slot === '2026-09-15T15:45')).toEqual({ slot: '2026-09-15T15:45', ok: 0, limited: 4 });
     expect(src!.slots.find((x) => x.slot === '2026-09-15T14:30')).toEqual({ slot: '2026-09-15T14:30', ok: 2, limited: 0 });
-    expect(src!.others).toEqual({ agents: 1, requests5h: 3, requests7d: 4 }); // counts only, no names
+    expect(src!.others).toEqual({ agents: 1, liveAgents: 1, requests5h: 3, requests7d: 4 }); // counts only, no names
     // …and so does the plan's 5-hour window passing with no call at all: the
     // limit has reset by then, whether or not anyone tried.
     expect(summarizeSourceUsage(store, OWNER, NOW + 5 * 3_600_000)[0]!.status).toBe('ok');
@@ -92,6 +92,29 @@ describe('sampleSourceUsage + summarizeSourceUsage', () => {
     [src] = summarizeSourceUsage(store, OWNER, NOW + 120_000);
     expect(src!.status).toBe('ok');
     expect(src!.limitHits7d).toBe(4);
+  });
+
+  // 2026-09-30: a member on a shared source got no banner for 5 h while the
+  // source refused the owner's agents — status was judged from theirs alone.
+  it('the status is the source\'s: every account\'s refusals and successes count, the history stays the viewer\'s', async () => {
+    const { store } = await world();
+    const at = (min: number) => new Date(NOW - min * 60_000).toISOString();
+    // The owner's agent is refused; the member's agent 'x' made no call since.
+    store.addLimitHit('a', 'max', at(30), 'claude-opus-4-8');
+    store.setUsageCursor('x', at(120), at(120));
+    const [member] = summarizeSourceUsage(store, 'user-other', NOW);
+    expect(member).toMatchObject({ id: 'max', mine: false, status: 'limited', limitedSince: at(30), limitHits7d: 0, liveAgents: 1 });
+    expect(member!.lastLimitAt).toBeUndefined(); // whose refusal: not theirs to see
+    const [owner] = summarizeSourceUsage(store, OWNER, NOW);
+    expect(owner).toMatchObject({ mine: true, status: 'limited', liveAgents: 2, others: { liveAgents: 1 } });
+    // Only the member's agent refused: the owner hears about it too.
+    const { store: s2 } = await world();
+    s2.addLimitHit('x', 'max', at(10), 'claude-opus-4-8');
+    s2.setUsageCursor('a', at(60), at(60));
+    expect(summarizeSourceUsage(s2, OWNER, NOW)[0]).toMatchObject({ status: 'limited', limitedSince: at(10), limitHits7d: 0 });
+    // A success by anyone after the refusal clears it for everyone.
+    s2.setUsageCursor('a', at(5), at(5));
+    expect(summarizeSourceUsage(s2, 'user-other', NOW)[0]!.status).toBe('ok');
   });
 
   it('successes come from the transcripts: the first pass replaces the log\'s partial counts, a repeat never doubles (review, 2026-09-29)', async () => {

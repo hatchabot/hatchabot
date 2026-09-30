@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { Store } from '../src/store/store.js';
-import { computePosture, riskKeys, diffRisks } from '../src/orchestrator/posture.js';
+import { computePosture, riskKeys, diffRisks, measureAgentDisks } from '../src/orchestrator/posture.js';
+import type { RuntimeProvider } from '../src/providers/provider.js';
 
 const OWNER = 'user-a';
 
@@ -89,5 +90,73 @@ describe('risk diffing', () => {
     const d = diffRisks(keys, ['agent:x:high']); // owner-header is new since last time
     expect(d.added).toEqual(['install:owner-header:critical']);
     expect(d.removed).toEqual([]);
+  });
+});
+
+// 2026-09-30: "Disk warning at 10 GB per agent" had nothing measuring it.
+describe('agent storage warning', () => {
+  it('an agent measured over the warning gets a reason, a Limits entry and a risk key', () => {
+    const store = baseStore();
+    agent(store, 'big');
+    agent(store, 'small');
+    store.setAgentDiskBytes('big', 12.4e9, '2026-09-30T03:00:00.000Z');
+    store.setAgentDiskBytes('small', 2e9);
+    const report = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'identity' });
+    const big = report.agents.find((a) => a.id === 'big')!;
+    expect(big.reasons).toContain('uses 12.4 GB of storage (warning at 10.0 GB)');
+    expect(big.diskOverBytes).toBe(12.4e9);
+    expect(report.agents.find((a) => a.id === 'small')!.diskOverBytes).toBeUndefined();
+    expect(report.limits.overDisk).toEqual([{ id: 'big', name: 'big', bytes: 12.4e9, measuredAt: '2026-09-30T03:00:00.000Z' }]);
+    expect(riskKeys(report)).toContain('disk:big');
+    expect(riskKeys(report)).not.toContain('disk:small');
+  });
+
+  it('honours HATCHABOT_AGENT_DISK_WARN_GB', () => {
+    const store = baseStore();
+    agent(store, 'mid');
+    store.setAgentDiskBytes('mid', 3e9);
+    process.env.HATCHABOT_AGENT_DISK_WARN_GB = '2';
+    try {
+      const report = computePosture(store, { ownerId: OWNER, isHostOwner: true, authMode: 'identity' });
+      expect(report.limits.overDisk?.map((d) => d.id)).toEqual(['mid']);
+    } finally {
+      delete process.env.HATCHABOT_AGENT_DISK_WARN_GB;
+    }
+  });
+
+  it('measureAgentDisks: read-only du per agent, sequential, skips fresh/busy/archived, keeps the old value on a failure', async () => {
+    const store = baseStore();
+    agent(store, 'run', { runtimeRef: 'rt-run' });
+    agent(store, 'sleep', { state: 'STOPPED', runtimeRef: 'rt-sleep' });
+    agent(store, 'fresh', { runtimeRef: 'rt-fresh' });
+    agent(store, 'busy', { runtimeRef: 'rt-busy' });
+    agent(store, 'arch', { state: 'ARCHIVED', runtimeRef: 'rt-arch' });
+    agent(store, 'broken', { runtimeRef: 'rt-broken' });
+    const now = Date.parse('2026-09-30T04:00:00.000Z');
+    store.setAgentDiskBytes('fresh', 5, new Date(now - 3_600_000).toISOString());
+    store.setAgentDiskBytes('broken', 7, new Date(now - 2 * 86_400_000).toISOString());
+    const seen: Array<{ ref: string; script: string; readOnly?: boolean }> = [];
+    let live = 0;
+    const provider = {
+      async execShellOnVolume(ref: string, script: string, opts?: { readOnly?: boolean }) {
+        live++;
+        expect(live).toBe(1); // one at a time
+        seen.push({ ref, script, readOnly: opts?.readOnly });
+        await new Promise((r) => setTimeout(r, 2));
+        live--;
+        if (ref === 'rt-broken') return { code: 1, stdout: '', stderr: 'no such volume' };
+        return { code: 0, stdout: ref === 'rt-run' ? '11000000000\n' : '42\n', stderr: '' };
+      },
+    } as unknown as RuntimeProvider;
+    const r = await measureAgentDisks({ store, providerFor: () => provider, isBusy: (id) => id === 'busy', now: () => now });
+    expect(r).toEqual({ measured: 2, failed: 1 });
+    expect(seen.map((x) => x.ref).sort()).toEqual(['rt-broken', 'rt-run', 'rt-sleep']);
+    expect(seen.every((x) => x.readOnly === true && x.script.includes('du -sb /home/node'))).toBe(true);
+    const d = store.agentDiskBytes();
+    expect(d.get('run')!.bytes).toBe(11e9);
+    expect(d.get('sleep')!.bytes).toBe(42);
+    expect(d.get('fresh')!.bytes).toBe(5);
+    expect(d.get('broken')!.bytes).toBe(7);
+    expect(d.has('arch')).toBe(false);
   });
 });

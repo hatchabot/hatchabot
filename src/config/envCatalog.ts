@@ -74,9 +74,9 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('limits', 'HATCHABOT_AGENT_DISK_WARN_GB', '10', 'Warn when an agent\'s storage passes this size.'),
   s('limits', 'HATCHABOT_IMPORT_MAX_GB', '8', 'How big an imported .hatchabot file may expand to.'),
   s('limits', 'HATCHABOT_FILE_MAX_MB', '512', 'Largest single download from an agent\'s Files tab.'),
-  s('limits', 'HATCHABOT_FILES_MB_TELEGRAM', '50', 'Largest file an agent sends on Telegram (Telegram\'s own limit is 50).'),
+  s('limits', 'HATCHABOT_FILES_MB_TELEGRAM', '50', 'Largest file an agent sends or receives on Telegram (Telegram\'s own limit is 50).'),
   s('limits', 'HATCHABOT_FILES_MB_DISCORD', '10', 'Largest file an agent sends on Discord (up to 500 on a boosted server).'),
-  s('limits', 'HATCHABOT_FILES_MB_SLACK', '100', 'Largest file an agent sends on Slack (up to 1000).'),
+  s('limits', 'HATCHABOT_FILES_MB_SLACK', '100', 'Largest file an agent sends or receives on Slack (up to 1000).'),
 
   // Agents
   s('agents', 'HATCHABOT_HIBERNATE_AFTER', null, 'Put agents to sleep after this long without use, e.g. 36h (90m, 6h, 2d). Unset: they never sleep.'),

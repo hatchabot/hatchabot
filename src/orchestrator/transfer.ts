@@ -550,14 +550,19 @@ async function importAgentInner(
     );
   }
 
-  // Prefer the importer's OWN profile over a profile merely shared with the
-  // installation — defaulting onto someone else's shared subscription would
-  // silently bill them. Own+vendor-match → own → any vendor-match → anything.
+  // The installation's ⭐ Default, when this importer can see it, wins the
+  // silent pick — "preselect this source whenever anyone creates or imports
+  // an agent", as template.ts already did; a restore used to take the
+  // importer's own first (2026-09-30). Otherwise prefer the importer's OWN
+  // profile over one merely shared with the installation — defaulting onto
+  // someone else's shared subscription would silently bill them.
+  // Own+vendor-match → own → any vendor-match → anything.
   const profiles = store.listAIProfiles(opts.ownerId);
   const mine = profiles.filter((p) => p.ownerId === opts.ownerId);
   const profile = opts.aiProfileId
     ? store.getAIProfile(opts.aiProfileId)
-    : (mine.find((p) => p.vendor === manifest.ai.vendor) ??
+    : (profiles.find((p) => p.defaultSource) ??
+      mine.find((p) => p.vendor === manifest.ai.vendor) ??
       mine[0] ??
       profiles.find((p) => p.vendor === manifest.ai.vendor) ??
       profiles[0]);

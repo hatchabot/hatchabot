@@ -72,8 +72,9 @@ describe('its runtime spec', () => {
     expect(patch.telegram).toBeUndefined();
     const cmds = buildConfigCommands(patch).map((c) => c.argv.join(' '));
     expect(cmds.some((c) => c.startsWith('config set tools.deny') && OPS_TOOLS_DENY.every((d) => c.includes(d)))).toBe(true);
-    expect(cmds.some((c) => c.startsWith('mcp set hatchabot'))).toBe(true);
-    expect(buildConfigCommands(patch).find((c) => c.argv[0] === 'mcp')?.sensitive).toBe(true);
+    // A config set of the entry `mcp set` wrote, so the key rides the seed's private batch file (2026-09-30).
+    expect(cmds.some((c) => c.startsWith('config set mcp.servers.hatchabot'))).toBe(true);
+    expect(buildConfigCommands(patch).find((c) => c.argv[2] === 'mcp.servers.hatchabot')?.sensitive).toBe(true);
     // The old key dies when a new one is minted.
     const two = await buildRuntimeSpec(deps, a.id);
     const k1 = (one.workspace.configPatch as any).ops.token, k2 = (two.workspace.configPatch as any).ops.token;

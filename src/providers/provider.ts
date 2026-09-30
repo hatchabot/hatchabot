@@ -252,8 +252,11 @@ export interface RuntimeProvider {
    * surgeries OpenClaw's CLI has no verb for (e.g. removing a revoked member
    * from the pairing allowlist file). Prefer exec() whenever a CLI verb exists.
    * `timeoutMs` overrides the provider's default (a web chat turn waits for the model).
+   * `secret`: the script carries a secret, so it is sent over stdin (`bash -s`)
+   * and never appears on a command line — argv is readable by every local
+   * user through /proc (2026-09-30).
    */
-  execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number }): Promise<ExecResult>;
+  execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number; secret?: boolean }): Promise<ExecResult>;
 
   /**
    * Run a shell script against the agent's VOLUME in a one-shot container,

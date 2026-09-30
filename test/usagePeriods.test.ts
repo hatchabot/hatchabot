@@ -93,6 +93,35 @@ describe('computeUsagePeriod', () => {
     expect(den.cost!.high).toBe(den.cost!.low);
   });
 
+  // 2026-09-30: an unpriced model showed "est. $0.00+"; and billing followed
+  // the agent's current source, not the one the tokens were spent on.
+  it('an API model with no known price is marked unpriced, not priced at $0', () => {
+    const store = world();
+    store.insertAIProfile({ id: 'odd', ownerId: OWNER, name: 'Odd key', vendor: 'anthropic', kind: 'api_key', model: 'claude-made-up-9', secretRef: 'ai/odd', createdAt: 'now' });
+    store.insertAgent({ id: 'shed', ownerId: OWNER, name: 'Shed', slug: 'shed', state: 'RUNNING', aiProfileId: 'odd', hostId: 'h1', runtimeRef: 'mock://shed', persona: '', sharedMemory: true, createdAt: 'now', updatedAt: 'now' } as never);
+    store.addTokenSample('shed', 'odd', iso(50 * MIN), 1_000);
+    store.addTokenSample('shed', 'odd', iso(20 * MIN), 3_000);
+    const v = computeUsagePeriod(store, OWNER, 'hour', NOW);
+    const shed = v.agents.find((a) => a.name === 'Shed')!;
+    expect(shed).toMatchObject({ billing: 'api', cost: null, unpriced: true, model: 'claude-made-up-9' });
+    // The total still prices Den, and says it is not the whole story.
+    expect(v.cost).toMatchObject({ agents: 1, partial: true });
+  });
+
+  it('tokens are billed to the source each reading was taken on', () => {
+    const store = world();
+    // Den moved from its API key to the subscription 30 minutes ago.
+    store.setAgentAIProfile('den', 'sub');
+    store.addTokenSample('den', 'sub', iso(5 * MIN), 125_900); // +500 on the subscription
+    const v = computeUsagePeriod(store, OWNER, 'hour', NOW);
+    const den = v.agents.find((a) => a.name === 'Den')!;
+    expect(den.tokens).toBe(900);
+    // Most of the hour was on the subscription: the row says so, and the API part keeps its price.
+    expect(den).toMatchObject({ billing: 'included', profileName: 'Max' });
+    expect(den.cost!.low).toBeCloseTo(400 / 1e6 * 5, 6);
+    expect(v.byBilling).toEqual({ included: 550, api: 400, local: 0 });
+  });
+
   it('a few hours back: 6 hours in 15-minute bars counts the last hours, not the morning (2026-09-28)', () => {
     const v = computeUsagePeriod(world(), OWNER, '6h', NOW);
     expect(v.bucketMinutes).toBe(15);

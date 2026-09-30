@@ -112,6 +112,23 @@ describe('seed script — the guards that protect an agent’s memory', () => {
     expect(seed()).toContain(`'\\''`);
     expect(seed()).not.toMatch(/^\s*touch \/tmp\/pwned/m);
   });
+
+  // 2026-09-30: argv is world-readable through /proc; the tokens went on
+  // `openclaw config set --batch-json …`. Now only builtins carry them.
+  it('secrets appear only inside printf (a builtin), never on an openclaw command line', async () => {
+    const bot = ['made', 'up', 'bot', 'value'].join('-'), gw = ['made', 'up', 'gw', 'value'].join('-');
+    await provider.provision(spec({
+      workspace: {
+        files: { 'SOUL.md': '# soul' },
+        configPatch: { agentId: 'kitchen-helper', authMode: 'api-key', gatewayToken: gw, telegram: { accountId: 'bot', botToken: bot, dmPolicy: 'pairing' } },
+      },
+    }) as any);
+    const lines = seed().split('\n').filter((l) => l.includes(bot) || l.includes(gw));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const l of lines) {
+      expect(l).toMatch(/^\{ __hb_f=\$\(mktemp\); printf %s '[^']*' > "\$__hb_f"; __hb_rc=0; openclaw config set --batch-file "\$__hb_f" --replace/);
+    }
+  });
 });
 
 // OpenClaw 2026.9's `agents add` scaffolds SOUL.md/AGENTS.md/USER.md, and the
@@ -450,5 +467,45 @@ describe('remote (fleet) provider — points docker at a remote daemon', () => {
     expect(log).not.toContain('/home/me/docs:/home/me/docs');
     // and everything still targeted the remote daemon
     expect(log.split('\n').filter(Boolean).every((l) => l.startsWith(`-H ${HOST} `))).toBe(true);
+  });
+});
+
+// 2026-09-30: a Google refresh token or a deploy key rode `docker exec … bash
+// -c '<script>'`, readable by any local user's ps. A secret script goes over stdin.
+describe('execShell with a secret sends the script over stdin', () => {
+  it('argv carries no script; bash -s runs it whole, with nothing left for its commands to read', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'acl-stdin-'));
+    const log = join(d, 'argv'), input = join(d, 'stdin');
+    const stdinStub = join(d, 'docker');
+    writeFileSync(stdinStub, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\ncat > ${JSON.stringify(input)}\necho done\n`, { mode: 0o755 });
+    const p = new LocalDockerProvider({ docker: stdinStub, image: 'test-image:latest' });
+    const secret = ['made', 'up', 'refresh', 'value'].join('-');
+    const b64 = Buffer.from(secret).toString('base64');
+    const script = [
+      'set -e',
+      `trap 'echo cleaned' EXIT`,
+      `echo ${JSON.stringify(b64)} | base64 -d > "$OUT"`,
+      // A command that reads stdin must not swallow the rest of the script.
+      'read -r line || echo no-input',
+      "cat <<'EOT'",
+      'heredoc-ok',
+      'EOT',
+      'false',
+      'echo not-reached',
+    ].join('\n');
+    const res = await p.execShell('rt-1', script, { secret: true });
+    expect(res.code).toBe(0);
+    const args = readFileSync(log, 'utf8');
+    expect(args).toMatch(/^exec -i \S+ bash -s$/m);
+    expect(args).not.toContain(b64);
+    // What the container's bash would read: run it the same way here.
+    const out = join(d, 'out');
+    const r = spawnSync('bash', ['-s'], { input: readFileSync(input, 'utf8'), encoding: 'utf8', env: { PATH: process.env.PATH, OUT: out } });
+    expect(readFileSync(out, 'utf8')).toBe(secret);
+    expect(r.stdout).toBe('no-input\nheredoc-ok\ncleaned\n');
+    expect(r.status).not.toBe(0); // set -e still ends it at `false`
+    // Without `secret`, the old argv form (non-secret scripts are unchanged).
+    await provider.execShell('rt-1', 'echo hi');
+    expect(argv()).toMatch(/^exec \S+ bash -c echo hi$/m);
   });
 });

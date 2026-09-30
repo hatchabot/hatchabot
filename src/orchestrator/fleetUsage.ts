@@ -10,7 +10,7 @@
  */
 import type { Store } from '../store/store.js';
 import type { Agent } from '../domain/types.js';
-import { estimateCost, type CostRange } from './pricing.js';
+import { estimateCost, pricesNothing, type CostRange } from './pricing.js';
 import { FIRST_READ_REACH_MS } from './usage.js';
 import { hourOf, slotOf } from './sourceUsage.js';
 
@@ -23,6 +23,8 @@ export interface UsageAgentRow {
   tokens: number; requests: number; limited: number;
   billing: 'included' | 'api' | 'local'; profileName?: string; model?: string;
   cost: CostRange | null;
+  /** API tokens with no known price for its model: the page says so rather than "$0.00+". */
+  unpriced?: boolean;
 }
 export interface UsagePeriodView {
   period: UsagePeriod;
@@ -52,6 +54,13 @@ const SPAN: Record<UsagePeriod, { ms: number; bucketMinutes: number }> = {
   week: { ms: 7 * 24 * 60 * MIN, bucketMinutes: 120 },
 };
 
+type Billing = UsageAgentRow['billing'];
+/** How a source's tokens are paid for. */
+function billingOfProfile(store: Store, profileId: string | undefined): Billing {
+  const p = profileId ? store.getAIProfile(profileId) : undefined;
+  return p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
+}
+
 function bucketStart(iso: string, bucketMinutes: number): string {
   const t = Date.parse(iso);
   return new Date(Math.floor(t / (bucketMinutes * MIN)) * bucketMinutes * MIN).toISOString();
@@ -66,6 +75,14 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
   const ids = new Set(agents.map((a) => a.id));
   const per = new Map<string, { tokens: number; requests: number; limited: number }>();
   const row = (id: string) => { let r = per.get(id); if (!r) { r = { tokens: 0, requests: 0, limited: 0 }; per.set(id, r); } return r; };
+  // Tokens by the source each reading was taken on (token_samples.profile_id),
+  // so an agent moved from an API key to a subscription keeps its API tokens
+  // priced and its subscription tokens included (2026-09-30; both were
+  // labelled by the agent's CURRENT source).
+  const currentProfile = new Map(agents.map((a) => [a.id, a.aiProfileId]));
+  const byProfile = new Map<string, Map<string, number>>();
+  const billingCache = new Map<string, Billing>();
+  const billingOf = (pid: string): Billing => { let b = billingCache.get(pid); if (!b) { b = billingOfProfile(store, pid); billingCache.set(pid, b); } return b; };
   const buckets = new Map<string, UsageBucket>();
   const startOf = new Date(Math.floor((now - ms) / (bucketMinutes * MIN)) * bucketMinutes * MIN).getTime();
   for (let t = startOf; t <= now; t += bucketMinutes * MIN) {
@@ -77,6 +94,10 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
   const firstBucket = [...buckets.values()][0];
   for (const d of store.tokenDeltas(ids, from)) {
     row(d.agentId).tokens += d.delta;
+    const pid = d.profileId ?? currentProfile.get(d.agentId) ?? '';
+    const m = byProfile.get(d.agentId) ?? new Map<string, number>();
+    m.set(pid, (m.get(pid) ?? 0) + d.delta);
+    byProfile.set(d.agentId, m);
     // A rise happened between two readings ten minutes apart: spread it over
     // the buckets that span covers. All of it at the reading's time made the
     // 5-minute bars alternate full and empty, one reading behind the request
@@ -111,25 +132,40 @@ export function computeUsagePeriod(store: Store, ownerId: string, period: UsageP
     }
   }
 
+  const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
   const rows: UsageAgentRow[] = agents.map((a) => {
-    const p = store.getAIProfile(a.aiProfileId);
-    const billing: UsageAgentRow['billing'] = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
     const r = per.get(a.id) ?? { tokens: 0, requests: 0, limited: 0 };
+    // The source that carried most of the window's tokens names the row;
+    // with no tokens, the agent's current one.
+    const spent = [...(byProfile.get(a.id) ?? new Map<string, number>())];
+    const main = spent.sort((x, y) => y[1] - x[1])[0]?.[0] || a.aiProfileId;
+    const p = store.getAIProfile(main);
+    const billing = billingOf(main);
+    let apiTokens = 0;
+    let apiProfile: string | undefined;
+    for (const [pid, n] of spent) {
+      byBilling[billingOf(pid)] = (byBilling[billingOf(pid)] ?? 0) + n;
+      if (billingOf(pid) === 'api') { apiTokens += n; apiProfile ??= pid; }
+    }
     const model = a.model ?? p?.model;
+    // Priced on the API source's model (the spent list is largest first).
+    const apiModel = a.model ?? (apiProfile ? store.getAIProfile(apiProfile)?.model : undefined) ?? model;
     // At the agent's own measured price per token when known (cache reads, most
     // of the tokens, cost a tenth of input); else the all-input..all-output bracket.
-    const rate = billing === 'api' && r.tokens > 0 ? store.agentTokenRate(a.id) : undefined;
-    const cost = billing !== 'api' || r.tokens <= 0 ? null
-      : rate ? { low: r.tokens * rate.usdPerToken, high: r.tokens * rate.usdPerToken, partial: rate.partial }
-      : estimateCost([{ model: model ?? '', tokens: r.tokens }]);
-    return { id: a.id, name: a.name, state: a.state, ...r, billing, profileName: p?.name, model, cost };
+    const rate = apiTokens > 0 ? store.agentTokenRate(a.id) : undefined;
+    let cost: CostRange | null = apiTokens <= 0 ? null
+      : rate ? { low: apiTokens * rate.usdPerToken, high: apiTokens * rate.usdPerToken, partial: rate.partial }
+      : estimateCost([{ model: apiModel ?? '', tokens: apiTokens }]);
+    // No price for the model at all: "est. $0.00+" read as nearly free
+    // (2026-09-30). Say it is unknown instead.
+    const unpriced = pricesNothing(cost);
+    if (unpriced) cost = null;
+    return { id: a.id, name: a.name, state: a.state, ...r, billing, profileName: p?.name, model: unpriced ? apiModel : model, cost, ...(unpriced ? { unpriced: true } : {}) };
   }).filter((r) => r.tokens || r.requests).sort((x, y) => y.tokens - x.tokens || y.requests - x.requests);
 
-  const byBilling: Record<string, number> = { included: 0, api: 0, local: 0 };
-  for (const r of rows) byBilling[r.billing] = (byBilling[r.billing] ?? 0) + r.tokens;
   const billed = rows.filter((r) => r.cost);
   const cost = billed.length
-    ? { low: billed.reduce((s, r) => s + r.cost!.low, 0), high: billed.reduce((s, r) => s + r.cost!.high, 0), partial: billed.some((r) => r.cost!.partial), agents: billed.length }
+    ? { low: billed.reduce((s, r) => s + r.cost!.low, 0), high: billed.reduce((s, r) => s + r.cost!.high, 0), partial: billed.some((r) => r.cost!.partial) || rows.some((r) => r.unpriced), agents: billed.length }
     : null;
   const totals = { tokens: rows.reduce((s, r) => s + r.tokens, 0), requests: rows.reduce((s, r) => s + r.requests, 0), limited: rows.reduce((s, r) => s + r.limited, 0) };
   // What each agent's readings can know reaches FIRST_READ_REACH_MS before its
@@ -197,7 +233,11 @@ export function snapshotDailyUsage(store: Store, now = Date.now()): void {
       const deltas = store.tokenDeltas(ids, startIso).filter((d) => !endIso || d.at < endIso);
       store.setUsageUsed(ownerId, day, deltas.reduce((s, d) => s + d.delta, 0));
       const perAgent = new Map<string, number>();
-      for (const d of deltas) if (billingOf.get(d.agentId) === 'api') perAgent.set(d.agentId, (perAgent.get(d.agentId) ?? 0) + d.delta);
+      // Priced by the source each reading was taken on, as the Usage view does.
+      for (const d of deltas) {
+        const b = d.profileId ? billingOfProfile(store, d.profileId) : billingOf.get(d.agentId);
+        if (b === 'api') perAgent.set(d.agentId, (perAgent.get(d.agentId) ?? 0) + d.delta);
+      }
       let low = 0, high = 0;
       for (const [id, tokens] of perAgent) {
         const rate = store.agentTokenRate(id);

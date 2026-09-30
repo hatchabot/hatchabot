@@ -465,3 +465,27 @@ describe('review, 2026-09-29: too-big and sleeping agents', () => {
     await expect(exportAgent(other.deps, 'a1')).resolves.toBeTruthy();
   });
 });
+
+// 2026-09-30: "⭐ Default — preselect this source whenever anyone creates or
+// imports an agent". A restore with no source chosen took the importer's own.
+describe('an import with no source chosen takes the ⭐ Default', () => {
+  it('the visible default wins; an unshared default of someone else does not', async () => {
+    const src = await installation();
+    await seedSourceAgent(src);
+    const { data } = await exportAgent(src.deps, 'a1');
+    const withHouse = async (shared: boolean) => {
+      const dst = await installation('importer');
+      dst.store.insertAIProfile({
+        id: 'p-house', ownerId: 'boss', name: 'House Claude', vendor: 'anthropic', kind: 'api_key',
+        model: 'claude-opus-4-8', secretRef: 'ai/p-house', createdAt: 'now',
+      });
+      await dst.secrets.put('ai/p-house', 'made-up-house-key');
+      dst.store.setAIProfileDefault('p-house');
+      if (shared) dst.store.setAIProfileShared('p-house', true);
+      return importAgent(dst.deps, data, { ownerId: 'importer', verifyToken: async () => 'kitchenbot' });
+    };
+    // Not shared: the importer cannot see it, so their own is taken.
+    expect((await withHouse(false)).aiProfileId).toBe('p1');
+    expect((await withHouse(true)).aiProfileId).toBe('p-house');
+  });
+});

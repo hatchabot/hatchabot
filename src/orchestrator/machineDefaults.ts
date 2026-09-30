@@ -43,7 +43,9 @@ export interface DefaultSpec {
 const mb = (kind: ChannelKindForFiles, label: string): DefaultSpec => ({
   key: `files${label}` as DefaultKey,
   env: filesEnv(kind),
-  label: `Files an agent may send on ${label}`,
+  // OpenClaw applies mediaMaxMb to downloads too on Telegram and Slack, so
+  // there it bounds what the agent receives as well (2026-09-30).
+  label: `Files an agent may ${kind === 'discord' ? 'send' : 'send or receive'} on ${label}`,
   help: `In MB, 1–${FILES_MB_MAX[kind]}. ${kind === 'discord' ? 'A Discord server without boosts takes 10 MB; a boosted one more.' : kind === 'telegram' ? 'Telegram bots can send up to 50 MB.' : 'Slack itself takes up to 1 GB.'} A bigger file is left out of the reply.`,
   fallback: String(FILES_MB_DEFAULT[kind]),
   check(input) {
@@ -84,7 +86,7 @@ export const MACHINE_DEFAULTS: DefaultSpec[] = [
     help: 'The most one agent\'s container may use, unless the agent or its class says otherwise. 3g suits most; a busy agent with a long history may want more.',
     fallback: '3g',
     check: memory(MEMORY_CAP_MIN_BYTES, MEMORY_CAP_CEILING_BYTES, 'Memory per agent'),
-    applies: 'now, on every agent that uses the default (no rebuild)',
+    applies: 'now, on every agent that uses the default, runners included (no rebuild; a runner that cannot be reached gets it at its next rebuild)',
   },
   {
     key: 'engineMemory',
