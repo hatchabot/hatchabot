@@ -88,10 +88,12 @@ adopting, backing up, and operating a fleet of agents.
   heaviest — measured from the agents' own model calls. When a provider starts
   refusing calls, a banner names the source and the affected agents, so a quiet
   fleet has an explanation instead of a mystery.
-- **Know it's really answering.** A per-agent **❤️ Health** check probes the live
-  gateway — event loop, Telegram connection (with last error), plugin errors — so
-  you can tell a truly-running agent from one that's *listed* as running but has
-  quietly stopped responding.
+- **Know it's really answering.** A per-agent **❤️ Health** check checks its
+  gateway and chat connection, and when its AI source last answered — event
+  loop, Telegram connection (with last error), plugin errors, and whether the
+  AI source has refused or failed since its last answer — so you can tell a
+  truly-running agent from one that's *listed* as running but has quietly
+  stopped responding.
 - **A running history.** The app shows what has actually happened — agents
   rebuilt, members admitted, snapshots taken, runtimes that stopped answering.
   Overview → Checks → Logs and each agent's Setup log show it, filterable by
@@ -106,9 +108,12 @@ adopting, backing up, and operating a fleet of agents.
   bot and secrets, verified on arrival, and rolled back if anything fails.
   Discord and Slack bots stay behind and are re-attached there. Or **Download** a copy
   to a single file and **Restore** it wherever you like.
-- **Share a trained agent.** Built a good one? **Share** it as a template — its
-  persona, instructions and schedules, with *no* bot, members or secrets. You
-  choose whether its memory goes too — read it before you send it. **Import** stands up a fresh copy the recipient
+- **Share a trained agent.** Built a good one? **Share** it as a template — a
+  copy of its instructions and scheduled tasks (and MEMORY.md if you choose),
+  *without* its bot, members or conversations — and send the file. Read it
+  before you send it: an agent may have written names or addresses into its
+  instructions, so Share tells you how many email addresses and phone numbers
+  the copy mentions, and where. **Import** stands up a fresh copy the recipient
   runs with their *own* bot and their *own* people.
 - **Bring your own AI — or none at all.** An Anthropic, OpenAI or Google
   Gemini API key, a Claude Pro/Max subscription (its `claude setup-token`,

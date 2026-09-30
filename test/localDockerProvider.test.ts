@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { LocalDockerProvider, SEED_STEP_MARK, secretValuesOf, seedFailure, seedStepLabel } from '../src/providers/localDockerProvider.js';
 
 /**
@@ -111,6 +111,60 @@ describe('seed script — the guards that protect an agent’s memory', () => {
     // can never break out of its argument and execute.
     expect(seed()).toContain(`'\\''`);
     expect(seed()).not.toMatch(/^\s*touch \/tmp\/pwned/m);
+  });
+});
+
+// OpenClaw 2026.9's `agents add` scaffolds SOUL.md/AGENTS.md/USER.md, and the
+// copy-if-absent kept those over a template's, a clone's and the manager's
+// own (2026-09-30). Run the workspace part of the real script, in a sandbox.
+describe('seed script — a first build replaces the scaffold with the files it was given', () => {
+  const files = { 'SOUL.md': '# ours', 'USER.md': '# them', 'MEMORY.md': '# memory', 'memory/2026-09-29.md': 'notes' };
+  const run = (script: string, root: string) => {
+    // Only the lines that decide and copy: the fresh test, `agents add`, the workspace step.
+    const keep = script.split('\n').filter((l) => /__hb_fresh|'agents' 'add'|^mkdir -p '\/home\/node\/\.openclaw\/agents|cp '\/seed\/|\.hatchabot-first-build/.test(l));
+    const body = keep.join('\n').replaceAll('/home/node', `${root}/home`).replaceAll('/seed/', `${root}/seed/`);
+    // `openclaw agents add` stands in for the real scaffold; nothing else runs.
+    const openclaw = `openclaw() { d="$6"; mkdir -p "$d"; for f in SOUL.md AGENTS.md USER.md; do echo "# scaffold" > "$d/$f"; done; }`;
+    const bin = join(root, 'bin');
+    execFileSync('mkdir', ['-p', bin]);
+    for (const b of ['bash', 'mkdir', 'cp', 'rm']) execFileSync('ln', ['-sf', execFileSync('bash', ['-c', `command -v ${b}`], { encoding: 'utf8' }).trim(), join(bin, b)]);
+    const r = spawnSync(join(bin, 'bash'), ['-c', `set -euo pipefail\n${openclaw}\n${body}`], { encoding: 'utf8', env: { PATH: bin, HOME: join(root, 'home') } });
+    expect(r.status, r.stderr).toBe(0);
+  };
+  const ws = (root: string, name: string) => readFileSync(join(root, 'home/.openclaw/agents/kitchen-helper/agent', name), 'utf8');
+
+  it('first build: ours over the scaffold; later builds: the agent’s edits stay', async () => {
+    await provider.provision(spec({ workspace: { files, replaceScaffold: Object.keys(files), configPatch: { agentId: 'kitchen-helper', authMode: 'api-key' } } }) as any);
+    const script = seed();
+    const root = mkdtempSync(join(tmpdir(), 'acl-scaffold-'));
+    for (const [n, t] of Object.entries(files)) { execFileSync('mkdir', ['-p', dirname(join(root, 'seed/workspace', n))]); writeFileSync(join(root, 'seed/workspace', n), t); }
+    run(script, root);
+    expect(ws(root, 'SOUL.md')).toBe('# ours');
+    expect(ws(root, 'USER.md')).toBe('# them');
+    expect(ws(root, 'AGENTS.md')).toBe('# scaffold\n'); // not given: OpenClaw's stays
+    expect(ws(root, 'memory/2026-09-29.md')).toBe('notes');
+    expect(existsSync(join(root, 'home/.openclaw/.hatchabot-first-build-kitchen-helper'))).toBe(false);
+    // The agent edits its files; a rebuild must not undo that.
+    writeFileSync(join(root, 'home/.openclaw/agents/kitchen-helper/agent/SOUL.md'), '# edited');
+    run(script, root);
+    expect(ws(root, 'SOUL.md')).toBe('# edited');
+  });
+
+  it('a first build that stopped before its files were in still counts as first', async () => {
+    await provider.provision(spec({ workspace: { files, replaceScaffold: ['SOUL.md'], configPatch: { agentId: 'kitchen-helper', authMode: 'api-key' } } }) as any);
+    const root = mkdtempSync(join(tmpdir(), 'acl-scaffold-'));
+    for (const [n, t] of Object.entries(files)) { execFileSync('mkdir', ['-p', dirname(join(root, 'seed/workspace', n))]); writeFileSync(join(root, 'seed/workspace', n), t); }
+    const agentDir = join(root, 'home/.openclaw/agents/kitchen-helper/agent');
+    execFileSync('mkdir', ['-p', agentDir]);
+    writeFileSync(join(agentDir, 'SOUL.md'), '# scaffold\n');
+    writeFileSync(join(root, 'home/.openclaw/.hatchabot-first-build-kitchen-helper'), '');
+    run(seed(), root);
+    expect(ws(root, 'SOUL.md')).toBe('# ours');
+  });
+
+  it('without replaceScaffold the script is as before: every copy guarded', async () => {
+    await provider.provision(spec() as any);
+    expect(seed()).not.toContain('__hb_fresh');
   });
 });
 

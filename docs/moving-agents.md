@@ -182,13 +182,18 @@ memory. To hand someone a copy of an agent you *built and trained*, use a
 **template** instead (**Share** on the agent card's ⋯ menu; the same **Import**
 button in the header takes it, or `hatchabot share` / `import`).
 
-A template is deliberately **stripped of identity**, so it's safe to email:
+A template leaves out the agent's **identity** — but it is not safe to email
+unread. Agents write names, addresses and phone numbers into their own
+`AGENTS.md`, and those travel. Share counts the email addresses, phone numbers
+and key-shaped strings the copy mentions and shows where, before the file is
+saved or sent (`hatchabot share` prints the same list). Read it before you send it.
 
 | Carried | Left out |
 |---|---|
-| the trained **`SOUL.md` + `AGENTS.md`** | the **bot token** |
-| the agent's **`MEMORY.md`** (web: asked when you Share; CLI: only with `--include-memory`) | all **members** and their Telegram IDs |
-| the AI **vendor** preference | conversation history |
+| the trained **`SOUL.md` + `AGENTS.md`** (minus the sections Hatchabot writes for this machine) | the **bot token** |
+| its enabled **scheduled tasks** (name, schedule, message) | all **members** and their Telegram IDs |
+| the agent's **`MEMORY.md`** (web: asked when you Share; CLI: only with `--include-memory`) | conversation history, its daily notes (`memory/`) and `USER.md` |
+| the AI **vendor** preference | — |
 | a checklist of **data sources & env-var names** it expects | — |
 
 **Import stands up a fresh agent.** The importer owns it, gives it its **own**
@@ -198,8 +203,8 @@ seed the new agent at first provision. Import then prints what the agent still
 needs — any data sources or env vars the template declared — for the recipient
 to wire up in **⚙ Settings**.
 
-*Note on memory:* the web app asks when you Share — OK for a faithful copy,
-Cancel for persona & instructions only; the CLI leaves memory out unless you
+*Note on memory:* the web app asks when you Share — OK also includes
+`MEMORY.md` (its summary notes), Cancel leaves it out; the CLI leaves it out unless you
 pass `--include-memory`. If the memory holds personal facts (or, on a
 shared-memory agent, `source:<telegram_id>` tags), share without it, or curate
 `MEMORY.md` first.

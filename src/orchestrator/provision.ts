@@ -17,7 +17,7 @@ import { ChannelSetupRequired } from '../channels/channel.js';
 import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
-import { autoSnapshot, writeFileInAgent } from './snapshots.js';
+import { autoSnapshot, workspacePath, writeFileInAgent } from './snapshots.js';
 import { addCron, cronTargetFor, listCrons } from './crons.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
@@ -370,6 +370,11 @@ async function runProvisionStepsInner(
       store.setPendingSchedules(agentId, stillPending.length ? stillPending : null);
     }
 
+    // A clone's daily notes and USER.md are on the volume now. Kept as seeds,
+    // a note the agent later deleted would come back at every rebuild
+    // (2026-09-30).
+    store.dropCarriedMemorySeed(agentId);
+
     // Step 8: live.
     const live = store.setAgentState(agentId, 'RUNNING');
     return { agent: live, deepLink: provisioned?.deepLink };
@@ -691,6 +696,7 @@ export async function buildRuntimeSpec(
     const problem = sharePathProblem(p);
     if (problem) throw new ProviderError(`shared folder refused at build: ${problem}`, `A shared folder is no longer safe to mount: ${problem} Remove it from the agent's Data, then rebuild.`);
   }
+  const seedFiles = store.getAgentSeed(agentId);
   return {
     agentId,
     slug: agent.slug,
@@ -710,8 +716,13 @@ export async function buildRuntimeSpec(
         sharedMemory: agent.sharedMemory,
         // A template import stashes its trained SOUL.md/AGENTS.md here; the seed
         // script only writes files that don't yet exist, so this seeds once.
-        seedFiles: store.getAgentSeed(agentId),
+        seedFiles,
       }),
+      // …except over what `agents add` scaffolded moments earlier in the same
+      // first build: on 2026.9 it writes its own SOUL.md, AGENTS.md and
+      // USER.md, and a template's, a clone's and the manager's files never
+      // landed (2026-09-30).
+      replaceScaffold: Object.keys(seedFiles),
       configPatch: {
         agentId: agent.slug,
         displayName: agent.name,
@@ -848,12 +859,28 @@ export async function buildRuntimeSpec(
  */
 export const CHECKPOINT_TIMEOUT_MS = Number(process.env.HATCHABOT_CHECKPOINT_TIMEOUT_MS ?? 180_000);
 
+/**
+ * A fingerprint of what the agent has saved: MEMORY.md's content and the
+ * names and sizes under memory/. Two readings around a checkpoint tell "it
+ * wrote something" from "the turn merely ended" — a turn that exits 0 has
+ * saved nothing if it found nothing worth saving (2026-09-30). One cheap
+ * exec; undefined when it could not be read.
+ */
+export async function memoryFingerprint(provider: RuntimeProvider, runtimeRef: string, slug: string): Promise<string | undefined> {
+  const res = await provider.execShell(
+    runtimeRef,
+    `cd ${JSON.stringify(workspacePath(slug, '.'))} && { cat MEMORY.md 2>/dev/null | sha256sum; find memory -type f -printf '%P %s\\n' 2>/dev/null | LC_ALL=C sort; } | sha256sum | cut -c1-64`,
+  ).catch(() => undefined);
+  const fp = res?.code === 0 ? res.stdout.trim() : '';
+  return /^[0-9a-f]{64}$/.test(fp) ? fp : undefined;
+}
+
 export async function checkpointMemory(
   provider: RuntimeProvider,
   runtimeRef: string,
   slug: string,
   log: (event: string, detail: Record<string, unknown>) => void,
-): Promise<{ ok: boolean; detail?: string }> {
+): Promise<{ ok: boolean; detail?: string; changed?: boolean }> {
   const prompt =
     'System note: please save anything from our recent conversation worth keeping — decisions, ' +
     'facts about the people you serve, ongoing tasks or context — into your memory (MEMORY.md, ' +
@@ -866,15 +893,20 @@ export async function checkpointMemory(
     // A summary turn that writes memory can legitimately take >60s under load;
     // cutting it mid-turn leaves the container stopped on a broken turn (the
     // "interrupted by a gateway restart" notice). 3 minutes, its own budget.
+    const before = await memoryFingerprint(provider, runtimeRef, slug);
     const res = await provider.exec(runtimeRef, ['agent', '--agent', slug, '-m', prompt], { timeoutMs: CHECKPOINT_TIMEOUT_MS });
     // The checkpoint IS an agent turn, so it needs the AI source to actually
     // run — an out-of-credits / expired / rate-limited source makes the turn
     // fail (non-zero), and the summary is NOT written. Report that instead of
     // pretending it saved, so callers can tell the user the truth.
     const ok = res.code === 0 && !res.timedOut;
-    log('memory.checkpointed', { slug, ok, timedOut: !!res.timedOut, tail: (res.stdout || res.stderr).slice(-200) });
+    // Did it write anything? Unknown (undefined) when either reading failed.
+    const after = ok && before ? await memoryFingerprint(provider, runtimeRef, slug) : undefined;
+    const changed = before && after ? before !== after : undefined;
+    log('memory.checkpointed', { slug, ok, changed, timedOut: !!res.timedOut, tail: (res.stdout || res.stderr).slice(-200) });
     return {
       ok,
+      changed,
       detail: ok ? undefined
         : res.timedOut ? 'the AI source did not finish in time'
           : (res.stderr || res.stdout || 'the AI source could not complete the turn (out of credits, expired, or unreachable?)').trim().slice(-180),
@@ -1010,6 +1042,7 @@ async function rebuildAgentInner(deps: ProvisionDeps, agentId: string): Promise<
     await waitForSkillsSettled(provider, runtimeRef, agent.slug, sleep, log);
     await reindexMemoryIfSwitched(deps, agentId, runtimeRef, log);
     log('runtime.rebuilt', { agentId, runtimeRef });
+    store.dropCarriedMemorySeed(agentId); // on the volume now (see provision)
     const live = store.setAgentState(agentId, 'RUNNING');
     void explainFailedCheckpoint();
     return live;

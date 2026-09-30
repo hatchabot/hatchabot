@@ -880,6 +880,115 @@ const SCENARIOS = String.raw`(() => {
         await refresh(false);
       }
     },
+    // Share a copy (2026-09-30): the file says what it mentions about people before it is saved; MEMORY.md is its own question.
+    sharePersonal: async () => {
+      const prev = window.fetch;
+      const asked = [];
+      try {
+        const personal = { emails: 2, phones: 1, tokens: 0, more: 0, hits: [
+          { where: 'AGENTS.md', line: 3, kind: 'email', sample: 'ann@example.com' },
+          { where: 'Scheduled task “Digest”', line: 1, kind: 'phone', sample: '416-555-0123' }] };
+        window.fetch = async (input, init) => {
+          const url = String(typeof input === 'string' ? input : input.url);
+          if (!/\/v1\/agents\/a1\/export(\?|$)/.test(url)) return prev(input, init);
+          asked.push(url);
+          return new Response(new Blob(['x']), { status: 200, headers: {
+            'content-type': 'application/octet-stream',
+            'content-disposition': 'attachment; filename="homework-helper.template.hatchabot"',
+            'x-hatchabot-personal': encodeURIComponent(JSON.stringify(personal)) } });
+        };
+        openV2Agent('a1', 'sharing');
+        const btn = await until(() => byText('#v2Pane button', 'Share a copy'));
+        ok('the button says what the copy is: ' + btn.title, /instructions and scheduled tasks, without its bot, members or conversations\. Read it before you send it/.test(btn.title) && !/safe to email/i.test(btn.title));
+        window.__confirmAnswer = false; // leave MEMORY.md out, then don't save
+        btn.click();
+        await until(() => document.getElementById('toast').textContent.includes('Not saved'));
+        const said = window.__confirms.slice(-2);
+        ok('asked about MEMORY.md in plain words: ' + said[0], said[0].includes('also include MEMORY.md (its summary notes; may contain personal facts)'));
+        ok('then said what the copy mentions: ' + said[1], said[1].includes('This copy mentions 2 email addresses and 1 phone number — read it before you send it.'));
+        ok('and where', said[1].includes('AGENTS.md, line 3: ann@example.com') && said[1].includes('Scheduled task “Digest”, line 1: 416-555-0123'));
+        ok('without MEMORY.md: ' + asked[0], asked[0].endsWith('?excludeMemory=1'));
+        window.__confirmAnswer = true;
+        btn.click();
+        await until(() => document.getElementById('toast').textContent.includes('Saved homework-helper.template.hatchabot'));
+        ok('with MEMORY.md this time', asked.length === 2 && !asked[1].includes('excludeMemory'));
+      } finally {
+        window.fetch = prev; window.__confirmAnswer = true;
+        try { v2Close(); } catch {}
+      }
+    },
+    // Send to someone here: the count and the places show in the dialog before anything leaves.
+    sendScan: async () => {
+      try {
+        window.__override['/v1/agents/a1/export/scan'] = { emails: 13, phones: 2, tokens: 0, more: 12, hits: [
+          { where: 'AGENTS.md', line: 4, kind: 'email', sample: 'owner@example.com' },
+          { where: 'AGENTS.md', line: 9, kind: 'phone', sample: '(416) 555-0199' }] };
+        openSendAgent('a1', 'Homework Helper');
+        const scan = document.getElementById('sendScan');
+        await until(() => scan.textContent.includes('read it before you send it'));
+        ok('the count: ' + scan.textContent.replace(/\s+/g, ' ').slice(0, 120), scan.textContent.includes('This copy mentions 13 email addresses and 2 phone numbers — read it before you send it.'));
+        ok('where, behind a toggle', !!scan.querySelector('details') && scan.querySelector('details').textContent.includes('AGENTS.md, line 4: owner@example.com') && scan.querySelector('details').textContent.includes('…and 12 more'));
+        ok('the scan leaves MEMORY.md out, as the send does', calls('GET', /\/v1\/agents\/a1\/export\/scan$/).at(-1).url.includes('excludeMemory=1'));
+        ok('the dialog no longer promises safe contents', !/safe contents/i.test(document.getElementById('sendAgentDlg').textContent));
+      } finally {
+        delete window.__override['/v1/agents/a1/export/scan'];
+        if (sendAgentDlg.open) sendAgentDlg.close();
+      }
+    },
+    // Asleep (2026-09-30): the tile says opening it wakes it — so opening it wakes it, in the console, saying so.
+    asleepTileWakes: async () => {
+      try {
+        const list = await (await fetch('/v1/agents')).json();
+        window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, state: 'STOPPED', hibernatedAt: new Date().toISOString() } : a);
+        window.__override['/v1/agents/a1/health'] = { reachable: true, status: 'healthy' };
+        await refresh(false);
+        const t = tile('Homework Helper');
+        ok('the tile says it is asleep', !!t && v2Status(agents.find((a) => a.id === 'a1')).label === 'Asleep — wakes when someone writes to it, or when you open it');
+        t.click();
+        await until(() => document.getElementById('consoleDlg').open);
+        ok('it says it is waking it', document.getElementById('consoleCover').textContent.includes('Waking it up'));
+        await until(() => calls('POST', /\/v1\/agents\/a1\/wake$/).length === 1);
+        ok('not the settings sheet', !v2AgentDlg.open);
+        await until(() => (document.getElementById('consoleFrame').getAttribute('src') || '').startsWith('/v1/agents/a1/ui/chat'), 12000);
+      } finally {
+        if (document.getElementById('consoleDlg').open) closeConsole();
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/a1/health'];
+        await refresh(false);
+      }
+    },
+    // Health (2026-09-30): the gateway answering is not its AI source answering.
+    healthAiSource: async () => {
+      try {
+        const hAgo = (h) => new Date(Date.now() - h * 3600000).toISOString();
+        window.__override['/v1/agents/a1/health'] = { reachable: true, status: 'healthy', pluginErrors: [],
+          aiSource: { name: 'Claude Max (household)', lastAnsweredAt: hAgo(5), refusingSince: hAgo(2), refusal: 'refused' } };
+        await openHealth('a1', 'Homework Helper');
+        const body = document.getElementById('healthBody');
+        await until(() => body.textContent.includes('AI source'));
+        ok('not "Responding" while its source refuses: ' + body.textContent.replace(/\s+/g, ' ').slice(0, 160), body.textContent.includes('Up, but its AI source is not answering') && !body.textContent.includes('Responding'));
+        ok('refused since, and when it last answered', /refused \(rate-limited\) since 2h ago/.test(body.textContent) && body.textContent.includes('last answered 5h ago'));
+        ok('the dialog says what it checks', document.getElementById('healthDlg').textContent.includes('Checks its gateway and chat connection, and when its AI source last answered'));
+        window.__override['/v1/agents/a1/health'] = { reachable: true, status: 'healthy', pluginErrors: [], aiSource: { lastAnsweredAt: hAgo(2) } };
+        await loadHealth();
+        await until(() => body.textContent.includes('Responding'));
+        ok('answering: last answered: ' + body.textContent.replace(/\s+/g, ' ').slice(0, 160), /AI source\s*last answered 2h ago/.test(body.textContent.replace(/\s+/g, ' ')));
+      } finally {
+        delete window.__override['/v1/agents/a1/health'];
+        if (healthDlg.open) healthDlg.close();
+      }
+    },
+    // Chat → Memory (2026-09-30): a turn that changed nothing is not "Saved".
+    checkpointNothingNew: async () => {
+      try {
+        window.__answer = { 'POST /v1/agents/a1/checkpoint': [{ status: 200, body: { ok: true, saved: false, nothingNew: true, note: 'It found nothing new to save — its memory files are unchanged.' } }] };
+        await checkpointAgent('a1', 'Homework Helper');
+        const t = document.getElementById('toast').textContent;
+        ok('says it found nothing new: ' + t, t.includes('found nothing new to save') && !t.includes('Saved'));
+      } finally {
+        window.__answer = {};
+      }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {

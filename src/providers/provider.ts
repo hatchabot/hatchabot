@@ -64,6 +64,13 @@ export interface WorkspaceSeed {
   /** Relative path -> file contents, written into the agent's workspace. */
   files: Record<string, string>;
   /**
+   * Files (keys of `files`) that replace what OpenClaw's `agents add`
+   * scaffolded when the workspace is created in this build — a template's,
+   * a clone's or the manager's own SOUL.md/AGENTS.md/USER.md. On every later
+   * build they are guarded like the rest: never overwritten.
+   */
+  replaceScaffold?: string[];
+  /**
    * Surgical patch applied to the runtime's openclaw.json. We deliberately
    * do not template the whole file — see src/openclaw/configWriter.ts.
    */

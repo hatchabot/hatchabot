@@ -401,10 +401,37 @@ describe('Chat → Memory reports honestly when the AI source cannot run', () =>
     expect(res.json().error).toMatch(/couldn't save/i);
   });
 
-  it('returns saved:true when the checkpoint turn succeeds', async () => {
-    const { f } = await world(); // mock exec defaults to code 0
+  // The memory fingerprint read before and after the turn (2026-09-30).
+  const fingerprints = (provider: MockProvider, readings: string[]) => {
+    const real = provider.execShell.bind(provider);
+    provider.execShell = async (ref, script, opts) =>
+      script.includes('sha256sum') ? { code: 0, stdout: `${readings.shift() ?? ''}\n`, stderr: '' } : real(ref, script, opts);
+  };
+  const notified = (store: Store) => store.listEvents(['a1']).some((e) => e.event === 'memory.checkpoint_notified');
+
+  it('returns saved:true when the checkpoint turn changed its memory files', async () => {
+    const { f, store, provider } = await world(); // mock exec defaults to code 0
+    fingerprints(provider, ['a'.repeat(64), 'b'.repeat(64)]);
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/checkpoint', headers: as });
     expect(res.json().saved).toBe(true);
+    expect(notified(store)).toBe(true); // the Telegram note goes out on a real save
+  });
+
+  it('says it found nothing new — and sends no Telegram note — when its memory files did not change', async () => {
+    const { f, store, provider } = await world();
+    fingerprints(provider, ['c'.repeat(64), 'c'.repeat(64)]);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/checkpoint', headers: as });
+    expect(res.json()).toMatchObject({ ok: true, saved: false, nothingNew: true });
+    expect(res.json().note).toMatch(/nothing new to save/);
+    expect(notified(store)).toBe(false);
+  });
+
+  it('does not claim a save when its memory files could not be read', async () => {
+    const { f, store } = await world(); // the mock's shell answers nothing: no fingerprint
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/checkpoint', headers: as });
+    expect(res.json()).toMatchObject({ ok: true, saved: false, nothingNew: false });
+    expect(res.json().note).toMatch(/couldn't be checked/);
+    expect(notified(store)).toBe(false);
   });
 });
 
