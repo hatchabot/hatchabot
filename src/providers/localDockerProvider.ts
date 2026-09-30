@@ -20,7 +20,7 @@ import { CONTAINER_GEN } from '../orchestrator/rebuildPolicy.js';
 /** How much an imported archive may expand to on the volume (default 8 GiB). */
 const IMPORT_MAX_BYTES = Math.floor((Number(process.env.HATCHABOT_IMPORT_MAX_GB) || 8) * 2 ** 30);
 import { DOORMAN_ALIAS, DOORMAN_CONSOLE_PORT, DOORMAN_DOOR_PORT, doormanRoutes, doormanScript, HOST_ALIAS } from '../ops/doorman.js';
-import { batchConfigCommands, buildConfigCommands, describeConfigCommands, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
+import { batchConfigCommands, buildConfigCommands, describeConfigCommands, seedInvocation, WORKSPACE_DIR_TEMPLATE } from '../openclaw/configWriter.js';
 
 const execFileP = promisify(execFile);
 
@@ -400,8 +400,9 @@ export class LocalDockerProvider implements RuntimeProvider {
       script.push(`hb_already() { node -e 'let c={};try{c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"))}catch{}let ok=false;try{ok=!!new Function("c","require","return ("+process.argv[1]+")")(c,require)}catch{}process.exit(ok?0:1)' "$1"; }`);
       for (const [i, cmd] of cmds.entries()) {
         script.push(`__hb_step=${shq(seedStepLabel(labels[i]!))}`);
-        const invoke = `openclaw ${cmd.argv.map(shq).join(' ')}`;
-        const base = cmd.rawShell ?? (cmd.stdin ? `printf %s ${shq(cmd.stdin)} | ${invoke}` : invoke);
+        // Secrets reach openclaw through builtins and a private file, never
+        // its command line (seedInvocation, 2026-09-30).
+        const base = seedInvocation(cmd);
         let line = cmd.optional ? `${base} || true` : base;
         if (cmd.marker) {
           const f = shq(cmd.marker.file), v = shq(cmd.marker.value);
@@ -604,9 +605,33 @@ export class LocalDockerProvider implements RuntimeProvider {
     return this.#docker(['exec', container, 'openclaw', ...openclawArgv], opts?.timeoutMs);
   }
 
-  async execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number }): Promise<ExecResult> {
+  async execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number; secret?: boolean }): Promise<ExecResult> {
     const { container } = this.#names(runtimeRef);
+    if (opts?.secret) {
+      // Over stdin, not argv: `docker exec … bash -c '<script>'` showed a
+      // refresh token or deploy key to anyone running ps, both here and in
+      // the container (2026-09-30). One brace group, so bash has read the
+      // whole script before anything runs, and nothing in it can read the
+      // rest of the script as its own input.
+      return this.#execStdin(['exec', '-i', container, 'bash', '-s'], stdinScript(script), opts.timeoutMs);
+    }
     return this.#docker(['exec', container, 'bash', '-c', script], opts?.timeoutMs);
+  }
+
+  /** A docker command with `input` on its stdin; a timeout answers timedOut, as #docker does. */
+  #execStdin(args: string[], input: string, timeoutMs?: number): Promise<ExecResult> {
+    return new Promise<ExecResult>((resolve) => {
+      const child = spawn(this.docker, this.#argv(args));
+      let stdout = '', stderr = '', timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs ?? Number(process.env.HATCHABOT_DOCKER_TIMEOUT_MS ?? 60_000));
+      timer.unref();
+      child.stdout.on('data', (c) => (stdout += c));
+      child.stderr.on('data', (c) => (stderr += c));
+      child.on('error', (err) => { clearTimeout(timer); resolve({ code: 1, stdout, stderr: stderr + String(err) }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve(timedOut ? { code: 1, stdout, stderr, timedOut: true } : { code: code ?? 1, stdout, stderr }); });
+      child.stdin.on('error', () => {});
+      child.stdin.end(input);
+    });
   }
 
   async execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean; image?: string }): Promise<ExecResult> {
@@ -1578,6 +1603,9 @@ export class LocalDockerProvider implements RuntimeProvider {
 }
 
 /** Minimal single-quote shell escaping for the generated seed script. */
+/** A script as `bash -s` reads it for execShell's `secret` mode: one group, its own stdin empty. */
+export const stdinScript = (script: string): string => `{\n${script}\n} </dev/null\n`;
+
 function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }

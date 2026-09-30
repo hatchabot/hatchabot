@@ -185,8 +185,10 @@ function bootstrapScript(): string {
 
 /**
  * Materialize one connection into a RUNNING agent's container. Secrets ride
- * base64 inside the script (same exposure class as deploy-key writes — an
- * accepted household risk, see docs/pre-production.md).
+ * base64 inside the script, which goes over stdin (execShell `secret`), never
+ * a command line: `docker exec … bash -c` showed the refresh token and the
+ * OAuth client secret to any local user's ps (2026-09-30). Inside, only
+ * builtins (echo) and pipes carry them.
  */
 export async function materializeConnection(
   deps: ConnectionSyncDeps,
@@ -241,7 +243,7 @@ export async function materializeConnection(
     // (review, 2026-09-29).
     `echo ${JSON.stringify(b64Token)} | base64 -d | ~/.local/bin/gog auth import --email "${conn.email}" --refresh-token-stdin --no-input --force${noSend}`,
   ].join('\n');
-  const res = await provider.execShell(agent.runtimeRef, script);
+  const res = await provider.execShell(agent.runtimeRef, script, { secret: true });
   if (res.code !== 0) {
     const error = (res.stderr || res.stdout || 'import failed').slice(0, 300);
     deps.log?.('connection.materialize_failed', { agentId: agent.id, email: conn.email, error });

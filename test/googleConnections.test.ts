@@ -202,6 +202,8 @@ describe('attach / detach / remove', () => {
     // Overwrites an entry the volume already holds (a rebuild or wake re-imports it; review, 2026-09-29).
     expect(script).toMatch(/gog auth import [^\n]*--force/);
     expect(script).toContain('keyring_password'); // non-interactive plumbing bootstrapped
+    // The token is in this script: it goes over stdin, never a command line (2026-09-30).
+    expect(provider.secretShells.some((s) => s.includes('--refresh-token-stdin'))).toBe(true);
     const attached = store.listAgentConnections('a1');
     expect(attached).toHaveLength(1);
     expect(attached[0]).toMatchObject({ connectionId: connId, gmailNoSend: true });

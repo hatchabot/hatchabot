@@ -152,8 +152,11 @@ export class MockProvider implements RuntimeProvider {
     if (typeof r === 'function') return r(req);
     return r ?? { code: 0, stdout: 'ok', stderr: '' };
   }
-  async execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number }): Promise<ExecResult> {
+  /** Scripts sent with `secret` (over stdin in the real provider), in order. */
+  secretShells: string[] = [];
+  async execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number; secret?: boolean }): Promise<ExecResult> {
     this.#require(runtimeRef);
+    if (opts?.secret) this.secretShells.push(script);
     const chat = this.#webChatRead(script);
     if (chat) return chat;
     const turn = await this.#webChatTurn(script, opts);

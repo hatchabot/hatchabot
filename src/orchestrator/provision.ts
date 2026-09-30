@@ -1220,7 +1220,8 @@ export async function syncGitDataSources(
             Buffer.from(await secrets.get(d.secretRef!), 'utf8').toString('base64'),
             commit,
           );
-      const res = await provider.execShell(runtimeRef, script);
+      // A deploy key rides in the script: over stdin, off every command line (2026-09-30).
+      const res = await provider.execShell(runtimeRef, script, publicRepo ? undefined : { secret: true });
       if (res.code !== 0) {
         // Persist the reason on the source, not just in the audit log — a repo
         // that never cloned (nearly always: its deploy key isn't on the host
