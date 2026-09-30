@@ -22,6 +22,10 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   it used to show the size of each conversation, not what was spent, so a
   busy agent looked cheap. The last 8 days fill in at once. Status → Usage
   also shows the last 3, 6, 9 or 12 hours.
+- **Scheduled tasks reach you again** (v2.109.0): since OpenClaw 2026.9 they ran
+  and reached no one; they now name your chat, and old ones are repointed.
+- **Web chat guests get a member's rights** (v2.109.0), not yours: they can't
+  schedule tasks or change the agent's settings, just like a Telegram member.
 - **Chat on the web for people you trust** (v2.108.0): invite someone to
   talk to an agent from Hatchabot's own page, no chat app needed. For now
   they have your rights on that agent, so it's for people you trust.

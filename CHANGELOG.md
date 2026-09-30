@@ -2,6 +2,17 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.109.0] — 2026-09-29
+
+### Fixed
+- **Scheduled tasks reach you again.** Since the move to OpenClaw 2026.9, a task made in the app ran every day and reached nobody: 2026.9 refuses to deliver a result that names no chat and recipient ("Refusing implicit isolated cron delivery"), and the app showed those runs as ok. New tasks name the owner's own chat with the agent (Telegram first, else Discord or Slack), and a task on an agent in no chat app is quiet instead of failing every run. Existing tasks that announced to no one are pointed at the owner's chat after each start and then daily, one agent at a time; that also catches tasks the agents make themselves.
+
+### Changed
+- **Web chat guests now have a member's rights, not yours.** A person you give web chat to is treated the way OpenClaw treats a Telegram member: they can chat and ask the agent to use its tools, but they can't schedule tasks (`automations`, formerly `cron`) or change its settings (`gateway`). The other owner-only tools (plugins, sessions, nodes, terminal, computer, conversations_*, openclaw) and the owner-only commands (/reset, /new, /config set) are also off for them. You keep your own rights when you use web chat on your own agent.
+- Hatchabot checks the agent's gateway before it sends a guest's message. If the gateway can't confirm the turn is limited, the guest sees "<Agent> needs a rebuild before web chat works with guest rights. Rebuild <Agent> to turn on guest rights for web chat — ask its owner." The message goes back into their box, and the owner's activity log shows "web chat refused a guest: rebuild it to turn on guest rights". It never falls back to the owner's rights.
+- Web chat turns are quicker: about 0.3 s of overhead per message, down from about 0.75 s with the CLI on the Spark.
+- The invite dialog, the Allow web chat confirm, the member badge, the join page and docs/features.md now describe these rights. The warning about handing over your rights is gone.
+
 ## [2.108.1] — 2026-09-29
 
 ### Fixed
