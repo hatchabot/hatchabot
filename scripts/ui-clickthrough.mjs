@@ -638,7 +638,8 @@ const SCENARIOS = String.raw`(() => {
         key(true);
         eq('Shift+Enter sends nothing', calls('POST', /\/v1\/agents\/w1\/chat$/).length, 0);
         window.__answer = { 'POST /v1/agents/w1/chat': [{ status: 200, body: { reply: 'Try Middlemarch.' } },
-          { status: 429, body: { error: "That's 60 messages this hour — try again in 12 minutes." } }] };
+          { status: 429, body: { error: "That's 60 messages this hour — try again in 12 minutes." } },
+          { status: 409, body: { code: 'needs-rebuild', error: 'Book Club needs a rebuild before web chat works with guest rights. Rebuild Book Club to turn on guest rights for web chat — ask its owner.' } }] };
         key(false);
         ok('their message shows at once, with the thinking line', log.textContent.includes('What should we read?'));
         const sent = await until(() => calls('POST', /\/v1\/agents\/w1\/chat$/)[0]);
@@ -649,6 +650,13 @@ const SCENARIOS = String.raw`(() => {
         document.getElementById('wchatSend').click();
         await until(() => document.getElementById('wchatErr').textContent.includes('60 messages this hour'));
         ok('the box is free again', !document.getElementById('wchatSend').disabled);
+        // An agent that can't give a guest a member's turn yet (step 2): said plainly; the message comes back.
+        box.value = 'Anything by Eliot?';
+        document.getElementById('wchatSend').click();
+        await until(() => document.getElementById('wchatErr').textContent.includes('Rebuild Book Club to turn on guest rights for web chat'));
+        eq('the undelivered message is back in the box', box.value, 'Anything by Eliot?');
+        ok('and not in the conversation as if sent', !log.textContent.includes('Anything by Eliot?'));
+        ok('what was answered before stays', log.textContent.includes('Try Middlemarch.'));
       } finally {
         window.__answer = {};
         if (webChatDlg.open) webChatDlg.close();
@@ -675,7 +683,11 @@ const SCENARIOS = String.raw`(() => {
         ok('an Allow web chat switch for Sam', !!allow);
         window.__confirmAnswer = false;
         allow.click(); await sleep(100);
-        ok('it warns about the rights first: ' + (window.__confirms.at(-1) || ''), /your rights on this agent/.test(window.__confirms.at(-1)) && /schedule tasks/.test(window.__confirms.at(-1)));
+        const said = window.__confirms.at(-1) || '';
+        ok("it says the rights first — a member's, like a Telegram member: " + said,
+          /a member's rights, exactly like a Telegram member/.test(said) && /ask it to use its tools, but not schedule tasks or change its settings/.test(said));
+        ok('no longer says it hands over your rights', !/your rights|hand your laptop/.test(said));
+        ok("the badge says a member's rights", /a member's rights/.test(jo.querySelector('.chip.webchat').title));
         eq('declined: nothing sent', calls('PUT', /\/web-chat$/).length, 0);
         window.__confirmAnswer = true;
         allow.click();
@@ -705,7 +717,8 @@ const SCENARIOS = String.raw`(() => {
         const web = document.getElementById('invWeb');
         ok('the web way shows', !web.hidden && web.textContent.includes('Chat on the web — for people you trust'));
         ok('it says they need to reach this machine', web.textContent.includes('Tailscale'));
-        ok('it says what it hands over', /They will have your rights on this agent: through it\s+they can schedule tasks and change its settings/.test(web.textContent) && web.textContent.includes("hand your laptop to"));
+        ok("it says what they get: a member's rights", /They will have a member's rights, exactly like a Telegram\s+member: they can chat and ask it to use its tools, but not schedule tasks or change its settings/.test(web.textContent));
+        ok('no longer says it hands over your rights', !/your rights|hand your laptop/.test(web.textContent));
         eq('only the plain invite so far', calls('POST', /\/v1\/agents\/a1\/invites$/).map((c) => c.body), [{}]);
         document.getElementById('invWebBtn').click();
         await until(() => !document.getElementById('invWebLink').hidden);

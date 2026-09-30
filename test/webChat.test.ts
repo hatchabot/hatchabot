@@ -15,9 +15,11 @@ import { MemSecrets } from './support/world.js';
 
 /**
  * Chat on the web (2026-09-29): invited people the owner trusts talk to an
- * agent from the app. Turns run through `openclaw agent` in a session of
- * their own; the MockProvider answers the turn (execResponses) and the
- * history read (webChatSessions).
+ * agent from the app, in a session of their own. A guest's turn is a
+ * member's (no operator.admin: no owner-only tools); the agent's owner's is
+ * the owner's. The MockProvider answers the turn (webChatReply, requests in
+ * webChatTurns) and the history read (webChatSessions). The in-container
+ * client itself is tested against a fake gateway in webChatTurn.test.ts.
  */
 
 const OWNER = 'user-owner';
@@ -49,14 +51,15 @@ async function world(opts: { authMode?: 'password' | 'accounts' | 'identity' } =
   return { store, provider, f, runtimeRef, chat, history };
 }
 
-const turns = (p: MockProvider) => p.execLog.filter((a) => a[0] === 'agent');
+const turns = (p: MockProvider) => p.webChatTurns;
+const reply = (stdout: string, code = 0) => ({ code, stdout, stderr: '' });
 
 afterEach(() => { delete process.env.HATCHABOT_WEB_CHAT_PER_HOUR; });
 
 describe('who may chat on the web', () => {
   it('the owner and a web-chat member may; a plain member, a stranger and a removed member may not', async () => {
     const w = await world();
-    w.provider.execResponses.set('agent --agent kitchen', { code: 0, stdout: 'Pasta tonight.\n', stderr: '' });
+    w.provider.webChatReply = reply('Pasta tonight.\n');
     const owner = await w.chat(OWNER, 'What is for dinner?');
     expect(owner.statusCode, owner.body).toBe(200);
     expect(owner.json()).toEqual({ reply: 'Pasta tonight.' });
@@ -81,12 +84,13 @@ describe('who may chat on the web', () => {
     await w.chat(OWNER, 'one');
     await w.chat(SAM, 'two');
     const [a, b] = turns(w.provider);
-    expect(a!.slice(0, 4)).toEqual(['agent', '--agent', 'kitchen', '--session-key']);
-    expect(a![4]).toBe(webChatSessionKey(OWNER));
-    expect(b![4]).toBe(webChatSessionKey(SAM));
-    expect(a![4]).not.toBe(b![4]);
-    expect(b![4]).toMatch(/^web:[0-9a-f]{16}$/);
-    expect(b!.slice(5)).toEqual(['-m', '[Sam via the web app]\ntwo']);
+    expect(a).toMatchObject({ agentId: 'kitchen', sessionKey: webChatSessionKey(OWNER) });
+    expect(b).toMatchObject({ agentId: 'kitchen', sessionKey: webChatSessionKey(SAM) });
+    expect(a!.sessionKey).not.toBe(b!.sessionKey);
+    expect(b!.sessionKey).toMatch(/^web:[0-9a-f]{16}$/);
+    expect(b!.message).toBe('[Sam via the web app]\ntwo');
+    // Nothing goes through the operator's CLI any more.
+    expect(w.provider.execLog.some((x) => x[0] === 'agent')).toBe(false);
     const ev = w.store.listEvents(['a1'], 50).filter((e) => e.event === 'webchat.turn');
     expect(ev).toHaveLength(2);
     expect(JSON.stringify(ev)).not.toContain('two');
@@ -101,8 +105,7 @@ describe('who may chat on the web', () => {
     // Hold the first turn open, then try again as the same person, and as another.
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    const exec = w.provider.exec.bind(w.provider);
-    w.provider.exec = async (ref, argv, o) => { if (argv[0] === 'agent') await gate; return exec(ref, argv, o); };
+    w.provider.webChatReply = async () => { await gate; return reply('done'); };
     const first = w.chat(SAM, 'long question');
     await new Promise((r) => setTimeout(r, 20));
     const second = await w.chat(SAM, 'hello?');
@@ -119,12 +122,17 @@ describe('who may chat on the web', () => {
     const { markBusy, clearBusy } = await import('../src/orchestrator/busy.js');
     markBusy('a1');
     try { expect((await w.chat(SAM, 'hi')).statusCode).toBe(409); } finally { clearBusy('a1'); }
-    w.provider.execResponses.set('agent --agent kitchen', { code: 1, stdout: '', stderr: 'gateway said no, with config detail' });
+    w.provider.webChatReply = { code: 1, stdout: '', stderr: 'gateway said no, with config detail' };
     const bad = await w.chat(SAM, 'hi');
     expect(bad.statusCode).toBe(502);
     expect(bad.body).not.toContain('config detail');
-    w.provider.execResponses.set('agent --agent kitchen', { code: 124, stdout: '', stderr: '', timedOut: true } as never);
+    w.provider.webChatReply = { code: 124, stdout: '', stderr: '', timedOut: true };
     expect((await w.chat(SAM, 'hi')).statusCode).toBe(504);
+    // The client's own deadline (exit 124) is a timeout too.
+    w.provider.webChatReply = { code: 124, stdout: '', stderr: 'no answer in time' };
+    expect((await w.chat(SAM, 'hi')).statusCode).toBe(504);
+    w.provider.webChatReply = { code: 25, stdout: '', stderr: 'a run is already in flight' };
+    expect((await w.chat(SAM, 'hi')).json().error).toMatch(/still answering/);
     w.store.setAgentState('a1', 'STOPPED');
     expect((await w.chat(SAM, 'hi')).statusCode).toBe(409);
   });
@@ -146,11 +154,63 @@ describe('who may chat on the web', () => {
     await w.provider.stop(w.runtimeRef);
     w.store.setAgentState('a1', 'STOPPED');
     w.store.setHibernated('a1', new Date().toISOString());
-    w.provider.execResponses.set('agent --agent kitchen', { code: 0, stdout: 'Awake now.', stderr: '' });
+    w.provider.webChatReply = reply('Awake now.');
     const res = await w.chat(SAM, 'wake up');
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().reply).toBe('Awake now.');
     expect(w.store.getAgent('a1')).toMatchObject({ state: 'RUNNING', hibernatedAt: undefined });
+  });
+});
+
+describe("a guest has a member's rights, never the owner's", () => {
+  it("a guest's turn asks for no operator.admin; the agent's owner keeps an owner's", async () => {
+    const w = await world();
+    await w.chat(SAM, 'hi');
+    await w.chat(OWNER, 'hi');
+    const [sam, owner] = turns(w.provider);
+    expect(sam).toMatchObject({ rights: 'member', scopes: ['operator.read', 'operator.write'] });
+    expect(sam!.scopes).not.toContain('operator.admin');
+    expect(owner).toMatchObject({ rights: 'owner' });
+    expect(owner!.scopes).toContain('operator.admin');
+    // The client stops itself at the route's timeout; the exec gets a little longer.
+    expect(sam!.timeoutMs).toBeGreaterThanOrEqual(10_000);
+    expect(w.provider.webChatTurnOpts[0]!.timeoutMs).toBeGreaterThan(sam!.timeoutMs);
+  });
+
+  it('another member who manages it still has a member\'s rights: only the agent\'s owner has the owner\'s', async () => {
+    const w = await world();
+    w.store.insertMembership({ id: 'm9', agentId: 'a1', userId: 'user-kim', role: 'owner', displayName: 'Kim', status: 'active', webChat: true });
+    expect((await w.chat('user-kim', 'hi')).statusCode).toBe(200);
+    expect(turns(w.provider)[0]).toMatchObject({ rights: 'member' });
+    expect(turns(w.provider)[0]!.scopes).not.toContain('operator.admin');
+  });
+
+  it("an agent whose gateway can't prove the limit refuses the guest — rebuild it — and never falls back to the owner's rights", async () => {
+    const w = await world();
+    w.provider.webChatReply = (req) => req.rights === 'member'
+      ? { code: 21, stdout: '', stderr: 'the gateway did not limit this connection (granted: null)' }
+      : reply('owner answer');
+    const res = await w.chat(SAM, 'hello');
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ code: 'needs-rebuild' });
+    expect(res.json().error).toBe('Kitchen needs a rebuild before web chat works with guest rights. Rebuild Kitchen to turn on guest rights for web chat — ask its owner.');
+    // One attempt, as a member; no owner-rights retry, no operator CLI.
+    expect(turns(w.provider)).toHaveLength(1);
+    expect(turns(w.provider)[0]!.rights).toBe('member');
+    expect(w.provider.execLog.some((x) => x[0] === 'agent')).toBe(false);
+    const ev = w.store.listEvents(['a1'], 50).find((e) => e.event === 'webchat.needs_rebuild');
+    expect(ev?.detail).toMatchObject({ userId: SAM });
+    // The owner, on their own agent, is not affected.
+    expect((await w.chat(OWNER, 'hello')).json()).toEqual({ reply: 'owner answer' });
+  });
+
+  it('an owner-only command from a guest (/reset, /config set) is refused plainly', async () => {
+    const w = await world();
+    w.provider.webChatReply = { code: 23, stdout: '', stderr: 'owner-only: {"code":"FORBIDDEN","message":"missing scope: operator.admin"}' };
+    const res = await w.chat(SAM, '/reset');
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toMatch(/Only its owner can do that/);
+    expect(res.body).not.toContain('operator.admin');
   });
 });
 

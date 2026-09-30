@@ -133,10 +133,31 @@ export class MockProvider implements RuntimeProvider {
     if (v && typeof v === 'object' && 'code' in (v as object)) return v as ExecResult;
     return { code: 0, stdout: JSON.stringify({ messages: v ?? [] }), stderr: '' };
   }
-  async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
+  /**
+   * Web chat turns (orchestrator/webChat.ts turnScript): each request as the
+   * in-container client would get it, in order — and what it answers:
+   * `webChatReply` (an ExecResult as-is, or a function of the request),
+   * else the reply "ok".
+   */
+  webChatTurns: Array<{ agentId: string; sessionKey: string; message: string; rights: string; scopes: string[]; timeoutMs: number }> = [];
+  webChatReply: ExecResult | ((req: MockProvider['webChatTurns'][number]) => ExecResult | Promise<ExecResult>) | undefined;
+  webChatTurnOpts: Array<{ timeoutMs?: number } | undefined> = [];
+  async #webChatTurn(script: string, opts?: { timeoutMs?: number }): Promise<ExecResult | undefined> {
+    if (!script.includes('/tmp/hatchabot-webturn-')) return undefined;
+    const r64 = /REQ='([A-Za-z0-9+/=]*)'/.exec(script)?.[1] ?? '';
+    const req = JSON.parse(Buffer.from(r64, 'base64').toString('utf8')) as MockProvider['webChatTurns'][number];
+    this.webChatTurns.push(req);
+    this.webChatTurnOpts.push(opts);
+    const r = this.webChatReply;
+    if (typeof r === 'function') return r(req);
+    return r ?? { code: 0, stdout: 'ok', stderr: '' };
+  }
+  async execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number }): Promise<ExecResult> {
     this.#require(runtimeRef);
     const chat = this.#webChatRead(script);
     if (chat) return chat;
+    const turn = await this.#webChatTurn(script, opts);
+    if (turn) return turn;
     if (script.startsWith('node -e "$(echo ') && script.includes('| base64 -d)"')) {
       const u = this.usage.get(runtimeRef) ?? this.usage.get('*');
       this.execLog.push(['usage-read', runtimeRef]);
