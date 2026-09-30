@@ -190,8 +190,23 @@ describe('a clone carries the daily notes and USER.md', () => {
     const ws = provider.lastSpec!.workspace;
     expect(ws.files['memory/2026-09-29.md']).toBe('notes');
     expect(ws.files['SOUL.md']).toBe('# Trained');
-    expect([...ws.replaceScaffold!].sort()).toEqual(['MEMORY.md', 'SOUL.md', 'USER.md', 'memory/2026-09-29.md']);
+    expect([...ws.replaceScaffold!].sort()).toEqual(['AGENTS.md', 'MEMORY.md', 'SOUL.md', 'USER.md', 'memory/2026-09-29.md']);
     expect(Object.keys(store.getAgentSeed(agent.id)).sort()).toEqual(['MEMORY.md', 'SOUL.md']);
+  });
+
+  it('a plain new agent\'s "What is it for?" persona replaces OpenClaw\'s generic SOUL.md on its first build (2026-09-30)', async () => {
+    const store = new Store(new Database(':memory:'));
+    const secrets = { m: new Map<string, string>(), async put(r: string, v: string) { this.m.set(r, v); }, async get(r: string) { const v = this.m.get(r); if (v === undefined) throw new Error(r); return v; }, async delete(r: string) { this.m.delete(r); } };
+    store.insertHost({ id: 'h1', ownerId: 'o', kind: 'local', provider: 'mock', name: 'box', settings: {}, createdAt: 'now' });
+    store.insertAIProfile({ id: 'p1', ownerId: 'o', name: 'AI', vendor: 'anthropic', kind: 'api_key', model: 'm', secretRef: 'ai/p1', createdAt: 'now' });
+    await secrets.put('ai/p1', 'test-key');
+    const provider = new MockProvider();
+    const agent = createAgentRecord(store, { ownerId: 'o', name: 'Chef', aiProfileId: 'p1', hostId: 'h1', persona: 'Plans weeknight dinners for a family of four.' });
+    store.setAgentWebOnly(agent.id, true);
+    await runProvisionSteps({ store, secrets, provider, channel: {} as ChannelProvisioner, sleep: async () => {} } as never, agent.id);
+    const ws = provider.lastSpec!.workspace;
+    expect(ws.files['SOUL.md']).toContain('Plans weeknight dinners for a family of four.');
+    expect(ws.replaceScaffold).toEqual(expect.arrayContaining(['SOUL.md', 'AGENTS.md']));
   });
 });
 

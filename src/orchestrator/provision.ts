@@ -721,8 +721,10 @@ export async function buildRuntimeSpec(
       // …except over what `agents add` scaffolded moments earlier in the same
       // first build: on 2026.9 it writes its own SOUL.md, AGENTS.md and
       // USER.md, and a template's, a clone's and the manager's files never
-      // landed (2026-09-30).
-      replaceScaffold: Object.keys(seedFiles),
+      // landed (2026-09-30). The generated SOUL.md and AGENTS.md too: a plain
+      // new agent's "What is it for?" persona lives in that SOUL.md, and on
+      // 2026.9 OpenClaw's generic "Who You Are" file had been winning.
+      replaceScaffold: [...new Set(['SOUL.md', 'AGENTS.md', ...Object.keys(seedFiles)])],
       configPatch: {
         agentId: agent.slug,
         displayName: agent.name,
