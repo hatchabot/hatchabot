@@ -859,7 +859,7 @@ export function fmtUsage(name: string, u: any): string {
 function usageCostCell(a: any): string {
   if (a.billing === 'local') return 'local';
   if (a.billing === 'included') return 'incl.';
-  return a.cost ? fmtCostRange(a.cost) : '—';
+  return a.cost ? fmtCostRange(a.cost) : a.unpriced ? 'no price' : '—';
 }
 
 /** `hatchabot usage` (no agent) — running agents ranked by tokens, with an

@@ -7662,10 +7662,15 @@ function fmtCostRange(c) {
   return (lo === hi ? lo : `${lo}–${hi}`) + (c.partial ? '+' : '');
 }
 // The per-agent cost cell: a $ range for API-keyed agents, else why it's free.
+// Billing follows the source each reading was taken on (2026-09-30), so an
+// agent moved off an API key keeps a cost for the API part of the window.
 function usageCost(a) {
+  if (a.cost) return { text: 'est. ' + fmtCostRange(a.cost) + (a.billing !== 'api' ? ' (API part)' : ''), dim: false };
+  // No price known for its model: "$0.00+" read as nearly free.
+  if (a.unpriced) return { text: `API — no price known for ${esc(a.model || 'its model')}`, dim: false };
   if (a.billing === 'local') return { text: 'local', dim: true };
   if (a.billing === 'included') return { text: 'included', dim: true };
-  return a.cost ? { text: 'est. ' + fmtCostRange(a.cost), dim: false } : { text: '', dim: true };
+  return { text: '', dim: true };
 }
 function billingLine(agentId, models) {
   const a = (agents ?? []).find(x => x.id === agentId);

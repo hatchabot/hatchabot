@@ -69,7 +69,7 @@ import { consoleActivity, type SessionEntry, sessionsReadShell } from '../orches
 import { parsePendingPairing, pendingPairingShell } from '../orchestrator/pairing.js';
 import { buildFailureReason, needsSharedEmbedder } from '../orchestrator/buildFailure.js';
 import { runtimeModels } from '../orchestrator/runtimeModels.js';
-import { estimateCost } from '../orchestrator/pricing.js';
+import { estimateCost, pricesNothing } from '../orchestrator/pricing.js';
 import { fetchOpenclawDistTags, type OpenclawDistTags } from '../openclaw/npmVersion.js';
 import {
   agentArchiveName,
@@ -6522,8 +6522,11 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           const u = await agentUsage(providerFor(a.hostId), a.runtimeRef!, a.slug, { strict: true });
           const p = store.getAIProfile(a.aiProfileId);
           const billing = p?.vendor === 'local' ? 'local' : p?.kind === 'subscription' ? 'included' : 'api';
-          const cost = billing === 'api' ? estimateCost(u.byModel) : null;
-          return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost };
+          const priced = billing === 'api' ? estimateCost(u.byModel) : null;
+          // No known price for any of its models: say so, not "$0.00+" (2026-09-30).
+          const unpriced = pricesNothing(priced);
+          const cost = unpriced ? null : priced;
+          return { id: a.id, name: a.name, ...u, billing, profileName: p?.name, cost, ...(unpriced ? { unpriced: true } : {}) };
         } catch {
           return null; // unreachable container — treat as skipped, not zero
         }
@@ -6537,7 +6540,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       ? {
           low: billed.reduce((s, a) => s + a.cost!.low, 0),
           high: billed.reduce((s, a) => s + a.cost!.high, 0),
-          partial: billed.some((a) => a.cost!.partial),
+          partial: billed.some((a) => a.cost!.partial) || agentsUsage.some((a) => 'unpriced' in a && a.unpriced),
           agents: billed.length,
         }
       : null;
