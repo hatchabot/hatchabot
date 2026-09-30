@@ -415,6 +415,23 @@ async function runProvisionStepsInner(
  * Used by fresh provisioning, retry, and rebuild — secrets are resolved as
  * late as possible and only ever live in the spec handed to the provider.
  */
+/**
+ * The agent owner's own chat ids, as OpenClaw command owners. Nobody known
+ * yet: a placeholder that matches no one, because an EMPTY list lets OpenClaw
+ * make the first person approved the owner (2026-09-29).
+ */
+export function commandOwnersFor(store: Store, agent: { id: string; ownerId: string }): string[] {
+  const ids = store.memberIdentities(agent.id, agent.ownerId);
+  const out: string[] = [];
+  const tg = ids.telegram ?? store.knownChannelUserId(agent.ownerId);
+  if (tg && /^\d{1,32}$/.test(tg)) out.push(`telegram:${tg}`);
+  for (const kind of ['discord', 'slack'] as const) {
+    const id = ids[kind];
+    if (id && /^[A-Za-z0-9]{1,40}$/.test(id)) out.push(`${kind}:${id}`);
+  }
+  return out.length ? out : ['telegram:0'];
+}
+
 export async function buildRuntimeSpec(
   deps: ProvisionDeps,
   agentId: string,
@@ -707,6 +724,7 @@ export async function buildRuntimeSpec(
         ops: ops && { mcpUrl: ops.mcpUrl, token: ops.token },
         setupToken: oauthToken,
         gatewayToken: gateway.token,
+        commandOwners: commandOwnersFor(store, agent),
         ...(agent.filesMaxMb ? { filesMaxMb: agent.filesMaxMb } : {}),
         // Web-only agents have no bot: configWriter then writes no Telegram
         // channel at all.

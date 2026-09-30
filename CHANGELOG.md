@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.109.1] — 2026-09-30
+
+### Fixed
+- **You are your agent's owner in OpenClaw, not a member.** Hatchabot never told OpenClaw who the owner was, and OpenClaw makes the first person approved by pairing the owner when nobody is named. On three agents that was an invited member, who could therefore schedule tasks, change the agent's settings, restart it and run `/update`, while you could not do those over Telegram. Every build now names your own chat ids as OpenClaw's command owners (a placeholder that matches nobody when none is known yet, never an empty list), removing someone also takes them off that list, and the daily sweep sets it live on agents built before this. The three agents were repaired by hand the same day.
+
 ## [2.109.0] — 2026-09-29
 
 ### Fixed

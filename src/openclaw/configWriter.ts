@@ -728,6 +728,12 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
   if (patch.telegram) {
     cmds.push({ argv: ['agents', 'bind', '--agent', patch.agentId, '--bind', `telegram:${patch.telegram.accountId}`], optional: true, skipIf: hasBinding(patch.agentId, 'telegram', patch.telegram.accountId) });
   }
+  // The owner is the owner: written every build (a plain set, so it rides the
+  // batch that runs anyway), so OpenClaw's pairing never promotes the first
+  // member approved (2026-09-29).
+  if (patch.commandOwners) {
+    cmds.push({ argv: ['config', 'set', 'commands.ownerAllowFrom', JSON.stringify(patch.commandOwners)] });
+  }
   // Route Slack and Discord to this agent on EVERY build: `agents add` runs
   // only on a fresh volume, so a channel added later would otherwise have no
   // binding. Both verbs are idempotent (checked on 2026.7.1-2).

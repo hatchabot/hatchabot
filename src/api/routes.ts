@@ -59,6 +59,7 @@ import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orche
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
+import { commandOwnersFor } from '../orchestrator/provision.js';
 import { CronSystemOwnedError, addCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
@@ -2316,6 +2317,18 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a));
         if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed });
       } catch { /* its gateway is not answering: next time */ }
+      // The owner is OpenClaw's command owner, live (hot-reloaded): an agent
+      // built before this left the key empty, and the next person approved
+      // would have become the owner (2026-09-29).
+      try {
+        const want = JSON.stringify(commandOwnersFor(store, a));
+        const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+          `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8"));process.stdout.write(JSON.stringify((c.commands&&c.commands.ownerAllowFrom)||[]))'`);
+        if (read.code === 0 && read.stdout.trim() !== want) {
+          const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'commands.ownerAllowFrom', want, '--strict-json']);
+          trace(a.id)('owner.command_owner_set', { ok: set.code === 0, had: (JSON.parse(read.stdout || '[]') as unknown[]).length });
+        }
+      } catch { /* next time */ }
     }
   };
   (app as unknown as { retargetCronSweep?: typeof retargetCronSweep }).retargetCronSweep = retargetCronSweep;

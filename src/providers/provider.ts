@@ -80,6 +80,14 @@ export interface OpenClawConfigPatch {
   /** Bare model id, e.g. "claude-opus-4-8". Prefixing is the writer's job. */
   model?: string;
   /**
+   * OpenClaw's command owners (commands.ownerAllowFrom), as "telegram:<id>",
+   * "discord:<id>", "slack:<id>": the Hatchabot owner's own ids. Left empty,
+   * OpenClaw made the FIRST sender approved by pairing the owner — a member,
+   * on three live agents — with the cron/gateway tools and /restart, /update
+   * (promise review, 2026-09-29). Undefined = leave the key alone.
+   */
+  commandOwners?: string[];
+  /**
    * Every model the agent may use, primary first, bare ids. Drives the
    * runtime's model allowlist and the /model picker in chat.
    */

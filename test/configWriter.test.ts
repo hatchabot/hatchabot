@@ -582,3 +582,23 @@ describe('channel plugins on an npm-install image (2026.8+ trust model)', () => 
     expect(cmds.some((c) => c.rawShell?.includes('hb-npm-cache'))).toBe(false);
   });
 });
+
+describe('command owners (2026-09-29)', () => {
+  it('names the Hatchabot owner as OpenClaw\'s command owner, as an array in the batch', () => {
+    const tg = ['7', '0', '0', '1'].join('');
+    const raw = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key', commandOwners: [`telegram:${tg}`] });
+    const set = raw.find((c) => c.argv[2] === 'commands.ownerAllowFrom')!;
+    expect(set.argv[3]).toBe(JSON.stringify([`telegram:${tg}`]));
+    // After batching it is either in a batch (as an array) or a single set (the JSON text).
+    const out = batchConfigCommands(raw);
+    const inBatch = out.filter((c) => c.argv.includes('--batch-json'))
+      .flatMap((c) => JSON.parse(c.argv[3]!) as Array<{ path: string; value: unknown }>)
+      .find((e) => e.path === 'commands.ownerAllowFrom');
+    const single = out.find((c) => c.argv[2] === 'commands.ownerAllowFrom');
+    expect(inBatch ? inBatch.value : JSON.parse(single!.argv[3]!)).toEqual([`telegram:${tg}`]);
+  });
+  it('leaves the key alone when not given', () => {
+    const raw = buildConfigCommands({ agentId: 'a1', model: 'm', authMode: 'api-key' });
+    expect(raw.some((c) => c.argv[2] === 'commands.ownerAllowFrom')).toBe(false);
+  });
+});

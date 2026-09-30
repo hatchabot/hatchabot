@@ -701,6 +701,12 @@ export function allowlistScrubScript(targets: Array<{ channel: string; acct: str
       const acc = cfg && cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
         && cfg.channels[t.channel].accounts[t.acct];
       if (acc && Array.isArray(acc.allowFrom)) { acc.allowFrom = drop(acc.allowFrom); cfgChanged = true; }
+      // Never a command owner once removed (2026-09-29).
+      const owners = cfg && cfg.commands && cfg.commands.ownerAllowFrom;
+      if (Array.isArray(owners)) {
+        const kept = owners.filter((x) => String(x) !== t.channel + ":" + t.id);
+        if (kept.length !== owners.length) { cfg.commands.ownerAllowFrom = kept.length ? kept : [t.channel + ":0"]; cfgChanged = true; }
+      }
       // And every room: Slack channels and Discord servers carry their own
       // users list, and a removed member could still @mention the bot there
       // until some later rebuild (night review, 2026-09-28).
