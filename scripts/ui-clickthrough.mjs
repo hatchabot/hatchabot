@@ -194,7 +194,7 @@ const SCENARIOS = String.raw`(() => {
     machineDefaults: async () => {
       window.__override['/v1/machine-defaults'] = { defaults: [
         { key: 'sleepAfter', label: 'Put idle agents to sleep after', help: 'h', applies: 'now', fallback: 'off', value: '36h', set: true },
-        { key: 'filesSlack', label: 'Files an agent may send on Slack', help: 'h', applies: 'now', fallback: '100', value: '100', set: false } ] };
+        { key: 'filesSlack', label: 'Files an agent may send or receive on Slack', help: 'h', applies: 'now', fallback: '100', value: '100', set: false } ] };
       await openAiDlg('hosts');
       const input = await until(() => document.getElementById('md-filesSlack'));
       ok('the defaults box shows', !document.getElementById('machineDefaults').hidden);

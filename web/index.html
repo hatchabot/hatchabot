@@ -11565,9 +11565,9 @@ function v2Pane(a, tab) {
         <div data-v2slot="memoryCapRow" style="flex-basis:100%"></div>`) : ''}
       ${built && a.state !== 'ARCHIVED' ? row('Sleep & files', `${a.ops || v2ChannelKinds(a).some(k => k !== 'telegram') ? `<span class="sub">${a.ops ? 'The manager never sleeps.' : 'On Discord or Slack it never sleeps (nothing queues their messages).'}</span>` : `<label style="margin:0">Sleep when idle <select id="v2Sleep" onchange="v2SetAgentPolicy('${id}', { hibernate: this.value || null })">
           <option value=""${a.hibernate === 'never' ? '' : ' selected'}>as the machine does</option><option value="never"${a.hibernate === 'never' ? ' selected' : ''}>never — stay awake</option></select></label>`}
-        <label style="margin:0">Files it may send <select id="v2FilesCap" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
+        <label style="margin:0">Files it may send or receive <select id="v2FilesCap" onchange="v2SetAgentPolicy('${id}', { filesMaxMb: this.value ? Number(this.value) : null })">
           ${[...new Set(['', 5, 10, 25, 50, 100, ...(a.filesMaxMb ? [a.filesMaxMb] : [])])].map(v => `<option value="${v}"${(a.filesMaxMb ?? '') === v ? ' selected' : ''}>${v ? `up to ${v} MB` : 'as the machine does'}</option>`).join('')}</select></label>
-        <div class="sub" style="flex-basis:100%">Each app still caps it at its own limit: Telegram 50 MB, a Discord server without boosts 10 MB.</div>`) : ''}
+        <div class="sub" style="flex-basis:100%">Each app still caps it at its own limit: Telegram 50 MB, a Discord server without boosts 10 MB. On Discord it limits only what it sends.</div>`) : ''}
       ${(run || a.state === 'STOPPED') && built ? row('Backup', B('Download copy', `downloadAgent('${id}','${n}')`, 'title="A complete private copy: keep it, do not share it"')) : ''}
       ${a.state !== 'ARCHIVED' ? slot('paneEditEnv') : ''}
       <div class="v2danger"><h4>Careful</h4><div class="v2v">

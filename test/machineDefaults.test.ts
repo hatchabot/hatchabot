@@ -6,6 +6,7 @@ import { buildConfigCommands } from '../src/openclaw/configWriter.js';
 import { filesMb } from '../src/orchestrator/machineDefaults.js';
 import { hibernateAfterMs } from '../src/orchestrator/hibernate.js';
 import { as, makeWorld, seedRunningAgent } from './support/world.js';
+import { MockProvider } from '../src/providers/mockProvider.js';
 
 /**
  * Defaults for this machine (Settings → Hosts): written to .env by the app,
@@ -75,5 +76,36 @@ describe('machine defaults', () => {
     // Back to the machine's value.
     expect((await w.f.inject({ method: 'PATCH', url: `/v1/agents/${id}`, headers: as(), payload: { filesMaxMb: null } })).statusCode).toBe(200);
     expect(w.store.getAgent(id)!.filesMaxMb).toBeUndefined();
+  });
+
+  // 2026-09-30: "applies now, on every agent" reached only this machine's
+  // agents; a runner's waited for a rebuild.
+  it('memory per agent reaches agents on runners too; an unreachable runner is skipped after one failure', async () => {
+    const w = await makeWorld();
+    envFile();
+    const runner = new MockProvider();
+    const dead = new MockProvider();
+    let deadTries = 0;
+    dead.updateMemory = async () => { deadTries++; throw new Error('runner offline'); };
+    w.providers.set('mock2', runner);
+    w.providers.set('mock3', dead);
+    w.store.insertHost({ id: 'h2', ownerId: w.owner, kind: 'cloud', provider: 'mock2', name: 'Runner Two', settings: {}, createdAt: 'now' });
+    w.store.insertHost({ id: 'h3', ownerId: w.owner, kind: 'cloud', provider: 'mock3', name: 'Runner Off', settings: {}, createdAt: 'now' });
+    await seedRunningAgent(w);
+    const onRunner = async (id: string, hostId: string, prov: MockProvider) => {
+      w.store.insertAgent({ id, ownerId: w.owner, name: id, slug: id, state: 'STOPPED', aiProfileId: 'p1', hostId, persona: '', sharedMemory: false, createdAt: 'now', updatedAt: 'now' });
+      const { runtimeRef } = await prov.provision({ agentId: id, slug: id, workspace: { files: {}, configPatch: { agentId: id, authMode: 'api-key' } }, env: {} });
+      w.store.setAgentRuntimeRef(id, runtimeRef);
+      return runtimeRef;
+    };
+    const ref2 = await onRunner('r1', 'h2', runner);
+    await onRunner('d1', 'h3', dead);
+    await onRunner('d2', 'h3', dead);
+    const put = await w.f.inject({ method: 'PUT', url: '/v1/machine-defaults', headers: as(), payload: { key: 'agentMemory', value: '4g' } });
+    expect(put.statusCode, put.body).toBe(200);
+    expect(put.json().applied).toBe(2);
+    expect(w.provider.memoryUpdates.map((u) => u.cap)).toEqual(['4g']);
+    expect(runner.memoryUpdates).toEqual([{ runtimeRef: ref2, cap: '4g' }]);
+    expect(deadTries).toBe(1);
   });
 });

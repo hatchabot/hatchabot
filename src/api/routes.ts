@@ -4122,14 +4122,26 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!wrote.ok) return reply.code(409).send({ error: wrote.error ?? 'Could not write .env' });
     process.env[spec.env] = checked.value;
     let applied = 0;
+    // Every agent this control plane runs, runners included: their next build
+    // takes these values from this .env anyway, and the live paths (docker
+    // update, openclaw config set) reach a runner through its provider just as
+    // the per-agent settings do. Only this machine's agents got them before,
+    // though the page said "on every agent" (2026-09-30). A runner that fails
+    // once is skipped for the rest of this change — one unreachable runner
+    // must not hold the page for a Docker timeout per agent.
     const local = store.localHostId();
-    const fleet = store.listAllActiveAgents().filter((a) => a.hostId === local && a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED'));
+    const fleet = store.listAllActiveAgents().filter((a) => a.runtimeRef && (a.state === 'RUNNING' || a.state === 'STOPPED') && !!store.getHost(a.hostId));
+    const unreachable = new Set<string>();
     if (spec.key === 'agentMemory') {
       for (const a of fleet) {
         const cls = a.classId ? store.getAgentClass(a.classId) : undefined;
         if (parseMemoryCap(a.memoryCap) || parseMemoryCap(cls?.memoryCap)) continue; // its own or its class's cap stands
+        if (unreachable.has(a.hostId)) continue;
         const prov = providerFor(a.hostId);
-        try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch { /* the next rebuild applies it */ }
+        try { await prov.updateMemory?.(a.runtimeRef!, effectiveMemoryCap(a, cls)); applied++; } catch {
+          // The next rebuild applies it.
+          if (a.hostId !== local) { unreachable.add(a.hostId); continue; }
+        }
         // And tell the agent its new budget (AGENTS.md), as a per-agent change does.
         if (a.state === 'RUNNING') void syncDataSourceDocs({ store, secrets, provider: prov, channel: deps.channel, log: trace(a.id) }, a.id, a.runtimeRef!, trace(a.id)).catch(() => {});
       }
@@ -4137,7 +4149,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (embedder.enabled && !embedder.external) { await embedder.restart().catch(() => undefined); applied = 1; }
     } else if (spec.key.startsWith('files')) {
       const kind = spec.key.slice(5).toLowerCase() as ChannelKindForFiles;
-      for (const a of fleet) applied += await applyFilesCap(a, kind);
+      for (const a of fleet) {
+        if (unreachable.has(a.hostId)) continue;
+        const n = await applyFilesCap(a, kind);
+        applied += n;
+        if (!n && a.hostId !== local && store.listChannelsForAgent(a.id).some((c) => c.kind === kind)) unreachable.add(a.hostId);
+      }
     }
     trace()('machine.default_set', { key: spec.key, value: checked.value || 'off', applied });
     return { default: readMachineDefaults().find((d) => d.key === spec.key), applied };

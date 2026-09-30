@@ -964,11 +964,13 @@ isn't in it.
 Settings → Hosts → **Defaults for this machine** holds what every agent here
 gets unless it says otherwise: *Put idle agents to sleep after* (36h, 90m,
 2d, or off), *Memory per agent* (the default cap), *Memory for the memory
-search service*, and *Files an agent may send* on Telegram (up to 50 MB),
-Discord (10 MB on a server without boosts, up to 500) and Slack (100 MB, up
-to 1000). The app writes each to `.env` and applies it at once, no rebuild.
-Only the machine's owner sees the box. An agent overrides two of them on its
-Advanced tab: *Sleep when idle* and *Files it may send*.
+search service*, and *Files an agent may send or receive* on Telegram (up to
+50 MB), Discord (sends only; 10 MB on a server without boosts, up to 500) and
+Slack (100 MB, up to 1000). The app writes each to `.env` and applies it at
+once, no rebuild, on every agent this Hatchabot runs (runners included). At
+startup, any agent whose OpenClaw config lacks the ceiling for one of its apps
+gets it. Only the machine's owner sees the box. An agent overrides two of them
+on its Advanced tab: *Sleep when idle* and *Files it may send or receive*.
 
 ## The memory search service
 
