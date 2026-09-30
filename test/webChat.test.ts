@@ -149,6 +149,30 @@ describe('who may chat on the web', () => {
     expect((await w.chat(OWNER, 'mine')).statusCode).toBe(200);
   });
 
+  // 2026-09-30: the count lived in memory, so every restart gave a fresh hour.
+  it('the hourly count survives a restart (it lives in the database)', async () => {
+    process.env.HATCHABOT_WEB_CHAT_PER_HOUR = '2';
+    const w = await world();
+    expect((await w.chat(SAM, 'one')).statusCode).toBe(200);
+    expect((await w.chat(SAM, 'two')).statusCode).toBe(200);
+    // A second app on the same database: what a restart is.
+    const again = Fastify();
+    await registerRoutes(again, {
+      store: w.store, secrets: new MemSecrets(), providers: new Map([['mock', w.provider]]),
+      channel: { pool: { availableCount: () => 0 }, release: async () => {} } as any,
+      authMode: 'identity',
+    });
+    const third = await again.inject({ method: 'POST', url: '/v1/agents/a1/chat', headers: as(SAM), payload: { text: 'three' } });
+    expect(third.statusCode).toBe(429);
+    // An hour on, the old rows no longer count.
+    const hourAgo = Date.now() - 3_600_001;
+    const db = (w.store as unknown as { db: Database.Database }).db;
+    db.prepare(`UPDATE rate_hits SET at = ?`).run(hourAgo);
+    expect((await again.inject({ method: 'POST', url: '/v1/agents/a1/chat', headers: as(SAM), payload: { text: 'four' } })).statusCode).toBe(200);
+    // …and adding one prunes them.
+    expect((db.prepare(`SELECT COUNT(*) AS n FROM rate_hits`).get() as { n: number }).n).toBe(1);
+  });
+
   it('wakes a sleeping agent first, as a chat-app message would', async () => {
     const w = await world();
     await w.provider.stop(w.runtimeRef);

@@ -45,8 +45,10 @@ export const webChatBusy = (inFlight: Set<string>, agentId: string): boolean =>
 
 export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): void {
   const { store } = deps;
-  /** Turns started per (agent, person) in the last hour. */
-  const recent = new Map<string, number[]>();
+  // Turns started per (agent, person) in the last hour live in SQLite
+  // (rate_hits), not memory: a restart — every deploy — used to hand everyone
+  // a fresh hour (2026-09-30).
+  const bucketOf = (key: string): string => `webchat:${key}`;
 
   /** The agent, when this caller may web-chat with it; else the refusal already sent. */
   const allowed = (id: string, userId: string, reply: any): Agent | undefined => {
@@ -81,7 +83,7 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
     const key = webChatKey(found.id, me);
     if (deps.inFlight.has(key)) return reply.code(409).send({ error: 'It is still answering your last message.' });
     const now = Date.now();
-    const times = (recent.get(key) ?? []).filter((t) => now - t < HOUR_MS);
+    const times = store.rateHitsSince(bucketOf(key), now - HOUR_MS + 1);
     if (times.length >= perHour()) {
       const mins = Math.max(1, Math.ceil((times[0]! + HOUR_MS - now) / 60_000));
       return reply.code(429).send({ error: `That's ${perHour()} messages this hour — try again in ${mins} minute${mins === 1 ? '' : 's'}.` });
@@ -97,8 +99,7 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
     if (deps.inFlight.has(key)) return reply.code(409).send({ error: 'It is still answering your last message.' });
     deps.inFlight.add(key);
     try {
-      times.push(now);
-      recent.set(key, times);
+      store.addRateHit(bucketOf(key), now, HOUR_MS);
       // Characters only: what they said stays out of the event log.
       deps.trace(agent.id)('webchat.turn', { userId: me, chars: text.length });
       // The agent's owner keeps an owner's rights; everyone else has a member's —

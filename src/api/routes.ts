@@ -857,7 +857,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   //    unrelated parallel consults alone (a per-owner depth counter didn't).
   //  - a2aOwnerLive: a per-owner concurrency cap, so one injected agent can't
   //    hold every docker exec slot.
-  //  - a2aBucket: per-caller consults/hour — each consult is a paid model turn
+  //  - a2aRateOk: per-caller consults/hour — each consult is a paid model turn
   //    on the peer, and a prompt-injected loop would burn the budget serially.
   const envNum = (name: string, dflt: number): number => {
     const n = Number(process.env[name]); return Number.isFinite(n) && process.env[name] !== '' && process.env[name] !== undefined ? n : dflt;
@@ -874,12 +874,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /** An owner's `ask` can be real work (research, a report): longer than a
    *  consult, and under the 300 s a client's fetch waits for response headers. */
   const ASK_TIMEOUT_MS = Math.max(10_000, envNum('HATCHABOT_ASK_TIMEOUT_MS', 280_000));
-  const a2aBucket = new Map<string, number[]>();
+  // Kept in SQLite (rate_hits) since 2026-09-30: in memory, every restart
+  // (every deploy) reset the hour.
   const a2aRateOk = (callerId: string): boolean => {
     const now = Date.now();
-    const hits = (a2aBucket.get(callerId) ?? []).filter((t) => now - t < 3_600_000);
-    if (hits.length >= A2A_PER_HOUR) { a2aBucket.set(callerId, hits); return false; }
-    hits.push(now); a2aBucket.set(callerId, hits); return true;
+    const bucket = `a2a:${callerId}`;
+    if (store.rateHitsSince(bucket, now - 3_600_000 + 1).length >= A2A_PER_HOUR) return false;
+    store.addRateHit(bucket, now);
+    return true;
   };
   const kickProvision = (agentId: string): void => {
     if (inflight.has(agentId)) return;
