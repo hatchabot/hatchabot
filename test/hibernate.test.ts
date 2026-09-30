@@ -114,6 +114,25 @@ describe('waking', () => {
     expect(await wakeAgent(deps, w.store.getAgent(id)!, 'x')).toMatchObject({ state: 'STOPPED' });
   });
 
+  // After a week with no updates Telegram starts update_id again at random:
+  // the first message of a quiet week can sit BELOW the bedtime mark (2026-09-30).
+  it('an update with a lower id than the bedtime mark is mail; the unconfirmed batch just below it is not', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w, { botToken: 'fake-token-W' });
+    let result = [{ update_id: 50000 }];
+    const deps = depsFor(w, { fetchImpl: (async () => new Response(JSON.stringify({ ok: true, result }))) as typeof fetch });
+    await hibernateAgent(deps, w.store.getAgent(id)!, 'test');
+    expect(w.store.getAgent(id)!.hibernateMark).toBe(50000);
+    expect(await wakeSweep(deps)).toEqual([]);
+    // Two the gateway handled in its last poll, still unconfirmed at bedtime: not mail.
+    result = [{ update_id: 49999 }, { update_id: 50000 }];
+    expect(await wakeSweep(deps)).toEqual([]);
+    // A quiet week later, the marked update expired and a new one arrived far below it.
+    result = [{ update_id: 17 }];
+    expect(await wakeSweep(deps)).toEqual([id]);
+    expect(w.store.getAgent(id)!.state).toBe('RUNNING');
+  });
+
   it('over the API: asking a sleeper wakes it first; hibernate/wake by hand; start clears the mark; the app sees hibernatedAt', async () => {
     const w = await makeWorld();
     const id = await seedRunningAgent(w);

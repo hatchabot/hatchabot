@@ -6,6 +6,7 @@ import type { Store } from '../store/store.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import { CORE_FILES, MAX_FILE_BYTES, workspacePath } from './snapshots.js';
 import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING, removeSection } from '../openclaw/workspace.js';
+import { scanPersonalData, type PersonalScan } from '../domain/personalData.js';
 
 /**
  * The sections Hatchabot writes into AGENTS.md for THIS machine and owner:
@@ -15,7 +16,9 @@ import { DATA_SOURCES_HEADING, INSTALL_HEADING, OPERATOR_HEADING, PEERS_HEADING,
  * setup values (night review, 2026-09-28). The importer's own build adds
  * its own.
  */
-const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Memory policy', '## Memory budget'];
+// The install notes' pre-rename heading too: agents built before v1.0.0
+// still carry it (2026-09-30).
+const MANAGED_HEADINGS = [OPERATOR_HEADING, DATA_SOURCES_HEADING, PEERS_HEADING, INSTALL_HEADING, '## Installing tools (managed by AgentClaw)', '## Memory policy', '## Memory budget'];
 export function stripManagedSections(agentsMd: string): string {
   return MANAGED_HEADINGS.reduce((s, h) => removeSection(s, h), agentsMd);
 }
@@ -27,9 +30,12 @@ import { normalizeGitUrl } from './gitSource.js';
 
 /**
  * A "template" is a SHAREABLE copy of an agent — its training (SOUL.md +
- * AGENTS.md) and what it expects to run against, with NONE of its identity: no
- * bot token, no members, no conversation history; memory only when the sharer
- * explicitly opts in (includeMemory). It's safe to email. Import stands up a
+ * AGENTS.md), its scheduled tasks and what it expects to run against, with
+ * none of its identity: no bot token, no members, no conversation history;
+ * MEMORY.md only when the sharer explicitly opts in (includeMemory). It is NOT
+ * automatically safe to email: agents write names and addresses into their
+ * own AGENTS.md, so the export reports what it found (scanTemplate) and the
+ * owner reads before sending (2026-09-30). Import stands up a
  * FRESH agent: the importer owns it, supplies
  * their own bot (the normal create flow), and re-invites their own people.
  *
@@ -176,7 +182,7 @@ export async function exportTemplate(
   deps: TemplateDeps,
   agentId: string,
   opts: { includeMemory?: boolean } = {},
-): Promise<{ filename: string; data: Buffer }> {
+): Promise<{ filename: string; data: Buffer; personal: PersonalScan }> {
   const { store, provider } = deps;
   const agent = store.getAgent(agentId);
   if (!agent?.runtimeRef) throw new TransferError('This agent has no runtime to export yet.');
@@ -233,11 +239,96 @@ export async function exportTemplate(
     envNeeds: store.listAgentEnv(agentId).map((e) => e.name),
     parameters: collectParameters(agent, files),
   };
-  deps.log?.('template.exported', { agentId });
+  const personal = scanTemplate(manifest);
+  deps.log?.('template.exported', { agentId, emails: personal.emails, phones: personal.phones, tokens: personal.tokens });
   return {
     filename: `${agent.slug}.template.hatchabot`,
     data: gzipSync(Buffer.from(JSON.stringify(manifest))),
+    personal,
   };
+}
+
+/** A clone's memory budget: what one exec's output can carry with room to spare. */
+export const CLONE_MEMORY_FILE_BYTES = 1024 * 1024;
+export const CLONE_MEMORY_TOTAL_BYTES = 5 * 1024 * 1024;
+
+// Runs inside the source agent, in its workspace: USER.md and the text files
+// under memory/ (hidden entries skipped — .dreams is OpenClaw's own state),
+// as JSON. Anything too big, binary or oddly named is listed, not copied.
+const READ_MEMORY_JS = `
+const fs = require('fs');
+const PER = ${CLONE_MEMORY_FILE_BYTES}, TOTAL = ${CLONE_MEMORY_TOTAL_BYTES};
+const files = {}, skipped = []; let total = 0;
+const okName = (rel) => rel.split('/').every((s) => s && !s.startsWith('.') && s.length <= 120 && !/[\\u0000-\\u001f\\\\]/.test(s));
+function take(rel) {
+  let st; try { st = fs.lstatSync(rel); } catch { return; }
+  if (!st.isFile()) return;
+  if (!okName(rel) || st.size > PER || total + st.size > TOTAL) { skipped.push(rel); return; }
+  const b = fs.readFileSync(rel), t = b.toString('utf8');
+  if (!Buffer.from(t, 'utf8').equals(b)) { skipped.push(rel); return; }
+  files[rel] = t; total += st.size;
+}
+function walk(dir, depth) {
+  let names; try { names = fs.readdirSync(dir).sort(); } catch { return; }
+  for (const n of names) {
+    if (n.startsWith('.')) continue;
+    const rel = dir + '/' + n;
+    let st; try { st = fs.lstatSync(rel); } catch { continue; }
+    if (st.isDirectory()) { if (depth < 3) walk(rel, depth + 1); } else take(rel);
+  }
+}
+take('USER.md'); walk('memory', 1);
+process.stdout.write(JSON.stringify({ files, skipped }));
+`;
+
+/**
+ * What a clone takes from its source beyond MEMORY.md: USER.md and the daily
+ * notes under memory/. That is where agents keep most of what they save — the
+ * Condo Adviser's memory/ holds 624 KB beside a 3.7 KB MEMORY.md — so a clone
+ * of MEMORY.md alone was not the faithful copy it promised (2026-09-30). Only
+ * clones read this: the owner copying their own agent. Shared copies never
+ * carry it. One exec; a failure copies nothing and says so.
+ */
+export async function readCloneMemory(
+  provider: RuntimeProvider,
+  runtimeRef: string,
+  slug: string,
+): Promise<{ files: Record<string, string>; skipped: string[]; failed?: boolean }> {
+  const b64 = Buffer.from(READ_MEMORY_JS).toString('base64');
+  const res = await provider
+    .execShell(runtimeRef, `cd ${JSON.stringify(workspacePath(slug, '.'))} && node -e "$(printf %s ${b64} | base64 -d)"`)
+    .catch(() => undefined);
+  try {
+    if (!res || res.code !== 0) throw new Error('read failed');
+    const out = JSON.parse(res.stdout) as { files?: Record<string, unknown>; skipped?: unknown };
+    const files: Record<string, string> = {};
+    // Names come from inside the agent: only USER.md and memory/… are seeds a
+    // clone may carry, never a path that climbs out of its workspace.
+    for (const [name, text] of Object.entries(out.files ?? {})) {
+      if (typeof text !== 'string') continue;
+      if (name !== 'USER.md' && !/^memory\/(?!\.)(?!.*\/\.)[^\\\0]+$/.test(name)) continue;
+      files[name] = text;
+    }
+    const skipped = Array.isArray(out.skipped) ? out.skipped.filter((s): s is string => typeof s === 'string').slice(0, 50) : [];
+    return { files, skipped };
+  } catch {
+    return { files: {}, skipped: [], failed: true };
+  }
+}
+
+/**
+ * Every place in a template that can mention a person — the files, the
+ * description, each task's message, setup-field text, repo addresses — and
+ * the email addresses, phone numbers and key-shaped strings found there.
+ */
+export function scanTemplate(m: TemplateManifest): PersonalScan {
+  return scanPersonalData([
+    ...Object.entries(m.files).map(([name, text]) => ({ where: name, text })),
+    { where: 'Description', text: m.agent.persona },
+    ...(m.schedules ?? []).map((s) => ({ where: `Scheduled task “${s.name}”`, text: s.message })),
+    ...m.parameters.map((p) => ({ where: `Setup field “${p.label}”`, text: [p.help, p.default].filter(Boolean).join('\n') })),
+    ...m.dataNeeds.map((d) => ({ where: `Data source “${d.mountName}”`, text: d.repoUrl })),
+  ]);
 }
 
 /**

@@ -1311,7 +1311,9 @@
     <div class="sub" style="margin-bottom:10px">
       Point-in-time copies of <b>SOUL.md</b>, <b>AGENTS.md</b>, and
       <b>MEMORY.md</b> — taken automatically before file edits and rebuilds, or
-      on demand. Restore one to roll the agent's definition and memory back.
+      on demand. Restore one to roll back its SOUL, AGENTS and MEMORY.md files.
+      Its daily notes (memory/) and other files are not included; use Backups
+      for the whole agent.
     </div>
     <div style="display:flex;align-items:center;gap:8px">
       <label style="margin:0;flex:1">History</label>
@@ -2257,10 +2259,12 @@
 <dialog id="sendAgentDlg" style="width:min(520px,96vw)">
   <h3 style="margin:0 0 4px">Send <span id="sendAgentName"></span></h3>
   <div class="sub" style="margin-bottom:10px">
-    Sends a trained copy to another user on this server — its persona and instructions,
-    <b>no bot token, no members, no conversation history</b>. They import it as a fresh
-    agent they own, on their own Telegram bot. Same safe contents as a shared file, delivered in-app.
+    Sends another user on this server a copy of its instructions and scheduled tasks,
+    without its bot, members or conversations. They import it as a fresh agent they own,
+    on their own Telegram bot. Read it before you send it: an agent may have written
+    names or addresses into its instructions.
   </div>
+  <div id="sendScan" class="sub" style="margin-bottom:10px"></div>
   <label>Recipient email</label>
   <input type="email" id="sendToEmail" list="accountEmails" placeholder="colleague@example.com" autocomplete="off">
   <datalist id="accountEmails"></datalist>
@@ -2511,8 +2515,9 @@
 <dialog id="healthDlg" style="width:min(560px,94vw)">
   <h3 style="margin:0 0 4px">Health — <span id="healthAgent"></span></h3>
   <div class="sub">
-    A live check of the agent's gateway right now — separate from its listed
-    state. An agent can show "running" here yet have quietly stopped answering.
+    Checks its gateway and chat connection, and when its AI source last answered
+    — separate from its listed state. An agent can show "running" yet have
+    quietly stopped answering.
   </div>
   <div id="healthBody" style="margin-top:12px"></div>
   <div class="actions" style="justify-content:flex-end">
@@ -5657,7 +5662,7 @@ async function faApply() {
   if (action === 'checkpoint' && !confirm(`Save the conversation to memory for ${ids.length} agent${ids.length > 1 ? 's' : ''}? Runs a ~20s turn per running agent, one at a time (uses tokens).`)) return;
   $('faApplyBtn').disabled = true;
   $('faResults').innerHTML = `Working on ${ids.length}…`;
-  let ok = 0, skipped = 0, failed = 0, notSaved = 0; const reasons = [];
+  let ok = 0, skipped = 0, failed = 0, notSaved = 0, nothingNew = 0; const reasons = [];
   for (const id of ids) {
     const a = agents.find(x => x.id === id);
     try {
@@ -5672,6 +5677,7 @@ async function faApply() {
       } else if (action === 'checkpoint') {
         if (a?.state !== 'RUNNING') { skipped++; continue; } // needs a live turn
         const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST', body: {} });
+        if (!r.saved && r.ok) { nothingNew++; continue; } // the turn ran; its memory files did not change
         if (!r.saved) { notSaved++; continue; } // soft fail (e.g. AI source out of credits)
       } else if (action === 'rebuild') {
         // Running ones only, as the note says: a rebuild ends RUNNING, so a
@@ -5702,7 +5708,7 @@ async function faApply() {
   }
   $('faErr').textContent = reasons.join(' · ');
   $('faApplyBtn').disabled = false;
-  $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${notSaved ? ` · <span style="color:var(--warn)">${notSaved} not saved (AI source didn't respond)</span>` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
+  $('faResults').innerHTML = `✓ ${ok} done${skipped ? ` · ${skipped} skipped (not applicable)` : ''}${nothingNew ? ` · ${nothingNew} found nothing new to save` : ''}${notSaved ? ` · <span style="color:var(--warn)">${notSaved} not saved (AI source didn't respond)</span>` : ''}${failed ? ` · <span style="color:var(--bad)">${failed} failed</span>` : ''}.`;
   await refresh(false);
   if ($('classList').childElementCount) renderClassList(); // Settings may still be open: keep its counts honest
 }
@@ -6552,7 +6558,7 @@ function agentCard(a) {
         ${a.state === 'RUNNING' ? `<button onclick="recoverContext('${a.id}', '${jsq(a.name)}')" title="Lost context after a reset? Restore the agent's earlier conversations into its workspace and have it save the important parts to memory — no copy-pasting">📥 Recover context</button>` : ''}
         <!-- copy / move: duplicate here · back up for me · share a copy · move server -->
         ${a.state === 'RUNNING' ? `<button onclick="cloneAgent('${a.id}', '${jsq(a.name)}')" title="Duplicate this agent here — a faithful copy with its own bot and name">⧉ Clone</button>` : ''}
-        ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="Share a trained copy for someone else — no bot token or members. Safe to email.">📤 Share</button>` : ''}
+        ${a.state === 'RUNNING' ? `<button onclick="shareTemplate('${a.id}', '${jsq(a.name)}')" title="A copy of its instructions and scheduled tasks, without its bot, members or conversations. Read it before you send it: an agent may have written names or addresses into its instructions.">📤 Share</button>` : ''}
         ${a.state === 'RUNNING' && appConfig.authMode === 'identity' ? `<button onclick="openSendAgent('${a.id}', '${jsq(a.name)}')" title="Send a trained copy to another user on this server — lands in their inbox">📨 Send</button>` : ''}
         ${a.state === 'RUNNING' && a.parameters?.length && !a.parentAgentId ? `<button onclick="deriveChild('${a.id}', '${jsq(a.name)}')" title="Create a child agent from this master: same training, its own setup values and bot, fresh memory. Children nest under this card.">👪 New child</button>` : ''}
         ${a.state === 'RUNNING' && agents.some(k => k.parentAgentId === a.id) ? `<button onclick="openProposals('${a.id}', '${jsq(a.name)}')" title="Distilled learnings proposed by this master's children, awaiting your review">📥 Proposals</button><button onclick="pushDefinition('${a.id}', '${jsq(a.name)}')" title="Re-render every child's SOUL/AGENTS from THIS master's current files, keeping each child's own setup values. Snapshot taken per child; memories untouched.">⬇ Push to children</button>` : ''}
@@ -8192,7 +8198,9 @@ function healthRow(label, ok, detail) {
     <span class="sub">${detail ? esc(detail) : ''}</span></div>`;
 }
 function renderHealth(h) {
-  const [color, word] = HEALTH_BADGE[h.status] ?? HEALTH_BADGE.unreachable;
+  // The gateway can answer while its AI source refuses every turn (2026-09-30).
+  const refusing = h.reachable && h.aiSource?.refusingSince;
+  const [color, word] = refusing ? ['var(--warn)', 'Up, but its AI source is not answering'] : HEALTH_BADGE[h.status] ?? HEALTH_BADGE.unreachable;
   let body = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
     <span style="color:${color};font-size:26px;line-height:1">●</span>
     <div><div style="font-size:18px;font-weight:700">${word}</div>
@@ -8203,6 +8211,12 @@ function renderHealth(h) {
     return;
   }
   const rows = [];
+  if (h.aiSource) {
+    const src = h.aiSource, named = src.name ? ` (${src.name})` : '';
+    if (src.refusingSince) rows.push(healthRow('AI source', false, `${src.refusal === 'refused' ? 'refused (rate-limited)' : 'failed'} since ${ago(src.refusingSince)}${src.lastAnsweredAt ? ` · last answered ${ago(src.lastAnsweredAt)}` : ''}${named}`));
+    else if (src.lastAnsweredAt) rows.push(healthRow('AI source', true, `last answered ${ago(src.lastAnsweredAt)}${named}`));
+    else rows.push(healthRow('AI source', null, `no answer seen yet${named}`));
+  }
   if (h.telegram) {
     rows.push(healthRow('Telegram connected', h.telegram.connected, h.telegram.connected ? 'live' : (h.telegram.lastError || 'disconnected')));
     if (h.telegram.reconnectAttempts) rows.push(healthRow('Reconnecting', false, `${h.telegram.reconnectAttempts} attempt${h.telegram.reconnectAttempts > 1 ? 's' : ''}`));
@@ -8847,13 +8861,15 @@ async function rebuildAll() {
 }
 
 async function del(id, name) {
-  // Deliberately annoying: deletion erases the agent's memory forever, so it
+  // Deliberately annoying: deletion erases the agent's memory for good, so it
   // costs a typed confirmation, not a reflex click.
   const a = agents.find(x => x.id === id);
   const botNote = a?.botUsername
     ? `\n\nIts Telegram bot @${a.botUsername} is kept in the Bot pool for the next agent (remove it there if you don't want that). "Delete chat" on it in Telegram clears your old conversation view.`
     : '';
-  const typed = prompt(`This permanently erases "${name}" and everything it remembers.${botNote}\n\nType the agent's name to confirm:`);
+  // Its volume stays in the nightly backup sets until they age out
+  // (scripts/backup-volumes.sh, 14 days) — say so, not "forever" (2026-09-30).
+  const typed = prompt(`This permanently erases "${name}" and everything it remembers. Copies in this machine's nightly backups are removed as they age out (14 days).${botNote}\n\nType the agent's name to confirm:`);
   if (typed === null) return;
   if (typed.trim() !== name) { toast('Name did not match — nothing deleted.'); return; }
   // The bot is parked in the pool by default (server-side): bots are the
@@ -9204,6 +9220,19 @@ function openSendAgent(id, name) {
   sendAgentId = id;
   $('sendAgentName').textContent = name;
   $('sendToEmail').value = ''; $('sendMessage').value = ''; $('sendErr').textContent = '';
+  // What the copy mentions, before anything leaves (2026-09-30). The send
+  // carries no MEMORY.md, so the scan leaves it out too.
+  const scan = $('sendScan');
+  scan.style.color = ''; scan.textContent = 'Checking what the copy mentions…';
+  api(`/v1/agents/${id}/export/scan?excludeMemory=1`).then(p => {
+    if (sendAgentId !== id) return;
+    const what = personalSummary(p);
+    if (!what) { scan.textContent = 'The copy mentions no email addresses, phone numbers or keys.'; return; }
+    scan.style.color = 'var(--warn)';
+    scan.innerHTML = `This copy mentions <b>${esc(what)}</b> — read it before you send it.
+      <details><summary>Where</summary><div>${(p.hits || []).map(h => `${esc(h.where)}, line ${Number(h.line) || 0}: <span class="pii">${esc(h.sample)}</span>`).concat(p.more ? [`…and ${Number(p.more)} more`] : []).join('<br>')}</div>
+      <div>Fix them in its Personality or Files, then send.</div></details>`;
+  }).catch(e => { if (sendAgentId === id) scan.textContent = `Couldn't check what the copy mentions: ${e.message}`; });
   api('/v1/accounts').then(r => {
     $('accountEmails').innerHTML = (r.accounts || []).filter(a => a.email).map(a => `<option value="${esc(a.email)}">`).join('');
   }).catch(() => {});
@@ -9272,22 +9301,53 @@ async function refreshInboxBadge() {
 }
 
 function shareTemplate(id) {
+  // Only MEMORY.md travels: its daily notes (memory/) never do (2026-09-30).
   const inclMem = confirm(
-    "Include the agent's MEMORY in the shared copy?\n\n" +
-    "OK — a faithful copy (its learned knowledge; note memory may contain personal facts).\n" +
-    'Cancel — persona & instructions only.',
+    'Also include MEMORY.md in the shared copy?\n\n' +
+    'OK — also include MEMORY.md (its summary notes; may contain personal facts).\n' +
+    'Cancel — its instructions and scheduled tasks only.',
   );
-  return saveFromServer(`/v1/agents/${id}/export${inclMem ? '' : '?excludeMemory=1'}`, 'agent-template.json');
+  return saveFromServer(`/v1/agents/${id}/export${inclMem ? '' : '?excludeMemory=1'}`, 'agent-template.json', personalCheck);
+}
+
+// What a shared copy mentions about real people, as the server found it
+// (x-hatchabot-personal): "13 email addresses and 2 phone numbers". Agents
+// write notes into their own instructions, so a copy is read before it is sent
+// (2026-09-30).
+function personalSummary(p) {
+  const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const parts = [
+    p?.emails ? n(p.emails, 'email address', 'email addresses') : '',
+    p?.phones ? n(p.phones, 'phone number', 'phone numbers') : '',
+    p?.tokens ? n(p.tokens, 'thing that looks like a password or key', 'things that look like passwords or keys') : '',
+  ].filter(Boolean);
+  return parts.length < 2 ? (parts[0] || '') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
+}
+function personalWhere(p) {
+  return (p?.hits || []).map(h => `${h.where}, line ${h.line}: ${h.sample}`)
+    .concat(p?.more ? [`…and ${p.more} more`] : []);
+}
+/** Ask before saving a copy that mentions people. False = don't save. */
+function personalCheck(res) {
+  let p = null;
+  try { p = JSON.parse(decodeURIComponent(res.headers.get('x-hatchabot-personal') || '')); } catch { p = null; }
+  const what = personalSummary(p);
+  if (!what) return true;
+  return confirm(`This copy mentions ${what} — read it before you send it.\n\n` +
+    `Where (fix them in its Personality or Files, then share again):\n• ${personalWhere(p).join('\n• ')}\n\n` +
+    "OK — save the file anyway. Cancel — don't save it.");
 }
 
 /**
  * Fetch a download and save it, instead of navigating to it: a refusal (busy,
  * not exportable) is then a message, not a page of raw JSON in place of the app.
+ * `check(res)` may still refuse once the answer is in (false = don't save).
  */
-async function saveFromServer(url, fallbackName) {
+async function saveFromServer(url, fallbackName, check) {
   try {
     const res = await fetch(url);
     if (!res.ok) { const j = await res.json().catch(() => ({})); toast(j.error || `The download failed (${res.status}).`, 10000); return; }
+    if (check && !check(res)) { toast('Not saved.'); return; }
     const blob = await res.blob();
     const file = /filename="([^"]+)"/.exec(res.headers.get('content-disposition') || '')?.[1] || fallbackName;
     const href = URL.createObjectURL(blob);
@@ -9298,7 +9358,7 @@ async function saveFromServer(url, fallbackName) {
   } catch (e) { toast(e.message, 8000); }
 }
 
-// Clone = a faithful local copy (memory included — you own both), with its own
+// Clone = a faithful local copy (MEMORY.md, its daily notes and USER.md — you own both), with its own
 // bot and name; only you as owner.
 // ---- template gallery (discovery over clone) --------------------------------
 
@@ -9333,7 +9393,10 @@ async function cloneAgent(id, name) {
   if (cn === null) return;
   try {
     const res = await api(`/v1/agents/${id}/clone`, { method: 'POST', body: { name: cn } });
-    const left = (res.notCopied || []).length ? ` Its data sources (${res.notCopied.join(', ')}) did not come along: add them under Data.` : '';
+    let left = (res.notCopied || []).length ? ` Its data sources (${res.notCopied.join(', ')}) did not come along: add them under Data.` : '';
+    // Its daily notes come too (2026-09-30); say when some could not.
+    if (res.memoryCopyFailed) left += " Its daily notes (memory/) and USER.md couldn't be read, so only MEMORY.md came along.";
+    else if ((res.memoryNotCopied || []).length) left += ` Some memory files were too big or not text and stayed behind: ${res.memoryNotCopied.slice(0, 5).join(', ')}${res.memoryNotCopied.length > 5 ? '…' : ''}.`;
     toast(`Cloned as "${res.name}" — connect its Telegram bot to finish.${left}`, 30000);
     await refresh(true);
   } catch (e) { toast(e.message, 30000); }
@@ -9806,6 +9869,7 @@ async function checkpointAgent(id, name) {
   try {
     const r = await api(`/v1/agents/${id}/checkpoint`, { method: 'POST' });
     if (r.saved) toast(`Saved "${name}"'s conversation to memory — the agent also confirms in its Telegram chat.`);
+    else if (r.ok) toast(`"${name}": ${r.note || 'It found nothing new to save.'}`, 9000); // the turn ran; its memory files did not change
     else toast(r.error || `Couldn't save "${name}" to memory — its AI source didn't respond (out of credits?).`, 12000);
   } catch (e) { toast(e.message); }
 }
@@ -11128,6 +11192,15 @@ function v2Open(id) {
   // Something waiting on you (a token to paste, someone asking to join, a
   // failure) — the settings sheet is where you act on it, so start there.
   const st = v2Status(a);
+  // Asleep: its tile says opening it wakes it, so opening it does — the
+  // console wakes it first and says so ("Waking it up — about a minute…").
+  // It used to open the settings sheet and wake nothing (2026-09-30).
+  const asleep = a.hibernatedAt && a.state === 'STOPPED' && st.cls === 'stopped'; // not when something waits on you
+  if (asleep && a.hasGateway && !a.opsDrift && window.isSecureContext) return openGateway(a.id, a.slug);
+  if (asleep && !a.opsDrift) { // no console on plain http: wake it anyway, and show its settings
+    toast(`Waking ${a.name} up — about a minute…`, 8000);
+    api(`/v1/agents/${a.id}/wake`, { method: 'POST', body: {} }).then(() => refresh(false)).catch(e => toast(`Could not wake it: ${e.message}`, 10000));
+  }
   if (st.cls === 'waiting' || a.state === 'FAILED' || a.opsDrift || !v2CanChat(a) || !window.isSecureContext) return openV2Agent(id, a.opsDrift ? 'advanced' : undefined);
   openGateway(a.id, a.slug);
 }
@@ -11537,7 +11610,7 @@ function v2Pane(a, tab) {
       ${v2ChannelKinds(a).length || webOk ? `<div data-v2slot="tgMembersBlock"></div>` : ''}
       ${v2ChannelKinds(a).length ? '' : row('People', `<span>${webOk ? 'It is in no chat app yet — people you invite can chat with it on the web, here.' : 'Only you — it is not in a chat app yet.'}</span>${B('Add Telegram…', goto('messaging'))}${B('Add Discord…', goto('channels'))}
             <span class="sub">Other people reach an agent through a chat app: Telegram or Discord${webOk ? ' — or the web chat, for people you trust' : ''}.</span>`)}
-      ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
+      ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A copy of its instructions and scheduled tasks, without its bot, members or conversations. Read it before you send it: an agent may have written names or addresses into its instructions."')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
         ${B('⧉ Clone', `cloneAgent('${id}','${n}')`)}
         ${a.parameters?.length && !a.parentAgentId ? B('👪 New child', `deriveChild('${id}','${n}')`) : ''}

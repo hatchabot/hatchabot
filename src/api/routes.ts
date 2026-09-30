@@ -107,12 +107,13 @@ import {
   exportTemplate,
   importTemplate,
   parseTemplate,
+  readCloneMemory,
   resolveParamValues,
   TemplateParamSchema,
   TEMPLATE_FORMAT,
   LEGACY_TEMPLATE_FORMAT,
 } from '../orchestrator/template.js';
-import { agentHealth, doctorLint } from '../orchestrator/health.js';
+import { agentHealth, aiSourceHealth, doctorLint } from '../orchestrator/health.js';
 import { checkInvite, createInvite, InviteInvalidError, redeemInvite } from '../orchestrator/invite.js';
 import { forgetDmPolicy } from '../orchestrator/dmPolicyMemo.js';
 import { admitMember, AdmitError, announceToMembers, denyPairing, grantChannelAccess, revokeMember, RevokeError, scrubChannelAllowlist, allowlistScrubScript, setDmPolicy } from '../orchestrator/members.js';
@@ -6141,6 +6142,16 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         error: `Couldn't save to memory — the agent's AI source didn't complete the turn (out of credits, expired, or unreachable?). Nothing was lost; the summary just wasn't written. ${r.detail ?? ''}`.trim(),
       });
     }
+    // A turn that ended well has not necessarily saved anything: only a
+    // change to MEMORY.md or memory/ is a save (2026-09-30).
+    if (r.changed !== true) {
+      return {
+        ok: true, saved: false, nothingNew: r.changed === false,
+        note: r.changed === false
+          ? 'It found nothing new to save — its memory files are unchanged.'
+          : "It finished, but its memory files couldn't be checked, so it isn't known whether anything was saved.",
+      };
+    }
     // Confirm in Telegram (ONLY on a real save) — where the agent lives, so a
     // web-triggered checkpoint isn't invisible to someone watching the chat.
     // Sent to the agent's active members; best-effort, no-op if it has no bot.
@@ -6547,12 +6558,14 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // Live health probe of the agent's own gateway (event loop, Telegram
   // connection, plugin errors). Distinct from the tracked state: an agent can be
-  // RUNNING here yet have a gateway that stopped answering.
+  // RUNNING here yet have a gateway that stopped answering. The gateway
+  // answering is not the agent answering: it runs no model turn, so when its
+  // AI source last answered (or has refused since) rides along (2026-09-30).
   app.get<{ Params: { id: string }; Querystring: { doctor?: string } }>('/v1/agents/:id/health', async (req, reply) => {
     const agent = runningAgent(req, req.params.id, reply, 'check its health');
     if (!agent) return reply;
     const provider = providerFor(agent.hostId);
-    const health = await agentHealth(provider, agent.runtimeRef!);
+    const health = { ...(await agentHealth(provider, agent.runtimeRef!)), aiSource: aiSourceHealth(store, agent) };
     // ?doctor=1 additionally runs `openclaw doctor --lint` — ~4s of read-only
     // config checks that catch silent degradations (disabled search provider,
     // missing memory-search key). The fleet sweep asks for it; the cheap
@@ -8640,9 +8653,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   );
 
   // ---- shareable template (Export / Import) -------------------------------
-  // A trained copy with NO identity (no token, members, or memory) — safe to
-  // email. Export reads the agent's SOUL.md/AGENTS.md; Import stands up a FRESH
-  // agent that provisions its own bot (pool or paste), owned by the importer.
+  // A copy of its instructions and scheduled tasks, without its bot, members
+  // or conversations. Not safe to email unread: agents write names and
+  // addresses into their own instructions, so what the copy mentions travels
+  // with it (x-hatchabot-personal) and the page shows it before saving
+  // (2026-09-30). Import stands up a FRESH agent that provisions its own bot
+  // (pool or paste), owned by the importer.
   app.get<{ Params: { id: string }; Querystring: { excludeMemory?: string } }>(
     '/v1/agents/:id/export',
     NO_COMPRESS,
@@ -8652,15 +8668,42 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
       if (busyNow(agent, reply)) return reply;
       try {
-        const { filename, data } = await exportTemplate(
+        const { filename, data, personal } = await exportTemplate(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           agent.id,
           { includeMemory: req.query.excludeMemory === undefined },
         );
+        // Header-sized: the first 20 places, the rest counted.
+        const brief = { ...personal, hits: personal.hits.slice(0, 20), more: personal.more + Math.max(0, personal.hits.length - 20) };
         return reply
           .type('application/octet-stream')
           .header('content-disposition', `attachment; filename="${filename}"`)
+          .header('x-hatchabot-personal', encodeURIComponent(JSON.stringify(brief)))
           .send(data);
+      } catch (err) {
+        if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
+        throw err;
+      }
+    },
+  );
+
+  // What a copy would mention — email addresses, phone numbers, key-shaped
+  // strings, and where — without making it. The Send dialog shows it before
+  // anything leaves (2026-09-30).
+  app.get<{ Params: { id: string }; Querystring: { excludeMemory?: string } }>(
+    '/v1/agents/:id/export/scan',
+    async (req, reply) => {
+      const agent = ownedAgent(req, req.params.id);
+      if (!agent) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(409).send({ error: OPS_STAYS_HERE });
+      if (busyNow(agent, reply)) return reply;
+      try {
+        const { personal } = await exportTemplate(
+          { store, provider: providerFor(agent.hostId) },
+          agent.id,
+          { includeMemory: req.query.excludeMemory === undefined },
+        );
+        return personal;
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;
@@ -8772,8 +8815,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         return reply.code(400).send({ error: "That's your own address — use Clone to copy an agent to yourself." });
       }
       try {
-        // The template is exactly what a shared file carries: SOUL/AGENTS
-        // (+memory), declared needs, NO bot/members/secrets.
+        // The template is exactly what a shared file carries: SOUL/AGENTS,
+        // its tasks, declared needs, NO bot/members/secrets — and whatever
+        // personal notes the agent wrote there, which the dialog showed first.
         const { data } = await exportTemplate(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
           agent.id,
@@ -8931,7 +8975,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return { dismissed: true };
   });
 
-  // Clone: a faithful local copy (memory included — you own both copies, so
+  // Clone: a faithful local copy (MEMORY.md, its daily notes and USER.md — you own both copies, so
   // there's no privacy concern), with a fresh identity: new name, its own bot,
   // and only you as owner. Export → import, in one step, on this installation.
   app.post<{ Params: { id: string }; Body: { name?: string } }>(
@@ -8966,8 +9010,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           store.insertAgentEnv({ id, agentId: clone.id, name: e.name, secretRef, createdAt: new Date().toISOString() });
         }
         const notCopied = store.listDataSources(agent.id).map((d) => d.mountName);
+        // Its daily notes (memory/) and USER.md too: most of what an agent
+        // saves lives there, not in MEMORY.md (2026-09-30). Seeded like the
+        // rest, before the first build; what could not come is named.
+        const carried = await readCloneMemory(deps.provider, agent.runtimeRef!, agent.slug);
+        if (Object.keys(carried.files).length) store.setAgentSeed(clone.id, carried.files);
         kickProvision(clone.id);
-        return reply.code(201).send({ ...publicAgent(clone), notCopied });
+        return reply.code(201).send({
+          ...publicAgent(clone), notCopied,
+          memoryNotCopied: carried.skipped,
+          ...(carried.failed ? { memoryCopyFailed: true } : {}),
+        });
       } catch (err) {
         if (err instanceof TransferError) return reply.code(400).send({ error: err.userMessage });
         throw err;

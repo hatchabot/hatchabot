@@ -391,6 +391,21 @@ export class LocalDockerProvider implements RuntimeProvider {
         'export NPM_CONFIG_PREFIX="$HOME/.npm-global"',
         'EOF',
       );
+      // A first build replaces what `agents add` is about to scaffold with the
+      // files this agent was given (replaceScaffold): OpenClaw 2026.9 writes
+      // its own SOUL.md, AGENTS.md and USER.md, and the copy-if-absent below
+      // then kept those over a template's, a clone's and the manager's own
+      // (2026-09-30). "First" = the workspace does not exist yet, or a first
+      // build stopped before its files were in (the pending mark). Every
+      // later build leaves the files alone, as before.
+      const replace = new Set((spec.workspace.replaceScaffold ?? []).filter((n) => n in spec.workspace.files));
+      const freshMark = `/home/node/.openclaw/.hatchabot-first-build-${spec.workspace.configPatch.agentId}`;
+      if (replace.size) {
+        script.push(
+          '__hb_fresh=0',
+          `if [ ! -d ${shq(workspaceDir)} ] || [ -f ${shq(freshMark)} ]; then __hb_fresh=1; mkdir -p /home/node/.openclaw; : > ${shq(freshMark)}; fi`,
+        );
+      }
       const cmds = batchConfigCommands(buildConfigCommands(spec.workspace.configPatch));
       const labels = describeConfigCommands(cmds);
       // "Already so?" for a step's skipIf: the expression runs against the
@@ -427,8 +442,12 @@ export class LocalDockerProvider implements RuntimeProvider {
         if (name.includes('/')) {
           script.push(`mkdir -p ${shq(dest.slice(0, dest.lastIndexOf('/')))}`);
         }
-        script.push(`[ -f ${shq(dest)} ] || cp ${shq(`${seedBase}/workspace/${name}`)} ${shq(dest)}`);
+        const from = shq(`${seedBase}/workspace/${name}`);
+        script.push(replace.has(name)
+          ? `if [ "$__hb_fresh" = 1 ] || [ ! -f ${shq(dest)} ]; then cp ${from} ${shq(dest)}; fi`
+          : `[ -f ${shq(dest)} ] || cp ${from} ${shq(dest)}`);
       }
+      if (replace.size) script.push(`rm -f ${shq(freshMark)}`);
 
       await writeFile(join(seedDir, 'seed.sh'), script.join('\n') + '\n', { mode: 0o700 });
       for (const [name, contents] of Object.entries(spec.workspace.files)) {

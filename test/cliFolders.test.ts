@@ -122,6 +122,15 @@ describe('fmtHealth / fmtUsage (CLI parity output)', () => {
     expect(out).toMatch(/plugin errors: telegram: boom/);
   });
 
+  // The gateway answering is not its AI source answering (2026-09-30).
+  it('says when its AI source last answered, or since when it has refused', () => {
+    const ok = fmtHealth('Kitchen', { status: 'healthy', reachable: true, aiSource: { name: 'Max', lastAnsweredAt: '2026-09-30T10:00:00.000Z' } });
+    expect(ok).toMatch(/AI source: last answered 2026-09-30T10:00:00.000Z \(Max\)/);
+    const refused = fmtHealth('Kitchen', { status: 'healthy', reachable: true, aiSource: { lastAnsweredAt: '2026-09-30T10:00:00.000Z', refusingSince: '2026-09-30T11:00:00.000Z', refusal: 'refused' } });
+    expect(refused).toMatch(/AI source: refused \(rate-limited\) since 2026-09-30T11:00:00.000Z; last answered 2026-09-30T10:00:00.000Z/);
+    expect(fmtHealth('Kitchen', { status: 'healthy', reachable: true, aiSource: {} })).toMatch(/AI source: no answer seen yet/);
+  });
+
   it('renders usage by model, and an empty state', () => {
     const out = fmtUsage('Kitchen', { totalTokens: 1_500_000, sessions: 3, byModel: [{ model: 'claude-opus-4-8', tokens: 1_500_000 }] });
     expect(out).toMatch(/1\.5M tokens · 3 sessions/);

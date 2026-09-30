@@ -1361,6 +1361,11 @@ export class Store {
     })();
   }
 
+  /** Forget the seeds a clone carried from its source's memory (memory/…, USER.md) once they are on the volume. */
+  dropCarriedMemorySeed(agentId: string): void {
+    this.db.prepare(`DELETE FROM agent_seed WHERE agent_id = ? AND (name LIKE 'memory/%' OR name = 'USER.md')`).run(agentId);
+  }
+
   getAgentSeed(agentId: string): Record<string, string> {
     const rows = this.db
       .prepare(`SELECT name, content FROM agent_seed WHERE agent_id = ?`)
@@ -2827,6 +2832,14 @@ export class Store {
   latestTokenTotal(agentId: string): number | undefined {
     const r = this.db.prepare(`SELECT total FROM token_samples WHERE agent_id = ? ORDER BY at DESC LIMIT 1`).get(agentId) as { total: number } | undefined;
     return r?.total;
+  }
+  /** This agent's refusals (429s) on a source after `afterIso`, oldest first — the health check's "refused since". */
+  limitHitsForAgent(agentId: string, profileId: string, afterIso: string): string[] {
+    return (this.db.prepare(`SELECT at FROM limit_hits WHERE agent_id = ? AND profile_id = ? AND at > ? ORDER BY at`).all(agentId, profileId, afterIso) as Array<{ at: string }>).map((r) => r.at);
+  }
+  /** The five-minute slots in which this agent's calls on a source failed (not refusals), after `afterSlot`, oldest first. */
+  failedSlotsForAgent(agentId: string, profileId: string, afterSlot: string): string[] {
+    return (this.db.prepare(`SELECT slot FROM model_call_slots WHERE agent_id = ? AND profile_id = ? AND failed > 0 AND slot > ? ORDER BY slot`).all(agentId, profileId, afterSlot) as Array<{ slot: string }>).map((r) => r.slot);
   }
   addLimitHit(agentId: string, profileId: string, at: string, model: string): void {
     this.db.prepare(`INSERT OR IGNORE INTO limit_hits (agent_id, profile_id, at, model) VALUES (?, ?, ?, ?)`).run(agentId, profileId, at, model || null);

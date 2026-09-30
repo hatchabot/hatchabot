@@ -325,8 +325,9 @@ Telegram · Environment).
   this while you're the only member.
 - **Snapshots** — point-in-time copies of the three definition files, taken
   automatically before file edits and rebuilds, or on demand (**Snapshot
-  now**). Restore one to roll the agent's definition and memory back — so a
-  bad edit is always undoable. (CLI: `hatchabot snapshot` / `revert`.)
+  now**). Restore one to roll back its SOUL, AGENTS and MEMORY.md files — so a
+  bad edit is always undoable. Its daily notes (`memory/`) and other files are
+  not included; use Backups for the whole agent. (CLI: `hatchabot snapshot` / `revert`.)
 - **Schedule** — the agent's scheduled tasks (CLI: `hatchabot tasks`). A
   task's result arrives as a message from the agent in your own chat with it:
   Telegram first, else Discord or Slack. An agent in no chat app writes it
@@ -365,14 +366,18 @@ news again even if an earlier one was dismissed.
 Five distinct verbs, for five intents:
 
 - **⧉ Clone** (card) — duplicate the agent on this machine: a faithful copy,
-  memory included, with its own bot and name. CLI: `hatchabot clone`.
-- **📤 Share** (card) — export a **template** for someone else: the trained
-  SOUL.md + AGENTS.md — plus memory if you say so (the web asks: OK for a
-  faithful copy, Cancel for persona & instructions only; the CLI leaves memory
-  out unless `--include-memory`) — the AI vendor preference, and a checklist of data sources and
-  env-var *names* — but **no bot token, members, or conversation history**.
-  Safe to email. The recipient uses **Import** (header) to stand up a fresh
-  agent with their own bot, AI source, and people.
+  memory included (MEMORY.md, its daily notes under `memory/` and USER.md),
+  with its own bot and name. CLI: `hatchabot clone`.
+- **📤 Share** (card) — export a **template** for someone else: a copy of its
+  instructions (SOUL.md + AGENTS.md) and scheduled tasks — plus MEMORY.md if
+  you say so (its summary notes; the daily notes never travel; the CLI leaves
+  it out unless `--include-memory`) — the AI vendor preference, and a checklist
+  of data sources and env-var *names* — without its bot, members or
+  conversations. Read it before you send it: an agent may have written names
+  or addresses into its instructions, so Share counts the email addresses and
+  phone numbers the copy mentions and shows where. The recipient uses
+  **Import** (header) to stand up a fresh agent with their own bot, AI source,
+  and people.
 - **Import** (header) — opens any `.hatchabot` file and auto-detects it: a
   full backup is restored as the *same* agent; a template becomes a *fresh*
   one.
@@ -1049,8 +1054,8 @@ model, bot, and host.
 Per-agent, the sheet's **Usage** tab (and ⋯ → 📊 Usage) shows lifetime tokens and calls,
 the last 24 hours, the conversation's size now — each call re-sends it — the
 split between new input, cache reads, cache writes and output, calls per model,
-billing context. Advanced → Checks has **❤️ Health** (is it actually
-answering?) and **Logs**.
+billing context. Advanced → Checks has **❤️ Health** (checks its gateway
+and chat connection, and when its AI source last answered) and **Logs**.
 
 **⚙ Settings → Hosts** manages the machines this cluster runs agents on
 ("this machine" is the built-in runner). Adding one is a guided three-step

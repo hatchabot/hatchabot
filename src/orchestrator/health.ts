@@ -1,4 +1,6 @@
 import type { RuntimeProvider } from '../providers/provider.js';
+import type { Store } from '../store/store.js';
+import type { Agent } from '../domain/types.js';
 
 /**
  * A live health probe of an agent's own OpenClaw gateway, via `health --json`.
@@ -101,6 +103,40 @@ export interface AgentHealth {
   };
   pluginErrors?: string[];
   checkedAt?: number;
+}
+
+/**
+ * When the agent's AI source last answered it, and whether it has refused
+ * since. The gateway probe never runs a model turn, so an expired or
+ * rate-limited source still read "Responding" (2026-09-30). This reads what
+ * the usage sampler already records from the agent's own calls: the newest
+ * success, its refusals (429) and failed calls after it. No model turn, no
+ * exec; as fresh as the last usage reading.
+ */
+export interface AiSourceHealth {
+  name?: string;
+  /** Its newest successful model call. */
+  lastAnsweredAt?: string;
+  /** The first refusal or failed call after that, when nothing has answered since. */
+  refusingSince?: string;
+  /** refused = rate-limited (429); failed = any other error (expired, out of credits, unreachable). */
+  refusal?: 'refused' | 'failed';
+}
+
+export function aiSourceHealth(store: Store, agent: Agent): AiSourceHealth {
+  const profile = store.getAIProfile(agent.aiProfileId);
+  const lastAnsweredAt = store.usageCursor(agent.id)?.lastOk;
+  const since = lastAnsweredAt ?? '';
+  const refused = store.limitHitsForAgent(agent.id, agent.aiProfileId, since)[0];
+  // A slot is a five-minute bucket ("2026-09-25T01:25"): a failure in the
+  // success's own slot cannot be ordered against it, so it is not counted.
+  const failed = store.failedSlotsForAgent(agent.id, agent.aiProfileId, since.slice(0, 16))[0];
+  const first = [refused, failed].filter((x): x is string => !!x).sort()[0];
+  return {
+    name: profile?.name,
+    lastAnsweredAt,
+    ...(first ? { refusingSince: first.length === 16 ? `${first}:00.000Z` : first, refusal: first === refused ? 'refused' as const : 'failed' as const } : {}),
+  };
 }
 
 export async function agentHealth(

@@ -131,8 +131,9 @@ Commands:
   tasks <agent> runs <task> [--limit <n>]
                                What its recent runs produced.
   tasks <agent> pause|resume|rm <task>
-  delete <agent> [--yes]       Delete an agent and its memory forever
-                               (retypes the name unless --yes)
+  delete <agent> [--yes]       Delete an agent and its memory (copies in this
+                               machine's nightly backups age out in 14 days;
+                               retypes the name unless --yes)
   archive <agent> [--yes]      Park an agent and hand its Telegram bot back for
                                another agent to use. Keeps memory, members and
                                settings; members are told in the chat.
@@ -147,16 +148,18 @@ Commands:
                                Pinned to an image this machine lacks: shows its
                                recipe and asks (build it here, or default image)
   share <agent> [-o <file>] [--include-memory]
-                               Share a TEMPLATE for someone else — the agent's
-                               trained SOUL/AGENTS, no bot token/members. Memory
-                               stays private unless --include-memory
+                               Share a TEMPLATE for someone else — a copy of its
+                               instructions and scheduled tasks, without its bot,
+                               members or conversations; MEMORY.md only with
+                               --include-memory. Read it before you send it: it
+                               lists the addresses and numbers it mentions
   import <file> [--name <n>] [--profile <aiProfileId>] [--host <id>] [--values <json>]
                                Import a template as a fresh agent (you give it
                                its own bot); prompts for the template's setup
                                fields ({{key}} placeholders) and prints what it
                                still needs
-  clone <agent> [new name]     Duplicate an agent here — a faithful copy with its
-                               own bot and name
+  clone <agent> [new name]     Duplicate an agent here — a faithful copy (MEMORY.md,
+                               its daily notes and USER.md) with its own bot and name
   start|stop|rebuild <agent> [--wait]
                                Lifecycle controls; --wait returns once it is
                                RUNNING (or STOPPED)
@@ -239,7 +242,8 @@ Commands:
   put <agent> <file> [dir] [--overwrite]
                                Upload a file into a folder of the agent (its
                                workspace when no dir is given)
-  health <agent>               Live gateway health — is it actually answering
+  health <agent>               Checks its gateway and chat connection, and when
+                               its AI source last answered
   usage [agent]                Token usage by model; no agent → the fleet ranked by tokens
   top [--sort cpu|mem|name]    Live CPU and memory per agent, per machine
                                (docker's own measurement; a second per machine).
@@ -771,7 +775,7 @@ function fmtCostRange(c: { low: number; high: number; partial?: boolean }): stri
   return body + (c.partial ? '+' : '');
 }
 
-/** `hatchabot health <agent>` output — a live gateway probe, mirroring ❤️ Health. */
+/** `hatchabot health <agent>` output — the gateway probe plus when its AI source last answered, mirroring ❤️ Health. */
 /**
  * Render the consolidated bot census as aligned, numbered lines. Pure so the
  * column alignment and the ⇄ "same bot elsewhere" markers are testable. `hosts`
@@ -843,6 +847,14 @@ export function fmtHealth(name: string, h: any): string {
     lines.push(`  event loop: degraded${h.eventLoop.reasons?.length ? ' — ' + h.eventLoop.reasons.join(', ') : ''}`);
   }
   if (h.pluginErrors?.length) lines.push(`  plugin errors: ${h.pluginErrors.join(', ')}`);
+  // The gateway answering is not its AI source answering (2026-09-30).
+  const src = h.aiSource;
+  if (src) {
+    const named = src.name ? ` (${src.name})` : '';
+    if (src.refusingSince) lines.push(`  AI source: ${src.refusal === 'refused' ? 'refused (rate-limited)' : 'failed'} since ${src.refusingSince}${src.lastAnsweredAt ? `; last answered ${src.lastAnsweredAt}` : ''}${named}`);
+    else if (src.lastAnsweredAt) lines.push(`  AI source: last answered ${src.lastAnsweredAt}${named}`);
+    else lines.push(`  AI source: no answer seen yet${named}`);
+  }
   return lines.join('\n');
 }
 
@@ -1292,7 +1304,7 @@ async function main() {
         if (!t.pooled) console.log(`note: bot @${t.accountId} is not pool-managed — save its token first (hatchabot token) if you want to recycle it.`);
       } catch { /* no channel yet — nothing to save */ }
       if (!flags.has('yes')) {
-        const typed = await askLine(`This permanently erases "${a.name}" and everything it remembers.\nType the agent's name to confirm: `);
+        const typed = await askLine(`This permanently erases "${a.name}" and everything it remembers. Copies in this machine's nightly backups are removed as they age out (14 days).\nType the agent's name to confirm: `);
         if (typed !== a.name) fail('name did not match — nothing deleted');
       }
       await api(ctx, `/v1/agents/${a.id}`, { method: 'DELETE' });
@@ -1717,7 +1729,9 @@ async function main() {
     }
     case 'checkpoint': {
       const a = await resolveAgent(ctx, rest[0] ?? fail('usage: hatchabot checkpoint <agent>'));
-      const r = (await (await jsonPost(`/v1/agents/${a.id}/checkpoint`, {})).json().catch(() => undefined)) as { saved?: boolean; error?: string } | undefined;
+      const r = (await (await jsonPost(`/v1/agents/${a.id}/checkpoint`, {})).json().catch(() => undefined)) as { ok?: boolean; saved?: boolean; note?: string; error?: string } | undefined;
+      // The turn ran but its memory files did not change: not a failure, not a save (2026-09-30).
+      if (r?.ok && r.saved === false) { console.log(r.note ?? 'it found nothing new to save'); return; }
       if (r && r.saved === false) fail(r.error ?? 'nothing was saved');
       console.log("saved — the conversation's key facts are in its memory");
       return;
@@ -1927,8 +1941,20 @@ async function main() {
       await chmod(out, 0o600);
       console.log(`exported template to ${out}`);
       console.log(withMemory
-        ? 'a trained copy INCLUDING MEMORY.md — it may hold personal facts the agent was told. Share only with someone you trust.'
-        : 'a shareable copy — no bot token, members, or memory. Safe to send to someone.');
+        ? 'a copy of its instructions, scheduled tasks and MEMORY.md (its summary notes; may contain personal facts), without its bot, members or conversations.'
+        : 'a copy of its instructions and scheduled tasks, without its bot, members or conversations.');
+      console.log('Read it before you send it: an agent may have written names or addresses into its instructions.');
+      // What the server found in it (2026-09-30): the count, then where.
+      try {
+        const p = JSON.parse(decodeURIComponent(res.headers.get('x-hatchabot-personal') ?? '')) as import('./domain/personalData.js').PersonalScan;
+        const { personalSummary } = await import('./domain/personalData.js');
+        const what = personalSummary(p);
+        if (what) {
+          console.log(`\nThis copy mentions ${what} — read it before you send it:`);
+          for (const h of p.hits ?? []) console.log(`  ${h.where}, line ${h.line}: ${h.sample}`);
+          if (p.more) console.log(`  …and ${p.more} more`);
+        }
+      } catch { /* an older server sends no scan */ }
       return;
     }
     case 'import': { // template
@@ -1987,6 +2013,9 @@ async function main() {
       const name = rest.slice(1).join(' ').trim() || `${a.name} (copy)`;
       const res: any = await (await jsonPost(`/v1/agents/${a.id}/clone`, { name })).json();
       console.log(`cloned "${a.name}" → "${res.name}" (${res.state}) — connect its Telegram bot to finish.`);
+      if (res.memoryCopyFailed) console.log("note: its daily notes (memory/) and USER.md couldn't be read — only MEMORY.md came along.");
+      else if (res.memoryNotCopied?.length) console.log(`note: these memory files stayed behind (too big or not text): ${res.memoryNotCopied.join(', ')}`);
+      if (res.notCopied?.length) console.log(`note: its data sources (${res.notCopied.join(', ')}) did not come along — add them again.`);
       return;
     }
     case 'archive': {

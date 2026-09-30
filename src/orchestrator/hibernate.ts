@@ -188,6 +188,11 @@ export function resetHibernateState(): void { refusedTokens.clear(); waking.clea
  * audit). The NEWEST waiting id is what this returns.
  */
 export async function telegramWaiting(deps: HibernateDeps, a: Agent): Promise<number | undefined> {
+  const ids = await telegramWaitingIds(deps, a);
+  return ids?.length ? Math.max(0, ...ids) : undefined;
+}
+/** Every update id waiting for the agent (up to a page), or undefined when none or unreadable. */
+async function telegramWaitingIds(deps: HibernateDeps, a: Agent): Promise<number[] | undefined> {
   const ch = deps.store.listChannelsForAgent(a.id).find((c) => c.kind === 'telegram');
   if (!ch || refusedTokens.has(ch.secretRef)) return undefined;
   let token: string;
@@ -204,14 +209,26 @@ export async function telegramWaiting(deps: HibernateDeps, a: Agent): Promise<nu
       return undefined;
     }
     if (!Array.isArray(body.result) || !body.result.length) return undefined;
-    return Math.max(0, ...body.result.map((u) => Number(u?.update_id) || 0));
+    return body.result.map((u) => Number(u?.update_id) || 0);
   } catch {
     return undefined;
   }
 }
-/** Mail = an update newer than the one that was already waiting when the agent went to sleep. */
+/**
+ * How far below the bedtime mark an update may sit and still be one that was
+ * already waiting then: the gateway's last batch, unconfirmed, is at most a
+ * page. Anything further down arrived after.
+ */
+const MARK_BATCH = 100;
+/**
+ * Mail = an update that was not already waiting when the agent went to sleep.
+ * Not only a newer id: after a week with no updates Telegram starts the next
+ * update_id at random (Bot API, getUpdates), so a quiet week's first message
+ * can sit BELOW the mark — and a sleeper waited for it forever (2026-09-30).
+ */
 export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<boolean> {
-  const waiting = await telegramWaiting(deps, a);
+  const ids = await telegramWaitingIds(deps, a);
+  const waiting = ids?.length ? Math.max(0, ...ids) : undefined;
   // The placeholder mark outlived its sleep (a restart between it and the
   // real mark): what waits now becomes the mark, or the agent never woke on
   // a message again (regression review, 2026-09-28).
@@ -220,8 +237,9 @@ export async function telegramHasMail(deps: HibernateDeps, a: Agent): Promise<bo
     if (now?.hibernatedAt && now.hibernateMark === Number.MAX_SAFE_INTEGER) deps.store.setHibernated(a.id, now.hibernatedAt, waiting ?? 0);
     return false;
   }
-  if (waiting === undefined) return false;
-  return waiting > (a.hibernateMark ?? 0);
+  if (!ids?.length) return false;
+  const mark = a.hibernateMark ?? 0;
+  return ids.some((id) => id > mark || id < mark - MARK_BATCH);
 }
 
 /** The wake sweep: sleeping agents with mail waiting get up. Returns who did. One sweep at a time: a slow Telegram must not stack them. */
