@@ -1429,6 +1429,21 @@ export class LocalDockerProvider implements RuntimeProvider {
     return ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
   }
 
+  /**
+   * Where an agent's gateway sees this machine's connections come from: the
+   * gateway address of the network agents run on (the published port is
+   * forwarded into the container from there). Its console trusts that
+   * address as the proxy that names people (openclaw/consoleIdentity.ts).
+   */
+  async agentProxySource(): Promise<string | undefined> {
+    const name = (process.env.HATCHABOT_AGENT_NETWORK ?? 'hatchabot-agents').trim();
+    const net = !name || name === 'default' ? 'bridge' : name;
+    if (net !== 'bridge') await this.#agentNetworkArgs().catch(() => []);
+    const res = await this.#docker(['network', 'inspect', net, '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}']);
+    const ip = res.code === 0 ? res.stdout.trim().split(/\s+/).find((x) => /^\d{1,3}(\.\d{1,3}){3}$/.test(x)) : undefined;
+    return ip;
+  }
+
   #networkReady = false;
   /** `--network <name>`, creating the isolated agent network on first use. */
   async #agentNetworkArgs(): Promise<string[]> {

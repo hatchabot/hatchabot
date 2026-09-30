@@ -69,6 +69,8 @@ import type { Agent, Channel, Host } from '../domain/types.js';
 import { briefCause } from '../domain/redact.js';
 import { opsToolsFingerprint } from '../ops/opsTools.js';
 import { opsSection, OPS_MANAGED_HEADINGS } from '../ops/opsAgent.js';
+import { consoleAllowUsers, consoleIdentityEnabled } from './consoleAccess.js';
+import { consoleIdentity, supportsConsoleIdentity } from '../openclaw/consoleIdentity.js';
 
 export interface CreateAgentInput {
   ownerId: string;
@@ -600,6 +602,17 @@ export async function buildRuntimeSpec(
   // Debug door: each agent's Control UI published on a stable host port
   // behind a per-agent gateway token.
   const gateway = store.ensureGatewayAccess(agentId);
+  // The console with identities (openclaw/consoleIdentity.ts): the owner and
+  // the people given web chat reach OpenClaw's own console, each named by
+  // Hatchabot's proxy. Not the management agent (its console stays the
+  // owner's, behind the token), not an OpenClaw without named roles.
+  const consoleSpec: OpenClawConfigPatch['console'] = !agent.ops && consoleIdentityEnabled() && supportsConsoleIdentity(openclawVersion)
+    ? {
+      trustedProxies: [await deps.provider.agentProxySource?.().catch(() => undefined)].filter((x): x is string => !!x),
+      ownerIdentity: consoleIdentity(gateway.token, 'owner', agent.ownerId),
+      guestIdentities: consoleAllowUsers(store, agent, gateway.token).slice(1),
+    }
+    : undefined;
   // Owner-set env vars (e.g. an API key the agent's own tools need). Their
   // values are secrets; fetch them here. The managed AI credentials are spread
   // AFTER these below, so a same-named var can never shadow the agent's own AI
@@ -724,6 +737,7 @@ export async function buildRuntimeSpec(
         ops: ops && { mcpUrl: ops.mcpUrl, token: ops.token },
         setupToken: oauthToken,
         gatewayToken: gateway.token,
+        console: consoleSpec,
         commandOwners: commandOwnersFor(store, agent),
         ...(agent.filesMaxMb ? { filesMaxMb: agent.filesMaxMb } : {}),
         // Web-only agents have no bot: configWriter then writes no Telegram

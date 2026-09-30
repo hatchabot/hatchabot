@@ -121,7 +121,9 @@ if (mode === "token") {
   const t = typeof a.token === "string" ? a.token : env.OPENCLAW_GATEWAY_TOKEN;
   if (!t) done(21, "no gateway token");
   auth = { token: t };
-} else if (mode === "password") {
+} else if (mode === "password" || mode === "trusted-proxy") {
+  // The console with identities: people come through Hatchabot's proxy, and
+  // this local client uses the loopback password, as the agent's own CLI does.
   const p = typeof a.password === "string" ? a.password : env.OPENCLAW_GATEWAY_PASSWORD;
   if (!p) done(21, "no gateway password");
   auth = { password: p };

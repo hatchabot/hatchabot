@@ -1,6 +1,7 @@
 import { filesMb, FILES_MB_DEFAULT } from '../orchestrator/machineDefaults.js';
 import type { OpenClawConfigPatch } from '../providers/provider.js';
 import { createHash } from 'node:crypto';
+import { consoleGatewayAuth, consoleGatewayRoles, NO_PROXY_YET } from './consoleIdentity.js';
 
 /** A skipIf test: is there a route binding of this agent to channel:account? */
 const hasBinding = (agentId: string, channel: string, accountId: string): string =>
@@ -351,6 +352,21 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     cmds.push(enable('llama-cpp'));
   }
 
+  // Back from the console with identities (an older image, or the switch
+  // turned off): named roles would refuse the owner's browser its device
+  // token. Only when there are some, and BEFORE the run of sets below so it
+  // does not split their one batched CLI start in two.
+  // A left-over trusted proxy is worse: its connections without a forwarded
+  // address are refused outright ("proxy_attribution_required"), which is
+  // every request of a token console.
+  if (patch.gatewayToken && !patch.console) {
+    cmds.push({
+      argv: ['config', 'patch', '--stdin'],
+      stdin: JSON.stringify({ gateway: { roles: null, trustedProxies: null } }),
+      skipIf: '!(c.gateway && (c.gateway.roles || c.gateway.trustedProxies))',
+      optional: true,
+    });
+  }
   cmds.push({ argv: ['config', 'set', 'gateway.mode', 'local'] });
   // OpenClaw's own recurring heartbeat (hourly on a token login) runs as its
   // default "main" agent against ~/.openclaw/workspace — not this agent, and
@@ -429,7 +445,32 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     })],
   });
 
-  if (patch.gatewayToken) {
+  if (patch.gatewayToken && patch.console) {
+    // The console with identities (consoleIdentity.ts): Hatchabot's console
+    // proxy names the person, named roles decide what they see. Three plain
+    // sets, so they ride the batch below — no extra CLI start on a rebuild —
+    // and the batch validates them together (trusted-proxy with no
+    // trustedProxies, or next to a token, is refused). `gateway.auth` is
+    // written whole: the token must go (OpenClaw will not start trusted-proxy
+    // next to one), and the same secret becomes the loopback-only password
+    // the `openclaw` CLI and Hatchabot's own clients use.
+    const c = patch.console;
+    cmds.push({ argv: ['config', 'set', 'gateway.trustedProxies', JSON.stringify(c.trustedProxies.length ? c.trustedProxies : [NO_PROXY_YET])] });
+    cmds.push({ argv: ['config', 'set', 'gateway.roles', JSON.stringify(consoleGatewayRoles(patch.agentId))] });
+    cmds.push({
+      argv: ['config', 'set', 'gateway.auth', JSON.stringify(consoleGatewayAuth({
+        password: patch.gatewayToken,
+        trustedProxies: c.trustedProxies,
+        allowUsers: c.guestIdentities,
+        ownerIdentity: c.ownerIdentity,
+        slug: patch.agentId,
+      }))],
+      sensitive: true,
+    });
+    cmds.push({ argv: ['config', 'set', 'gateway.bind', 'auto'] });
+    // Same reason as below: the page's origin is whatever the owner browses from.
+    cmds.push({ argv: ['config', 'set', 'gateway.controlUi.allowedOrigins', '["*"]'] });
+  } else if (patch.gatewayToken) {
     cmds.push({ argv: ['config', 'set', 'gateway.auth.mode', 'token'] });
     cmds.push({
       argv: ['config', 'set', 'gateway.auth.token', patch.gatewayToken],

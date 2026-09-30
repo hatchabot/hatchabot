@@ -195,6 +195,15 @@ describe('the web chat client (inside the container)', () => {
     expect(g.frames[0]!.params).not.toHaveProperty('auth');
   });
 
+  it('an agent with the console with identities: the loopback password, still read + write only', async () => {
+    // Trusted-proxy gateways take no token; the CLI and this client use the
+    // password OpenClaw accepts only from the container's own loopback.
+    const g = await gateway();
+    const out = await runClient(g.port, {}, { gateway: { auth: { mode: 'trusted-proxy', password: FAKE_TOKEN, trustedProxy: { userHeader: 'x-hatchabot-user' } } } });
+    expect(out, out.stderr).toMatchObject({ code: 0 });
+    expect(g.frames[0]!.params).toMatchObject({ auth: { password: FAKE_TOKEN }, scopes: ['operator.read', 'operator.write'] });
+  });
+
   it('a gateway that never answers: the client gives up at its own deadline', async () => {
     const server = createServer();
     const held: Socket[] = [];

@@ -176,6 +176,9 @@ import {
 import type { Agent, AIProfile, Channel } from '../domain/types.js';
 import { LOCAL_OWNER, ownerIdOf, principalOf } from './principal.js';
 import { registerWebChatRoutes, webChatBusy } from './webChat.js';
+import { forwardedClientAddress, guestHttpAllowed, spliceGuest, stripClientIdentity, withConsoleIdentity } from './consoleProxy.js';
+import { ConsoleAccess } from '../orchestrator/consoleAccess.js';
+import { consoleIdentity, type ConsoleRole } from '../openclaw/consoleIdentity.js';
 import type { IdentityVerifier } from './identity.js';
 import {
   autoSnapshot,
@@ -5218,10 +5221,46 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const ip = agent.ops && agent.runtimeRef ? await providerFor(agent.hostId).containerIp?.(agent.runtimeRef) : undefined;
     return ip ? { host: ip, port: 18789 } : undefined;
   };
-  const gatewayTarget = async (req: FastifyRequest, id: string): Promise<{ host: string; port: number } | undefined> => {
-    const agent = ownedAgent(req, id);
-    return agent ? gatewayAddr(agent) : undefined;
+  /**
+   * The console with identities (openclaw/consoleIdentity.ts): the owner and,
+   * on a rebuilt agent, the people the owner gave web chat reach OpenClaw's
+   * own Control UI through this proxy, each named to the gateway.
+   */
+  const consoleAccess = new ConsoleAccess({ store, providerFor, gatewayAddr, trace: (id) => trace(id) });
+  (app as unknown as { consoleAccess?: ConsoleAccess }).consoleAccess = consoleAccess;
+  /** Who may open this agent's console, and as what: its owner, or a web-chat guest. Never the management agent's guest. */
+  const consoleCaller = (userId: string, id: string): { agent: Agent; role: ConsoleRole } | undefined => {
+    const agent = store.getAgent(id);
+    if (!agent || agent.state === 'DELETED') return undefined;
+    if (agent.ownerId === userId) return { agent, role: 'owner' };
+    if (agent.ops || !agent.gatewayToken) return undefined;
+    return store.webChatAllowed(agent.id, userId) ? { agent, role: 'guest' } : undefined;
   };
+  /**
+   * The headers one console request carries to the gateway. On an identity
+   * gateway: the person's name (and a guest's scope cap), never anything the
+   * browser claimed. On a token gateway (not rebuilt yet): as before.
+   */
+  const consoleHeaders = (
+    raw: Record<string, string | string[] | undefined>, agent: Agent, role: ConsoleRole, userId: string,
+    identity: boolean, remote: string | undefined,
+  ): Record<string, string | string[] | undefined> => {
+    const base = stripSessionCookie(raw);
+    if (!identity) return stripClientIdentity(base);
+    return withConsoleIdentity(base, {
+      identity: consoleIdentity(agent.gatewayToken!, role, role === 'owner' ? agent.ownerId : userId),
+      guest: role === 'guest',
+      clientAddress: forwardedClientAddress(remote),
+    });
+  };
+  /** Wake a sleeping agent for its console, then where its gateway answers. */
+  const consoleTarget = async (agentIn: Agent): Promise<{ agent: Agent; addr: { host: string; port: number } } | undefined> => {
+    const agent = agentIn.hibernatedAt && agentIn.state === 'STOPPED' ? await ensureAwake(agentIn, 'its console was opened') : agentIn;
+    const addr = await gatewayAddr(agent);
+    return addr ? { agent, addr } : undefined;
+  };
+  const needsRebuildForGuests = (name: string) =>
+    `${name} needs a rebuild before its guests can use the full chat. Until then, use the chat here — or ask its owner to rebuild it.`;
 
   // The agent gateway is the least-trusted component (it runs AI-authored tool
   // and MCP code) and authenticates via its own bearer token carried in the URL
@@ -5326,16 +5365,57 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.redirect(`/v1/agents/${req.params.id}/ui/`);
   });
 
+  /**
+   * What this caller's console is, before they open it: the owner learns
+   * whether the token still rides in the address (a gateway not rebuilt yet);
+   * a guest learns whether the full chat is there for them, and which
+   * conversation is theirs — or that the agent needs a rebuild first.
+   */
+  app.get<{ Params: { id: string } }>('/v1/agents/:id/console/access', async (req, reply) => {
+    const me = ownerIdOf(req);
+    const caller = consoleCaller(me, req.params.id);
+    if (!caller) return reply.code(404).send({ error: 'Not found' });
+    const { agent, role } = caller;
+    if (agent.state !== 'RUNNING' && !(agent.hibernatedAt && agent.state === 'STOPPED')) {
+      return { role, console: 'unavailable', reason: 'It is not running right now.' };
+    }
+    // A sleeping agent: what it runs is known once it is awake; the owner's
+    // console wakes it, a guest is offered the chat here meanwhile.
+    if (agent.state !== 'RUNNING') return { role, console: role === 'owner' ? 'token' : 'unavailable', reason: 'It is asleep.' };
+    const ready = await consoleAccess.ensureReady(agent);
+    if (role === 'owner') return { role, console: ready.mode === 'unavailable' ? (ready.identity ? 'identity' : 'token') : ready.mode, ...(ready.mode === 'unavailable' ? { reason: ready.reason } : {}) };
+    if (ready.mode !== 'identity') {
+      return { role, console: ready.mode === 'token' ? 'needs-rebuild' : 'unavailable', reason: ready.mode === 'token' ? needsRebuildForGuests(agent.name) : ready.reason };
+    }
+    return { role, console: 'identity', session: consoleAccess.guestSessionKey(agent, me) };
+  });
+
   app.all<{ Params: { id: string; '*': string } }>('/v1/agents/:id/ui/*', NO_COMPRESS, async (req, reply) => {
-    const target = await gatewayTarget(req, req.params.id);
+    const me = ownerIdOf(req);
+    const caller = consoleCaller(me, req.params.id);
+    if (!caller) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
+    const target = await consoleTarget(caller.agent).catch(() => undefined);
     if (!target) return reply.code(404).send({ error: 'No debug gateway for this agent.' });
     const path = `/${req.params['*'] ?? ''}`;
+    const ready = await consoleAccess.ensureReady(target.agent);
+    const identity = ready.mode === 'identity' || (ready.mode === 'unavailable' && !!ready.identity);
+    if (caller.role === 'guest') {
+      // A guest only ever reaches an identity gateway, and only its chat's paths.
+      if (ready.mode !== 'identity') return reply.code(409).send({ code: 'needs-rebuild', error: ready.mode === 'token' ? needsRebuildForGuests(target.agent.name) : ready.reason });
+      if (!guestHttpAllowed(req.method, path)) {
+        app.log.info({ agent: target.agent.id, userId: me, http: `${req.method} ${path.slice(0, 80)}` }, 'console.guest_refused');
+        return reply.code(403).send({ error: 'That part of the console is for its owner.' });
+      }
+    }
     const qs = req.raw.url?.includes('?') ? req.raw.url.slice(req.raw.url.indexOf('?')) : '';
     // The app's document (a route, not a file) is rewritten onto this prefix
     // below — so it is asked for uncompressed. Assets pass through as they
     // come, gzip/brotli included.
     const isDocument = isControlUiDocument(path);
-    const forwarded: Record<string, string | string[] | undefined> = { ...stripSessionCookie(req.headers), host: `127.0.0.1:${target.port}`, connection: 'close' };
+    const forwarded: Record<string, string | string[] | undefined> = {
+      ...consoleHeaders(req.headers, target.agent, caller.role, me, identity, req.socket.remoteAddress),
+      host: `127.0.0.1:${target.addr.port}`, connection: 'close',
+    };
     if (isDocument) delete forwarded['accept-encoding'];
     // The body as it will be sent, and a content-length that matches it: a
     // parsed JSON body re-serialised can be shorter than the client's declared
@@ -5348,8 +5428,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       (resolve, reject) => {
         const r = httpRequest(
           {
-            host: target.host,
-            port: target.port,
+            host: target.addr.host,
+            port: target.addr.port,
             path: path + qs,
             method: req.method,
             // Drop hop-by-hop and our own host header; keep auth/content ones.
@@ -5408,6 +5488,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   // password and identity modes, and anything that silently fell back to
   // LOCAL_OWNER would forward an UNAUTHENTICATED upgrade on a password-mode
   // install. No resolver (or no session) means the socket is destroyed.
+  //
+  // A guest's socket is not spliced blind: every message is read
+  // (consoleProxy.ts spliceGuest) and a removal closes it (consoleAccess).
   app.server.on('upgrade', async (rawReq, socket, head) => {
     const url = rawReq.url ?? '';
     const m = /^\/v1\/agents\/([^/]+)\/ui\/?([^?]*)/.exec(url);
@@ -5418,12 +5501,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const principal = resolve(rawReq.headers.cookie);
     if (!principal) return deny();
 
-    // Same ownership rule as every other agent route, against the real caller.
-    const agent = store.getAgent(m[1]!);
-    if (!agent || agent.ownerId !== principal.ownerId || agent.state !== 'RUNNING') return deny();
-    socket.on('error', () => {}); // the await below must not leave an unhandled error
-    const addr = await gatewayAddr(agent).catch(() => undefined);
+    // Same rule as the page itself, against the real caller: the owner, or a
+    // guest the owner gave web chat.
+    const caller = consoleCaller(principal.ownerId, m[1]!);
+    if (!caller || caller.agent.state !== 'RUNNING') return deny();
+    socket.on('error', () => {}); // the awaits below must not leave an unhandled error
+    const addr = await gatewayAddr(caller.agent).catch(() => undefined);
     if (!addr) return deny();
+    const ready = await consoleAccess.ensureReady(caller.agent).catch(() => ({ mode: 'unavailable' as const, reason: 'error', identity: false }));
+    const identity = ready.mode === 'identity' || (ready.mode === 'unavailable' && !!ready.identity);
+    const guest = caller.role === 'guest';
+    if (guest && ready.mode !== 'identity') return deny();
+    // A guest's socket is the app's own, at the root — not a worker, node or plugin door.
+    if (guest && (m[2] ?? '') !== '') return deny();
+    if (socket.destroyed) return;
 
     const qs = url.includes('?') ? url.slice(url.indexOf('?')) : '';
     const up = httpRequest({
@@ -5431,7 +5522,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       port: addr.port,
       path: `/${m[2] ?? ''}${qs}`,
       method: 'GET',
-      headers: { ...stripSessionCookie(rawReq.headers), host: `127.0.0.1:${addr.port}` },
+      headers: { ...consoleHeaders(rawReq.headers, caller.agent, caller.role, principal.ownerId, identity, rawReq.socket.remoteAddress), host: `127.0.0.1:${addr.port}` },
     });
     up.on('upgrade', (upRes, upSocket, upHead) => {
       socket.write(
@@ -5445,12 +5536,42 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         ].join('\r\n'),
       );
       if (upHead?.length) upSocket.unshift(upHead);
+      if (guest) {
+        // Whatever the browser sent after its upgrade request goes through the filter too.
+        if (head?.length) socket.unshift(head);
+        const forget = consoleAccess.trackGuest(caller.agent.id, principal.ownerId, () => { socket.destroy(); upSocket.destroy(); });
+        const refusedOnce = new Set<string>();
+        socket.on('close', forget);
+        upSocket.on('close', forget);
+        spliceGuest(socket, upSocket, {
+          identity: consoleIdentity(caller.agent.gatewayToken!, 'guest', principal.ownerId),
+          // Once per method per connection: the app polls some of them.
+          onRefused: (method) => {
+            const name = String(method ?? '').slice(0, 60);
+            if (refusedOnce.has(name)) return;
+            refusedOnce.add(name);
+            trace(caller.agent.id)('console.guest_refused', { userId: principal.ownerId, method: name });
+          },
+        });
+        trace(caller.agent.id)('console.guest_opened', { userId: principal.ownerId });
+        // The owner's view names guests' sessions after them (best-effort).
+        void consoleAccess.nameGuests(caller.agent, true).catch(() => {});
+        return;
+      }
+      if (identity) void consoleAccess.nameGuests(caller.agent).catch(() => {});
       upSocket.on('error', () => socket.destroy());
       socket.on('error', () => upSocket.destroy());
       upSocket.pipe(socket).pipe(upSocket);
     });
+    // The gateway answered without upgrading (it refused): say so, then close.
+    up.on('response', (res) => {
+      try { socket.write(`HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? ''}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); } catch { /* gone */ }
+      res.resume();
+      socket.destroy();
+    });
     up.on('error', deny);
-    up.end(head?.length ? head : undefined);
+    // An owner's early bytes went with the request as before; a guest's went through the filter above.
+    up.end(!guest && head?.length ? head : undefined);
   });
 
   // Add a data source. Folders are host mounts (ro/rw), gated to the machine
@@ -9350,6 +9471,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       }
       store.setMembershipWebChat(agent.id, m.userId, on);
       trace(agent.id)(on ? 'member.web_chat_on' : 'member.web_chat_off', { userId: m.userId });
+      // Off: their open console closes now; on or off, the gateway's list of
+      // people follows (a guest's name is only admitted while they may chat).
+      if (!on) consoleAccess.dropGuests(agent.id, m.userId);
+      if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent).catch(() => {});
       return { userId: m.userId, webChat: on };
     },
   );
@@ -9365,6 +9490,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
           agent.id,
           req.params.userId,
         );
+        // Their open console (the full chat) ends with the membership, and
+        // their name leaves the gateway's list.
+        consoleAccess.dropGuests(agent.id, req.params.userId);
+        if (agent.state === 'RUNNING') void consoleAccess.ensureReady(agent).catch(() => {});
         return { revoked: true };
       } catch (err) {
         if (err instanceof RevokeError) return reply.code(400).send({ error: err.userMessage });

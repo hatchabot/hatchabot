@@ -622,12 +622,16 @@ const SCENARIOS = String.raw`(() => {
         window.__override['/v1/agents/w1/chat'] = { messages: [
           { role: 'user', text: 'Hi' },
           { role: 'assistant', text: 'Hello <b>there</b>\nline two' } ] };
+        // Not rebuilt yet for the full chat: the chat here, and a line saying why.
+        window.__override['/v1/agents/w1/console/access'] = { role: 'guest', console: 'needs-rebuild', reason: 'Book Club needs a rebuild before its guests can use the full chat. Until then, use the chat here — or ask its owner to rebuild it.' };
         await refresh(false);
         openV2Agent('w1');
         const pane = document.getElementById('v2Pane').textContent;
         ok('the pane offers the web: ' + pane.replace(/\s+/g, ' ').slice(0, 160), pane.includes('On the web') && pane.includes('No chat app needed') && !pane.includes('Not running'));
         byText('#v2Pane button', 'Chat').click();
         await until(() => webChatDlg.open);
+        ok('it says why this is not the full chat yet', !document.getElementById('wchatNote').hidden && document.getElementById('wchatNote').textContent.includes('needs a rebuild before its guests can use the full chat'));
+        ok('no console was opened', !document.getElementById('consoleDlg').open);
         const log = document.getElementById('wchatLog');
         await until(() => log.querySelectorAll('.wchat-msg').length === 2);
         ok('the agent\'s text is shown as text, never HTML', !log.querySelector('b') && log.textContent.includes('Hello <b>there</b>'));
@@ -661,8 +665,58 @@ const SCENARIOS = String.raw`(() => {
         window.__answer = {};
         if (webChatDlg.open) webChatDlg.close();
         try { v2Close(); } catch {}
-        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/w1/chat'];
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/w1/chat']; delete window.__override['/v1/agents/w1/console/access'];
         await refresh(false);
+      }
+    },
+    // The full chat (2026-09-30): on a rebuilt agent a guest's 💬 Chat is OpenClaw's own console, on their own conversation — no token, nothing of the owner's.
+    webChatConsole: async () => {
+      try {
+        const list = await (await fetch('/v1/agents')).json();
+        const base = list.find((a) => a.id === 'a1');
+        window.__override['/v1/agents'] = [...list, { ...base, id: 'w1', name: 'Book Club', role: 'user', ownerId: 'o2', webChat: true, botUsername: undefined, deepLink: undefined, otherChannels: [] }];
+        window.__override['/v1/agents/w1/console/access'] = { role: 'guest', console: 'identity', session: 'agent:book-club:guest:0123456789abcdef' };
+        await refresh(false);
+        openV2Agent('w1');
+        byText('#v2Pane button', 'Chat').click();
+        await until(() => document.getElementById('consoleDlg').open);
+        const src = document.getElementById('consoleFrame').getAttribute('src');
+        eq('their own conversation, no token', src, '/v1/agents/w1/ui/chat?session=agent%3Abook-club%3Aguest%3A0123456789abcdef');
+        eq('titled with the agent', document.getElementById('consoleTitle').textContent, 'Book Club');
+        ok('no settings gear for a guest', document.getElementById('consoleGearBtn').style.display === 'none');
+        ok('no approve button', document.getElementById('consoleApproveBtn').hidden);
+        eq('the owner-only token was never asked for', calls('GET', /\/v1\/agents\/w1\/gateway$/).length, 0);
+        ok('the chat here stayed closed', !webChatDlg.open);
+        closeConsole();
+        await sleep(100);
+        eq('nothing of the owner\'s (seen marks) was sent', calls('POST', /\/v1\/agents\/w1\/seen$/).length, 0);
+      } finally {
+        if (document.getElementById('consoleDlg').open) closeConsole();
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents']; delete window.__override['/v1/agents/w1/console/access'];
+        await refresh(false);
+      }
+    },
+    // The owner's console on a rebuilt agent: no token in the address (Hatchabot names them); on one not rebuilt, the token as before.
+    ownerConsoleIdentity: async () => {
+      try {
+        window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'identity' };
+        const a = (await (await fetch('/v1/agents')).json()).find((x) => x.id === 'a1');
+        await openGateway('a1', a.slug);
+        await until(() => document.getElementById('consoleDlg').open);
+        const src = document.getElementById('consoleFrame').getAttribute('src');
+        ok('no token in the address: ' + src, !src.includes('#token') && src.startsWith('/v1/agents/a1/ui/chat?session='));
+        eq('the token was not fetched', calls('GET', /\/v1\/agents\/a1\/gateway$/).length, 0);
+        ok('the settings gear is back for the owner', document.getElementById('consoleGearBtn').style.display !== 'none');
+        closeConsole();
+        window.__override['/v1/agents/a1/console/access'] = { role: 'owner', console: 'token' };
+        window.__override['/v1/agents/a1/gateway'] = { port: 19100, token: 'made-up-console-token' };
+        await openGateway('a1', a.slug);
+        await until(() => document.getElementById('consoleDlg').open);
+        ok('not rebuilt: the token rides in the fragment as before', document.getElementById('consoleFrame').getAttribute('src').endsWith('#token=made-up-console-token'));
+      } finally {
+        if (document.getElementById('consoleDlg').open) closeConsole();
+        delete window.__override['/v1/agents/a1/console/access']; delete window.__override['/v1/agents/a1/gateway'];
       }
     },
     // The owner's Members list: a badge on who has web chat, and the switch — turning it ON repeats the rights warning.

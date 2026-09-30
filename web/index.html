@@ -2576,10 +2576,12 @@
        member's rights (step 2), said before the link exists. -->
   <div id="invWeb" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
     <div class="sub"><b>Chat on the web — for people you trust.</b> They sign in to this
-      Hatchabot and chat with the agent here; no chat app needed. They need to reach
-      this machine (Tailscale).</div>
+      Hatchabot and chat with the agent in OpenClaw's own chat, seeing only their own
+      conversations; no chat app needed. They need to reach this machine at its https
+      address (Tailscale).</div>
     <div class="sub" id="invWebWarn" style="margin-top:4px">They will have a member's rights, exactly like a Telegram
-      member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.</div>
+      member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.
+      You see their conversations in your console; they see neither yours nor each other's.</div>
     <div class="invite-link" id="invWebLink" hidden></div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
       <button id="invWebBtn" onclick="makeWebChatInvite()">Make a web chat link</button>
@@ -2600,6 +2602,7 @@
     <button onclick="webChatDlg.close()" aria-label="Close">✕</button>
   </div>
   <div class="sub">Its memory is shared: what you tell it, it may remember and use with the others who talk to it.</div>
+  <div class="sub" id="wchatNote" hidden></div>
   <div class="wchat-log" id="wchatLog" aria-live="polite"></div>
   <div class="err" id="wchatErr"></div>
   <div class="wchat-send">
@@ -8270,7 +8273,7 @@ async function renderEditMembers() {
  */
 /** Web chat on or off for a member; turning it ON says what it gives them (2026-09-29). */
 async function setWebChat(agentId, userId, name, on) {
-  if (on && !confirm(`Let ${name} chat with this agent on the web?\n\nThey will have a member's rights, exactly like a Telegram member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.`)) return;
+  if (on && !confirm(`Let ${name} chat with this agent on the web?\n\nThey will have a member's rights, exactly like a Telegram member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.\n\nThey get OpenClaw's own chat with only their own conversations (on an agent rebuilt with this release; until then, Hatchabot's simpler chat).`)) return;
   try {
     await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/web-chat`, { method: 'PUT', body: { on } });
     toast(on ? `${name} can chat with it on the web now.` : `Web chat is off for ${name}.`);
@@ -8919,7 +8922,12 @@ async function openGateway(id, slug) {
       $('consoleCover').lastElementChild.textContent = 'Connecting this browser…';
       await refresh(false);
     }
-    const g = await api(`/v1/agents/${id}/gateway`);
+    // A rebuilt agent's console knows people by name (the console with
+    // identities): no token rides in the address — Hatchabot's proxy says who
+    // you are. One not rebuilt yet still takes the token, as before.
+    let access = null;
+    try { access = await api(`/v1/agents/${id}/console/access`); } catch { access = null; }
+    const g = access?.console === 'identity' ? null : await api(`/v1/agents/${id}/gateway`);
     // Proxied same-origin through the control plane so the gateway port can
     // stay bound to the host's loopback. Pass ONLY the token: the Control UI
     // derives its gateway from the page it was served from, and handing it an
@@ -8932,11 +8940,13 @@ async function openGateway(id, slug) {
     // like the agent had forgotten everything said on Telegram. Telegram DMs
     // live in `agent:<slug>:main` (OpenClaw's agent id is always the slug).
     const session = encodeURIComponent(`agent:${slug}:main`);
-    const url = `/v1/agents/${id}/ui/chat?session=${session}#token=${encodeURIComponent(g.token)}`;
+    const url = `/v1/agents/${id}/ui/chat?session=${session}${g ? `#token=${encodeURIComponent(g.token)}` : ''}`;
     // In the app, not a new tab: the proxy now permits framing by this origin
     // (and still refuses every other one).
     const a = (agents || []).find(x => x.id === id);
     $('consoleTitle').textContent = a?.name || slug;
+    consoleGuest = false;
+    $('consoleGearBtn').style.display = '';
     renderConsoleChannels(a);
     $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
     $('consoleFrame').src = url;
@@ -8956,11 +8966,11 @@ async function openGateway(id, slug) {
 // way, or the console's WebSocket and token outlive the panel.
 $('consoleDlg')?.addEventListener('close', () => { markConsoleSeen(consoleAgentId); $('consoleFrame').src = 'about:blank'; $('consoleProps').hidden = true; $('consoleCover').hidden = true; });
 
-let consoleAgentId = null, consoleUrl = null;
+let consoleAgentId = null, consoleUrl = null, consoleGuest = false;
 // What you can see in an open console is read: on open, on close, and every
 // 20 seconds in between (so a reply that lands while you watch never flags).
 function markConsoleSeen(id) {
-  if (!id) return;
+  if (!id || consoleGuest) return;
   const a = (agents || []).find(x => x.id === id);
   if (a?.unread) { a.unread = false; renderAgents(); }
   api(`/v1/agents/${id}/seen`, { method: 'POST' }).catch(() => {});
@@ -11360,8 +11370,42 @@ function v2MemberAbout(a) {
 let webChatAgentId = null, webChatSending = false;
 const webChatBubble = (role, text, cls = '') => `<div class="wchat-msg${role === 'user' ? ' me' : ''}${cls}">${esc(text)}</div>`;
 const webChatScroll = () => { const l = $('wchatLog'); l.scrollTop = l.scrollHeight; };
+/**
+ * A guest's 💬 Chat. On a rebuilt agent it is OpenClaw's own chat — the
+ * owner's console, cut down to this person's conversations (the console with
+ * identities, 2026-09-30). It needs a secure context (https) like the owner's;
+ * without one, or on an agent not rebuilt yet, the chat here is used instead.
+ */
 async function openWebChat(id) {
   const a = v2Find(id); if (!a) return;
+  if (!window.isSecureContext) {
+    const httpsHere = location.protocol === 'http:' && location.hostname !== 'localhost' ? `https://${location.host}` : null;
+    return openWebChatPanel(id, `The full chat needs a secure page${httpsHere ? ` — open ${httpsHere}` : ' (https)'} for it. Meanwhile, chat here.`);
+  }
+  let acc = null;
+  try { acc = await api(`/v1/agents/${id}/console/access`); } catch { acc = null; }
+  if (acc?.console === 'identity' && acc.session) return openGuestConsole(a, acc.session);
+  return openWebChatPanel(id, acc?.console === 'needs-rebuild' ? acc.reason : '');
+}
+function openGuestConsole(a, sessionKey) {
+  const url = `/v1/agents/${a.id}/ui/chat?session=${encodeURIComponent(sessionKey)}`;
+  consoleGuest = true;
+  consoleAgentId = null; // nothing of the owner's (unread, settings) follows a guest's console
+  consoleUrl = url;
+  $('consoleTitle').textContent = a.name;
+  $('consoleGearBtn').style.display = 'none';
+  $('consoleApproveBtn').hidden = true;
+  $('consoleChans').innerHTML = '';
+  $('consoleProps').hidden = true;
+  $('consoleCover').hidden = true;
+  $('consoleNewTab').onclick = () => window.open(url, '_blank', 'noopener');
+  $('consoleFrame').src = url;
+  $('consoleDlg').showModal();
+}
+async function openWebChatPanel(id, note = '') {
+  const a = v2Find(id); if (!a) return;
+  $('wchatNote').textContent = note;
+  $('wchatNote').hidden = !note;
   webChatAgentId = id;
   $('wchatAgent').textContent = a.name;
   $('wchatErr').textContent = '';

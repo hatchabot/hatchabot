@@ -89,6 +89,7 @@ export const ENV_SETTINGS: EnvSetting[] = [
   s('agents', 'HATCHABOT_A2A_TIMEOUT_MS', '120000', 'How long a consult may take.'),
   s('agents', 'HATCHABOT_ASK_TIMEOUT_MS', '280000', 'How long an "ask" from the app may take.'),
   s('agents', 'HATCHABOT_WEB_CHAT_PER_HOUR', '60', 'Messages one person may send one agent per hour from the web chat.'),
+  s('agents', 'HATCHABOT_CONSOLE_IDENTITY', null, 'off gives agents rebuilt from now on the token console again (no OpenClaw chat for web-chat guests). Set it, and rebuild, before going back to an older release.'),
   s('agents', 'HATCHABOT_ALLOW_MACHINE_LOGIN', null, '1 allows NEW Claude sources that mount this machine\'s own ~/.claude into agents (read-write). Off since v2.39.0; use a setup token instead.'),
 
   // Usage

@@ -118,6 +118,13 @@ export interface OpenClawConfigPatch {
    * provider can publish its port — the per-agent Control UI debug door.
    */
   gatewayToken?: string;
+  /**
+   * The console with identities (openclaw/consoleIdentity.ts): with a
+   * gatewayToken, the gateway trusts Hatchabot's console proxy to name the
+   * person (owner or web-chat guest) instead of taking a shared token, and
+   * the token becomes the loopback-only password. Absent = token auth, as before.
+   */
+  console?: { trustedProxies: string[]; ownerIdentity: string; guestIdentities: string[] };
   /** cron.triggers.enabled — see Agent.cronTriggers. Written convergently. */
   cronTriggers?: boolean;
   /**
@@ -311,6 +318,8 @@ export interface RuntimeProvider {
   /** A running container's address on its network, for host→container calls
    *  where no port is published (isolated runtimes). */
   containerIp?(runtimeRef: string): Promise<string | undefined>;
+  /** The address an agent's gateway sees this machine's connections come from (its network's gateway). */
+  agentProxySource?(): Promise<string | undefined>;
   /**
    * Where THIS machine can reach a port an agent published on its host's
    * loopback. Local: that port. A runner over SSH: a tunnel to it. Undefined
