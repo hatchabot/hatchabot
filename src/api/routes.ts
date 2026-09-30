@@ -2305,8 +2305,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   };
   /**
    * Scheduled tasks that announce to no one in particular get the owner's chat
-   * as their recipient (or go quiet when the agent is in no chat app): OpenClaw
-   * 2026.9 refuses implicit delivery, so they ran daily and reached nobody.
+   * as their recipient, or the console conversation of an agent in no chat app
+   * (quiet when neither is possible): OpenClaw 2026.9 refuses implicit
+   * delivery, so they ran daily and reached nobody.
    * Agents create such tasks themselves too, so this runs after each start and
    * then daily, one agent at a time (promise review, 2026-09-29).
    */
@@ -5871,9 +5872,10 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       cron: parsed.data.cron,
       everyMs: parsed.data.everyMinutes ? Math.round(parsed.data.everyMinutes * 60_000) : undefined,
       tz: parsed.data.tz,
-      // An agent with no chat app has nowhere to post a result: announcing
-      // would only fail each run. Its runs are read with `tasks … runs`.
-      announce: parsed.data.announce !== false && store.listChannelsForAgent(agent.id).length > 0,
+      // The owner's chat, or — an agent in no chat app — its console
+      // conversation. With neither (older OpenClaw, owner's id unknown) the
+      // task is quiet and its runs are read with `tasks … runs`.
+      announce: parsed.data.announce !== false,
       deliverTo: cronTargetFor(store, agent),
     });
     if (!out.ok) return reply.code(502).send({ error: out.error });

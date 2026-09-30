@@ -123,7 +123,8 @@ Commands:
          [--message <text>] [--quiet]
                                Something it does on its own, on a schedule. The
                                message is what it is told each time (stdin if
-                               omitted). --quiet: don't post the result to its chat.
+                               omitted). --quiet: don't post the result to its chat
+                               (its console conversation when it has no chat app).
   tasks <agent> run <task> [--wait] [--timeout <min>]
                                Run it now; --wait prints the result and exits
                                non-zero if the run failed.

@@ -48,6 +48,10 @@ export interface Cron {
   /** Announcing with no explicit recipient ("last", or no `to`): OpenClaw
    *  2026.9 refuses to deliver those, so the result reaches nobody. */
   implicitDelivery?: boolean;
+  /** Where it runs: 'isolated' | 'main' | 'current' | 'session:<key>'. */
+  sessionTarget?: string;
+  /** The conversation a 'current' task is bound to (its result is written there). */
+  sessionKey?: string;
 }
 
 /** One past run of a task: what the agent produced, and whether it arrived. */
@@ -84,6 +88,8 @@ function normalizeCron(j: Record<string, any>): Cron {
     announce: typeof j.delivery?.mode === 'string' ? j.delivery.mode !== 'none' : undefined,
     implicitDelivery: typeof j.delivery?.mode === 'string' && j.delivery.mode !== 'none'
       && (!j.delivery.channel || j.delivery.channel === 'last' || !j.delivery.to),
+    sessionTarget: typeof j.sessionTarget === 'string' ? j.sessionTarget : undefined,
+    sessionKey: typeof j.sessionKey === 'string' && j.sessionKey ? j.sessionKey : undefined,
     message:
       typeof p.message === 'string' ? p.message
       : typeof p.command === 'string' ? p.command
@@ -175,23 +181,39 @@ export interface AddCronOptions {
   /** Deliver the run's final text to the agent's chat (what a scheduled
    *  briefing is FOR — default true). */
   announce?: boolean;
-  /** Where to deliver it. Required to announce: 2026.9 refuses a delivery
+  /** Where to deliver it: the owner's chat, or (an agent in no chat app) its
+   *  console conversation. Required to announce: 2026.9 refuses a delivery
    *  that names no channel and recipient, so without one the task is quiet. */
   deliverTo?: CronTarget;
 }
 
 /** Where a task's result goes: a chat app and the recipient on it. */
-export interface CronTarget { channel: 'telegram' | 'discord' | 'slack'; to: string }
+export interface ChatTarget { channel: 'telegram' | 'discord' | 'slack'; to: string }
+/**
+ * Or a conversation of the agent's own: the result is written into it as the
+ * agent's message. For an agent in no chat app that is `agent:<slug>:main`,
+ * the conversation its console opens on.
+ */
+export interface ConversationTarget { session: string }
+export type CronTarget = ChatTarget | ConversationTarget;
+
+/** The conversation the owner's console shows (web/index.html opens it with ?session=). */
+export const consoleSessionKey = (slug: string): string => `agent:${slug}:main`;
 
 /**
  * The owner's own chat with the agent, on the first app where both exist:
- * the agent's bot and the owner's id there. Undefined = nowhere to post, so
- * tasks stay quiet (their runs are read in the app). Scheduled results went
- * to "whoever chatted last" before 2026.9; 2026.9 refuses that ("Refusing
+ * the agent's bot and the owner's id there. Scheduled results went to
+ * "whoever chatted last" before 2026.9; 2026.9 refuses that ("Refusing
  * implicit isolated cron delivery … set delivery.channel and delivery.to"),
  * and every app-made task stopped arriving (promise review, 2026-09-29).
+ *
+ * An agent in no chat app gets its console conversation instead: the owner
+ * talks to it only there, and a daily reminder that went nowhere was the
+ * complaint (Lunch Agent, 2026-09-30). Undefined = an agent in a chat app
+ * whose owner's id there is not known yet: nowhere safe to post, so its tasks
+ * stay quiet (their runs are read in the app).
  */
-export function cronTargetFor(store: Store, agent: { id: string; ownerId: string }): CronTarget | undefined {
+export function cronTargetFor(store: Store, agent: { id: string; ownerId: string; slug: string }): CronTarget | undefined {
   const ids = store.memberIdentities(agent.id, agent.ownerId);
   if (store.getChannelForAgent(agent.id, 'telegram')) {
     const tg = ids.telegram ?? store.knownChannelUserId(agent.ownerId);
@@ -201,31 +223,92 @@ export function cronTargetFor(store: Store, agent: { id: string; ownerId: string
     const id = ids[kind];
     if (store.getChannelForAgent(agent.id, kind) && id && /^[A-Za-z0-9]{1,40}$/.test(id)) return { channel: kind, to: `user:${id}` };
   }
+  if (store.listChannelsForAgent(agent.id).length === 0) return { session: consoleSessionKey(agent.slug) };
   return undefined;
+}
+
+const isConversation = (t: CronTarget | undefined): t is ConversationTarget => !!t && 'session' in t;
+
+/**
+ * Whether this OpenClaw can write a task's result into a conversation: the
+ * `current` session target, with its result committed to the bound
+ * conversation ("announce -> current session: commits to this conversation"),
+ * proven on 2026.9.6 (2026-09-30). 2026.7's CLI knows only main|isolated.
+ */
+export function conversationDeliverySupported(openclawVersion: string | undefined): boolean {
+  const m = /^(\d{4})\.(\d+)/.exec(openclawVersion ?? '');
+  return !!m && (Number(m[1]) > 2026 || (Number(m[1]) === 2026 && Number(m[2]) >= 9));
+}
+
+/** A conversation target the agent's OpenClaw cannot serve is no target: the task stays quiet, as before. */
+async function usableTarget(provider: RuntimeProvider, runtimeRef: string, target: CronTarget | undefined): Promise<CronTarget | undefined> {
+  if (!isConversation(target)) return target;
+  const v = await provider.info(runtimeRef).then((i) => i.openclawVersion, () => undefined);
+  return conversationDeliverySupported(v) ? target : undefined;
+}
+
+/**
+ * Make sure the conversation exists before a task is bound to it: a result
+ * whose conversation has never been opened is refused ("current cron delivery
+ * is missing its source session generation"), and a new agent's first
+ * reminder can come before its owner's first message. Looked up first in
+ * the agent's session records (the store unread.ts reads), so an existing
+ * conversation is not touched at all; `sessions.create` on a key that exists
+ * would adopt it anyway — same session id, history untouched (checked on
+ * 2026.9.6). Best-effort: without it the task still works once they chat.
+ */
+export async function ensureConversation(provider: RuntimeProvider, runtimeRef: string, slug: string, key: string): Promise<boolean> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(slug) || !/^agent:[a-z0-9][a-z0-9_-]{0,63}:[A-Za-z0-9:_-]{1,128}$/.test(key)) return false;
+  const db = `/home/node/.openclaw/agents/${slug}/agent/openclaw-agent.sqlite`;
+  const probe = await provider.execShell(runtimeRef,
+    `node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync(${JSON.stringify(db)},{readOnly:true});process.stdout.write(db.prepare("select 1 as x from session_nodes where session_key = ?").get(${JSON.stringify(key)})?"yes":"no")' 2>/dev/null || true`,
+  ).catch(() => undefined);
+  if (probe?.stdout.trim() === 'yes') return true;
+  const res = await provider.exec(runtimeRef, ['gateway', 'call', 'sessions.create', '--params', JSON.stringify({ key, agentId: slug }), '--json']);
+  return res.code === 0;
+}
+
+/**
+ * The delivery half of a `cron add`/`cron edit` argv. A conversation target
+ * runs as `current` bound to that conversation and announces with no channel:
+ * the gateway writes the result there and, with no chat route, nowhere else.
+ */
+function deliveryArgs(target: CronTarget | undefined): string[] {
+  if (!target) return ['--no-deliver'];
+  if (isConversation(target)) return ['--session', 'current', '--session-key', target.session, '--announce', '--best-effort-deliver'];
+  return ['--announce', '--best-effort-deliver', '--channel', target.channel, '--to', target.to];
 }
 
 /** Point one task at `target`, or make it quiet when there is none. */
 export async function retargetCron(provider: RuntimeProvider, runtimeRef: string, jobId: string, target: CronTarget | undefined): Promise<boolean> {
-  const argv = target
-    ? ['cron', 'edit', jobId, '--announce', '--best-effort-deliver', '--channel', target.channel, '--to', target.to]
-    : ['cron', 'edit', jobId, '--no-deliver'];
-  const res = await provider.exec(runtimeRef, argv);
+  const res = await provider.exec(runtimeRef, ['cron', 'edit', jobId, ...deliveryArgs(target)]);
   return res.code === 0;
 }
 
 /**
  * Every task of an agent that announces with no explicit recipient, pointed at
- * the owner's chat (or made quiet). Agents also make such tasks themselves, so
- * this runs after each start and daily, not once. Returns how many changed.
+ * the owner's chat, or at the console conversation of an agent in no chat app
+ * (or made quiet). Agents also make such tasks themselves, so this runs after
+ * each start and daily, not once. Returns how many changed.
+ *
+ * A task already bound to a conversation of its own (`current` with a session
+ * key: what an agent makes when asked in its console) is left alone on an
+ * agent in no chat app — its result is written there. On an agent in a chat
+ * app it still gets the owner's chat: "last" there is whoever wrote last.
  */
 export async function retargetImplicitCrons(
   provider: RuntimeProvider, runtimeRef: string, slug: string, target: CronTarget | undefined,
 ): Promise<{ changed: number; failed: number }> {
   const jobs = await listCrons(provider, runtimeRef, slug);
+  const todo = jobs.filter((j) => !j.system && j.implicitDelivery);
+  if (!todo.length) return { changed: 0, failed: 0 };
+  const to = await usableTarget(provider, runtimeRef, target);
+  const bound = (j: Cron) => j.sessionTarget === 'current' && !!j.sessionKey;
+  const change = isConversation(to) ? todo.filter((j) => !bound(j)) : todo;
+  if (change.length && isConversation(to)) await ensureConversation(provider, runtimeRef, slug, to.session);
   let changed = 0, failed = 0;
-  for (const j of jobs) {
-    if (j.system || !j.implicitDelivery) continue;
-    if (await retargetCron(provider, runtimeRef, j.id, target)) changed++; else failed++;
+  for (const j of change) {
+    if (await retargetCron(provider, runtimeRef, j.id, to)) changed++; else failed++;
   }
   return { changed, failed };
 }
@@ -264,9 +347,9 @@ export async function addCron(
   // default, and on an agent with no chat app that delivery FAILS THE RUN —
   // "Channel is required (no configured channels detected)" — though the agent
   // did its work (found by scripts/regress-autonomous.sh, v2.33.0).
-  if (opts.announce !== false && opts.deliverTo) {
-    argv.push('--announce', '--best-effort-deliver', '--channel', opts.deliverTo.channel, '--to', opts.deliverTo.to);
-  } else argv.push('--no-deliver');
+  const to = opts.announce !== false ? await usableTarget(provider, runtimeRef, opts.deliverTo) : undefined;
+  if (isConversation(to)) await ensureConversation(provider, runtimeRef, slug, to.session);
+  argv.push(...deliveryArgs(to));
   const res = await provider.exec(runtimeRef, argv);
   if (res.code !== 0) {
     return { ok: false, error: (res.stderr || res.stdout || 'cron add failed').slice(0, 300) };
