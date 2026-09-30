@@ -187,8 +187,13 @@ export interface SourceUsage {
   window5h: SourceWindow;
   window24h: SourceWindow;
   window7d: SourceWindow;
-  /** limited = the latest call through this source was refused and none has succeeded since. */
+  /** limited = the latest call through this source — by ANY account's agent —
+   *  was refused and none has succeeded since. A limit is the source's, not the
+   *  viewer's: judged from the viewer's agents alone, a member on a shared
+   *  source got no banner for 5 h while it refused (2026-09-30). */
   status: 'ok' | 'limited' | 'idle';
+  /** The viewer owns this source (else it is shared with them). */
+  mine?: boolean;
   limitedSince?: string;
   lastLimitAt?: string;
   lastOkAt?: string;
@@ -201,7 +206,7 @@ export interface SourceUsage {
   /** 288 five-minute buckets covering the last day, oldest first (the chart's hour and day views). */
   slots: Array<{ slot: string; ok: number; limited: number }>;
   /** Other accounts' agents on a source you own count toward the same limit (counts only). */
-  others?: { agents: number; requests5h: number; requests7d: number };
+  others?: { agents: number; liveAgents: number; requests5h: number; requests7d: number };
 }
 
 /** Per-source usage for one viewer: their own agents, plus other accounts' totals on sources they own. */
@@ -239,23 +244,28 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
     const mineSlots = slotRows.filter((r) => myIds.has(r.agentId));
     const ws = (fromIso: string, list = mineSlots): Omit<SourceWindow, 'tokens'> => list.filter((r) => r.slot >= slotOf(fromIso))
       .reduce((s, r) => ({ requests: s.requests + r.ok + r.limited + r.failed, limited: s.limited + r.limited, failed: s.failed + r.failed }), { requests: 0, limited: 0, failed: 0 });
-    const cursors = my.map((a) => store.usageCursor(a.id)).filter(Boolean) as Array<{ lastOk?: string; lastLimited?: string }>;
-    const lastOkAt = cursors.map((c) => c.lastOk).filter(Boolean).sort().at(-1);
-    const hits = store.limitHitsFor(p.id, t7).filter((h) => myIds.has(h.agentId));
+    const lastOkOf = (agents: Agent[]) => agents.map((a) => store.usageCursor(a.id)?.lastOk).filter(Boolean).sort().at(-1) as string | undefined;
+    const lastOkAt = lastOkOf(my);
+    const allHits = store.limitHitsFor(p.id, t7);
+    const hits = allHits.filter((h) => myIds.has(h.agentId));
     // The last refusal BY THIS SOURCE, from its own hits: an agent's cursor
     // follows the agent, so one switched away after a 429 showed its new
     // source as rate-limited and its old one as fine (night review).
     const lastLimitAt = hits.map((h) => h.at).sort().at(-1);
-    let status: SourceUsage['status'] = lastOkAt || lastLimitAt ? 'ok' : 'idle';
+    // Status is the SOURCE's: every account's agents on it, successes and
+    // refusals alike (2026-09-30). The history above stays the viewer's own.
+    const lastOkAny = lastOkOf(all.filter((a) => a.aiProfileId === p.id));
+    const lastLimitAny = allHits.map((h) => h.at).sort().at(-1);
+    let status: SourceUsage['status'] = lastOkAt || lastLimitAt || lastOkAny || lastLimitAny ? 'ok' : 'idle';
     let limitedSince: string | undefined;
     // A refusal counts as current only within the limit's own window: a Claude
     // plan's 5-hour window, minutes for an API key. Before this, "rate-limited"
     // stuck from the last refusal until some agent happened to call again — a
     // MacBook showed it 19 hours after its plan had reset (2026-09-25).
-    const stillCounts = lastLimitAt ? now - Date.parse(lastLimitAt) <= (p.kind === 'subscription' ? 5 * 3_600_000 : 15 * 60_000) : false;
-    if (lastLimitAt && stillCounts && (!lastOkAt || lastLimitAt > lastOkAt)) {
+    const stillCounts = lastLimitAny ? now - Date.parse(lastLimitAny) <= (p.kind === 'subscription' ? 5 * 3_600_000 : 15 * 60_000) : false;
+    if (lastLimitAny && stillCounts && (!lastOkAny || lastLimitAny > lastOkAny)) {
       status = 'limited';
-      limitedSince = hits.filter((h) => !lastOkAt || h.at > lastOkAt).map((h) => h.at).sort()[0] ?? lastLimitAt;
+      limitedSince = allHits.filter((h) => !lastOkAny || h.at > lastOkAny).map((h) => h.at).sort()[0] ?? lastLimitAny;
     }
     const byAgent = new Map<string, { requests: number; limited: number }>();
     for (const r of mineRows) {
@@ -289,16 +299,17 @@ export function summarizeSourceUsage(store: Store, ownerId: string, now = Date.n
       window5h: { ...ws(t5), tokens: tokensFor(myIds, t5) },
       window24h: { ...ws(t24), tokens: tokensFor(myIds, t24) },
       window7d: { ...w(d7), tokens: tokensFor(myIds, t7) },
-      status, limitedSince, lastLimitAt, lastOkAt, limitHits7d: hits.length, topAgents,
+      status, mine: p.ownerId === ownerId, limitedSince, lastLimitAt, lastOkAt, limitHits7d: hits.length, topAgents,
       tokensSince: store.firstTokenSampleAt(p.id, myIds),
       hourly: hours.map((hour) => ({ hour, ...(hourMap.get(hour) ?? { ok: 0, limited: 0 }) })),
       slots: slotsList.map((slot) => ({ slot, ...(slotMap.get(slot) ?? { ok: 0, limited: 0 }) })),
     };
     if (p.ownerId === ownerId) {
-      const theirIds = new Set(all.filter((a) => a.aiProfileId === p.id && a.ownerId !== ownerId).map((a) => a.id));
+      const theirs = all.filter((a) => a.aiProfileId === p.id && a.ownerId !== ownerId);
+      const theirIds = new Set(theirs.map((a) => a.id));
       if (theirIds.size) {
         const theirRows = rows.filter((r) => theirIds.has(r.agentId));
-        entry.others = { agents: theirIds.size, requests5h: ws(t5, slotRows.filter((r) => theirIds.has(r.agentId))).requests, requests7d: w(d7, theirRows).requests };
+        entry.others = { agents: theirIds.size, liveAgents: theirs.filter((a) => a.state !== 'ARCHIVED').length, requests5h: ws(t5, slotRows.filter((r) => theirIds.has(r.agentId))).requests, requests7d: w(d7, theirRows).requests };
       }
     }
     out.push(entry);

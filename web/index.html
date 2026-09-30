@@ -4670,9 +4670,17 @@ function renderLimitBanner() {
   const el = $('limitBanner'); if (!el) return;
   // Archived agents can't answer anyway: count the live ones (an older server sends only `agents`).
   const live = (s) => s.liveAgents ?? s.agents;
-  const limited = (sourceUsageData?.sources || []).filter(s => s.status === 'limited' && live(s));
+  // The status is the source's, from every account's agents on it
+  // (2026-09-30): a member on a shared source hears about it too, and the
+  // owner hears whose agents are stuck.
+  const theirs = (s) => s.mine === false ? 0 : (s.others?.liveAgents ?? 0);
+  const limited = (sourceUsageData?.sources || []).filter(s => s.status === 'limited' && (live(s) || theirs(s)));
+  const pl = (n) => `${n} agent${n === 1 ? '' : 's'}`;
+  const who = (s) => s.mine === false ? `your ${pl(live(s))} on it can't answer`
+    : live(s) && theirs(s) ? `its ${pl(live(s))} (and ${theirs(s)} on other accounts) can't answer`
+    : live(s) ? `its ${pl(live(s))} can't answer` : `its ${pl(theirs(s))} on other accounts can't answer`;
   el.hidden = !limited.length;
-  el.innerHTML = limited.map(s => `⛔ <b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — its ${live(s)} agent${live(s) === 1 ? '' : 's'} can't answer until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
+  el.innerHTML = limited.map(s => `⛔ ${s.mine === false ? 'Shared source ' : ''}<b>${esc(s.name)}</b> is being rate-limited (since ${esc(clock(s.limitedSince))}) — ${who(s)} until it recovers. <a href="#" onclick="event.preventDefault();openAiDlg('ai')">See usage</a>`).join('<br>');
 }
 /**
  * Time markers for a bar chart over a period (Chris, 2026-09-25): which
