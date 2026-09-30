@@ -79,8 +79,10 @@ under them.
 `vendor: 'local'` points an agent at a model server you run yourself (Ollama
 today, over its OpenAI-compatible endpoint). It is the only profile kind with
 **no credential anywhere**: nothing in the secret store, no env var injected,
-no `~/.claude` mounted. That also makes it the only configuration where "your
-family's data never leaves this machine" is literally true — and it sidesteps
+no `~/.claude` mounted. That also makes it the only configuration where your
+conversations never go to an AI company (the agent still uses the internet for
+search and tools, and chat apps carry messages through their own servers) — and
+it sidesteps
 the prompt-injection blast radius that the mounted subscription credential
 carries.
 

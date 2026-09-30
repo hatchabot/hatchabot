@@ -4,8 +4,8 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
 
 - **Google sign-in keeps you signed in for 14 days**, not about an hour.
 - **Safer by design, after the largest review yet** (eighteen reviewers, every
-  area, then a pass over the fixes; docs/audit-2026-09-28-night.md): an
-  agent's keys reach it through a private file, never a command line; reset
+  area, then a pass over the fixes; docs/audit-2026-09-28-night.md): AI
+  keys and setup tokens reach an agent through a private file; reset
   links go only through bots your own side holds; Google connections come back
   only to the browser that asked; removing someone takes them out of every
   Slack channel and Discord server too; templates carry no one's private
@@ -22,6 +22,14 @@ For people who use Hatchabot, not the change log (that is CHANGELOG.md).
   it used to show the size of each conversation, not what was spent, so a
   busy agent looked cheap. The last 8 days fill in at once. Status → Usage
   also shows the last 3, 6, 9 or 12 hours.
+- **Web chat guests use OpenClaw's real chat** (v2.111.0): someone you give
+  web chat to sees only their own conversation, with a member's rights. The
+  agent's memory is still shared, and a guest's turn can run commands in the
+  agent's container, so web chat stays for people you trust.
+- **Scheduled tasks on a web-only agent** (v2.110.0) post their result into
+  the conversation its console opens on.
+- **You are OpenClaw's command owner** on every agent (v2.109.1), never an
+  invited member.
 - **Scheduled tasks reach you again** (v2.109.0): since OpenClaw 2026.9 they ran
   and reached no one; they now name your chat, and old ones are repointed.
 - **Web chat guests get a member's rights** (v2.109.0), not yours: they can't

@@ -1410,13 +1410,13 @@
     <div class="sub" style="margin-bottom:10px">Gmail, Calendar, Drive and Sheets, per account.</div>
     <div class="sub" style="margin-bottom:10px;padding:8px 10px;border:1px solid var(--warn);border-radius:8px;color:var(--warn)">
       ⚠ <b>Every member of this agent can use these accounts</b> — to read mail, calendars and files,
-      and to send mail as them unless you attach with <b>no send</b>.
+      and to send mail as them unless you attach with <b>no send</b> (a switch in the agent's mail tool, not a Google permission: the account's access still covers mail).
     </div>
     <label>Attach a connected account <span style="color:var(--dim)">— from ⚙ Settings → Connections</span></label>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <select id="connAttachPick" style="flex:1;min-width:180px"></select>
       <label style="display:flex;gap:5px;align-items:center;font-weight:400;margin:0;width:auto;cursor:pointer"
-             title="The agent can read mail but never send it — recommended unless sending is the point">
+             title="Switches sending off in the agent's mail tool — recommended unless sending is the point. A tool setting, not a Google permission: don't rely on it against someone determined">
         <input type="checkbox" id="connNoSend" checked style="width:auto;flex:none"> no send</label>
       <button id="connAttachBtn" onclick="attachConnection()">Attach</button>
     </div>
@@ -1528,7 +1528,7 @@
     <select id="aiKind" onchange="aiKindChanged()">
       <option value="subscription">Claude subscription (login on this machine)</option>
       <option value="api_key">API key</option>
-      <option value="local">Local model server (Ollama) — no credential, nothing leaves this machine</option>
+      <option value="local">Local model server (Ollama) — no credential, model calls stay on this machine</option>
     </select>
     <div id="aiLocalRow" style="display:none">
       <input type="text" id="aiBaseUrl" value="http://172.17.0.1:11434/v1"
@@ -1549,12 +1549,11 @@
     <div id="aiTokenRow">
       <div style="display:flex;gap:8px;align-items:center">
         <input type="password" id="aiToken" autocomplete="off"
-               placeholder="Optional: paste a `claude setup-token`" style="flex:1;min-width:0">
+               placeholder="paste the token printed by: claude setup-token" style="flex:1;min-width:0">
         <button type="button" onclick="toggleReveal(this,'aiToken')">Show</button>
       </div>
-      <div class="sub">Leave blank to use this machine's Claude login (mounts <code>~/.claude</code> into every
-        agent). <b>Paste a <code>claude setup-token</code></b> to inject just the token instead — no directory
-        mount, which is the safer choice on a shared or exposed box.</div>
+      <div class="sub">Run <code>claude setup-token</code> on any machine where you are logged in to Claude and paste what it prints.
+        The token is stored encrypted and injected into each agent; nothing is mounted.</div>
     </div>
     <label class="sub" style="margin-top:6px">Default model</label>
     <select id="aiModelSelect" onchange="aiModelSelectChanged()" style="display:none"></select>
@@ -2219,6 +2218,7 @@
     <div>
       <b>Memory &amp; the model command</b>
       <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
+        <li><b>Memory is shared</b>: an agent has one memory for everyone who talks to it. For something private, give that person their own agent.</li>
         <li>Agents write durable facts to memory <b>as they go</b>. <b>Chat → Memory</b> saves the current conversation on demand — handy before a source switch or a long archive.</li>
         <li>Typing <code>/model</code> to the bot in Telegram is a <b>temporary</b> this-conversation switch — it reverts. Change models <b>in the app</b> to make it stick.</li>
       </ul>
@@ -2243,8 +2243,8 @@
     <div>
       <b>Talking &amp; safety</b>
       <ul style="margin:6px 0 0;padding-left:20px;line-height:1.5">
-        <li><b>Agents can consult each other</b> — ⚙ → 🔗 Peers (same-owner only; needs a rebuild, since it installs a tool).</li>
-        <li><b>Telegram is the open door</b>: anyone you admit to an agent can direct it. Be mindful of powerful agents (that send email or write files) with a wide audience — <b>⚙ → 🛡 Security</b> shows each agent's exposure.</li>
+        <li><b>Agents can consult each other</b> — the agent's <b>Sharing</b> tab (same-owner only; needs a rebuild, since it installs a tool).</li>
+        <li><b>Anyone you admit, on any app or on the web, can direct it.</b> Be mindful of powerful agents (that send email or write files) with a wide audience — <b>⚙ → 🛡 Security</b> shows each agent's exposure.</li>
       </ul>
     </div>
   </div>
@@ -3188,15 +3188,14 @@ function setupSteps() {
   const steps = [
     { key: 'ai', done: aiDone, title: aiDone ? `AI connected: ${esc(profiles[0].name)}` : 'Connect the AI', body: `
       <p class="sub" style="margin:4px 0 6px">A Claude subscription (Pro or Max) powers every agent. On the machine running Hatchabot, run
-        <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.
-        ${myAccount.hostOs === 'linux' ? "Logged into Claude on this very machine? Leave the token blank — it's one tap." : ''}</p>
+        <code>npm i -g @anthropic-ai/claude-code</code>, then <code>claude</code> once to log in, then <code>claude setup-token</code> and paste the token here.</p>
       <label>Model</label>
       <select id="setupModel" style="width:auto">
         <option value="claude-opus-4-8">Claude Opus 4.8 (best)</option>
         <option value="claude-sonnet-5">Claude Sonnet 5 (faster)</option>
       </select>
       <label>Setup token</label>
-      <input type="password" id="setupToken" placeholder="${myAccount.hostOs === 'linux' ? "paste the token printed by: claude setup-token   (blank = use this machine's Claude login)" : 'paste the token printed by: claude setup-token'}" autocomplete="off">
+      <input type="password" id="setupToken" placeholder="paste the token printed by: claude setup-token" autocomplete="off">
       <div class="err" id="setupErr"></div>
       <div class="actions" style="justify-content:space-between;align-items:center">
         <span class="sub">Using an API key or a local model instead? <a href="#" onclick="event.preventDefault();openAiDlg('ai')">⚙ AI sources</a></span>
@@ -3424,18 +3423,19 @@ async function wizardAddBot() {
 }
 
 async function createSubscriptionProfile() {
-  // A blank token means "use this machine's own Claude login", which only
-  // works where the containers can reach that login — Linux. On a Mac it made
-  // a source that looked fine and could never answer.
-  if (!$('setupToken').value.trim() && myAccount.hostOs && myAccount.hostOs !== 'linux') {
-    $('setupErr').textContent = 'On this machine the agents need a token: run `claude setup-token` in a terminal and paste what it prints.';
+  // A token is required. A blank one used to mean "use this machine's own
+  // Claude login", but the server refuses new sources of that kind (v2.39.0,
+  // unless HATCHABOT_ALLOW_MACHINE_LOGIN is set), so the first-run card
+  // offered a path that always failed.
+  if (!$('setupToken').value.trim()) {
+    $('setupErr').textContent = 'Paste a token: run `claude setup-token` in a terminal and paste what it prints.';
     return;
   }
   try {
     await api('/v1/ai-profiles', { method: 'POST', body: {
       kind: 'subscription', vendor: 'anthropic',
       name: 'My Claude', model: $('setupModel').value,
-      oauthToken: $('setupToken').value.trim() || undefined,
+      oauthToken: $('setupToken').value.trim(),
     }});
     await refresh(true);
     toast('Claude connected');

@@ -375,6 +375,26 @@ const SCENARIOS = String.raw`(() => {
       delete window.__override['/v1/agents'];
       await refresh(false);
     },
+    welcomeNeedsToken: async () => {
+      // The Welcome card used to offer "leave the token blank" on Linux, which the
+      // server has refused since v2.39.0: it must ask for a token and never send a blank one.
+      const saved = { profiles, hostOs: myAccount.hostOs, hostOwner: myAccount.hostOwner, open: setupOpen };
+      try {
+        profiles = []; myAccount.hostOs = 'linux'; myAccount.hostOwner = true; setupOpen = true;
+        renderSetup();
+        const input = await until(() => document.getElementById('setupToken'));
+        ok('no "blank" in the placeholder: ' + input.placeholder, !/blank/i.test(input.placeholder));
+        ok('no "leave the token blank" offer', !/leave the token blank/i.test(document.getElementById('setup').textContent));
+        input.value = '';
+        const posts = calls('POST', /\/v1\/ai-profiles$/).length;
+        await createSubscriptionProfile();
+        ok('says a token is needed', /claude setup-token/.test(document.getElementById('setupErr').textContent));
+        eq('nothing sent', calls('POST', /\/v1\/ai-profiles$/).length, posts);
+      } finally {
+        profiles = saved.profiles; myAccount.hostOs = saved.hostOs; myAccount.hostOwner = saved.hostOwner; setupOpen = saved.open;
+        renderSetup();
+      }
+    },
     agentUsagePage: async () => {
       // ⋯ → Usage says where the tokens went: the last day, the conversation size, the split, the calls (v2.102.0).
       window.__override['/v1/agents/a1/usage'] = { totalTokens: 1_000_000_000, input: 7e6, output: 2e6, cacheRead: 851e6, cacheWrite: 140e6, calls: 4700, sessions: 12,

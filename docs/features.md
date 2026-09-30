@@ -318,11 +318,10 @@ To edit an agent's mind, open **⚙ Settings** on its card. The sheet's tabs are
 Sharing · Schedule · Advanced** (the classic look has Definition · Snapshots · AI · Data ·
 Telegram · Environment).
 
-- **Definition** — rename the agent, edit SOUL.md / AGENTS.md / MEMORY.md,
-  and toggle **shared memory**: On means MEMORY.md is a common log for every
-  member (entries tagged with who said them, and anything written may surface
-  to other members); Off means memory is private to you. You can only change
-  this while you're the only member.
+- **Definition** — rename the agent, edit SOUL.md / AGENTS.md / MEMORY.md.
+  Memory is shared: MEMORY.md is one log for everyone who talks to the agent
+  (entries tagged with who said them), and anything in it may surface to
+  anyone. There is no private-memory switch (removed in v2.107.0).
 - **Snapshots** — point-in-time copies of the three definition files, taken
   automatically before file edits and rebuilds, or on demand (**Snapshot
   now**). Restore one to roll the agent's definition and memory back — so a
@@ -1127,12 +1126,13 @@ Operations section.
 
 - **API key** — Anthropic, OpenAI or Google Gemini; stored encrypted, injected at
   boot, runs on any host including cloud.
-- **Claude Pro/Max subscription**, two flavours: **machine login** (reuses
-  this box's `~/.claude` in place — local/desktop hosts only) and
-  **setup-token** (`claude setup-token`, stored and injected as an OAuth
-  token — runs on runners too, and the only route on macOS).
-- **Local model server** (Ollama) — no credential anywhere; nothing leaves
-  the machine. Point it at the docker bridge address, not localhost.
+- **Claude Pro/Max subscription** — a **setup-token** (`claude setup-token`,
+  stored encrypted and injected as an OAuth token — runs on runners too). The
+  older **machine login** flavour (this box's `~/.claude` mounted in place) can
+  no longer be created since v2.39.0 unless `HATCHABOT_ALLOW_MACHINE_LOGIN=1`;
+  existing ones keep working.
+- **Local model server** (Ollama) — no credential anywhere; model calls never
+  leave the machine (the agent still uses the internet for search and tools). Point it at the docker bridge address, not localhost.
 
 **The list is in the order you put it in.** ▲▼ on each source moves it, and
 that order is what every list of sources shows — the create form, an agent's

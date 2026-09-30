@@ -1,6 +1,6 @@
 # Hatchabot
 
-**Run private AI agents for your family on your own hardware, reachable from
+**Run AI agents for your family on your own hardware, reachable from
 Telegram, Discord, Slack or the app itself**.
 
 Hatchabot turns a machine you already own into a home for persistent AI agents.
@@ -47,9 +47,10 @@ adopting, backing up, and operating a fleet of agents.
   any other contact on Telegram — no AI account, no app, no setup on their
   side (Discord and Slack too). An agent can also have no
   chat app at all and be talked to in the Hatchabot app.
-- **Private by default.** A stranger who finds an agent's bot gets silence:
-  only people you invited, or who already use one of your agents, get
-  through. Everyone who uses the web app signs in as themselves, and a
+- **Closed to strangers by default.** A stranger who finds an agent's bot gets
+  silence: only people you invited, or who already use one of your agents, get
+  through (while an invite window is open, a stranger gets a short pairing
+  reply). Everyone who uses the web app signs in as themselves, and a
   forgotten password is a link you send them, one "Forgot password?" sends
   to their own Telegram, or the recovery code each person keeps.
 - **A manager agent.** Your Hatchabot agent reads the fleet and proposes
@@ -64,8 +65,10 @@ adopting, backing up, and operating a fleet of agents.
   read-only (never system paths or credential directories), a writable folder,
   or a first-class **git repo** the agent clones onto its own volume and commits
   to — so every change is a reviewable commit, not a write into your disk. A public
-  repo needs no key at all: tick **Public repo** and it is cloned read-only over https. Pair
-  it with a local model and nothing leaves the machine at all.
+  repo needs no key at all: tick **Public repo** and it is cloned read-only over https. Put
+  the agent on a local model and your conversations never go to an AI company
+  (the agent still uses the internet for search and tools, and chat apps carry
+  messages through their own servers).
 - **Organize your fleet.** Sort agents into named groups and arrange them: drag an
   icon onto another group, or into the empty strip to start a new group and name it
   in place; sort by age, name or activity. (The classic look keeps the ⠿ grip,
@@ -99,31 +102,35 @@ adopting, backing up, and operating a fleet of agents.
   everyone it lets in is told so. For something private, give that person
   their own agent.
 - **Portability.** **Move** an agent to another Hatchabot server in one step (`hatchabot rehost`) —
-  it is preflight-checked, transferred with its memory, members and Telegram
-  identity, verified on arrival, and rolled back if anything fails. Or **Download** a copy
+  it is preflight-checked, transferred with its memory, members, Telegram
+  bot and secrets, verified on arrival, and rolled back if anything fails.
+  Discord and Slack bots stay behind and are re-attached there. Or **Download** a copy
   to a single file and **Restore** it wherever you like.
 - **Share a trained agent.** Built a good one? **Share** it as a template — its
-  persona, instructions and memory, with *no* bot token or members — and send
-  the file (it's safe to email). **Import** stands up a fresh copy the recipient
+  persona, instructions and schedules, with *no* bot, members or secrets. You
+  choose whether its memory goes too — read it before you send it. **Import** stands up a fresh copy the recipient
   runs with their *own* bot and their *own* people.
 - **Bring your own AI — or none at all.** An Anthropic, OpenAI or Google
-  Gemini API key, a Claude Pro/Max subscription on a machine where you're
-  already logged in, or a **local model server you run yourself** (Ollama). The local path
-  needs no credential of any kind: nothing stored, nothing injected, nothing
-  leaving the machine.
+  Gemini API key, a Claude Pro/Max subscription (its `claude setup-token`,
+  injected into each agent), or a **local model server you run yourself**
+  (Ollama). The local path needs no AI credential, and model calls never leave
+  the machine.
 - **Different agents can use different AIs — and different models.** The
   kitchen helper on a local model, the homework tutor on Claude — chosen per
-  agent, changed any time. One Claude source can drive a cheap model for simple
+  agent. Switch models within a source instantly; switching providers takes
+  a rebuild and starts a fresh conversation, with memory kept. One Claude source can drive a cheap model for simple
   agents and a top model for the demanding ones; each agent picks from that
   source's model list, or follows its default.
 
 ## Requirements
 
 - **Linux or macOS** with **Docker** (Docker Desktop is fine) and **Node.js 22+**
-- **A Telegram account** (to create bots via [@BotFather](https://t.me/botfather) —
-  about 60 seconds per agent, or pre-stock a pool so it's zero)
-- **An AI**: an Anthropic, OpenAI or Google Gemini API key, the `claude` CLI logged in, **or** a
-  local model server (see below) — the local path needs no account or credential
+- (optional) **A Telegram account** (to create bots via [@BotFather](https://t.me/botfather) —
+  about 60 seconds per agent, or pre-stock a pool so it's zero). Slack, Discord
+  and the app's own chat work too.
+- **An AI**: an Anthropic, OpenAI or Google Gemini API key, a Claude Pro/Max
+  subscription's `claude setup-token`, **or** a local model server (see below)
+  — the local path needs no account or credential
 - A machine that stays on, if you want the agents to stay reachable
 
 ## Quick start
@@ -172,10 +179,12 @@ be deleted at @BotFather → `/mybots` → `/deletebot`.
 
 Then open **http://localhost:8080** on that machine — with accounts you create your own there and become its owner; with a shared password you unlock with it — and:
 
-1. **Connect an AI source** (⚙ Settings → AI sources). If the `claude` CLI is logged in on this
-   machine, it's one tap. On macOS, run `claude setup-token` and paste the
-   token (see [docs/ai-profiles.md](docs/ai-profiles.md)). Otherwise paste an
-   API key — or pick **Local model server** and point it at your own Ollama.
+1. **Connect an AI source** (the Welcome card, or ⚙ Settings → AI sources).
+   For a Claude subscription, run `claude setup-token` (after logging in to
+   the `claude` CLI once) and paste the token; it is stored encrypted and
+   injected into each agent, and nothing is mounted (see
+   [docs/ai-profiles.md](docs/ai-profiles.md)). Otherwise paste an API key —
+   or pick **Local model server** and point it at your own Ollama.
 2. **Tap +** to create an agent. If the bot pool is empty you'll be asked for a
    BotFather token — the app walks you through it.
 3. **Tap the Telegram link and say hi.** That first message claims the agent as
@@ -295,8 +304,9 @@ a Tailscale setup that opens nothing to the internet.
 
 ## Running on your own hardware
 
-Agents can run entirely on a local model, with no credential and no outbound
-traffic. Three things have to line up:
+Agents can run entirely on a local model, with no AI credential, and model
+calls never leave the machine (the agent still uses the internet for search
+and tools, and chat apps carry messages through their own servers). Three things have to line up:
 
 ```sh
 # 1. The server must listen where CONTAINERS can reach it. The host's own
@@ -360,8 +370,10 @@ Design decisions worth knowing before you read the code:
 - **Containers are cattle, volumes are not.** All durable state lives on the
   agent's volume. Rebuild replaces the container and keeps memory; only Delete
   purges, and it makes you type the agent's name.
-- **Credentials stay put.** A Claude subscription is bind-mounted in place
-  rather than copied; API keys are encrypted at rest and resolved only at boot.
+- **Credentials are encrypted and injected.** Bot tokens, API keys, Claude
+  setup tokens and Google tokens are encrypted at rest and resolved only at
+  boot; a Claude subscription reaches an agent as its setup
+  token, never as a mount of your `~/.claude`.
 
 ## Operations
 

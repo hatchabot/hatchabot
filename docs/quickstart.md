@@ -101,7 +101,7 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
 
 - **Tell it who you are once** — ⚙ Settings → **👤 You**. Injected into every agent you make.
 - **Let family in** — **Invite…** on the card: a link or QR for chat-only access, or a full invite so they can also log into Hatchabot. Or make an agent a **group room**.
-- **Give it your Google account** — ⚙ Settings → Connections (Gmail, Calendar, Drive, Sheets). Per agent, with a "no send" option.
+- **Give it your Google account** — ⚙ Settings → Connections (Gmail, Calendar, Drive, Sheets). Per agent, with a "no send" option: sending is switched off in the agent's mail tool (a tool setting, not a Google permission — don't rely on it against someone determined).
 - **Give it data** — the agent's **Data** tab: a read-only folder, a writable one, or a git repo it commits to.
 - **Schedule it** — the agent's **Schedule** tab: a morning briefing, an inbox poll, a weekly digest.
 - **Let agents consult each other** — the agent's **Sharing** tab. A consult is
@@ -114,7 +114,7 @@ machine, survives restarts and rebuilds, and is yours to read and edit.
   the rule against handing over credentials. Long jobs need
   `HATCHABOT_A2A_TIMEOUT_MS` raised from its 120 s default.
 - **Keep it cheap** — **Classes** (⚙ → AI sources) put simple agents on a cheaper model and demanding ones on the best, in one place.
-- **Back up / move / share** — every card: Download (a single file), Rehost (to another Hatchabot), Share (as a template with no secrets).
+- **Back up / move / share** — every card: Download (a single file), Rehost (to another Hatchabot), Share (as a template with no bot, members or secrets; you choose whether its memory goes too).
 - **Share a screenshot** — add `?demo` to the app's address (e.g. `http://localhost:8080/?demo`): your email is hidden and family members' names, bot handles, connected accounts and Telegram ids are blurred. Nothing changes on the server; remove `?demo` to see everything again.
 
 ## Moved to a new machine, or `hatchabot: command not found`?
@@ -197,6 +197,6 @@ tailscale serve --bg http://localhost:8080
 ```
 If it asks you to enable HTTPS certificates, do that in the admin console under **DNS**, then rerun. The app is now at `https://<machine>.<tailnet>.ts.net` (no port) — update `HATCHABOT_PUBLIC_URL` to match. If you use Google sign-in, add that `https://…ts.net` origin to your OAuth client's authorized JavaScript origins.
 
-**Don't** use `tailscale funnel` for this — it would publish the app to the open internet behind one shared password. The whole point is that nothing is.
+**Don't** use `tailscale funnel` for this — it would publish the app to the open internet, with only the sign-in page in front of it. The whole point is that nothing is.
 
 Details and the reasoning behind each choice: [docs/tailscale.md](tailscale.md).

@@ -7,8 +7,8 @@ talk to them. Security reports are welcome and taken seriously.
 ## Reporting a vulnerability
 
 - **Do not open a public issue** for anything exploitable.
-- Email **security@hatchabot.com**, or use GitHub's
-  **Report a vulnerability** (Security → Advisories) on this repository.
+- Email **security@hatchabot.com**. (GitHub's private vulnerability
+  reporting is not turned on for this repository, so email is the route.)
 - Include: what you found, how to reproduce it, and what an attacker gains.
   A proof of concept against your *own* installation is ideal.
 
@@ -32,4 +32,5 @@ release; the CHANGELOG credits reporters who want credit.
 - Denial of service against your own installation.
 
 See `docs/family-member-risk-assessment.md` for the threat model this project
-is designed against, and `the CHANGELOG (audit findings ship as fixes with a note)` for the review history.
+is designed against, and `CHANGELOG.md` for the review history (audit findings
+ship as fixes with a note).

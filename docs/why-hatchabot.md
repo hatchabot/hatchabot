@@ -3,8 +3,11 @@
 ## The idea in one paragraph
 
 Claude and ChatGPT give you **one excellent assistant, in one app, from one
-company, for one person — with a memory you can clear but never open, correct,
-back up or take to another provider.**
+company, for one person.** Both remember you now, and both let you view, edit
+and export what they remember. The difference is where it lives and who uses
+it: a Hatchabot agent's memory is a plain file on your disk that the agent
+reads directly. You can back it up with everything else, run it under another
+model, or move it to another machine, without anyone's export button.
 Hatchabot is the opposite shape: **many purpose-built agents, on hardware you
 own, thinking with whichever AI you choose, reachable by whoever you let in,
 through the messaging app your family already uses.** It is not a chatbot. It
@@ -25,21 +28,24 @@ chat history, or recover the context of a conversation that was reset. Nothing
 important is trapped in a transcript.
 
 **Not locked to one lab.** Anthropic (subscription or API key), OpenAI, Google Gemini,
-or a local model server with no account at all — per agent, switchable live
-without a rebuild. Put simple agents on a cheap model and the demanding ones on
+or a local model server with no account at all, per agent. Switch models
+within a source instantly; switching providers takes a rebuild and starts a
+fresh conversation, with memory kept. Put simple agents on a cheap model and the demanding ones on
 the best; group them into classes and retune a whole tier in one place. Your
 agents outlive any one provider's pricing decision.
 
 **The front door is Telegram.** No app to install for the people you invite, no
 account with anyone but Telegram. Chat with an agent like a contact. Several
-people can talk to the same agent — each privately ("blind" to each other) or
-together in a group room — and the agent's memory can be shared across them or
-kept personal, with everyone told which.
+people can talk to the same agent, one to one or together in a group room. It
+has one memory and one conversation for direct messages, and everyone it lets
+in is told so. For something private, give that person their own agent. (Slack,
+Discord and Hatchabot's own web chat work too.)
 
 **Isolation by construction.** One container, one bot, one set of credentials
 per agent. An agent can be given exactly the data it needs (a folder, a git
-repo, a Google account — with "read mail but never send" if you like) and
-nothing else. The security posture check tells you, every day, which agents
+repo, a Google account whose mail tool has sending switched off — a tool
+setting, not a Google permission, so don't rely on it against someone
+determined) and nothing else. The security posture check tells you, every day, which agents
 have both a wide audience and a powerful capability.
 
 **Claude Max, on purpose.** A Max subscription is consumer pricing — a flat
@@ -79,8 +85,8 @@ a fleet, by more than one person.
   one gateway, one process, one `openclaw.json`, one workspace and credential
   set shared by every agent in it. Hatchabot gives each agent its own container,
   volume, bot token, tool policy and secrets. A runaway task, a bad config edit,
-  a rate-limited source, a compromised agent, or a crash touches one agent —
-  the other thirty keep answering. Upgrades work the same way: the runtime image
+  or a crash touches one agent — the other thirty keep answering. Agents on
+  the same subscription share its limits. Upgrades work the same way: the runtime image
   is pinned and rolled out per agent (candidate first), never "upgrade the
   gateway and hope every agent survives".
 - **Lifecycle instead of hand-editing.** Create, clone, rebuild, archive,
@@ -88,8 +94,8 @@ a fleet, by more than one person.
   and a rollback if a move fails. In plain OpenClaw that's you, a shell, and a
   directory.
 - **Credentials managed once, injected per agent.** One Claude setup-token
-  serves every agent; Google accounts attach per agent with "read but never
-  send"; per-agent secrets are write-only. No keyrings to hand-copy into each
+  serves every agent; Google accounts attach per agent, with sending switched
+  off in the mail tool if you like; per-agent secrets are write-only. No keyrings to hand-copy into each
   install.
 - **More than one human.** Owners, members, invites by link or QR, pairing
   approvals, group rooms, a shared memory that everyone is told about,
@@ -114,12 +120,12 @@ when there are several, they matter, and other people talk to them.
 | **Create agents fast** | Name + one paragraph + a bot token → a running, remembering agent in a minute. Clone one you like; import a shared template. |
 | **Talk through Telegram** | You and your family message agents like contacts. Invite by link or QR; group rooms; per-agent allowlists. |
 | **Many humans, one agent** | Several people on the same agent, or a shared room. One shared memory, declared to everyone who joins. |
-| **Choose the brain per agent** | Claude, OpenAI, Gemini, or a local model; switch the model live; classes for tiers; live source migration. |
+| **Choose the brain per agent** | Claude, OpenAI, Gemini, or a local model; switch models within a source instantly; a provider switch takes a rebuild and starts a fresh conversation, with memory kept; classes for tiers. |
 | **Give agents accounts and data** | Gmail / Calendar / Drive / Sheets connections, folders, git repos it commits to, per-agent secrets. |
 | **Schedule and react** | Cron tasks, event-triggered tasks (a zero-cost check decides whether to wake the model), run-now tests. |
 | **Agents that consult each other** | Grant an investing agent access to your tax and legal agents; it asks them mid-task. |
 | **Master → child lineage** | A "master" agent's improvements distil into proposals that push to its children. |
-| **Move, copy, share, back up** | Move to another Hatchabot server in one step; download to a file; share as a template with no secrets; scheduled backups. |
+| **Move, copy, share, back up** | Move to another Hatchabot server in one step; download to a file; share as a template with no bot, members or secrets (you choose whether its memory goes too); scheduled backups. |
 | **Rebuild without fear** | Rebuilds keep memory; only a change of AI *source* resets a thread — and that offers to save memory first. |
 | **Multiple machines** | Add runners (a laptop, a second box) and place agents where they fit. |
 | **See what's going on** | Fleet health, usage per agent per day, audit timeline, security posture with daily diffs. |
