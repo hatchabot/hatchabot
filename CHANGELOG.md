@@ -2,6 +2,11 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.111.1] — 2026-09-30
+
+### Fixed
+- A web chat guest's OpenClaw chat no longer offers features they can't use (Publish PR, automations, projects, the task board, model settings) and then shows '"sessions.github.options" is not available to guests…' when one is opened. The gateway's list of available features is trimmed to what a guest may use when their chat connects, so the chat hides the rest.
+
 ## [2.111.0] — 2026-09-30
 
 ### Changed

@@ -217,3 +217,14 @@ describe('a guest socket, spliced', () => {
     expect(Buffer.concat(gateway.sent).equals(ping)).toBe(true);
   });
 });
+
+describe('the guest hello advertises only what a guest may use (2026-09-30)', () => {
+  it('drops methods like sessions.github.options, so the chat hides Publish PR instead of erroring', async () => {
+    const { scrubForGuest, GUEST_METHODS } = await import('../src/api/consoleProxy.js');
+    const allowed = [...GUEST_METHODS][0]!;
+    const hello = { type: 'res', id: 'c', ok: true, payload: { type: 'hello-ok', features: { methods: [allowed, 'sessions.github.options', 'cron.list', 'config.get'], events: ['chat'] } } };
+    const out = scrubForGuest(hello, GUEST, new Set()) as any;
+    expect(out.payload.features.methods).toEqual([allowed]);
+    expect(out.payload.features.events).toEqual(['chat']);
+  });
+});

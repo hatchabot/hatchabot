@@ -186,11 +186,21 @@ export function scrubForGuest(msg: unknown, identity: string, healthIds: Set<str
   if (!msg || typeof msg !== 'object') return undefined;
   const f = msg as { type?: string; event?: string; id?: string; ok?: boolean; payload?: any };
   if (f.type === 'res' && f.ok && f.payload && typeof f.payload === 'object') {
-    if (f.payload.type === 'hello-ok' && f.payload.snapshot) {
-      const snap = { ...f.payload.snapshot };
-      if ('presence' in snap) snap.presence = scrubPresence(snap.presence, identity);
-      if ('health' in snap) snap.health = scrubHealth(snap.health);
-      return { ...f, payload: { ...f.payload, snapshot: snap } };
+    if (f.payload.type === 'hello-ok') {
+      const payload = { ...f.payload };
+      if (payload.snapshot) {
+        const snap = { ...payload.snapshot };
+        if ('presence' in snap) snap.presence = scrubPresence(snap.presence, identity);
+        if ('health' in snap) snap.health = scrubHealth(snap.health);
+        payload.snapshot = snap;
+      }
+      // Only the methods a guest may use are advertised: the chat hides what
+      // isn't, instead of offering Publish PR, automations, projects… and
+      // showing "not available to guests" when one is opened (2026-09-30).
+      if (payload.features && Array.isArray(payload.features.methods)) {
+        payload.features = { ...payload.features, methods: payload.features.methods.filter((m: unknown) => typeof m === 'string' && GUEST_METHODS.has(m)) };
+      }
+      return { ...f, payload };
     }
     if (f.id !== undefined && healthIds.has(String(f.id))) {
       healthIds.delete(String(f.id));
