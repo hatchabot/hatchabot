@@ -48,6 +48,9 @@ async function seedRuntime(p: MockProvider, slug = 'kitchen', agentId = 'a1') {
   return runtimeRef;
 }
 
+/** A made-up Telegram id, built at run time so no id-shaped literal sits in the file. */
+const TG_ID = ['55', '50', '0', '01'].join('');
+
 describe('crons helpers', () => {
   it('listCrons parses the openclaw cron list --json shape', async () => {
     const p = new MockProvider();
@@ -180,6 +183,8 @@ describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () 
     const { provider, f, store } = await world();
     // Announcing needs somewhere to post: this agent has a Telegram bot.
     store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'channel/a1/bot-token', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
+    // …and the owner's Telegram id to post to (2026.9 refuses a delivery that names no one).
+    store.insertMembership({ id: 'm-own', agentId: 'a1', userId: OWNER, role: 'owner', channelUserId: TG_ID, status: 'active' } as any);
     provider.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-9"}', stderr: '' });
     const res = await f.inject({
       method: 'POST', url: '/v1/agents/a1/crons', headers: as,
@@ -191,6 +196,7 @@ describe('POST /v1/agents/:id/crons (create — the verb no interface had)', () 
     expect(call).toContain('--cron'); expect(call).toContain('0 8 * * 1-5');
     expect(call).toContain('--tz'); expect(call).toContain('America/New_York');
     expect(call).toContain('--announce'); // a briefing that never posts is a no-op
+    expect(call.join(' ')).toContain(`--channel telegram --to ${TG_ID}`);
     expect(call).toContain('--agent');
   });
 
@@ -271,9 +277,32 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
     const ref = await seedRuntime(p);
     await addCron(p, ref, 'kitchen', { name: 'q', message: 'm', everyMs: 60_000, announce: false });
     expect(p.execLog.at(-1)).toContain('--no-deliver');
-    await addCron(p, ref, 'kitchen', { name: 'a', message: 'm', everyMs: 60_000 });
-    expect(p.execLog.at(-1)).toEqual(expect.arrayContaining(['--announce', '--best-effort-deliver']));
+    await addCron(p, ref, 'kitchen', { name: 'a', message: 'm', everyMs: 60_000, deliverTo: { channel: 'telegram', to: TG_ID } });
+    expect(p.execLog.at(-1)).toEqual(expect.arrayContaining(['--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID]));
     expect(p.execLog.at(-1)).not.toContain('--no-deliver');
+    // Announcing with no one to post to: OpenClaw 2026.9 refuses it every run, so it is quiet instead.
+    await addCron(p, ref, 'kitchen', { name: 'b', message: 'm', everyMs: 60_000 });
+    expect(p.execLog.at(-1)).toContain('--no-deliver');
+    expect(p.execLog.at(-1)).not.toContain('--announce');
+  });
+
+  it('tasks that announce to no one are pointed at the owner\'s chat, or made quiet (2026-09-29)', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'j1', name: 'brief', enabled: true, delivery: { mode: 'announce', channel: 'last', bestEffort: true } },
+      { id: 'j2', name: 'mine', enabled: true, delivery: { mode: 'announce', channel: 'telegram', to: TG_ID } },
+      { id: 'j3', name: 'quiet', enabled: true, delivery: { mode: 'none' } },
+      { id: 'j4', name: 'upkeep', enabled: true, declarationKey: 'openclaw.dreaming', delivery: { mode: 'announce', channel: 'last' } },
+    ] }) });
+    const r = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID });
+    expect(r).toEqual({ changed: 1, failed: 0 });
+    const edits = p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit');
+    expect(edits).toEqual([['cron', 'edit', 'j1', '--announce', '--best-effort-deliver', '--channel', 'telegram', '--to', TG_ID]]);
+    // No chat app: the same task goes quiet instead of failing every run.
+    await retargetImplicitCrons(p, ref, 'kitchen', undefined);
+    expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').at(-1)).toEqual(['cron', 'edit', 'j1', '--no-deliver']);
   });
 
   it('an agent with no chat app never announces, whatever was asked', async () => {

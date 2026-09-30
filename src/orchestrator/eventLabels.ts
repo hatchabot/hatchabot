@@ -197,6 +197,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'reconcile.runtime_missing': 'its container is gone',
   'reconcile.unhealthy': 'its gateway is not answering',
   'restore.restart_failed': 'did not restart after the restore',
+  'cron.retargeted': 'scheduled tasks pointed at the owner\'s chat (they reached no one)',
   'restore.access_read_failed': "could not read who the backup let in",
   'restore.reapply_partial': 'only its bot and members were put back after the restore; the rest waits for a rebuild',
   'restore.reapply_failed': 'current settings could not be put back after the restore; left as it was',

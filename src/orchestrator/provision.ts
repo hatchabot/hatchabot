@@ -18,7 +18,7 @@ import { DOORMAN_EMBED_PORT } from '../ops/doorman.js';
 import { whileBusy } from './busy.js';
 import { notifyAgentChat } from '../channels/notify.js';
 import { autoSnapshot, writeFileInAgent } from './snapshots.js';
-import { addCron, listCrons } from './crons.js';
+import { addCron, cronTargetFor, listCrons } from './crons.js';
 import { clearStaleRuntimePins } from './runtimePins.js';
 import { syncConnections } from './googleConnections.js';
 import { forgetDmPolicy } from './dmPolicyMemo.js';
@@ -356,6 +356,7 @@ async function runProvisionStepsInner(
         if (existing.has(sch.name)) { log('schedule.already_present', { agentId, name: sch.name }); continue; }
         const out = await addCron(provider, runtimeRef, agent.slug, {
           name: sch.name, message: sch.message, cron: sch.cron, everyMs: sch.everyMs, tz: sch.tz,
+          deliverTo: cronTargetFor(store, agent),
         }).catch(() => ({ ok: false as const, error: 'exec failed' }));
         if (!out.ok) {
           stillPending.push(sch);

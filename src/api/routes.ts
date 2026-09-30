@@ -59,7 +59,7 @@ import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orche
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
 import { canTransition } from '../domain/stateMachine.js';
-import { CronSystemOwnedError, addCron, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
+import { CronSystemOwnedError, addCron, cronTargetFor, retargetImplicitCrons, listCrons, setCronEnabled, runCronNow, deleteCron, listCronRuns } from '../orchestrator/crons.js';
 import { request as httpRequest } from 'node:http';
 import { setTelegramDisplayName } from '../channels/telegramName.js';
 import { agentUsage } from '../orchestrator/usage.js';
@@ -2302,9 +2302,28 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     }
     return store.getAgent(woken.id) ?? woken;
   };
+  /**
+   * Scheduled tasks that announce to no one in particular get the owner's chat
+   * as their recipient (or go quiet when the agent is in no chat app): OpenClaw
+   * 2026.9 refuses implicit delivery, so they ran daily and reached nobody.
+   * Agents create such tasks themselves too, so this runs after each start and
+   * then daily, one agent at a time (promise review, 2026-09-29).
+   */
+  const retargetCronSweep = async () => {
+    for (const a of store.listAllActiveAgents()) {
+      if (a.state !== 'RUNNING' || !a.runtimeRef || isBusy(a.id)) continue;
+      try {
+        const r = await retargetImplicitCrons(providerFor(a.hostId), a.runtimeRef, a.slug, cronTargetFor(store, a));
+        if (r.changed || r.failed) trace(a.id)('cron.retargeted', { changed: r.changed, failed: r.failed });
+      } catch { /* its gateway is not answering: next time */ }
+    }
+  };
+  (app as unknown as { retargetCronSweep?: typeof retargetCronSweep }).retargetCronSweep = retargetCronSweep;
   (app as unknown as { hibernateDeps?: HibernateDeps; ensureAwake?: typeof ensureAwake }).hibernateDeps = hibernateDeps;
   (app as unknown as { ensureAwake?: typeof ensureAwake }).ensureAwake = ensureAwake;
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    setTimeout(() => { void retargetCronSweep(); }, 3 * 60_000).unref();
+    setInterval(() => { void retargetCronSweep(); }, 24 * 3_600_000).unref();
     setInterval(() => { void hibernateSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'hibernate sweep failed')); },
       Number(process.env.HATCHABOT_HIBERNATE_SWEEP_MS) || 5 * 60_000).unref();
     setInterval(() => { void wakeSweep(hibernateDeps).catch((err) => app.log.warn({ err: String(err) }, 'wake sweep failed')); },
@@ -5842,6 +5861,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // An agent with no chat app has nowhere to post a result: announcing
       // would only fail each run. Its runs are read with `tasks … runs`.
       announce: parsed.data.announce !== false && store.listChannelsForAgent(agent.id).length > 0,
+      deliverTo: cronTargetFor(store, agent),
     });
     if (!out.ok) return reply.code(502).send({ error: out.error });
     trace(agent.id)('cron.created', { name: parsed.data.name, cron: parsed.data.cron, everyMinutes: parsed.data.everyMinutes });
