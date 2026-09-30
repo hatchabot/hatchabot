@@ -2,6 +2,20 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.110.0] — 2026-09-30
+
+### Fixed
+- **A scheduled task on an agent in no chat app now reaches you.** Its result is written into the conversation the agent's console opens on, as a message from the agent. So a daily reminder is there, with the red dot on the icon, the next time you open it, and you can reply to it. Until now these tasks were quiet: OpenClaw 2026.9 would not deliver them anywhere, and moving them to the main session is refused for an agent that is not OpenClaw's default ("is only valid for the default agent"). The task runs on its own, reads the last few messages of that conversation, and adds only its result to it. This needs OpenClaw 2026.9; on 2026.7 such a task stays quiet as before.
+- **Reminders you ask an agent for in its console are no longer silenced.** OpenClaw ties such a task to the conversation it was asked in. On an agent in no chat app, the daily sweep from 2.109.0 counted it as "announcing to no one" and made it quiet, so it never appeared. The sweep now leaves it alone. Tasks that really do announce to no one (made in the app before this release, or by an agent outside a conversation) are pointed at the console conversation instead of being made quiet.
+- If the conversation has never been opened (a new agent's first reminder), Hatchabot creates it when the task is made, so the first run has somewhere to land. It is created empty, with no model call. A conversation that already exists is left untouched.
+- The Schedule tab, `hbt tasks add --help` and docs/features.md say where a result goes: your chat with the agent, or its console conversation when it is in no chat app.
+- **No rebuild, no config change.** Nothing in openclaw.json changes and nothing is added to the seed, so there is no new seed step and no skipIf. Everything is `openclaw cron` / `gateway call` at run time.
+- **Applies live once the release is deployed:**
+- **Existing quiet tasks stay quiet.** Hatchabot cannot tell a task the owner made quiet on purpose from one it made quiet because there was nowhere to post, so it does not change `delivery.mode: none` tasks. This includes **Lunch Agent's "Daily lunch suggestion"** (`64595047-78a9-4e73-a520-429e15687a41`, currently `isolated`, `delivery none`). To fix it, pick one:
+- **Before the deploy,** asking a web-only agent to set a reminder does create a task bound to the console conversation. The running prod sweep (v2.109.x) will still make it quiet at its next pass.
+- **OpenClaw 2026.7 agents** are unchanged: their tasks stay quiet. Their CLI knows only `--session main|isolated`, and the version comes from `provider.info`.
+- **Agents in a chat app** are unchanged. The owner's Telegram, else Discord or Slack, is used as before. If the owner's id there is not known, the task stays quiet, not the console: "last" in the shared main conversation is whoever wrote last.
+
 ## [2.109.1] — 2026-09-30
 
 ### Fixed
