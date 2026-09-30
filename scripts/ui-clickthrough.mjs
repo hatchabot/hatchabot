@@ -618,6 +618,8 @@ const SCENARIOS = String.raw`(() => {
       window.__confirmAnswer = false;
       item.click(); await sleep(100);
       ok('it asked first', window.__confirms.at(-1).includes('every device'));
+      // …and says the command line is signed out too (2026-09-30).
+      ok('it names command-line sign-ins', window.__confirms.at(-1).includes('Command-line sign-ins are ended too') && window.__confirms.at(-1).includes('hatchabot logout'));
       eq('declined: nothing sent', everywhere(), 0);
       ok('the menu closed', document.getElementById('v2AcctPop').hidden);
       window.__confirmAnswer = true;
@@ -809,6 +811,73 @@ const SCENARIOS = String.raw`(() => {
       } finally {
         window.__promptAnswer = null; window.__answer = {};
         if (inviteDlg.open) inviteDlg.close();
+      }
+    },
+    // Access promises (2026-09-30): the Telegram invite opens a knock window
+    // when copied, "Let them in again" asks for a handle when the app is not
+    // known, removal says scheduled tasks live on, and the Hatchabot agent
+    // offers nobody a way in.
+    accessPromises: async () => {
+      const list = await (await fetch('/v1/agents')).json();
+      const hb = list.find((a) => a.ops);
+      try {
+        window.__promptAnswer = '@maria_k';
+        window.__answer = {
+          'POST /v1/agents/a1/invites': [{ status: 201, body: { code: 'TGCODE', path: '/join/TGCODE' } }],
+          'POST /v1/agents/a1/invites/TGCODE/knock-window': [{ status: 200, body: { open: true, minutes: 30, for: 'maria_k' } }] };
+        await invite('a1', 'Homework Helper');
+        await until(() => inviteDlg.open);
+        const dlg = document.getElementById('inviteDlg').textContent.replace(/\s+/g, ' ');
+        ok('the member wording says what chat reaches: ' + dlg.slice(0, 240), dlg.includes("they can't change its settings here, but through chat they can use everything the agent can"));
+        ok('the Telegram way promises a knock, never an automatic admit', dlg.includes('holds the door open for 30 minutes') && dlg.includes('Nobody is let in without that tap'));
+        ok('names who it is for', dlg.includes("Only @maria_k's message is shown"));
+        eq('no window until it is sent', calls('POST', /\/knock-window$/).length, 0);
+        byText('#inviteDlg button', 'Copy Telegram invite').click();
+        await until(() => calls('POST', /^\/v1\/agents\/a1\/invites\/TGCODE\/knock-window$/).length === 1);
+        await until(() => document.getElementById('toast').textContent.includes('Needs you'));
+        inviteDlg.close();
+
+        window.__override['/v1/agents/a1/members'] = [
+          { userId: 'o1', role: 'owner', status: 'active', channelUserId: '11', identities: {}, account: true, webChat: false },
+          { userId: 'member-late', displayName: 'Maria', role: 'user', status: 'active', identities: {}, account: false, webChat: false }];
+        window.__answer = { 'POST /v1/agents/a1/members/member-late/reopen': [
+          { status: 409, body: { error: 'We do not know which app they joined with.', code: 'needs-handle' } },
+          { status: 200, body: { reopened: true, minutes: 30, on: ['telegram'], for: 'maria_k' } }] };
+        openV2Agent('a1', 'sharing');
+        const again = await until(() => byText('#tgMemberList button', 'Let them in again'));
+        ok('its tooltip says which app: ' + again.title, again.title.includes('the app they joined with') && again.title.includes('@handle'));
+        again.click();
+        await until(() => calls('POST', /member-late\/reopen$/).length === 2);
+        eq('asked again with their handle', calls('POST', /member-late\/reopen$/)[1].body, { handle: '@maria_k' });
+        await until(() => document.getElementById('toast').textContent.includes('for @maria_k only'));
+        window.__confirmAnswer = false;
+        byText('#tgMemberList button', 'Remove').click(); await sleep(100);
+        ok('removal says their scheduled tasks keep running', (window.__confirms.at(-1) || '').includes('keeps running; check Schedule'));
+        eq('declined: nobody removed', calls('DELETE', /\/members\//).length, 0);
+        window.__confirmAnswer = true;
+        v2Close();
+
+        // The manager: no members block, no Invite, no "Let them in", no "Who can reach it".
+        window.__override['/v1/agents'] = list.map((a) => a.ops ? { ...a, botUsername: 'HbBot', deepLink: 'https://t.me/x', webOnly: false } : a);
+        window.__override['/v1/agents/' + hb.id + '/channels'] = { channels: [{ kind: 'telegram', displayName: 'Hatchabot', youAreLinked: true, rooms: { mode: 'members' }, people: [] }], imageSupports: [], spare: {} };
+        await refresh(false);
+        pairings[hb.id] = [{ code: 'K1', kind: 'telegram', id: '77', meta: { firstName: 'Stranger' } }];
+        openV2Agent(hb.id, 'sharing');
+        const pane = document.getElementById('v2Pane');
+        ok('Sharing says it is yours alone: ' + pane.textContent.replace(/\s+/g, ' ').slice(0, 200), pane.textContent.includes('yours alone') && !pane.querySelector('#tgMembersBlock'));
+        openV2Agent(hb.id, 'messaging');
+        const card = await until(() => { const c = document.querySelector('#v2Chans .v2chan'); return c && c.textContent.includes('Stranger') ? c : null; });
+        ok('a knock on it offers "That\'s me", not "Let them in"', !!byText('#v2Chans button', "That's me") && !byText('#v2Chans button', 'Let them in'));
+        ok('no "Who can reach it" for it', !card.textContent.includes('Who can reach it'));
+        v2Close();
+      } finally {
+        window.__promptAnswer = null; window.__answer = {}; window.__confirmAnswer = true;
+        if (inviteDlg.open) inviteDlg.close();
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents/a1/members'];
+        delete window.__override['/v1/agents'];
+        if (hb) { delete window.__override['/v1/agents/' + hb.id + '/channels']; delete pairings[hb.id]; }
+        await refresh(false);
       }
     },
   });

@@ -662,6 +662,11 @@ export class Store {
       // a web turn runs as the owner, so it is given, never assumed.
       `ALTER TABLE memberships ADD COLUMN web_chat INTEGER NOT NULL DEFAULT 0`,
       `ALTER TABLE invites ADD COLUMN web_chat INTEGER NOT NULL DEFAULT 0`,
+      // The app a redeemed invite was used for (2026-09-30): "Let them in
+      // again" reopens that one only. It opened a window on every app they
+      // were not linked on, and on a big Slack or Discord without a named
+      // handle the first stranger to message took the seat.
+      `ALTER TABLE invites ADD COLUMN redeemed_via TEXT`,
       // …and the window the redeemed invite opens carries it. CREATE TABLE IF
       // NOT EXISTS does nothing to a table that already exists, so a column
       // added to one after it shipped needs this line or every read of it
@@ -2179,6 +2184,19 @@ export class Store {
       expiresAt: r.expires_at ?? undefined,
       scope: r.scope ?? undefined,
     }));
+  }
+
+  /**
+   * "Sign out on every device" ends the person's own command-line sign-ins
+   * too (2026-09-30): a 90-day token checks no session epoch, so it outlived
+   * the sign-out it was supposed to be part of. Only full personal tokens —
+   * a peer server's rehost token and the agents' call tokens are plumbing,
+   * and ending them would break moves and consults, not sign anyone out.
+   */
+  revokePersonalCliTokens(ownerId: string): number {
+    return this.db
+      .prepare(`DELETE FROM cli_tokens WHERE owner_id = ? AND agent_id IS NULL AND scope IS NULL`)
+      .run(ownerId).changes;
   }
 
   revokeCliToken(ownerId: string, id: string): boolean {
@@ -3785,17 +3803,21 @@ export class Store {
     })();
   }
 
-  /** The @handle the invite this person redeemed named, if it named one — so
-   *  reopening the door keeps admitting only them. */
-  inviteHandleFor(agentId: string, userId: string): string | undefined {
+  /** Which app a redeemed invite was used for (set by /v1/join). */
+  setInviteRedeemedVia(code: string, kind: string): void {
+    this.db.prepare(`UPDATE invites SET redeemed_via = ? WHERE code = ?`).run(kind, code.trim().toUpperCase());
+  }
+
+  /** The invite this person joined by: the @handle it named and the app they
+   *  chose, when known — what "Let them in again" may reopen (2026-09-30). */
+  inviteJoinFor(agentId: string, userId: string): { handle?: string; via?: string } {
     const r = this.db
       .prepare(
-        `SELECT expect_handle h FROM invites
-          WHERE agent_id = ? AND redeemed_by = ? AND expect_handle IS NOT NULL
-          ORDER BY redeemed_at DESC LIMIT 1`,
+        `SELECT expect_handle h, redeemed_via v FROM invites
+          WHERE agent_id = ? AND redeemed_by = ? ORDER BY redeemed_at DESC LIMIT 1`,
       )
-      .get(agentId, userId) as { h: string } | undefined;
-    return r?.h ?? undefined;
+      .get(agentId, userId) as { h: string | null; v: string | null } | undefined;
+    return { handle: r?.h ?? undefined, via: r?.v ?? undefined };
   }
 
   /** Anyone who finds the bot may knock, instead of invitees and people the

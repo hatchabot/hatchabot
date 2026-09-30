@@ -258,9 +258,14 @@ function registerLogoutEverywhere(app: FastifyInstance, store: Store | undefined
     if (!signsIn) return reply.code(400).send({ error: 'Nobody signs in to this installation, so there are no sessions to end.' });
     if (!store) return reply.code(503).send({ error: 'This server has no database to record the sign-out in.' });
     store.bumpSessionEpoch(who);
+    // …and their command-line sign-ins, which never read the epoch
+    // (2026-09-30). A Google-signed-in CLI keeps its own refresh token on
+    // that computer; the confirm tells them to run `hatchabot logout` there.
+    const cliTokens = store.revokePersonalCliTokens(who);
+    if (cliTokens) app.log.warn({ owner: who, revoked: cliTokens }, 'logout_everywhere.cli_tokens_revoked');
     reply.clearCookie(COOKIE, { path: '/' });
     reply.clearCookie(LEGACY_COOKIE, { path: '/' });
-    return { ok: true };
+    return { ok: true, cliTokens };
   });
 }
 

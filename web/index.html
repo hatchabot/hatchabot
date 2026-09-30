@@ -883,7 +883,7 @@
         <button role="menuitem" onclick="location.search = '?ui=classic'">Classic look</button>
         <div class="v2popsep"></div>
         <button role="menuitem" class="v2signout" onclick="signOut()">Sign out or switch account</button>
-        <button role="menuitem" id="v2SignOutAll" onclick="v2CloseAccount(); signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included">Sign out on every device</button>
+        <button role="menuitem" id="v2SignOutAll" onclick="v2CloseAccount(); signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included, and your command-line sign-ins">Sign out on every device</button>
         <div class="v2ver" id="v2Ver"></div>
       </div>
     </div>
@@ -904,7 +904,7 @@
       </label>
       <button id="logoutBtn" class="hbtn" onclick="signOut()"
               title="Sign out — then sign in as anyone: the Google chooser offers 'Use another account'. Tabs share one login; for two accounts AT ONCE, use another browser profile or a private window.">Sign out / switch</button>
-      <button id="logoutAllBtn" class="hbtn" onclick="signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included">Sign out everywhere</button>
+      <button id="logoutAllBtn" class="hbtn" onclick="signOutEverywhere()" title="Ends your sessions on every phone, tablet and computer, this one included, and your command-line sign-ins">Sign out everywhere</button>
     </div>
     <div class="hrow">
       <button id="aiBtn" class="hbtn" title="Settings — AI sources, servers, CLI access" onclick="openAiDlg()">⚙ Settings</button>
@@ -1430,7 +1430,7 @@
       <label>👤 Members <span style="color:var(--dim)">— who may talk to this agent</span></label>
       <div id="tgMemberList" style="margin-bottom:6px"></div>
       <div id="tgKnownPeople" style="margin-bottom:6px"></div>
-      <div style="display:flex;gap:8px;align-items:center">
+      <div id="tgInviteRow" style="display:flex;gap:8px;align-items:center">
         <button onclick="invite(editAgentId, $('editName')?.value || '')">Invite…</button>
         <span class="sub">Someone new starts by messaging the bot; Invite mints them the link.</span>
       </div>
@@ -2554,17 +2554,20 @@
   <h3 style="margin:0 0 4px">Invite someone to <span id="invAgent"></span></h3>
   <div id="invApps">
   <div class="sub">
-    Send them this link. It works once, expires in 48 hours, and they join as a
-    member — they can chat, not change settings.
+    Send them this link. It works once and expires in 48 hours. They join as a
+    member: they can't change its settings here, but through chat they can use
+    everything the agent can — its files, the web, connected accounts.
   </div>
   <div class="sub" id="invFor" style="margin:4px 0"></div>
   <div class="invite-link" id="invLink"></div>
   <div class="sub">They'll see a note that this agent's memory is shared.</div>
   <div class="sub" style="margin-top:10px">
     <b>Invite via Telegram — no Tailscale needed.</b> Send them the agent's
-    Telegram link (or let them scan the code). When they message it, you get a
-    <b>“wants to join”</b> prompt — in your management bot if it's set up, or as a
-    card here — and one tap lets them in.
+    Telegram link (or let them scan the code). Copying or sharing it holds the
+    door open for 30 minutes: when they message it in that time, you get a
+    <b>“wants to join”</b> prompt — on your phone if your Hatchabot agent has a
+    bot, and as a card here — and one tap lets them in. Nobody is let in without
+    that tap. <span id="invTgFor"></span>
   </div>
   <div style="display:flex;align-items:center;gap:12px">
     <div class="invite-link" id="invTgLink" style="flex:1;min-width:0"></div>
@@ -2800,7 +2803,9 @@ async function signOut() {
  * (review, 2026-09-29). Plain sign-out above still only forgets this browser.
  */
 async function signOutEverywhere() {
-  if (!confirm('Sign out on every device? Every phone, tablet and computer signed in as you, this one included, will need to sign in again.')) return;
+  // Command-line tokens end too (2026-09-30): they never read the sign-in
+  // generation, so "every device" left them working for up to 90 days.
+  if (!confirm('Sign out on every device? Every browser signed in as you, this one included, will need to sign in again. Command-line sign-ins are ended too; a Google-signed-in hatchabot CLI needs `hatchabot logout` on that computer.')) return;
   try { await api('/v1/logout/everywhere', { method: 'POST' }); }
   catch (e) { if (e.message !== 'auth required') toast(e.message); return; }
   localStorage.removeItem('hatchabot_email');
@@ -6539,7 +6544,7 @@ function agentCard(a) {
       <div class="actions">
         <!-- "Telegram App" button retired: the agent NAME is the deep-link now;
              Telegram Web stays in the ⋯ menu. -->
-        ${a.state === 'RUNNING' ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>
+        ${a.state === 'RUNNING' && !a.ops ? `<button onclick="invite('${a.id}', '${jsq(a.name)}')">Invite…</button>` : ''}${a.state === 'RUNNING' ? `
           <button onclick="openEdit('${a.id}', '${jsq(a.name)}')" title="Persona & memory, AI, data, bot, environment">⚙ Settings</button>
           <button onclick="openCrons('${a.id}', '${jsq(a.name)}')" title="Scheduled tasks">⏰ Tasks</button>` : ''}
         ${a.state === 'RUNNING' && a.botUsername ? (
@@ -8230,6 +8235,14 @@ async function renderEditMembers() {
   const el = $('tgMemberList');
   if (!el) return;
   const forId = editAgentId;
+  // Your Hatchabot agent runs your machine: no invites, no members (2026-09-30).
+  const opsAgent = !!agents.find(x => x.id === forId)?.ops;
+  if ($('tgInviteRow')) $('tgInviteRow').hidden = opsAgent;
+  if (opsAgent) {
+    el.innerHTML = '<div class="sub">Your Hatchabot agent is yours alone — nobody else can be let in.</div>';
+    if ($('tgKnownPeople')) $('tgKnownPeople').innerHTML = '';
+    return;
+  }
   try {
     const ms = (members[forId] = await api(`/v1/agents/${forId}/members`));
     if (editAgentId !== forId) return;
@@ -8245,7 +8258,7 @@ async function renderEditMembers() {
         : webOnlyMember || m.role === 'owner' && !m.channelUserId && !v2ChannelKinds(agents.find(x => x.id === forId) || {}).length ? ''
         : `<span class="sub" style="color:var(--warn)">hasn't messaged yet</span>
            <button onclick="reopenDoor('${editAgentId}','${jsq(m.userId)}','${jsq(m.displayName || 'They')}')"
-                   title="Hold the door open for 30 minutes so their next message is let through">Let them in again</button>`;
+                   title="Hold the door open for 30 minutes on the app they joined with, so their next message is let through. If we don't know that app, you give their @handle and only they are let in">Let them in again</button>`;
       const who = jsq(m.displayName || 'them');
       // Web chat (2026-09-29): a badge, and the switch — offered only to someone who signs in here.
       const web = m.role === 'owner' ? ''
@@ -8281,10 +8294,24 @@ async function setWebChat(agentId, userId, name, on) {
   } catch (e) { toast(e.message, 8000); }
 }
 
+/**
+ * "Let them in again" reopens only the app they joined with; when that was
+ * never recorded, it asks for their @handle, so the window admits only them
+ * rather than whoever messages first (2026-09-30).
+ */
 async function reopenDoor(agentId, userId, name) {
+  const url = `/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/reopen`;
   try {
-    const r = await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/reopen`, { method: 'POST', body: {} });
-    toast(`Door open for ${r.minutes} minutes — tell ${name} to message the bot now.`, 9000);
+    let r;
+    try { r = await api(url, { method: 'POST', body: {} }); }
+    catch (e) {
+      if (e.code !== 'needs-handle') throw e;
+      const handle = prompt(`Which app ${name} joined with was never recorded, so the door would open to whoever messages first.\n\nTheir @handle (Telegram username, or their Slack / Discord name) — only they will be let in:`, '');
+      if (!handle || !handle.trim()) return;
+      r = await api(url, { method: 'POST', body: { handle: handle.trim() } });
+    }
+    const where = r.on?.length === 1 ? ` on ${r.on[0][0].toUpperCase()}${r.on[0].slice(1)}` : '';
+    toast(`Door open for ${r.minutes} minutes${where}${r.for ? ` for @${r.for} only` : ''} — tell ${name} to message the bot now.`, 9000);
     await renderEditMembers();
   } catch (e) { toast(e.message, 8000); }
 }
@@ -8352,7 +8379,8 @@ function renderAllowKnocks(a) {
   sel.value = a?.allowKnocks ? 'on' : 'off';
   $('tgAllowKnocksHelp').innerHTML = a?.allowKnocks
     ? 'Anyone who finds the bot can ask, and waits under <b>Needs you</b> — how it worked before v2.13.'
-    : 'Only people you invite, or already know from another agent. Strangers are turned away silently.';
+    // Said as it is (2026-09-30): an open window answers anyone, not only the invitee.
+    : 'Only people you invite, or already know from another agent. Strangers get no answer — except while an invite or ‘Let them in again’ window is open (30 minutes): then anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.';
 }
 
 
@@ -8699,7 +8727,7 @@ async function invite(id, name) {
   if (webOnly) { $('invAgent').textContent = name; invShare = null; inviteDlg.showModal(); return; }
   try {
     const who = prompt(
-      `Who is this invite for?\n\nTheir Telegram @handle — then only they can use it, and anyone else who messages the bot is turned away.\n\nLeave blank if you don't know it: the first person to message within 30 minutes is admitted instead.`,
+      `Who is this invite for?\n\nTheir Telegram @handle — then only they can use it, and anyone else who messages the bot is turned away.\n\nLeave blank if you don't know it: whoever redeems the web link and messages first within 30 minutes is admitted. Someone who comes by the Telegram link always waits for your tap.`,
       '',
     );
     if (who === null) return; // cancelled
@@ -8711,8 +8739,10 @@ async function invite(id, name) {
     const qr = $('invTgQr');
     qr.style.display = link ? '' : 'none';
     if (link) qr.src = `/v1/agents/${id}/qr.svg`;
-    // A ready-to-send message, not just the bare URL.
-    invShare = { name, link, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
+    // A ready-to-send message, not just the bare URL. The invite's code rides
+    // along: copying or sharing it opens the knock window (2026-09-30).
+    invShare = { id, name, link, code: inv.code, message: link ? `Chat with ${name} on Telegram: ${link}` : '' };
+    $('invTgFor').textContent = who.trim() ? `Only @${who.trim().replace(/^@/, '')}'s message is shown; anyone else's is turned away.` : '';
     const forWho = $('invFor');
     if (forWho) {
       forWho.textContent = who.trim()
@@ -8777,16 +8807,36 @@ async function copyInvite() {
   toast(ok ? 'Web link copied' : 'Select the link and copy it manually');
 }
 
+/**
+ * Copying or sharing the Telegram invite holds the door open for 30 minutes
+ * (2026-09-30): an agent under "Invite only" drops a stranger's message in
+ * silence, so the "wants to join" prompt the dialog promised never came. The
+ * window only SHOWS their knock; the owner's tap lets them in. Returns the
+ * words to add to the toast, or '' when the door could not be opened.
+ */
+async function openInviteKnockWindow() {
+  if (!invShare?.code || !invShare?.id) return '';
+  try {
+    const r = await api(`/v1/agents/${invShare.id}/invites/${encodeURIComponent(invShare.code)}/knock-window`, { method: 'POST', body: {} });
+    return r.alreadyOpen ? ' Anyone can knock on this agent, so their request will show under Needs you.'
+      : ` For the next ${r.minutes} minutes their message shows under Needs you — tap Let them in.`;
+  } catch (e) { toast(e.message, 8000); return null; }
+}
+
 async function copyInviteTg() {
   if (!invShare?.message) { toast('This agent has no Telegram bot yet'); return; }
   const ok = await copyText(invShare.message);
-  toast(ok ? 'Telegram invite copied — paste it to them' : 'Select the link and copy it manually');
+  const door = await openInviteKnockWindow();
+  if (door === null) return; // the reason is on screen
+  toast(ok ? `Telegram invite copied — paste it to them.${door}` : `Select the link and copy it manually.${door}`, door ? 9000 : undefined);
 }
 
 async function shareInviteTg() {
   if (!invShare?.link) return;
   try { await navigator.share({ title: `Chat with ${invShare.name}`, text: invShare.message, url: invShare.link }); }
-  catch { /* user cancelled the share sheet, or it's unavailable — no-op */ }
+  catch { return; /* user cancelled the share sheet, or it's unavailable — no door opened */ }
+  const door = await openInviteKnockWindow();
+  if (door) toast(`Shared.${door}`, 9000);
 }
 
 /**
@@ -8868,7 +8918,7 @@ async function del(id, name) {
 }
 
 async function kick(agentId, userId, label) {
-  if (!confirm(`Remove ${label}? They lose access to this agent immediately.`)) return;
+  if (!confirm(`Remove ${label}? They lose access to this agent immediately.\n\nAnything they set up through it (scheduled tasks) keeps running; check Schedule.`)) return;
   try {
     await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });
     toast(`${label} removed`);
@@ -11534,8 +11584,9 @@ function v2Pane(a, tab) {
       // Where people sign in, invited people can chat on the web: the member list shows without a chat app (2026-09-29).
       const webOk = appConfig.authMode !== 'password' && !a.ops;
       return `
-      ${v2ChannelKinds(a).length || webOk ? `<div data-v2slot="tgMembersBlock"></div>` : ''}
-      ${v2ChannelKinds(a).length ? '' : row('People', `<span>${webOk ? 'It is in no chat app yet — people you invite can chat with it on the web, here.' : 'Only you — it is not in a chat app yet.'}</span>${B('Add Telegram…', goto('messaging'))}${B('Add Discord…', goto('channels'))}
+      ${a.ops ? row('People', '<span>Only you. Your Hatchabot agent is yours alone — it cannot be shared or given members.</span>') : ''}
+      ${!a.ops && (v2ChannelKinds(a).length || webOk) ? `<div data-v2slot="tgMembersBlock"></div>` : ''}
+      ${v2ChannelKinds(a).length || a.ops ? '' : row('People', `<span>${webOk ? 'It is in no chat app yet — people you invite can chat with it on the web, here.' : 'Only you — it is not in a chat app yet.'}</span>${B('Add Telegram…', goto('messaging'))}${B('Add Discord…', goto('channels'))}
             <span class="sub">Other people reach an agent through a chat app: Telegram or Discord${webOk ? ' — or the web chat, for people you trust' : ''}.</span>`)}
       ${run ? row('Copy or share', `${B('📤 Share a copy', `shareTemplate('${id}','${n}')`, 'title="A trained copy with no bot or members — safe to email"')}
         ${appConfig.authMode === 'identity' ? B('📨 Send to someone here', `openSendAgent('${id}','${n}')`) : ''}
@@ -11697,8 +11748,8 @@ async function v2LoadChans(id) {
         ${knocks.map(p => `<div class="pair"><span class="grow">🔑 <b class="pii">${esc(who(p))}</b> wants to talk to it on ${label}</span>
           <button onclick="denyPair('${jsq(id)}','${jsq(p.code)}','${jsq(who(p))}','${kind}')" title="Turn this request away. They can ask again by messaging the bot.">Not now</button>
           <button onclick="approve('${jsq(id)}','${jsq(p.code)}', true,'${kind}','${jsq(who(p))}')" title="This is you on ${label}: link it to your login">That's me</button>
-          <button class="primary" onclick="approve('${jsq(id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button></div>`).join('')}
-        <span class="sub" style="flex-basis:100%">Members, invites and people you already know are under <b>Sharing</b>; removing a member takes them off every app.</span>
+          ${a.ops ? '' : `<button class="primary" onclick="approve('${jsq(id)}','${jsq(p.code)}', false,'${kind}')">Let them in</button>`}</div>`).join('')}
+        <span class="sub" style="flex-basis:100%">${a.ops ? 'Your Hatchabot agent is yours alone: only you can link to it.' : 'Members, invites and people you already know are under <b>Sharing</b>; removing a member takes them off every app.'}</span>
       </div>
       <div class="v2chan-rooms">
         <label for="chanRoomMode-${kind}" style="margin:0">Group chats</label>
@@ -11709,14 +11760,14 @@ async function v2LoadChans(id) {
         ${canChange ? `<button onclick="chanSaveRooms('${jsq(id)}','${kind}', this)">Save</button>` : ''}
         <span class="sub" style="flex-basis:100%">In a group it answers members only, and only when @mentioned. ${roomHelp}</span>
       </div>
-      <div class="v2chan-rooms">
+      ${a.ops ? '' : `<div class="v2chan-rooms">
         <label for="chanKnocks-${kind}" style="margin:0">Who can reach it</label>
         <select id="chanKnocks-${kind}" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanAllowKnocks('${jsq(id)}', this.value === 'on')">
           <option value="off"${r.allowKnocks ? '' : ' selected'}>Invite only (default)</option>
           <option value="on"${r.allowKnocks ? ' selected' : ''}>Anyone can knock</option>
         </select>
-        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Needs you.' : 'Only people you invite, or already know from another agent; strangers are turned away silently.'} One setting for every app this agent is on.</span>
-      </div>
+        <span class="sub" style="flex-basis:100%">${r.allowKnocks ? 'Anyone who finds a bot of this agent can ask, and waits under Needs you.' : 'Only people you invite, or already know from another agent. Strangers get no answer — except while an invite or ‘Let them in again’ window is open (30 minutes): then anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.'} One setting for every app this agent is on.</span>
+      </div>`}
       ${kind === 'telegram' ? `<div class="v2chan-rooms">
         <label for="chanRich-telegram" style="margin:0">Rich messages</label>
         <select id="chanRich-telegram" style="width:auto"${canChange ? '' : ' disabled'} onchange="chanRichMessages('${jsq(id)}', this.value === 'off')">

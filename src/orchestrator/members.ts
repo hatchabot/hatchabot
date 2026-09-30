@@ -68,6 +68,8 @@ export interface AdmitResult {
   displayName: string;
   channelUserId: string;
   alreadyMember: boolean;
+  /** Their @handle on the app, when it gave one — which invite window they answered. */
+  username?: string;
 }
 
 /**
@@ -139,6 +141,7 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
       displayName: existing.displayName ?? existing.userId,
       channelUserId: req.id,
       alreadyMember: true,
+      username: req.meta?.username,
     };
   }
 
@@ -183,7 +186,7 @@ export async function admitMember(deps: RevokeDeps, opts: AdmitOptions): Promise
     log('member.welcome_failed', { agentId: opts.agentId, userId, stderr: sent.stderr });
   }
 
-  return { userId, displayName, channelUserId: req.id, alreadyMember: false };
+  return { userId, displayName, channelUserId: req.id, alreadyMember: false, username: req.meta?.username };
 }
 
 /**
@@ -206,6 +209,10 @@ async function admitOtherChannel(deps: RevokeDeps, opts: AdmitOptions & { kind: 
   if (!(await approvePairing(provider, opts.runtimeRef, opts.accountId, opts.code, kind))) {
     throw new AdmitError("Couldn't approve the request — try again.");
   }
+
+  // Their rooms too, not just their DMs: OpenClaw's approval writes only the
+  // DM allow store (2026-09-30).
+  await grantRoomAccess(deps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: req.id });
 
   const agent = store.getAgent(opts.agentId);
   if (agent && opts.asSelf) {
@@ -391,7 +398,10 @@ export async function grantChannelAccess(
       const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
       const acc = cfg.channels && cfg.channels[t.channel] && cfg.channels[t.channel].accounts
         && cfg.channels[t.channel].accounts[t.acct];
-      if (acc) { acc.allowFrom = add(acc.allowFrom); writeAtomic(cfgPath, cfg); }
+      let changed = false;
+      if (acc) { acc.allowFrom = add(acc.allowFrom); changed = true; }
+      ${ROOM_USERS_ADD_JS}
+      if (changed) writeAtomic(cfgPath, cfg);
     }'`;
   forgetDmPolicy(opts.agentId); // the config's allowFrom is being written
   const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script);
@@ -399,6 +409,60 @@ export async function grantChannelAccess(
     throw new AdmitError('Adding them to the bot allowlist failed — try again in a moment.');
   }
   log('member.allowlist_granted', { agentId: opts.agentId, kind: opts.kind });
+}
+
+/**
+ * Slack channels and Discord servers carry their own `users` list, written
+ * only at a build — so somebody admitted today was ignored in every room
+ * until the next rebuild, though the app said rooms answer "people you
+ * admitted" (2026-09-30). This adds `t.id` to each room Hatchabot wrote (a
+ * NON-empty list: an empty one means "anyone" to OpenClaw, and a room with
+ * nobody admitted yet is written closed, not empty — that one still waits for
+ * a rebuild). Needs `cfg`, `t` ({channel, id}) and a `changed` flag in scope;
+ * the mirror of allowlistScrubScript's room handling.
+ */
+const ROOM_USERS_ADD_JS = `
+      const chRooms = cfg.channels && cfg.channels[t.channel];
+      if (chRooms && t.channel !== "telegram") {
+        for (const key of ["channels", "guilds"]) {
+          const rooms = chRooms[key];
+          if (!rooms || typeof rooms !== "object") continue;
+          for (const r of Object.values(rooms)) {
+            if (!r || !Array.isArray(r.users) || !r.users.length) continue;
+            if (!r.users.some((x) => String(x) === t.id)) { r.users.push(t.id); changed = true; }
+          }
+        }
+      }`;
+
+/**
+ * Let somebody just admitted on Slack or Discord into the rooms too, live.
+ * The DM door is OpenClaw's own approval (or grantChannelAccess); the rooms
+ * are config only this writes. Best effort: a failure is logged, and the next
+ * rebuild writes the rooms from the member list anyway.
+ */
+export async function grantRoomAccess(
+  deps: RevokeDeps,
+  opts: { agentId: string; runtimeRef: string; kind: ChannelKind; channelUserId: string },
+): Promise<boolean> {
+  if (opts.kind === 'telegram' || !ID_SHAPE[opts.kind].test(opts.channelUserId)) return false;
+  const t = { channel: opts.kind, id: opts.channelUserId };
+  const script = `node -e '
+    const fs = require("fs");
+    const t = ${JSON.stringify(t)};
+    const cfgPath = "/home/node/.openclaw/openclaw.json";
+    if (!fs.existsSync(cfgPath)) process.exit(0);
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    let changed = false;
+    ${ROOM_USERS_ADD_JS}
+    if (changed) { fs.writeFileSync(cfgPath + ".tmp", JSON.stringify(cfg, null, 2)); fs.renameSync(cfgPath + ".tmp", cfgPath); }
+    console.log(changed ? "added" : "unchanged");'`;
+  const res = await deps.provider.execShellOnVolume(opts.runtimeRef, script).catch(() => ({ code: 1, stdout: '', stderr: '' }));
+  if (res.code !== 0) {
+    deps.log?.('member.room_grant_failed', { agentId: opts.agentId, kind: opts.kind });
+    return false;
+  }
+  if (res.stdout.trim() === 'added') deps.log?.('member.room_granted', { agentId: opts.agentId, kind: opts.kind });
+  return true;
 }
 
 /**

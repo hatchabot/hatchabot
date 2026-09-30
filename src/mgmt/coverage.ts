@@ -121,6 +121,7 @@ export const COVERAGE: Record<string, string> = {
   'PATCH /v1/ai-profiles/:id': 'app: later — rename/share a source, change its default model',
   'DELETE /v1/ai-profiles/:id': 'app: fleet-wide/irreversible — deleting a source strands its agents',
   'POST /v1/agents/:id/members/:userId/reopen': 'app: later — holding the door open is a live decision the owner makes',
+  'POST /v1/agents/:id/invites/:code/knock-window': 'app: browser — the invite dialog opens it when the Telegram invite is copied or shared',
   'POST /v1/agents/:id/members/known': 'app: later — admitting a person is something only the owner does',
   'POST /v1/tailscale/use-for-links': 'app: later — it edits the .env the service reads',
   'POST /v1/local-accounts/recover': 'app: secret — it sends a one-time sign-in link, and is used signed out',

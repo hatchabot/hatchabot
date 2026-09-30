@@ -76,6 +76,23 @@ describe('Google sign-in (identity mode)', () => {
     expect((await whoami(f, phone)).statusCode).toBe(200);
   });
 
+  it('ends their own command-line sign-ins too, and nothing that is plumbing (2026-09-30)', async () => {
+    const { f, store } = await identityApp();
+    const me = 'user-g-person-1';
+    const cli = store.createCliToken(me, 'laptop');
+    const peer = store.createCliToken(me, 'peer server', 90, 'rehost');
+    const other = store.createCliToken('user-g-someone-else', 'their laptop');
+    const call = store.createAgentCallToken('agent-x', me);
+    expect(store.ownerForCliToken(cli.token)).toBe(me);
+    const out = await everywhere(f, await signIn(f));
+    expect(out.statusCode).toBe(200);
+    expect(out.json().cliTokens).toBe(1);
+    expect(store.ownerForCliToken(cli.token)).toBeUndefined(); // ended
+    expect(store.ownerForCliToken(peer.token)).toBe(me); // a peer's move key stays
+    expect(store.ownerForCliToken(other.token)).toBe('user-g-someone-else');
+    expect(store.agentForCallToken(call)?.agentId).toBe('agent-x'); // agents still consult each other
+  });
+
   it('needs a signed-in person', async () => {
     const { f, store } = await identityApp();
     expect((await f.inject({ method: 'POST', url: '/v1/logout/everywhere' })).statusCode).toBe(401);
