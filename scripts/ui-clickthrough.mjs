@@ -791,6 +791,81 @@ const SCENARIOS = String.raw`(() => {
         if (inviteDlg.open) inviteDlg.close();
       }
     },
+    // Settings promises (2026-09-30): what the AI source says about sharing and helper calls; the shared-source banner; the disk warning; an unpriced model.
+    sourcePromises: async () => {
+      const savedProfiles = profiles, savedUsage = sourceUsageData;
+      try {
+        // The dialog paints from the page's own list (it is fetched with the fleet).
+        window.__override['/v1/ai-profiles'] = profiles = [{ id: 'p1', name: 'Claude token', vendor: 'anthropic', kind: 'subscription', credential: 'setup-token', mine: true,
+          ownerId: 'o1', model: 'claude-sonnet-5', models: [], shared: true, defaultSource: true }];
+        await openAiDlg('ai');
+        const list = await until(() => { const el = document.getElementById('aiList'); return el && el.textContent.includes('Claude token') ? el : null; });
+        ok('the checkbox is Helper calls', list.textContent.includes('Helper calls') && !list.textContent.includes('Management'));
+        const helper = [...list.querySelectorAll('label')].find((l) => l.textContent.includes('Helper calls'));
+        ok('its tooltip says what it is used for: ' + helper.title, /small background calls \(like picking icons\)/.test(helper.title));
+        ok('sharing no longer promises they never see it', !list.textContent.includes('never see it'));
+        ok('it says their agents hold the key', list.textContent.includes('Their agents hold it, so someone determined can read it from their own agent'));
+        ok('and how to take it back', list.textContent.includes('un-share, move their agents, and replace the token'));
+        aiDlg.close();
+        // The rate-limit banner is the source's: a member hears about a shared source; the owner hears whose agents are stuck.
+        const since = new Date(Date.now() - 3600000).toISOString();
+        const src = { id: 'p9', name: 'House Claude', agents: 2, liveAgents: 2, status: 'limited', limitedSince: since };
+        sourceUsageData = { sources: [{ ...src, mine: false }] };
+        renderLimitBanner();
+        const banner = document.getElementById('limitBanner');
+        ok('a member sees it: ' + banner.textContent, !banner.hidden && banner.textContent.includes('Shared source House Claude is being rate-limited') && banner.textContent.includes("your 2 agents on it can't answer"));
+        sourceUsageData = { sources: [{ ...src, liveAgents: 3, mine: true, others: { agents: 2, liveAgents: 2, requests5h: 1, requests7d: 1 } }] };
+        renderLimitBanner();
+        ok('the owner hears about the other accounts: ' + banner.textContent, banner.textContent.includes("its 3 agents (and 2 on other accounts) can't answer") && !banner.textContent.includes('Shared source'));
+        sourceUsageData = { sources: [{ ...src, liveAgents: 0, agents: 0, mine: true, others: { agents: 1, liveAgents: 1, requests5h: 1, requests7d: 1 } }] };
+        renderLimitBanner();
+        ok('only other accounts stuck: still shown', !banner.hidden && banner.textContent.includes("its 1 agent on other accounts can't answer"));
+      } finally {
+        delete window.__override['/v1/ai-profiles'];
+        profiles = savedProfiles; sourceUsageData = savedUsage; renderLimitBanner();
+        if (aiDlg.open) aiDlg.close();
+      }
+    },
+    diskWarning: async () => {
+      try {
+        const list = await (await fetch('/v1/agents')).json();
+        window.__override['/v1/agents'] = list.map((a) => a.id === 'a1' ? { ...a, diskOver: { bytes: 12.4e9, warnBytes: 10e9, measuredAt: new Date().toISOString() } } : a);
+        await refresh(false);
+        openV2Agent('a1', 'overview');
+        const why = await until(() => [...document.querySelectorAll('.v2why li')].find((li) => li.textContent.includes('GB of storage')));
+        ok('Needs you says how big: ' + why.textContent, why.textContent.includes('it uses 12.4 GB of storage (the warning is at 10 GB)'));
+        v2Close();
+        // The security check lists who is over.
+        window.__override['/v1/security/posture'] = { comparedToPrior: false, changes: { added: [], removed: [] }, report: { install: [], agents: [],
+          limits: { agentCap: 0, liveAgents: 14, diskWarnGB: 10, overDisk: [{ id: 'a1', name: 'Homework Helper', bytes: 12.4e9, measuredAt: new Date().toISOString() }] } } };
+        await loadPosture();
+        const out = document.getElementById('postureOut').textContent;
+        ok('the check says it is measured: ' + out, out.includes('Disk warning at 10 GB per agent (measured daily)'));
+        ok('and names the agent over it', out.includes('Homework Helper uses 12.4 GB'));
+      } finally {
+        try { v2Close(); } catch {}
+        delete window.__override['/v1/agents']; delete window.__override['/v1/security/posture'];
+        await refresh(false);
+      }
+    },
+    unpricedModel: async () => {
+      try {
+        const now = Date.now();
+        window.__override['/v1/usage/periods'] = { period: 'day', from: new Date(now - 864e5).toISOString(), to: new Date(now).toISOString(), bucketMinutes: 60, buckets: [],
+          agents: [
+            { id: 'a1', name: 'Homework Helper', state: 'RUNNING', tokens: 5000, requests: 2, limited: 0, billing: 'api', model: 'claude-made-up-9', cost: null, unpriced: true },
+            { id: 'a2', name: 'Meal Planner', state: 'RUNNING', tokens: 4000, requests: 2, limited: 0, billing: 'included', model: 'claude-sonnet-5', cost: { low: 0.02, high: 0.02, partial: false } }],
+          totals: { tokens: 9000, requests: 4, limited: 0 }, byBilling: { included: 3000, api: 6000, local: 0 }, cost: { low: 0.02, high: 0.02, partial: true, agents: 1 } };
+        openFleetUsage();
+        const body = await until(() => { const el = document.getElementById('fleetUsageBody'); return el.textContent.includes('Meal Planner') ? el : null; });
+        ok('an unknown price is said, not $0.00+: ' + body.textContent.slice(0, 300), body.textContent.includes('API — no price known for claude-made-up-9') && !body.textContent.includes('$0.00+'));
+        ok('an agent now on a subscription keeps the cost of its API part', body.textContent.includes('est. $0.02 (API part)'));
+        ok('the breakdown names the token kinds', document.body.textContent.includes('tokens (new input, cache reads and writes, and output)'));
+      } finally {
+        if (fleetUsageDlg.open) fleetUsageDlg.close();
+        delete window.__override['/v1/usage/periods'];
+      }
+    },
   });
   (async () => {
     for (const [name, run] of Object.entries(T)) {
