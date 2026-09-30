@@ -84,6 +84,7 @@ const LABELS: Record<string, string | ((d: Record<string, unknown>) => string)> 
   'owner.ask': 'a message from its owner',
   'webchat.turn': 'a message on the web chat',
   'webchat.failed': 'a web chat message got no answer',
+  'webchat.needs_rebuild': 'web chat refused a guest: rebuild it to turn on guest rights',
   'invite.web_chat': 'a web chat invite was made',
   'agent.exported': 'exported',
   'agent.archived': 'archived',

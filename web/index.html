@@ -2571,14 +2571,14 @@
          style="display:none;border-radius:8px;background:#fff;padding:4px">
   </div>
   </div>
-  <!-- The third way (2026-09-29): chat here, signed in. A web turn runs as the
-       owner, so the rights it hands over are said before the link exists. -->
+  <!-- The third way (2026-09-29): chat here, signed in. A guest's web turn has a
+       member's rights (step 2), said before the link exists. -->
   <div id="invWeb" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
     <div class="sub"><b>Chat on the web — for people you trust.</b> They sign in to this
       Hatchabot and chat with the agent here; no chat app needed. They need to reach
       this machine (Tailscale).</div>
-    <div class="sub" id="invWebWarn" style="color:var(--warn);margin-top:4px">They will have your rights on this agent: through it
-      they can schedule tasks and change its settings. Only invite people you'd hand your laptop to.</div>
+    <div class="sub" id="invWebWarn" style="margin-top:4px">They will have a member's rights, exactly like a Telegram
+      member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.</div>
     <div class="invite-link" id="invWebLink" hidden></div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
       <button id="invWebBtn" onclick="makeWebChatInvite()">Make a web chat link</button>
@@ -8245,7 +8245,7 @@ async function renderEditMembers() {
       const who = jsq(m.displayName || 'them');
       // Web chat (2026-09-29): a badge, and the switch — offered only to someone who signs in here.
       const web = m.role === 'owner' ? ''
-        : m.webChat ? `<span class="chip webchat" title="Chats with it on this page — with your rights on this agent">web chat</span>
+        : m.webChat ? `<span class="chip webchat" title="Chats with it on this page — with a member's rights, like a Telegram member">web chat</span>
             <button onclick="setWebChat('${forId}','${jsq(m.userId)}','${who}',false)" title="They can no longer chat with it on this page">Turn off web chat</button>`
         : m.account && appConfig.authMode !== 'password' ? `<button onclick="setWebChat('${forId}','${jsq(m.userId)}','${who}',true)" title="Let them chat with it on this page, signed in">Allow web chat…</button>` : '';
       const kickBtn = m.role === 'owner' ? '' :
@@ -8267,9 +8267,9 @@ async function renderEditMembers() {
  * "they redeemed the invite and got round to it two hours later" is therefore
  * to open it again, on demand, rather than to leave it ajar for a day.
  */
-/** Web chat on or off for a member; turning it ON repeats what it hands over (2026-09-29). */
+/** Web chat on or off for a member; turning it ON says what it gives them (2026-09-29). */
 async function setWebChat(agentId, userId, name, on) {
-  if (on && !confirm(`Let ${name} chat with this agent on the web?\n\nThey will have your rights on this agent: through it they can schedule tasks and change its settings. Only do this for people you'd hand your laptop to.`)) return;
+  if (on && !confirm(`Let ${name} chat with this agent on the web?\n\nThey will have a member's rights, exactly like a Telegram member: they can chat and ask it to use its tools, but not schedule tasks or change its settings.`)) return;
   try {
     await api(`/v1/agents/${agentId}/members/${encodeURIComponent(userId)}/web-chat`, { method: 'PUT', body: { on } });
     toast(on ? `${name} can chat with it on the web now.` : `Web chat is off for ${name}.`);
@@ -8721,7 +8721,7 @@ async function invite(id, name) {
   } catch (e) { toast(e.message); }
 }
 
-/** The web-chat link: minted only when asked for, since it hands over the owner's rights (2026-09-29). */
+/** The web-chat link: minted only when asked for — each one is a way in (2026-09-29). */
 let invWebFor = null;
 async function makeWebChatInvite() {
   if (!invWebFor) return;
@@ -11398,7 +11398,13 @@ async function webChatSend() {
     if (webChatAgentId === id) $('wchatLog').insertAdjacentHTML('beforeend', webChatBubble('assistant', r.reply));
   } catch (e) {
     $('wchatWait')?.remove();
-    // Busy, too many this hour, no answer in time, not allowed: said where they are typing.
+    // It can't give a guest a member's (limited) turn until it is rebuilt: the
+    // message was not delivered, so it comes back into the box (step 2).
+    if (e.code === 'needs-rebuild' && webChatAgentId === id) {
+      [...$('wchatLog').querySelectorAll('.wchat-msg.me')].at(-1)?.remove();
+      if (!box.value) box.value = text;
+    }
+    // Busy, too many this hour, no answer in time, not allowed, needs a rebuild: said where they are typing.
     if (webChatAgentId === id) $('wchatErr').textContent = e.message;
   } finally {
     webChatSending = false; $('wchatSend').disabled = false;

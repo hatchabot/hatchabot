@@ -604,9 +604,9 @@ export class LocalDockerProvider implements RuntimeProvider {
     return this.#docker(['exec', container, 'openclaw', ...openclawArgv], opts?.timeoutMs);
   }
 
-  async execShell(runtimeRef: string, script: string): Promise<ExecResult> {
+  async execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number }): Promise<ExecResult> {
     const { container } = this.#names(runtimeRef);
-    return this.#docker(['exec', container, 'bash', '-c', script]);
+    return this.#docker(['exec', container, 'bash', '-c', script], opts?.timeoutMs);
   }
 
   async execShellOnVolume(runtimeRef: string, script: string, opts?: { readOnly?: boolean; image?: string }): Promise<ExecResult> {

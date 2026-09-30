@@ -2,13 +2,14 @@ import type { FastifyInstance } from 'fastify';
 import type { Agent } from '../domain/types.js';
 import type { RuntimeProvider } from '../providers/provider.js';
 import type { Store } from '../store/store.js';
-import { runWebChatTurn, webChatHistory } from '../orchestrator/webChat.js';
+import { runWebChatTurn, webChatHistory, type WebChatRights } from '../orchestrator/webChat.js';
 import { ownerIdOf } from './principal.js';
 
 /**
  * Chat on the web (2026-09-29): the routes behind the member's 💬 Chat panel.
  * Allowed: the agent's owner, and an ACTIVE member the owner gave web chat.
- * The turn itself is runWebChatTurn (orchestrator/webChat.ts) — step 2 swaps it.
+ * The turn itself is runWebChatTurn (orchestrator/webChat.ts): a guest's is a
+ * member's turn (no owner-only tools), the agent's owner's is the owner's.
  */
 export interface WebChatDeps {
   store: Store;
@@ -26,6 +27,10 @@ export interface WebChatDeps {
 
 export const MAX_WEB_CHAT_CHARS = 8000;
 const HOUR_MS = 3_600_000;
+
+/** What a guest is told when the agent's gateway could not give them a member's (limited) turn. */
+export const webChatNeedsRebuild = (name: string): string =>
+  `${name} needs a rebuild before web chat works with guest rights. Rebuild ${name} to turn on guest rights for web chat — ask its owner.`;
 
 /** Read per call, so a changed .env applies at the next restart and tests can tune it. */
 function perHour(): number {
@@ -96,16 +101,28 @@ export function registerWebChatRoutes(app: FastifyInstance, deps: WebChatDeps): 
       recent.set(key, times);
       // Characters only: what they said stays out of the event log.
       deps.trace(agent.id)('webchat.turn', { userId: me, chars: text.length });
-      const res = await runWebChatTurn(deps.providerFor(agent.hostId), agent, { userId: me, displayName: nameOf(agent, me), text }, deps.timeoutMs);
+      // The agent's owner keeps an owner's rights; everyone else has a member's —
+      // what a Telegram member has: no scheduling, no settings.
+      const rights: WebChatRights = agent.ownerId === me ? 'owner' : 'member';
+      const res = await runWebChatTurn(deps.providerFor(agent.hostId), agent, { userId: me, displayName: nameOf(agent, me), text, rights }, deps.timeoutMs);
       deps.afterTurn?.(agent.id);
-      if (res.timedOut) {
-        return reply.code(504).send({ error: `No answer within ${Math.round(deps.timeoutMs / 1000)} s. It may still be working — reopen the chat in a little while.` });
+      switch (res.kind) {
+        case 'reply':
+          return { reply: res.text.slice(0, 50_000) || '(no reply)' };
+        case 'timeout':
+          return reply.code(504).send({ error: `No answer within ${Math.round(deps.timeoutMs / 1000)} s. It may still be working — reopen the chat in a little while.` });
+        case 'busy':
+          return reply.code(409).send({ error: 'It is still answering your last message.' });
+        case 'owner-only':
+          return reply.code(403).send({ error: 'Only its owner can do that. You can chat with it and ask it to use its tools, but not schedule tasks or change its settings.' });
+        case 'needs-rebuild':
+          // Never the owner's path instead: the guest is refused, the owner sees why in the activity.
+          deps.trace(agent.id)('webchat.needs_rebuild', { userId: me, detail: res.detail.slice(0, 200) });
+          return reply.code(409).send({ code: 'needs-rebuild', error: webChatNeedsRebuild(agent.name) });
+        default:
+          deps.trace(agent.id)('webchat.failed', { userId: me, code: res.code });
+          return reply.code(502).send({ error: 'The turn did not complete. Try again; if it keeps failing, tell its owner.' });
       }
-      if (res.code !== 0) {
-        deps.trace(agent.id)('webchat.failed', { userId: me, code: res.code });
-        return reply.code(502).send({ error: 'The turn did not complete. Try again; if it keeps failing, tell its owner.' });
-      }
-      return { reply: res.stdout.trim().slice(0, 50_000) || '(no reply)' };
     } finally {
       deps.inFlight.delete(key);
     }

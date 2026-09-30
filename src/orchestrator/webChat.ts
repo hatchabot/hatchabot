@@ -6,12 +6,27 @@ import type { ExecResult, RuntimeProvider } from '../providers/provider.js';
  * Chat on the web (2026-09-29): a person the owner trusts talks to an agent
  * from Hatchabot's own page instead of a chat app.
  *
- * Step 1 of 2. A turn goes through `openclaw agent` — the operator's CLI — so
- * OpenClaw treats the writer as the agent's owner: through it they can use the
- * owner-only tools (`cron`: schedule tasks; `gateway`: change the agent's
- * configuration). That is accepted for now and said plainly wherever web chat
- * is granted. Step 2 replaces runWebChatTurn with a limited guest identity;
- * nothing else here should need to change.
+ * Step 2: a guest's turn is a NON-OWNER turn — a member's rights, exactly like
+ * a Telegram member's. OpenClaw decides owner status per turn from the
+ * gateway client's scopes: the `agent` RPC sets senderIsOwner only when the
+ * connection holds `operator.admin` (2026.9.6 agent-turn-service,
+ * clientHasAdminScope; the same test in 2026.7.1-2's agent handler). A
+ * non-owner turn loses the owner-only tools (GATEWAY_OWNER_ONLY_CORE_TOOLS:
+ * `automations` — the old `cron` — `gateway`, `plugins`, `sessions`, `nodes`,
+ * `terminal`, `computer`, `conversations_*`, `openclaw`, …) and the
+ * admin-only commands (/config set, /new, /reset).
+ *
+ * So the turn is sent by a small WebSocket client run INSIDE the agent's
+ * container, on loopback, with the gateway's own shared token and only
+ * `operator.read` + `operator.write` — the same trusted local backend path
+ * OpenClaw's own helpers use. Nothing in the agent's config changes, the
+ * owner's console authenticates exactly as before, and Hatchabot stays the
+ * only thing the gateway trusts. The client refuses to send the message
+ * unless the gateway's hello proves the connection holds no admin scope.
+ * Proven live 2026-09-29 on a throwaway 2026.9.6 agent: the step-1 CLI turn
+ * reported `automations` and `gateway` callable, this path did not.
+ *
+ * The agent's own owner keeps owner rights (they have the console anyway).
  *
  * Each person has their OWN OpenClaw session, keyed from their account id, so
  * their history shows only their conversation. Memory stays one per agent, as
@@ -45,22 +60,168 @@ export function stripWebChatPrefix(text: string): string {
   return text.replace(PREFIX_RE, '');
 }
 
+/** Whose rights a web turn carries: the agent's owner, or a member (every guest). */
+export type WebChatRights = 'owner' | 'member';
+
+/** The gateway scopes each kind of turn connects with. A member's never include operator.admin. */
+export const WEB_CHAT_SCOPES: Record<WebChatRights, readonly string[]> = {
+  member: ['operator.read', 'operator.write'],
+  owner: ['operator.admin', 'operator.read', 'operator.write'],
+};
+
+/** What the in-container client says by its exit code. */
+export const TURN_EXIT = {
+  /** The gateway did not prove a member's turn would be a non-owner turn. */
+  rightsUnproven: 21,
+  /** The gateway refused it as owner-only (a /new, /reset or /config command). */
+  ownerOnly: 23,
+  /** A run of this session is already in flight. */
+  inFlight: 25,
+  timeout: 124,
+} as const;
+
+export type WebChatTurnResult =
+  | { kind: 'reply'; text: string }
+  | { kind: 'timeout' }
+  | { kind: 'busy' }
+  /** Something only the owner may do (a /new, /reset or /config command). */
+  | { kind: 'owner-only' }
+  /** This agent's gateway could not be made to run a limited turn: never falls back to the owner's. */
+  | { kind: 'needs-rebuild'; detail: string }
+  | { kind: 'failed'; code: number; detail: string };
+
 /**
- * THE transport: one turn in this person's web session, answered on stdout.
- * The message travels as an argv element (no shell), like the owner's ask.
+ * The in-container client (CommonJS, node 22+: global WebSocket). REQ is
+ * base64 JSON { agentId, sessionKey, message, scopes, rights, timeoutMs }.
+ * Prints the reply on stdout; see TURN_EXIT for the rest. The gateway's
+ * credential never leaves the container: it is read from the agent's own
+ * openclaw.json, as the agent's own CLI reads it.
+ */
+export const TURN_SCRIPT = String.raw`
+// hatchabot-webchat-turn
+const fs = require("fs"), path = require("path"), crypto = require("crypto");
+const env = process.env;
+const done = (code, msg) => { if (msg) process.stderr.write(String(msg).slice(0, 2000)); process.exit(code); };
+let req;
+try { req = JSON.parse(Buffer.from(env.REQ || "", "base64").toString("utf8")); } catch { done(2, "bad request"); }
+const member = req.rights !== "owner";
+const scopes = Array.isArray(req.scopes) ? req.scopes.map(String) : [];
+if (member && scopes.includes("operator.admin")) done(2, "a member turn asked for operator.admin");
+setTimeout(() => done(124, "no answer in time"), Math.max(1000, Number(req.timeoutMs) || 280000)).unref();
+if (typeof WebSocket !== "function") done(21, "this runtime's node has no WebSocket client");
+const home = env.HOME || "/home/node";
+const cfgPath = env.CFG_PATH || env.OPENCLAW_CONFIG_PATH || path.join(env.OPENCLAW_STATE_DIR || path.join(home, ".openclaw"), "openclaw.json");
+let cfg;
+// No parse detail: it can quote the file, credential and all.
+try { cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8")); } catch (e) { done(21, "gateway config unreadable (" + String((e && e.code) || e && e.name || "error") + ")"); }
+const gw = (cfg && cfg.gateway) || {}, a = gw.auth || {};
+const mode = a.mode || (a.token ? "token" : a.password ? "password" : "none");
+let auth;
+if (mode === "token") {
+  const t = typeof a.token === "string" ? a.token : env.OPENCLAW_GATEWAY_TOKEN;
+  if (!t) done(21, "no gateway token");
+  auth = { token: t };
+} else if (mode === "password") {
+  const p = typeof a.password === "string" ? a.password : env.OPENCLAW_GATEWAY_PASSWORD;
+  if (!p) done(21, "no gateway password");
+  auth = { password: p };
+} else if (mode !== "none") done(21, "gateway auth mode " + mode + " is not supported");
+const port = Number(env.GW_PORT || gw.port) || 18789;
+const ws = new WebSocket("ws://127.0.0.1:" + port);
+let n = 0, finished = false;
+const pending = new Map();
+const call = (method, params) => new Promise((resolve, reject) => {
+  const id = "hb" + (++n);
+  pending.set(id, { resolve, reject });
+  ws.send(JSON.stringify({ type: "req", id, method, params }));
+});
+const textOf = (payloads) => (Array.isArray(payloads) ? payloads : []).map((p) => {
+  if (!p) return "";
+  const t = typeof p.text === "string" ? p.text.trim() : "";
+  const m = typeof p.mediaUrl === "string" && p.mediaUrl ? p.mediaUrl : "";
+  return [t, m].filter(Boolean).join("\n");
+}).filter(Boolean).join("\n\n");
+const refusedAsOwnerOnly = (e) => /missing scope|operator\.admin/i.test(String((e && (e.message || e.code)) || ""));
+async function run() {
+  const hello = await call("connect", {
+    minProtocol: 4, maxProtocol: 4,
+    client: { id: "gateway-client", version: "hatchabot-webchat", platform: process.platform, mode: "backend", displayName: "Hatchabot web chat" },
+    role: "operator", scopes, caps: [], ...(auth ? { auth } : {}),
+  });
+  const granted = hello && hello.auth && Array.isArray(hello.auth.scopes) ? hello.auth.scopes : null;
+  // The proof: a member's message is sent only on a connection the gateway
+  // itself says holds no operator.admin. Anything else is refused here.
+  if (member && (!granted || granted.includes("operator.admin"))) {
+    done(21, "the gateway did not limit this connection (granted: " + JSON.stringify(granted) + ")");
+  }
+  let res;
+  try {
+    res = await call("agent", {
+      message: String(req.message || ""), agentId: req.agentId, sessionKey: req.sessionKey,
+      deliver: false, timeout: Math.max(1, Math.floor((Number(req.timeoutMs) || 280000) / 1000)),
+      idempotencyKey: "hb-web-" + crypto.randomUUID(),
+    });
+  } catch (e) {
+    if (member && refusedAsOwnerOnly(e)) done(23, "owner-only: " + JSON.stringify(e));
+    done(1, "agent call failed: " + JSON.stringify(e));
+  }
+  finished = true;
+  const status = res && res.status;
+  if (status === "ok" || status === "completed") { process.stdout.write(textOf(res.result && res.result.payloads), () => done(0)); return; }
+  if (status === "timeout") done(124, "the run timed out");
+  if (status === "in_flight") done(25, "a run is already in flight");
+  done(1, "run ended " + String(status) + ": " + String((res && res.summary) || "").slice(0, 300));
+}
+ws.onmessage = (ev) => {
+  let f; try { f = JSON.parse(String(ev.data)); } catch { return; }
+  if (f.type === "event" && f.event === "connect.challenge") { run().catch((e) => done(1, "handshake failed: " + JSON.stringify(e && (e.message || e)))); return; }
+  if (f.type !== "res") return;
+  const p = pending.get(f.id); if (!p) return;
+  // The agent RPC answers twice: "accepted" first, then the final result.
+  if (f.ok && f.payload && f.payload.status === "accepted") return;
+  pending.delete(f.id);
+  if (f.ok) p.resolve(f.payload); else p.reject(f.error || { message: "error" });
+};
+ws.onerror = (e) => { if (!finished) done(1, "gateway connection failed: " + String((e && e.message) || "")); };
+ws.onclose = (e) => { if (!finished) done(1, "gateway closed the connection: " + String(e && e.code) + " " + String((e && e.reason) || "")); };
+`;
+
+/**
+ * The shell that runs TURN_SCRIPT in the container. Every value is base64
+ * (a fixed character set), so plain quoting is safe; the message itself is
+ * inside REQ and never meets the shell.
+ */
+export function turnScript(req: { agentId: string; sessionKey: string; message: string; rights: WebChatRights; timeoutMs: number }): string {
+  if (!SLUG_RE.test(req.agentId) || !/^web:[0-9a-f]{16}$/.test(req.sessionKey)) throw new Error('unexpected agent slug or session key');
+  const body = { ...req, scopes: WEB_CHAT_SCOPES[req.rights] };
+  const b64 = Buffer.from(TURN_SCRIPT, 'utf8').toString('base64');
+  const r64 = Buffer.from(JSON.stringify(body), 'utf8').toString('base64');
+  return `T=/tmp/hatchabot-webturn-$$.cjs; echo ${b64} | base64 -d > $T || exit 2; REQ='${r64}' node $T; rc=$?; rm -f $T; exit $rc`;
+}
+
+/**
+ * THE transport: one turn in this person's web session. A guest's turn is a
+ * member's (non-owner) turn; only the agent's owner gets an owner's. When the
+ * agent's gateway cannot prove the limit, the answer is 'needs-rebuild' —
+ * never the owner's path instead.
  */
 export async function runWebChatTurn(
   provider: RuntimeProvider,
   agent: Pick<Agent, 'slug' | 'runtimeRef'>,
-  turn: { userId: string; displayName: string; text: string },
+  turn: { userId: string; displayName: string; text: string; rights: WebChatRights },
   timeoutMs: number,
-): Promise<ExecResult> {
+): Promise<WebChatTurnResult> {
   const message = `${webChatPrefix(turn.displayName)}\n${turn.text}`;
-  return provider.exec(
-    agent.runtimeRef!,
-    ['agent', '--agent', agent.slug, '--session-key', webChatSessionKey(turn.userId), '-m', message],
-    { timeoutMs },
-  );
+  const script = turnScript({ agentId: agent.slug, sessionKey: webChatSessionKey(turn.userId), message, rights: turn.rights, timeoutMs });
+  // The client stops itself at timeoutMs; the exec gets a little longer so it can say so.
+  const res: ExecResult = await provider.execShell(agent.runtimeRef!, script, { timeoutMs: timeoutMs + 15_000 });
+  const detail = (res.stderr || res.stdout || '').slice(-300);
+  if (res.timedOut || res.code === TURN_EXIT.timeout) return { kind: 'timeout' };
+  if (res.code === 0) return { kind: 'reply', text: res.stdout.trim() };
+  if (res.code === TURN_EXIT.rightsUnproven) return { kind: 'needs-rebuild', detail };
+  if (res.code === TURN_EXIT.ownerOnly) return { kind: 'owner-only' };
+  if (res.code === TURN_EXIT.inFlight) return { kind: 'busy' };
+  return { kind: 'failed', code: res.code, detail };
 }
 
 export interface WebChatMessage {

@@ -229,8 +229,9 @@ export interface RuntimeProvider {
    * Run a shell script inside the runtime. Escape hatch for the few state
    * surgeries OpenClaw's CLI has no verb for (e.g. removing a revoked member
    * from the pairing allowlist file). Prefer exec() whenever a CLI verb exists.
+   * `timeoutMs` overrides the provider's default (a web chat turn waits for the model).
    */
-  execShell(runtimeRef: string, script: string): Promise<ExecResult>;
+  execShell(runtimeRef: string, script: string, opts?: { timeoutMs?: number }): Promise<ExecResult>;
 
   /**
    * Run a shell script against the agent's VOLUME in a one-shot container,
