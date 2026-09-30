@@ -86,7 +86,7 @@ The header holds:
   then drag; an ordinary swipe still scrolls.
 - **A red dot at the top left** means the agent has said something in its
   console since you last had that console open — a reply that finished after
-  you closed it, or a scheduled run on an agent with no chat app.
+  you closed it, or a scheduled task's result on an agent with no chat app.
   Opening the console clears it. Messages that went to Telegram, Slack or
   Discord are not flagged; those apps show their own unread marks.
 - **A small mark on the icon** shows which chat apps reach the agent: a
@@ -327,6 +327,16 @@ Telegram · Environment).
   automatically before file edits and rebuilds, or on demand (**Snapshot
   now**). Restore one to roll the agent's definition and memory back — so a
   bad edit is always undoable. (CLI: `hatchabot snapshot` / `revert`.)
+- **Schedule** — the agent's scheduled tasks (CLI: `hatchabot tasks`). A
+  task's result arrives as a message from the agent in your own chat with it:
+  Telegram first, else Discord or Slack. An agent in no chat app writes it
+  into the conversation its console opens on, so a daily reminder is there
+  (with the red dot on its icon) the next time you open it, and the agent can
+  talk about it. The task runs on its own, reading the last few messages of
+  that conversation; only its result is added to it. A task you asked the
+  agent for in its console lands in the same place. Tasks made quiet
+  (`--quiet`) post nowhere; their runs are read in the app. Needs OpenClaw
+  2026.9 or newer; on an older one a task on such an agent is quiet.
 
 **📝 Chat → Memory** (card) asks the agent to write the current
 conversation's key facts into MEMORY.md now (~20s) — a checkpoint, so the

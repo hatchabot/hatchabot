@@ -305,13 +305,157 @@ describe('delivery (regression: tasks on a web-only agent failed every run)', ()
     expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit').at(-1)).toEqual(['cron', 'edit', 'j1', '--no-deliver']);
   });
 
-  it('an agent with no chat app never announces, whatever was asked', async () => {
-    const { provider, f } = await world();
+  it('an agent with no chat app on an OpenClaw without conversation delivery stays quiet', async () => {
+    const { provider, f } = await world(); // the mock reports OpenClaw "mock": not 2026.9+
     const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'brief', message: 'm', everyMinutes: 60 } });
     expect(res.statusCode).toBe(201);
     const add = provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add')!;
     expect(add).toContain('--no-deliver');
     expect(add).not.toContain('--announce');
+    expect(add).not.toContain('--session');
+  });
+});
+
+describe('an agent in no chat app: results go to its console conversation (2026-09-30)', () => {
+  const on2026_9 = (p: MockProvider, ref: string) => p.infoOverride.set(ref, { openclawVersion: '2026.9.6' });
+
+  it('cronTargetFor: the owner\'s chat first, the console conversation only with no chat app at all', async () => {
+    const { cronTargetFor } = await import('../src/orchestrator/crons.js');
+    const { store } = await world();
+    const agent = store.getAgent('a1')!;
+    expect(cronTargetFor(store, agent)).toEqual({ session: 'agent:kitchen:main' });
+    // In a chat app but the owner's id there is unknown: nowhere safe, quiet (not the console —
+    // "last" in that conversation is whoever wrote last).
+    store.insertChannel({ id: 'c1', agentId: 'a1', kind: 'telegram', accountId: 'kitchenbot', secretRef: 'channel/a1/bot-token', deepLink: 'https://t.me/kitchenbot', createdAt: 'now' });
+    expect(cronTargetFor(store, agent)).toBeUndefined();
+    store.insertMembership({ id: 'm-own', agentId: 'a1', userId: OWNER, role: 'owner', channelUserId: TG_ID, status: 'active' } as any);
+    expect(cronTargetFor(store, agent)).toEqual({ channel: 'telegram', to: TG_ID });
+  });
+
+  it('conversationDeliverySupported: 2026.9 and later only', async () => {
+    const { conversationDeliverySupported } = await import('../src/orchestrator/crons.js');
+    expect(conversationDeliverySupported('2026.9.6')).toBe(true);
+    expect(conversationDeliverySupported('2026.10.1')).toBe(true);
+    expect(conversationDeliverySupported('2027.1.0')).toBe(true);
+    expect(conversationDeliverySupported('2026.7.1-2')).toBe(false);
+    expect(conversationDeliverySupported('2026.8.3')).toBe(false);
+    expect(conversationDeliverySupported(undefined)).toBe(false);
+    expect(conversationDeliverySupported('mock')).toBe(false);
+  });
+
+  it('addCron binds the task to the conversation (current + its key), announcing with no channel, after making sure it exists', async () => {
+    const { addCron } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    on2026_9(p, ref);
+    await addCron(p, ref, 'kitchen', { name: 'lunch', message: 'Suggest lunch.', cron: '30 11 * * *', tz: 'America/Toronto', deliverTo: { session: 'agent:kitchen:main' } });
+    const add = p.execLog.at(-1)!;
+    expect(add.slice(0, 2)).toEqual(['cron', 'add']);
+    expect(add.join(' ')).toContain('--session current --session-key agent:kitchen:main --announce --best-effort-deliver');
+    expect(add).not.toContain('--channel');
+    expect(add).not.toContain('--to');
+    expect(add).not.toContain('--no-deliver');
+    // Before the add: the conversation is created, or adopted as it is.
+    const create = p.execLog.at(-2)!;
+    expect(create.slice(0, 4)).toEqual(['gateway', 'call', 'sessions.create', '--params']);
+    expect(JSON.parse(create[4]!)).toEqual({ key: 'agent:kitchen:main', agentId: 'kitchen' });
+    // Asked to be quiet: quiet, and no conversation is touched.
+    const before = p.execLog.length;
+    await addCron(p, ref, 'kitchen', { name: 'q', message: 'm', everyMs: 60_000, announce: false, deliverTo: { session: 'agent:kitchen:main' } });
+    expect(p.execLog.slice(before).map((a) => a.slice(0, 2).join(' '))).toEqual(['cron add']);
+    expect(p.execLog.at(-1)).toContain('--no-deliver');
+  });
+
+  it('a conversation target on an older OpenClaw is quiet, as before', async () => {
+    const { addCron } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.infoOverride.set(ref, { openclawVersion: '2026.7.1-2' });
+    await addCron(p, ref, 'kitchen', { name: 'b', message: 'm', everyMs: 60_000, deliverTo: { session: 'agent:kitchen:main' } });
+    expect(p.execLog.at(-1)).toContain('--no-deliver');
+    expect(p.execLog.some((a) => a.includes('sessions.create'))).toBe(false);
+  });
+
+  it('ensureConversation leaves an existing conversation untouched, and refuses odd keys', async () => {
+    const { ensureConversation } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('sh', { code: 0, stdout: 'yes', stderr: '' });
+    expect(await ensureConversation(p, ref, 'kitchen', 'agent:kitchen:main')).toBe(true);
+    const probe = p.execLog.at(-1)!;
+    expect(probe[0]).toBe('sh');
+    expect(probe[1]).toContain('session_nodes');
+    expect(probe[1]).toContain('"agent:kitchen:main"');
+    expect(p.execLog.some((a) => a.includes('sessions.create'))).toBe(false);
+    const n = p.execLog.length;
+    expect(await ensureConversation(p, ref, 'kitchen', "agent:kitchen:main'; rm -rf /")).toBe(false);
+    expect(await ensureConversation(p, ref, 'Kitchen!', 'agent:kitchen:main')).toBe(false);
+    expect(p.execLog.length).toBe(n);
+  });
+
+  it('a failed sessions.create does not stop the task being made', async () => {
+    const { addCron } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    on2026_9(p, ref);
+    p.execResponses.set('gateway call sessions.create', { code: 1, stdout: '', stderr: 'gateway busy' });
+    p.execResponses.set('cron add', { code: 0, stdout: '{"id":"job-7"}', stderr: '' });
+    expect(await addCron(p, ref, 'kitchen', { name: 'b', message: 'm', everyMs: 60_000, deliverTo: { session: 'agent:kitchen:main' } })).toEqual({ ok: true, id: 'job-7' });
+  });
+
+  it('POST …/crons on a web-only 2026.9 agent posts into the console conversation', async () => {
+    const { provider, f, store } = await world();
+    on2026_9(provider, store.getAgent('a1')!.runtimeRef!);
+    const res = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'brief', message: 'm', everyMinutes: 60 } });
+    expect(res.statusCode).toBe(201);
+    const add = provider.execLog.find((a) => a[0] === 'cron' && a[1] === 'add')!;
+    expect(add.join(' ')).toContain('--session current --session-key agent:kitchen:main --announce');
+    // …and quiet when asked (an edit of a quiet task keeps it quiet).
+    const quiet = await f.inject({ method: 'POST', url: '/v1/agents/a1/crons', headers: as, payload: { name: 'q', message: 'm', everyMinutes: 60, announce: false } });
+    expect(quiet.statusCode).toBe(201);
+    expect(provider.execLog.filter((a) => a[0] === 'cron' && a[1] === 'add').at(-1)).toContain('--no-deliver');
+  });
+
+  it('the sweep binds implicit tasks to the console conversation and leaves ones already bound to a conversation', async () => {
+    const { retargetImplicitCrons } = await import('../src/orchestrator/crons.js');
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    on2026_9(p, ref);
+    p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'j1', name: 'made in the app before', enabled: true, sessionTarget: 'isolated', delivery: { mode: 'announce', channel: 'last' } },
+      { id: 'j2', name: 'asked for in the console', enabled: true, sessionTarget: 'current', sessionKey: 'agent:kitchen:main', delivery: { mode: 'announce', channel: 'last' } },
+      { id: 'j3', name: 'asked for in web chat', enabled: true, sessionTarget: 'current', sessionKey: 'agent:kitchen:web:0123456789abcdef', delivery: { mode: 'announce', channel: 'last' } },
+      { id: 'j4', name: 'quiet', enabled: true, sessionTarget: 'isolated', delivery: { mode: 'none' } },
+      { id: 'j5', name: 'upkeep', enabled: true, declarationKey: 'openclaw.dreaming', delivery: { mode: 'announce', channel: 'last' } },
+    ] }) });
+    const r = await retargetImplicitCrons(p, ref, 'kitchen', { session: 'agent:kitchen:main' });
+    expect(r).toEqual({ changed: 1, failed: 0 });
+    expect(p.execLog.filter((a) => a[0] === 'cron' && a[1] === 'edit')).toEqual([
+      ['cron', 'edit', 'j1', '--session', 'current', '--session-key', 'agent:kitchen:main', '--announce', '--best-effort-deliver'],
+    ]);
+    expect(p.execLog.filter((a) => a.includes('sessions.create'))).toHaveLength(1);
+    // The same agent once it is in a chat app: every implicit one gets the owner's chat, bound or not.
+    const r2 = await retargetImplicitCrons(p, ref, 'kitchen', { channel: 'telegram', to: TG_ID });
+    expect(r2).toEqual({ changed: 3, failed: 0 });
+    // Nothing to change: not even the version is asked.
+    const p2 = new MockProvider();
+    const ref2 = await seedRuntime(p2);
+    p2.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [{ id: 'q', enabled: true, delivery: { mode: 'none' } }] }) });
+    expect(await retargetImplicitCrons(p2, ref2, 'kitchen', { session: 'agent:kitchen:main' })).toEqual({ changed: 0, failed: 0 });
+    expect(p2.execLog.map((a) => a.slice(0, 2).join(' '))).toEqual(['cron list']);
+  });
+
+  it('listCrons reads where a task runs and the conversation it is bound to', async () => {
+    const p = new MockProvider();
+    const ref = await seedRuntime(p);
+    p.execResponses.set('cron list', { code: 0, stderr: '', stdout: JSON.stringify({ jobs: [
+      { id: 'j', enabled: true, sessionTarget: 'current', sessionKey: 'agent:kitchen:main', delivery: { mode: 'announce', channel: 'last' } },
+      { id: 'k', enabled: true, sessionTarget: 'isolated', sessionKey: '' },
+    ] }) });
+    const [j, k] = await listCrons(p, ref, 'kitchen');
+    expect(j).toMatchObject({ sessionTarget: 'current', sessionKey: 'agent:kitchen:main', announce: true, implicitDelivery: true });
+    expect(k!.sessionTarget).toBe('isolated');
+    expect(k!.sessionKey).toBeUndefined();
   });
 });
 
