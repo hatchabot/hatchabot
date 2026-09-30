@@ -2,6 +2,14 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.111.0] — 2026-09-30
+
+### Changed
+- **Web chat guests use OpenClaw's real chat.** A person you give web chat to now opens the agent in OpenClaw's own chat (its Control UI), through Hatchabot, and sees only their own conversation: your conversations, other guests', scheduled-task runs and the agent's settings are hidden or refused. Their turns have a member's rights (no scheduling tasks or changing settings); you keep full control in your console. This is OpenClaw 2026.9's own multi-user mode: each agent's gateway now trusts Hatchabot to say who is connecting (trusted-proxy sign-in with named roles), and Hatchabot strips any identity a browser tries to send and filters what OpenClaw would otherwise show a guest (logs, other people's presence).
+- It applies to an agent when it is next rebuilt (OpenClaw 2026.9 agents; not 2026.7 or the Hatchabot agent). Until then, and on a plain-http page, guests keep Hatchabot's chat panel. Turning web chat off or removing someone closes their open chat at once.
+- Not a wall against someone you don't trust: like a Telegram member, a guest's turn can run commands in the agent's container, from where other conversations and the gateway password are reachable. Web chat stays for people you trust.
+- Going back to an older release: set `HATCHABOT_CONSOLE_IDENTITY=off` and rebuild these agents first (it restores the token console).
+
 ## [2.110.0] — 2026-09-30
 
 ### Fixed
