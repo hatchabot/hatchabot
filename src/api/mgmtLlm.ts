@@ -71,7 +71,7 @@ export function friendlyLlmError(raw: string): string {
     return "Anthropic is overloaded at the moment — not your quota. Try again shortly.";
   }
   if (/401|invalid.*(key|bearer|token)/i.test(raw)) {
-    return 'The AI source rejected its credential — check the 🛠 Management source under ⚙ Settings → AI sources.';
+    return 'The AI source rejected its credential — check the 🛠 Helper calls source under ⚙ Settings → AI sources.';
   }
   return raw.slice(0, 300);
 }

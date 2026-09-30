@@ -3616,9 +3616,12 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
   /**
    * Reveal a source's stored credential — the only way to copy a Claude
    * subscription token or an API key to a SECOND installation, since the app
-   * stores secrets write-only everywhere else. Owner only: a source shared
-   * with other accounts lets them SPEND it, never read it. Logged, because a
-   * credential leaving the box is exactly the event an audit wants.
+   * stores secrets write-only everywhere else. Owner only here — but this is
+   * not the only way out: a source shared with other accounts is materialized
+   * into THEIR agents' containers, which their owners can read (Files, export,
+   * or just asking the agent). 2026-09-30: the page no longer claims they
+   * "never see it". Logged, because a credential leaving the box is exactly
+   * the event an audit wants.
    */
   app.get<{ Params: { id: string } }>('/v1/ai-profiles/:id/credential', async (req, reply) => {
     const profile = store.getAIProfile(req.params.id);

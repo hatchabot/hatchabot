@@ -2192,7 +2192,7 @@
     <button class="hbtn" onclick="loadFleetUsage()">Refresh</button>
   </div>
   <div class="sub" style="margin:4px 0 0">
-    What your agents used in the last hour, day or week — tokens (input + output) and requests, per
+    What your agents used in the last hour, day or week — tokens (new input, cache reads and writes, and output) and requests, per
     agent — from the usage samples Hatchabot takes every ten minutes. Usage, not a bill: subscription
     and local agents have no per-token cost.
   </div>
@@ -4781,11 +4781,11 @@ function renderAiList() {
         <span class="chip">${vendorChip(p)}</span>
         ${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? `
         <label class="sub" style="display:flex;align-items:center;gap:4px;margin-left:auto"
-               title="Your Hatchabot agent's own management calls run on THIS source — the control plane makes them, so nothing else holds the key">
-          <input type="checkbox" ${p.mgmtLlm ? 'checked' : ''} onchange="setMgmtLlmSource('${p.id}', this.checked)"> 🛠 Management
+               title="Hatchabot's small background calls (like picking icons) use this source.">
+          <input type="checkbox" ${p.mgmtLlm ? 'checked' : ''} onchange="setMgmtLlmSource('${p.id}', this.checked)"> 🛠 Helper calls
         </label>` : ''}
         <label class="sub" style="display:flex;align-items:center;gap:4px;${p.vendor === 'anthropic' && (p.credential === 'api-key' || p.credential === 'setup-token') ? '' : 'margin-left:auto'}"
-               title="Let every account on this server use this source for their agents — they spend on it">
+               title="Let every account on this server use this source for their agents — they spend on it, and their agents hold the key">
           <input type="checkbox" ${p.shared ? 'checked' : ''} onchange="shareAiProfile('${p.id}', this.checked, ${p.kind === 'subscription' && p.credential === 'machine-login'})"> Shared
         </label>
         <label class="sub" style="display:flex;align-items:center;gap:4px"
@@ -4798,7 +4798,7 @@ function renderAiList() {
       ${p.credential === 'machine-login' || p.vendor === 'local' ? '' : `
       <details class="su" style="width:100%">
         <summary><b>🔑 Credential</b> <span class="sub">— reveal only to copy this source to another Hatchabot machine</span></summary>
-        <div class="sub" style="margin:6px 0">Anyone holding it can spend this plan. Accounts you share the source with can use it, but never see it.</div>
+        <div class="sub" style="margin:6px 0">Anyone holding it can spend this plan. Accounts you share this with can use it for their agents. Their agents hold it, so someone determined can read it from their own agent. Share only with people you'd trust with the key; to take it back, un-share, move their agents, and replace the token.</div>
         <div style="display:flex;gap:8px;align-items:center">
           <button onclick="revealSourceCredential('${p.id}', this)">Show</button>
           <code id="cred-${p.id}" class="invite-link" style="display:none;flex:1;min-width:0;word-break:break-all"></code>
@@ -4902,7 +4902,7 @@ async function setMgmtLlmSource(id, on) {
     await api(`/v1/ai-profiles/${id}`, { method: 'PATCH', body: { mgmtLlm: on } });
     profiles = await api('/v1/ai-profiles');
     renderAiList();
-    toast(on ? 'Management bot now answers with this source.' : 'Cleared — the bot falls back to the automatic pick.');
+    toast(on ? 'Background helper calls (like picking icons) now use this source.' : 'Cleared — helper calls fall back to the automatic pick.');
   } catch (e) { toast(e.message); renderAiList(); }
 }
 
