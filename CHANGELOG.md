@@ -2,6 +2,53 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.112.0] — 2026-09-30
+
+A check of every promise the app makes against what actually enforces it (docs/review-prompt.md, step 2), and the fixes.
+
+### Access
+- **The Telegram invite's "wants to join" prompt now actually comes.** Under the default "Invite only", a stranger's message was dropped silently, so someone sent the agent's Telegram link never showed up anywhere. Now, when you press Copy or Share on the Telegram invite, the door stays open for 30 minutes. Their message shows under Needs you (and on your phone) as wanting to join. If the invite named an @handle, only that person's message shows. Nobody gets in until you tap Let them in, and the window closes once they're in or when the 30 minutes are up. Live, no rebuild.
+- **Telegram groups answer again in the default "Any group — people you admitted" mode.** Hatchabot wrote an empty group list, and OpenClaw read that as "no group is allowed", so no group ever got a reply. Now every group is allowed, but the bot only answers when @mentioned and only for people you admitted. **Takes effect at each agent's next rebuild.**
+- **"Let them in again" reopens only the app the person joined with.** It used to open a 30-minute window on every app they weren't linked on. With no @handle given, the first stranger to message any of them (anyone in a big Slack or Discord) took their seat. For people who joined before the app was recorded, it now asks for their @handle, and only that person is let in. Live, no rebuild.
+- **Your Hatchabot agent can't be given members.** Invites, "add someone you already know", "Let them in" on a knock, "Anyone can knock" and old invite links are all refused ("Your Hatchabot agent is yours alone."). Linking yourself with "That's me" still works. The Invite and member controls are hidden for it. Live, no rebuild.
+- **"Sign out on every device" also ends your command-line sign-ins.** Personal CLI tokens (up to 90 days) kept working after it. They're now removed too. A peer server's move key and agent-to-agent tokens are kept. The confirm says a Google-signed-in `hatchabot` CLI still needs `hatchabot logout` on that computer. Live, no rebuild.
+- **Wording now matches what's enforced.** The invite says a member can't change settings here but can use everything the agent can through chat (its files, the web, connected accounts). Removing a member warns that scheduled tasks they set up keep running (check Schedule). "Invite only" no longer says strangers are always turned away silently: while an invite or "Let them in again" window is open, anyone who messages gets a pairing reply, and the first one is let in unless the invite named their @handle.
+- **Someone newly admitted on Slack or Discord can use the rooms straight away.** Room member lists were written only at a rebuild, so a new member was ignored in channels and servers until then. Admitting someone (approval, invite claim, or "add someone you already know") now adds them to every room the agent answers in, live. One exception still needs a rebuild: a room saved while nobody was admitted yet.
+
+### Sharing and an agent's life
+- **Sharing a copy no longer claims it is "safe to email".** A shared copy carries the agent's instructions and scheduled tasks, and agents write names and addresses there. Share now counts the email addresses, phone numbers and key-shaped strings the copy mentions and shows where ("This copy mentions 13 email addresses and 2 phone numbers — read it before you send it") before the file is saved; Send to someone here shows the same in its dialog, and `hatchabot share` prints it. The wording everywhere is now "a copy of its instructions and scheduled tasks, without its bot, members or conversations". The old "Installing tools (managed by AgentClaw)" section is also stripped from shared copies.
+- **Clone copies the agent's daily notes and USER.md too.** Most of what an agent saves lives in memory/ and USER.md, not MEMORY.md; a clone now carries them (text files, up to 1 MB each and 5 MB in all; anything left behind is named). The Share question now reads "also include MEMORY.md (its summary notes; may contain personal facts)", and daily notes never travel in a shared copy.
+- **A template's, a clone's and the manager's own files now actually land.** On OpenClaw 2026.9 `agents add` writes its own SOUL.md, AGENTS.md and USER.md first, and the build kept those over the files the agent was given. A first build now replaces that scaffold with them; later builds still never overwrite an agent's files.
+- **Snapshots say what they cover.** "Restore one to roll back its SOUL, AGENTS and MEMORY.md files. Its daily notes (memory/) and other files are not included; use Backups for the whole agent."
+- **Delete says where copies remain.** "…and everything it remembers. Copies in this machine's nightly backups are removed as they age out (14 days)." (app and CLI)
+- **Opening a sleeping agent wakes it.** Its tile said it would; opening it went to settings and woke nothing. It now opens the console, which wakes it and says "Waking it up — about a minute…".
+- **"Saved our conversation to memory" only when something was saved.** Chat → Memory compares the agent's memory files before and after; when nothing changed it says "It found nothing new to save" and sends no Telegram note.
+- **Health says when the AI source last answered.** The check never ran a model turn, so an expired or rate-limited source still showed "Responding". It now shows "AI source: last answered 2h ago", or "refused since …" (headline: "Up, but its AI source is not answering"), in the app and `hatchabot health`.
+- **Sleeping agents wake after a quiet week.** After a week with no updates Telegram restarts message ids at random, so the first message could have a lower id than the one the agent went to sleep on and never woke it. Any new update now wakes it.
+
+### Settings, AI sources and usage
+- A shared AI source no longer claims the other accounts "never see it": their agents hold the key, so the Credential panel now says to share only with people you'd trust with it, and how to take it back (un-share, move their agents, replace the token).
+- The "🛠 Management" checkbox on an AI source is now "🛠 Helper calls": it only picks the source for Hatchabot's small background calls (like choosing icons). The management calls it used to describe went away in v2.0.0; the unused client code for them is removed.
+- The disk warning is real now: once a day Hatchabot measures each agent's storage, and an agent over the warning (HATCHABOT_AGENT_DISK_WARN_GB, 10 GB by default) shows in Needs you and in the security check. Before, nothing measured it.
+- File size limits reach every agent: agents built before the per-app limit existed (most Telegram agents) ran with OpenClaw's own 100 MB; Hatchabot now sets the limit on them at startup. Telegram and Slack limits say "send or receive", since they limit both directions there.
+- The rate-limit banner is about the source, whoever hit the limit: someone using a shared source now sees "Shared source X is being rate-limited", and the owner sees how many agents on other accounts are stuck too.
+- An API agent on a model with no known price shows "API — no price known for <model>" instead of "est. $0.00+". Usage now bills each token to the source it was used on, so an agent moved from an API key to a subscription keeps the cost of its API part.
+- The Usage page says what its token count includes: new input, cache reads and writes, and output.
+- "Memory per agent" and the file limits in Defaults for this machine now apply at once to agents on runners too, not only this machine's (a runner that can't be reached gets them at its next rebuild).
+- The web chat hourly limit and the agent-to-agent consult limit are kept in the database, so a restart no longer resets them.
+- Restoring a .hatchabot file without choosing a source now uses the ⭐ Default source, as creating an agent does.
+- Keys no longer appear on any command line during a rebuild: bot tokens, the gateway token and the manager's key go to OpenClaw through a private temporary file, and Google tokens and git deploy keys are sent to the agent over stdin. Before, any user on the machine could see them with `ps` while a rebuild or attach ran.
+
+### What the website, README and help say
+- **The first-run Welcome card no longer offers a path that always fails.** On Linux it said "Logged into Claude on this very machine? Leave the token blank — it's one tap", but new sources that mount this machine's Claude login have been refused since v2.39.0. The card now asks for a `claude setup-token` and says so if the box is empty; the AI sources dialog no longer says a blank token uses the machine's login. A click-through check covers it (`welcomeNeedsToken`).
+- In-app text: the Gmail "no send" box is described as what it is (a switch in the agent's mail tool, not a Google permission); the local model option says model calls stay on this machine rather than "nothing leaves"; Help points consults at the agent's Sharing tab, says anyone admitted on any app or on the web can direct an agent, and says memory is shared.
+- README, pitch, why-hatchabot, quickstart, features, ai-profiles and whats-new no longer claim that ChatGPT/Claude memory can't be viewed or exported, that "no send" is a Google-level limit, that a local model means nothing leaves the house, that providers switch live, that people can talk to an agent privately, or that templates strip "private memory" (memory is optional and on by default). The README no longer describes the retired machine login as the one-tap path or a Requirement, and Telegram is optional.
+- SECURITY.md: report by email only (GitHub private vulnerability reporting is off), and the broken last line is fixed.
+- whats-new: web chat guests on OpenClaw's real chat (v2.111.0), web-only scheduled tasks (v2.110.0), the owner as OpenClaw's command owner (v2.109.1).
+
+### Internal
+- The click-through checks check their own code parses first (a merge had dropped a closing brace and the page reported nothing), and have 120 s of page time for 50 checks.
+
 ## [2.111.1] — 2026-09-30
 
 ### Fixed

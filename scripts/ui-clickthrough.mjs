@@ -987,6 +987,8 @@ const SCENARIOS = String.raw`(() => {
         ok('says it found nothing new: ' + t, t.includes('found nothing new to save') && !t.includes('Saved'));
       } finally {
         window.__answer = {};
+      }
+    },
     // Settings promises (2026-09-30): what the AI source says about sharing and helper calls; the shared-source banner; the disk warning; an unpriced model.
     sourcePromises: async () => {
       const savedProfiles = profiles, savedUsage = sourceUsageData;
@@ -1073,6 +1075,13 @@ const SCENARIOS = String.raw`(() => {
   })();
 })();`;
 
+// The checks are a string run in the page: a syntax error there (a merge once
+// dropped a closing brace) made Chrome report nothing at all. Say which line.
+try { new Function(SCENARIOS); } catch (err) {
+  console.error(`The click-through checks don't parse: ${err.message}`);
+  process.exit(1);
+}
+
 const work = mkdtempSync(join(tmpdir(), 'hb-ui-'));
 try {
   const head = `<head><script>localStorage.setItem('theme','light')</script><script>${STUB.replace('__VERSION__', version)}</script><script>${RECORDER}</script>`;
@@ -1085,7 +1094,7 @@ try {
       dom = execFileSync('docker', [
         'run', '--rm', '--shm-size=1g', '-v', `${work}:/w`, 'zenika/alpine-chrome',
         '--no-sandbox', '--headless', '--disable-gpu', '--disable-dev-shm-usage', '--hide-scrollbars',
-        '--window-size=1400,1000', '--virtual-time-budget=30000', '--dump-dom', 'file:///w/page.html',
+        '--window-size=1400,1000', '--virtual-time-budget=120000', '--dump-dom', 'file:///w/page.html',
       ], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
     } catch (err) { dom = String(err.stdout ?? ''); }
   }
