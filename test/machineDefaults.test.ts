@@ -108,4 +108,31 @@ describe('machine defaults', () => {
     expect(runner.memoryUpdates).toEqual([{ runtimeRef: ref2, cap: '4g' }]);
     expect(deadTries).toBe(1);
   });
+
+  // 2026-09-30: agents built before the ceiling existed ran with OpenClaw's
+  // own 100 MB; the start sweep sets it where the app's section lacks it.
+  it('the start sweep sets a missing file ceiling live, once, and only for the apps that lack it', async () => {
+    const w = await makeWorld();
+    const id = await seedRunningAgent(w);
+    const ref = w.store.getAgent(id)!.runtimeRef!;
+    const sweep = (w.f as unknown as { retargetCronSweep: () => Promise<void> }).retargetCronSweep;
+    const sets = () => w.provider.execLog.filter((c) => c[0] === 'config' && c[1] === 'set' && String(c[2]).endsWith('.mediaMaxMb'));
+    // The config says Telegram lacks it.
+    w.provider.execResponses.set('sh', { code: 0, stdout: '["telegram"]', stderr: '' });
+    await sweep();
+    expect(sets()).toEqual([['config', 'set', 'channels.telegram.mediaMaxMb', '50']]);
+    const read = w.provider.execLog.find((c) => c[0] === 'sh' && String(c[1]).includes('mediaMaxMb'));
+    expect(read?.[1]).toMatch(/ telegram$/); // asks only about the apps it is on
+    expect(w.store.listEvents([id]).some((e) => e.event === 'files.cap_backfilled')).toBe(true);
+    // Now it has it: nothing more is set.
+    w.provider.execLog.length = 0;
+    w.provider.execResponses.set('sh', { code: 0, stdout: '[]', stderr: '' });
+    await sweep();
+    expect(sets()).toEqual([]);
+    // A failed read sets nothing.
+    w.provider.execResponses.set('sh', { code: 1, stdout: '', stderr: 'no config' });
+    await sweep();
+    expect(sets()).toEqual([]);
+    expect(ref).toBeTruthy();
+  });
 });

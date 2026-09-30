@@ -2314,7 +2314,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * (quiet when neither is possible): OpenClaw 2026.9 refuses implicit
    * delivery, so they ran daily and reached nobody.
    * Agents create such tasks themselves too, so this runs after each start and
-   * then daily, one agent at a time (promise review, 2026-09-29).
+   * then daily, one agent at a time (promise review, 2026-09-29). The same pass
+   * keeps the command owner and the per-app file ceilings in each config.
    */
   const retargetCronSweep = async () => {
     for (const a of store.listAllActiveAgents()) {
@@ -2333,6 +2334,23 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         if (read.code === 0 && read.stdout.trim() !== want) {
           const set = await providerFor(a.hostId).exec(a.runtimeRef, ['config', 'set', 'commands.ownerAllowFrom', want, '--strict-json']);
           trace(a.id)('owner.command_owner_set', { ok: set.code === 0, had: (JSON.parse(read.stdout || '[]') as unknown[]).length });
+        }
+      } catch { /* next time */ }
+      // The per-app file ceiling reached OpenClaw only at a build or when
+      // changed, so agents built before it ran with OpenClaw's own 100 MB
+      // (32 of 35 Telegram agents on the Spark, 2026-09-30). Set it on any app
+      // whose config section lacks it — once: afterwards the key is there.
+      try {
+        const kinds = [...new Set(store.listChannelsForAgent(a.id).map((c) => c.kind))]
+          .filter((k): k is ChannelKindForFiles => k === 'telegram' || k === 'discord' || k === 'slack');
+        if (kinds.length) {
+          const read = await providerFor(a.hostId).execShell(a.runtimeRef,
+            `node -e 'const c=JSON.parse(require("fs").readFileSync("/home/node/.openclaw/openclaw.json","utf8")).channels||{};process.stdout.write(JSON.stringify(process.argv.slice(1).filter(k=>c[k]&&typeof c[k]==="object"&&c[k].mediaMaxMb===undefined)))' ${kinds.join(' ')}`);
+          const missing = read.code === 0 ? (JSON.parse(read.stdout || '[]') as ChannelKindForFiles[]).filter((k) => kinds.includes(k)) : [];
+          for (const kind of missing) {
+            const n = await applyFilesCap(a, kind);
+            trace(a.id)('files.cap_backfilled', { kind, ok: n > 0 });
+          }
         }
       } catch { /* next time */ }
     }
