@@ -256,6 +256,12 @@ export async function claimFirstContact(
           });
           deps.store.closePairingWindow(opts.agentId, seat);
           await restoreDoor();
+          // Slack/Discord rooms carry their own users list: let them in there
+          // now, not at the next rebuild (2026-09-30).
+          if (kind !== 'telegram') {
+            const { grantRoomAccess } = await import('./members.js');
+            await grantRoomAccess(policyDeps, { agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, channelUserId: first.id });
+          }
           // Say something. OpenClaw answered their first message with the
           // pairing challenge rather than a reply, so an approval that lands
           // in silence reads as "still broken" and the person types "hi"
@@ -283,6 +289,88 @@ export async function claimFirstContact(
   deps.store.closePairingWindow(opts.agentId, seat);
   await restoreDoor();
   return null;
+}
+
+/**
+ * A door held open to be LOOKED AT, never walked through on its own
+ * (2026-09-30).
+ *
+ * The invite dialog promised "send them the Telegram link; when they message
+ * it you get a 'wants to join' prompt" — but an agent rests in `allowlist`,
+ * where a stranger's DM is dropped without a word, so the prompt never came.
+ * Copying or sharing the Telegram invite now opens one window like this: the
+ * door is `pairing` for 30 minutes, a knock that fits it (the invite's
+ * @handle when it named one, anyone otherwise) is SHOWN under "Needs you" as
+ * wanting to join, and nothing is admitted until the owner taps "Let them
+ * in". Unlike claimFirstContact there is no watcher binding the first knock:
+ * the window is only what expectedKnock and the rest-door rules read.
+ *
+ * One window per invite (`key`): pressing Copy again refreshes its deadline
+ * rather than stacking another. It closes itself when the time is up, and
+ * the door goes back to silence unless something else still holds it open.
+ */
+export async function holdDoorForKnocks(
+  deps: ClaimDeps,
+  opts: {
+    agentId: string; runtimeRef: string; accountId: string;
+    /** The invite this window belongs to. */
+    key: string;
+    /** Who the invite named — a Telegram @handle — if anyone. */
+    expect?: string;
+    kind?: ChannelKind;
+    timeoutMs?: number;
+    /** Tests: skip the timer that closes the window. */
+    noTimer?: boolean;
+  },
+): Promise<{ seat: string; until: string }> {
+  const kind = opts.kind ?? 'telegram';
+  const openedFor = knockSeatFor(opts.key);
+  const seat = Store.pairingSeat(kind, openedFor);
+  const timeoutMs = opts.timeoutMs ?? 30 * 60_000;
+  const until = new Date(Date.now() + timeoutMs).toISOString();
+  deps.store.openPairingWindow(opts.agentId, until, openedFor, { expect: opts.expect, kind });
+  const { setDmPolicy } = await import('./members.js');
+  await setDmPolicy({ store: deps.store, provider: deps.provider, log: deps.log }, {
+    agentId: opts.agentId, runtimeRef: opts.runtimeRef, kind, accountId: opts.accountId, policy: 'pairing',
+  }).catch(() => false);
+  deps.log?.('invite.knock_window', { agentId: opts.agentId, kind, named: !!opts.expect, until });
+  if (!opts.noTimer) {
+    setTimeout(() => {
+      // Pressed again meanwhile: the later press owns the deadline.
+      const still = deps.store.pairingWindows(opts.agentId, new Date(Date.now() + 1000)).find((w) => w.seat === seat);
+      if (still) return;
+      void closeKnockWindow(deps, opts.agentId, seat, kind).catch(() => {});
+    }, timeoutMs + 500).unref?.();
+  }
+  return { seat, until };
+}
+
+/** The `opened_for` of a knock window: never a user id, so no claim ever binds to it. */
+export const knockSeatFor = (key: string): string => `knock:${key}`;
+/** Is this window one that only shows knocks (holdDoorForKnocks), not a claim? */
+export const isKnockWindow = (w: { openedFor?: string }): boolean => !!w.openedFor?.startsWith('knock:');
+
+/**
+ * Close a knock window and put the door back to silence when nothing else
+ * holds it open. Read afresh: 30 minutes on, the container may have been
+ * rebuilt (a new runtimeRef) or stopped (the next build writes the door).
+ */
+export async function closeKnockWindow(deps: ClaimDeps, agentId: string, seat: string, kind: ChannelKind = 'telegram'): Promise<void> {
+  deps.store.closePairingWindow(agentId, seat);
+  forgetDmPolicy(agentId);
+  const agent = deps.store.getAgent(agentId);
+  if (!agent || agent.allowKnocks || agent.state !== 'RUNNING' || !agent.runtimeRef) return;
+  if (deps.store.pairingWindows(agentId).some((w) => w.seat.startsWith(`${kind}:`))) return;
+  const admit = deps.store.listAllowedChannelUserIds(agentId, kind);
+  if (!admit.length) return; // nobody yet: stay reachable
+  const ch = deps.store.getChannelForAgent(agentId, kind);
+  if (!ch) return;
+  const { setDmPolicy } = await import('./members.js');
+  const { CHANNEL_ACCOUNT } = await import('../openclaw/configWriter.js');
+  await setDmPolicy({ store: deps.store, provider: deps.provider, log: deps.log }, {
+    agentId, runtimeRef: agent.runtimeRef, kind, accountId: kind === 'telegram' ? ch.accountId : CHANNEL_ACCOUNT,
+    policy: 'allowlist', allowFrom: admit,
+  }).catch(() => false);
 }
 
 /**

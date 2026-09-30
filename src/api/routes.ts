@@ -54,7 +54,7 @@ import {
 } from '../orchestrator/provision.js';
 import { generateDeployKey, isPublicGitUrl, normalizeGitUrl, PUBLIC_REPO_READ_ONLY } from '../orchestrator/gitSource.js';
 import QRCode from 'qrcode';
-import { claimFirstContact, listPairingRequests } from '../orchestrator/claim.js';
+import { claimFirstContact, holdDoorForKnocks, isKnockWindow, listPairingRequests } from '../orchestrator/claim.js';
 import { AgentBusyError, clearBusy, isBusy, markBusy, whileBusy } from '../orchestrator/busy.js';
 import { contextStats, exportTranscript, recoverContext } from '../orchestrator/transcript.js';
 import { archiveAgent, ArchiveError } from '../orchestrator/archive.js';
@@ -9371,6 +9371,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
 
   // ---- invites & join (§12.3) --------------------------------------------
 
+  /** The one answer every "add a person" route gives the management agent. */
+  const OPS_ALONE = 'Your Hatchabot agent is yours alone.';
+
   /** Someone who signs in here: a Google account (identity mode) or a local account. */
   const isAccountId = (userId: string): boolean => /^user-./.test(userId) || !!store.localAccount(userId);
 
@@ -9430,7 +9433,9 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (forParsed.data.webChat && (deps.authMode ?? 'password') === 'password') {
       return reply.code(400).send({ error: 'Chat on the web needs people to sign in to this Hatchabot — switch it to accounts or Google sign-in first (⚙ Settings → Access).' });
     }
-    if (forParsed.data.webChat && agent.ops) return reply.code(400).send({ error: 'Your Hatchabot agent is yours alone.' });
+    // Your Hatchabot agent runs your whole machine: nobody else is ever let in,
+    // by any door (2026-09-30 — only web-chat invites refused it before).
+    if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
     const { code, expiresAt } = createInvite(store, agent.id, ownerId, forParsed.data.for, { webChat: forParsed.data.webChat });
     if (forParsed.data.webChat) trace(agent.id)('invite.web_chat', {});
     const path = `/join/${code}`;
@@ -9440,6 +9445,35 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       path,
       url: appUrlFor() ? `${appUrlFor()}${path}` : undefined,
     });
+  });
+
+  /**
+   * The Telegram invite was copied or shared: hold the door open for 30
+   * minutes so the person it is for can knock (2026-09-30). The dialog
+   * promised a "wants to join" prompt, but under Invite only a stranger's DM
+   * is dropped in silence and nothing ever showed. The knock is only SHOWN —
+   * under Needs you, and pushed like any other — and the owner's tap admits
+   * it; when the invite named an @handle, only that person's knock is shown
+   * and everyone else's is turned away by the sweep as before.
+   */
+  app.post<{ Params: { id: string; code: string } }>('/v1/agents/:id/invites/:code/knock-window', async (req, reply) => {
+    const agent = ownedAgent(req, req.params.id);
+    if (!agent) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
+    const inv = store.getInviteByCode(req.params.code.trim().toUpperCase());
+    if (!inv || inv.agentId !== agent.id || inv.webChat) return reply.code(404).send({ error: 'Not found' });
+    if (Date.parse(inv.expiresAt) < Date.now()) return reply.code(410).send({ error: 'That invite has expired — make a new one.' });
+    const channel = store.getChannelForAgent(agent.id, 'telegram');
+    if (!channel) return reply.code(409).send({ error: 'This agent has no Telegram bot yet.' });
+    if (agent.state !== 'RUNNING' || !agent.runtimeRef) return reply.code(409).send({ error: 'Start the agent first — the door lives in its container.' });
+    // Open to anyone already: every knock is shown, nothing to hold open.
+    if (agent.allowKnocks) return { open: true, minutes: 0, alreadyOpen: true };
+    const { until } = await holdDoorForKnocks(
+      { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
+      { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: channel.accountId, key: inv.id, expect: inv.expectHandle },
+    );
+    forgetKnocks(agent.id);
+    return { open: true, minutes: 30, until, for: inv.expectHandle };
   });
 
   app.get<{ Params: { id: string } }>('/v1/agents/:id/members', async (req, reply) => {
@@ -9527,6 +9561,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     const body = (req.body ?? {}) as { code?: string; name?: string; idToken?: string; channel?: string };
     if (!body.code) return reply.code(400).send({ error: 'code required' });
     const pre = checkInvite(store, body.code);
+    // A link minted for the management agent before it was refused (2026-09-30).
+    if (pre.valid && store.getAgent(pre.agentId)?.ops) return reply.code(400).send({ error: 'This invite is no longer valid.' });
     if (pre.valid && pre.webChat) return joinForWebChat(req, reply, body);
     // Which app the invitee will message. One window per join, on that channel
     // only: a big Slack workspace or Discord server has strangers in it, and
@@ -9547,6 +9583,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
         }
       }
       const joined = redeemInvite(store, body.code, body.name ?? '', accountId);
+      // Which app they chose: "Let them in again" reopens that one only (2026-09-30).
+      store.setInviteRedeemedVia(body.code, joinKind);
       const agent = store.getAgent(joined.agentId)!;
       const channelRow = store.getChannelForAgent(agent.id, joinKind);
       // Someone who already uses another of this owner's agents is not a
@@ -9883,6 +9921,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
       // gates this route). Binds the owner seat + links the account's Telegram.
       const asSelf = (req.body as { asSelf?: boolean } | null)?.asSelf === true;
       if (!agent?.runtimeRef || !channel) return reply.code(404).send({ error: 'Not found' });
+      // Linking yourself is fine; letting anyone else into it is not (2026-09-30).
+      if (agent.ops && !asSelf) return reply.code(400).send({ error: OPS_ALONE });
       if (!code) return reply.code(400).send({ error: 'code required' });
       try {
         const admitted = await admitMember(
@@ -9898,6 +9938,17 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             asSelf,
           },
         );
+        // The Telegram invite's knock window has done its job once its person
+        // is in: the one that named them, or else one that named nobody —
+        // left open, it kept showing strangers for the rest of the half hour
+        // (2026-09-30).
+        if (kind === 'telegram' && !asSelf) {
+          const knockWins = store.pairingWindows(agent.id).filter((w) => w.seat.startsWith('telegram:') && isKnockWindow(w));
+          const handle = normalizeHandle(admitted.username);
+          const answered = knockWins.find((w) => w.expect && (w.expect === handle || w.expect === normalizeHandle(admitted.channelUserId)))
+            ?? knockWins.find((w) => !w.expect);
+          if (answered) store.closePairingWindow(agent.id, answered.seat);
+        }
         // They are on the list now, so the door goes back to silence (unless
         // a window is still open for someone else, or the agent is open).
         await restDoor(agent);
@@ -9977,45 +10028,55 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
    * agent is deaf to strangers outside it — so the answer to "they took two
    * hours to get round to it" is to reopen it, not to leave it ajar.
    */
-  app.post<{ Params: { id: string; userId: string } }>(
+  app.post<{ Params: { id: string; userId: string }; Body: { handle?: string } }>(
     '/v1/agents/:id/members/:userId/reopen',
     async (req, reply) => {
       const agent = ownedAgent(req, req.params.id);
       if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+      if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
       const member = store.getMembership(agent.id, req.params.userId);
       if (!member || member.status !== 'active') return reply.code(404).send({ error: 'Not a member of this agent.' });
       const have = store.memberIdentities(agent.id, member.userId);
-      const open = store.listChannelsForAgent(agent.id).filter((c) => !have[c.kind]);
-      if (!open.length) return reply.code(409).send({ error: store.listChannelsForAgent(agent.id).length ? 'They are already linked — nothing to reopen.' : 'This agent is not in a chat app yet.' });
+      const unlinked = store.listChannelsForAgent(agent.id).filter((c) => !have[c.kind]);
+      if (!unlinked.length) return reply.code(409).send({ error: store.listChannelsForAgent(agent.id).length ? 'They are already linked — nothing to reopen.' : 'This agent is not in a chat app yet.' });
       if (agent.state !== 'RUNNING') return reply.code(409).send({ error: 'Start the agent first.' });
-      for (const c of open.filter((c) => c.kind !== 'telegram')) {
+      // Which door, and for whom (2026-09-30). This opened a window on EVERY
+      // app they were not linked on, and without a handle the first stranger
+      // to message any of them took the seat — on a big Slack or Discord,
+      // anybody in it. Now: the app they joined with, only; or, when we never
+      // learned which (joined before this was recorded), only for a named
+      // @handle — the one their invite named, or one the owner types now.
+      const joinedBy = store.inviteJoinFor(agent.id, member.userId);
+      const typed = z.string().trim().max(64).optional().safeParse((req.body as { handle?: unknown } | null)?.handle);
+      const expect = joinedBy.handle ?? (typed.success && typed.data ? typed.data : undefined);
+      const via = unlinked.find((c) => c.kind === joinedBy.via);
+      if (joinedBy.via && !via) return reply.code(409).send({ error: `They are already linked on ${joinedBy.via} — nothing to reopen.` });
+      if (!via && !expect) {
+        return reply.code(409).send({
+          error: 'We do not know which app they joined with, so the door would open to whoever messages first. Give their @handle and only they are let in.',
+          code: 'needs-handle',
+        });
+      }
+      const open = via ? [via] : unlinked;
+      for (const c of open) {
         void claimFirstContact(
           { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-          { agentId: agent.id, runtimeRef: agent.runtimeRef, accountId: CHANNEL_ACCOUNT, kind: c.kind, forUserId: member.userId, expect: store.inviteHandleFor(agent.id, member.userId), timeoutMs: 30 * 60_000 },
+          {
+            agentId: agent.id, runtimeRef: agent.runtimeRef,
+            accountId: c.kind === 'telegram' ? c.accountId : CHANNEL_ACCOUNT,
+            kind: c.kind, forUserId: member.userId, expect, timeoutMs: 30 * 60_000,
+          },
         ).catch((err) => app.log.error({ err }, 'reopen claim failed'));
       }
-      const channelRow = open.find((c) => c.kind === 'telegram');
-      if (!channelRow) { trace(agent.id)('member.door_reopened', { userId: member.userId, on: open.map((c) => c.kind) }); return { reopened: true, minutes: 30 }; }
-      void claimFirstContact(
-        { store, provider: providerFor(agent.hostId), log: trace(agent.id) },
-        {
-          agentId: agent.id,
-          runtimeRef: agent.runtimeRef,
-          accountId: channelRow.accountId,
-          forUserId: member.userId,
-          kind: 'telegram',
-          expect: store.inviteHandleFor(agent.id, member.userId),
-          timeoutMs: 30 * 60_000,
-        },
-      ).catch((err) => app.log.error({ err }, 'reopen claim failed'));
-      trace(agent.id)('member.door_reopened', { userId: member.userId });
-      return { reopened: true, minutes: 30 };
+      trace(agent.id)('member.door_reopened', { userId: member.userId, on: open.map((c) => c.kind), named: !!expect });
+      return { reopened: true, minutes: 30, on: open.map((c) => c.kind), ...(expect ? { for: expect.replace(/^@/, '') } : {}) };
     },
   );
 
   app.post<{ Params: { id: string } }>('/v1/agents/:id/members/known', async (req, reply) => {
     const agent = ownedAgent(req, req.params.id);
     if (!agent?.runtimeRef) return reply.code(404).send({ error: 'Not found' });
+    if (agent.ops) return reply.code(400).send({ error: OPS_ALONE });
     const parsed = z.object({ userId: z.string().min(1) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
     const person = store.knownPeopleFor(agent.ownerId, agent.id).find((p) => p.userId === parsed.data.userId);
@@ -10163,6 +10224,8 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!agent) return reply.code(404).send({ error: 'Not found' });
     const parsed = z.object({ on: z.boolean() }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: zodMessage(parsed.error) });
+    // Turning it OFF is always allowed (it shuts a door); on, never for the manager (2026-09-30).
+    if (agent.ops && parsed.data.on) return reply.code(400).send({ error: OPS_ALONE });
     store.setAllowKnocks(agent.id, parsed.data.on);
     trace(agent.id)('agent.allow_knocks', { on: parsed.data.on });
     // Live, not at the next rebuild: "anyone can knock" that only takes

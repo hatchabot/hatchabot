@@ -550,14 +550,19 @@ recovery code works even while an account is paused.
 
 To let someone in, tap **Invite…** on the card:
 
-- **Invite link** — works once, expires in 48 hours; they join as a member
-  (they can chat, not change settings). If the agent's memory is shared, the
-  join page tells them so before they accept.
+- **Invite link** — works once, expires in 48 hours; they join as a member:
+  they can't change its settings here, but through chat they can use
+  everything the agent can — its files, the web, connected accounts. If the
+  agent's memory is shared, the join page tells them so before they accept.
 - **Several apps?** The join page asks which one they'll use (Telegram,
   Slack or Discord) and gives them that app's link.
 - **Off your network?** Send the agent's Telegram link (or the QR code)
-  instead. When they message it, a "wants to talk" card appears on the agent
-  and **Let them in** makes them a member.
+  instead. Copying or sharing it from the dialog holds the door open for 30
+  minutes: when they message it in that time, a "wants to talk" card appears
+  on the agent (only for the @handle the invite named, if it named one) and
+  **Let them in** makes them a member. Nobody is let in without that tap.
+- **Your Hatchabot agent** is yours alone: it takes no invites, no members
+  and no knocks from anyone but you.
 
 **Someone who already uses another of your agents never pairs twice.** Their
 Telegram id is on file, so they can be added outright: **⚙ Settings → Telegram
@@ -602,8 +607,13 @@ anyone on Telegram can message an agent — and every one of those knocks used
 to reach you as a card, and a push to your phone. An agent now admits only a
 knock it is expecting:
 
-- an **invite window** is open — a fresh agent waiting for its owner, or
-  somebody who has just redeemed an invite link (30 minutes), or
+- an **invite window** is open — a fresh agent waiting for its owner,
+  somebody who has just redeemed an invite link, a Telegram invite you just
+  copied, or **Let them in again** (30 minutes each). While one is open,
+  anyone who messages gets a pairing reply, and the first one is let in
+  unless the invite named their @handle (a copied Telegram invite only shows
+  the knock; you let them in). **Let them in again** reopens only the app
+  they joined with, or asks for their @handle when that is not known; or
 - the sender is **someone you already know**: your own linked Telegram, or an
   active member of any agent you own — let someone into one agent and they are
   not a stranger at the next.

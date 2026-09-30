@@ -277,7 +277,20 @@ describe('group-chat access (GroupAccess → openclaw config)', () => {
   it('absent CONVERGES to members-only — a cleared open-room must not survive on the volume', () => {
     const cmds = buildConfigCommands(tg(undefined));
     expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('allowlist');
-    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
+    // Every group, mention-gated; no bound room survives (2026-09-30).
+    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({ '*': { requireMention: true } });
+  });
+
+  it("members mode lets groups in at all: an empty map under allowlist blocked every group (2026-09-30)", () => {
+    const groups = JSON.parse(argFor(buildConfigCommands(tg({ mode: 'members' })), 'channels.telegram.groups')!);
+    expect(Object.keys(groups)).toEqual(['*']);
+    expect(groups['*'].requireMention).toBe(true);
+    // The senders are still the admitted people: allowFrom is written, never widened.
+    const acct = JSON.parse(argFor(buildConfigCommands(tg({ mode: 'members' })), 'channels.telegram.accounts')!);
+    expect(acct.b.allowFrom).toEqual(['1']);
+    // Nobody admitted yet: nothing to let into a group either.
+    const empty = buildConfigCommands({ ...tg({ mode: 'members' }), telegram: { ...tg({ mode: 'members' }).telegram, allowFrom: [] } });
+    expect(JSON.parse(argFor(empty, 'channels.telegram.groups')!)).toEqual({});
   });
 
   it("'off' disables groups; groups map is emptied so nothing stale survives", () => {
@@ -299,10 +312,10 @@ describe('group-chat access (GroupAccess → openclaw config)', () => {
     expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
   });
 
-  it("switching back to 'members' converges: policy allowlist, groups emptied", () => {
+  it("switching back to 'members' converges: policy allowlist, the bound room gone", () => {
     const cmds = buildConfigCommands(tg({ mode: 'members' }));
     expect(argFor(cmds, 'channels.telegram.groupPolicy')).toBe('allowlist');
-    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({});
+    expect(JSON.parse(argFor(cmds, 'channels.telegram.groups')!)).toEqual({ '*': { requireMention: true } });
   });
 });
 

@@ -658,10 +658,18 @@ export function buildConfigCommands(patch: OpenClawConfigPatch): ConfigCommand[]
     const policy = groupAccess?.mode === 'off' || (groupAccess?.mode === 'room' && !admitted) ? 'disabled' : 'allowlist';
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groupPolicy', policy] });
     cmds.push({ argv: ['config', 'set', 'channels.telegram.mediaMaxMb', String(filesMb('telegram', patch.filesMaxMb))] });
+    // `members` (the default) needs a "*" entry to mean anything: under
+    // groupPolicy allowlist, OpenClaw treats an EMPTY groups map as "no group
+    // is allowed" (resolveChannelGroupPolicy → allowed: false), so no group
+    // ever got an answer while the app said "any group — people you
+    // admitted" (2026-09-30). "*" admits the group itself; the senders are
+    // still filtered by the account's allowFrom, and only @mentions wake it.
     const groups =
       groupAccess?.mode === 'room' && groupAccess.roomId && admitted
         ? { [groupAccess.roomId]: { groupPolicy: 'allowlist', requireMention: true } }
-        : {};
+        : policy === 'allowlist' && admitted && groupAccess?.mode !== 'room'
+          ? { '*': { requireMention: true } }
+          : {};
     cmds.push({ argv: ['config', 'set', 'channels.telegram.groups', JSON.stringify(groups), '--replace'] });
   } else {
     // No bot: turn Telegram OFF and empty its accounts, every build. The

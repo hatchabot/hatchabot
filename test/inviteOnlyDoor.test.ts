@@ -244,9 +244,13 @@ describe('reopening the door after a window lapses', () => {
     const already = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/user-here/reopen', headers: H });
     expect(already.statusCode).toBe(409);
 
+    // She redeemed an invite for Telegram: that app is the one reopened (2026-09-30).
+    s.insertInvite({ id: 'i1', agentId: 'a1', code: 'LATEJOIN23', role: 'user', createdBy: OWNER, createdAt: 'now', expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    s.markInviteRedeemed('LATEJOIN23', 'user-late');
+    s.setInviteRedeemedVia('LATEJOIN23', 'telegram');
     const again = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/user-late/reopen', headers: H });
     expect(again.statusCode).toBe(200);
-    expect(again.json()).toEqual({ reopened: true, minutes: 30 });
+    expect(again.json()).toEqual({ reopened: true, minutes: 30, on: ['telegram'] });
     expect(s.pairingWindowOpen('a1')).toBe(true); // the door is held for them
 
     const notMine = await f.inject({ method: 'POST', url: '/v1/agents/a1/members/user-late/reopen', headers: { 'x-hatchabot-owner': 'someone-else' } });
