@@ -4,15 +4,23 @@
  * the /v1/usage rollup prices against so the web and CLI agree.
  */
 export const MODEL_PRICES: Record<string, [number, number]> = {
+  'claude-opus-5-5': [4, 20],
   'claude-opus-5': [5, 25],
   'claude-opus-4-8': [5, 25],
   'claude-opus-4-7': [5, 25],
   'claude-opus-4-6': [5, 25],
-  'claude-sonnet-5': [3, 15],
+  'claude-sonnet-5-5': [2, 10],
+  // $2/$10 was Sonnet 5's launch price and stayed: the rise to $3/$15 planned
+  // for 2026-09-01 was called off (Anthropic's pricing page, read 2026-10-01).
+  'claude-sonnet-5': [2, 10],
   'claude-sonnet-4-6': [3, 15],
   'claude-haiku-4-5': [1, 5],
+  'claude-fable-5-1': [10, 50],
   'claude-fable-5': [10, 50],
 };
+
+/** A cache read as a share of the input price: a tenth, except where Anthropic lists less. */
+export const CACHE_READ_SHARE: Record<string, number> = { 'claude-opus-5-5': 0.05, 'claude-fable-5-1': 0.025 };
 
 export interface CostRange {
   /** Lower bound: every token priced as input (the realistic end for
@@ -44,10 +52,11 @@ export function estimateCost(
       continue;
     }
     // With the per-call split (2026-09-28) the figure is exact: input and
-    // output at their prices, cache reads at a tenth of input, cache writes
+    // output at their prices, cache reads at a tenth of input (less on the
+    // models in CACHE_READ_SHARE), cache writes
     // at 1.25× (Anthropic's 5-minute cache). Without it, the old bracket.
     if (typeof m.input === 'number' && typeof m.output === 'number') {
-      const exact = ((m.input + 1.25 * (m.cacheWrite ?? 0) + 0.1 * (m.cacheRead ?? 0)) * price[0] + m.output * price[1]) / 1e6;
+      const exact = ((m.input + 1.25 * (m.cacheWrite ?? 0) + (CACHE_READ_SHARE[m.model] ?? 0.1) * (m.cacheRead ?? 0)) * price[0] + m.output * price[1]) / 1e6;
       low += exact; high += exact;
       continue;
     }

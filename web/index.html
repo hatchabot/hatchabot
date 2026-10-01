@@ -8094,8 +8094,8 @@ let usageAgentId = null;
 // Per-1M-token list price [input, output], USD — only used to show API-key
 // agents the model's rate so they can judge; never multiplied into a fake total.
 const MODEL_PRICES = {
-  'claude-opus-5': [5, 25], 'claude-opus-4-8': [5, 25], 'claude-opus-4-7': [5, 25], 'claude-opus-4-6': [5, 25],
-  'claude-sonnet-5': [3, 15], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5': [10, 50],
+  'claude-opus-5-5': [4, 20], 'claude-opus-5': [5, 25], 'claude-opus-4-8': [5, 25], 'claude-opus-4-7': [5, 25], 'claude-opus-4-6': [5, 25],
+  'claude-sonnet-5-5': [2, 10], 'claude-sonnet-5': [2, 10], 'claude-sonnet-4-6': [3, 15], 'claude-haiku-4-5': [1, 5], 'claude-fable-5-1': [10, 50], 'claude-fable-5': [10, 50],
 };
 function fmtTokens(n) {
   const v = Number(n) || 0; // guard undefined/NaN/string → "0" not "undefined"

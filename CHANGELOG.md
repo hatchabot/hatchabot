@@ -29,6 +29,11 @@ Built on the `reach-anywhere` branch. Not released, and not yet run against a re
 - Tests never change this machine's Tailscale: under a test runner every command that changes `serve` or `funnel` refuses unless the test names its own stand-in (`HATCHABOT_TAILSCALE_BIN`).
 - `scripts/public-access-mutants.mjs`: removes each safeguard in a copy of the tree and checks that the tests notice.
 
+## [2.113.1] — 2026-10-01
+
+### Fixed
+- **Cost estimates used an out-of-date price for Sonnet 5.** It is $2 in / $10 out per million tokens (the rise to $3/$15 planned for September did not happen), so its estimates were 50% high. Opus 5.5 ($4/$20), Sonnet 5.5 ($2/$10) and Fable 5.1 ($10/$50) now have prices instead of "no price known", and a cache read on Opus 5.5 and Fable 5.1 is priced at their lower rate. Prices checked against Anthropic's pricing page on 2026-10-01.
+
 ## [2.113.0] — 2026-10-01
 
 ### Added
