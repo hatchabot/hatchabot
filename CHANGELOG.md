@@ -2,6 +2,32 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [Unreleased]
+
+Built on the `reach-anywhere` branch. Not released, and not yet run against a real tailnet (docs/public-access.md, "Not verified yet").
+
+### Added
+- **"Reach it from anywhere": public access, off by default** (docs/public-access.md). The machine's owner can make this Hatchabot's sign-in page reachable from the internet through Tailscale Funnel, so invited people need no Tailscale app: ⚙ Settings → You → Reach it from anywhere, or `hatchabot reach on|off|status`. It asks first ("This makes your sign-in page reachable from the internet"), shows the address with a QR code, and Off undoes all of it (Funnel's entry, the listener, the setting, the address). `tailscale serve` for the private address is left alone.
+- **It can only be on while every safeguard holds.** The switch refuses and names what is missing; the running process re-checks every minute and the public address answers 503 to everyone while one is off; `hatchabot doctor` (and `--json`) reports each safeguard and fails when public access is on with any off. The safeguards: accounts or Google sign-in (the shared-password mode is refused); a second factor for everyone with owner rights; "only invited people"; public traffic on its own listener; a route table; public sign-in limits; a new-device notice; stricter sessions; automatic upgrades on the stable channel; a record.
+- **Second factors: passkeys and an authenticator app, with backup codes** (⚙ Settings → You → Second factor). Passkeys (WebAuthn) and authenticator codes (TOTP, RFC 6238) are implemented with `node:crypto`, no new dependency. Asked for at the public address when signing in, and again before sensitive actions; sign-in at the private address is unchanged. With Google sign-in the owner needs one too. Members may add one; `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL=1` asks everyone. A lost phone: backup codes, or `hatchabot second-factor reset <user>` at the private address.
+- **Invitation and password-reset links are made for the public address while public access is on** (the person opening one may not be on your tailnet), and for the private address again when it is off. They are never built from a request's `Host`.
+- **A notice when someone signs in from a new device** at the public address: to the person and to the machine's owner, on the home screen and on Telegram when linked, with the browser, the approximate source and "sign out everywhere". The owner can sign anyone out everywhere from the notice or the record.
+- **A security record** (Settings → You → Reach it from anywhere → Record): every public sign-in, second factor given, burst of failures, and the switch going on or off.
+- Settings in `.env` under "Public access": `HATCHABOT_PUBLIC_ACCESS`, `HATCHABOT_PUBLIC_ACCESS_URL`, `HATCHABOT_PUBLIC_INVITED_ONLY`, `HATCHABOT_PUBLIC_SECOND_FACTOR_FOR_ALL`, `HATCHABOT_PUBLIC_PORT`, `HATCHABOT_PUBLIC_FUNNEL_PORT`, `HATCHABOT_PUBLIC_IDLE_MINUTES`, `HATCHABOT_PUBLIC_STEPUP_MINUTES`, `HATCHABOT_PUBLIC_REQS_PER_MIN`, `HATCHABOT_PUBLIC_REQS_PER_MIN_PER_ADDRESS`, `HATCHABOT_PUBLIC_FAILS_CEILING`.
+
+### Security
+- **Public traffic is its own trust class, decided by the listener it arrived on, never by a header** (`src/api/trust.ts`). Funnel is pointed at a separate loopback port; a request from there is never "on this machine" (no first-run set-up, no owner's first claim), never the management agent's in-process call, never signed in by a command-line, peer or Google bearer token, always HTTPS for cookies, and limited by the address Tailscale reports. A change of the management agent confirmed at the public address is executed as a public request too.
+- **At the public address every route has a class, and an unclassified route is refused** (`src/api/publicRoutes.ts`): open (the page, sign-in, invitations), signed-in (the app as invited people use it), step-up (machine-level and dangerous: hosts, runners, images, runner set-up, environment variables, backups and downloads, credential reveals, token minting, accounts, AI sources, bot pools, confirming a management change), and never (first-run, Tailscale set-up, agent-to-agent calls, turning public access on). A test sweeps every registered route in every sign-in mode.
+- **A public sign-in has its own pass**: a session from the private address does not carry over, a public session ends after 12 hours without use, and a password reset does not get around the second factor.
+- **Public sign-in limits are counted apart, back off, and have a ceiling.** Failures at the public address never lock anyone out of the private one; a lockout lasts twice as long each time it repeats; all public failures together have a ceiling; requests have ceilings per address and overall.
+- `hatchabot doctor` fails if `tailscale funnel` publishes Hatchabot's private port (set up by hand), whether or not public access is on.
+- Public answers carry HSTS (one week), a content security policy, `frame-ancestors`, `nosniff` and `Referrer-Policy: no-referrer`.
+
+### Changed
+- docs/tailscale.md: Funnel is no longer "deliberately not enabled"; it says how to use it safely and not to point it at port 8080.
+- Tests never change this machine's Tailscale: under a test runner every command that changes `serve` or `funnel` refuses unless the test names its own stand-in (`HATCHABOT_TAILSCALE_BIN`).
+- `scripts/public-access-mutants.mjs`: removes each safeguard in a copy of the tree and checks that the tests notice.
+
 ## [2.113.0] — 2026-10-01
 
 ### Added

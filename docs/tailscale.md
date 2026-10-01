@@ -70,14 +70,36 @@ serves HTTPS itself (both or neither — half-configured refuses to boot),
 then `systemctl --user restart hatchabot`. You own the cert lifecycle on
 that path.
 
-## Deliberately NOT enabled: Funnel
+## Funnel: a public address, off by default
 
-`tailscale funnel` would publish the app to the open internet (no Tailscale
-app needed for invitees). In **password mode** that's a bad trade: one shared
-password guards everything. With `HATCHABOT_AUTH=accounts` or `identity` (per-user accounts,
-see docs/identity.md) the calculus changes — but note the join pages are still
-reachable by invite code alone, by design.
+`tailscale funnel` publishes a port to the open internet, so invited people
+need no Tailscale app. Hatchabot does not turn it on by itself, and **do not
+run `tailscale funnel` against port 8080 by hand**: everything arriving on
+that port is treated as this machine, your LAN or your tailnet, so internet
+visitors would get that trust with none of the safeguards. `hatchabot doctor`
+fails if it finds Funnel pointed there.
 
+The supported way is **"Reach it from anywhere"** (⚙ Settings → You, or
+`hatchabot reach on`), described in [docs/public-access.md](public-access.md):
+
+- Funnel is pointed at a separate, loopback-only **public listener**
+  (`127.0.0.1:8092`), on Funnel's port 8443. Everything arriving there is
+  treated as a stranger, whatever its headers say.
+- `tailscale serve` on 443 stays what it is: your private tailnet address,
+  on the normal port. Turning public access on or off does not touch it.
+- It can only be turned on in `accounts` or `identity` mode, with a second
+  factor for the owner, "only invited people" on, and automatic upgrades on
+  the stable channel; in **password mode it is refused**.
+- The public address is `https://<your-machine>.<your-tailnet>.ts.net:8443`.
+  `HATCHABOT_PUBLIC_URL` stays the private address. While public access is
+  on, invitation and password-reset links are made for the public address
+  (the person opening one may not be on your tailnet); with it off, for the
+  private one, as before.
+
+What Funnel needs from your tailnet (Hatchabot reports which is missing, with
+the link): MagicDNS, HTTPS certificates (admin console → DNS), and the
+`funnel` node attribute for this machine (admin console → Access controls).
+On a Mac, Funnel needs the open-source Tailscale, not the App Store app.
 
 ## The OpenClaw console needs HTTPS
 
