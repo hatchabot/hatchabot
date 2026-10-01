@@ -97,6 +97,8 @@ import { OPS_AGENT_ICON, OPS_AGENT_NAME, OPS_AGENT_PERSONA, OPS_AGENTS_MD, OPS_S
 import { pickIcons, validIcon, validIconColor, type IconCompleter } from '../orchestrator/agentIcons.js';
 import { ENV_NAME_RE, reservedEnvProblem } from '../orchestrator/envPolicy.js';
 import { registerMgmtChat } from './mgmtChat.js';
+import { registerReachRoutes } from './reachRoutes.js';
+import { isPublic, publicReplayHeaders } from './trust.js';
 import { discoverOpenclawAgents, quiesceOpenclawBots } from '../orchestrator/openclawImport.js';
 import { scanWorkspacePaths } from '../orchestrator/dataPaths.js';
 import {
@@ -1426,14 +1428,20 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     return reply.header('cache-control', 'no-cache').type('image/svg+xml').send(svg);
   });
 
+  // "Reach it from anywhere": the public-access switch, the security record and notices (reachRoutes.ts).
+  registerReachRoutes(app, { store, secrets, ownsLocalHost, appUrlFor, trace: (e, d) => trace()(e, d), fetchImpl: deps.oauthFetch });
+
   app.get('/healthz', async () => ({ ok: true }));
 
   // What the login screen needs before anyone is authenticated. The API key
   // is publishable by design (Google: "API keys for Firebase services do not
   // need to be treated as secrets") — it identifies the project, it doesn't
   // authorise anything on its own.
-  app.get('/v1/config', async () => ({
+  app.get('/v1/config', async (req) => ({
     authMode: deps.authMode ?? 'password',
+    // The page is being read through the public address (decided by the
+    // listener it arrived on): it hides what is not available there.
+    publicAddress: isPublic(req),
     // Managed mode (a hosted Hatchabot): who runs it, where to get help, and a
     // notice to show everyone. The app hides the machine chores that are not
     // the customer's (HTTPS, backups, OpenClaw upgrades) when `managed` is set.
@@ -5618,6 +5626,15 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
     if (!resolve) return deny();
     const principal = resolve(rawReq.headers.cookie, requestIsHttps(rawReq as RequestLike));
     if (!principal) return deny();
+    // On the public listener the gate's rules apply to the socket too: the
+    // public pass, its idle limit, the second factor (publicAccess.ts).
+    if (isPublic(rawReq)) {
+      const refused = app.publicAccess ? app.publicAccess.refuseUpgrade(rawReq, principal.ownerId) : 'no public gate';
+      if (refused) {
+        app.log.warn({ path: url.split('?')[0], why: refused }, 'console.public_upgrade_refused');
+        return deny();
+      }
+    }
 
     // Same rule as the page itself, against the real caller: the owner, or a
     // guest the owner gave web chat.
@@ -9428,6 +9445,7 @@ const recovering = new Set<string>(); // agents with a background recovery turn 
             ...(typeof req.headers.authorization === 'string' ? { authorization: req.headers.authorization } : {}),
             ...(typeof req.headers.cookie === 'string' ? { cookie: req.headers.cookie } : {}),
             ...(typeof req.headers['x-hatchabot-owner'] === 'string' ? { 'x-hatchabot-owner': req.headers['x-hatchabot-owner'] as string } : {}),
+            ...publicReplayHeaders(req), // a public caller's replay stays public (trust.ts)
             'content-type': 'application/json',
           },
           payload: '{}',
