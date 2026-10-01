@@ -2,6 +2,16 @@
 
 All notable changes to Hatchabot are recorded here. Dates are ISO (YYYY-MM-DD).
 
+## [2.112.2] — 2026-09-30
+
+### Fixed
+- **A new web-chat guest's first open no longer drops everyone's console.** The guest's name is now added to the agent's gateway when they're let in (a "Chat on the web" invite, the members switch), not when they first open the chat. A changed list reloads the gateway's sign-in rules, which reconnects every open console (the owner's too), so this way it happens while the guest isn't connected yet. Their page waits until the new list is in effect, so their first open gets in on the first try with no brief "unauthorized". Removals (switch off, Remove) update the list right away too. If access changed while the agent was stopped or asleep, the list is updated as soon as it starts. If an open still finds the list out of date, it fixes it and waits for the change to take effect before letting anyone in.
+- **A guest's OpenClaw chat no longer shows owner pages.** The sidebar now offers a guest only what they can open: Home (now their own conversation, not the owner's "Session … not found") and their sessions. Before, it also listed Agents, Dashboards, Systems, Automations and Plugins, which then refused them. The composer no longer says "Default (Full Access)" to a guest; it says "Default". The agent switcher lists only their agent, and OpenClaw's "Join us on Discord" card is gone for guests. Every refusal is unchanged: owner methods and owner pages are still refused by the proxy.
+- Starting an agent now marks it RUNNING before the after-start checks run, the same order a wake uses.
+- A grant made while an older gateway sync was still running gets its own sync. Before, it shared the older run and could be served the old list of names.
+- The shared-host bed's browser check (`scripts/shared-host-console.mjs`) now also checks that the guest gets in on the first try, that the owner's console is not dropped when the guest first opens, that a guest's sidebar shows no owner pages, and that the composer does not say Full Access.
+- The shared-host test now opens the console and a guest's chat in a real browser (headless Chrome in each tenant's rootless Docker): 76 checks passed on v2.112.1.
+
 ## [2.112.1] — 2026-09-30
 
 ### Fixed
