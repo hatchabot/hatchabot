@@ -3,7 +3,9 @@ import { promisify } from 'node:util';
 import { loopbackIsRemote } from './auth.js';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Store } from '../store/store.js';
+import type { LocalAccount } from '../domain/types.js';
 import type { Principal } from './principal.js';
+import type { LinkSignIn } from './signinLink.js';
 
 /**
  * Accounts mode (HATCHABOT_AUTH=accounts): the middle rung between one shared
@@ -171,6 +173,31 @@ function setSessionCookie(reply: FastifyReply, req: FastifyRequest, value: strin
     path: '/',
     maxAge: Math.floor(TTL_MS / 1000),
   });
+}
+
+/** How long the password chooser a sign-in link opens stays good. */
+const LINK_CLAIM_TTL_MS = 15 * 60_000;
+
+/**
+ * A one-time sign-in link (signinLink.ts) for a local account. An account
+ * that has a password gets an ordinary session. One that has never chosen a
+ * password — above all the owner a provisioner made with `hatchabot accounts
+ * create --host-owner` — is CLAIMED: its pending claim code (the link the
+ * provisioner printed, good 48 hours) is replaced by a fresh one good 15
+ * minutes, and the person is sent to choose their password with it. So the
+ * printed link stops working the moment the signed one is used, and the owner
+ * leaves with a password and a recovery code that work without the provider.
+ */
+export function signInLocalByLink(store: Store, secret: Buffer, req: FastifyRequest, reply: FastifyReply, account: LocalAccount | undefined): LinkSignIn {
+  if (!account) return { kind: 'refused', why: 'no-account' };
+  if (account.disabled) return { kind: 'refused', why: 'disabled' };
+  if (account.pwHash === '') {
+    const code = randomBytes(16).toString('base64url');
+    store.setLocalAccountClaim(account.id, code, new Date(Date.now() + LINK_CLAIM_TTL_MS).toISOString());
+    return { kind: 'claim', ownerId: account.id, code };
+  }
+  setSessionCookie(reply, req, mintSession(secret, account.id, account.pwHash, Date.now() + TTL_MS, store.sessionEpoch(account.id)));
+  return { kind: 'session', ownerId: account.id };
 }
 
 /**

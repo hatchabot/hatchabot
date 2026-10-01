@@ -563,6 +563,16 @@ export class Store {
         at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS rate_hits_bucket_at ON rate_hits (bucket, at);
+      -- One-time sign-in links (docs/signin-links.md): every nonce a valid
+      -- link has spent, so it cannot be spent again. A row outlives its
+      -- link's expiry by weeks (keep_until), which makes the table a record of
+      -- who signed in by link and when, beside the journal's line.
+      CREATE TABLE IF NOT EXISTS signin_links (
+        nonce TEXT PRIMARY KEY,
+        sub TEXT NOT NULL,
+        used_at TEXT NOT NULL,
+        keep_until INTEGER NOT NULL
+      );
     `);
     // Windows that were open when this version arrived move to the per-seat
     // table once; the old table is then left empty (its ALTER below still runs).
@@ -1780,6 +1790,39 @@ export class Store {
   addRateHit(bucket: string, at: number, keepMs = 3_600_000): void {
     this.db.prepare(`DELETE FROM rate_hits WHERE at < ?`).run(at - keepMs);
     this.db.prepare(`INSERT INTO rate_hits (bucket, at) VALUES (?, ?)`).run(bucket, at);
+  }
+
+  /**
+   * Spend a sign-in link's nonce: true the first time, false ever after (a
+   * replay). One INSERT, so two requests racing with the same link cannot
+   * both win. Rows past keep_until are pruned here.
+   */
+  spendSigninNonce(nonce: string, sub: string, keepUntilMs: number, now = Date.now()): boolean {
+    this.db.prepare(`DELETE FROM signin_links WHERE keep_until < ?`).run(now);
+    const r = this.db
+      .prepare(`INSERT OR IGNORE INTO signin_links (nonce, sub, used_at, keep_until) VALUES (?, ?, ?, ?)`)
+      .run(nonce, sub.slice(0, 200), new Date(now).toISOString(), keepUntilMs);
+    return r.changes === 1;
+  }
+
+  /** Recent sign-ins by link, newest first: who (as the link named them) and when. */
+  recentSigninLinks(limit = 50): Array<{ sub: string; usedAt: string }> {
+    return (this.db.prepare(`SELECT sub, used_at FROM signin_links ORDER BY used_at DESC LIMIT ?`).all(limit) as Array<{ sub: string; used_at: string }>)
+      .map((r) => ({ sub: r.sub, usedAt: r.used_at }));
+  }
+
+  /** A Google (identity-mode) account by the verified email its last sign-in recorded. Local accounts never match. */
+  identityOwnerForEmail(email: string): string | undefined {
+    const r = this.db
+      .prepare(`SELECT owner_id FROM accounts WHERE email = ? COLLATE NOCASE AND owner_id LIKE 'user-%' ORDER BY last_seen DESC LIMIT 1`)
+      .get(email.trim()) as { owner_id: string } | undefined;
+    return r?.owner_id;
+  }
+
+  /** The email recorded for an owner, if any. */
+  emailForOwner(ownerId: string): string | undefined {
+    const r = this.db.prepare(`SELECT email FROM accounts WHERE owner_id = ?`).get(ownerId) as { email: string | null } | undefined;
+    return r?.email ?? undefined;
   }
 
   /** End every session this owner has, everywhere: cookies minted under an older epoch are refused. Returns the new epoch. */

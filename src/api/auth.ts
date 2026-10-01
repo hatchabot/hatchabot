@@ -2,7 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import { LOCAL_OWNER, internalPrincipal, type Principal } from './principal.js';
-import { registerAccountRoutes, sessionAccount } from './accountsAuth.js';
+import { registerAccountRoutes, sessionAccount, signInLocalByLink } from './accountsAuth.js';
+import { registerSigninLink, SIGNIN_LINK_PATH, type LinkSignIn, type SigninLinkDeps } from './signinLink.js';
 import type { Store } from '../store/store.js';
 import {
   identityConfigFromEnv,
@@ -272,6 +273,17 @@ function registerLogoutEverywhere(app: FastifyInstance, store: Store | undefined
 /** The console proxy: a browser reaches an agent's Control UI through here, with its cookie. */
 const CONSOLE_PATH = /^\/v1\/agents\/[^/]+\/ui(\/|$)/;
 
+/**
+ * One-time sign-in links (docs/signin-links.md), when HATCHABOT_SIGNIN_KEY_FILE
+ * is set: each mode says what "sign in as this account" means for it. Spent
+ * nonces live in the store, so without one there are no links.
+ */
+function linkRoute(app: FastifyInstance, opts: AuthOptions, signIn: SigninLinkDeps['signIn']): void {
+  if (!process.env.HATCHABOT_SIGNIN_KEY_FILE?.trim()) return;
+  if (!opts.store) { app.log.error('signin_link: no database to record spent links in; sign-in links are off'); return; }
+  registerSigninLink(app, { store: opts.store, guard: { throttled, noteFailure }, signIn });
+}
+
 export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Promise<void> {
   await app.register(fastifyCookie);
 
@@ -360,6 +372,19 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
   });
   registerLogoutEverywhere(app, opts.store, !!opts.password);
 
+  // Password mode has one person: a link for "owner" is a password session,
+  // and a link naming anyone else names nobody here.
+  linkRoute(app, opts, (req, reply, who): LinkSignIn => {
+    if (!('owner' in who)) return { kind: 'refused', why: 'no-account' };
+    if (opts.password) {
+      const exp = Date.now() + TTL_MS;
+      reply.setCookie(COOKIE, `${exp}.${sign(exp)}`, {
+        httpOnly: true, sameSite: 'strict', secure: requestIsHttps(req), path: '/', maxAge: Math.floor(TTL_MS / 1000),
+      });
+    }
+    return { kind: 'session', ownerId: LOCAL_OWNER };
+  });
+
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     if (!opts.password) return { ownerId: LOCAL_OWNER, via: 'password' };
     return validSession(cookieValue(header, COOKIE))
@@ -378,6 +403,9 @@ export async function registerAuth(app: FastifyInstance, opts: AuthOptions): Pro
     // readable before anyone is authenticated.
     if (path === '/' || path === '/healthz' || path === '/v1/login' || path === '/v1/config') return;
     if (path === '/v1/logout') return;
+    // A one-time sign-in link is its own credential, checked in the route
+    // (which exists only when HATCHABOT_SIGNIN_KEY_FILE is set).
+    if (path === SIGNIN_LINK_PATH) return;
     // PWA shell assets carry no data — reachable before login so the app can install.
     if (path === '/manifest.webmanifest' || path === '/sw.js' || path === '/app-qr.svg' || path.startsWith('/icons/')) return;
     if (path === '/privacy' || path === '/terms') return; // public legal pages (Google OAuth consent screen)
@@ -426,6 +454,13 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
   });
   registerLogoutEverywhere(app, store);
 
+  linkRoute(app, opts, (req, reply, who): LinkSignIn => {
+    const account = 'owner' in who ? store.listLocalAccounts().find((a) => a.hostOwner) : store.localAccountByUsername(who.user);
+    const r = signInLocalByLink(store, opts.secret, req, reply, account);
+    if (r.kind === 'session' && account) opts.onAuthenticated?.({ ownerId: account.id, via: 'password', email: account.username.includes('@') ? account.username : undefined });
+    return r;
+  });
+
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     const id = sessionAccount(store, opts.secret, cookieValue(header, COOKIE));
     return id ? { ownerId: id, via: 'password', subject: id } : undefined;
@@ -436,6 +471,7 @@ function registerAccountsAuth(app: FastifyInstance, opts: AuthOptions): void {
     const path = req.url.split('?')[0] ?? '';
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/login' || path === '/v1/logout') return;
+    if (path === SIGNIN_LINK_PATH) return; // the link is the credential; the route checks it
     // First run has no accounts and therefore no way to authenticate; the
     // route itself refuses once account #1 exists.
     if (path === '/v1/local-accounts/bootstrap') return;
@@ -586,6 +622,31 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
   });
   registerLogoutEverywhere(app, opts.store);
 
+  // A link names the machine's owner or an email. A Google account is found
+  // by the verified email its last sign-in recorded (so someone who never
+  // signed in here has no account to sign in to), and answers to the
+  // allowed-emails list like any session; a local account (when those are
+  // on) signs in as in accounts mode.
+  linkRoute(app, opts, (req, reply, who): LinkSignIn => {
+    const store = opts.store!;
+    const ownerId = 'owner' in who ? store.localHostOwnerId() : store.identityOwnerForEmail(who.user);
+    if (ownerId?.startsWith('user-')) {
+      const email = store.emailForOwner(ownerId);
+      if (process.env.HATCHABOT_ALLOWED_EMAILS?.trim() && allowedEmailProblem(email)) return { kind: 'refused', why: 'not-allowed' };
+      const exp = Date.now() + sessionTtlMs();
+      reply.setCookie(COOKIE, mintSession(ownerId.slice('user-'.length), exp, email), {
+        httpOnly: true, sameSite: 'strict', secure: requestIsHttps(req), path: '/', maxAge: Math.floor((exp - Date.now()) / 1000),
+      });
+      opts.onAuthenticated?.({ ownerId, via: 'identity', subject: ownerId.slice('user-'.length), email });
+      return { kind: 'session', ownerId };
+    }
+    if (!localAccounts) return { kind: 'refused', why: 'no-account' };
+    const account = 'owner' in who
+      ? (ownerId ? store.localAccount(ownerId) : undefined)
+      : store.localAccountByUsername(who.user);
+    return signInLocalByLink(store, opts.secret, req, reply, account);
+  });
+
   app.decorate('principalFromCookieHeader', (header: string | undefined): Principal | undefined => {
     const session = readSession(cookieValue(header, COOKIE));
     if (session) return { ownerId: `user-${session.sub}`, via: 'identity', subject: session.sub, email: session.email };
@@ -604,6 +665,7 @@ async function registerIdentityAuth(app: FastifyInstance, opts: AuthOptions): Pr
     const path = req.url.split('?')[0] ?? '';
     if (path === '/' || path === '/healthz' || path === '/v1/config') return;
     if (path === '/v1/session' || path === '/v1/logout') return;
+    if (path === SIGNIN_LINK_PATH) return; // the link is the credential; the route checks it
     // Sign-in, claiming an invitation, and the bootstrap route (which answers
     // with "this installation signs in with Google" rather than a bare 401).
     // Recovery too: local accounts forget passwords here as anywhere (the
